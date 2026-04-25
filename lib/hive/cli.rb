@@ -1,4 +1,5 @@
 require "thor"
+require "hive/stages"
 
 module Hive
   class CLI < Thor
@@ -6,10 +7,12 @@ module Hive
       true
     end
 
-    # `--json` is honoured by `status` and `run`; other commands accept the
-    # flag silently so an automated caller can pass it uniformly.
+    # `--json` is honoured by `status`, `run`, and `approve`; other commands
+    # accept the flag silently so an automated caller can pass it uniformly.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
+
+    APPROVE_TO_ENUM = (Hive::Stages::DIRS + Hive::Stages::NAMES).freeze
 
     desc "init [PROJECT_PATH]", "Bootstrap .hive-state in a project (orphan hive/state branch)"
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
@@ -41,18 +44,26 @@ module Hive
       Hive::Commands::Status.new(json: options[:json]).call
     end
 
-    desc "approve TARGET", "Move a task to the next stage (or --to <stage>); replaces shell `mv`"
+    desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"
     long_desc <<~DESC
       TARGET is either a task folder path or a bare slug. A bare slug is
       resolved across registered projects; if the slug appears in two
-      projects, pass --project to disambiguate.
+      projects, pass --project to disambiguate. Multi-stage hits inside one
+      project are also flagged as ambiguous — pass an absolute folder path.
 
       Forward auto-advance requires a terminal marker (:complete or
       :execute_complete). Use --to <stage> for an explicit destination
       (including backward moves for recovery), or --force to bypass the
       terminal-marker check.
+
+      Pass --from <stage> on retry to assert the task is at the named stage
+      before advancing — a previously successful call would fail with exit
+      code 4 (WRONG_STAGE) instead of silently advancing a second stage.
     DESC
-    option :to, type: :string, desc: "destination stage (e.g. '3-plan' or 'plan'); default: next stage"
+    option :to, type: :string, enum: APPROVE_TO_ENUM,
+                desc: "destination stage (full '3-plan' or short 'plan'); default: next stage"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch (idempotency)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :force, type: :boolean, default: false, desc: "skip terminal-marker check on forward move"
     def approve(target)
@@ -60,6 +71,7 @@ module Hive
       Hive::Commands::Approve.new(
         target,
         to: options[:to],
+        from: options[:from],
         project: options[:project],
         force: options[:force],
         json: options[:json]

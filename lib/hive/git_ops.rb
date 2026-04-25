@@ -1,10 +1,11 @@
 require "open3"
 require "fileutils"
+require "hive/stages"
 
 module Hive
   class GitOps
     HIVE_BRANCH = "hive/state".freeze
-    STAGE_DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done].freeze
+    STAGE_DIRS = Hive::Stages::DIRS
 
     attr_reader :project_root
 

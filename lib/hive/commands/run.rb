@@ -5,6 +5,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/git_ops"
 require "hive/agent"
+require "hive/stages"
 
 module Hive
   module Commands
@@ -143,14 +144,7 @@ module Hive
       end
 
       def next_stage_dir(task)
-        next_idx = task.stage_index + 1
-        next_name = case next_idx
-        when 2 then "2-brainstorm"
-        when 3 then "3-plan"
-        when 4 then "4-execute"
-        when 5 then "5-pr"
-        when 6 then "6-done"
-        end
+        next_name = Hive::Stages.next_dir(task.stage_index)
         return nil unless next_name
 
         File.join(task.hive_state_path, "stages", next_name)

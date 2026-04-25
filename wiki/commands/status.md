@@ -60,5 +60,5 @@ For each stage in `STAGE_ORDER = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6
 
 ## Backlinks
 
-- [[cli]] · [[commands/run]]
+- [[cli]] · [[commands/run]] · [[commands/approve]]
 - [[modules/markers]] · [[modules/task]] · [[modules/config]]

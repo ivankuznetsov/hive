@@ -7,7 +7,7 @@ updated: 2026-04-25
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI with four commands: `init`, `new`, `run`, `status`. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status` and `run` support `--json` for machine-readable output, and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI with five commands: `init`, `new`, `run`, `status`, `approve`. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, and `approve` support `--json` for machine-readable output (with a structured error envelope on every failure path of `approve`), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
@@ -21,14 +21,15 @@ tags: [cli, api]
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project | `Hive::Commands::New` | [[commands/new]] |
 | `hive run FOLDER` | Run the stage agent for the task at `FOLDER` | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive status` | Tabular status across registered projects | `Hive::Commands::Status` | [[commands/status]] |
-| `hive approve TARGET [--to STAGE]` | Move a task between stages + record a hive/state commit (replaces shell `mv`) | `Hive::Commands::Approve` | [[commands/approve]] |
+| `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
 
 `Hive::CLI` (`lib/hive/cli.rb`) is the Thor class. Notable mappings:
 
 - `new_task` is mapped to the user-visible `new` (Thor reserves `new`).
 - `run_task` is mapped to `run`.
 - `init` accepts `--force` (skip clean-tree check).
-- `--json` is a `class_option` honoured by `status` and `run`; other commands accept the flag silently so an automated caller can pass it uniformly.
+- `--json` is a `class_option` honoured by `status`, `run`, and `approve`; other commands accept the flag silently so an automated caller can pass it uniformly. `approve --json` emits a `hive-approve` document on success AND a structured error envelope on every failure path.
+- `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works (without the rewrite, Thor would consume `--help` as the next positional argument).
 
 ## Exit-code contract (`Hive::ExitCodes`)
 

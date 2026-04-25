@@ -70,7 +70,7 @@ hive run .hive-state/stages/6-done/<slug>       # prints worktree-cleanup comman
 |---------|--------------|
 | `hive new <project> '<text>'` | Capture an idea — writes `.hive-state/stages/1-inbox/<slug>/idea.md` and commits on `hive/state`. |
 | `mv` between stage folders | The original approval gesture. Still works; `hive approve` is the agent-callable equivalent. |
-| `hive approve <slug>` | Move a task to the next stage and record a hive/state commit. Use `--to <stage>` for explicit destinations (including backward recovery). Replaces shell `mv` for scripted callers. |
+| `hive approve <slug>` | Move a task to the next stage and record a hive/state commit. Use `--to <stage>` for explicit destinations (including backward recovery), `--from <stage>` to assert the current stage on retry, `--force` to bypass the terminal-marker check, `--json` for machine-readable output. Agent-callable equivalent of shell `mv`. |
 | `hive run <task-folder>` | Run the stage agent for the task at its current location. Idempotent; safe to re-run. |
 | `hive status` | Tabular view of every active task across all registered projects. Read-only. |
 

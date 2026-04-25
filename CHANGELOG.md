@@ -8,7 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `hive approve TARGET [--to STAGE] [--project NAME] [--force] [--json]` — agent-callable replacement for shell `mv <task> <next-stage>/`. Resolves bare slugs across registered projects; validates terminal-marker on forward auto-advance; records a `hive/state` commit on each move; emits a `hive-approve` JSON document (schema_version 1) under `--json`. Stable exit codes: `Hive::InvalidTaskPath` (64), `Hive::WrongStage` (4), `Hive::Error` (1) for the four failure modes.
+- `hive approve TARGET [--to STAGE] [--from STAGE] [--project NAME] [--force] [--json]` — agent-callable equivalent of shell `mv <task> <next-stage>/`. Resolves bare slugs across registered projects; validates terminal-marker on forward auto-advance; records a `hive/state` commit on each move; emits a `hive-approve` JSON document on success AND a structured error envelope on every failure path under `--json` (schema_version 1).
+- `Hive::Stages` — single source of truth for the stage list (`DIRS`, `NAMES`, `SHORT_TO_FULL`, `next_dir`, `resolve`, `parse`). `GitOps`, `Status`, `Run`, and `Approve` all delegate to this module so adding a 7th stage is a one-file change.
+- New typed exceptions: `Hive::AmbiguousSlug` (carries structured `candidates`), `Hive::DestinationCollision` (carries `path`), `Hive::FinalStageReached` (carries `stage`). Each surfaces extra fields in the JSON error envelope so callers don't parse stderr prose.
+- `Hive::Schemas::NextActionKind::RUN` — new kind emitted by `hive approve --json` so an agent can chain to `hive run <new_folder>` deterministically. Closed-enum membership pinned in `test/unit/exit_codes_test.rb`.
+- `--from STAGE` on `hive approve`: asserts the task is at the named stage before advancing. Mismatch raises `WrongStage` (4). Idempotency lever for retry loops — a network blip mid-call no longer silently double-advances on the next attempt.
+- `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works.
+- Thor `enum:` constraint on `--to` and `--from`: invalid stage values fail at parse time before any code in `Approve` runs, and the valid set is listed in `hive help approve` output.
+
+### Changed
+
+- `hive approve` JSON schema: split combined `from_stage` / `to_stage` strings into `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined), mirroring `hive-run`'s `stage` / `stage_index` shape. Added `ok`, `noop`, `direction`, `forced`, `from_marker`, `next_action` fields. Schema version stays at 1 (no consumers in the wild yet).
+- `hive approve` git commit is now slug-scoped: `git add -A stages/<src>/<slug> stages/<dst>/<slug>` instead of staging the whole parent stage directories. Sibling-task changes in the same stage no longer get swept into the approve commit, fixing audit-trail corruption.
+- `hive approve` is now atomic-with-rollback: `with_commit_lock` is acquired BEFORE the move so contention surfaces before any filesystem mutation; `with_task_lock` blocks concurrent `hive run` on the same task; if the commit fails (pre-commit hook abort, lock timeout mid-flight, etc.) the move is reversed and the original error is wrapped in `Hive::Error` so fs and git don't diverge.
+- `hive approve` raises `Hive::FinalStageReached` (exit 4, `WRONG_STAGE`) instead of bare `Hive::Error` (exit 1) when asked to advance past `6-done`. Distinguishes "no further stage" from a recoverable destination collision (still exit 1) so retry loops can branch deterministically.
+- `hive approve` raises `Hive::AmbiguousSlug` when a bare slug exists at multiple stages within one project (was: silent lowest-stage-wins). The previous heuristic was wrong for the partial-failure-recovery case where the lower stage is the stale leftover. Pass an absolute folder path or `--to` to disambiguate.
+- `hive approve --to <current-stage>` is now a clean no-op (exit 0, `noop: true` in JSON) instead of triggering the destination-collision branch.
+- `hive approve` text-mode output sends the `next: hive run …` hint to stderr instead of stdout, so a caller piping stdout through `jq` (without remembering `--json`) doesn't get prose mixed with data.
+- `hive approve` deletes the per-process `.lock` file at the destination after the move so it isn't tracked in the slug-scoped commit.
 - Initial public release of Hive — folder-as-agent pipeline driving a six-stage filesystem state machine.
 - CLI commands: `hive init`, `hive new`, `hive run`, `hive status`, `hive approve`.
 - Six pipeline stages: `1-inbox`, `2-brainstorm`, `3-plan`, `4-execute`, `5-pr`, `6-done`.

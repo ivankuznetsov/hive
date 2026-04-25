@@ -21,12 +21,12 @@ class RunApproveTest < Minitest::Test
     Hive::Markers.set(state, marker_name, attrs)
   end
 
-  # Forward auto-advance with terminal marker is the load-bearing happy path.
+  # ── Happy paths ─────────────────────────────────────────────────────────
+
   def test_advances_brainstorm_complete_to_plan
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
-        # Move to 2-brainstorm and put a COMPLETE marker on brainstorm.md.
         brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
         FileUtils.mkdir_p(File.dirname(brainstorm))
         FileUtils.mv(inbox, brainstorm)
@@ -45,13 +45,6 @@ class RunApproveTest < Minitest::Test
     end
   end
 
-  # Inbox -> brainstorm has no terminal marker requirement (idea.md just says
-  # WAITING by template). The forward move from 1-inbox should still work
-  # because the destination stage index is *not greater* than the source... wait,
-  # 2 > 1, so it IS forward. The marker check kicks in. That means inbox tasks
-  # need --force OR the user must hand-edit a terminal marker — undesirable UX.
-  # Document the inbox case: idea.md's WAITING is the user's "this is ready to
-  # think about" signal; require --force for inbox→brainstorm.
   def test_forward_from_inbox_requires_force_due_to_waiting_marker
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -71,8 +64,6 @@ class RunApproveTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
-        # Park in 4-execute with a non-terminal marker — exactly what a user
-        # would have when they realise the plan was wrong.
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(File.dirname(execute_dir))
         FileUtils.mv(inbox, execute_dir)
@@ -96,13 +87,40 @@ class RunApproveTest < Minitest::Test
         FileUtils.mv(inbox, plan_dir)
         write_marker(plan_dir, :complete)
 
-        # `--to execute` should resolve to `4-execute`.
         capture_io { Hive::Commands::Approve.new(slug, to: "execute").call }
 
         assert File.directory?(File.join(dir, ".hive-state", "stages", "4-execute", slug))
       end
     end
   end
+
+  def test_to_accepts_every_short_stage_name
+    # Round-trip every short name through Hive::Stages.resolve to catch a
+    # constant-construction regression that drops or mistypes one entry.
+    short_to_full = Hive::Stages::SHORT_TO_FULL
+    expected = {
+      "inbox" => "1-inbox", "brainstorm" => "2-brainstorm", "plan" => "3-plan",
+      "execute" => "4-execute", "pr" => "5-pr", "done" => "6-done"
+    }
+    assert_equal expected, short_to_full.to_h
+  end
+
+  def test_folder_path_target_works_directly
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        capture_io { Hive::Commands::Approve.new(brainstorm).call }
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", slug))
+      end
+    end
+  end
+
+  # ── Resolution / ambiguity ──────────────────────────────────────────────
 
   def test_unknown_stage_in_to_raises_invalid_task_path
     with_tmp_global_config do
@@ -127,10 +145,22 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_project_filter_with_zero_matches_includes_project_in_message
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        seed_project_with_inbox_task(dir)
+        _, err, status = with_captured_exit do
+          Hive::Commands::Approve.new("absent-260424-aaaa", project: "no-such-project").call
+        end
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "in project 'no-such-project'"
+      end
+    end
+  end
+
   def test_ambiguous_slug_across_projects_requires_project_filter
     with_tmp_global_config do
       with_tmp_git_repo do |dir1|
-        # Project 2 lives in a sibling tmpdir with the same slug.
         Dir.mktmpdir("hive-test-other") do |dir2|
           run!("git", "-C", dir2, "init", "-b", "master", "--quiet")
           run!("git", "-C", dir2, "config", "user.email", "t@t")
@@ -142,7 +172,6 @@ class RunApproveTest < Minitest::Test
 
           capture_io { Hive::Commands::Init.new(dir1).call }
           capture_io { Hive::Commands::Init.new(dir2).call }
-          # Force the same slug into both projects by injecting folders directly.
           slug = "shared-slug-260424-aaaa"
           [ dir1, dir2 ].each do |d|
             FileUtils.mkdir_p(File.join(d, ".hive-state", "stages", "1-inbox", slug))
@@ -155,7 +184,6 @@ class RunApproveTest < Minitest::Test
           assert_includes err, "ambiguous"
           assert_includes err, "--project"
 
-          # With --project, disambiguation works.
           capture_io { Hive::Commands::Approve.new(slug, force: true, project: File.basename(dir1)).call }
           assert File.directory?(File.join(dir1, ".hive-state", "stages", "2-brainstorm", slug))
         end
@@ -163,7 +191,46 @@ class RunApproveTest < Minitest::Test
     end
   end
 
-  def test_destination_collision_aborts
+  def test_same_project_multi_stage_ambiguity_raises
+    # The lowest-stage-wins heuristic was wrong for the partial-failure-
+    # recovery case (lower=stale, higher=real). Any same-project multi-hit
+    # now raises and demands an explicit folder path.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        # Manually plant a stale leftover at a second stage.
+        leftover = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(leftover)
+        File.write(File.join(leftover, "plan.md"), "stale\n")
+
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug, force: true).call }
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "ambiguous"
+        assert_includes err, "multiple stages"
+
+        # Folder-path target disambiguates and works.
+        capture_io { Hive::Commands::Approve.new(inbox, force: true).call }
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "2-brainstorm", slug))
+      end
+    end
+  end
+
+  def test_absolute_path_target_with_mismatched_project_filter_raises
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, _slug = seed_project_with_inbox_task(dir)
+        _, err, status = with_captured_exit do
+          Hive::Commands::Approve.new(inbox, project: "totally-different", force: true).call
+        end
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "but --project says 'totally-different'"
+      end
+    end
+  end
+
+  def test_cwd_collision_does_not_shadow_slug_lookup
+    # A bare slug must always go through the cross-project search even if a
+    # cwd subdirectory happens to share the name.
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -172,11 +239,39 @@ class RunApproveTest < Minitest::Test
         FileUtils.mv(inbox, brainstorm)
         write_marker(brainstorm, :complete)
 
-        # Pre-create the destination folder under 3-plan to simulate a stale leftover.
-        dest = File.join(dir, ".hive-state", "stages", "3-plan", slug)
-        FileUtils.mkdir_p(dest)
+        Dir.mktmpdir("decoy") do |decoy|
+          # Plant a directory in cwd with the slug name — must NOT be picked.
+          FileUtils.mkdir_p(File.join(decoy, slug))
+          Dir.chdir(decoy) do
+            capture_io { Hive::Commands::Approve.new(slug).call }
+          end
+        end
 
-        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", slug)),
+               "slug lookup must resolve via the registered project, not the cwd-shadow"
+      end
+    end
+  end
+
+  # ── Marker policy ───────────────────────────────────────────────────────
+
+  def test_destination_collision_aborts
+    # Use folder-path target so same-project multi-stage ambiguity (which is
+    # raised earlier) doesn't shadow the destination-collision branch.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        # A *different* sibling folder pre-occupies the destination — not a
+        # same-project leftover at the slug level (that would trigger the
+        # ambiguity branch).
+        FileUtils.mkdir_p(File.join(dir, ".hive-state", "stages", "3-plan", slug))
+
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(brainstorm).call }
         assert_equal Hive::ExitCodes::GENERIC, status
         assert_includes err, "destination already exists"
         assert File.directory?(brainstorm), "source folder must remain on collision"
@@ -184,7 +279,57 @@ class RunApproveTest < Minitest::Test
     end
   end
 
-  def test_folder_path_target_works_directly
+  def test_error_marker_forward_approve_refused_with_clear_message
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        FileUtils.mkdir_p(File.dirname(execute_dir))
+        FileUtils.mv(inbox, execute_dir)
+        write_marker(execute_dir, :error, reason: "agent_crashed")
+
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_includes err, "marker is :error"
+      end
+    end
+  end
+
+  def test_error_marker_backward_recovery_via_to_works
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        FileUtils.mkdir_p(File.dirname(execute_dir))
+        FileUtils.mv(inbox, execute_dir)
+        write_marker(execute_dir, :error, reason: "agent_crashed")
+
+        capture_io { Hive::Commands::Approve.new(slug, to: "3-plan").call }
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", slug))
+      end
+    end
+  end
+
+  def test_advancing_past_6_done_errors_with_wrong_stage
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        done = File.join(dir, ".hive-state", "stages", "6-done", slug)
+        FileUtils.mkdir_p(File.dirname(done))
+        FileUtils.mv(inbox, done)
+        write_marker(done, :complete)
+
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status,
+                     "past-final-stage must use WRONG_STAGE (4), not GENERIC (1)"
+        assert_includes err, "already at the final stage"
+      end
+    end
+  end
+
+  # ── --from idempotency ─────────────────────────────────────────────────
+
+  def test_from_assertion_blocks_silent_double_advance
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -193,11 +338,82 @@ class RunApproveTest < Minitest::Test
         FileUtils.mv(inbox, brainstorm)
         write_marker(brainstorm, :complete)
 
-        capture_io { Hive::Commands::Approve.new(brainstorm).call }
+        # First call advances 2-brainstorm -> 3-plan.
+        capture_io { Hive::Commands::Approve.new(slug, from: "2-brainstorm").call }
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", slug))
+
+        # Naive retry that re-passes --from <previous-stage> must fail loudly.
+        write_marker(File.join(dir, ".hive-state", "stages", "3-plan", slug), :complete)
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug, from: "2-brainstorm").call }
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_includes err, "but --from expected 2-brainstorm"
+      end
+    end
+  end
+
+  def test_from_short_name_resolves_to_full
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        capture_io { Hive::Commands::Approve.new(slug, from: "brainstorm").call }
         assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", slug))
       end
     end
   end
+
+  def test_from_unknown_stage_raises_usage
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, _inbox, slug = seed_project_with_inbox_task(dir)
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug, from: "8-quux").call }
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_includes err, "unknown --from stage"
+      end
+    end
+  end
+
+  # ── No-op + same-stage ──────────────────────────────────────────────────
+
+  def test_to_current_stage_is_clean_noop
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        out, _err = capture_io { Hive::Commands::Approve.new(slug, to: "brainstorm").call }
+        assert_includes out, "noop"
+        assert File.directory?(brainstorm), "noop must not move anything"
+      end
+    end
+  end
+
+  def test_to_current_stage_noop_in_json_emits_noop_field
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        out, _err = capture_io { Hive::Commands::Approve.new(slug, to: "brainstorm", json: true).call }
+        payload = JSON.parse(out)
+        assert payload["ok"]
+        assert payload["noop"]
+        assert_equal "same", payload["direction"]
+      end
+    end
+  end
+
+  # ── JSON contract ───────────────────────────────────────────────────────
 
   def test_json_output_emits_stable_schema
     with_tmp_global_config do
@@ -211,18 +427,125 @@ class RunApproveTest < Minitest::Test
         out, _err = capture_io { Hive::Commands::Approve.new(slug, json: true).call }
         assert_equal 1, out.lines.count, "JSON output must be a single line"
         payload = JSON.parse(out)
+
+        # Pin the full key set so renames/drops fail at test time.
+        expected_keys = %w[
+          schema schema_version ok noop slug
+          from_stage from_stage_index from_stage_dir
+          to_stage to_stage_index to_stage_dir
+          direction forced from_folder to_folder from_marker
+          commit_action next_action
+        ].sort
+        assert_equal expected_keys, payload.keys.sort
+
         assert_equal "hive-approve", payload["schema"]
         assert_equal 1, payload["schema_version"]
+        assert_equal true, payload["ok"]
+        assert_equal false, payload["noop"]
         assert_equal slug, payload["slug"]
-        assert_equal "2-brainstorm", payload["from_stage"]
-        assert_equal "3-plan", payload["to_stage"]
+        assert_equal "brainstorm", payload["from_stage"]
+        assert_equal 2, payload["from_stage_index"]
+        assert_equal "2-brainstorm", payload["from_stage_dir"]
+        assert_equal "plan", payload["to_stage"]
+        assert_equal 3, payload["to_stage_index"]
+        assert_equal "3-plan", payload["to_stage_dir"]
+        assert_equal "forward", payload["direction"]
+        assert_equal false, payload["forced"]
+        assert_equal "complete", payload["from_marker"]
+        assert_match(%r{/2-brainstorm/#{slug}\z}, payload["from_folder"])
         assert_match(%r{/3-plan/#{slug}\z}, payload["to_folder"])
         assert_includes payload["commit_action"], "approve 2-brainstorm -> 3-plan"
+
+        # next_action: agent reads this to chain the pipeline.
+        next_action = payload["next_action"]
+        assert_equal Hive::Schemas::NextActionKind::RUN, next_action["kind"]
+        assert_includes Hive::Schemas::NextActionKind::ALL, next_action["kind"]
+        assert_match(%r{/3-plan/#{slug}\z}, next_action["folder"])
+        assert_match(%r{\Ahive run .*/3-plan/#{slug}\z}, next_action["command"])
       end
     end
   end
 
-  def test_advancing_past_6_done_errors
+  def test_json_next_action_at_final_stage_is_no_op_with_reason
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        pr_dir = File.join(dir, ".hive-state", "stages", "5-pr", slug)
+        FileUtils.mkdir_p(File.dirname(pr_dir))
+        FileUtils.mv(inbox, pr_dir)
+        write_marker(pr_dir, :complete)
+
+        out, _err = capture_io { Hive::Commands::Approve.new(slug, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal "6-done", payload["to_stage_dir"]
+        assert_equal Hive::Schemas::NextActionKind::NO_OP, payload["next_action"]["kind"]
+        assert_equal "final_stage", payload["next_action"]["reason"]
+      end
+    end
+  end
+
+  def test_json_error_envelope_on_ambiguous_slug
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir1|
+        Dir.mktmpdir("hive-test-other") do |dir2|
+          run!("git", "-C", dir2, "init", "-b", "master", "--quiet")
+          run!("git", "-C", dir2, "config", "user.email", "t@t")
+          run!("git", "-C", dir2, "config", "user.name", "t")
+          run!("git", "-C", dir2, "config", "commit.gpgsign", "false")
+          File.write(File.join(dir2, "README.md"), "x")
+          run!("git", "-C", dir2, "add", ".")
+          run!("git", "-C", dir2, "commit", "-m", "i", "--quiet")
+
+          capture_io { Hive::Commands::Init.new(dir1).call }
+          capture_io { Hive::Commands::Init.new(dir2).call }
+          slug = "shared-slug-260424-aaaa"
+          [ dir1, dir2 ].each do |d|
+            FileUtils.mkdir_p(File.join(d, ".hive-state", "stages", "1-inbox", slug))
+          end
+
+          out, _err, status = with_captured_exit do
+            Hive::Commands::Approve.new(slug, json: true, force: true).call
+          end
+          assert_equal Hive::ExitCodes::USAGE, status
+
+          payload = JSON.parse(out)
+          assert_equal "hive-approve", payload["schema"]
+          assert_equal false, payload["ok"]
+          assert_equal "AmbiguousSlug", payload["error_class"]
+          assert_equal "ambiguous_slug", payload["error_kind"]
+          assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+          # Structured candidates rather than prose:
+          assert_kind_of Array, payload["candidates"]
+          assert_equal 2, payload["candidates"].size
+          assert_equal [ File.basename(dir1), File.basename(dir2) ].sort,
+                       payload["candidates"].map { |c| c["project"] }.sort
+        end
+      end
+    end
+  end
+
+  def test_json_error_envelope_on_destination_collision
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+        FileUtils.mkdir_p(File.join(dir, ".hive-state", "stages", "3-plan", slug))
+
+        out, _err, status = with_captured_exit { Hive::Commands::Approve.new(brainstorm, json: true).call }
+        assert_equal Hive::ExitCodes::GENERIC, status
+
+        payload = JSON.parse(out)
+        assert_equal "DestinationCollision", payload["error_class"]
+        assert_equal "destination_collision", payload["error_kind"]
+        assert_match(%r{/3-plan/#{slug}\z}, payload["path"])
+      end
+    end
+  end
+
+  def test_json_error_envelope_on_final_stage
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -231,9 +554,84 @@ class RunApproveTest < Minitest::Test
         FileUtils.mv(inbox, done)
         write_marker(done, :complete)
 
-        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
-        assert_equal Hive::ExitCodes::GENERIC, status
-        assert_includes err, "already at the final stage"
+        out, _err, status = with_captured_exit { Hive::Commands::Approve.new(slug, json: true).call }
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+
+        payload = JSON.parse(out)
+        assert_equal "FinalStageReached", payload["error_class"]
+        assert_equal "final_stage", payload["error_kind"]
+        assert_equal "6-done", payload["stage"]
+      end
+    end
+  end
+
+  # ── Slug-scoped commit (cross-contamination prevention) ─────────────────
+
+  def test_commit_does_not_sweep_unrelated_sibling_task_changes
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        # Set up the task being approved.
+        _, inbox, slug = seed_project_with_inbox_task(dir, text: "primary task")
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        # Plant an UNRELATED dirty file under the same source-stage directory.
+        # If the commit scopes to slug paths only, this should NOT be in the
+        # resulting commit.
+        sibling = File.join(dir, ".hive-state", "stages", "2-brainstorm", "sibling-trash-260424-bbbb")
+        FileUtils.mkdir_p(sibling)
+        File.write(File.join(sibling, "scratch.md"), "I should not be in the approve commit\n")
+
+        capture_io { Hive::Commands::Approve.new(slug).call }
+
+        # Inspect the commit. The sibling's path must NOT appear.
+        files_in_commit = `git -C #{File.join(dir, ".hive-state")} show --pretty= --name-only HEAD`.lines.map(&:strip)
+        refute_includes files_in_commit, "stages/2-brainstorm/sibling-trash-260424-bbbb/scratch.md",
+                        "approve commit must scope to the slug, not sweep stage-level neighbours"
+      end
+    end
+  end
+
+  def test_orphan_task_lock_at_destination_is_not_committed
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        capture_io { Hive::Commands::Approve.new(slug).call }
+        plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        files_in_commit = `git -C #{File.join(dir, ".hive-state")} show --pretty= --name-only HEAD`.lines.map(&:strip)
+        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock",
+                        "the per-process .lock file must not be committed"
+        refute File.exist?(File.join(plan, ".lock")),
+               "orphan .lock from with_task_lock must be cleaned at destination"
+      end
+    end
+  end
+
+  # ── Plain-text output ───────────────────────────────────────────────────
+
+  def test_text_output_includes_next_hint_on_stderr
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        out, err = capture_io { Hive::Commands::Approve.new(slug).call }
+        assert_includes out, "hive: approved #{slug}"
+        assert_includes out, "from:"
+        assert_includes out, "to:"
+        # The "next: hive run" hint goes to stderr so a `... | jq`
+        # consumer who forgot --json doesn't get prose mixed with data.
+        assert_includes err, "next: hive run"
       end
     end
   end

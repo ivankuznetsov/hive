@@ -30,8 +30,9 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-
 
 - [[commands/init]] — bootstrap orphan branch, attach worktree, register globally.
 - [[commands/new]] — capture an idea, derive a slug, scaffold `idea.md`.
-- [[commands/run]] — dispatcher: lock → stage runner → commit → report.
-- [[commands/status]] — read-only table of every active task across registered projects.
+- [[commands/run]] — dispatcher: lock → stage runner → commit → report (`--json` supported).
+- [[commands/status]] — read-only table of every active task across registered projects (`--json` supported).
+- [[commands/approve]] — agent-callable `mv <task> <next-stage>/` with marker validation, ambiguity resolution, and a hive/state commit per move.
 
 ## Stages
 

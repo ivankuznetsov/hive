@@ -23,6 +23,7 @@ module Hive
     module NextActionKind
       EDIT          = "edit".freeze
       MV            = "mv".freeze
+      RUN           = "run".freeze
       RECOVER_STALE = "recover_stale".freeze
       NO_OP         = "no_op".freeze
       # Self-derived: every constant in this module other than ALL itself.
@@ -133,6 +134,45 @@ module Hive
   class AlreadyInitialized < Error
     def exit_code
       ExitCodes::ALREADY_INITIALIZED
+    end
+  end
+
+  # Raised by `hive approve` when a slug resolves to folders in multiple
+  # registered projects (or in multiple stages of one project). Carries the
+  # structured candidate list so a JSON error envelope can surface it without
+  # re-parsing the prose message.
+  class AmbiguousSlug < InvalidTaskPath
+    attr_reader :slug, :candidates
+
+    def initialize(message, slug:, candidates:)
+      super(message)
+      @slug = slug
+      @candidates = candidates
+    end
+  end
+
+  # Raised by `hive approve` when the destination folder already exists.
+  # Distinct class so test pinning is meaningful and so callers (and the
+  # JSON error envelope) can distinguish a real collision from a generic
+  # error sharing exit code 1.
+  class DestinationCollision < Error
+    attr_reader :path
+
+    def initialize(message, path:)
+      super(message)
+      @path = path
+    end
+  end
+
+  # Raised by `hive approve` when forward auto-advance is asked but the task
+  # is at the final stage. Maps to WRONG_STAGE (4) so wrappers can branch
+  # cleanly between "real collision (1)" and "no further stage (4)".
+  class FinalStageReached < WrongStage
+    attr_reader :stage
+
+    def initialize(message, stage:)
+      super(message)
+      @stage = stage
     end
   end
 end

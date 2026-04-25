@@ -69,6 +69,6 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 
 ## Backlinks
 
-- [[cli]] · [[commands/init]] · [[commands/status]]
+- [[cli]] · [[commands/init]] · [[commands/status]] · [[commands/approve]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]] · [[stages/done]]
 - [[modules/task]] · [[modules/lock]] · [[modules/markers]] · [[modules/git_ops]]

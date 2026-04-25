@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/task"
 require "hive/markers"
 require "hive/lock"
+require "hive/stages"
 
 module Hive
   module Commands
@@ -18,7 +19,7 @@ module Hive
         execute_stale: "⚠",
         error: "⚠"
       }.freeze
-      STAGE_ORDER = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done].freeze
+      STAGE_ORDER = Hive::Stages::DIRS
 
       def initialize(json: false)
         @json = json

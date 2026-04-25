@@ -12,7 +12,7 @@ tags: [index]
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-pr` → `6-done`) where stage agents run via `claude -p` and `mv` between directories is the only approval gesture.
 
-**Pages**: 27 (excl. `index.md`/`log.md`) · **Date**: 2026-04-25
+**Pages**: 31 (excl. `index.md`/`log.md`) · **Date**: 2026-04-25
 
 ## Top level
 
@@ -33,6 +33,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-
 - [[commands/run]] — dispatcher: lock → stage runner → commit → report (`--json` supported).
 - [[commands/status]] — read-only table of every active task across registered projects (`--json` supported).
 - [[commands/approve]] — agent-callable `mv <task> <next-stage>/` with marker validation, ambiguity resolution, and a hive/state commit per move.
+- [[commands/findings]] — `hive findings` / `accept-finding` / `reject-finding`: list and toggle GFM-checkbox findings in `reviews/ce-review-NN.md`.
 
 ## Stages
 
@@ -54,3 +55,5 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-
 - [[modules/agent]] — `claude -p` subprocess wrapper with timeout/budget/atomic exit-status capture.
 - [[modules/config]] — global + per-project YAML configs with deep-merge defaults.
 - [[modules/stages]] — six-stage list + helpers; single source of truth for `DIRS` / `NAMES` / `SHORT_TO_FULL`.
+- [[modules/findings]] — parser + writer for `reviews/ce-review-NN.md`; CRLF-safe round-trip toggle.
+- [[modules/task_resolver]] — slug-or-folder TARGET resolution shared by every agent-callable command.

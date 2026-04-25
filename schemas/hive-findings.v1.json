@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-findings.v1.json",
+  "title": "hive findings / accept-finding / reject-finding output (v1)",
+  "description": "Stable contract emitted by `hive findings --json`, `hive accept-finding --json`, and `hive reject-finding --json`. The list command's success payload omits operation/changes/selected_ids/next_action; the toggle commands include them. Both share the error envelope.",
+  "oneOf": [
+    { "$ref": "#/$defs/ListPayload" },
+    { "$ref": "#/$defs/TogglePayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "ListPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "slug",
+        "stage",
+        "stage_dir",
+        "task_folder",
+        "review_file",
+        "pass",
+        "findings",
+        "summary"
+      ],
+      "properties": {
+        "schema": { "const": "hive-findings" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "slug": { "type": "string" },
+        "stage": {
+          "type": "string",
+          "enum": ["inbox", "brainstorm", "plan", "execute", "pr", "done"]
+        },
+        "stage_dir": {
+          "type": "string",
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"]
+        },
+        "task_folder": { "type": "string" },
+        "review_file": { "type": "string" },
+        "pass": { "type": ["integer", "null"], "minimum": 1 },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Finding" }
+        },
+        "summary": { "$ref": "#/$defs/Summary" }
+      }
+    },
+    "TogglePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "operation",
+        "slug",
+        "review_file",
+        "pass",
+        "selected_ids",
+        "changes",
+        "noop",
+        "summary",
+        "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-findings" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "operation": { "type": "string", "enum": ["accept", "reject"] },
+        "slug": { "type": "string" },
+        "review_file": { "type": "string" },
+        "pass": { "type": ["integer", "null"], "minimum": 1 },
+        "selected_ids": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "Every ID the caller asked the command to toggle (after expanding --all / --severity)."
+        },
+        "changes": {
+          "type": "array",
+          "description": "One entry per finding whose checkbox state actually changed; idempotent re-toggles produce no entry.",
+          "items": {
+            "type": "object",
+            "required": ["id", "severity", "was", "now"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "integer", "minimum": 1 },
+              "severity": { "type": ["string", "null"] },
+              "was": { "type": "boolean" },
+              "now": { "type": "boolean" }
+            }
+          }
+        },
+        "noop": {
+          "type": "boolean",
+          "description": "True when every selected ID was already in the requested state."
+        },
+        "summary": { "$ref": "#/$defs/Summary" },
+        "next_action": { "$ref": "#/$defs/NextAction" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "description": "`operation` is present iff the error came from `hive accept-finding` or `hive reject-finding`; absent for `hive findings`. Per-error structured fields (`candidates`, `id`) appear only on the matching error_kind.",
+      "properties": {
+        "schema": { "const": "hive-findings" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "operation": { "type": "string", "enum": ["accept", "reject"] },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "ambiguous_slug",
+            "no_review_file",
+            "unknown_finding",
+            "no_selection",
+            "rollback_failed",
+            "invalid_task_path",
+            "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "enum": [1, 64, 70, 75, 78] },
+        "message": { "type": "string" },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Mirrors the hive-approve.v1 candidate shape.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
+        "id": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "accepted", "title", "justification"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "severity": {
+          "type": ["string", "null"],
+          "description": "Lowercased heading text from `## Heading` above the finding (typically high/medium/nit). null if the finding precedes any heading."
+        },
+        "accepted": { "type": "boolean" },
+        "title": { "type": "string" },
+        "justification": { "type": ["string", "null"] }
+      }
+    },
+    "Summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "accepted", "by_severity"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "integer", "minimum": 0 },
+        "by_severity": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "NextAction": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+        },
+        "folder": { "type": "string" },
+        "command": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

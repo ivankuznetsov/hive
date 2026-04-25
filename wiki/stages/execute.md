@@ -83,5 +83,6 @@ When pass count hits `max_review_passes`:
 ## Backlinks
 
 - [[stages/plan]] · [[stages/pr]]
-- [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]]
+- [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]] · [[modules/findings]]
+- [[commands/findings]] — list and toggle the `[x]` accepted-flag on findings this stage produces
 - [[state-model]]

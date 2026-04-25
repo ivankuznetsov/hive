@@ -66,5 +66,5 @@ Per-task lock is held for the entire `hive run`, including a 45-minute execute p
 ## Backlinks
 
 - [[modules/task]] · [[modules/agent]]
-- [[commands/run]]
+- [[commands/run]] · [[commands/approve]] · [[commands/findings]]
 - [[state-model]]

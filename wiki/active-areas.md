@@ -1,17 +1,20 @@
 ---
 title: Active Areas
 type: active-areas
-source: working tree (no git history yet)
+source: git log + working tree
 created: 2026-04-25
 updated: 2026-04-25
 tags: [roadmap, status]
 ---
 
-**TLDR**: Greenfield repo. No git commits yet — `git log` is empty as of this writing. Active surface is the entire MVP, currently at "implemented + tested locally, not yet committed".
+**TLDR**: Phase 1 MVP shipped across three commits (`c2098f0`, `873b1ae`, `1b05ccb`). CI wired, live-claude smoke wired, 94 unit/integration tests + 2 opt-in smoke cases all green. Phase 1 surface is settled; backlog below is Phase 2/3 plus the explicitly-deferred Phase 1 items.
 
 ## Status
 
-`git status` (2026-04-25) shows the entire working tree as untracked. The first commit hasn't been authored. So "active areas based on the last 6 months of git activity" is degenerate — *everything* is active.
+Working tree clean as of 2026-04-25. Three commits on `main`:
+1. `c2098f0` — initial Phase 1 MVP (folder-as-agent pipeline).
+2. `873b1ae` — post-MVP review hardening (P0 worktree-hijack + 9 P1 fixes).
+3. `1b05ccb` — agent-failure propagation, live-claude smoke, secondary review fixes.
 
 ## What exists
 
@@ -21,7 +24,10 @@ tags: [roadmap, status]
 | Stage runners | `lib/hive/stages/{base,inbox,brainstorm,plan,execute,pr,done}.rb` | Implemented + integration-tested |
 | Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,config}.rb` | Implemented + unit-tested |
 | Templates | `templates/*.erb` (8 files) | Drafted |
-| Tests | `test/unit/*.rb` (7 files), `test/integration/*.rb` (10 files) | Local; CI not yet wired |
+| Tests | `test/unit/*.rb`, `test/integration/*.rb` (94 tests / 299 assertions) | All green |
+| Live smoke | `test/smoke/live_claude_smoke_test.rb` (`rake smoke`) | Opt-in; verified 2 / 11 cases |
+| CI | `.github/workflows/ci.yml`, `.github/dependabot.yml`, `config/brakeman.ignore` | Wired |
+| Repo hygiene | `CHANGELOG.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | Authored |
 | Docs | `README.md`, `wiki/` knowledge base | Authored |
 
 ## Phase 1 deferred work

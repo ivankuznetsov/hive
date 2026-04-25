@@ -15,15 +15,15 @@ tags: [stage, inbox, capture]
 
 ## Behaviour of `hive run`
 
-`Hive::Stages::Inbox.run!` (`lib/hive/stages/inbox.rb:5`) prints to stderr:
+`Hive::Stages::Inbox.run!` (`lib/hive/stages/inbox.rb:10`) **raises `Hive::WrongStage`** with the suggested `mv` + re-run command in the message. `bin/hive` rescues it and exits with code `4` (`ExitCodes::WRONG_STAGE`) so agent callers can branch on wrong-stage without parsing stderr — see [[cli]] for the full exit-code contract.
+
+The error message format is:
 
 ```
-hive: 1-inbox/ is an inert capture zone. To start work:
-  mv <task> <hive-state>/stages/2-brainstorm/
-  hive run <new-path>
+1-inbox/ is an inert capture zone. To start work: mv <task> <hive-state>/stages/2-brainstorm/ && hive run <new-path>
 ```
 
-Returns `{commit: nil, status: :inert}` so `Commands::Run` skips the post-run hive commit.
+No commit is produced — the runner never returns a result, the lock is released by `with_task_lock`, and `Commands::Run#commit_after` / `report` are skipped because the raise unwinds before them.
 
 ## Why it's special
 

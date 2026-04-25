@@ -150,6 +150,32 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
+  def test_iteration_pass_accepts_uppercase_checked_findings
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_PASS"] = "1"
+        ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "1"
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        review_file = File.join(folder, "reviews", "ce-review-01.md")
+        body = File.read(review_file).sub("- [ ] finding-1", "- [X] finding-1")
+        File.write(review_file, body)
+
+        ENV["HIVE_EXEC_DRIVER_PASS"] = "2"
+        ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "0"
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        assert File.exist?(File.join(folder, "reviews", "ce-review-02.md")),
+               "uppercase checked findings must be re-injected like lowercase [x]"
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
   def test_no_accepted_findings_short_circuits_to_complete
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

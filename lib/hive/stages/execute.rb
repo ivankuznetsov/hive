@@ -252,7 +252,7 @@ module Hive
         review_path = File.join(task.reviews_dir, format("ce-review-%02d.md", previous_pass))
         return "" unless File.exist?(review_path)
 
-        File.readlines(review_path).select { |l| l =~ /^\s*-\s+\[x\]\s+/ }.join
+        File.readlines(review_path).select { |l| l =~ /^\s*-\s+\[[xX]\]\s+/ }.join
       end
 
       def sha256_for(task, names)

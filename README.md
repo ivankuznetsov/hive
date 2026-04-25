@@ -73,6 +73,9 @@ hive run .hive-state/stages/6-done/<slug>       # prints worktree-cleanup comman
 | `hive approve <slug>` | Move a task to the next stage and record a hive/state commit. Use `--to <stage>` for explicit destinations (including backward recovery), `--from <stage>` to assert the current stage on retry, `--force` to bypass the terminal-marker check, `--json` for machine-readable output. Agent-callable equivalent of shell `mv`. |
 | `hive run <task-folder>` | Run the stage agent for the task at its current location. Idempotent; safe to re-run. |
 | `hive status` | Tabular view of every active task across all registered projects. Read-only. |
+| `hive findings <slug>` | List GFM-checkbox findings in the latest `reviews/ce-review-NN.md`. `--pass N` for a specific pass; `--json` for machine-readable. |
+| `hive accept-finding <slug> ID...` | Tick `[ ]` → `[x]` on review findings so they're re-injected into the next implementation pass. `--severity high` for all of one severity; `--all` for everything. |
+| `hive reject-finding <slug> ID...` | Inverse: tick `[x]` → `[ ]`. Same selectors. |
 
 ## How it stays out of the way
 

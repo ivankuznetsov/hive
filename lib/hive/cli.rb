@@ -13,6 +13,7 @@ module Hive
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
     APPROVE_TO_ENUM = (Hive::Stages::DIRS + Hive::Stages::NAMES).freeze
+    FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 
     desc "init [PROJECT_PATH]", "Bootstrap .hive-state in a project (orphan hive/state branch)"
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
@@ -77,5 +78,72 @@ module Hive
         json: options[:json]
       ).call
     end
+
+    desc "findings TARGET", "List findings in the latest reviews/ce-review-NN.md (or --pass N)"
+    long_desc <<~DESC
+      TARGET is either a 4-execute task folder path or a bare slug. Findings
+      are GFM-checkbox lines in the review file written by the execute-stage
+      reviewer; an unchecked `[ ]` finding is pending, a checked `[x]` will
+      be re-injected into the next implementation pass via
+      `Hive::Stages::Execute#collect_accepted_findings`.
+
+      Use `hive accept-finding TARGET ID...` (or --all / --severity) to tick
+      `[x]`, `hive reject-finding TARGET ID...` to untick.
+    DESC
+    option :pass, type: :numeric, desc: "review pass to inspect (default: latest on disk)"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def findings(target)
+      require "hive/commands/findings"
+      Hive::Commands::Findings.new(
+        target,
+        pass: options[:pass],
+        project: options[:project],
+        json: options[:json]
+      ).call
+    end
+
+    desc "accept-finding TARGET [ID...]", "Tick `[x]` on review findings (toggle to accepted)"
+    long_desc <<~DESC
+      Toggle one or more review findings to `[x]` so they are re-injected
+      into the next implementation pass. IDs are 1-based and listed by
+      `hive findings`. Combine `ID...` positionals with `--severity high`
+      (accept all of one severity) or `--all` (accept everything in the
+      review file).
+    DESC
+    option :all, type: :boolean, default: false, desc: "accept every finding in the review file"
+    option :severity, type: :string, enum: FINDING_SEVERITY_ENUM,
+                      desc: "accept all findings of the given severity"
+    option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def accept_finding(target, *ids)
+      require "hive/commands/finding_toggle"
+      Hive::Commands::FindingToggle.new(
+        Hive::Commands::FindingToggle::ACCEPT,
+        target, ids: ids, all: options[:all], severity: options[:severity],
+                pass: options[:pass], project: options[:project], json: options[:json]
+      ).call
+    end
+    map "accept-finding" => :accept_finding
+
+    desc "reject-finding TARGET [ID...]", "Untick `[x]` on review findings (toggle to rejected)"
+    long_desc <<~DESC
+      Inverse of `accept-finding`: returns a finding to the unchecked `[ ]`
+      state so it is NOT re-injected into the next implementation pass.
+      Same flags: positional IDs, `--severity`, `--all`.
+    DESC
+    option :all, type: :boolean, default: false, desc: "reject every finding in the review file"
+    option :severity, type: :string, enum: FINDING_SEVERITY_ENUM,
+                      desc: "reject all findings of the given severity"
+    option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def reject_finding(target, *ids)
+      require "hive/commands/finding_toggle"
+      Hive::Commands::FindingToggle.new(
+        Hive::Commands::FindingToggle::REJECT,
+        target, ids: ids, all: options[:all], severity: options[:severity],
+                pass: options[:pass], project: options[:project], json: options[:json]
+      ).call
+    end
+    map "reject-finding" => :reject_finding
   end
 end

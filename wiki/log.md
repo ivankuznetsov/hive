@@ -185,6 +185,115 @@ Append-only log of all wiki operations.
 **Tests:** 7 new (149 / 576 green), RuboCop clean.
 
 - `test/unit/stages_test.rb` (new) — validation semantics for `next_dir` (raises on bad index), `parse` (nil for unknown stages), `resolve`, and constant frozen-ness.
+
+## [2026-04-25T23:00:00Z] hive findings / accept-finding / reject-finding (Phase 2 PR3)
+
+**Driver:** Continuation of Phase 2 agent-callable contract work. `hive approve` (PR #4, merged) replaced shell `mv`; this commit replaces the second hand-edit step in the pipeline — ticking `[x]` on review findings in `reviews/ce-review-NN.md` to mark which findings the next implementation pass should address. The reviewer prompt writes all findings unchecked; the user (now an agent) flips a subset to accepted; `Hive::Stages::Execute#collect_accepted_findings` re-injects only the `[x]` lines into the next pass's prompt.
+
+**Code changes:**
+
+- **`Hive::Findings`** module (`lib/hive/findings.rb`, new) — parser + writer for review files. `Document.new(path)` reads the file, parses each `- [ ]` / `- [x]` line into a `Data.define` value object with `id` (1-based stable; document order), `severity` (lowercased heading), `accepted`, `title`, `justification`, `line_index`. `toggle!(id, accepted:)` flips a single checkbox character without touching surrounding bytes — verified by a unit test that asserts every non-target line is byte-identical after a write. `write!` uses tempfile + rename. `summary` returns total / accepted / by_severity. `Hive::Findings.review_path_for(task, pass:)` resolves the latest or named-pass review file.
+- **`Hive::TaskResolver`** (`lib/hive/task_resolver.rb`, new) — extracted from `Hive::Commands::Approve#resolve_target` + `find_slug_across_projects` + `validate_project_path_match!`. ~80 LOC of slug-or-folder resolution now shared between four commands (`approve`, `findings`, `accept-finding`, `reject-finding`); `Approve#do_call` is one line shorter and the duplication that would have appeared in three new commands is collapsed at extraction time.
+- **`Hive::Commands::Findings`** (`lib/hive/commands/findings.rb`, new) — read-only list. Resolves task via `TaskResolver`; loads document; emits text table or single-line `hive-findings` JSON. JSON includes per-finding `to_h` plus `summary` block.
+- **`Hive::Commands::FindingToggle`** (`lib/hive/commands/finding_toggle.rb`, new) — shared accept/reject. Combines `ID...` positionals + `--severity <s>` + `--all` into a unioned ID list (empty union is an error). Validates every ID exists; flips checkboxes; atomic write; commits to `hive/state` (slug-scoped `git add` of the review file). Acquires `Hive::Lock.with_task_lock(task.folder)` so a concurrent `hive run` can't race against the toggle. Idempotent: already-correct entries are no-ops and excluded from the JSON `changes` array. `next_action` in the JSON points at `hive run <task.folder>` so an agent driving the pipeline knows the immediate next step.
+- **CLI wiring** (`lib/hive/cli.rb`): three new Thor subcommands. `--severity` Thor `enum:` constraint against `%w[high medium low nit]`; `--pass` numeric; `--all` boolean; positional `IDs` is variadic (`*ids`).
+- **Typed exceptions** (`lib/hive.rb`): `Hive::NoReviewFile` (exit 64), `Hive::UnknownFinding` (exit 64, carries `id`).
+- **`Hive::Schemas::SCHEMA_VERSIONS["hive-findings"] = 1`** added.
+- **`schemas/hive-findings.v1.json`** — draft 2020-12 schema with `oneOf` over `ListPayload`, `TogglePayload`, and `ErrorPayload`. Per-finding shape, summary, error-kind enum (`ambiguous_slug`, `no_review_file`, `unknown_finding`, `invalid_task_path`, `error`), and the closed `NextAction.kind` enum.
+
+**Wiki updates:**
+
+- `wiki/commands/findings.md` (new) — full page for the three commands. Data model, JSON contract for both list and toggle paths, error envelope, exit-code table, locking section, "why not just edit the file" rationale, backlinks.
+- `wiki/cli.md` — TLDR updated to "eight commands"; command table grew three rows; `--json` honour list extended.
+- `wiki/index.md` — new entry under Commands; page count bumped 27 → 29.
+- `README.md` — daily-usage table grew three rows.
+
+**Tests:** 27 new (176 / 699 green; was 149 / 576 on round-3-merged main). RuboCop clean.
+
+- `test/unit/findings_test.rb` — 9 cases on the parser: severity/order/state pinning, missing-justification handling, summary counts, byte-for-byte round-trip preservation, idempotent toggle, unknown-id raises typed, missing-file raises typed, latest-pass resolution, named-pass missing.
+- `test/integration/run_findings_test.rb` — 13 cases on the three commands: text output shape, full JSON-key-set pin, named-pass selection, no-review-file error envelope, accept by ID, accept --severity, accept --all (with no-op detection on already-accepted entries), idempotent re-accept, unknown-id typed error, no-selectors error, reject behaviour, reject idempotency, task-lock contention surfaces ConcurrentRunError (TEMPFAIL/75).
+- `test/unit/schema_files_test.rb` — 4 new pins for hive-findings: file existence + draft, ListPayload required keys, TogglePayload required keys, error_kind enum drift.
+- `test/unit/exit_codes_test.rb` — pinned `NoReviewFile` (64), `UnknownFinding` (64), `InternalError` (70) exit codes; pinned `hive-findings` schema-versions key.
+
+**Refactor:**
+
+- `Hive::Commands::Approve` was simplified to delegate to `Hive::TaskResolver`. ~80 LOC removed from `approve.rb`; one line in `do_call` (`task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve`). All 32 existing approve tests still pass.
+
+## [2026-04-25T23:30:00Z] hive findings — round-2 ce-code-review remediation
+
+**Driver:** /compound-engineering:ce-code-review on PR #5 ran 8 reviewer personas (cli-readiness ran out of tokens; the other 8 produced findings). 4 P1s + 8 P2s + a few P3s addressed in this commit. Two of the P1s were independently corroborated by 2 reviewers each.
+
+**Code changes:**
+
+- **Lock-order inversion fixed** (`finding_toggle.rb#do_call`): swapped to `with_commit_lock` outermost → `with_task_lock` inner, matching `Hive::Commands::Approve`. Closes the deadlock where concurrent `hive approve <slug>` + `hive accept-finding <slug>` would both wait 30s on each other's lock and surface as `ConcurrentRunError`.
+- **Rollback false-failure message fixed** (`rollback_review_change!`): the previous shape used a method-level rescue that caught the intentional "rolled back" re-raise on the success path and falsely reported "rollback ALSO failed." Restructured to a flat `begin/rescue` where the rollback I/O is the rescued region; the success-path re-raise leaves the method without re-entering any rescue. The "rollback failed" branch is now reserved for actual rollback failures.
+- **CRLF + no-trailing-newline byte-preservation** (`Hive::Findings::Document#toggle!`): captured the original line ending in a 4th regex group on `FINDING_RE` and reused it on rebuild. CRLF input round-trips as CRLF; a last line without `\n` stays without one. The earlier hardcoded `"…\n"` flattened CRLF and added a trailing newline. Pinned by two new unit tests asserting byte-exact round-trip.
+- **Severity carry-over fixed** (`parse_lines`): any `## …` heading that doesn't match `KNOWN_SEVERITIES` (`high|medium|low|nit`) now clears `current_severity` to nil. Multi-word headings like `## Detailed Analysis` previously didn't match the heading regex at all (so subsequent findings inherited the prior severity); short non-severity headings like `## Notes` previously matched and set a fake severity. Both leak vectors closed.
+- **`with_task_lock` collision in test helper** (`run_findings_test.rb`): the lock-serialisation test pre-acquires `with_task_lock(execute, …)` then calls toggle. With the new outer/inner lock order, toggle still surfaces `ConcurrentRunError` (TEMPFAIL/75) — the test's contract is preserved without modification.
+- **Rollback `git reset` exit status checked** (`rollback_review_change!`): switched from `Open3.capture3` (status discarded) to `ops.run_git!` (raises on non-zero). A failed reset now propagates and the rollback message can't lie about the index state.
+- **`Hive::Schemas::ErrorEnvelope.build` helper** added. `Findings#emit_error_envelope` and `FindingToggle#emit_error_envelope` collapsed from ~25 LOC each to ~7 LOC. Per-error structured fields (`candidates` / `id` / `path` / `stage`) are pulled from the typed exception automatically. `approve.rb` left intact (its envelope has different structured fields and the duplication risk is lower now).
+- **`Hive::NoSelection` exception** added (exit 64 / USAGE). `select_target_ids` now raises this typed class instead of overloading `Hive::InvalidTaskPath`. `error_kind: "no_selection"` joins the `hive-findings` enum. Closes the agent-facing taxonomy issue where `error_kind: "invalid_task_path"` was being used for "argument set was empty."
+- **Targeted no-selection messages**: when `--all` runs against an empty review file, the message names that. When `--severity X` matches nothing, the message lists the available severities.
+- **`next_action` consistency**: both `kind: "run"` branches now carry a `reason` field. Previously the "nothing accepted yet" branch omitted `reason`; consumers that branched on its presence saw an inconsistent shape.
+- **`pass_from_path` deduped**: moved to `Hive::Findings.pass_from_path(path)` module function. The two duplicate `pass_from_review_path` / `pass_from_path` private helpers in `findings.rb` and `finding_toggle.rb` are gone; both commands call the shared module function.
+- **Module-level comment de-transitionalised** (`findings.rb`): "after this module, an agent ticks…" rewritten to "Ticking `[x]` flags a finding to address…" (no transitional reference). Per CLAUDE.md "don't reference the current task/fix" rule.
+
+**Schema changes (`schemas/hive-findings.v1.json`):**
+
+- `ErrorPayload.error_kind` enum gained `no_selection`.
+- `ErrorPayload.candidates` items now require `{project, stage, folder}` — mirrors `hive-approve.v1.json` so consumers validating `AmbiguousSlug` across the two endpoints can share validation logic.
+- Description added to `ErrorPayload` documenting that `operation` is present iff the error came from a toggle command.
+
+**New wiki pages (round-2):**
+
+- `wiki/modules/findings.md` — public surface of `Hive::Findings` (Document, toggle!, write!, summary, review_path_for, pass_from_path), parsing rules, round-trip guarantees pinned by unit tests, consumer table.
+- `wiki/modules/task_resolver.md` — resolution rules (path-shaped vs slug, ambiguity classes, `--project` validation), public API, consumers.
+- Reciprocal backlinks: `[[modules/findings]]` on `wiki/stages/execute.md` and `wiki/modules/lock.md`; `[[commands/findings]]` on `wiki/stages/execute.md` and `wiki/modules/lock.md`.
+- `wiki/index.md` page count bumped 29 → 31.
+
+**Tests:** 10 new (186 / 735 green; was 176 / 699 on round-1). RuboCop expected clean.
+
+- `test_toggle_preserves_crlf_line_endings` — the `\r\n` round-trip pin.
+- `test_toggle_preserves_missing_trailing_newline` — the no-trailing-newline pin.
+- `test_non_severity_heading_resets_current_severity` — `## Detailed Analysis` and `## Notes` both clear severity.
+- `test_pass_from_path_extracts_integer` — module function pin.
+- `test_accept_finding_unions_severity_with_explicit_ids` — combinator behaviour pin.
+- `test_accept_finding_with_no_selectors_errors` upgraded to assert `error_kind: "no_selection"` and `error_class: "NoSelection"`.
+- `test_hive_findings_candidates_item_shape_pinned` — schema drift guard for the candidate item shape.
+- `test_hive_findings_error_kinds_match_producer` updated to include `no_selection`.
+- `test_error_subclasses_map_to_their_contract_code` updated to pin `Hive::NoSelection` exit code.
+
+**Findings dismissed (false positives):**
+
+- API-contract reviewer's "UnknownFinding can default to `id: nil`" — only theoretical; no current call site passes nil.
+- Adversarial reviewer's `path_target?` containment concern — same behaviour as `approve.rb`'s, intentional.
+- Maintainability reviewer's "premature TaskResolver extraction" framing — 4 consumers and the realpath/ambiguity rules are exactly the kind of thing that benefits from one source of truth.
+
+## [2026-04-26T00:30:00Z] hive findings — P3 follow-ups (rollback abstraction, fence awareness, tempfile uniqueness)
+
+**Driver:** Closing the three deferred P3 items from the round-2 review entry above. All three landed together so the rollback contract is consistent across approve and the finding commands.
+
+**Code changes:**
+
+- **`Hive::CommitOrRollback.attempt!` helper** (`lib/hive/commit_or_rollback.rb`, new): consolidates the dual-rescue rollback pattern shared by `Hive::Commands::Approve#attempt_rollback!` and `Hive::Commands::FindingToggle#rollback_review_change!`. The helper owns the rescue + re-raise contract: on undo success, it re-raises the original typed `Hive::Error` (preserving exit codes like `GitError → 70`) or wraps non-typed errors in a generic `Hive::Error`; on undo failure, it raises `Hive::RollbackFailed` carrying both the original cause and the rollback failure. Caller-specific concerns (approve's "source path now exists" precondition, the message templates) stay in the caller. ~30 LOC of duplication removed across the two callers.
+- **`Hive::RollbackFailed`** (`lib/hive.rb`, new): typed exception (exit 1 / GENERIC) so the JSON envelope can surface `error_kind: "rollback_failed"`. Lets agents distinguish "commit failed but rollback succeeded → safe to retry" from "commit failed AND rollback failed → fs/git may be inconsistent." Both `hive-findings` and `hive-approve` schemas gained `rollback_failed` in the `error_kind` enum; both commands' `error_kind_for` map the new class.
+- **Fenced-code-block awareness** (`Hive::Findings::Document#parse_lines`): triple-backtick / triple-tilde fence tracking. Lines inside a fenced block don't register as headings or findings, so an example finding-shaped line in a reviewer's justification block can't false-positive. Closes a latent bug that would surface as soon as the reviewer prompt template emits fenced examples.
+- **Tempfile uniqueness** (`Hive::Findings::Document#write!`, `Hive::Lock.update_task_lock`): tempfile names now append `SecureRandom.hex(4)` to the `Process.pid` suffix. Defends against PID reuse-after-crash where a new process with the same PID would otherwise collide on a stale tempfile path.
+
+**Refactors:**
+
+- `Hive::Commands::Approve#attempt_rollback!` now delegates to the helper. The "source path now exists, can't roll back" precondition stays at the caller; the typed-vs-generic re-raise contract moves to the helper.
+- `Hive::Commands::FindingToggle#rollback_review_change!` collapses to the same helper-call shape. Identical contract; only the on_undo block (binwrite + git reset) and message lambdas differ.
+
+**Tests:** 5 new unit tests, 191/758 green (was 186/735). RuboCop clean.
+
+- `test/unit/commit_or_rollback_test.rb` (new) — pins the three helper paths: typed re-raise on undo success, generic wrap on undo success with non-typed original, RollbackFailed on undo failure.
+- `test_fenced_code_block_lines_are_ignored_by_parser` — backtick fences with `## High` and `- [ ] foo` content; asserts only real findings are parsed.
+- `test_tilde_fenced_code_block_also_ignored` — `~~~` fences too.
+- `test_error_subclasses_map_to_their_contract_code` updated to pin `RollbackFailed` exit code.
+- Both `hive-findings` and `hive-approve` `test_*_error_kinds_match_producer*` tests updated to include `rollback_failed`.
+
+**Wiki:** No new pages this round (the helper module is small and consumer-focused; documenting it inline in the source comment is sufficient). CHANGELOG covers the user-facing surface.
 - `test_commit_failure_rolls_mv_back_to_source` — installs a real `pre-commit` hook that exits 1, asserts mv reverses, exit 70 (GitError), and source restored.
 - `test_rollback_failure_surfaces_combined_error_message` — pre-commit hook recreates the source path so rollback can't proceed; asserts the combined "rollback NOT possible / manual recovery" message branch.
 - `test_json_error_envelope_on_from_mismatch_carries_wrong_stage_kind` — exercises the JSON error envelope on a `--from` mismatch with `--json`.

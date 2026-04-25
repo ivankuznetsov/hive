@@ -10,7 +10,8 @@ module Hive
     SCHEMA_VERSIONS = {
       "hive-status" => 1,
       "hive-run" => 1,
-      "hive-approve" => 1
+      "hive-approve" => 1,
+      "hive-findings" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
@@ -23,6 +24,33 @@ module Hive
     def self.schema_path(name)
       version = SCHEMA_VERSIONS.fetch(name)
       File.join(schema_dir, "#{name}.v#{version}.json")
+    end
+
+    # Build the JSON error envelope shared by every command that emits a
+    # versioned schema. Centralised so the same Hive::Error subclass
+    # surfaces with the same envelope shape regardless of which command
+    # raised it. Per-error structured fields (candidates / id / path /
+    # stage) are pulled off the exception when present.
+    module ErrorEnvelope
+      module_function
+
+      def build(schema:, error:, error_kind:, extras: {})
+        payload = {
+          "schema" => schema,
+          "schema_version" => SCHEMA_VERSIONS.fetch(schema),
+          "ok" => false,
+          "error_class" => error.class.name.split("::").last,
+          "error_kind" => error_kind,
+          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+          "message" => error.message
+        }.merge(extras)
+
+        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
+        payload["id"] = error.id if error.is_a?(Hive::UnknownFinding)
+        payload["path"] = error.path if error.is_a?(Hive::DestinationCollision)
+        payload["stage"] = error.stage if error.is_a?(Hive::FinalStageReached)
+        payload
+      end
     end
 
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.
@@ -195,6 +223,52 @@ module Hive
     def initialize(message, stage:)
       super(message)
       @stage = stage
+    end
+  end
+
+  # The task has no review file at the requested (or default-latest) pass
+  # — `hive findings` / `accept-finding` / `reject-finding` only make sense
+  # against an existing `reviews/ce-review-NN.md`.
+  class NoReviewFile < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  # An ID was passed to accept-finding / reject-finding that doesn't
+  # match any finding in the targeted review file.
+  class UnknownFinding < Error
+    attr_reader :id
+
+    def initialize(message, id: nil)
+      super(message)
+      @id = id
+    end
+
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  # accept-finding / reject-finding was invoked with no IDs, no --severity,
+  # and no --all — there's nothing to act on. Distinct from
+  # InvalidTaskPath (the path was valid; the *argument set* was empty) so
+  # callers branching on `error_kind` get a clearer signal.
+  class NoSelection < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  # A rollback attempt itself failed after a commit failure. Distinct
+  # from a plain Hive::Error so the agent contract can differentiate:
+  # a typed re-raise (commit failed but rollback succeeded → fs and git
+  # are pristine; safe to retry) from this class (commit failed AND
+  # rollback failed → fs/git may be inconsistent; manual intervention
+  # required before retry).
+  class RollbackFailed < Error
+    def exit_code
+      ExitCodes::GENERIC
     end
   end
 end

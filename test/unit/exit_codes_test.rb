@@ -31,6 +31,11 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE,               Hive::AmbiguousSlug.new("x", slug: "s", candidates: []).exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::DestinationCollision.new("x", path: "/p").exit_code
     assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "6-done").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::NoReviewFile.new("x").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::UnknownFinding.new("x", id: 1).exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::NoSelection.new("x").exit_code
+    assert_equal Hive::ExitCodes::SOFTWARE,            Hive::InternalError.new("x").exit_code
+    assert_equal Hive::ExitCodes::GENERIC,             Hive::RollbackFailed.new("x").exit_code
   end
 
   # The `schema_version` emit sites in run.rb / status.rb / approve.rb call
@@ -45,6 +50,8 @@ class ExitCodesTest < Minitest::Test
            "Hive::Commands::Run emits payload['schema'] = 'hive-run' and fetches the version by that key"
     assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-approve"),
            "Hive::Commands::Approve emits payload['schema'] = 'hive-approve' and fetches the version by that key"
+    assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-findings"),
+           "Hive::Commands::Findings + FindingToggle emit payload['schema'] = 'hive-findings'"
   end
 
   # Closed enum NextActionKind is shared across schemas. ALL is self-derived

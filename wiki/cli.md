@@ -7,7 +7,7 @@ updated: 2026-04-25
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI with five commands: `init`, `new`, `run`, `status`, `approve`. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, and `approve` support `--json` for machine-readable output (with a structured error envelope on every failure path of `approve`), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI with eight commands: `init`, `new`, `run`, `status`, `approve`, `findings`, `accept-finding`, `reject-finding`. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, `approve`, `findings`, `accept-finding`, and `reject-finding` support `--json` for machine-readable output (with a structured error envelope on every failure path), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
@@ -22,13 +22,16 @@ tags: [cli, api]
 | `hive run FOLDER` | Run the stage agent for the task at `FOLDER` | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive status` | Tabular status across registered projects | `Hive::Commands::Status` | [[commands/status]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
+| `hive findings TARGET [--pass N]` | List GFM-checkbox findings in `reviews/ce-review-NN.md` (latest by default) | `Hive::Commands::Findings` | [[commands/findings]] |
+| `hive accept-finding TARGET [ID...] [--severity S] [--all]` | Tick `[x]` on review findings; selectors are unioned | `Hive::Commands::FindingToggle` (accept) | [[commands/findings]] |
+| `hive reject-finding TARGET [ID...] [--severity S] [--all]` | Untick `[x]` on review findings | `Hive::Commands::FindingToggle` (reject) | [[commands/findings]] |
 
 `Hive::CLI` (`lib/hive/cli.rb`) is the Thor class. Notable mappings:
 
 - `new_task` is mapped to the user-visible `new` (Thor reserves `new`).
 - `run_task` is mapped to `run`.
 - `init` accepts `--force` (skip clean-tree check).
-- `--json` is a `class_option` honoured by `status`, `run`, and `approve`; other commands accept the flag silently so an automated caller can pass it uniformly. `approve --json` emits a `hive-approve` document on success AND a structured error envelope on every failure path.
+- `--json` is a `class_option` honoured by `status`, `run`, `approve`, `findings`, `accept-finding`, and `reject-finding`; other commands accept the flag silently so an automated caller can pass it uniformly. Each emits a typed JSON document on success AND a structured error envelope on every failure path.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works (without the rewrite, Thor would consume `--help` as the next positional argument).
 
 ## Exit-code contract (`Hive::ExitCodes`)

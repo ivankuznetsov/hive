@@ -1,6 +1,7 @@
 require "yaml"
 require "fileutils"
 require "time"
+require "securerandom"
 
 module Hive
   module Lock
@@ -49,7 +50,7 @@ module Hive
 
       data = YAML.safe_load(File.read(lock_path)) || {}
       additions.each { |k, v| data[k.to_s] = v }
-      tmp = "#{lock_path}.tmp.#{Process.pid}"
+      tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
       File.write(tmp, data.to_yaml)
       File.rename(tmp, lock_path)
     ensure

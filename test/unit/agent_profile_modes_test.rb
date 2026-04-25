@@ -70,6 +70,9 @@ class AgentProfileModesTest < Minitest::Test
   end
 
   def test_exit_code_only_returns_error_on_nonzero_exit
+    # Non-:state_file_marker modes leave task.state_file untouched (the
+    # orchestrator owns the marker for these flows). Caller reads
+    # result[:status] / result[:error_message] to decide what to do.
     with_tmp_dir do |dir|
       task = make_task(dir)
       File.write(task.state_file, "")
@@ -78,6 +81,30 @@ class AgentProfileModesTest < Minitest::Test
         task: task, prompt: "test",
         max_budget_usd: 1, timeout_sec: 5,
         profile: make_profile(:exit_code_only)
+      ).run!
+      assert_equal :error, result[:status]
+      assert_match(/exit_code=2/, result[:error_message])
+      # Orchestrator-owned marker contract: task.state_file must NOT have
+      # been mutated by the spawn — orchestrator gets to decide REVIEW_*
+      # marker outcomes after observing result[:status].
+      assert_equal :none, Hive::Markers.current(task.state_file).name,
+                   "non-:state_file_marker modes must not write to task.state_file"
+    end
+  end
+
+  def test_state_file_marker_mode_still_writes_error_on_nonzero_exit
+    # Backward-compat regression: the :state_file_marker mode (today's
+    # claude path for 4-execute / brainstorm / plan / pr) keeps writing
+    # :error to task.state_file. Without this, existing stage runners
+    # that read the marker post-spawn would see :agent_working stuck.
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "2"
+      result = Hive::Agent.new(
+        task: task, prompt: "test",
+        max_budget_usd: 1, timeout_sec: 5,
+        profile: make_profile(:state_file_marker)
       ).run!
       assert_equal :error, result[:status]
       assert_equal :error, Hive::Markers.current(task.state_file).name

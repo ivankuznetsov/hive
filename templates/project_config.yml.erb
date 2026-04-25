@@ -11,6 +11,10 @@ budget_usd:
   execute_implementation: 100
   execute_review: 50
   pr: 10
+  review_ci: 25
+  review_triage: 15
+  review_fix: 100
+  review_browser: 25
 
 timeout_sec:
   brainstorm: 300
@@ -18,3 +22,74 @@ timeout_sec:
   execute_implementation: 2700
   execute_review: 600
   pr: 300
+  review_ci: 600
+  review_triage: 300
+  review_fix: 2700
+  review_browser: 900
+
+# 5-review stage configuration. Each role takes an `agent` (one of the
+# names registered in Hive::AgentProfiles — claude, codex, pi by default)
+# and an optional `prompt_template` path under templates/.
+review:
+  ci:
+    # Path to the project's CI command. `null` skips the CI-fix phase.
+    # Example: "bin/ci" for hive itself, "bin/rails test" for a Rails project.
+    command: null
+    max_attempts: 3
+    agent: claude
+    prompt_template: ci_fix_prompt.md.erb
+  triage:
+    enabled: true
+    agent: claude
+    # Bias presets:
+    #   - courageous (default): action-biased — auto-fix polish, clarity,
+    #     mechanical findings; escalate only architecture / auth /
+    #     contradictions / low-confidence.
+    #   - safetyist: escalation-biased — auto-fix only the truly mechanical
+    #     (typos, lint); escalate anything else by default.
+    bias: courageous
+    # Optional path under <hive-state>/templates/ to override the bias
+    # preset's prompt entirely.
+    custom_prompt: null
+  fix:
+    agent: claude
+    prompt_template: fix_prompt.md.erb
+  browser_test:
+    # Set to true for projects that have a browsable surface (Rails apps,
+    # web frontends). Hive itself (CLI tool) leaves this disabled.
+    enabled: false
+    agent: claude
+    prompt_template: browser_test_prompt.md.erb
+    max_attempts: 2
+  max_passes: 4
+  # Aggregate wall-clock cap across all phases of one `hive run` on a
+  # 5-review folder. 5400s = 90 min.
+  max_wall_clock_sec: 5400
+  # Hive's recommended reviewer set: claude /ce-code-review + codex
+  # /ce-code-review + claude /pr-review-toolkit:review-pr. Each entry's
+  # `name` becomes part of the output filename (`reviews/<name>-<pass>.md`).
+  # To disable an entry, comment it out or remove it. To replace the set
+  # entirely, edit this list — the deep-merge replaces `review.reviewers`
+  # wholesale (no per-element merge).
+  reviewers:
+    - name: claude-ce-code-review
+      kind: agent
+      agent: claude
+      skill: ce-code-review
+      output_basename: claude-ce-code-review
+      budget_usd: 50
+      timeout_sec: 600
+    - name: codex-ce-code-review
+      kind: agent
+      agent: codex
+      skill: ce-code-review
+      output_basename: codex-ce-code-review
+      budget_usd: 50
+      timeout_sec: 600
+    - name: pr-review-toolkit
+      kind: agent
+      agent: claude
+      skill: pr-review-toolkit:review-pr
+      output_basename: pr-review-toolkit
+      budget_usd: 50
+      timeout_sec: 600

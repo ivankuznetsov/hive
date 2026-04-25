@@ -50,6 +50,9 @@ module Hive
         when "execute"
           require "hive/stages/execute"
           Hive::Stages::Execute.method(:run!)
+        when "review"
+          require "hive/stages/review"
+          Hive::Stages::Review.method(:run!)
         when "pr"
           require "hive/stages/pr"
           Hive::Stages::Pr.method(:run!)

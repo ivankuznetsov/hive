@@ -2,6 +2,46 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-25T20:00:00Z] U2 ship — review.* + agents.* config + recursive deep-merge
+
+**Action:** Phase 1's config foundation for the 5-review autonomous loop. Replaced `Hive::Config.merge_defaults`'s single-level `Hash#merge` with a recursive deep-merge (closes doc-review F3 P0); added `agents.*` and `review.*` defaults trees; added load-time validation for reviewer uniqueness, agent-profile resolution, and reviewer entry shape. `templates/project_config.yml.erb` now scaffolds a live (not commented) `review:` block with the 3-entry recommended set (claude-ce-code-review + codex-ce-code-review + pr-review-toolkit), so a fresh `hive init` produces a working 5-review config out of the box.
+
+**Code:** `lib/hive/config.rb` rewrite (deep-merge + validate! + new DEFAULTS keys + ROLE_AGENT_PATHS); `templates/project_config.yml.erb` (live review block); `test/unit/config_test.rb` (+10 cases for deep-merge / validation); `test/integration/init_test.rb` (+1 case for scaffold round-trip).
+
+**Key decisions:**
+- Recursive deep-merge with **wholesale-replace at `review.reviewers`** (per ADR-018 — Arrays replace, no per-element merge). All other paths under `review.*` and `agents.*` deep-merge by key.
+- Validation runs at load time (`Config.load`) so a bad config fails fast at exit code 78 (`CONFIG`). Error messages enumerate the registered profile names so an agent reading the failure output learns the valid domain.
+- `max_wall_clock_sec: 5400` (90 min) aggregate cap — closes doc-review ADV-4.
+- New per-role budget/timeout keys (`review_ci`, `review_triage`, `review_fix`, `review_browser`) added to `budget_usd` / `timeout_sec` blocks.
+
+**Code review (ce-code-review run `20260425-f58aa04b`):** 9 reviewer personas; 1 P0 + 5 P1 + 7 P2 + 2 P3 = 15 findings. LFG dispatch:
+
+- **Applied (5 safe_auto fixes):**
+  - **#1 P0:** `schemas/hive-approve.v1.json` integer maximum bumped from 6 to 7 (was rejecting valid `7-done` payloads).
+  - **#9 P2:** Extracted shared `validate_agent_name!` helper used by both `validate_reviewers!` and `validate_role_agent_names!`.
+  - **#11 P2:** Reject empty / whitespace-only `output_basename` (would have produced `reviews/-NN.md` filenames).
+  - **#12 P2:** `reviewers:` (nil) now raises `ConfigError` with a clear message instead of silently early-returning into a downstream `NoMethodError`.
+  - **#13 P2:** Validation errors now annotate "(defaults; no file present)" when the cited config path doesn't exist on disk.
+
+- **Deferred (gated_auto, residual actionable):**
+  - **#2 P1:** `deep_merge` defensive shape-check — adversarial reviewer reproduced 3 paths where bad user input (scalar/array/null at a Hash key) leaks raw `TypeError` / `NoMethodError` instead of typed `ConfigError`. Concrete fix exists (validate type compatibility before recursing) but folds into a follow-up since the architectural choice (raise vs warn vs coerce) deserves explicit treatment.
+  - **#6 P1 partial:** `wiki/modules/config.md` rewrite (DEFAULTS block + deep-merge contract + validation rules). Folds into U10 wiki update pass per plan; this entry covers the wiki/log requirement.
+  - **#6 P1 partial:** `wiki/decisions.md` ADR-011 amendment for the new review_ci/review_triage/review_fix/review_browser budget keys. Same — folds into U10.
+  - **#7 P2:** Orphan `5-pr/` directory after pre-U1 upgrade — `Task.new` accepts the path, status hides it, approve raises misleading `FinalStageReached`. Concrete fix (validation arm in `Task.new` raising `InvalidTaskPath` with migration hint) deferred — needs UX design for the message and the auto-recovery flag.
+  - **#8 P2:** Move `review_*` budget/timeout keys from flat `budget_usd.*` into each `review.<role>` block. Defers to U7/U8 when consumers wire up.
+  - **#14 P3:** Strict-mode reviewer entry validation (reject unknown fields like `kind: lintr`). Defers to U4 reviewer adapter when the canonical entry shape locks in.
+
+- **Skipped (deliberate, design decisions for later, not bugs):**
+  - **#3 P1:** Schema-version bump for `hive-approve` (in-place enum mutation at v1 violates the documented bump policy). Decision: schema is pre-1.0 and has no external cached consumers; accept the in-place mutation. Revisit if hive ships a v1.0 release.
+  - **#4 P1:** `Stages.next_dir(idx)` parameter semantics flipped — same signature, different behavior. Decision: internal helper, no external callers; accept.
+  - **#5 P1:** `Config.load` raises `ConfigError` on previously-tolerated inputs. Decision: broader failure surface is the design (validation pass is the point of U2); existing wrappers either rescue `ConfigError` or accept the broader contract.
+  - **#10 P2:** `config_version` field for the new `agents:`/`review:` keys. Decision: defer until first config-breaking change forces the conversation.
+  - **#15 P3:** Mixed git-history search across the renumber — pre-existing commits won't change. Acceptable history split.
+
+**Code:** 4 commits on `feat/5-review-stage` from this U2 work. 210 tests passing (was 206, +4 new tests for the validation paths). Rubocop clean.
+
+**Wiki pages updated:** this entry. Larger pass (`wiki/modules/config.md`, `wiki/decisions.md` ADR-011 amendment, ADRs 014–019) deferred to U10 per plan.
+
 ## [2026-04-25T19:30:00Z] CLI: status-first workflow verbs
 
 **Action:** Added the human-facing command surface where `hive status` shows current slugs grouped by next action, and stage verbs (`hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, `hive archive`) move-or-run tasks by slug.

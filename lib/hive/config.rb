@@ -221,11 +221,18 @@ module Hive
 
     def validate_reviewers!(cfg, source_path)
       reviewers = cfg.dig("review", "reviewers")
-      return if reviewers.nil? # only present after merge if defaults still hold
+      # Defaults provide []; the only path to nil is a YAML user typing
+      # `reviewers:` with no value. Fail loudly instead of silently
+      # accepting (downstream code would NoMethodError on .each).
+      if reviewers.nil?
+        raise ConfigError,
+              "review.reviewers in #{describe_source(source_path)} is nil; " \
+              "either remove the key (defaults provide []) or supply an Array of reviewer entries"
+      end
 
       unless reviewers.is_a?(Array)
         raise ConfigError,
-              "review.reviewers in #{source_path} must be an Array of reviewer entries; got #{reviewers.class}"
+              "review.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries; got #{reviewers.class}"
       end
 
       seen_names = {}
@@ -233,45 +240,73 @@ module Hive
       reviewers.each_with_index do |entry, idx|
         unless entry.is_a?(Hash)
           raise ConfigError,
-                "review.reviewers[#{idx}] in #{source_path} must be a Hash; got #{entry.class}"
+                "review.reviewers[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
         end
 
         name = entry["name"]
         if name && (prev = seen_names[name])
           raise ConfigError,
-                "review.reviewers in #{source_path} has duplicate name #{name.inspect} " \
+                "review.reviewers in #{describe_source(source_path)} has duplicate name #{name.inspect} " \
                 "at indices [#{prev}, #{idx}]"
         end
         seen_names[name] = idx if name
 
+        # output_basename uniqueness — empty / whitespace-only strings are
+        # treated as absent (would yield `reviews/-01.md` which is broken,
+        # so reject them explicitly rather than letting the uniqueness
+        # check silently allow two empty values to collide on disk).
         basename = entry["output_basename"]
-        if basename && (prev = seen_basenames[basename])
+        normalized_basename = basename.is_a?(String) ? basename.strip : basename
+        if basename.is_a?(String) && normalized_basename.empty?
           raise ConfigError,
-                "review.reviewers in #{source_path} has duplicate output_basename #{basename.inspect} " \
+                "review.reviewers[#{idx}].output_basename in #{describe_source(source_path)} must not be empty " \
+                "(would produce reviews/-NN.md filenames)"
+        end
+
+        if normalized_basename && (prev = seen_basenames[normalized_basename])
+          raise ConfigError,
+                "review.reviewers in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \
                 "at indices [#{prev}, #{idx}] (would cause concurrent file-write collisions)"
         end
-        seen_basenames[basename] = idx if basename
+        seen_basenames[normalized_basename] = idx if normalized_basename
 
-        # Each agent reviewer entry must reference a registered profile.
-        agent = entry["agent"]
-        if agent && !Hive::AgentProfiles.registered?(agent)
-          raise ConfigError,
-                "review.reviewers[#{idx}].agent #{agent.inspect} in #{source_path} " \
-                "is not a registered AgentProfile (registered: #{Hive::AgentProfiles.registered_names.inspect})"
-        end
+        validate_agent_name!(
+          entry["agent"],
+          "review.reviewers[#{idx}].agent",
+          source_path
+        )
       end
     end
 
     def validate_role_agent_names!(cfg, source_path)
       ROLE_AGENT_PATHS.each do |path|
         agent = cfg.dig(*path)
-        next if agent.nil?
-        next if Hive::AgentProfiles.registered?(agent)
-
-        raise ConfigError,
-              "#{path.join('.')} #{agent.inspect} in #{source_path} " \
-              "is not a registered AgentProfile (registered: #{Hive::AgentProfiles.registered_names.inspect})"
+        validate_agent_name!(agent, path.join("."), source_path)
       end
+    end
+
+    # Shared check used by both validate_reviewers! and
+    # validate_role_agent_names!: ensure `agent_name` resolves via
+    # Hive::AgentProfiles.lookup. Nil values pass through (the field is
+    # optional). Each error message lists the registered profile names so
+    # an agent reading the failure output learns the valid set.
+    def validate_agent_name!(agent_name, label, source_path)
+      return if agent_name.nil?
+      return if Hive::AgentProfiles.registered?(agent_name)
+
+      raise ConfigError,
+            "#{label} #{agent_name.inspect} in #{describe_source(source_path)} " \
+            "is not a registered AgentProfile (registered: #{Hive::AgentProfiles.registered_names.inspect})"
+    end
+
+    # Stable description of where a config came from, for error messages.
+    # When the candidate file does not exist (defaults-only path), point
+    # the user at the right path with an explicit "(defaults; no file
+    # present)" note instead of pointing them at a phantom file.
+    def describe_source(path)
+      return path if File.exist?(path)
+
+      "#{path} (defaults; no file present)"
     end
   end
 end

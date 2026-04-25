@@ -27,6 +27,35 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_initializes_project_with_populated_review_reviewers
+    # U2 closes doc-review C-3: hive init scaffolds a live review.reviewers
+    # block (not commented). Verifies the YAML is parseable and lands the
+    # 3-entry recommended set (claude-ce-code-review, codex-ce-code-review,
+    # pr-review-toolkit) so a fresh project can run 5-review without
+    # additional hand-edit.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        cfg = Hive::Config.load(dir)
+
+        reviewers = cfg.dig("review", "reviewers")
+        assert_kind_of Array, reviewers
+        names = reviewers.map { |r| r["name"] }.sort
+        assert_equal %w[claude-ce-code-review codex-ce-code-review pr-review-toolkit], names
+
+        # Each entry references a registered AgentProfile.
+        reviewers.each do |entry|
+          assert Hive::AgentProfiles.registered?(entry["agent"]),
+                 "reviewer #{entry['name'].inspect} agent #{entry['agent'].inspect} must be a registered profile"
+        end
+
+        # Other defaults present.
+        assert_equal "courageous", cfg.dig("review", "triage", "bias")
+        assert_equal 4,            cfg.dig("review", "max_passes")
+      end
+    end
+  end
+
   def test_rejects_non_git_repo
     with_tmp_global_config do
       with_tmp_dir do |dir|

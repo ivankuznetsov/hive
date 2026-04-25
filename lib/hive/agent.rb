@@ -7,11 +7,11 @@ require "hive/agent_profiles"
 module Hive
   class Agent
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
-                :profile, :expected_output
+                :profile, :expected_output, :status_mode
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
-                   profile: nil, expected_output: nil)
+                   profile: nil, expected_output: nil, status_mode: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -21,6 +21,23 @@ module Hive
       @log_label = log_label || task.stage_name
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
       @expected_output = expected_output
+      # Per-spawn override of the profile's default detection mode. The
+      # same CLI (e.g., claude) serves multiple roles — 4-execute uses
+      # :state_file_marker (agent writes terminal marker to task.md);
+      # the 5-review reviewer adapter uses :output_file_exists (agent
+      # writes a structured findings file). Passing nil falls back to
+      # the profile's default. Validation lives in AgentProfile's enum.
+      if status_mode && !Hive::AgentProfile::STATUS_DETECTION_MODES.include?(status_mode)
+        raise ArgumentError,
+              "unknown status_mode: #{status_mode.inspect}; valid: #{Hive::AgentProfile::STATUS_DETECTION_MODES.inspect}"
+      end
+      @status_mode = status_mode
+    end
+
+    # Effective mode for this spawn — explicit kwarg wins, falls back to
+    # the profile's default.
+    def effective_status_mode
+      @status_mode || @profile.status_detection_mode
     end
 
     # Backward-compat class methods. Resolve to the claude profile so legacy
@@ -35,9 +52,19 @@ module Hive
 
     def run!
       ensure_log_dir
-      Hive::Markers.set(@task.state_file, :agent_working,
-                        pid: Process.pid,
-                        started: Time.now.utc.iso8601)
+      # Marker writes on task.state_file are gated by the profile's
+      # status_detection_mode. Only the :state_file_marker mode (today's
+      # claude path for 4-execute / brainstorm / plan / pr) writes
+      # :agent_working pre-spawn — the agent itself overwrites it with
+      # the terminal marker on exit. The other two modes do NOT write
+      # the task marker because the orchestrator owns it (e.g., the
+      # 5-review runner sets REVIEW_WORKING phase=reviewers and that
+      # must persist across each per-reviewer spawn).
+      if effective_status_mode == :state_file_marker
+        Hive::Markers.set(@task.state_file, :agent_working,
+                          pid: Process.pid,
+                          started: Time.now.utc.iso8601)
+      end
       result = spawn_and_wait
       handle_exit(result)
       result
@@ -197,14 +224,21 @@ module Hive
     #   is the success criterion.
     def handle_exit(result)
       if result[:timed_out]
-        Hive::Markers.set(@task.state_file, :error,
-                          reason: "timeout",
-                          timeout_sec: @timeout_sec)
+        # Only the :state_file_marker mode writes :error to task.state_file
+        # on timeout. The other modes leave the orchestrator-owned marker
+        # in place (e.g., REVIEW_WORKING phase=reviewers stays so the
+        # 5-review runner can decide whether to retry, escalate, or
+        # convert to REVIEW_ERROR).
+        if effective_status_mode == :state_file_marker
+          Hive::Markers.set(@task.state_file, :error,
+                            reason: "timeout",
+                            timeout_sec: @timeout_sec)
+        end
         result[:status] = :timeout
         return
       end
 
-      case @profile.status_detection_mode
+      case effective_status_mode
       when :state_file_marker
         handle_exit_state_file_marker(result)
       when :exit_code_only
@@ -236,39 +270,38 @@ module Hive
       end
     end
 
+    # The :exit_code_only and :output_file_exists modes deliberately do
+    # NOT write to task.state_file. The orchestrator owns the marker for
+    # these flows (5-review's runner aggregates per-reviewer results and
+    # writes a single REVIEW_* marker at the end of the phase). Writing
+    # :error here would clobber the in-progress REVIEW_WORKING marker.
+    # Caller reads result[:status] (:ok | :error) and result[:error_message]
+    # to decide what to do.
+
     def handle_exit_exit_code_only(result)
       if result[:exit_code] == 0
         result[:status] = :ok
       else
-        Hive::Markers.set(@task.state_file, :error,
-                          reason: "exit_code",
-                          exit_code: result[:exit_code])
         result[:status] = :error
+        result[:error_message] = "exit_code=#{result[:exit_code]}"
       end
     end
 
     def handle_exit_output_file_exists(result)
       if result[:exit_code] != 0
-        Hive::Markers.set(@task.state_file, :error,
-                          reason: "exit_code",
-                          exit_code: result[:exit_code])
         result[:status] = :error
+        result[:error_message] = "exit_code=#{result[:exit_code]}"
         return
       end
 
       path = @expected_output
       if path.nil? || path.to_s.empty?
-        Hive::Markers.set(@task.state_file, :error,
-                          reason: "missing_expected_output_path")
         result[:status] = :error
         result[:error_message] = "profile #{@profile.name} uses :output_file_exists but no expected_output was provided"
         return
       end
 
       unless File.exist?(path) && File.size(path) > 0
-        Hive::Markers.set(@task.state_file, :error,
-                          reason: "missing_or_empty_output",
-                          path: path)
         result[:status] = :error
         result[:error_message] = "expected output file missing or empty: #{path}"
         return

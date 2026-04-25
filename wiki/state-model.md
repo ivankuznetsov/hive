@@ -67,8 +67,14 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- EXECUTE_WAITING findings_count=N pass=K -->` | review pass produced findings to triage | `Stages::Execute#finalize_review_state` |
 | `<!-- EXECUTE_COMPLETE pass=K -->` | review pass found no findings (or no accepted findings remained) | `Stages::Execute#finalize_review_state` / `run_iteration_pass` |
 | `<!-- EXECUTE_STALE max_passes=N pass=K -->` | hit `cfg["max_review_passes"]` (default 4) | `Stages::Execute#run_iteration_pass` |
+| `<!-- REVIEW_WORKING phase=ci\|reviewers\|triage\|fix\|browser pass=NN -->` | 5-review phase in flight (transient — replaced at phase exit) | `Stages::Review` phase entry (U9, future) |
+| `<!-- REVIEW_WAITING escalations=N pass=NN -->` | review pass produced escalations awaiting human edit | `Stages::Review` orchestrator |
+| `<!-- REVIEW_CI_STALE attempts=N -->` | CI hard-block — `cfg.review.ci.max_attempts` reached without green; reviewers don't run on red CI | `Stages::Review` CI phase |
+| `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 4) | `Stages::Review` orchestrator |
+| `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to mv to 6-pr (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
+| `<!-- REVIEW_ERROR phase=… reason=… -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`) | `Stages::Review` orchestrator |
 
-Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Attributes are `key=value` (or `key="quoted value"`).
+Marker name allowlist: `Hive::Markers::KNOWN_NAMES` (twelve names — six pre-U3 + six REVIEW_* added in U3). Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`).
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 

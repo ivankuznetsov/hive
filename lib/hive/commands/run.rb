@@ -117,11 +117,9 @@ module Hive
         end
       end
 
-      # APPROVE replaces the old MV emission: the canonical agent action
-      # for a terminal marker is now `hive approve <slug>`, not literal
-      # /bin/mv. The `command` field includes `--from <stage>` so a retry
-      # is idempotent — the same call after a partial success fails with
-      # WRONG_STAGE (4) instead of advancing again.
+      # Emit an APPROVE action with `--from <stage>` so a retry after a
+      # partial success fails with WRONG_STAGE (4) instead of advancing
+      # twice. The `command` field is a copy-paste-executable shell line.
       def approve_action(task, dest_path)
         kind = Hive::Schemas::NextActionKind
         return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless dest_path

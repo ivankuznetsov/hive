@@ -14,9 +14,8 @@ module Hive
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
-    # `Hive::Schemas.schema_path("hive-approve")` to get the full path for a
-    # specific schema; external consumers can validate emitted documents
-    # with any draft-2020-12 validator (ajv, json_schemer, etc.).
+    # `Hive::Schemas.schema_path(name)` for a specific schema; external
+    # consumers validate emitted documents with any draft-2020-12 validator.
     def self.schema_dir
       File.expand_path("../schemas", __dir__)
     end
@@ -125,6 +124,15 @@ module Hive
     end
   end
 
+  # Catch-all wrapper for unexpected non-Hive errors that escape into the
+  # CLI's top-level rescue. Translates to SOFTWARE (70) so wrappers can
+  # treat it like other internal failures rather than the generic 1.
+  class InternalError < Error
+    def exit_code
+      ExitCodes::SOFTWARE
+    end
+  end
+
   # Raised by `hive run` when the stage's terminal marker is :error. The
   # runner itself succeeded — the agent recorded a task-level failure.
   # Distinct from StageError (which signals a runner bug / git failure).
@@ -151,10 +159,11 @@ module Hive
     end
   end
 
-  # Raised by `hive approve` when a slug resolves to folders in multiple
-  # registered projects (or in multiple stages of one project). Carries the
-  # structured candidate list so a JSON error envelope can surface it without
-  # re-parsing the prose message.
+  # A slug resolved to folders in multiple registered projects, or in
+  # multiple stages of one project. Carries the structured candidate list
+  # so a JSON error envelope can surface it without re-parsing prose.
+  # Inherits from InvalidTaskPath for the USAGE (64) exit code; the IS-A is
+  # exit-code convenience, not a path-type relationship.
   class AmbiguousSlug < InvalidTaskPath
     attr_reader :slug, :candidates
 
@@ -165,10 +174,9 @@ module Hive
     end
   end
 
-  # Raised by `hive approve` when the destination folder already exists.
-  # Distinct class so test pinning is meaningful and so callers (and the
-  # JSON error envelope) can distinguish a real collision from a generic
-  # error sharing exit code 1.
+  # The destination folder for a stage move already exists. Distinct class
+  # so callers (and the JSON error envelope) can distinguish a real
+  # collision from a generic error sharing exit code 1.
   class DestinationCollision < Error
     attr_reader :path
 
@@ -178,9 +186,9 @@ module Hive
     end
   end
 
-  # Raised by `hive approve` when forward auto-advance is asked but the task
-  # is at the final stage. Maps to WRONG_STAGE (4) so wrappers can branch
-  # cleanly between "real collision (1)" and "no further stage (4)".
+  # Forward auto-advance was asked but the task is at the final stage.
+  # Maps to WRONG_STAGE (4) so wrappers can branch cleanly between
+  # "real collision (1)" and "no further stage (4)".
   class FinalStageReached < WrongStage
     attr_reader :stage
 

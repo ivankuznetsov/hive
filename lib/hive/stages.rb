@@ -9,26 +9,33 @@ module Hive
 
     module_function
 
-    # Directory for the stage *after* the one at idx (1-based). Returns nil at
-    # the final stage. DIRS[idx] works because stage_index is 1-based and the
-    # array is 0-based: idx=1 ("1-inbox") → DIRS[1] = "2-brainstorm".
+    # Directory for the stage *after* the one at the given 1-based index.
+    # Returns nil for indices at or past the final stage. Out-of-range
+    # arguments raise so an off-by-one shows up at the call site rather
+    # than silently returning nil and being indistinguishable from "final".
     def next_dir(idx)
+      raise ArgumentError, "stage index out of range: #{idx.inspect}" unless idx.is_a?(Integer) && idx >= 1
+
       DIRS[idx]
     end
 
-    # Resolve a user-provided stage string ("3-plan" or "plan") to a canonical
-    # DIRS entry, or nil if neither shape matches.
+    # Resolve a user-provided stage string ("3-plan" or "plan") to a
+    # canonical DIRS entry, or nil if neither shape matches.
     def resolve(name)
       return name if DIRS.include?(name)
 
       SHORT_TO_FULL[name]
     end
 
-    # ["3-plan"] → [3, "plan"]; nil if malformed.
+    # Validate `dir` is a known stage directory and return [index, name].
+    # Returns nil only for inputs that aren't known stages — callers that
+    # need fail-loud semantics should raise on nil. (`"99-foo"` returns nil
+    # rather than `[99, "foo"]` so a hand-constructed stage string can't
+    # silently slip past validation.)
     def parse(dir)
-      idx, name = dir.split("-", 2)
-      return nil unless name && idx.match?(/\A\d+\z/)
+      return nil unless DIRS.include?(dir)
 
+      idx, name = dir.split("-", 2)
       [ idx.to_i, name ]
     end
   end

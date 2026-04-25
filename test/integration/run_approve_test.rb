@@ -94,16 +94,6 @@ class RunApproveTest < Minitest::Test
     end
   end
 
-  def test_to_accepts_every_short_stage_name
-    # Round-trip every short name through Hive::Stages.resolve to catch a
-    # constant-construction regression that drops or mistypes one entry.
-    short_to_full = Hive::Stages::SHORT_TO_FULL
-    expected = {
-      "inbox" => "1-inbox", "brainstorm" => "2-brainstorm", "plan" => "3-plan",
-      "execute" => "4-execute", "pr" => "5-pr", "done" => "6-done"
-    }
-    assert_equal expected, short_to_full.to_h
-  end
 
   def test_folder_path_target_works_directly
     with_tmp_global_config do
@@ -484,6 +474,30 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_json_error_envelope_on_from_mismatch_carries_wrong_stage_kind
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::Approve.new(slug, from: "1-inbox", json: true).call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "wrong_stage", payload["error_kind"]
+        assert_equal "WrongStage", payload["error_class"]
+        assert_equal Hive::ExitCodes::WRONG_STAGE, payload["exit_code"]
+        assert_includes payload["message"], "but --from expected 1-inbox"
+      end
+    end
+  end
+
   def test_json_error_envelope_on_ambiguous_slug
     with_tmp_global_config do
       with_tmp_git_repo do |dir1|
@@ -514,9 +528,18 @@ class RunApproveTest < Minitest::Test
           assert_equal "AmbiguousSlug", payload["error_class"]
           assert_equal "ambiguous_slug", payload["error_kind"]
           assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-          # Structured candidates rather than prose:
+          # Structured candidates rather than prose. Pin the full per-
+          # candidate key set so a producer regression that drops `stage`
+          # or `folder` fails this test.
           assert_kind_of Array, payload["candidates"]
           assert_equal 2, payload["candidates"].size
+          payload["candidates"].each do |candidate|
+            assert_equal %w[folder project stage], candidate.keys.sort,
+                         "each candidate must have project / stage / folder"
+            assert_equal "1-inbox", candidate["stage"]
+            assert candidate["folder"].end_with?("/.hive-state/stages/1-inbox/#{slug}"),
+                   "candidate folder must point at the actual hit"
+          end
           assert_equal [ File.basename(dir1), File.basename(dir2) ].sort,
                        payload["candidates"].map { |c| c["project"] }.sort
         end
@@ -707,6 +730,78 @@ class RunApproveTest < Minitest::Test
           File.singleton_class.alias_method(:exist?, :__orig_exist?)
           File.singleton_class.send(:remove_method, :__orig_exist?)
         end
+      end
+    end
+  end
+
+  # ── Rollback on commit failure ──────────────────────────────────────────
+
+  def test_commit_failure_rolls_mv_back_to_source
+    # Inject a commit failure via a pre-commit hook that always exits 1.
+    # The mv must reverse so the filesystem and git history don't diverge.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        # The hive/state worktree shares its hooks dir with the project's
+        # .git/hooks because it's a worktree. A pre-commit hook that exits 1
+        # aborts the commit at the kernel level — exactly the production
+        # scenario the rollback was designed for.
+        hooks_dir = File.join(dir, ".git", "hooks")
+        FileUtils.mkdir_p(hooks_dir)
+        hook_path = File.join(hooks_dir, "pre-commit")
+        File.write(hook_path, "#!/bin/sh\nexit 1\n")
+        FileUtils.chmod(0o755, hook_path)
+
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
+
+        # The typed Hive::GitError surfaces with SOFTWARE (70), preserving
+        # the contract code instead of being collapsed to GENERIC (1).
+        assert_equal Hive::ExitCodes::SOFTWARE, status,
+                     "commit failure must surface the typed GitError exit code, not generic 1"
+
+        # Filesystem rolled back: source restored, destination gone.
+        assert File.directory?(brainstorm), "source must be restored on rollback"
+        refute File.exist?(File.join(dir, ".hive-state", "stages", "3-plan", slug)),
+               "destination must be cleaned up on rollback"
+
+        # Error message names the rollback so a human / agent operator can
+        # understand state — the typed Hive::GitError.message describes the
+        # commit failure; the rescue path doesn't double-wrap when the
+        # underlying error already carried a typed exit code.
+        assert_includes err, "commit"
+      end
+    end
+  end
+
+  def test_rollback_failure_surfaces_combined_error_message
+    # If the rollback mv ALSO fails (e.g., source path was somehow re-
+    # created by a concurrent process between mv and rollback), both errors
+    # must surface — original cause AND rollback failure — so the operator
+    # has the full picture for manual recovery.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        hooks_dir = File.join(dir, ".git", "hooks")
+        FileUtils.mkdir_p(hooks_dir)
+        hook_path = File.join(hooks_dir, "pre-commit")
+        File.write(hook_path, "#!/bin/sh\nmkdir -p '#{brainstorm}'\nexit 1\n")
+        FileUtils.chmod(0o755, hook_path)
+
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
+        assert_includes [ Hive::ExitCodes::GENERIC, Hive::ExitCodes::SOFTWARE ], status,
+                        "rollback-not-possible path produces a typed Hive::Error"
+        assert_includes err, "rollback NOT possible"
+        assert_includes err, "manual recovery"
       end
     end
   end

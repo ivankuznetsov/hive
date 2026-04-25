@@ -11,15 +11,15 @@ require "hive/stages"
 module Hive
   module Commands
     # Move a task folder between stages and record a hive/state commit. The
-    # agent-callable replacement for shell `mv <task> <next-stage>/`.
+    # agent-callable equivalent of shell `mv <task> <next-stage>/`.
     #
     # Resolution paths for `target`:
     #   - path-shaped (contains '/' or starts with '~'/'.') → used directly
     #   - bare slug → searched across registered projects (or the one given
     #     by --project) for an unambiguous match. Multi-stage hits inside
-    #     one project are now treated as ambiguous (caller passes a folder
-    #     path or --to to disambiguate); silently picking the lowest stage
-    #     was wrong for the partial-failure-recovery case.
+    #     one project are treated as ambiguous; the caller must pass an
+    #     absolute folder path to pick a specific stage (--to selects the
+    #     destination, not the source).
     #
     # Forward auto-advance requires a terminal marker (`:complete` /
     # `:execute_complete`). Backward `--to <stage>` is a recovery action and
@@ -46,6 +46,16 @@ module Hive
       rescue Hive::Error => e
         emit_error_envelope(e) if @json
         raise
+      rescue StandardError => e
+        # Anything that isn't a typed Hive::Error is an internal bug or an
+        # I/O fault we didn't anticipate (Errno::ENOSPC from mkdir_p, an
+        # Open3 failure, a SystemCallError from the cross-device fallback).
+        # Translate to InternalError so --json callers still get a parseable
+        # envelope on stdout instead of a Ruby trace on stderr, and the
+        # exit code is the documented SOFTWARE (70) rather than nothing.
+        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        emit_error_envelope(wrapped) if @json
+        raise wrapped
       end
 
       private
@@ -118,9 +128,8 @@ module Hive
       end
 
       # Returns every stage hit across registered projects (filtered by
-      # --project if given) as { project:, stage:, folder: } hashes. Same-
-      # project multi-stage hits are kept — disambiguation is the caller's
-      # job, not silent picking.
+      # --project if given) as { project:, stage:, folder: } hashes. The
+      # caller is responsible for handling 0, 1, or many results.
       def find_slug_across_projects(slug)
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
@@ -231,10 +240,11 @@ module Hive
         new_folder = File.join(new_parent, task.slug)
 
         # Pre-check is the early-exit fast path; the rescue below is the
-        # real safety net. A concurrent process can mkdir the destination
-        # between this check and File.rename — an empty dir there would
-        # cause rename to silently REPLACE it (POSIX rename(2) semantics),
-        # and a non-empty dir surfaces as ENOTEMPTY which we catch.
+        # real safety net. POSIX rename(2) on a non-empty destination
+        # directory raises ENOTEMPTY; on an empty destination directory
+        # implementations vary (Linux glibc replaces; some libcs surface
+        # as EEXIST/EISDIR). The rescue covers all three so the outcome
+        # is uniform regardless of platform.
         raise_destination_collision(new_folder) if File.exist?(new_folder)
 
         begin
@@ -242,12 +252,23 @@ module Hive
         rescue Errno::ENOTEMPTY, Errno::EEXIST, Errno::EISDIR
           raise_destination_collision(new_folder)
         rescue Errno::EXDEV
-          # Cross-device move (rare; .hive-state lives under the project
-          # root by construction). Fall back to copy + remove.
-          FileUtils.cp_r(task.folder, new_folder)
-          FileUtils.rm_rf(task.folder)
+          cross_device_move!(task.folder, new_folder)
         end
         new_folder
+      end
+
+      # Cross-device fallback: copy then remove. If the copy fails partway
+      # through (ENOSPC mid-tree, EACCES on a child), tear down the partial
+      # destination so the next retry doesn't hit a phantom "destination
+      # exists" collision. The source is left intact on copy failure.
+      def cross_device_move!(src, dst)
+        FileUtils.cp_r(src, dst)
+        FileUtils.rm_rf(src)
+      rescue StandardError => e
+        FileUtils.rm_rf(dst) if File.exist?(dst)
+        raise Hive::Error,
+              "cross-device move failed; partial destination cleaned up. " \
+              "underlying: #{e.class}: #{e.message}"
       end
 
       def raise_destination_collision(path)
@@ -257,9 +278,15 @@ module Hive
         )
       end
 
+      # Only swallow ENOENT (lock already gone — concurrent process raced
+      # us to delete it, or the lock module's release path beat us to it).
+      # Other errors (EACCES on a read-only mount, IOError) need to surface
+      # so the caller sees a typed exception and the rollback path runs.
       def cleanup_orphan_task_lock(new_folder)
         lock_path = File.join(new_folder, ".lock")
         File.delete(lock_path) if File.exist?(lock_path)
+      rescue Errno::ENOENT
+        # Already gone — nothing to do.
       end
 
       # Slug-scoped commit. Adding the parent stage dir would sweep unrelated
@@ -285,29 +312,62 @@ module Hive
         ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?
       end
 
+      # ls-files exits non-zero on a corrupt index or a missing repo. An
+      # empty stdout from a successful run means "no tracked files at this
+      # path"; the same empty stdout from a failed run would silently skip
+      # staging the source-side deletion, leaving a tree-vs-index drift.
+      # Distinguish the two and raise typed on git failure.
       def source_has_tracked_files?(hive_state_path, source_rel)
-        out, _, _ = Open3.capture3("git", "-C", hive_state_path, "ls-files", "--", source_rel)
+        out, err, status = Open3.capture3("git", "-C", hive_state_path, "ls-files", "--", source_rel)
+        unless status.success?
+          raise Hive::GitError,
+                "git ls-files failed in #{hive_state_path}: #{err.strip.empty? ? out : err}"
+        end
+
         !out.strip.empty?
       end
 
-      # If the commit fails (pre-commit hook abort, disk full, hive/state
-      # branch corruption), mv the folder back to the source so the
-      # filesystem and git history don't diverge. If rollback isn't possible
-      # (source path was somehow re-created in the meantime), surface a clear
-      # manual-recovery message instead of compounding the problem.
+      # Two failure paths to handle distinctly:
+      #   1. The git commit itself fails — caused by run_git! raising
+      #      typed Hive::GitError (or similar). Rollback the move and
+      #      surface the typed error so callers see the SOFTWARE (70)
+      #      exit code, not a generic 1.
+      #   2. The rollback mv itself fails (cross-device, EACCES, source
+      #      re-created mid-flight). Both errors must surface — the
+      #      original commit failure is the cause; the rollback failure
+      #      is what actually blocks recovery.
       def record_commit_or_rollback!(task, dest_stage, new_folder, action)
         record_hive_commit(task, dest_stage, action)
-      rescue StandardError => e
+      rescue Hive::Error, SystemCallError => e
+        attempt_rollback!(task, new_folder, e)
+      end
+
+      def attempt_rollback!(task, new_folder, original_error)
         if new_folder && File.directory?(new_folder) && !File.exist?(task.folder)
-          FileUtils.mv(new_folder, task.folder)
+          begin
+            FileUtils.mv(new_folder, task.folder)
+          rescue StandardError => rollback_err
+            raise Hive::Error,
+                  "approve aborted AND rollback failed. " \
+                  "task is at #{new_folder}, original was #{task.folder}. " \
+                  "commit error: #{original_error.class}: #{original_error.message}. " \
+                  "rollback error: #{rollback_err.class}: #{rollback_err.message}"
+          end
+
+          # If the underlying error was a typed Hive::Error, re-raise it
+          # so the contract exit code (e.g. GitError → 70) is preserved
+          # rather than collapsed to GENERIC (1).
+          raise original_error if original_error.is_a?(Hive::Error)
+
           raise Hive::Error,
-                "approve aborted; mv rolled back to #{task.folder}. underlying: #{e.class}: #{e.message}"
+                "approve aborted; mv rolled back to #{task.folder}. " \
+                "underlying: #{original_error.class}: #{original_error.message}"
         end
 
         raise Hive::Error,
               "approve aborted but rollback NOT possible (source path now exists); " \
               "manual recovery: task is at #{new_folder}, original was #{task.folder}. " \
-              "underlying: #{e.class}: #{e.message}"
+              "underlying: #{original_error.class}: #{original_error.message}"
       end
 
       # ── Reporting ───────────────────────────────────────────────────────

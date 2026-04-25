@@ -19,7 +19,6 @@ module Hive
         execute_stale: "⚠",
         error: "⚠"
       }.freeze
-      STAGE_ORDER = Hive::Stages::DIRS
 
       def initialize(json: false)
         @json = json
@@ -106,7 +105,7 @@ module Hive
           return
         end
 
-        STAGE_ORDER.each do |stage|
+        Hive::Stages::DIRS.each do |stage|
           stage_rows = rows.select { |r| r[:stage] == stage }
           next if stage_rows.empty?
 
@@ -119,7 +118,7 @@ module Hive
 
       def collect_rows(hive_state)
         rows = []
-        STAGE_ORDER.each do |stage|
+        Hive::Stages::DIRS.each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 

@@ -153,3 +153,40 @@ Append-only log of all wiki operations.
 **Wiki updates:**
 - `wiki/commands/approve.md` — symlink hardening note in Steps section, TOCTOU rescue noted, JSON Schema file referenced under JSON contract.
 - `wiki/cli.md` — `Hive::Schemas.schema_path("hive-approve")` mentioned for external consumers.
+
+## [2026-04-25T22:00:00Z] hive approve round-3 review remediation
+
+**Driver:** /pr-review-toolkit:review-pr final pass surfaced silent-failure (6), type-design (5), test-coverage (6), comment-rot (8), and project-standards (3) findings. All addressed in this commit.
+
+**Code changes:**
+
+- **JSON envelope on non-`Hive::Error` failures** (`approve.rb` `call`): added a second `rescue StandardError` that wraps in new `Hive::InternalError` (exit 70 / SOFTWARE) and emits the JSON envelope. An Errno::ENOSPC from `mkdir_p`, an Open3 fault, or a SystemCallError no longer escapes as a Ruby trace on stderr while a `--json` consumer reads EOF on stdout.
+- **`record_commit_or_rollback!` rescue narrowed** from `StandardError` to `Hive::Error, SystemCallError`. The broad rescue was swallowing typed errors and rewrapping them as exit 1; typed errors (`Hive::GitError` exit 70) now re-raise unchanged after rollback.
+- **`attempt_rollback!` extracted** with its own inner rescue around the rollback `FileUtils.mv`. If the rollback itself fails, original cause AND rollback failure both surface in one message.
+- **`cross_device_move!` extracted** with cleanup on partial `cp_r` failure. ENOSPC mid-tree no longer leaves a half-copy + intact source.
+- **`cleanup_orphan_task_lock` rescue narrowed** to `Errno::ENOENT` only. Other I/O errors propagate so rollback runs.
+- **`source_has_tracked_files?` checks status**. A failed `git ls-files` was silently being read as "no tracked files," skipping the source-side add. Now raises `Hive::GitError`.
+- **`Hive::Stages.parse` validates `DIRS.include?(dir)` first**. `parse("99-foo")` returns nil, not `[99, "foo"]`.
+- **`Hive::Stages.next_dir` raises on out-of-range / non-integer**. Off-by-ones surface at the call site.
+- **`GitOps::STAGE_DIRS` and `Status::STAGE_ORDER` aliases removed**. Both consumers reference `Hive::Stages::DIRS` directly. Closes the half-migration smell.
+- **CLAUDE.md-violating comments fixed**: removed "now treated as", "silently picking the lowest stage was wrong for the partial-failure-recovery case", "Raised by `hive approve`", "APPROVE replaces the old MV emission" and similar transitional / caller-tying / contrast-with-old-behavior phrasings that rot. The structural WHY in each location was preserved or restated as a positive.
+- **POSIX rename overclaim corrected** (`move_task!` comment): "silently REPLACE … POSIX rename(2) semantics" was libc-dependent, not portable; reworded to "implementations vary; the rescue covers all three errnos."
+- **`--to disambiguates same-project ambiguity`** docstring claim corrected (it doesn't — `--to` selects destination, not source). Same fix in `wiki/commands/approve.md`.
+
+**Wiki updates:**
+
+- `wiki/modules/stages.md` (new) — module page per project convention. Covers DIRS / NAMES / SHORT_TO_FULL constants, `next_dir` / `resolve` / `parse` helpers, the consumer table, and the rationale for module-vs-class.
+- `wiki/index.md` — adds `[[modules/stages]]` to the Modules list.
+- `wiki/state-model.md` — points the canonical-stage-list claim at `Hive::Stages::DIRS` (was `Hive::GitOps::STAGE_DIRS`).
+- `wiki/modules/git_ops.md` — removed the `STAGE_DIRS` constant entry; documents `HIVE_STATE_GITIGNORE` and points to [[modules/stages]] for the stage list.
+- `wiki/commands/status.md` — `Hive::Stages::DIRS` reference instead of the deleted `STAGE_ORDER`.
+- `wiki/commands/approve.md` — corrected `--to disambiguates` claim.
+
+**Tests:** 7 new (149 / 576 green), RuboCop clean.
+
+- `test/unit/stages_test.rb` (new) — validation semantics for `next_dir` (raises on bad index), `parse` (nil for unknown stages), `resolve`, and constant frozen-ness.
+- `test_commit_failure_rolls_mv_back_to_source` — installs a real `pre-commit` hook that exits 1, asserts mv reverses, exit 70 (GitError), and source restored.
+- `test_rollback_failure_surfaces_combined_error_message` — pre-commit hook recreates the source path so rollback can't proceed; asserts the combined "rollback NOT possible / manual recovery" message branch.
+- `test_json_error_envelope_on_from_mismatch_carries_wrong_stage_kind` — exercises the JSON error envelope on a `--from` mismatch with `--json`.
+- AmbiguousSlug envelope test now pins the full per-candidate key set (`folder`, `project`, `stage`).
+- The tautological `test_to_accepts_every_short_stage_name` was deleted; the new `stages_test.rb` covers the constants directly.

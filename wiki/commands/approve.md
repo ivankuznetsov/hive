@@ -72,7 +72,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 }
 ```
 
-The split `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined) shape mirrors `hive-run`'s `stage` / `stage_index` so a consumer can compare across schemas without string parsing. `next_action.kind` is drawn from the closed `Hive::Schemas::NextActionKind` enum (`edit`, `mv`, `run`, `recover_stale`, `no_op`).
+The split `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined) shape mirrors `hive-run`'s `stage` / `stage_index` so a consumer can compare across schemas without string parsing. `next_action.kind` is drawn from the closed `Hive::Schemas::NextActionKind` enum (`edit`, `mv`, `approve`, `run`, `recover_stale`, `no_op`). `hive run --json` now emits `kind=approve` for `:complete` / `:execute_complete` (was `mv`); the `mv` value is retained in the enum for back-compat.
 
 ### Error envelope (every failure path under `--json`)
 
@@ -104,7 +104,7 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration
 ## Slug resolution rules
 
 - **Slug not found**: `Hive::InvalidTaskPath` → exit 64 (USAGE).
-- **Slug appears in multiple stages of the same project**: `Hive::AmbiguousSlug` → exit 64. Pass an absolute folder path or use `--to` to disambiguate. (The previous "lowest stage wins" heuristic was wrong for partial-failure-recovery cases where the lower stage is the stale leftover.)
+- **Slug appears in multiple stages of the same project**: `Hive::AmbiguousSlug` → exit 64. Pass an absolute folder path to pick a specific stage; `--to` selects the destination, not the source, so it cannot disambiguate this case.
 - **Slug appears in multiple projects**: `Hive::AmbiguousSlug` → exit 64 with a hint to pass `--project <name>`.
 - **`--project NAME`** scopes the slug lookup to a single registered project. Combining `--project` with an absolute folder path is allowed only if the path's project matches the name; mismatch raises `Hive::InvalidTaskPath`.
 - **Bare slug + cwd shadow**: a bare slug is always resolved through the cross-project search even if a directory of the same name exists in `pwd`.

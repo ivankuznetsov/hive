@@ -53,3 +53,4 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-
 - [[modules/git_ops]] — default-branch detection, hive-state bootstrap, `hive_commit`.
 - [[modules/agent]] — `claude -p` subprocess wrapper with timeout/budget/atomic exit-status capture.
 - [[modules/config]] — global + per-project YAML configs with deep-merge defaults.
+- [[modules/stages]] — six-stage list + helpers; single source of truth for `DIRS` / `NAMES` / `SHORT_TO_FULL`.

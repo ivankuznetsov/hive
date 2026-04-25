@@ -5,7 +5,6 @@ require "hive/stages"
 module Hive
   class GitOps
     HIVE_BRANCH = "hive/state".freeze
-    STAGE_DIRS = Hive::Stages::DIRS
 
     attr_reader :project_root
 
@@ -51,7 +50,7 @@ module Hive
       FileUtils.rm_rf(Dir.glob(File.join(hive_state_path, "*")))
       FileUtils.rm_rf(Dir.glob(File.join(hive_state_path, ".[!.]*")).reject { |p| File.basename(p) == ".git" })
 
-      STAGE_DIRS.each do |stage|
+      Hive::Stages::DIRS.each do |stage|
         d = File.join(hive_state_path, "stages", stage)
         FileUtils.mkdir_p(d)
         File.write(File.join(d, ".gitkeep"), "")

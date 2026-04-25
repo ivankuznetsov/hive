@@ -59,15 +59,14 @@ class FullFlowTest < Minitest::Test
       when "execute-implement"
         task_md = File.join(folder, "task.md")
         if File.exist?(task_md)
-          c = File.read(task_md).sub(/<!-- AGENT_WORKING.*-->/, "## Implementation\nstub work pass #{pass}")
+          c = File.read(task_md).sub(/<!-- AGENT_WORKING.*-->/, "## Implementation\nstub work")
           File.write(task_md, c)
         end
-      when "execute-review"
-        rd = File.join(folder, "reviews"); FileUtils.mkdir_p(rd)
-        rf = File.join(rd, "ce-review-%02d.md" % pass)
-        body = +"## High\n"
-        findings.times { |i| body << "- [ ] f-#{i+1}: stub\n" }
-        File.write(rf, body)
+      when "review"
+        # Stage runner spawns no agents in this minimal review path
+        # (zero reviewers + nil ci + browser disabled). Driver should
+        # never reach this branch from a hive run; placed here only so
+        # the case-statement is exhaustive.
       when "pr"
         File.write(File.join(folder, "pr.md"), <<~MD)
           ---
@@ -97,14 +96,6 @@ class FullFlowTest < Minitest::Test
       # Auto-detect implement vs review prompts via "ce-review" substring,
       # but only when phase is "execute-*". Otherwise honor whatever phase the
       # test set.
-      original_phase="${HIVE_FLOW_PHASE:-}"
-      if [[ "$original_phase" == "execute-mixed" ]]; then
-        if printf '%s' "$*" | grep -q 'ce-review'; then
-          export HIVE_FLOW_PHASE=execute-review
-        else
-          export HIVE_FLOW_PHASE=execute-implement
-        fi
-      fi
       exec ruby "#{script}" "$@"
     SH
     File.chmod(0o755, bin)
@@ -151,33 +142,47 @@ class FullFlowTest < Minitest::Test
         capture_io { Hive::Commands::Run.new(plan_dir).call }
         assert_equal :complete, Hive::Markers.current(File.join(plan_dir, "plan.md")).name
 
-        # 3-plan → 4-execute (init pass with 1 finding)
+        # 3-plan → 4-execute (impl-only since U9; success → EXECUTE_COMPLETE)
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(File.dirname(execute_dir))
         FileUtils.mv(plan_dir, execute_dir)
         ENV["HIVE_FLOW_FOLDER"] = execute_dir
-        ENV["HIVE_FLOW_PHASE"] = "execute-mixed"
-        ENV["HIVE_FLOW_PASS"] = "1"
-        ENV["HIVE_FLOW_FINDINGS"] = "1"
+        ENV["HIVE_FLOW_PHASE"] = "execute-implement"
         capture_io { Hive::Commands::Run.new(execute_dir).call }
         @spawned_worktrees << YAML.safe_load(File.read(File.join(execute_dir, "worktree.yml")))["path"]
-        assert_equal :execute_waiting, Hive::Markers.current(File.join(execute_dir, "task.md")).name
-
-        # User accepts the finding (tick [x]).
-        review_file = File.join(execute_dir, "reviews", "ce-review-01.md")
-        body = File.read(review_file).sub("- [ ] f-1", "- [x] f-1")
-        File.write(review_file, body)
-
-        # Iteration pass with 0 findings → execute_complete.
-        ENV["HIVE_FLOW_PASS"] = "2"
-        ENV["HIVE_FLOW_FINDINGS"] = "0"
-        capture_io { Hive::Commands::Run.new(execute_dir).call }
         assert_equal :execute_complete, Hive::Markers.current(File.join(execute_dir, "task.md")).name
 
-        # 4-execute → 6-pr
+        # 4-execute → 5-review (autonomous loop). Configure a minimal
+        # 5-review setup that exercises the runner's plumbing without
+        # requiring real CI / reviewer / triage / browser infrastructure:
+        #   - review.ci.command = nil → CI phase skipped
+        #   - review.reviewers = []   → Phase 2 skipped (zero reviewers ≠ failure)
+        #   - review.browser_test.enabled = false → Phase 5 skipped
+        # Loop converges to REVIEW_COMPLETE browser=skipped on first pass.
+        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        FileUtils.mkdir_p(File.dirname(review_dir))
+        FileUtils.mv(execute_dir, review_dir)
+
+        cfg = YAML.safe_load(File.read(cfg_path))
+        cfg["review"] ||= {}
+        cfg["review"]["ci"] ||= {}
+        cfg["review"]["ci"]["command"] = nil
+        cfg["review"]["reviewers"] = []
+        cfg["review"]["browser_test"] ||= {}
+        cfg["review"]["browser_test"]["enabled"] = false
+        File.write(cfg_path, cfg.to_yaml)
+
+        ENV["HIVE_FLOW_FOLDER"] = review_dir
+        ENV["HIVE_FLOW_PHASE"] = "review"
+        capture_io { Hive::Commands::Run.new(review_dir).call }
+        marker = Hive::Markers.current(File.join(review_dir, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "skipped", marker.attrs["browser"]
+
+        # 5-review → 6-pr
         pr_dir = File.join(dir, ".hive-state", "stages", "6-pr", slug)
         FileUtils.mkdir_p(File.dirname(pr_dir))
-        FileUtils.mv(execute_dir, pr_dir)
+        FileUtils.mv(review_dir, pr_dir)
 
         # PR stage will git push to origin; create a bare remote in the worktree.
         worktree_path = YAML.safe_load(File.read(File.join(pr_dir, "worktree.yml")))["path"]

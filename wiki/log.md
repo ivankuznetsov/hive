@@ -2,6 +2,37 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-26T10:00:00Z] U9 ship — Review runner integration + 4-execute drops to impl-only
+
+**Action:** Phase 3 of the plan. Wires U4 (reviewer adapter), U6 (triage), U7 (CI-fix), U8 (browser-test), and U13 (post-fix guardrail, stubbed) into the autonomous loop documented in the plan's high-level technical design. Concurrently, 4-execute drops its review pass and finalizes with `EXECUTE_COMPLETE` immediately after impl spawn — the user `mv`s to `5-review` to enter the review loop.
+
+**Code:**
+- `lib/hive/stages/review.rb` — `Hive::Stages::Review.run!(task, cfg)`. Pre-flight inspects markers (REVIEW_COMPLETE / REVIEW_CI_STALE / REVIEW_STALE / REVIEW_ERROR short-circuit). Validates worktree.yml. Tracks wall-clock budget at every phase boundary. Pass loop runs CI (Phase 1, once on entry) → reviewers (Phase 2) → triage (Phase 3) → branch (Phase 4 fix or REVIEW_WAITING) → loop with pass++ → eventually browser-test (Phase 5) → REVIEW_COMPLETE. Stub finding files for failed reviewers; REVIEW_ERROR if all reviewers fail. SHA-256 protects plan.md/worktree.yml/task.md around the fix spawn. Honors REVIEW_WAITING resume by skipping Phase 2/3 and going straight to Phase 4 with the user's manually-toggled [x] marks.
+- `lib/hive/stages/review/fix_guardrail.rb` — **stub** for U13. Returns `{status: :clean, matches: []}`. U13 will fill in the regex/pattern matching against the new commits' diff. Phase 4 calls FixGuardrail unconditionally so U13 lands as a pure module-body change with no further wiring.
+- `templates/fix_prompt.md.erb` — Phase 4 fix-agent prompt. Receives `accepted_findings` (concatenated [x] lines from per-reviewer files) wrapped in the per-spawn nonce. Instructs the agent to apply each finding scope-narrowly, run tests, commit. Same constraint set as triage: no edits to plan.md/worktree.yml/task.md/reviews/*.
+- `lib/hive/stages/execute.rb` rewritten — impl-only since U9. Drops `run_iteration_pass`, `current_pass_from_reviews`, `collect_accepted_findings`, `count_findings`, `finalize_review_state`, `spawn_reviewer`. Single-pass: spawn impl → SHA-protect plan.md/worktree.yml → set EXECUTE_COMPLETE. Re-running on a complete task says "already complete; mv to 5-review/".
+- `templates/execute_prompt.md.erb` rewritten — drops the "after impl, expect a review pass" language. Agent's job is "implement the plan and commit" full stop; user mv's to 5-review to run the review loop.
+- `lib/hive/stages.rb` — DIRS now `[1-inbox, 2-brainstorm, 3-plan, 4-execute, 5-review, 6-pr, 7-done]` (no gap). next_dir(4) returns "5-review".
+- `lib/hive/commands/run.rb` — pick_runner adds the `"review"` case routing to `Hive::Stages::Review.run!`.
+- `lib/hive/task.rb` — STAGE_NAMES + STATE_FILES gain "review" → "task.md".
+- `schemas/hive-approve.v1.json` — stage enums include `review` and `5-review`.
+- `test/unit/stages_test.rb` — DIRS / SHORT_TO_FULL / NAMES / next_dir assertions updated for the filled gap.
+- `test/integration/run_execute_test.rb` rewritten — drops 7 review-iteration tests; keeps + adds impl-only tests (init pass → EXECUTE_COMPLETE; re-run announces 5-review; tampering → :error; impl failure → :error; missing plan.md exits 1; no review files written).
+- `test/integration/run_review_test.rb` (new) — 9 integration tests: REVIEW_COMPLETE / REVIEW_CI_STALE / REVIEW_STALE / REVIEW_ERROR pre-flight short-circuits; missing worktree.yml exits 1; worktree dir missing exits 1; clean fast path (zero reviewers + nil CI + browser disabled → REVIEW_COMPLETE skipped); CI hard-block → REVIEW_CI_STALE + ci-blocked.md written; wall-clock cap → REVIEW_STALE reason=wall_clock.
+- `test/integration/full_flow_test.rb` — flow now goes 4-execute → 5-review → 6-pr (the new transition).
+- `test/integration/prompt_injection_test.rb` — `test_execute_prompt_wraps_plan` (no accepted_findings binding anymore) + new `test_fix_prompt_wraps_accepted_findings` for the 5-review fix prompt.
+
+**Key decisions:**
+- **One `hive run` lands a terminal marker or exhausts budgets.** No partial-run states the user has to manually reconcile. The loop runs CI once, then iterates Phase 2/3/4 until terminal (REVIEW_WAITING / REVIEW_STALE / REVIEW_ERROR / REVIEW_COMPLETE).
+- **REVIEW_WAITING resume skips Phase 2/3 and re-enters Phase 4 directly.** When the user has manually toggled `[x]` in per-reviewer files and re-runs hive, re-running triage would overwrite their decisions. So resume goes straight to fix.
+- **Empty reviewers list is OK, not an error.** Zero reviewers configured = nothing to triage = clean branch = Phase 5. Useful for testing and for projects that haven't configured the reviewer set yet.
+- **Pass derivation by max-NN-suffix in reviewer filenames.** No frontmatter pass: field, no pass.txt sidecar. Recovery is filesystem-native: delete the highest-NN reviewer files to drop pass back.
+- **EXECUTE_COMPLETE is the only success state for 4-execute.** No more EXECUTE_WAITING / EXECUTE_STALE — those moved to REVIEW_WAITING / REVIEW_STALE in 5-review.
+
+266 tests passing (was 259 pre-U9 + 9 new review runner integration tests − 7 dropped 4-execute review-iteration tests + 5 new misc). Rubocop clean.
+
+**Wiki pages updated:** this entry. Larger pass (`wiki/stages/review.md` new page, `wiki/stages/execute.md` rewrite, `wiki/state-model.md` directory layout, `wiki/decisions.md` ADR-014–021) deferred to U10.
+
 ## [2026-04-25T22:00:00Z] U8 ship — Browser-test phase (soft-warn + JSON result protocol)
 
 **Action:** Phase 2's fourth primitive. Optional. Skipped entirely when `review.browser_test.enabled` is false (default). When enabled, runs after Phase 2 produced zero findings and before the runner finalizes. Spawns the configured agent (typically claude with the `/ce-test-browser` skill) up to `review.browser_test.max_attempts` times. Each attempt is expected to write `reviews/browser-result-<pass>-<attempt>.json` with `{status, summary, details, duration_sec}`.

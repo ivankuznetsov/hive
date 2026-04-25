@@ -25,7 +25,7 @@ module Hive
                      pass: nil, project: nil, json: false)
         @operation = operation
         @target = target
-        @ids = (ids || []).map(&:to_i)
+        @ids = ids || []
         @all = all
         @severity = severity
         @pass = pass
@@ -54,10 +54,7 @@ module Hive
           doc = Hive::Findings::Document.new(review_path)
           target_ids = select_target_ids(doc)
           changes = apply_toggle!(doc, target_ids)
-          if changes.any?
-            doc.write!
-            commit_change(task, review_path, changes)
-          end
+          write_and_commit_change(task, review_path, doc, changes) if changes.any?
           emit_report(task, review_path, doc, target_ids, changes)
         end
       end
@@ -69,7 +66,7 @@ module Hive
         ids = []
         ids.concat(doc.findings.map(&:id)) if @all
         ids.concat(doc.findings.select { |f| f.severity == @severity.downcase }.map(&:id)) if @severity
-        ids.concat(@ids)
+        ids.concat(parsed_ids)
         ids = ids.uniq.sort
 
         if ids.empty?
@@ -79,6 +76,18 @@ module Hive
 
         validate_ids_exist!(doc, ids)
         ids
+      end
+
+      def parsed_ids
+        @ids.map do |id|
+          text = id.to_s
+          unless text.match?(/\A[1-9]\d*\z/)
+            raise Hive::InvalidTaskPath,
+                  "invalid finding id '#{id}'; IDs must be positive integers"
+          end
+
+          text.to_i
+        end
       end
 
       def validate_ids_exist!(doc, ids)
@@ -107,16 +116,43 @@ module Hive
         end
       end
 
+      def write_and_commit_change(task, review_path, doc, changes)
+        original = File.binread(review_path)
+        Hive::Lock.with_commit_lock(task.hive_state_path) do
+          doc.write!
+          commit_change(task, review_path, changes)
+        rescue Hive::Error, SystemCallError => e
+          rollback_review_change!(task, review_path, original, e)
+        end
+      end
+
       def commit_change(task, review_path, changes)
         rel = review_path.sub("#{task.hive_state_path}/", "")
         action = "#{@operation} findings #{changes.map { |c| c['id'] }.join(',')} in #{File.basename(review_path)}"
         message = "hive: #{task.stage_index}-#{task.stage_name}/#{task.slug} #{action}"
         ops = Hive::GitOps.new(task.project_root)
-        Hive::Lock.with_commit_lock(task.hive_state_path) do
-          ops.run_git!("-C", task.hive_state_path, "add", "--", rel)
-          _, _, status = Open3.capture3("git", "-C", task.hive_state_path, "diff", "--cached", "--quiet")
-          ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?
-        end
+        ops.run_git!("-C", task.hive_state_path, "add", "--", rel)
+        _, _, status = Open3.capture3("git", "-C", task.hive_state_path, "diff", "--cached", "--quiet")
+        ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?
+      end
+
+      def rollback_review_change!(task, review_path, original, original_error)
+        rel = review_path.sub("#{task.hive_state_path}/", "")
+        File.binwrite(review_path, original)
+        Open3.capture3("git", "-C", task.hive_state_path, "reset", "--", rel)
+        raise original_error if original_error.is_a?(Hive::Error)
+
+        raise Hive::Error,
+              "finding toggle aborted; review file rolled back. " \
+              "underlying: #{original_error.class}: #{original_error.message}"
+      rescue StandardError => rollback_error
+        raise original_error if rollback_error.equal?(original_error)
+
+        raise Hive::Error,
+              "finding toggle aborted AND rollback failed. " \
+              "review file: #{review_path}. " \
+              "commit error: #{original_error.class}: #{original_error.message}. " \
+              "rollback error: #{rollback_error.class}: #{rollback_error.message}"
       end
 
       def emit_report(task, review_path, doc, target_ids, changes)

@@ -237,6 +237,29 @@ class RunFindingsTest < Minitest::Test
     end
   end
 
+  def test_accept_finding_rejects_malformed_id_without_mutating
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, execute, slug = seed_execute_task_with_reviews(dir)
+        review_path = File.join(execute, "reviews", "ce-review-02.md")
+        original = File.read(review_path)
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::FindingToggle.new(
+            Hive::Commands::FindingToggle::ACCEPT, slug, ids: [ "2foo" ], json: true
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        payload = JSON.parse(out)
+        assert_equal "invalid_task_path", payload["error_kind"]
+        assert_includes payload["message"], "invalid finding id"
+        assert_equal original, File.read(review_path),
+                     "malformed IDs must not be coerced into valid finding IDs"
+      end
+    end
+  end
+
   def test_accept_finding_with_no_selectors_errors
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -248,6 +271,45 @@ class RunFindingsTest < Minitest::Test
         end
         assert_equal Hive::ExitCodes::USAGE, status
         assert_includes err, "no findings selected"
+      end
+    end
+  end
+
+  def test_accept_finding_commit_failure_rolls_review_file_back
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, execute, slug = seed_execute_task_with_reviews(dir)
+        review_path = File.join(execute, "reviews", "ce-review-02.md")
+        rel = review_path.sub("#{File.join(dir, ".hive-state")}/", "")
+        original = File.read(review_path)
+
+        hooks_dir = File.join(dir, ".git", "hooks")
+        FileUtils.mkdir_p(hooks_dir)
+        hook_path = File.join(hooks_dir, "pre-commit")
+        File.write(hook_path, "#!/bin/sh\nexit 1\n")
+        FileUtils.chmod(0o755, hook_path)
+
+        _, err, status = with_captured_exit do
+          Hive::Commands::FindingToggle.new(
+            Hive::Commands::FindingToggle::ACCEPT, slug, ids: [ 1 ]
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::SOFTWARE, status
+        assert_includes err, "commit"
+        assert_equal original, File.read(review_path),
+                     "commit failure must not leave the checkbox changed without an audit commit"
+        staged = `git -C #{File.join(dir, ".hive-state").shellescape} diff --cached --name-only`
+        refute_includes staged.lines.map(&:strip), rel,
+                        "failed toggle must unstage the review file so a retry can commit it"
+
+        FileUtils.rm_f(hook_path)
+        capture_io do
+          Hive::Commands::FindingToggle.new(
+            Hive::Commands::FindingToggle::ACCEPT, slug, ids: [ 1 ]
+          ).call
+        end
+        assert_match(/^- \[x\] memory leak/, File.read(review_path))
       end
     end
   end

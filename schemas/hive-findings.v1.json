@@ -121,7 +121,7 @@
             "error"
           ]
         },
-        "exit_code": { "type": "integer", "enum": [1, 64, 70, 75] },
+        "exit_code": { "type": "integer", "enum": [1, 64, 70, 75, 78] },
         "message": { "type": "string" },
         "candidates": { "type": "array" },
         "id": { "type": "integer", "minimum": 1 }

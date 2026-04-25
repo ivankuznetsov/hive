@@ -107,4 +107,17 @@ class SchemaFilesTest < Minitest::Test
     ].sort
     assert_equal producer_kinds, schema_kinds
   end
+
+  def test_hive_findings_error_exit_codes_cover_producer_errors
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-findings")))
+    schema_codes = doc.dig("$defs", "ErrorPayload", "properties", "exit_code", "enum").sort
+    producer_codes = [
+      Hive::ExitCodes::GENERIC,
+      Hive::ExitCodes::USAGE,
+      Hive::ExitCodes::SOFTWARE,
+      Hive::ExitCodes::TEMPFAIL,
+      Hive::ExitCodes::CONFIG
+    ].sort
+    assert_equal producer_codes, schema_codes
+  end
 end

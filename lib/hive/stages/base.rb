@@ -86,8 +86,16 @@ module Hive
       end
 
       def warn_isolation_reduced(task, profile, add_dirs)
+        # Reject non-Array add_dirs loudly instead of silently coercing via
+        # Array() — a Hash or string here is an upstream type bug, not a
+        # legitimate single-dir shorthand.
+        unless add_dirs.is_a?(Array)
+          raise ArgumentError,
+                "spawn_agent expected add_dirs to be an Array; got #{add_dirs.class}"
+        end
+
         message = "[hive] agent profile #{profile.name.inspect} has no add_dir_flag; " \
-                  "ignoring add_dirs=#{Array(add_dirs).inspect}. " \
+                  "ignoring add_dirs=#{add_dirs.inspect}. " \
                   "ADR-008 filesystem-isolation boundary is reduced for this spawn (see ADR-018)."
         # Best-effort log write; never blocks spawn.
         begin

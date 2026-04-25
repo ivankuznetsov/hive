@@ -1,4 +1,5 @@
 require "open3"
+require "timeout"
 
 module Hive
   # Per-CLI invocation contract for a headless agent.
@@ -23,17 +24,22 @@ module Hive
     #   the agent must produce is the success criterion.
     STATUS_DETECTION_MODES = %i[state_file_marker exit_code_only output_file_exists].freeze
 
+    # Hard cap for `bin --version` invocation in check_version!. Hive picks
+    # 10s as a balance: well above any sane CLI's startup time, well below
+    # the per-stage timeouts the runner enforces around spawn_and_wait.
+    VERSION_CHECK_TIMEOUT_SEC = 10
+
     attr_reader :name, :bin_default, :env_bin_override_key,
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
-                :status_detection_mode, :extra_flags
+                :status_detection_mode
 
     def initialize(name:, bin_default:, headless_flag:, version_flag:,
                    skill_syntax_format:, status_detection_mode:,
                    env_bin_override_key: nil, permission_skip_flag: nil,
                    add_dir_flag: nil, budget_flag: nil,
-                   output_format_flags: [], extra_flags: [],
+                   output_format_flags: [],
                    headless_supported: true, min_version: nil,
                    preflight: nil)
       unless STATUS_DETECTION_MODES.include?(status_detection_mode)
@@ -52,7 +58,6 @@ module Hive
       @output_format_flags = Array(output_format_flags).freeze
       @version_flag = version_flag
       @skill_syntax_format = skill_syntax_format
-      @extra_flags = Array(extra_flags).freeze
       @headless_supported = headless_supported
       @min_version = min_version
       @status_detection_mode = status_detection_mode
@@ -88,10 +93,18 @@ module Hive
               "cannot run from a non-interactive context"
       end
 
+      # Hard timeout protects against wrapper binaries that prompt for
+      # credentials or hang on first run. Without this, spawn_agent's
+      # preflight could block indefinitely outside the per-stage timeout.
       begin
-        out, _err, status = Open3.capture3(bin, @version_flag)
+        out, _err, status = Timeout.timeout(VERSION_CHECK_TIMEOUT_SEC) do
+          Open3.capture3(bin, @version_flag)
+        end
       rescue Errno::ENOENT, Errno::EACCES => e
         raise Hive::AgentError, "#{@name} binary not runnable: #{bin} (#{e.class.name.split('::').last}: #{e.message})"
+      rescue Timeout::Error
+        raise Hive::AgentError,
+              "#{@name} version check timed out after #{VERSION_CHECK_TIMEOUT_SEC}s: #{bin} #{@version_flag}"
       end
       raise Hive::AgentError, "#{@name} binary not runnable: #{bin}" unless status.success?
 

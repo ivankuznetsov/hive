@@ -33,6 +33,7 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "6-done").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoReviewFile.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::UnknownFinding.new("x", id: 1).exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::NoSelection.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::InternalError.new("x").exit_code
   end
 

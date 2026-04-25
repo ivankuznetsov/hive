@@ -4,30 +4,21 @@ module Hive
   # Parser + writer for the `reviews/ce-review-NN.md` finding files written
   # by the execute-stage reviewer. Each file is a markdown document with
   # severity headings (`## High` / `## Medium` / `## Nit`) and GFM-checkbox
-  # findings (`- [ ]` / `- [x]`). The user (or, after this module, an
-  # agent) ticks `[x]` for findings to address in the next implementation
-  # pass; ticked findings are re-injected into the next prompt by
-  # `Hive::Stages::Execute#collect_accepted_findings`.
+  # findings (`- [ ]` / `- [x]`). Ticking `[x]` flags a finding to address
+  # in the next implementation pass; ticked findings are re-injected into
+  # the next prompt by `Hive::Stages::Execute#collect_accepted_findings`.
   #
-  # IDs are 1-based and assigned in document order so an agent can refer to
+  # IDs are 1-based and assigned in document order so callers can refer to
   # a finding by its position in `hive findings` output. They're stable as
   # long as findings aren't reordered or removed; the reviewer prompt
   # writes append-only so this holds in normal use.
   module Findings
-    Finding = Data.define(:id, :severity, :accepted, :title, :justification, :line_index) do
-      def to_h
-        {
-          "id" => id,
-          "severity" => severity,
-          "accepted" => accepted,
-          "title" => title,
-          "justification" => justification
-        }
-      end
-    end
-
-    SEVERITY_HEADING_RE = /\A##\s+(\S+)\s*\z/
-    FINDING_RE = /\A(\s*-\s+)\[([ xX])\]\s+(.+?)\s*\z/
+    KNOWN_SEVERITIES = %w[high medium low nit].freeze
+    SEVERITY_HEADING_RE = /\A##\s+(.+?)\s*\z/
+    # Captures the leading prefix (`- `), the checkbox state, the title +
+    # justification body, and the trailing line ending separately so the
+    # writer can preserve `\n` vs `\r\n` when rebuilding the line.
+    FINDING_RE = /\A(\s*-\s+)\[([ xX])\]\s+(.*?)([\r\n]*)\z/
 
     # Parses a review file into a list of `Finding` records. Preserves the
     # raw line array so writes can flip a single checkbox character without
@@ -43,22 +34,23 @@ module Hive
         @findings = parse
       end
 
-      # Returns a new line array with the given finding's checkbox flipped
-      # to the requested state. Idempotent — flipping a `[x]` to "accepted"
-      # is a no-op. Returns nil if the finding line doesn't match the
-      # expected shape (defensive — should never happen if parse succeeded).
+      # Flip the given finding's checkbox to the requested state. Idempotent
+      # on a no-op (already in target state) — returns nil. Preserves the
+      # original line ending (`\n` or `\r\n`) so a CRLF file round-trips
+      # without flattening to LF.
       def toggle!(id, accepted:)
         finding = @findings.find { |f| f.id == id }
         raise Hive::UnknownFinding.new("no finding with id=#{id} in #{@path}", id: id) unless finding
 
+        return nil if finding.accepted == accepted
+
         line = @lines[finding.line_index]
         new_line = line.sub(FINDING_RE) do
           prefix = ::Regexp.last_match(1)
-          rest = "#{::Regexp.last_match(3)}\n"
-          "#{prefix}[#{accepted ? 'x' : ' '}] #{rest}"
+          body   = ::Regexp.last_match(3)
+          eol    = ::Regexp.last_match(4)
+          "#{prefix}[#{accepted ? 'x' : ' '}] #{body}#{eol}"
         end
-        return nil if new_line == line && finding.accepted == accepted
-
         @lines[finding.line_index] = new_line
         @findings = parse_lines(@lines)
         finding.id
@@ -100,7 +92,11 @@ module Hive
         next_id = 1
         lines.each_with_index.filter_map do |line, idx|
           if (m = SEVERITY_HEADING_RE.match(line))
-            current_severity = m[1].downcase
+            # Any `##` heading resets severity; a non-canonical heading
+            # (e.g. `## Detailed Analysis`) clears it instead of leaking
+            # the previous severity into the findings that follow.
+            first_word = m[1].split(/\s+/).first&.downcase
+            current_severity = KNOWN_SEVERITIES.include?(first_word) ? first_word : nil
             next nil
           end
 
@@ -132,6 +128,18 @@ module Hive
       end
     end
 
+    Finding = Data.define(:id, :severity, :accepted, :title, :justification, :line_index) do
+      def to_h
+        {
+          "id" => id,
+          "severity" => severity,
+          "accepted" => accepted,
+          "title" => title,
+          "justification" => justification
+        }
+      end
+    end
+
     module_function
 
     # Resolve which review file to load for a task. Defaults to the latest
@@ -149,6 +157,13 @@ module Hive
       raise Hive::NoReviewFile, "no review files in #{task.reviews_dir}" if candidates.empty?
 
       candidates.last
+    end
+
+    # Extract the integer pass number from a `ce-review-NN.md` filename.
+    # Returns nil for paths whose basename doesn't match the convention.
+    def pass_from_path(path)
+      m = File.basename(path).match(/ce-review-(\d+)\.md/)
+      m ? m[1].to_i : nil
     end
   end
 end

@@ -51,7 +51,7 @@ module Hive
           "stage_dir" => "#{task.stage_index}-#{task.stage_name}",
           "task_folder" => task.folder,
           "review_file" => review_path,
-          "pass" => pass_from_review_path(review_path),
+          "pass" => Hive::Findings.pass_from_path(review_path),
           "findings" => doc.findings.map(&:to_h),
           "summary" => doc.summary
         }
@@ -82,23 +82,12 @@ module Hive
         warn "  total=#{s['total']} accepted=#{s['accepted']} by_severity=#{s['by_severity'].to_a.map { |k, v| "#{k}:#{v}" }.join(' ')}"
       end
 
-      def pass_from_review_path(path)
-        m = File.basename(path).match(/ce-review-(\d+)\.md/)
-        m ? m[1].to_i : nil
-      end
-
       def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-findings",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-findings"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
-        payload["id"] = error.id if error.is_a?(Hive::UnknownFinding)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-findings",
+          error: error,
+          error_kind: error_kind_for(error)
+        )
         puts JSON.generate(payload)
       end
 

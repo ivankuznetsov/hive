@@ -154,4 +154,76 @@ class FindingsTest < Minitest::Test
       assert_raises(Hive::NoReviewFile) { Hive::Findings.review_path_for(task, pass: 5) }
     end
   end
+
+  # CRLF input: every non-target line must round-trip identically; the
+  # toggled line must keep its CRLF instead of being flattened to LF.
+  def test_toggle_preserves_crlf_line_endings
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "ce-review-03.md")
+      crlf_body = "## High\r\n- [ ] one: x\r\n- [ ] two: y\r\n"
+      File.binwrite(path, crlf_body)
+
+      doc = Hive::Findings::Document.new(path)
+      doc.toggle!(1, accepted: true)
+      doc.write!
+
+      bytes = File.binread(path)
+      assert_equal "## High\r\n- [x] one: x\r\n- [ ] two: y\r\n", bytes,
+                   "CRLF must round-trip; only the checkbox character should change"
+    end
+  end
+
+  # No-trailing-newline input: toggling the LAST line must not introduce
+  # an extra newline that would change file size.
+  def test_toggle_preserves_missing_trailing_newline
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "ce-review-04.md")
+      body = "## High\n- [ ] alone: no eol"
+      File.binwrite(path, body)
+
+      doc = Hive::Findings::Document.new(path)
+      doc.toggle!(1, accepted: true)
+      doc.write!
+
+      assert_equal "## High\n- [x] alone: no eol", File.binread(path),
+                   "missing trailing newline must be preserved"
+    end
+  end
+
+  # A non-canonical heading (anything other than high/medium/low/nit)
+  # must clear the current severity instead of leaking the prior section's
+  # value into the findings that follow. Multi-word headings like
+  # `## Detailed Analysis` failed both checks before this fix:
+  # SEVERITY_HEADING_RE didn't match (so prior severity carried over) and
+  # `## Notes` matched but wasn't a real severity.
+  def test_non_severity_heading_resets_current_severity
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "ce-review-05.md")
+      File.write(path, <<~MD)
+        ## High
+        - [ ] real high finding: should stay tagged high
+
+        ## Detailed Analysis
+        - [ ] post-analysis finding: must NOT inherit 'high'
+
+        ## Notes
+        - [ ] notes finding: also not a severity
+      MD
+
+      doc = Hive::Findings::Document.new(path)
+      assert_equal "high", doc.findings[0].severity
+      assert_nil doc.findings[1].severity,
+                 "## Detailed Analysis must clear severity (multi-word heading)"
+      assert_nil doc.findings[2].severity,
+                 "## Notes is not a canonical severity; must clear current_severity"
+    end
+  end
+
+  # Pass extraction lives on the Hive::Findings module so the two
+  # commands don't carry duplicated `pass_from_path` helpers.
+  def test_pass_from_path_extracts_integer
+    assert_equal 1, Hive::Findings.pass_from_path("/x/reviews/ce-review-01.md")
+    assert_equal 12, Hive::Findings.pass_from_path("ce-review-12.md")
+    assert_nil Hive::Findings.pass_from_path("not-a-review.md")
+  end
 end

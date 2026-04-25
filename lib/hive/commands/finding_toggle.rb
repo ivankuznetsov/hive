@@ -46,16 +46,25 @@ module Hive
 
       private
 
+      # Locking strategy mirrors `Hive::Commands::Approve`:
+      #   - commit_lock OUTERMOST so contention surfaces before any FS
+      #     mutation and the lock order matches approve's (preventing the
+      #     deadlock where one command holds task_lock and the other
+      #     holds commit_lock).
+      #   - task_lock INNER blocks a concurrent `hive run` on the same
+      #     task while we read + mutate the review file.
       def do_call
         task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
         review_path = Hive::Findings.review_path_for(task, pass: @pass)
 
-        Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: @operation.to_s) do
-          doc = Hive::Findings::Document.new(review_path)
-          target_ids = select_target_ids(doc)
-          changes = apply_toggle!(doc, target_ids)
-          write_and_commit_change(task, review_path, doc, changes) if changes.any?
-          emit_report(task, review_path, doc, target_ids, changes)
+        Hive::Lock.with_commit_lock(task.hive_state_path) do
+          Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: @operation.to_s) do
+            doc = Hive::Findings::Document.new(review_path)
+            target_ids = select_target_ids(doc)
+            changes = apply_toggle!(doc, target_ids)
+            write_and_commit_change(task, review_path, doc, changes) if changes.any?
+            emit_report(task, review_path, doc, target_ids, changes)
+          end
         end
       end
 
@@ -69,13 +78,20 @@ module Hive
         ids.concat(parsed_ids)
         ids = ids.uniq.sort
 
-        if ids.empty?
-          raise Hive::InvalidTaskPath,
-                "no findings selected; pass IDs, --all, or --severity <name>"
-        end
+        raise Hive::NoSelection, no_selection_message(doc) if ids.empty?
 
         validate_ids_exist!(doc, ids)
         ids
+      end
+
+      def no_selection_message(doc)
+        if @all && doc.findings.empty?
+          "review file has no findings: #{doc.path}"
+        elsif @severity && doc.findings.none? { |f| f.severity == @severity.downcase }
+          "no findings with severity '#{@severity}'; available: #{doc.findings.map(&:severity).compact.uniq.sort.inspect}"
+        else
+          "no findings selected; pass IDs, --all, or --severity <name>"
+        end
       end
 
       def parsed_ids
@@ -118,12 +134,10 @@ module Hive
 
       def write_and_commit_change(task, review_path, doc, changes)
         original = File.binread(review_path)
-        Hive::Lock.with_commit_lock(task.hive_state_path) do
-          doc.write!
-          commit_change(task, review_path, changes)
-        rescue Hive::Error, SystemCallError => e
-          rollback_review_change!(task, review_path, original, e)
-        end
+        doc.write!
+        commit_change(task, review_path, changes)
+      rescue Hive::Error, SystemCallError => e
+        rollback_review_change!(task, review_path, original, e)
       end
 
       def commit_change(task, review_path, changes)
@@ -136,23 +150,38 @@ module Hive
         ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?
       end
 
+      # Restore the review file's pre-toggle bytes and unstage the
+      # aborted change. Two failure paths:
+      #   1. Rollback succeeds → re-raise the original error so the
+      #      contract exit code (e.g. GitError → 70) is preserved.
+      #   2. Rollback ITSELF fails (binwrite EACCES, git reset failure)
+      #      → raise a combined Hive::Error with both the original cause
+      #      and the rollback failure.
+      # The previous shape used a method-level rescue that caught the
+      # intentional re-raise on path 1 and falsely reported "rollback
+      # ALSO failed". The flat begin/rescue below makes the success path
+      # impossible to mis-classify because the re-raise leaves the method
+      # without re-entering any rescue.
       def rollback_review_change!(task, review_path, original, original_error)
         rel = review_path.sub("#{task.hive_state_path}/", "")
-        File.binwrite(review_path, original)
-        Open3.capture3("git", "-C", task.hive_state_path, "reset", "--", rel)
+        begin
+          File.binwrite(review_path, original)
+          ops = Hive::GitOps.new(task.project_root)
+          ops.run_git!("-C", task.hive_state_path, "reset", "--", rel)
+        rescue StandardError => rollback_error
+          raise Hive::Error,
+                "finding toggle aborted AND rollback failed. " \
+                "review file: #{review_path}. " \
+                "commit error: #{original_error.class}: #{original_error.message}. " \
+                "rollback error: #{rollback_error.class}: #{rollback_error.message}"
+        end
+
+        # Rollback succeeded. Preserve the typed exit code when possible.
         raise original_error if original_error.is_a?(Hive::Error)
 
         raise Hive::Error,
               "finding toggle aborted; review file rolled back. " \
               "underlying: #{original_error.class}: #{original_error.message}"
-      rescue StandardError => rollback_error
-        raise original_error if rollback_error.equal?(original_error)
-
-        raise Hive::Error,
-              "finding toggle aborted AND rollback failed. " \
-              "review file: #{review_path}. " \
-              "commit error: #{original_error.class}: #{original_error.message}. " \
-              "rollback error: #{rollback_error.class}: #{rollback_error.message}"
       end
 
       def emit_report(task, review_path, doc, target_ids, changes)
@@ -171,7 +200,7 @@ module Hive
           "operation" => @operation.to_s,
           "slug" => task.slug,
           "review_file" => review_path,
-          "pass" => pass_from_path(review_path),
+          "pass" => Hive::Findings.pass_from_path(review_path),
           "selected_ids" => target_ids,
           "changes" => changes,
           "noop" => changes.empty?,
@@ -191,45 +220,32 @@ module Hive
         end
       end
 
-      # After accept-finding, the agent's natural next step is to re-run
-      # the execute stage so the implementer pass picks up the newly-
-      # accepted findings. After reject, the next step is the same — the
-      # reviewer's outcome is unchanged but the implementer pass already
-      # reflects the up-to-date set.
+      # Both `kind: run` branches carry a `reason` so consumers see a
+      # consistent shape. The agent's natural next step is the same in
+      # both cases — re-run the execute stage; only the rationale differs.
       def next_action(task, doc)
         kind = Hive::Schemas::NextActionKind
         accepted = doc.summary["accepted"]
         total = doc.summary["total"]
-        if accepted.zero? && total.positive?
-          # Nothing accepted — the agent should mark execute_complete by
-          # re-running, which counts findings and sets the marker.
-          { "kind" => kind::RUN, "folder" => task.folder, "command" => "hive run #{task.folder}" }
-        elsif accepted.positive?
-          { "kind" => kind::RUN, "folder" => task.folder, "command" => "hive run #{task.folder}",
-            "reason" => "#{accepted} accepted finding(s) need a fresh implementation pass" }
-        else
-          { "kind" => kind::NO_OP, "reason" => "no findings" }
-        end
-      end
 
-      def pass_from_path(path)
-        m = File.basename(path).match(/ce-review-(\d+)\.md/)
-        m ? m[1].to_i : nil
+        return { "kind" => kind::NO_OP, "reason" => "no findings" } if total.zero?
+
+        reason = if accepted.positive?
+          "#{accepted} accepted finding(s) need a fresh implementation pass"
+        else
+          "no accepted findings; re-run to mark execute_complete"
+        end
+        { "kind" => kind::RUN, "folder" => task.folder,
+          "command" => "hive run #{task.folder}", "reason" => reason }
       end
 
       def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-findings",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-findings"),
-          "ok" => false,
-          "operation" => @operation.to_s,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
-        payload["id"] = error.id if error.is_a?(Hive::UnknownFinding)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-findings",
+          error: error,
+          error_kind: error_kind_for(error),
+          extras: { "operation" => @operation.to_s }
+        )
         puts JSON.generate(payload)
       end
 
@@ -238,6 +254,7 @@ module Hive
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::NoReviewFile then "no_review_file"
         when Hive::UnknownFinding then "unknown_finding"
+        when Hive::NoSelection then "no_selection"
         when Hive::InvalidTaskPath then "invalid_task_path"
         else "error"
         end

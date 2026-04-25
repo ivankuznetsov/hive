@@ -26,6 +26,33 @@ module Hive
       File.join(schema_dir, "#{name}.v#{version}.json")
     end
 
+    # Build the JSON error envelope shared by every command that emits a
+    # versioned schema. Centralised so the same Hive::Error subclass
+    # surfaces with the same envelope shape regardless of which command
+    # raised it. Per-error structured fields (candidates / id / path /
+    # stage) are pulled off the exception when present.
+    module ErrorEnvelope
+      module_function
+
+      def build(schema:, error:, error_kind:, extras: {})
+        payload = {
+          "schema" => schema,
+          "schema_version" => SCHEMA_VERSIONS.fetch(schema),
+          "ok" => false,
+          "error_class" => error.class.name.split("::").last,
+          "error_kind" => error_kind,
+          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
+          "message" => error.message
+        }.merge(extras)
+
+        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
+        payload["id"] = error.id if error.is_a?(Hive::UnknownFinding)
+        payload["path"] = error.path if error.is_a?(Hive::DestinationCollision)
+        payload["stage"] = error.stage if error.is_a?(Hive::FinalStageReached)
+        payload
+      end
+    end
+
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.
     # `ALL` is self-derived from the constants in this module so adding a
     # new kind without updating ALL is impossible.
@@ -218,6 +245,16 @@ module Hive
       @id = id
     end
 
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  # accept-finding / reject-finding was invoked with no IDs, no --severity,
+  # and no --all — there's nothing to act on. Distinct from
+  # InvalidTaskPath (the path was valid; the *argument set* was empty) so
+  # callers branching on `error_kind` get a clearer signal.
+  class NoSelection < Error
     def exit_code
       ExitCodes::USAGE
     end

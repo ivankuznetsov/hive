@@ -105,6 +105,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "description": "`operation` is present iff the error came from `hive accept-finding` or `hive reject-finding`; absent for `hive findings`. Per-error structured fields (`candidates`, `id`) appear only on the matching error_kind.",
       "properties": {
         "schema": { "const": "hive-findings" },
         "schema_version": { "const": 1 },
@@ -117,13 +118,26 @@
             "ambiguous_slug",
             "no_review_file",
             "unknown_finding",
+            "no_selection",
             "invalid_task_path",
             "error"
           ]
         },
         "exit_code": { "type": "integer", "enum": [1, 64, 70, 75, 78] },
         "message": { "type": "string" },
-        "candidates": { "type": "array" },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Mirrors the hive-approve.v1 candidate shape.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
         "id": { "type": "integer", "minimum": 1 }
       }
     },

@@ -264,13 +264,46 @@ class RunFindingsTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, _execute, slug = seed_execute_task_with_reviews(dir)
-        _, err, status = with_captured_exit do
+        out, err, status = with_captured_exit do
           Hive::Commands::FindingToggle.new(
-            Hive::Commands::FindingToggle::ACCEPT, slug
+            Hive::Commands::FindingToggle::ACCEPT, slug, json: true
           ).call
         end
         assert_equal Hive::ExitCodes::USAGE, status
         assert_includes err, "no findings selected"
+        # The "argument set was empty" failure mode gets its own
+        # error_kind so callers can distinguish it from "the path you
+        # passed isn't a valid task" (also USAGE).
+        payload = JSON.parse(out)
+        assert_equal "no_selection", payload["error_kind"]
+        assert_equal "NoSelection", payload["error_class"]
+      end
+    end
+  end
+
+  def test_accept_finding_unions_severity_with_explicit_ids
+    # The class doc and wiki promise: positional IDs + --severity + --all
+    # are unioned. Pin the union behaviour so a refactor that switches to
+    # exclusive-flag semantics breaks visibly.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, execute, slug = seed_execute_task_with_reviews(dir)
+        out, _err = capture_io do
+          Hive::Commands::FindingToggle.new(
+            Hive::Commands::FindingToggle::ACCEPT, slug,
+            ids: [ 5 ], severity: "high", json: true
+          ).call
+        end
+
+        payload = JSON.parse(out)
+        # high.0 (id 1) + high.1 (id 2) from --severity, plus id 5 from positional.
+        assert_equal [ 1, 2, 5 ], payload["selected_ids"]
+        body = File.read(File.join(execute, "reviews", "ce-review-02.md"))
+        assert_match(/^- \[x\] memory leak/, body)
+        assert_match(/^- \[x\] missing rate limit/, body)
+        assert_match(/^- \[x\] typo in error message/, body)
+        # Medium findings untouched.
+        assert_match(/^- \[ \] redundant validation/, body)
       end
     end
   end

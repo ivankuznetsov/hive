@@ -103,9 +103,18 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-findings")))
     schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
     producer_kinds = %w[
-      ambiguous_slug no_review_file unknown_finding invalid_task_path error
+      ambiguous_slug no_review_file unknown_finding no_selection
+      invalid_task_path error
     ].sort
     assert_equal producer_kinds, schema_kinds
+  end
+
+  def test_hive_findings_candidates_item_shape_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-findings")))
+    candidates = doc.dig("$defs", "ErrorPayload", "properties", "candidates")
+    item_required = candidates.dig("items", "required").sort
+    assert_equal %w[folder project stage], item_required,
+                 "candidate items must require project/stage/folder, mirroring hive-approve.v1"
   end
 
   def test_hive_findings_error_exit_codes_cover_producer_errors

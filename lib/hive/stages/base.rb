@@ -46,7 +46,7 @@ module Hive
       # for this spawn (per ADR-018).
       def spawn_agent(task, prompt:, max_budget_usd:, timeout_sec:,
                       add_dirs: [], cwd: nil, log_label: nil,
-                      profile: nil, expected_output: nil)
+                      profile: nil, expected_output: nil, status_mode: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         profile.check_version!
         profile.preflight!
@@ -64,7 +64,8 @@ module Hive
           cwd: cwd,
           log_label: log_label,
           profile: profile,
-          expected_output: expected_output
+          expected_output: expected_output,
+          status_mode: status_mode
         ).run!
       end
 

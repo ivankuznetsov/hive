@@ -2,6 +2,32 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-25T20:30:00Z] U4 ship — Reviewer adapter abstraction (agent-only in v1)
+
+**Action:** Phase 2's first primitive. Common interface for "anything that produces `reviews/<name>-<pass>.md`" so the 5-review runner's per-reviewer loop is shape-uniform across reviewer types. Plus a per-spawn `status_mode:` override on `Hive::Agent` so the same claude binary serves both `:state_file_marker` mode (4-execute) and `:output_file_exists` mode (reviewer adapter) — the orchestrator's `REVIEW_WORKING` marker now survives each reviewer's spawn.
+
+**Code:**
+- `lib/hive/reviewers/base.rb` — `Reviewers::Context` (Data) + `Reviewers::Result` (Data) + `Reviewers::Base` interface (defines `#run!`, `#name`, `#output_path`).
+- `lib/hive/reviewers/agent.rb` — agent-based reviewer. Renders the spec's `prompt_template` with skill-invocation per profile (`profile.skill_syntax_format` formatted with the spec's `skill`), spawns via `Stages::Base.spawn_agent` with `status_mode: :output_file_exists`, returns `Result.new(name, output_path, status, error_message)`.
+- `lib/hive/reviewers.rb` — `Reviewers.dispatch(spec, ctx)`. Single entry point. v1 supports `kind: agent` only.
+- `templates/reviewer_claude_ce_code_review.md.erb`, `templates/reviewer_codex_ce_code_review.md.erb`, `templates/reviewer_pr_review_toolkit.md.erb` — three reviewer prompt templates. Each renders `<%= skill_invocation %>` via the profile's `skill_syntax_format` so the same template works across CLIs once profile is selected.
+- `lib/hive/agent.rb` — added `status_mode:` per-spawn kwarg (overrides `profile.status_detection_mode`). Mode-gated marker writes: `:state_file_marker` mode preserves today's behavior (`:agent_working` pre-spawn + `:error` on timeout/exit_code); `:exit_code_only` and `:output_file_exists` modes leave `task.state_file` untouched so the orchestrator-owned marker survives.
+- `lib/hive/stages/base.rb` — `spawn_agent` accepts and forwards `status_mode:`.
+
+**Key decisions:**
+- **Linter reviewers DROPPED from v1.** Tool-specific linters (rubocop, brakeman, golangci-lint, ruff, etc.) belong in the project's `bin/ci`, not in hive's reviewer set. Hardcoding linter knowledge would couple hive to one ecosystem (the plan originally had Ruby/Rails linters). The user's CI command is a clean per-language contract: hive's 5-review CI-fix phase (U7) shells out to `review.ci.command`, the project's linters run there. `Reviewers.dispatch` raises a helpful error if a config sets `kind: linter` ("not supported in v1; set `review.ci.command` to your linter driver instead"). **Future:** if community contributions arrive for cross-ecosystem CI/linter integration, a plugin pattern can grow then; v1 stays minimal.
+- **`status_mode:` is per-spawn, not per-profile.** The same claude binary serves `:state_file_marker` (4-execute, brainstorm, plan, pr) and `:output_file_exists` (reviewer adapter). Mode is a property of the spawn's PURPOSE, not the CLI. Profile's `status_detection_mode` is the default; reviewer adapter overrides per spawn.
+- **Reviewer Agent uses a synthetic task object.** `spawn_agent` expects task-shaped `folder`/`state_file`/`log_dir`/`stage_name`. The reviewer adapter receives a `Reviewers::Context` (paths only) and constructs a minimal facade for spawn — keeps the adapter independent of full `Hive::Task` parsing.
+
+**Tests (+10):**
+- `test/unit/reviewers_test.rb` (5): dispatcher kind=agent → Agent; kind defaults to agent when absent; kind=linter raises with helpful "not supported in v1" message; unknown kind raises; output_path uses output_basename + zero-padded pass.
+- `test/unit/reviewers/agent_test.rb` (5): agent run returns ok when fake-claude writes expected output; error when expected output missing; error when exit non-zero; orchestrator REVIEW_WORKING survives the reviewer spawn (proves the per-spawn `status_mode: :output_file_exists` gating); rendered prompt invokes `/ce-code-review` against `git diff main..HEAD`.
+- `test/unit/agent_profile_modes_test.rb` (+1): backward-compat regression for `:state_file_marker` mode still writing `:error` to task.state_file on non-zero exit.
+
+231 tests passing (was 220 before U4). Rubocop clean.
+
+**Wiki pages updated:** this entry. `wiki/modules/agent.md` U4 changes (status_mode kwarg, mode-gated marker writes) deferred to U10's wiki pass.
+
 ## [2026-04-25T20:00:00Z] U2 ship — review.* + agents.* config + recursive deep-merge
 
 **Action:** Phase 1's config foundation for the 5-review autonomous loop. Replaced `Hive::Config.merge_defaults`'s single-level `Hash#merge` with a recursive deep-merge (closes doc-review F3 P0); added `agents.*` and `review.*` defaults trees; added load-time validation for reviewer uniqueness, agent-profile resolution, and reviewer entry shape. `templates/project_config.yml.erb` now scaffolds a live (not commented) `review:` block with the 3-entry recommended set (claude-ce-code-review + codex-ce-code-review + pr-review-toolkit), so a fresh `hive init` produces a working 5-review config out of the box.

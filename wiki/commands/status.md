@@ -4,10 +4,10 @@ type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
 updated: 2026-04-25
-tags: [command, status, observability]
+tags: [command, status, observability, json]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker, and prints a grouped, mtime-sorted table. Read-only; takes no args.
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker, and prints a grouped, mtime-sorted table. Read-only; takes no args. Pass `--json` for a single machine-readable document on stdout (schema `hive-status`, version per `Hive::SCHEMA_VERSIONS`).
 
 ## Output shape
 
@@ -48,7 +48,7 @@ tags: [command, status, observability]
 
 ## How tasks are discovered
 
-For each stage in `STAGE_ORDER = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]`, `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`; mtime falls back to the directory mtime if the state file doesn't exist yet.
+For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`; mtime falls back to the directory mtime if the state file doesn't exist yet.
 
 ## Read-only
 
@@ -60,5 +60,5 @@ For each stage in `STAGE_ORDER = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6
 
 ## Backlinks
 
-- [[cli]] · [[commands/run]]
+- [[cli]] · [[commands/run]] · [[commands/approve]]
 - [[modules/markers]] · [[modules/task]] · [[modules/config]]

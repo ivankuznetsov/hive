@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-approve.v1.json",
+  "title": "hive approve output (v1)",
+  "description": "Stable contract emitted by `hive approve --json`. Successful invocations and every failure path produce a single-line JSON document on stdout. v1 baseline.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "noop",
+        "slug",
+        "from_stage",
+        "from_stage_index",
+        "from_stage_dir",
+        "to_stage",
+        "to_stage_index",
+        "to_stage_dir",
+        "direction",
+        "forced",
+        "from_folder",
+        "to_folder",
+        "from_marker",
+        "commit_action",
+        "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-approve" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "noop": {
+          "type": "boolean",
+          "description": "true when --to <current-stage> resulted in no move and no commit."
+        },
+        "slug": { "type": "string" },
+        "from_stage": {
+          "type": "string",
+          "enum": ["inbox", "brainstorm", "plan", "execute", "pr", "done"],
+          "description": "Bare stage name, mirrors hive-run.stage."
+        },
+        "from_stage_index": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "from_stage_dir": {
+          "type": "string",
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"],
+          "description": "Combined directory name (index + bare name) for path construction."
+        },
+        "to_stage": {
+          "type": "string",
+          "enum": ["inbox", "brainstorm", "plan", "execute", "pr", "done"]
+        },
+        "to_stage_index": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "to_stage_dir": {
+          "type": "string",
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"]
+        },
+        "direction": { "type": "string", "enum": ["forward", "backward", "same"] },
+        "forced": {
+          "type": "boolean",
+          "description": "True when --force was passed."
+        },
+        "from_folder": { "type": "string", "description": "Absolute path of the source folder before the move." },
+        "to_folder": { "type": "string", "description": "Absolute path of the destination folder after the move (or noop target)." },
+        "from_marker": {
+          "type": ["string", "null"],
+          "description": "The marker that gated the move (e.g. \"complete\", \"execute_complete\"); null on noop."
+        },
+        "commit_action": {
+          "type": ["string", "null"],
+          "description": "The body of the hive/state commit message (e.g. \"approve 2-brainstorm -> 3-plan\"). null on noop."
+        },
+        "next_action": { "$ref": "#/$defs/NextAction" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-approve" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "The Hive::Error subclass without the Hive:: prefix (e.g. \"AmbiguousSlug\")."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "ambiguous_slug",
+            "destination_collision",
+            "final_stage",
+            "wrong_stage",
+            "rollback_failed",
+            "invalid_task_path",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 4, 64, 70, 75, 78],
+          "description": "Process exit code (Hive::ExitCodes). 1=GENERIC, 4=WRONG_STAGE, 64=USAGE, 75=TEMPFAIL."
+        },
+        "message": { "type": "string" },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
+        "path": {
+          "type": "string",
+          "description": "Present on DestinationCollision: the conflicting destination path."
+        },
+        "stage": {
+          "type": "string",
+          "description": "Present on FinalStageReached: the stage the task was already at."
+        }
+      }
+    },
+    "NextAction": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"],
+          "description": "Closed enum from Hive::Schemas::NextActionKind."
+        },
+        "folder": { "type": "string" },
+        "command": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

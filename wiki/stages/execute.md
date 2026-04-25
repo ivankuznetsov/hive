@@ -11,7 +11,7 @@ tags: [stage, execute, worktree, review]
 
 ## Setup
 
-- **State file**: `task.md` with frontmatter `slug`, `started_at`, `pass`. Initial body has `## Implementation` and `## Review History` headings plus `<!-- AGENT_WORKING -->`.
+- **State file**: `task.md` with frontmatter `slug`, `started_at`. Initial body has `## Implementation` and `## Review History` headings plus `<!-- AGENT_WORKING -->`. (Pass count is *not* tracked in frontmatter — see `current_pass_from_reviews`.)
 - **Worktree pointer**: `worktree.yml` (created on init pass; gates iteration vs init).
 - **Reviews directory**: `reviews/` (created at top of `run!`).
 - **Plan precondition**: `plan.md` must exist; otherwise stderr `"plan.md missing; this task did not pass through 3-plan"` and exit 1.
@@ -83,5 +83,6 @@ When pass count hits `max_review_passes`:
 ## Backlinks
 
 - [[stages/plan]] · [[stages/pr]]
-- [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]]
+- [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]] · [[modules/findings]]
+- [[commands/findings]] — list and toggle the `[x]` accepted-flag on findings this stage produces
 - [[state-model]]

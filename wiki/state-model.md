@@ -27,7 +27,7 @@ Per project, every task is a folder in exactly one stage subdirectory. Stage = l
 └── logs/<slug>/<stage>-<UTC-ts>.log
 ```
 
-The constant `Hive::GitOps::STAGE_DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]` is the canonical list (`lib/hive/git_ops.rb:7`).
+The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]].
 
 `Hive::Task::PATH_RE` (`lib/hive/task.rb:14`) is the only validator for task paths and parses `<root>/.hive-state/stages/<N>-<stage>/<slug>/`.
 

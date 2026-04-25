@@ -150,6 +150,32 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
+  def test_iteration_pass_accepts_uppercase_checked_findings
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_PASS"] = "1"
+        ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "1"
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        review_file = File.join(folder, "reviews", "ce-review-01.md")
+        body = File.read(review_file).sub("- [ ] finding-1", "- [X] finding-1")
+        File.write(review_file, body)
+
+        ENV["HIVE_EXEC_DRIVER_PASS"] = "2"
+        ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "0"
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        assert File.exist?(File.join(folder, "reviews", "ce-review-02.md")),
+               "uppercase checked findings must be re-injected like lowercase [x]"
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
   def test_no_accepted_findings_short_circuits_to_complete
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -212,7 +238,8 @@ class RunExecuteTest < Minitest::Test
         ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "1"
         ENV["HIVE_EXEC_DRIVER_TAMPER"] = "1"
         _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal 1, status
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "marker :error must map to TASK_IN_ERROR (3)"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name
@@ -246,7 +273,8 @@ class RunExecuteTest < Minitest::Test
         File.chmod(0o755, @driver_bin)
 
         _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal 1, status, "Run.report must exit 1 when execute records :error"
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "Run.report must exit 3 (TASK_IN_ERROR) when execute records :error"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name,
@@ -284,7 +312,8 @@ class RunExecuteTest < Minitest::Test
         File.chmod(0o755, @driver_bin)
 
         _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal 1, status, "Run.report must exit 1 when execute records :error"
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "Run.report must exit 3 (TASK_IN_ERROR) when execute records :error"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name,
@@ -312,24 +341,5 @@ class RunExecuteTest < Minitest::Test
         assert_includes err, "plan.md missing"
       end
     end
-  end
-
-  def with_captured_exit
-    out_pipe = StringIO.new
-    err_pipe = StringIO.new
-    real_out = $stdout
-    real_err = $stderr
-    $stdout = out_pipe
-    $stderr = err_pipe
-    status = 0
-    begin
-      yield
-    rescue SystemExit => e
-      status = e.status
-    ensure
-      $stdout = real_out
-      $stderr = real_err
-    end
-    [ out_pipe.string, err_pipe.string, status ]
   end
 end

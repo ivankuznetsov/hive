@@ -3,7 +3,7 @@ module Hive
   # ordering, Run#next_stage_dir, Approve resolution) all read from here so
   # adding a 7th stage or renaming an existing one is a one-file change.
   module Stages
-    DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done].freeze
+    DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-review 6-pr 7-done].freeze
     NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
     SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze
 

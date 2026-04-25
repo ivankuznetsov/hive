@@ -88,4 +88,4 @@ A few stage runners still call `warn`/`exit N` directly for non-bug user errors 
 
 - [[architecture]]
 - [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/approve]] · [[commands/findings]] · [[commands/stage_action]]
-- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]] · [[stages/done]]
+- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/review]] · [[stages/pr]] · [[stages/done]]

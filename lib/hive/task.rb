@@ -2,12 +2,13 @@ require "yaml"
 
 module Hive
   class Task
-    STAGE_NAMES = %w[inbox brainstorm plan execute pr done].freeze
+    STAGE_NAMES = %w[inbox brainstorm plan execute review pr done].freeze
     STATE_FILES = {
       "inbox" => "idea.md",
       "brainstorm" => "brainstorm.md",
       "plan" => "plan.md",
       "execute" => "task.md",
+      "review" => "task.md",
       "pr" => "pr.md",
       "done" => "task.md"
     }.freeze
@@ -48,6 +49,9 @@ module Hive
     end
 
     def worktree_path
+      # Worktree first appears in 4-execute and carries through 5-review
+      # and 6-pr; earlier stages don't have one. 7-done is post-PR; the
+      # worktree may still exist (cleanup happens after merge).
       return nil if @stage_index < 4
 
       if File.exist?(worktree_yml_path)

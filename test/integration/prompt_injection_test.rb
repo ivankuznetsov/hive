@@ -105,7 +105,9 @@ class PromptInjectionTest < Minitest::Test
     end
   end
 
-  def test_execute_prompt_wraps_plan_and_findings
+  def test_execute_prompt_wraps_plan
+    # 4-execute is impl-only since U9 — there's no accepted_findings
+    # binding anymore (moved to fix_prompt.md.erb in the 5-review stage).
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
       tag = Hive::Stages::Base.user_supplied_tag
@@ -115,16 +117,34 @@ class PromptInjectionTest < Minitest::Test
           project_name: File.basename(dir),
           worktree_path: "/tmp/wt",
           task_folder: task.folder,
-          pass: 2,
           plan_text: HOSTILE_IDEA,
-          accepted_findings: HOSTILE_IDEA,
           user_supplied_tag: tag
         )
       )
       assert_includes prompt, "<#{tag} content_type=\"plan_md\">"
+      assert_includes prompt, "</#{tag}>"
+      assert_equal 1, prompt.scan("<#{tag} ").count, "execute prompt has exactly one wrapped block (plan_md)"
+    end
+  end
+
+  def test_fix_prompt_wraps_accepted_findings
+    # The accepted_findings wrapping moved to the 5-review fix prompt.
+    with_tmp_dir do |dir|
+      task = make_task(dir, "5-review")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "fix_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          worktree_path: "/tmp/wt",
+          task_folder: task.folder,
+          pass: 2,
+          accepted_findings: HOSTILE_IDEA,
+          user_supplied_tag: tag
+        )
+      )
       assert_includes prompt, "<#{tag} content_type=\"accepted_findings\">"
-      assert_equal 2, prompt.scan("<#{tag} ").count
-      assert_equal 2, prompt.scan("</#{tag}>").count
+      assert_includes prompt, "</#{tag}>"
     end
   end
 

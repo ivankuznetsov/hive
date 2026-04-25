@@ -8,6 +8,22 @@ require "hive/markers"
 
 module Hive
   module Stages
+    # 4-execute stage runner. Implementation-only since U9 split the
+    # review pass out into the new 5-review stage.
+    #
+    # Flow per `hive run` on a 4-execute task:
+    #   1. Pre-flight: terminal markers, worktree pointer health.
+    #   2. If no worktree.yml: create the feature worktree at
+    #      <worktree_root>/<slug>, write the pointer.
+    #   3. Spawn the implementation agent with plan.md as context. The
+    #      agent edits the worktree and commits.
+    #   4. Finalize: SHA-protect plan.md / worktree.yml around the spawn.
+    #      On clean spawn → set EXECUTE_COMPLETE; on tamper → :error.
+    #
+    # User then `mv`s the task folder to .hive-state/stages/5-review/
+    # to enter the autonomous review loop. There is no review pass
+    # inside 4-execute anymore — the orchestrator-owned terminal
+    # marker is EXECUTE_COMPLETE on success.
     module Execute
       module_function
 
@@ -24,27 +40,25 @@ module Hive
 
         case task_state(task)
         when :complete
-          puts "hive: already complete; mv this folder to 6-pr/ to continue"
+          puts "hive: already complete; mv this folder to 5-review/ to continue"
           return { commit: nil, status: :execute_complete }
-        when :stale
-          warn "hive: EXECUTE_STALE — edit reviews/, lower pass:, remove the marker, then re-run"
-          return { commit: nil, status: :execute_stale }
         when :worktree_missing
           warn "hive: worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"
           exit 1
         end
 
         if File.exist?(task.worktree_yml_path)
-          run_iteration_pass(task, cfg)
+          run_continuation_pass(task, cfg)
         else
           run_init_pass(task, cfg)
         end
       end
 
+      # Pre-flight state. EXECUTE_STALE is no longer a state 4-execute
+      # writes (the review pass moved to 5-review).
       def task_state(task)
         marker = Hive::Markers.current(task.state_file)
         return :complete if marker.name == :execute_complete
-        return :stale if marker.name == :execute_stale
 
         if File.exist?(task.worktree_yml_path)
           pointer = Hive::Worktree.read_pointer(task.folder) || {}
@@ -54,12 +68,14 @@ module Hive
         :ready
       end
 
-      # Canonical worktree_root for a task — never derived from agent-written
-      # pointer paths. Mirrors the path used at init time.
+      # Canonical worktree_root for a task — never derived from
+      # agent-written pointer paths. Mirrors the path used at init time.
       def canonical_worktree_root(task, cfg)
         cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(task.project_root)}.worktrees")
       end
 
+      # First entry into 4-execute: create the feature worktree, run
+      # implementation, finalize.
       def run_init_pass(task, cfg)
         ops = Hive::GitOps.new(task.project_root)
         worktree_root = canonical_worktree_root(task, cfg)
@@ -70,75 +86,48 @@ module Hive
         wt.write_pointer!(task.folder, task.slug)
 
         write_initial_task_md(task)
-        run_pass(task, cfg, wt.path, pass: 1, accepted_findings: nil)
+        run_pass(task, cfg, wt.path)
       end
 
-      def run_iteration_pass(task, cfg)
+      # User re-ran `hive run` on a 4-execute task whose worktree
+      # already exists — re-validate the pointer and re-run the impl
+      # spawn. Idempotent at the agent level (the agent re-reads
+      # plan.md and continues / refines whatever was committed last
+      # time).
+      def run_continuation_pass(task, cfg)
         worktree_root = canonical_worktree_root(task, cfg)
         pointer = Hive::Worktree.read_pointer(task.folder)
         worktree_path = pointer["path"]
-        # Reject any pointer that escapes the canonical root — defends against
-        # an agent rewriting worktree.yml to point at the master checkout.
         Hive::Worktree.validate_pointer_path(worktree_path, worktree_root)
 
-        previous_pass = current_pass_from_reviews(task)
-        max_passes = cfg["max_review_passes"] || 4
-        pass = previous_pass + 1
-
-        if previous_pass >= max_passes
-          Hive::Markers.set(task.state_file, :execute_stale, max_passes: max_passes, pass: previous_pass)
-          return { commit: "stale_max_passes", status: :execute_stale }
-        end
-
-        accepted = collect_accepted_findings(task, previous_pass)
-        if accepted.strip.empty?
-          Hive::Markers.set(task.state_file, :execute_complete, pass: previous_pass)
-          return { commit: "complete_no_accepted", status: :execute_complete }
-        end
-
-        run_pass(task, cfg, worktree_path, pass: pass, accepted_findings: accepted)
+        run_pass(task, cfg, worktree_path)
       end
 
-      # One iteration of impl + review, both wrapped in sha256 integrity checks
-      # against PROTECTED_FILES. Either agent tampering with plan.md or
-      # worktree.yml fails the run with marker :error.
-      #
-      # Also stops on agent-level failure: if `spawn_implementation` times out
-      # or returns non-zero, Hive::Agent.run! has already set :error /
-      # :timeout on task.md. Continuing into the review pass would let a
-      # second agent run overwrite that marker with EXECUTE_WAITING /
-      # EXECUTE_COMPLETE, hiding the implementation failure.
-      def run_pass(task, cfg, worktree_path, pass:, accepted_findings:)
+      # Spawn the implementation agent, SHA-protect plan.md /
+      # worktree.yml around it, finalize EXECUTE_COMPLETE on clean
+      # spawn or :error on tamper / agent failure.
+      def run_pass(task, cfg, worktree_path)
         before_impl = sha256_for(task, PROTECTED_FILES)
-        impl_result = spawn_implementation(task, cfg, worktree_path,
-                                           pass: pass, accepted_findings: accepted_findings)
+        impl_result = spawn_implementation(task, cfg, worktree_path)
         after_impl = sha256_for(task, PROTECTED_FILES)
+
         if (tampered = diff_hashes(before_impl, after_impl)).any?
           return record_tamper(task, tampered, who: "implementer")
         end
+
         return { commit: "implementer_failed", status: impl_result[:status] } if agent_failed?(impl_result)
 
-        before_review = sha256_for(task, PROTECTED_FILES)
-        review_result = spawn_reviewer(task, cfg, worktree_path, pass: pass)
-        after_review = sha256_for(task, PROTECTED_FILES)
-        if (tampered = diff_hashes(before_review, after_review)).any?
-          return record_tamper(task, tampered, who: "reviewer")
-        end
-        return { commit: "reviewer_failed", status: review_result[:status] } if agent_failed?(review_result)
-
-        finalize_review_state(task, pass)
+        Hive::Markers.set(task.state_file, :execute_complete)
+        { commit: "execute_complete", status: :execute_complete }
       end
 
-      # Agent.run! returns :status set to the marker that's now in the file
-      # (or :error / :timeout when handle_exit set one itself). Anything that
-      # isn't a normal in-progress signal is a failure that must propagate.
       def agent_failed?(result)
         return true if result.nil?
 
         %i[error timeout].include?(result[:status])
       end
 
-      def spawn_implementation(task, cfg, worktree_path, pass:, accepted_findings:)
+      def spawn_implementation(task, cfg, worktree_path)
         plan_text = File.read(File.join(task.folder, "plan.md"))
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
@@ -146,9 +135,7 @@ module Hive
             project_name: File.basename(task.project_root),
             worktree_path: worktree_path,
             task_folder: task.folder,
-            pass: pass,
             plan_text: plan_text,
-            accepted_findings: accepted_findings,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
@@ -159,35 +146,8 @@ module Hive
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
-          log_label: "execute-impl-#{format('%02d', pass)}"
+          log_label: "execute-impl"
         )
-      end
-
-      def spawn_reviewer(task, cfg, worktree_path, pass:)
-        ops = Hive::GitOps.new(task.project_root)
-        prompt = Hive::Stages::Base.render(
-          "review_prompt.md.erb",
-          Hive::Stages::Base::TemplateBindings.new(
-            project_name: File.basename(task.project_root),
-            worktree_path: worktree_path,
-            task_folder: task.folder,
-            default_branch: ops.default_branch,
-            pass: pass
-          )
-        )
-        Hive::Stages::Base.spawn_agent(
-          task,
-          prompt: prompt,
-          add_dirs: [ task.folder ],
-          cwd: worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "execute_review"),
-          timeout_sec: cfg.dig("timeout_sec", "execute_review"),
-          log_label: "execute-review-#{format('%02d', pass)}"
-        )
-      end
-
-      def diff_hashes(before, after)
-        before.keys.reject { |k| before[k] == after[k] }
       end
 
       def record_tamper(task, tampered, who:)
@@ -195,26 +155,6 @@ module Hive
                           reason: "#{who}_tampered",
                           files: tampered.join(","))
         { commit: "#{who}_tampered", status: :error }
-      end
-
-      # The orchestrator (not the agent) owns the terminal marker on task.md.
-      # Pass count is derived from reviews/ce-review-*.md count, not from
-      # frontmatter the agent has to remember to update.
-      def finalize_review_state(task, pass)
-        review_path = File.join(task.reviews_dir, format("ce-review-%02d.md", pass))
-        if File.exist?(review_path)
-          findings = count_findings(File.read(review_path))
-          if findings.positive?
-            Hive::Markers.set(task.state_file, :execute_waiting,
-                              findings_count: findings, pass: pass)
-            return { commit: "review_pass_#{format('%02d', pass)}_waiting",
-                     status: :execute_waiting }
-          end
-        end
-
-        Hive::Markers.set(task.state_file, :execute_complete, pass: pass)
-        { commit: "review_pass_#{format('%02d', pass)}_complete",
-          status: :execute_complete }
       end
 
       def write_initial_task_md(task)
@@ -230,29 +170,9 @@ module Hive
 
           ## Implementation
 
-          ## Review History
-
           <!-- AGENT_WORKING -->
         MD
         File.write(task.state_file, content)
-      end
-
-      # Pass count = number of completed review files. The init pass writes
-      # ce-review-01.md, the next iteration writes ce-review-02.md, etc. This
-      # avoids any dependency on the agent updating task.md frontmatter.
-      def current_pass_from_reviews(task)
-        Dir[File.join(task.reviews_dir, "ce-review-*.md")].size
-      end
-
-      def count_findings(text)
-        text.lines.count { |l| l =~ /^\s*-\s+\[[ x]\]\s+/ }
-      end
-
-      def collect_accepted_findings(task, previous_pass)
-        review_path = File.join(task.reviews_dir, format("ce-review-%02d.md", previous_pass))
-        return "" unless File.exist?(review_path)
-
-        File.readlines(review_path).select { |l| l =~ /^\s*-\s+\[[xX]\]\s+/ }.join
       end
 
       def sha256_for(task, names)
@@ -260,6 +180,10 @@ module Hive
           path = File.join(task.folder, name)
           h[name] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
         end
+      end
+
+      def diff_hashes(before, after)
+        before.keys.reject { |k| before[k] == after[k] }
       end
     end
   end

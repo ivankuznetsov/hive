@@ -5,11 +5,12 @@ class StagesTest < Minitest::Test
   def test_dirs_short_names_and_short_to_full_round_trip
     expected_short_to_full = {
       "inbox" => "1-inbox", "brainstorm" => "2-brainstorm", "plan" => "3-plan",
-      "execute" => "4-execute", "pr" => "6-pr", "done" => "7-done"
+      "execute" => "4-execute", "review" => "5-review",
+      "pr" => "6-pr", "done" => "7-done"
     }
     assert_equal expected_short_to_full, Hive::Stages::SHORT_TO_FULL.to_h
-    assert_equal %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done], Hive::Stages::DIRS
-    assert_equal %w[inbox brainstorm plan execute pr done], Hive::Stages::NAMES
+    assert_equal %w[1-inbox 2-brainstorm 3-plan 4-execute 5-review 6-pr 7-done], Hive::Stages::DIRS
+    assert_equal %w[inbox brainstorm plan execute review pr done], Hive::Stages::NAMES
     assert Hive::Stages::DIRS.frozen?
     assert Hive::Stages::NAMES.frozen?
     assert Hive::Stages::SHORT_TO_FULL.frozen?
@@ -25,17 +26,16 @@ class StagesTest < Minitest::Test
 
   def test_next_dir_returns_following_stage_or_nil_at_end
     assert_equal "2-brainstorm", Hive::Stages.next_dir(1)
-    assert_equal "6-pr", Hive::Stages.next_dir(4)
+    assert_equal "5-review", Hive::Stages.next_dir(4)
+    assert_equal "6-pr", Hive::Stages.next_dir(5)
     assert_equal "7-done", Hive::Stages.next_dir(6)
     assert_nil Hive::Stages.next_dir(7),
                "past the final stage must return nil so the caller can branch on it"
   end
 
-  def test_next_dir_returns_nil_for_unused_prefix
-    # After U1's renumber, stage_index 5 is reserved for the future 5-review
-    # stage but does not yet exist in DIRS. Querying it returns nil cleanly,
-    # not the next stage, so callers don't accidentally skip over the gap.
-    assert_nil Hive::Stages.next_dir(5)
+  def test_next_dir_returns_nil_for_unknown_prefix
+    # Prefix that doesn't exist in DIRS returns nil cleanly, not a
+    # neighboring stage.
     assert_nil Hive::Stages.next_dir(99)
   end
 

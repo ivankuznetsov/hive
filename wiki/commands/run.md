@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [command, dispatcher, stages, json]
 ---
 
@@ -22,7 +22,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 
 1. Resolve `TARGET` via `Hive::TaskResolver` and load merged config via `Hive::Config.load(task.project_root)`.
 2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
-3. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,Pr,Done}.method(:run!)`. Unknown stage → `StageError`.
+3. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,Review,Pr,Done}.method(:run!)`. Unknown stage → `StageError`.
 4. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
 5. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
 6. `report`: print the current marker, the state file path, and a stage-aware next step.
@@ -47,6 +47,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 | `brainstorm` | `Stages::Brainstorm` | [[stages/brainstorm]] |
 | `plan` | `Stages::Plan` | [[stages/plan]] |
 | `execute` | `Stages::Execute` | [[stages/execute]] |
+| `review` | `Stages::Review` | [[stages/review]] |
 | `pr` | `Stages::Pr` | [[stages/pr]] |
 | `done` | `Stages::Done` | [[stages/done]] |
 
@@ -71,5 +72,5 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 ## Backlinks
 
 - [[cli]] · [[commands/init]] · [[commands/status]] · [[commands/approve]]
-- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]] · [[stages/done]]
+- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/review]] · [[stages/pr]] · [[stages/done]]
 - [[modules/task]] · [[modules/lock]] · [[modules/markers]] · [[modules/git_ops]]

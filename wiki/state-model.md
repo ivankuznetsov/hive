@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [state, filesystem, model, architecture]
 ---
 
@@ -74,7 +74,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to mv to 6-pr (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=… reason=… -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`) | `Stages::Review` orchestrator |
 
-Marker name allowlist: `Hive::Markers::KNOWN_NAMES` (twelve names — six pre-U3 + six REVIEW_* added in U3). Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`).
+Marker name allowlist: `Hive::Markers::KNOWN_NAMES` (thirteen names — seven pre-U3 + six REVIEW_* added in U3). Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`).
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
@@ -195,10 +195,14 @@ stateDiagram-v2
     S3_plan --> S3_plan: hive run (refine)
     S3_plan --> S4_execute: user mv
     S4_execute --> S4_execute: hive run (next pass)
-    S4_execute --> S5_pr: user mv
-    S5_pr --> S6_done: user mv (after merge)
-    S6_done --> [*]
+    S4_execute --> S5_review: user mv (U9, future)
+    S5_review --> S5_review: hive run (next review pass — ci/reviewers/triage/fix/browser)
+    S5_review --> S6_pr: user mv (REVIEW_COMPLETE)
+    S6_pr --> S7_done: user mv (after merge)
+    S7_done --> [*]
 ```
+
+Slot `5-` is reserved for `5-review/` but not yet added to `Hive::Stages::DIRS` (`lib/hive/stages.rb:6`). Until the U9 orchestrator lands, `Stages.next_dir(4)` returns `"6-pr"` directly.
 
 See [[stages/index]] for one page per stage.
 

@@ -21,6 +21,7 @@ tags: [cli, api]
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project | `Hive::Commands::New` | [[commands/new]] |
 | `hive run FOLDER` | Run the stage agent for the task at `FOLDER` | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive status` | Tabular status across registered projects | `Hive::Commands::Status` | [[commands/status]] |
+| `hive approve TARGET [--to STAGE]` | Move a task between stages + record a hive/state commit (replaces shell `mv`) | `Hive::Commands::Approve` | [[commands/approve]] |
 
 `Hive::CLI` (`lib/hive/cli.rb`) is the Thor class. Notable mappings:
 

@@ -9,7 +9,8 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 1,
-      "hive-run" => 1
+      "hive-run" => 1,
+      "hive-approve" => 1
     }.freeze
 
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.

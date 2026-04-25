@@ -8,8 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `hive approve TARGET [--to STAGE] [--project NAME] [--force] [--json]` — agent-callable replacement for shell `mv <task> <next-stage>/`. Resolves bare slugs across registered projects; validates terminal-marker on forward auto-advance; records a `hive/state` commit on each move; emits a `hive-approve` JSON document (schema_version 1) under `--json`. Stable exit codes: `Hive::InvalidTaskPath` (64), `Hive::WrongStage` (4), `Hive::Error` (1) for the four failure modes.
 - Initial public release of Hive — folder-as-agent pipeline driving a six-stage filesystem state machine.
-- CLI commands: `hive init`, `hive new`, `hive run`, `hive status`.
+- CLI commands: `hive init`, `hive new`, `hive run`, `hive status`, `hive approve`.
 - Six pipeline stages: `1-inbox`, `2-brainstorm`, `3-plan`, `4-execute`, `5-pr`, `6-done`.
 - Orphan-branch state model (`hive/state` checked out as a separate worktree at `<project>/.hive-state/`).
 - Per-task `.lock` (with PID-reuse defence via `/proc/<pid>/stat` start time, macOS `ps -o lstart=` fallback) and per-project `.commit-lock` (flock).

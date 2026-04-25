@@ -4,15 +4,15 @@ type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
 updated: 2026-04-25
-tags: [command, dispatcher, stages]
+tags: [command, dispatcher, stages, json]
 ---
 
-**TLDR**: `hive run FOLDER` is the dispatcher: parses `FOLDER` into a `Hive::Task`, takes the per-task lock, picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a `next:` hint.
+**TLDR**: `hive run FOLDER` is the dispatcher: parses `FOLDER` into a `Hive::Task`, takes the per-task lock, picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a `next:` hint. With `--json`, emits a single machine-readable document; exit codes are stable per `Hive::ExitCodes` (see [[cli]]).
 
 ## Usage
 
 ```
-hive run <project>/.hive-state/stages/<N>-<stage>/<slug>
+hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 ```
 
 `FOLDER` is `File.expand_path`-ed and parsed by `Hive::Task#initialize`; mismatches against `Hive::Task::PATH_RE` raise `InvalidTaskPath`.
@@ -20,7 +20,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug>
 ## Steps performed (`Commands::Run#call`)
 
 1. Build `Hive::Task.new(folder)` and load merged config via `Hive::Config.load(task.project_root)`.
-2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 1, stderr `hive: another hive run is active`).
+2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
 3. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,Pr,Done}.method(:run!)`. Unknown stage → `StageError`.
 4. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
 5. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
@@ -34,7 +34,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug>
 | `:complete` | `next: mv <folder> <hive-state>/stages/<next>/` (resolved by `next_stage_dir`) |
 | `:execute_complete` | `next: mv <folder> <hive-state>/stages/5-pr/` |
 | `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
-| `:error` | stderr `status: ERROR (<attrs>)`, exit 1 |
+| `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 
 `next_stage_dir` increments `task.stage_index`; `6-done` has no `next:`.
 

@@ -36,6 +36,37 @@ For security issues, see [SECURITY.md](SECURITY.md) — please do not open a pub
 - All git/gh/claude calls go through the dedicated wrappers in `lib/hive/git_ops.rb`, `lib/hive/worktree.rb`, and `lib/hive/agent.rb`. Don't call `system` or backticks directly.
 - See [`wiki/architecture.md`](wiki/architecture.md) for the layer cake and [`wiki/decisions.md`](wiki/decisions.md) for the active ADRs before proposing structural changes.
 
+## CLI contract for agent callers
+
+Two surface guarantees that programmatic callers can rely on:
+
+### Exit codes
+
+| Code | Meaning | Retry? |
+|------|---------|--------|
+| 0    | success                                             | n/a       |
+| 1    | generic failure (unclassified)                      | no        |
+| 2    | `hive init` ran on an already-initialised project   | no        |
+| 3    | task is in `:error` marker state (agent recorded a failure) | no — investigate task.md |
+| 4    | wrong stage (`hive run` on inert `1-inbox/`)        | no — `mv` first |
+| 64   | usage error (bad slug, malformed task path)         | no        |
+| 70   | internal failure (git, worktree, agent, stage)      | maybe — inspect logs |
+| 75   | retryable: lock contention                          | **yes**   |
+| 78   | bad config (project or global)                      | no        |
+
+Codes are surfaced via `Hive::Error` subclasses; `bin/hive` rescues them and exits with the contract code. Constants live in `Hive::ExitCodes`.
+
+### `--json` output
+
+Both `hive status` and `hive run` accept `--json`. Each emits a single JSON document on stdout with a `schema` + `schema_version` header so future evolution is explicit.
+
+```bash
+hive status --json | jq '.projects[].tasks[] | select(.marker == "execute_waiting")'
+hive run /path/to/task --json | jq '.next_action'
+```
+
+`schema_version` will only bump when an existing key changes shape or is removed — adding new keys is non-breaking. Pin and assert the version in your wrapper if you depend on the contract.
+
 ## Tests
 
 - `test/fixtures/fake-claude` and `test/fixtures/fake-gh` are bash scripts that stand in for real binaries during tests. Pointed at via `HIVE_CLAUDE_BIN` / `PATH`.

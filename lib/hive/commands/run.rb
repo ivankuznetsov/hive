@@ -1,3 +1,4 @@
+require "json"
 require "hive/config"
 require "hive/task"
 require "hive/markers"
@@ -8,8 +9,9 @@ require "hive/agent"
 module Hive
   module Commands
     class Run
-      def initialize(folder)
+      def initialize(folder, json: false)
         @folder = File.expand_path(folder)
+        @json = json
       end
 
       def call
@@ -60,8 +62,68 @@ module Hive
         end
       end
 
-      def report(task, _result)
+      def report(task, result)
         marker = Hive::Markers.current(task.state_file)
+        if @json
+          report_json(task, result, marker)
+        else
+          report_text(task, result, marker)
+        end
+      end
+
+      # Stable schema for agent / wrapper consumption. The closed set of
+      # `next_action.kind` values is exported as Hive::Schemas::NextActionKind
+      # so producer and tests share a single source of truth.
+      def report_json(task, result, marker)
+        payload = {
+          "schema" => "hive-run",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"),
+          "slug" => task.slug,
+          "stage" => task.stage_name,
+          "stage_index" => task.stage_index,
+          "folder" => task.folder,
+          "state_file" => task.state_file,
+          "marker" => marker.name.to_s,
+          "attrs" => marker.attrs,
+          "commit_action" => result.is_a?(Hash) ? result[:commit] : nil,
+          "next_action" => json_next_action(task, marker)
+        }
+        # The JSON payload is written to stdout *before* the raise. bin/hive
+        # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
+        # interpreter shutdown flushes stdout via IO finalizers, so the
+        # caller receives the full JSON document AND a non-zero exit code
+        # (3, TASK_IN_ERROR) as a dual signal.
+        puts JSON.generate(payload)
+        raise Hive::TaskInErrorState, "stage recorded :error (#{marker.attrs.inspect})" if marker.name == :error
+      end
+
+      def json_next_action(task, marker)
+        kind = Hive::Schemas::NextActionKind
+        case marker.name
+        when :waiting, :execute_waiting
+          { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => "hive run #{task.folder}" }
+        when :complete
+          next_stage = next_stage_dir(task)
+          if next_stage
+            { "kind" => kind::MV, "from" => task.folder, "to" => "#{next_stage}/" }
+          else
+            { "kind" => kind::NO_OP }
+          end
+        when :execute_complete
+          { "kind" => kind::MV,
+            "from" => task.folder,
+            "to" => "#{File.join(task.hive_state_path, 'stages', '5-pr')}/" }
+        when :execute_stale
+          { "kind" => kind::RECOVER_STALE,
+            "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }
+        when :error
+          { "kind" => kind::NO_OP, "error" => marker.attrs }
+        else
+          { "kind" => kind::NO_OP }
+        end
+      end
+
+      def report_text(task, _result, marker)
         puts "hive: marker=#{marker.name}"
         puts "  state_file: #{task.state_file}"
         case marker.name
@@ -76,7 +138,7 @@ module Hive
           puts "  next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run"
         when :error
           warn "  status: ERROR (#{marker.attrs.inspect})"
-          exit 1
+          raise Hive::TaskInErrorState, "stage recorded :error (#{marker.attrs.inspect})"
         end
       end
 

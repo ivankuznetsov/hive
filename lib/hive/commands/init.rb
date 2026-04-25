@@ -17,8 +17,8 @@ module Hive
 
         ops = Hive::GitOps.new(@project_path)
         if ops.hive_state_branch_exists?
-          warn "hive: already initialized; hive/state branch present at #{@project_path}"
-          exit 2
+          raise Hive::AlreadyInitialized,
+                "already initialized; hive/state branch present at #{@project_path}"
         end
 
         ops.hive_state_init

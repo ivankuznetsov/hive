@@ -8,6 +8,7 @@ ARGV_LOG="${LOG_DIR}/fake-gh-argv.log"
 {
   echo "---"
   date -u +"%Y-%m-%dT%H:%M:%SZ"
+  printf 'cwd=%s\n' "$PWD"
   for a in "$@"; do
     printf 'arg=%s\n' "$a"
   done

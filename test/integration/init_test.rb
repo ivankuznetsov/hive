@@ -30,7 +30,7 @@ class InitTest < Minitest::Test
   def test_rejects_non_git_repo
     with_tmp_global_config do
       with_tmp_dir do |dir|
-        _, err, status = capture_io_and_exit { Hive::Commands::Init.new(dir).call }
+        _, err, status = with_captured_exit { Hive::Commands::Init.new(dir).call }
         assert_equal 1, status
         assert_includes err, "not a git repository"
       end
@@ -42,7 +42,7 @@ class InitTest < Minitest::Test
       with_tmp_git_repo do |dir|
         # Modify a tracked file to make the tree dirty (untracked files alone don't fail).
         File.write(File.join(dir, "README.md"), "modified\n")
-        _, err, status = capture_io_and_exit { Hive::Commands::Init.new(dir).call }
+        _, err, status = with_captured_exit { Hive::Commands::Init.new(dir).call }
         assert_equal 1, status
         assert_includes err, "uncommitted modifications"
       end
@@ -71,33 +71,15 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_double_init_idempotent_exit_2
+  def test_double_init_raises_already_initialized_with_exit_2
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
-        _, err, status = capture_io_and_exit { Hive::Commands::Init.new(dir).call }
-        assert_equal 2, status
+        _, err, status = with_captured_exit { Hive::Commands::Init.new(dir).call }
+        assert_equal Hive::ExitCodes::ALREADY_INITIALIZED, status,
+                     "second init must raise Hive::AlreadyInitialized (exit 2), not bare exit"
         assert_includes err, "already initialized"
       end
     end
-  end
-
-  def capture_io_and_exit
-    out_pipe = StringIO.new
-    err_pipe = StringIO.new
-    real_stdout = $stdout
-    real_stderr = $stderr
-    $stdout = out_pipe
-    $stderr = err_pipe
-    status = 0
-    begin
-      yield
-    rescue SystemExit => e
-      status = e.status
-    ensure
-      $stdout = real_stdout
-      $stderr = real_stderr
-    end
-    [ out_pipe.string, err_pipe.string, status ]
   end
 end

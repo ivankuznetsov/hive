@@ -23,7 +23,8 @@ class RunPrTest < Minitest::Test
     FileUtils.rm_rf(@gh_dir) if @gh_dir
     Array(@worktree_paths).each { |p| FileUtils.rm_rf(p) }
     %w[HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
-       HIVE_FAKE_GH_PR_EXISTS HIVE_FAKE_GH_CREATE_EXIT].each { |k| ENV.delete(k) }
+       HIVE_FAKE_GH_PR_EXISTS HIVE_FAKE_GH_CREATE_EXIT
+       HIVE_FAKE_GH_LOG_DIR].each { |k| ENV.delete(k) }
   end
 
   def setup_pr_task(dir)
@@ -70,6 +71,29 @@ class RunPrTest < Minitest::Test
     end
   end
 
+  def test_existing_pr_lookup_runs_in_worktree
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        pr_dir, worktree_path = setup_pr_task(dir)
+        stub_push(worktree_path)
+        log_dir = Dir.mktmpdir("fake-gh-log")
+        ENV["HIVE_FAKE_GH_LOG_DIR"] = log_dir
+        ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
+
+        Dir.chdir("/") do
+          capture_io { Hive::Commands::Run.new(pr_dir).call }
+        end
+
+        argv_log = File.read(File.join(log_dir, "fake-gh-argv.log"))
+        pr_list_call = argv_log.split("---").find { |entry| entry.include?("arg=list") }
+        assert pr_list_call, "expected fake gh to receive a pr list call"
+        assert_includes pr_list_call, "cwd=#{worktree_path}\n"
+      ensure
+        FileUtils.rm_rf(log_dir) if log_dir
+      end
+    end
+  end
+
   def test_pr_runner_invokes_agent_when_pr_missing
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -105,24 +129,5 @@ class RunPrTest < Minitest::Test
         assert_includes err, "no worktree pointer"
       end
     end
-  end
-
-  def with_captured_exit
-    out_pipe = StringIO.new
-    err_pipe = StringIO.new
-    real_out = $stdout
-    real_err = $stderr
-    $stdout = out_pipe
-    $stderr = err_pipe
-    status = 0
-    begin
-      yield
-    rescue SystemExit => e
-      status = e.status
-    ensure
-      $stdout = real_out
-      $stderr = real_err
-    end
-    [ out_pipe.string, err_pipe.string, status ]
   end
 end

@@ -126,23 +126,4 @@ class NewTest < Minitest::Test
       end
     end
   end
-
-  def with_captured_exit
-    out_pipe = StringIO.new
-    err_pipe = StringIO.new
-    real_stdout = $stdout
-    real_stderr = $stderr
-    $stdout = out_pipe
-    $stderr = err_pipe
-    status = 0
-    begin
-      yield
-    rescue SystemExit => e
-      status = e.status
-    ensure
-      $stdout = real_stdout
-      $stderr = real_stderr
-    end
-    [ out_pipe.string, err_pipe.string, status ]
-  end
 end

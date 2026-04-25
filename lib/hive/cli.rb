@@ -6,6 +6,11 @@ module Hive
       true
     end
 
+    # `--json` is honoured by `status` and `run`; other commands accept the
+    # flag silently so an automated caller can pass it uniformly.
+    class_option :json, type: :boolean, default: false,
+                        desc: "emit a single JSON document on stdout (commands that support it)"
+
     desc "init [PROJECT_PATH]", "Bootstrap .hive-state in a project (orphan hive/state branch)"
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     def init(project_path = Dir.pwd)
@@ -26,14 +31,14 @@ module Hive
     desc "run FOLDER", "Run the stage agent for the task at FOLDER"
     def run_task(folder)
       require "hive/commands/run"
-      Hive::Commands::Run.new(folder).call
+      Hive::Commands::Run.new(folder, json: options[:json]).call
     end
     map "run" => :run_task
 
     desc "status", "Show all active tasks across registered projects"
     def status
       require "hive/commands/status"
-      Hive::Commands::Status.new.call
+      Hive::Commands::Status.new(json: options[:json]).call
     end
   end
 end

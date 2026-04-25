@@ -48,7 +48,7 @@
         "from_stage_index": { "type": "integer", "minimum": 1, "maximum": 6 },
         "from_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"],
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "6-pr", "7-done"],
           "description": "Combined directory name (index + bare name) for path construction."
         },
         "to_stage": {
@@ -58,7 +58,7 @@
         "to_stage_index": { "type": "integer", "minimum": 1, "maximum": 6 },
         "to_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"]
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "6-pr", "7-done"]
         },
         "direction": { "type": "string", "enum": ["forward", "backward", "same"] },
         "forced": {

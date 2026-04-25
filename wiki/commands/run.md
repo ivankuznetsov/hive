@@ -37,7 +37,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 | `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 
-`next_stage_dir` increments `task.stage_index`; `6-done` has no `next:`.
+`next_stage_dir` increments `task.stage_index`; `7-done` has no `next:`.
 
 ## Stage routing
 

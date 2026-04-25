@@ -3,20 +3,25 @@ module Hive
   # ordering, Run#next_stage_dir, Approve resolution) all read from here so
   # adding a 7th stage or renaming an existing one is a one-file change.
   module Stages
-    DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done].freeze
+    DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done].freeze
     NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
     SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze
 
     module_function
 
-    # Directory for the stage *after* the one at the given 1-based index.
-    # Returns nil for indices at or past the final stage. Out-of-range
-    # arguments raise so an off-by-one shows up at the call site rather
-    # than silently returning nil and being indistinguishable from "final".
+    # Directory for the stage *after* the one whose numeric prefix is `idx`.
+    # Returns nil when `idx` is past the final stage's prefix or when no
+    # stage with prefix `idx` exists (the renumber to 1/2/3/4/6/7 means
+    # stage_index 5 is unused until 5-review lands; callers querying it
+    # get nil cleanly). Out-of-range argument types raise so off-by-one
+    # bugs surface at the call site rather than silently returning nil.
     def next_dir(idx)
       raise ArgumentError, "stage index out of range: #{idx.inspect}" unless idx.is_a?(Integer) && idx >= 1
 
-      DIRS[idx]
+      current_array_idx = DIRS.index { |d| d.start_with?("#{idx}-") }
+      return nil unless current_array_idx
+
+      DIRS[current_array_idx + 1]
     end
 
     # Resolve a user-provided stage string ("3-plan" or "plan") to a

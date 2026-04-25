@@ -27,7 +27,7 @@ No commit is produced — the runner never returns a result, the lock is release
 
 ## Why it's special
 
-Other stages are *active* — their `hive run` invokes `claude -p`. `1-inbox/` is deliberately passive: capture should be cheap (`hive new` writes the file and exits) and agent work should only start once the user has explicitly approved by `mv`-ing into `2-brainstorm/`. This is the stage-naming convention noted in the original plan: stage folder = "phase the task is in", with `1-inbox` and `6-done` being the two non-working stages.
+Other stages are *active* — their `hive run` invokes `claude -p`. `1-inbox/` is deliberately passive: capture should be cheap (`hive new` writes the file and exits) and agent work should only start once the user has explicitly approved by `mv`-ing into `2-brainstorm/`. This is the stage-naming convention noted in the original plan: stage folder = "phase the task is in", with `1-inbox` and `7-done` being the two non-working stages.
 
 ## Backlinks
 

@@ -120,7 +120,7 @@ module Hive
         when :complete
           approve_action(task, next_stage_dir(task))
         when :execute_complete
-          approve_action(task, File.join(task.hive_state_path, "stages", "5-pr"))
+          approve_action(task, File.join(task.hive_state_path, "stages", "6-pr"))
         when :execute_stale
           { "kind" => kind::RECOVER_STALE,
             "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }

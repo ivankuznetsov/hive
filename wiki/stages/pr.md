@@ -1,5 +1,5 @@
 ---
-title: 5-pr stage
+title: 6-pr stage
 type: stage
 source: lib/hive/stages/pr.rb, templates/pr_prompt.md.erb, templates/pr_body.md.erb
 created: 2026-04-25

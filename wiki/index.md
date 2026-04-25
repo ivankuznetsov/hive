@@ -10,7 +10,7 @@ tags: [index]
 
 *Auto-generated. Do not edit manually.*
 
-Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-pr` → `6-done`) where stage agents run via `claude -p` and `mv` between directories is the only approval gesture.
+Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `6-pr` → `7-done`) where stage agents run via `claude -p` and `mv` between directories is the only approval gesture.
 
 **Pages**: 34 (excl. `index.md`/`log.md`) · **Date**: 2026-04-26
 

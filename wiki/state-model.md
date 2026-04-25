@@ -22,12 +22,12 @@ Per project, every task is a folder in exactly one stage subdirectory. Stage = l
 │   ├── 2-brainstorm/<slug>/
 │   ├── 3-plan/<slug>/
 │   ├── 4-execute/<slug>/
-│   ├── 5-pr/<slug>/
-│   └── 6-done/<slug>/
+│   ├── 6-pr/<slug>/
+│   └── 7-done/<slug>/
 └── logs/<slug>/<stage>-<UTC-ts>.log
 ```
 
-The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]].
+The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]].
 
 `Hive::Task::PATH_RE` (`lib/hive/task.rb:14`) is the only validator for task paths and parses `<root>/.hive-state/stages/<N>-<stage>/<slug>/`.
 
@@ -41,8 +41,8 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `2-brainstorm` | `brainstorm.md` | `Stages::Brainstorm` agent on first run |
 | `3-plan` | `plan.md` | `Stages::Plan` agent on first run |
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`, `pass`) |
-| `5-pr` | `pr.md` | `Stages::Pr` agent (or `write_pr_md` for idempotent re-entry) |
-| `6-done` | `task.md` | reused from `4-execute` |
+| `6-pr` | `pr.md` | `Stages::Pr` agent (or `write_pr_md` for idempotent re-entry) |
+| `7-done` | `task.md` | reused from `4-execute` |
 
 Mapping is encoded in `Hive::Task::STATE_FILES` (`lib/hive/task.rb:6`).
 
@@ -157,8 +157,8 @@ Loaded by `Hive::Config.load`, merged onto `Hive::Config::DEFAULTS` (`lib/hive/c
 ## Frontmatter conventions
 
 - `idea.md` (Step 0 capture): `slug`, `created_at`, `original_text` (multiline).
-- `task.md` (4-execute / 6-done): `slug`, `started_at`, `pass`. Reviewer agents must update `pass:` to match marker `pass=`.
-- `pr.md`: `pr_url`, `pr_number` (when populated by 5-pr runner from existing PR lookup).
+- `task.md` (4-execute / 7-done): `slug`, `started_at`, `pass`. Reviewer agents must update `pass:` to match marker `pass=`.
+- `pr.md`: `pr_url`, `pr_number` (when populated by 6-pr runner from existing PR lookup).
 
 ## State machine diagram
 

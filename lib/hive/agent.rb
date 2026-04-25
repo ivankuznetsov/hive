@@ -63,6 +63,10 @@ module Hive
       ensure
         r.close unless r.closed?
       end
+      # Surface reader-thread crashes (ENOSPC on log, encoding errors, etc.)
+      # instead of letting them die silently — a dead reader can stall the
+      # child once the pipe buffer fills.
+      reader.report_on_exception = true
 
       timed_out = false
       deadline = Time.now + @timeout_sec
@@ -75,9 +79,11 @@ module Hive
             kill_group(pgid)
             break
           end
-          done_pid = Process.wait(pid, Process::WNOHANG)
-          if done_pid
-            status = $CHILD_STATUS
+          # Capture status atomically into a local; avoids races on $? / $CHILD_STATUS
+          # being clobbered by other Process.wait calls (e.g. from the reader thread).
+          captured = Process.wait2(pid, Process::WNOHANG)
+          if captured
+            status = captured.last
             break
           end
           sleep [remaining, 0.2].min
@@ -89,13 +95,9 @@ module Hive
 
       if timed_out
         sleep_grace_then_kill(pgid, pid)
-        begin
-          status = begin
-            Process.wait2(pid)[1]
-          rescue StandardError
-            $CHILD_STATUS
-          end
-        rescue Errno::ECHILD
+        status = begin
+          Process.wait2(pid).last
+        rescue StandardError
           nil
         end
       end
@@ -164,9 +166,16 @@ module Hive
                           timeout_sec: @timeout_sec)
         result[:status] = :timeout
       elsif result[:exit_code].nil? || result[:exit_code].zero?
-        # nil exit_code means we couldn't capture it but the child completed
-        # without timeout; trust the marker the agent wrote to the state file.
-        result[:status] = Hive::Markers.current(@task.state_file).name
+        # exit_code 0 = success; trust the marker the agent wrote.
+        # exit_code nil = capture failed but child returned without timeout —
+        # if no marker was written, that's a corrupted state, not silent OK.
+        marker = Hive::Markers.current(@task.state_file)
+        if marker.name == :none && result[:exit_code].nil?
+          Hive::Markers.set(@task.state_file, :error, reason: "no_marker_no_exit_code")
+          result[:status] = :error
+        else
+          result[:status] = marker.name
+        end
       else
         Hive::Markers.set(@task.state_file, :error,
                           reason: "exit_code",
@@ -185,6 +194,9 @@ module Hive
     end
 
     def self.check_version!
+      cached = (@verified_versions ||= {})[bin]
+      return cached if cached
+
       out, _err, status = Open3.capture3(bin, "--version")
       raise AgentError, "claude binary not runnable: #{bin}" unless status.success?
 
@@ -194,7 +206,7 @@ module Hive
       compare = version_tuple(version) <=> version_tuple(Hive::MIN_CLAUDE_VERSION)
       raise AgentError, "claude #{version} below minimum #{Hive::MIN_CLAUDE_VERSION}" if compare.nil? || compare.negative?
 
-      version
+      @verified_versions[bin] = version
     end
 
     def self.version_tuple(version_string)

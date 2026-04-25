@@ -17,7 +17,7 @@ module Hive
     def current(state_file_path)
       return State.new(name: :none, attrs: {}, raw: nil) unless File.exist?(state_file_path)
 
-      content = File.read(state_file_path)
+      content = File.read(state_file_path, encoding: "UTF-8")
       last = nil
       content.scan(MARKER_RE) do
         match = Regexp.last_match
@@ -32,15 +32,20 @@ module Hive
       )
     end
 
+    # Atomic update: write to a sibling tempfile then File.rename. A torn
+    # write (ENOSPC, crash mid-write) leaves the original state file intact.
+    # The lock file (a sidecar) serialises concurrent writers; the data file
+    # itself is replaced atomically.
     def set(state_file_path, name, attrs = {})
       marker_name = name.to_s.upcase
       raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
 
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
-      File.open(state_file_path, File::RDWR | File::CREAT, 0o644) do |f|
-        f.flock(File::LOCK_EX)
-        body = f.read
+      lock_path = "#{state_file_path}.markers-lock"
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        lock.flock(File::LOCK_EX)
+        body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
         replaced, count = replace_last_marker(body, new_marker)
         body = if count.positive?
                  replaced
@@ -48,12 +53,27 @@ module Hive
                  separator = body.empty? || body.end_with?("\n") ? "" : "\n"
                  "#{body}#{separator}#{new_marker}\n"
                end
-        f.rewind
-        f.truncate(0)
+        write_atomic(state_file_path, body)
+      end
+      File.delete(lock_path) if File.exist?(lock_path)
+      new_marker
+    end
+
+    def write_atomic(path, body)
+      dir = File.dirname(path)
+      tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}")
+      File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o644, encoding: "UTF-8") do |f|
         f.write(body)
         f.flush
+        begin
+          f.fsync
+        rescue StandardError
+          nil
+        end
       end
-      new_marker
+      File.rename(tmp, path)
+    ensure
+      File.delete(tmp) if tmp && File.exist?(tmp)
     end
 
     def build_marker(name, attrs)

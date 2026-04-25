@@ -3,6 +3,14 @@
 # to the state file, exits with HIVE_FAKE_CLAUDE_EXIT (default 0).
 set -u
 
+# Hive::Agent.check_version! probes `claude --version` before spawning.
+# Emit a parseable version line so the runtime check passes by default.
+# Override with HIVE_FAKE_CLAUDE_VERSION (e.g. "1.0.0" to simulate too-old).
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s (Claude Code)\n' "${HIVE_FAKE_CLAUDE_VERSION:-2.1.118}"
+  exit 0
+fi
+
 LOG_DIR="${HIVE_FAKE_CLAUDE_LOG_DIR:-/tmp}"
 mkdir -p "$LOG_DIR"
 ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"

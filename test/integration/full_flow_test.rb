@@ -88,6 +88,12 @@ class FullFlowTest < Minitest::Test
     bin = File.join(@driver_dir, "claude")
     File.write(bin, <<~SH)
       #!/usr/bin/env bash
+      # Hive::Agent.check_version! probes `claude --version` before spawn;
+      # short-circuit so the driver Ruby isn't invoked for a non-flow call.
+      if [[ "${1:-}" == "--version" ]]; then
+        echo "2.1.118 (Claude Code)"
+        exit 0
+      fi
       # Auto-detect implement vs review prompts via "ce-review" substring,
       # but only when phase is "execute-*". Otherwise honor whatever phase the
       # test set.

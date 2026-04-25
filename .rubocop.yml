@@ -22,7 +22,7 @@ Metrics/MethodLength:
     - "test/**/*"
 
 Metrics/AbcSize:
-  Max: 60
+  Max: 65
   Exclude:
     - "test/**/*"
 

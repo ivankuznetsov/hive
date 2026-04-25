@@ -25,13 +25,10 @@ Behavior:
 
    Use `[ ]` (unchecked) for every finding. The user will tick `[x]` for the
    ones they want addressed in the next pass.
-3. Do not modify any code file in the worktree.
-4. Do not edit `<%= task_folder %>/plan.md`, `<%= task_folder %>/task.md`,
-   or `<%= task_folder %>/worktree.yml`.
-5. After writing the review file, write to <%= task_folder %>/task.md a
-   trailing marker:
-   - `<!-- EXECUTE_WAITING findings_count=N pass=<%= pass %> -->` if there
-     are 1 or more findings.
-   - `<!-- EXECUTE_COMPLETE pass=<%= pass %> -->` if there are 0 findings.
 
-   Update the `pass:` value in task.md frontmatter to <%= pass %>.
+Constraints:
+- Write only to <%= task_folder %>/reviews/ce-review-<%= "%02d" % pass %>.md.
+- Do not edit any code file in the worktree.
+- Do not edit task.md, plan.md, worktree.yml, or any other review file.
+  The hive runner sets the task.md marker after counting your findings — you
+  must not write task.md yourself.

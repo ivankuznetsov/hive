@@ -72,13 +72,14 @@ claude -p
   --max-budget-usd <stage_budget>
   --output-format stream-json
   --include-partial-messages
+  --verbose
   --no-session-persistence
   <prompt>
 ```
 
-`HIVE_CLAUDE_BIN` env var overrides the binary (used by tests with `test/fixtures/fake-claude`).
+`HIVE_CLAUDE_BIN` env var overrides the binary (used by tests with `test/fixtures/fake-claude`). `--verbose` is mandatory whenever `-p` is paired with `--output-format stream-json` (claude rejects the invocation otherwise).
 
-`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) prompt-injection wrapping (`<user_supplied content_type="…">`), (b) physical cwd isolation (agent only sees `cwd` + explicit `--add-dir`), and (c) post-run integrity checks (inode tracking; SHA-256 of protected files in the reviewer pass).
+`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **prompt-injection wrapping with a per-run random nonce** (`<user_supplied_<hex16>>…</user_supplied_<hex16>>`) so attacker-supplied closing tags can't terminate the wrapper, (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source), and (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` around **both** the implementation and reviewer passes; tampering yields `<!-- ERROR reason=implementer_tampered|reviewer_tampered -->`. A separate post-PR secret-scan in `Stages::Pr` blocks publishing on api-key/AWS/GH-token regex hits.
 
 ## State machine (cross-stage)
 

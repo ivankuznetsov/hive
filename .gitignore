@@ -11,3 +11,7 @@
 # Per-developer Claude Code config and Codex CLI marker.
 /.claude/
 /.codex
+# Internal planning artefacts (kept out of public repo).
+/docs/brainstorms/
+/docs/plans/
+/raw/

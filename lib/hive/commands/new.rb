@@ -10,9 +10,12 @@ module Hive
     class New
       RESERVED_SLUGS = %w[
         head fetch_head orig_head merge_head
-        master main origin hive
+        master main origin hive hive-state hive_state state
       ].freeze
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
+      # Leave room in the slug budget for the appended `-YYMMDD-XXXX` suffix
+      # (12 chars) under the 64-char SLUG_RE max.
+      DERIVED_PREFIX_MAX = 51
 
       def initialize(project_name, text, slug_override: nil)
         @project_name = project_name
@@ -57,6 +60,8 @@ module Hive
         words = normalized.split(/\s+/).first(5).reject(&:empty?)
         prefix = words.empty? ? "task" : words.join("-")
         prefix = prefix.gsub(/^-+|-+$/, "")
+        # Cap prefix length so the composed slug always fits SLUG_RE (≤64 chars).
+        prefix = prefix[0, DERIVED_PREFIX_MAX].sub(/-+\z/, "")
         date = Time.now.strftime("%y%m%d")
         suffix = SecureRandom.hex(2)
         candidate = "#{prefix}-#{date}-#{suffix}"
@@ -67,7 +72,7 @@ module Hive
 
       def validate_slug!(slug)
         unless slug.is_a?(String) && SLUG_RE.match?(slug)
-          warn "hive: invalid slug '#{slug}' (must match #{SLUG_RE.source}; pass --slug to override)"
+          warn "hive: invalid slug '#{slug}' (must match #{SLUG_RE.source}; rephrase the task text so its derived slug fits the pattern)"
           exit 1
         end
         return unless RESERVED_SLUGS.include?(slug.downcase) || slug.include?("..") || slug.include?("/") || slug.include?("@")

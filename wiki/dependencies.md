@@ -7,7 +7,7 @@ updated: 2026-04-25
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: One runtime gem (`thor`); three development gems (`minitest`, `rake`, `rubocop`). Three external CLI dependencies (`claude`, `gh`, `git`).
+**TLDR**: One runtime gem (`thor`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
 
 ## Runtime gems
 

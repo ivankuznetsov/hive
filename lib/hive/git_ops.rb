@@ -1,10 +1,10 @@
 require "open3"
 require "fileutils"
+require "hive/stages"
 
 module Hive
   class GitOps
     HIVE_BRANCH = "hive/state".freeze
-    STAGE_DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done].freeze
 
     attr_reader :project_root
 
@@ -50,7 +50,7 @@ module Hive
       FileUtils.rm_rf(Dir.glob(File.join(hive_state_path, "*")))
       FileUtils.rm_rf(Dir.glob(File.join(hive_state_path, ".[!.]*")).reject { |p| File.basename(p) == ".git" })
 
-      STAGE_DIRS.each do |stage|
+      Hive::Stages::DIRS.each do |stage|
         d = File.join(hive_state_path, "stages", stage)
         FileUtils.mkdir_p(d)
         File.write(File.join(d, ".gitkeep"), "")
@@ -59,10 +59,28 @@ module Hive
       FileUtils.mkdir_p(logs_dir)
       File.write(File.join(logs_dir, ".gitkeep"), "")
 
+      File.write(File.join(hive_state_path, ".gitignore"), HIVE_STATE_GITIGNORE)
+
       run_git!("-C", hive_state_path, "add", ".")
       run_git!("-C", hive_state_path, "commit", "-m", "hive: bootstrap")
       :created
     end
+
+    # Per-task and per-project lock metadata. PIDs and process_start_time
+    # values are local to each process invocation; tracking them in
+    # hive/state would commit lock state into history every `hive run` and
+    # `hive approve`. The patterns below match each lock-file location.
+    HIVE_STATE_GITIGNORE = <<~GITIGNORE.freeze
+      # Per-task lock metadata (Hive::Lock.with_task_lock).
+      stages/*/*/.lock
+      stages/*/*/.lock.tmp.*
+
+      # Per-marker atomic-write lock (Hive::Markers).
+      stages/*/*/*.markers-lock
+
+      # Per-project commit lock (Hive::Lock.with_commit_lock).
+      .commit-lock
+    GITIGNORE
 
     def ensure_hive_state_worktree_attached
       return if hive_state_worktree_exists?

@@ -70,7 +70,7 @@ class RunBrainstormTest < Minitest::Test
     end
   end
 
-  def test_inbox_stage_refuses_to_run_agent
+  def test_inbox_stage_raises_wrong_stage_with_exit_4
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io do
@@ -78,7 +78,9 @@ class RunBrainstormTest < Minitest::Test
           Hive::Commands::New.new(File.basename(dir), "no run inbox").call
         end
         inbox_task = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
-        _, err = capture_io { Hive::Commands::Run.new(inbox_task).call }
+        _, err, status = with_captured_exit { Hive::Commands::Run.new(inbox_task).call }
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status,
+                     "1-inbox is inert; running it must raise WrongStage (exit 4)"
         assert_includes err, "1-inbox/ is an inert capture zone"
       end
     end

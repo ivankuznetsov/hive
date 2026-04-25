@@ -98,6 +98,6 @@ class InitTest < Minitest::Test
       $stdout = real_stdout
       $stderr = real_stderr
     end
-    [out_pipe.string, err_pipe.string, status]
+    [ out_pipe.string, err_pipe.string, status ]
   end
 end

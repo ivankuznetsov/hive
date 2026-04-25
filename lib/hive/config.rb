@@ -47,9 +47,9 @@ module Hive
                raise ConfigError, "config.yml at #{candidate} must be a hash" unless parsed.is_a?(Hash)
 
                parsed
-             else
+      else
                {}
-             end
+      end
       merge_defaults(data).merge("project_root" => project_root)
     end
 
@@ -80,9 +80,9 @@ module Hive
       FileUtils.mkdir_p(hive_home)
       data = if File.exist?(global_config_path)
                YAML.safe_load(File.read(global_config_path)) || {}
-             else
+      else
                {}
-             end
+      end
       data["registered_projects"] ||= []
       abs_path = File.expand_path(path)
       hive_state_path = File.join(abs_path, ".hive-state")
@@ -102,9 +102,9 @@ module Hive
       data.each do |k, v|
         out[k] = if v.is_a?(Hash) && out[k].is_a?(Hash)
                    out[k].merge(v)
-                 else
+        else
                    v
-                 end
+        end
       end
       out
     end

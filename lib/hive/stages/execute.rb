@@ -102,22 +102,40 @@ module Hive
       # One iteration of impl + review, both wrapped in sha256 integrity checks
       # against PROTECTED_FILES. Either agent tampering with plan.md or
       # worktree.yml fails the run with marker :error.
+      #
+      # Also stops on agent-level failure: if `spawn_implementation` times out
+      # or returns non-zero, Hive::Agent.run! has already set :error /
+      # :timeout on task.md. Continuing into the review pass would let a
+      # second agent run overwrite that marker with EXECUTE_WAITING /
+      # EXECUTE_COMPLETE, hiding the implementation failure.
       def run_pass(task, cfg, worktree_path, pass:, accepted_findings:)
         before_impl = sha256_for(task, PROTECTED_FILES)
-        spawn_implementation(task, cfg, worktree_path, pass: pass, accepted_findings: accepted_findings)
+        impl_result = spawn_implementation(task, cfg, worktree_path,
+                                           pass: pass, accepted_findings: accepted_findings)
         after_impl = sha256_for(task, PROTECTED_FILES)
         if (tampered = diff_hashes(before_impl, after_impl)).any?
           return record_tamper(task, tampered, who: "implementer")
         end
+        return { commit: "implementer_failed", status: impl_result[:status] } if agent_failed?(impl_result)
 
         before_review = sha256_for(task, PROTECTED_FILES)
-        spawn_reviewer(task, cfg, worktree_path, pass: pass)
+        review_result = spawn_reviewer(task, cfg, worktree_path, pass: pass)
         after_review = sha256_for(task, PROTECTED_FILES)
         if (tampered = diff_hashes(before_review, after_review)).any?
           return record_tamper(task, tampered, who: "reviewer")
         end
+        return { commit: "reviewer_failed", status: review_result[:status] } if agent_failed?(review_result)
 
         finalize_review_state(task, pass)
+      end
+
+      # Agent.run! returns :status set to the marker that's now in the file
+      # (or :error / :timeout when handle_exit set one itself). Anything that
+      # isn't a normal in-progress signal is a failure that must propagate.
+      def agent_failed?(result)
+        return true if result.nil?
+
+        %i[error timeout].include?(result[:status])
       end
 
       def spawn_implementation(task, cfg, worktree_path, pass:, accepted_findings:)
@@ -137,7 +155,7 @@ module Hive
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [task.folder],
+          add_dirs: [ task.folder ],
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
@@ -160,7 +178,7 @@ module Hive
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [task.folder],
+          add_dirs: [ task.folder ],
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_review"),
           timeout_sec: cfg.dig("timeout_sec", "execute_review"),

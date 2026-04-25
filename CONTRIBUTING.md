@@ -51,7 +51,3 @@ Hive's scope is deliberately narrow (see [Phase 1 deferred work](wiki/active-are
 - Single-developer trust model — `--dangerously-skip-permissions` is intentional.
 
 If a proposal would change one of these, open an issue first to discuss before sending a PR.
-
-## Code of Conduct
-
-By participating in this project, you agree to abide by the [Contributor Covenant](CODE_OF_CONDUCT.md).

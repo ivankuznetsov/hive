@@ -63,7 +63,7 @@ module Hive
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [task.folder],
+          add_dirs: [ task.folder ],
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "pr"),
           timeout_sec: cfg.dig("timeout_sec", "pr"),
@@ -87,7 +87,7 @@ module Hive
       end
 
       def scan_for_secrets(task, marker)
-        sources = [File.read(task.state_file)]
+        sources = [ File.read(task.state_file) ]
         if (url = marker.attrs["pr_url"]) && !url.empty?
           out, _err, status = Open3.capture3("gh", "pr", "view", url, "--json", "body", "-q", ".body")
           sources << out if status.success? && !out.empty?
@@ -115,12 +115,15 @@ module Hive
         exit 1
       end
 
-      def lookup_existing_pr(_worktree_path, branch)
+      def lookup_existing_pr(worktree_path, branch)
         # Include closed PRs too — a previous attempt that closed without
-        # merging would otherwise create a duplicate on retry.
+        # merging would otherwise create a duplicate on retry. Run with
+        # chdir into the worktree so `gh` resolves the right repo regardless
+        # of where `hive run` was invoked from.
         out, _err, status = with_network_timeout do
           Open3.capture3("gh", "pr", "list", "--head", branch,
-                         "--state", "all", "--json", "url,number,state")
+                         "--state", "all", "--json", "url,number,state",
+                         chdir: worktree_path)
         end
         return nil unless status.success?
 

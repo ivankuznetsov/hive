@@ -83,12 +83,12 @@ module Hive
       def next_stage_dir(task)
         next_idx = task.stage_index + 1
         next_name = case next_idx
-                    when 2 then "2-brainstorm"
-                    when 3 then "3-plan"
-                    when 4 then "4-execute"
-                    when 5 then "5-pr"
-                    when 6 then "6-done"
-                    end
+        when 2 then "2-brainstorm"
+        when 3 then "3-plan"
+        when 4 then "4-execute"
+        when 5 then "5-pr"
+        when 6 then "6-done"
+        end
         return nil unless next_name
 
         File.join(task.hive_state_path, "stages", next_name)

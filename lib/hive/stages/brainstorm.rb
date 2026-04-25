@@ -25,7 +25,7 @@ module Hive
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [task.folder],
+          add_dirs: [ task.folder ],
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),

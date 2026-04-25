@@ -46,7 +46,7 @@ class RunPrTest < Minitest::Test
     run!("git", "-C", worktree_path, "commit", "-m", "wt", "--quiet")
     File.write(File.join(pr_dir, "worktree.yml"),
                { "path" => worktree_path, "branch" => slug }.to_yaml)
-    [pr_dir, worktree_path]
+    [ pr_dir, worktree_path ]
   end
 
   def stub_push(worktree_path)
@@ -123,6 +123,6 @@ class RunPrTest < Minitest::Test
       $stdout = real_out
       $stderr = real_err
     end
-    [out_pipe.string, err_pipe.string, status]
+    [ out_pipe.string, err_pipe.string, status ]
   end
 end

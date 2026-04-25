@@ -70,7 +70,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 
 Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Attributes are `key=value` (or `key="quoted value"`).
 
-`Markers.set` writes via `flock(LOCK_EX)` on the state file, replacing the *last* matched marker (or appending if none). See [[modules/markers]].
+`Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
 ## Concurrency files
 

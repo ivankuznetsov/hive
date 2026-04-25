@@ -24,12 +24,13 @@ hive new PROJECT TEXT...
 1. `unicode_normalize(:nfd)`, strip non-ASCII bytes.
 2. Lowercase, collapse runs of non-alphanumerics to single spaces.
 3. Take first 5 words → join with `-` → trim leading/trailing `-`.
-4. Append `-<YYMMDD>-<4hex>` (random).
-5. If the prefix doesn't start with `[a-z]` (e.g. all-Cyrillic input was filtered to empty), fall back to `task-<YYMMDD>-<4hex>`.
+4. Cap the prefix at `DERIVED_PREFIX_MAX = 51` chars (12 reserved for the `-YYMMDD-XXXX` suffix under the 64-char `SLUG_RE` ceiling), re-stripping any trailing `-`.
+5. Append `-<YYMMDD>-<4hex>` (random).
+6. If the prefix doesn't start with `[a-z]` (e.g. all-Cyrillic input was filtered to empty), fall back to `task-<YYMMDD>-<4hex>`.
 
-`SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/` is the gate. `RESERVED_SLUGS` rejects: `head`, `fetch_head`, `orig_head`, `merge_head`, `master`, `main`, `origin`, `hive`. Any `..`, `/`, or `@` in the slug also rejects.
+`SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/` is the gate. `RESERVED_SLUGS` rejects: `head`, `fetch_head`, `orig_head`, `merge_head`, `master`, `main`, `origin`, `hive`, `hive-state`, `hive_state`, `state`. Any `..`, `/`, or `@` in the slug also rejects.
 
-A `--slug` override is reserved on the constructor (`slug_override:`) but not exposed on the CLI in MVP.
+A `slug_override:` keyword is reserved on the constructor but not exposed as a CLI flag in MVP — the warning text on validation failure asks the user to rephrase the task text rather than pointing at a non-existent `--slug` option.
 
 ## Steps performed
 

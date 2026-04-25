@@ -85,7 +85,7 @@ class AgentTest < Minitest::Test
       ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
       File.write(task.state_file, "<!-- WAITING -->\n")
       Hive::Agent.new(task: task, prompt: "do work", max_budget_usd: 5, timeout_sec: 5,
-                      add_dirs: [dir]).run!
+                      add_dirs: [ dir ]).run!
       argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
       assert_includes argv_log, "arg=--dangerously-skip-permissions"
       assert_includes argv_log, "arg=--add-dir"

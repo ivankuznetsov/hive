@@ -43,7 +43,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 - Dispatcher daemon at `~/Dev/hive/daemon.rb` with polling + fswatch.
 - Telegram bot bidirectional adapter.
 - Observability probes track (`<project>/.hive-state/reports/`).
-- QMD export of `6-done/` task artefacts to per-project learning collections.
+- QMD export of `7-done/` task artefacts to per-project learning collections.
 - `gh api` PR-comment ingestion into `reviews/pr-comments-NN.md`.
 
 ## What's NOT implemented yet (per plan)

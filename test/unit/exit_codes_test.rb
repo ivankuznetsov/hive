@@ -30,7 +30,7 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::ALREADY_INITIALIZED, Hive::AlreadyInitialized.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::AmbiguousSlug.new("x", slug: "s", candidates: []).exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::DestinationCollision.new("x", path: "/p").exit_code
-    assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "6-done").exit_code
+    assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "7-done").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoReviewFile.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::UnknownFinding.new("x", id: 1).exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoSelection.new("x").exit_code

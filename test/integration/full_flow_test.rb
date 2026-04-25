@@ -174,8 +174,8 @@ class FullFlowTest < Minitest::Test
         capture_io { Hive::Commands::Run.new(execute_dir).call }
         assert_equal :execute_complete, Hive::Markers.current(File.join(execute_dir, "task.md")).name
 
-        # 4-execute → 5-pr
-        pr_dir = File.join(dir, ".hive-state", "stages", "5-pr", slug)
+        # 4-execute → 6-pr
+        pr_dir = File.join(dir, ".hive-state", "stages", "6-pr", slug)
         FileUtils.mkdir_p(File.dirname(pr_dir))
         FileUtils.mv(execute_dir, pr_dir)
 
@@ -191,8 +191,8 @@ class FullFlowTest < Minitest::Test
         capture_io { Hive::Commands::Run.new(pr_dir).call }
         assert_equal :complete, Hive::Markers.current(File.join(pr_dir, "pr.md")).name
 
-        # 5-pr → 6-done (no agent invoked)
-        done_dir = File.join(dir, ".hive-state", "stages", "6-done", slug)
+        # 6-pr → 7-done (no agent invoked)
+        done_dir = File.join(dir, ".hive-state", "stages", "7-done", slug)
         FileUtils.mkdir_p(File.dirname(done_dir))
         FileUtils.mv(pr_dir, done_dir)
         out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }

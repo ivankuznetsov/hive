@@ -61,8 +61,8 @@ task default: :test
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
-| `run_pr_test.rb` | `hive run` of `5-pr/` — push, idempotent existing-PR path, fake-gh PR create. |
-| `run_done_test.rb` | `hive run` of `6-done/` — cleanup instructions, complete marker. |
+| `run_pr_test.rb` | `hive run` of `6-pr/` — push, idempotent existing-PR path, fake-gh PR create. |
+| `run_done_test.rb` | `hive run` of `7-done/` — cleanup instructions, complete marker. |
 | `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → pr → done. |
 | `skip_worktree_test.rb` | Verifies hive-state commits on master don't leak into feature worktrees. |

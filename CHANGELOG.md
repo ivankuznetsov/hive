@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Stage directories renumbered: `5-pr` → `6-pr` and `6-done` → `7-done`.** Position 5 is reserved for the upcoming `5-review` stage (CI-fix → multi-reviewer → auto-triage → fix → browser-test loop, per `docs/plans/2026-04-25-001-feat-5-review-stage-plan.md`). `5-review` is NOT yet present — `Hive::Stages::DIRS` currently has a numeric gap at position 5 that fills when U9 ships.
+
+  **Upgrade path for users with active hive tasks at the time of upgrade:**
+
+  ```sh
+  cd <project-root>
+  # If a task is in 5-pr/, move it to 6-pr/
+  if [ -d .hive-state/stages/5-pr ]; then
+    mkdir -p .hive-state/stages/6-pr
+    mv .hive-state/stages/5-pr/* .hive-state/stages/6-pr/ 2>/dev/null || true
+    rmdir .hive-state/stages/5-pr
+  fi
+  # If a task is in 6-done/, move it to 7-done/
+  if [ -d .hive-state/stages/6-done ]; then
+    mkdir -p .hive-state/stages/7-done
+    mv .hive-state/stages/6-done/* .hive-state/stages/7-done/ 2>/dev/null || true
+    rmdir .hive-state/stages/6-done
+  fi
+  ```
+
+  `hive init` on fresh projects creates the new directory layout automatically. The migration is one-shot per project; no auto-migration helper ships in v1.
+
 ### Added
 
 - Five workflow verbs `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, `hive archive` — each is a single Thor command that resolves a slug or folder, then either runs the target stage's agent (already at target) or promotes from source-stage and runs the target's agent. `--from STAGE` is the idempotency assertion: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice. `--json` emits a single `hive-stage-action` v1 envelope (success and error). `archive` is idempotent at 6-done.

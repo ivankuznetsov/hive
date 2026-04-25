@@ -11,7 +11,7 @@ tags: [module, stages, constants]
 
 ## Constants
 
-- `DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]` — the canonical stage directory names (index + bare name).
+- `DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done]` — the canonical stage directory names (index + bare name).
 - `NAMES = %w[inbox brainstorm plan execute pr done]` — bare stage names without the index prefix; same as `Hive::Task::STAGE_NAMES`.
 - `SHORT_TO_FULL = { "inbox" => "1-inbox", … }` — frozen hash for short→full resolution.
 

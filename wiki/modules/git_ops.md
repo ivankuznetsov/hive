@@ -42,7 +42,7 @@ Idempotent bootstrap. Returns `:existed` if the `hive/state` branch already exis
 1. `git worktree add --no-checkout --detach <hive_state_path> <default_branch>` — attach a worktree without checking out anything.
 2. `cd <hive_state_path>; git checkout --orphan hive/state` — replace the worktree's HEAD with a new orphan branch.
 3. `git rm -rf .` plus `FileUtils.rm_rf` glob cleanup of all visible files and dotfiles (preserving `.git`).
-4. Create stage subdirs `stages/1-inbox/.gitkeep`, …, `stages/6-done/.gitkeep`, plus `logs/.gitkeep`.
+4. Create stage subdirs `stages/1-inbox/.gitkeep`, …, `stages/7-done/.gitkeep`, plus `logs/.gitkeep`.
 5. `git add . && git commit -m "hive: bootstrap"`.
 
 Returns `:created`.

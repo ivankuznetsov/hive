@@ -20,7 +20,7 @@ tags: [stage, execute, worktree, review]
 
 | Marker / State | Action |
 |----------------|--------|
-| `:execute_complete` | print `"already complete; mv this folder to 5-pr/"`, return `{commit: nil, status: :execute_complete}` |
+| `:execute_complete` | print `"already complete; mv this folder to 6-pr/"`, return `{commit: nil, status: :execute_complete}` |
 | `:execute_stale` | warn `"EXECUTE_STALE — edit reviews/, lower pass:, remove the marker, then re-run"`, return without re-spawning |
 | `worktree.yml` exists but path missing | warn `"worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"`, exit 1 |
 | no `worktree.yml` | run **init pass** |

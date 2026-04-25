@@ -130,7 +130,7 @@ class PromptInjectionTest < Minitest::Test
 
   def test_pr_prompt_wraps_plan_and_reviews
     with_tmp_dir do |dir|
-      task = make_task(dir, "5-pr")
+      task = make_task(dir, "6-pr")
       tag = Hive::Stages::Base.user_supplied_tag
       prompt = Hive::Stages::Base.render(
         "pr_prompt.md.erb",

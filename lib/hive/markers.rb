@@ -1,10 +1,24 @@
 module Hive
   module Markers
+    # Marker names live in two places: this list (validates writes via
+    # Markers.set) and the MARKER_RE alternation (parses reads via
+    # Markers.current). Both must list the same names — adding to one
+    # without the other causes silent parse failures.
+    #
+    # REVIEW_* markers (added in U3) carry the 5-review stage's state
+    # machine. REVIEW_WORKING is transient (set at phase entry, replaced
+    # at phase exit by writing the next marker per ADR-005's last-marker-
+    # wins rule). REVIEW_WAITING / REVIEW_CI_STALE / REVIEW_STALE /
+    # REVIEW_COMPLETE / REVIEW_ERROR are terminal — the orchestrator
+    # owns the terminal marker and the runner returns until the next
+    # `hive run` re-evaluates.
     KNOWN_NAMES = %w[
       WAITING COMPLETE AGENT_WORKING ERROR
       EXECUTE_WAITING EXECUTE_COMPLETE EXECUTE_STALE
+      REVIEW_WORKING REVIEW_WAITING REVIEW_CI_STALE
+      REVIEW_STALE REVIEW_COMPLETE REVIEW_ERROR
     ].freeze
-    MARKER_RE = /<!--\s*(?<name>WAITING|COMPLETE|AGENT_WORKING|ERROR|EXECUTE_WAITING|EXECUTE_COMPLETE|EXECUTE_STALE)(?<attrs>(?:\s+[^<>]*?)?)\s*-->/
+    MARKER_RE = /<!--\s*(?<name>WAITING|COMPLETE|AGENT_WORKING|ERROR|EXECUTE_WAITING|EXECUTE_COMPLETE|EXECUTE_STALE|REVIEW_WORKING|REVIEW_WAITING|REVIEW_CI_STALE|REVIEW_STALE|REVIEW_COMPLETE|REVIEW_ERROR)(?<attrs>(?:\s+[^<>]*?)?)\s*-->/
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?

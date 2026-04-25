@@ -1,0 +1,140 @@
+require "open3"
+
+module Hive
+  # Per-CLI invocation contract for a headless agent.
+  #
+  # Replaces the previous class-level singleton on Hive::Agent that hardcoded
+  # claude-only flags. Each profile is a frozen value object that captures
+  # everything Hive::Agent#build_cmd needs to spawn one specific CLI: which
+  # binary, which flags, how to detect status, what version is required.
+  #
+  # See docs/notes/headless-agent-cli-matrix.md for the source of truth on
+  # each CLI's flag mapping. Profiles ship in lib/hive/agent_profiles/.
+  class AgentProfile
+    # Status-detection modes. handle_exit branches on these:
+    #
+    # - :state_file_marker -- read the marker on task.state_file (today's
+    #   claude behavior; agent writes the terminal marker itself).
+    # - :exit_code_only -- exit 0 = :ok, anything else = :error. No file
+    #   inspection. Used by CI-fix loops where the agent's role is "make the
+    #   command succeed."
+    # - :output_file_exists -- exit 0 AND expected_output file present and
+    #   non-empty = :ok. Used by reviewer/triage spawns where the artifact
+    #   the agent must produce is the success criterion.
+    STATUS_DETECTION_MODES = %i[state_file_marker exit_code_only output_file_exists].freeze
+
+    attr_reader :name, :bin_default, :env_bin_override_key,
+                :headless_flag, :permission_skip_flag, :add_dir_flag,
+                :budget_flag, :output_format_flags, :version_flag,
+                :skill_syntax_format, :headless_supported, :min_version,
+                :status_detection_mode, :extra_flags
+
+    def initialize(name:, bin_default:, headless_flag:, version_flag:,
+                   skill_syntax_format:, status_detection_mode:,
+                   env_bin_override_key: nil, permission_skip_flag: nil,
+                   add_dir_flag: nil, budget_flag: nil,
+                   output_format_flags: [], extra_flags: [],
+                   headless_supported: true, min_version: nil,
+                   preflight: nil)
+      unless STATUS_DETECTION_MODES.include?(status_detection_mode)
+        raise ArgumentError,
+              "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
+              "valid: #{STATUS_DETECTION_MODES.inspect}"
+      end
+
+      @name = name
+      @bin_default = bin_default
+      @env_bin_override_key = env_bin_override_key
+      @headless_flag = headless_flag
+      @permission_skip_flag = permission_skip_flag
+      @add_dir_flag = add_dir_flag
+      @budget_flag = budget_flag
+      @output_format_flags = Array(output_format_flags).freeze
+      @version_flag = version_flag
+      @skill_syntax_format = skill_syntax_format
+      @extra_flags = Array(extra_flags).freeze
+      @headless_supported = headless_supported
+      @min_version = min_version
+      @status_detection_mode = status_detection_mode
+      @preflight = preflight
+
+      freeze
+    end
+
+    # Resolved binary path: env override (if env_bin_override_key set and
+    # the env var is non-empty) else bin_default.
+    def bin
+      key = @env_bin_override_key
+      return @bin_default unless key
+
+      override = ENV[key]
+      override && !override.empty? ? override : @bin_default
+    end
+
+    # Verify the installed binary's version meets min_version.
+    #
+    # Cached per (bin, min_version) pair so repeated spawns in one process
+    # don't re-fork the binary. Returns the parsed version string on success.
+    # Raises Hive::AgentError on missing binary, parse failure, or version
+    # below min_version. Profiles without min_version skip the comparison.
+    def check_version!
+      cache_key = [ bin, @min_version ]
+      cached = (self.class.send(:version_cache))[cache_key]
+      return cached if cached
+
+      unless @headless_supported
+        raise Hive::AgentError,
+              "agent profile #{@name.inspect} is not headless-supported; " \
+              "cannot run from a non-interactive context"
+      end
+
+      begin
+        out, _err, status = Open3.capture3(bin, @version_flag)
+      rescue Errno::ENOENT, Errno::EACCES => e
+        raise Hive::AgentError, "#{@name} binary not runnable: #{bin} (#{e.class.name.split('::').last}: #{e.message})"
+      end
+      raise Hive::AgentError, "#{@name} binary not runnable: #{bin}" unless status.success?
+
+      version = out[/\d+\.\d+\.\d+/]
+      raise Hive::AgentError, "could not parse #{@name} #{@version_flag} output: #{out.inspect}" unless version
+
+      if @min_version
+        cmp = version_tuple(version) <=> version_tuple(@min_version)
+        if cmp.nil? || cmp.negative?
+          raise Hive::AgentError,
+                "#{@name} #{version} below minimum #{@min_version}"
+        end
+      end
+
+      self.class.send(:version_cache)[cache_key] = version
+    end
+
+    # Pre-flight hook for profiles that need extra checks beyond version
+    # (e.g., pi requires the user to be logged in to a provider). Profiles
+    # supply a Proc at construction via the `preflight:` kwarg; if absent
+    # this is a no-op. The Proc receives no arguments and may raise
+    # Hive::AgentError to abort the spawn before the binary runs.
+    def preflight!
+      @preflight&.call
+      nil
+    end
+
+    private
+
+    def version_tuple(version_string)
+      version_string.split(".").map(&:to_i)
+    end
+
+    class << self
+      def reset_version_cache!
+        @version_cache = nil
+      end
+
+      private
+
+      def version_cache
+        @version_cache ||= {}
+      end
+    end
+  end
+end

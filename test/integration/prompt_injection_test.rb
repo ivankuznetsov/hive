@@ -43,14 +43,18 @@ class PromptInjectionTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
-  def test_user_supplied_tag_is_random_per_process
+  # ADR-019: per-spawn nonce. Each call to user_supplied_tag returns a
+  # fresh value; callers bind it once into TemplateBindings so the rendered
+  # prompt's opening and closing tags match within ONE spawn, but two
+  # consecutive spawns get distinct nonces. This is the SEC-1 fix that
+  # closes the per-process-shared-nonce attack surface across multi-agent
+  # loops in 5-review.
+  def test_user_supplied_tag_is_fresh_per_call
     a = Hive::Stages::Base.user_supplied_tag
     b = Hive::Stages::Base.user_supplied_tag
-    assert_equal a, b, "tag must be stable within a process so open and close match"
-    Hive::Stages::Base.reset_user_supplied_tag!
-    c = Hive::Stages::Base.user_supplied_tag
-    refute_equal a, c, "tag must rotate between processes / explicit resets"
-    assert_match(/\Auser_supplied_[0-9a-f]{16}\z/, c, "tag must follow user_supplied_<hex16> shape")
+    refute_equal a, b, "tag must be fresh per call (ADR-019 per-spawn nonce)"
+    assert_match(/\Auser_supplied_[0-9a-f]{16}\z/, a, "tag must follow user_supplied_<hex16> shape")
+    assert_match(/\Auser_supplied_[0-9a-f]{16}\z/, b, "tag must follow user_supplied_<hex16> shape")
   end
 
   def test_brainstorm_prompt_wraps_hostile_idea_in_unique_tags

@@ -49,10 +49,10 @@ module Hive
         replaced, count = replace_last_marker(body, new_marker)
         body = if count.positive?
                  replaced
-               else
+        else
                  separator = body.empty? || body.end_with?("\n") ? "" : "\n"
                  "#{body}#{separator}#{new_marker}\n"
-               end
+        end
         write_atomic(state_file_path, body)
       end
       File.delete(lock_path) if File.exist?(lock_path)
@@ -101,10 +101,10 @@ module Hive
 
     def replace_last_marker(body, new_marker)
       matches = body.to_enum(:scan, MARKER_RE).map { Regexp.last_match }
-      return [body, 0] if matches.empty?
+      return [ body, 0 ] if matches.empty?
 
       last = matches.last
-      [body[0...last.begin(0)] + new_marker + body[last.end(0)..], 1]
+      [ body[0...last.begin(0)] + new_marker + body[last.end(0)..], 1 ]
     end
   end
 end

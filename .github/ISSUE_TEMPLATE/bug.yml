@@ -1,0 +1,45 @@
+name: Bug report
+description: Something isn't working the way the docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more concrete the reproduction, the faster the fix.
+        For security issues, see [SECURITY.md](https://github.com/ivankuznetsov/hive/blob/main/SECURITY.md) and email instead — please don't file a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, factual description of the actual behavior.
+      placeholder: When I ran `hive run .hive-state/stages/3-plan/<slug>`, the marker stayed AGENT_WORKING after the agent exited.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Smallest possible sequence — `hive init` / `hive new` / `mv` / `hive run` calls in order.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Output of `ruby -v`, `claude --version`, `gh --version`, `git --version`, OS.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log slice
+      description: Trim from `<project>/.hive-state/logs/<slug>/<stage>-<ts>.log`.
+      render: shell

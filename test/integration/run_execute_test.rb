@@ -95,7 +95,7 @@ class RunExecuteTest < Minitest::Test
       stub
       <!-- COMPLETE -->
     PLAN
-    [folder, slug]
+    [ folder, slug ]
   end
 
   def test_init_pass_creates_worktree_and_review
@@ -224,6 +224,82 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
+  def test_implementation_failure_stops_before_review
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_PASS"] = "1"
+        ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "0"
+        # Implementation prompt → exit 1; reviewer prompt → exit 0. The
+        # reviewer branch must NEVER fire; if it does, the test fails because
+        # ce-review-01.md will appear.
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then echo "2.1.118 (Claude Code)"; exit 0; fi
+          if printf '%s' "$*" | grep -q 'ce-review'; then
+            exit 0
+          else
+            exit 1
+          fi
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal 1, status, "Run.report must exit 1 when execute records :error"
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :error, marker.name,
+                     "implementation failure must surface as :error, not be overwritten by reviewer pass"
+        refute File.exist?(File.join(folder, "reviews", "ce-review-01.md")),
+               "reviewer must NOT run after implementation failure"
+      ensure
+        wt_path = begin
+          YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        rescue StandardError
+          nil
+        end
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_reviewer_failure_does_not_overwrite_with_complete
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_PASS"] = "1"
+        ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "0"
+        # Implementation succeeds via the driver script; reviewer exits 1.
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then echo "2.1.118 (Claude Code)"; exit 0; fi
+          if printf '%s' "$*" | grep -q 'ce-review'; then
+            exit 1
+          else
+            exec ruby "#{@driver_script}" "$@"
+          fi
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal 1, status, "Run.report must exit 1 when execute records :error"
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :error, marker.name,
+                     "reviewer failure must surface as :error, not be overwritten by finalize_review_state"
+      ensure
+        wt_path = begin
+          YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        rescue StandardError
+          nil
+        end
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
   def test_missing_plan_aborts
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -254,6 +330,6 @@ class RunExecuteTest < Minitest::Test
       $stdout = real_out
       $stderr = real_err
     end
-    [out_pipe.string, err_pipe.string, status]
+    [ out_pipe.string, err_pipe.string, status ]
   end
 end

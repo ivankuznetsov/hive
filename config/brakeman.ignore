@@ -1,0 +1,14 @@
+{
+  "ignored_warnings": [
+    {
+      "fingerprint": "6c7220d812801d79f634aa63179b515a90854f02696d034da7693068081493a2",
+      "note": "False positive. Open3.capture3 array form: each argument is a discrete argv element passed to execve(2), not a shell. branch_name is interpolated only into a refspec literal that becomes a single argv member; no shell ever sees it."
+    },
+    {
+      "fingerprint": "9f73651d265a69db942fb10947510d982d4dbd1db3e69638332f147d32829e97",
+      "note": "False positive. pid is integer-coerced via .to_i before interpolation, so the string can only contain digits. The 2>/dev/null suffix is the only shell-meaningful syntax and is a static literal."
+    }
+  ],
+  "updated": "2026-04-25",
+  "brakeman_version": "8.0.4"
+}

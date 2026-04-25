@@ -1,5 +1,9 @@
 # Hive
 
+[![CI](https://github.com/ivankuznetsov/hive/actions/workflows/ci.yml/badge.svg)](https://github.com/ivankuznetsov/hive/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Ruby](https://img.shields.io/badge/ruby-3.4-red.svg)](.ruby-version)
+
 Folder-as-agent pipeline for software work. Each task lives in a directory; the directory's location *is* its stage (`1-inbox/` → `2-brainstorm/` → `3-plan/` → `4-execute/` → `5-pr/` → `6-done/`). `mv` between stage folders is the only approval gesture. Stage agents run as `claude -p` subprocesses, read from / write to the task folder, and exit.
 
 No daemon. No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and `mv` is the API.

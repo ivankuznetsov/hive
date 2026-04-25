@@ -8,10 +8,15 @@
 # Runtime registry of installed projects — machine-specific, not source.
 # See config.example.yml for the schema.
 /config.yml
-# Per-developer Claude Code config and Codex CLI marker.
+# Per-developer Claude Code config and Codex CLI marker. Use the un-slashed
+# form too so a symlink at /.claude (e.g. into a private overlay) is ignored.
+/.claude
 /.claude/
 /.codex
-# Internal planning artefacts (kept out of public repo).
+# Internal planning artefacts (kept out of public repo). Both un-slashed and
+# slashed forms so the patterns match either a directory or a symlink.
+/docs/brainstorms
 /docs/brainstorms/
+/docs/plans
 /docs/plans/
 /raw/

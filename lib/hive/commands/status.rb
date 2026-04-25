@@ -98,12 +98,12 @@ module Hive
           # is recorded in the per-task .lock file by Hive::Agent.
           pid = lookup_claude_pid(task) || marker.attrs["pid"]
           if pid && pid_alive?(pid.to_i)
-            ["🤖", "agent_working pid=#{pid}"]
+            [ "🤖", "agent_working pid=#{pid}" ]
           else
-            ["⚠", "stale lock pid=#{pid}"]
+            [ "⚠", "stale lock pid=#{pid}" ]
           end
         else
-          [ICON.fetch(marker.name, "·"), label_for(marker)]
+          [ ICON.fetch(marker.name, "·"), label_for(marker) ]
         end
       end
 

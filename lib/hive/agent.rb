@@ -86,7 +86,7 @@ module Hive
             status = captured.last
             break
           end
-          sleep [remaining, 0.2].min
+          sleep [ remaining, 0.2 ].min
         end
       ensure
         trap("INT", old_int || "DEFAULT")
@@ -106,11 +106,11 @@ module Hive
 
       exit_code = if status.nil?
                     nil
-                  elsif status.exited?
+      elsif status.exited?
                     status.exitstatus
-                  elsif status.signaled?
+      elsif status.signaled?
                     -status.termsig
-                  end
+      end
 
       {
         pid: pid,
@@ -123,7 +123,7 @@ module Hive
     end
 
     def build_cmd
-      cmd = [Agent.bin, "-p"]
+      cmd = [ Agent.bin, "-p" ]
       cmd << "--dangerously-skip-permissions"
       @add_dirs.each do |d|
         cmd << "--add-dir" << d

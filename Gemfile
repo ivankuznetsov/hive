@@ -8,4 +8,7 @@ group :development, :test do
   gem "minitest", "~> 5.20"
   gem "rake", "~> 13.0"
   gem "rubocop", "~> 1.60", require: false
+  gem "rubocop-rails-omakase", "~> 1.1", require: false
+  gem "brakeman", "~> 8.0", require: false
+  gem "bundler-audit", "~> 0.9", require: false
 end

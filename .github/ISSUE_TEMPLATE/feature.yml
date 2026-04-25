@@ -1,0 +1,31 @@
+name: Feature proposal
+description: Suggest a change or addition to Hive.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Hive's scope is deliberately narrow (filesystem is the queue, markdown is the source of truth, `mv` is the API, single-developer trust model). Proposals that align with that identity are most likely to land.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong today, or what workflow is missing? Concrete scenario beats abstract description.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: How you'd like Hive to behave. Surface (CLI flag? new stage? config key?) and the user-visible diff.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: scope-fit
+    attributes:
+      label: How this fits Hive's scope
+      description: See the README for what Hive is and isn't. If your proposal would broaden scope (daemon, web UI, multi-user), say so explicitly so we can discuss.

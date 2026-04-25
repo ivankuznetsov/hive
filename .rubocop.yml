@@ -1,3 +1,6 @@
+inherit_gem:
+  rubocop-rails-omakase: rubocop.yml
+
 AllCops:
   TargetRubyVersion: 3.4
   NewCops: disable
@@ -7,6 +10,7 @@ AllCops:
     - "tmp/**/*"
     - "test/fixtures/**/*"
 
+# Project-specific overrides on top of the 37signals omakase base.
 Style/Documentation:
   Enabled: false
 

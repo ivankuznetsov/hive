@@ -36,10 +36,10 @@ module Hive
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
       args = if exists.success?
-               ["worktree", "add", path, branch_name]
-             else
-               ["worktree", "add", path, "-b", branch_name, default_branch]
-             end
+               [ "worktree", "add", path, branch_name ]
+      else
+               [ "worktree", "add", path, "-b", branch_name, default_branch ]
+      end
       out, err, status = Open3.capture3("git", "-C", @project_root, *args)
       unless status.success?
         raise WorktreeError, "git worktree add failed: #{err.strip.empty? ? out : err}"

@@ -63,6 +63,23 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_very_long_words_do_not_overflow_slug_regex
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        # Two single "words" that together exceed the 64-char slug limit.
+        long_text = "#{'a' * 80} #{'b' * 80}"
+        capture_io { Hive::Commands::New.new(project, long_text).call }
+        glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
+        assert_equal 1, glob.size, "long text must not cause new to reject its own derived slug"
+        slug = File.basename(glob.first)
+        assert_operator slug.length, :<=, 64, "derived slug must always fit SLUG_RE max length"
+        assert_match(/\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/, slug)
+      end
+    end
+  end
+
   def test_long_text_truncates_to_five_words
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -126,6 +143,6 @@ class NewTest < Minitest::Test
       $stdout = real_stdout
       $stderr = real_stderr
     end
-    [out_pipe.string, err_pipe.string, status]
+    [ out_pipe.string, err_pipe.string, status ]
   end
 end

@@ -14,6 +14,16 @@ Append-only log of all wiki operations.
 
 **Pages updated:** `cli.md`, `commands/run.md`, `commands/status.md`, `commands/findings.md`, `modules/task_resolver.md`.
 
+## [2026-04-25T19:31:00Z] U1 ship — renumber 5-pr → 6-pr, 6-done → 7-done
+
+**Action:** Reserved position 5 for the upcoming `5-review` stage by renaming `5-pr` → `6-pr` and `6-done` → `7-done`. `5-review` is NOT yet present — `Hive::Stages::DIRS` has a numeric gap at position 5 that fills when U9 lands.
+
+**Code:** `lib/hive/stages.rb` (`DIRS` updated; `next_dir` now does prefix-based lookup so non-contiguous numbering works — `next_dir(4) → 6-pr`, `next_dir(6) → 7-done`, `next_dir(5) → nil`). Also touched: `commands/run.rb`, `stages/execute.rb`, `templates/pr_prompt.md.erb`, `schemas/hive-approve.v1.json`, README, CHANGELOG (with upgrade snippet for in-flight tasks).
+
+**Wiki swept (16 pages):** `architecture.md`, `state-model.md`, `testing.md`, `index.md`, `active-areas.md`, `stages/{index,pr,done,inbox,execute}.md`, `commands/{init,approve,run,status}.md`, `modules/{stages,git_ops}.md`. The `5-pr → 6-pr` literal in this log's prior brainstorm entry is intentionally preserved (describes the rename action).
+
+**Tests:** 195 passing (was 194; +1 case for prefix-gap `next_dir(5)`). Rubocop clean.
+
 ## [2026-04-25T19:00:00Z] U11 + U12 ship — multi-CLI matrix + AgentProfile abstraction
 
 **Action:** Phase 0 of the 5-review-stage plan landed on `feat/5-review-stage`. Two units shipped:

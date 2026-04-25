@@ -60,7 +60,7 @@ Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb
 
 The CLI itself has no auth. Preconditions checked at runtime by individual stage runners:
 
-- `Hive::Agent.check_version!` parses `claude --version` and compares against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`. Raises `AgentError` if below.
+- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi: profile-specific). Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
 - `Stages::Pr#ensure_gh_authenticated!` runs `gh auth status` and exits 1 with stderr if unauthenticated.
 - `Init#validate_git_repo!` rejects non-git dirs and rejects targets that are themselves worktrees (must run on the main checkout).
 - `Init#validate_clean_tree!` aborts on dirty working tree unless `--force`.

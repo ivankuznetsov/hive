@@ -51,29 +51,11 @@ class AgentProfilesTest < Minitest::Test
     assert_same custom, Hive::AgentProfiles.lookup(:claude)
   end
 
-  def test_lazy_block_registration
-    Hive::AgentProfiles.reset_for_tests!
-    Hive::AgentProfiles.register(:lazy) do
-      Hive::AgentProfile.new(
-        name: :lazy,
-        bin_default: "y",
-        headless_flag: "-p",
-        version_flag: "--version",
-        skill_syntax_format: "/%{skill}",
-        status_detection_mode: :state_file_marker
-      )
+  def test_register_rejects_non_agent_profile
+    err = assert_raises(ArgumentError) do
+      Hive::AgentProfiles.register(:bad, "not a profile")
     end
-    profile = Hive::AgentProfiles.lookup(:lazy)
-    assert_kind_of Hive::AgentProfile, profile
-    # Second lookup returns the same memoized instance, not a fresh build.
-    assert_same profile, Hive::AgentProfiles.lookup(:lazy)
-  end
-
-  def test_lazy_block_must_return_agent_profile
-    Hive::AgentProfiles.reset_for_tests!
-    Hive::AgentProfiles.register(:bad) { "not a profile" }
-    err = assert_raises(Hive::AgentError) { Hive::AgentProfiles.lookup(:bad) }
-    assert_match(/did not return an AgentProfile/, err.message)
+    assert_match(/expected Hive::AgentProfile/, err.message)
   end
 
   def test_registered_names_lists_v1_built_ins

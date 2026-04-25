@@ -18,9 +18,9 @@ module Hive
       output_format_flags: [
         "--output-format", "stream-json",
         "--include-partial-messages",
-        "--verbose"
+        "--verbose",
+        "--no-session-persistence"
       ],
-      extra_flags: [ "--no-session-persistence" ],
       version_flag: "--version",
       skill_syntax_format: "/%{skill}",
       headless_supported: true,

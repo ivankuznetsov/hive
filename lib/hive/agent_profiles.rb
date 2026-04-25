@@ -12,12 +12,14 @@ module Hive
 
     class << self
       # Register a profile under a name. Re-registering replaces the old
-      # entry (lets tests swap stubs in for a profile name). Pass a block
-      # that returns the AgentProfile for lazy construction; the registry
-      # memoizes the first lookup.
-      def register(name, profile = nil, &block)
+      # entry (lets tests swap stubs in for a profile name).
+      def register(name, profile)
+        unless profile.is_a?(Hive::AgentProfile)
+          raise ArgumentError, "register expected Hive::AgentProfile, got #{profile.class}"
+        end
+
         @mutex.synchronize do
-          @profiles[name.to_sym] = profile || block
+          @profiles[name.to_sym] = profile
         end
       end
 
@@ -26,20 +28,7 @@ module Hive
         entry = @mutex.synchronize { @profiles[sym] }
         raise UnknownAgent, "unknown agent profile: #{name.inspect} (registered: #{registered_names.inspect})" if entry.nil?
 
-        return entry if entry.is_a?(Hive::AgentProfile)
-
-        # Lazy block. Resolve once, replace the registry entry with the
-        # constructed profile so future lookups skip the block.
-        @mutex.synchronize do
-          existing = @profiles[sym]
-          return existing if existing.is_a?(Hive::AgentProfile)
-
-          built = existing.call
-          unless built.is_a?(Hive::AgentProfile)
-            raise Hive::AgentError, "agent profile registration block for #{name.inspect} did not return an AgentProfile"
-          end
-          @profiles[sym] = built
-        end
+        entry
       end
 
       def registered?(name)

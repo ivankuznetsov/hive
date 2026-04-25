@@ -6,14 +6,6 @@ require "hive/agent_profiles"
 
 module Hive
   class Agent
-    # Backward compat: the `bin` reader is preserved at the class level so
-    # external callers that still ask for `Hive::Agent.bin` (without holding
-    # a profile) get the claude binary path. Production call sites all pass
-    # a profile via Stages::Base.spawn_agent. Tests historically stub
-    # ENV["HIVE_CLAUDE_BIN"] — the claude profile honors that env var, so
-    # the test pattern keeps working unchanged after the refactor.
-    DEFAULT_BIN = "claude".freeze
-
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
                 :profile, :expected_output
 
@@ -167,8 +159,7 @@ module Hive
       if @profile.budget_flag && @max_budget_usd
         cmd << @profile.budget_flag << @max_budget_usd.to_s
       end
-      cmd.concat(@profile.output_format_flags) if @profile.output_format_flags
-      cmd.concat(@profile.extra_flags) if @profile.extra_flags
+      cmd.concat(@profile.output_format_flags)
       cmd << @prompt
       cmd
     end

@@ -14,17 +14,19 @@ module Hive
   #   - bare slug → searched across registered projects (filtered by
   #     `--project` if given). Multi-stage hits within one project are
   #     ambiguous; cross-project hits are ambiguous unless `--project` is
-  #     set.
+  #     set. `stage_filter` narrows slug lookup to one canonical stage.
   class TaskResolver
-    def initialize(target, project_filter: nil)
+    def initialize(target, project_filter: nil, stage_filter: nil)
       @target = target
       @project_filter = project_filter
+      @stage_filter = resolve_stage_filter(stage_filter)
     end
 
     def resolve
       folder = resolve_folder
       task = Hive::Task.new(folder)
       validate_project_path_match!(task)
+      validate_stage_match!(task)
       task
     end
 
@@ -57,7 +59,10 @@ module Hive
     end
 
     def project_hint
-      @project_filter ? " in project '#{@project_filter}'" : ""
+      hints = []
+      hints << "project '#{@project_filter}'" if @project_filter
+      hints << "stage '#{@stage_filter}'" if @stage_filter
+      hints.empty? ? "" : " in #{hints.join(' and ')}"
     end
 
     def ambiguity_message(matches)
@@ -67,15 +72,16 @@ module Hive
       else
         stages = matches.map { |m| m[:stage] }
         "slug '#{@target}' is ambiguous (multiple stages in '#{projects.first}': #{stages.join(', ')}); " \
-          "pass an absolute folder path"
+          "pass --stage <stage> or an absolute folder path"
       end
     end
 
     def find_slug_across_projects(slug)
       projects = Hive::Config.registered_projects
       projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
+      stages = @stage_filter ? [ @stage_filter ] : Hive::Stages::DIRS
       projects.flat_map do |project|
-        Hive::Stages::DIRS.filter_map do |stage|
+        stages.filter_map do |stage|
           folder = File.join(project["hive_state_path"], "stages", stage, slug)
           next nil unless File.directory?(folder)
 
@@ -94,6 +100,25 @@ module Hive
 
       raise Hive::InvalidTaskPath,
             "TARGET path is in project '#{actual_name}' but --project says '#{@project_filter}'"
+    end
+
+    def validate_stage_match!(task)
+      return unless @stage_filter
+
+      actual = "#{task.stage_index}-#{task.stage_name}"
+      return if actual == @stage_filter
+
+      raise Hive::InvalidTaskPath,
+            "TARGET is at #{actual} but --stage/--from says #{@stage_filter}"
+    end
+
+    def resolve_stage_filter(stage_filter)
+      return nil if stage_filter.nil? || stage_filter.to_s.strip.empty?
+
+      Hive::Stages.resolve(stage_filter) ||
+        raise(Hive::InvalidTaskPath,
+              "unknown stage '#{stage_filter}'; valid: #{Hive::Stages::DIRS.join(', ')} " \
+              "or short names #{Hive::Stages::NAMES.join(', ')}")
     end
   end
 end

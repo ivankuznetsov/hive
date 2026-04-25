@@ -451,12 +451,12 @@ class RunApproveTest < Minitest::Test
         assert_equal Hive::Schemas::NextActionKind::RUN, next_action["kind"]
         assert_includes Hive::Schemas::NextActionKind::ALL, next_action["kind"]
         assert_match(%r{/3-plan/#{slug}\z}, next_action["folder"])
-        assert_match(%r{\Ahive run .*/3-plan/#{slug}\z}, next_action["command"])
+        assert_equal "hive plan #{slug}", next_action["command"]
       end
     end
   end
 
-  def test_json_next_action_at_final_stage_is_no_op_with_reason
+  def test_json_next_action_at_final_stage_points_to_archive
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -468,8 +468,8 @@ class RunApproveTest < Minitest::Test
         out, _err = capture_io { Hive::Commands::Approve.new(slug, json: true).call }
         payload = JSON.parse(out)
         assert_equal "6-done", payload["to_stage_dir"]
-        assert_equal Hive::Schemas::NextActionKind::NO_OP, payload["next_action"]["kind"]
-        assert_equal "final_stage", payload["next_action"]["reason"]
+        assert_equal Hive::Schemas::NextActionKind::RUN, payload["next_action"]["kind"]
+        assert_equal "hive archive #{slug}", payload["next_action"]["command"]
       end
     end
   end
@@ -821,9 +821,9 @@ class RunApproveTest < Minitest::Test
         assert_includes out, "hive: approved #{slug}"
         assert_includes out, "from:"
         assert_includes out, "to:"
-        # The "next: hive run" hint goes to stderr so a `... | jq`
+        # The "next:" hint goes to stderr so a `... | jq`
         # consumer who forgot --json doesn't get prose mixed with data.
-        assert_includes err, "next: hive run"
+        assert_includes err, "next: hive plan #{slug}"
       end
     end
   end

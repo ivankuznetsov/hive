@@ -89,7 +89,7 @@ class JsonOutputTest < Minitest::Test
         refute_nil next_action
         assert_equal "edit", next_action["kind"]
         assert next_action["target"].end_with?("/brainstorm.md")
-        assert_includes next_action["rerun_with"], "hive run"
+        assert_equal "hive brainstorm #{slug}", next_action["rerun_with"]
       end
     end
   end
@@ -116,7 +116,7 @@ class JsonOutputTest < Minitest::Test
         assert_equal slug, next_action["slug"]
         assert_equal "2-brainstorm", next_action["from_stage"]
         assert_equal "3-plan", next_action["to_stage"]
-        assert_equal "hive approve #{slug} --from 2-brainstorm", next_action["command"]
+        assert_equal "hive plan #{slug}", next_action["command"]
         # Back-compat fields kept for callers that parsed the old MV shape.
         assert next_action["to"].end_with?("3-plan/")
         assert_equal brainstorm_dir, next_action["from"]

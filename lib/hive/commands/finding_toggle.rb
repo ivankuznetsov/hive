@@ -23,7 +23,7 @@ module Hive
       REJECT = :reject
 
       def initialize(operation, target, ids: [], all: false, severity: nil,
-                     pass: nil, project: nil, json: false)
+                     pass: nil, project: nil, stage: nil, json: false)
         @operation = operation
         @target = target
         @ids = ids || []
@@ -31,6 +31,7 @@ module Hive
         @severity = severity
         @pass = pass
         @project_filter = project
+        @stage_filter = stage
         @json = json
       end
 
@@ -55,7 +56,11 @@ module Hive
       #   - task_lock INNER blocks a concurrent `hive run` on the same
       #     task while we read + mutate the review file.
       def do_call
-        task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+        task = Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
         review_path = Hive::Findings.review_path_for(task, pass: @pass)
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -206,7 +211,7 @@ module Hive
         if changes.empty?
           puts "  (no-op: every selected finding was already #{verb})"
         else
-          warn "next: hive run #{task.folder}"
+          warn "next: hive develop #{task.slug}"
         end
       end
 
@@ -226,7 +231,7 @@ module Hive
           "no accepted findings; re-run to mark execute_complete"
         end
         { "kind" => kind::RUN, "folder" => task.folder,
-          "command" => "hive run #{task.folder}", "reason" => reason }
+          "command" => "hive develop #{task.slug}", "reason" => reason }
       end
 
       def emit_error_envelope(error)

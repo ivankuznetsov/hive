@@ -13,10 +13,12 @@ tags: [command, findings, review, json]
 
 ```
 hive findings <slug>                          # list findings of latest pass
+hive findings <slug> --stage execute          # disambiguate same slug in another stage
 hive findings <slug> --pass 1                 # specific pass
 hive findings <slug> --json                   # machine-readable
 
 hive accept-finding <slug> 1 3 5              # tick by IDs
+hive accept-finding <slug> 1 --stage execute  # disambiguate same slug in another stage
 hive accept-finding <slug> --severity high    # tick all High findings
 hive accept-finding <slug> --all              # tick everything
 hive accept-finding <slug> --json             # JSON envelope (success and error)
@@ -46,7 +48,7 @@ The reviewer prompt writes a markdown file with severity headings and unchecked 
 
 `hive findings` (`Hive::Commands::Findings#call`):
 
-1. Resolve TARGET via `Hive::TaskResolver` (path or slug; cross-project with `--project`).
+1. Resolve TARGET via `Hive::TaskResolver` (path or slug; cross-project with `--project`; same-slug stage collisions with `--stage`).
 2. `Hive::Findings.review_path_for(task, pass:)` picks `<reviews>/ce-review-NN.md` (latest by default).
 3. `Hive::Findings::Document.new(path)` parses the file.
 4. Emit table on stdout (default) or single-line `hive-findings` JSON document with `--json`.
@@ -60,7 +62,7 @@ The reviewer prompt writes a markdown file with severity headings and unchecked 
 5. For each selected ID, flip its checkbox to the target state. Already-correct entries are no-ops.
 6. Atomic write: tempfile + `File.rename`.
 7. Commit the change to `hive/state` (slug-scoped `git add`, single commit per command).
-8. Emit text or JSON report including a `next_action` pointing at `hive run <task.folder>` to consume the new accepted set.
+8. Emit text or JSON report including a `next_action` pointing at `hive develop <slug>` to consume the new accepted set.
 
 ## JSON contract (`schema = "hive-findings"`, version 1)
 
@@ -115,7 +117,7 @@ The reviewer prompt writes a markdown file with severity headings and unchecked 
   "next_action": {
     "kind": "run",
     "folder": "/.../4-execute/fix-bug-260424-aaaa",
-    "command": "hive run /.../4-execute/fix-bug-260424-aaaa",
+    "command": "hive develop fix-bug-260424-aaaa",
     "reason": "3 accepted finding(s) need a fresh implementation pass"
   }
 }

@@ -2,6 +2,18 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-25T19:30:00Z] CLI: status-first workflow verbs
+
+**Action:** Added the human-facing command surface where `hive status` shows current slugs grouped by next action, and stage verbs (`hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, `hive archive`) move-or-run tasks by slug.
+
+**Key decisions:**
+- Folder paths remain authoritative storage and recovery targets.
+- `hive run TARGET` remains the lower-level dispatcher and now accepts slugs.
+- Workflow verbs use `--from` for source-stage disambiguation; generic target commands use `--stage`.
+- `hive brainstorm <slug>` is the only marker-bypass transition, and only for validated `1-inbox` to `2-brainstorm`.
+
+**Pages updated:** `cli.md`, `commands/run.md`, `commands/status.md`, `commands/findings.md`, `modules/task_resolver.md`.
+
 ## [2026-04-25T18:00:00Z] brainstorm: 5-review stage
 
 **Action:** Captured requirements for splitting 4-execute into impl-only + a new 5-review stage that runs CI-fix → multi-reviewer (parallel) → auto-triage → fix → browser-test as a fully autonomous loop. Renumbers pr/done.

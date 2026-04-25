@@ -5,6 +5,7 @@ require "hive/task"
 require "hive/markers"
 require "hive/lock"
 require "hive/stages"
+require "hive/task_action"
 
 module Hive
   module Commands
@@ -37,7 +38,7 @@ module Hive
         end
 
         projects.each do |project|
-          render_project(project)
+          render_project(project, project_count: projects.size)
         end
       end
 
@@ -50,11 +51,11 @@ module Hive
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "generated_at" => Time.now.utc.iso8601,
-          "projects" => projects.map { |p| project_payload(p) }
+          "projects" => projects.map { |p| project_payload(p, project_count: projects.size) }
         }
       end
 
-      def project_payload(project)
+      def project_payload(project, project_count:)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -67,7 +68,8 @@ module Hive
         elsif !File.directory?(hive_state)
           base.merge("error" => "not_initialised", "tasks" => [])
         else
-          base.merge("tasks" => collect_rows(hive_state).map { |r| task_payload(r) })
+          rows = annotate_actions(collect_rows(hive_state), project, project_count)
+          base.merge("tasks" => rows.map { |r| task_payload(r) })
         end
       end
 
@@ -82,11 +84,14 @@ module Hive
           "mtime" => row[:mtime].utc.iso8601,
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
-          "claude_pid_alive" => row[:claude_pid_alive]
+          "claude_pid_alive" => row[:claude_pid_alive],
+          "action" => row[:action_key],
+          "action_label" => row[:action_label],
+          "suggested_command" => row[:suggested_command]
         }
       end
 
-      def render_project(project)
+      def render_project(project, project_count:)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -98,20 +103,21 @@ module Hive
           return
         end
 
-        rows = collect_rows(hive_state)
+        rows = annotate_actions(collect_rows(hive_state), project, project_count)
         puts project["name"]
         if rows.empty?
           puts "  no active tasks"
           return
         end
 
-        Hive::Stages::DIRS.each do |stage|
-          stage_rows = rows.select { |r| r[:stage] == stage }
+        action_labels(rows).each do |label|
+          stage_rows = rows.select { |r| r[:action_label] == label }
           next if stage_rows.empty?
 
-          puts "  #{stage}/"
+          puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
-            puts "    #{r[:icon]} #{r[:slug].ljust(36)} #{r[:state_label].ljust(28)} #{r[:age]}"
+            command = r[:suggested_command] || "-"
+            puts "    #{r[:icon]} #{r[:slug].ljust(36)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
           end
         end
       end
@@ -140,6 +146,7 @@ module Hive
               slug: slug,
               folder: entry,
               state_file: task.state_file,
+              task: task,
               marker_name: marker.name,
               marker_attrs: marker.attrs,
               icon: icon,
@@ -167,6 +174,46 @@ module Hive
         else
           [ ICON.fetch(marker.name, "·"), label_for(marker) ]
         end
+      end
+
+      ACTION_LABEL_ORDER = [
+        "Ready to brainstorm",
+        "Needs your input",
+        "Ready to plan",
+        "Ready to develop",
+        "Review findings",
+        "Needs recovery",
+        "Ready for PR",
+        "Ready to archive",
+        "Archived",
+        "Error"
+      ].freeze
+
+      def annotate_actions(rows, project, project_count)
+        slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
+        rows.map do |row|
+          action = Hive::TaskAction.for(
+            row[:task],
+            marker_from_row(row),
+            project_name: project["name"],
+            project_count: project_count,
+            stage_collision: slug_counts[row[:slug]] > 1
+          )
+          row.merge(
+            action_key: action.key,
+            action_label: action.label,
+            suggested_command: action.command
+          )
+        end
+      end
+
+      def marker_from_row(row)
+        Hive::Markers::State.new(name: row[:marker_name], attrs: row[:marker_attrs], raw: nil)
+      end
+
+      def action_labels(rows)
+        labels = rows.map { |row| row[:action_label] }.uniq
+        labels.sort_by { |label| ACTION_LABEL_ORDER.index(label) || ACTION_LABEL_ORDER.length }
       end
 
       def label_for(marker)

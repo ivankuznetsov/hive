@@ -65,7 +65,7 @@ module Hive
       # ── Pipeline ────────────────────────────────────────────────────────
 
       def do_call
-        task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+        task = resolve_task
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
 
@@ -80,6 +80,21 @@ module Hive
       end
 
       # ── Destination resolution ──────────────────────────────────────────
+
+      def resolve_task
+        return Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve unless @from
+
+        Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @from
+        ).resolve
+      rescue Hive::InvalidTaskPath
+        # Preserve --from's idempotency contract: if a retry runs after the
+        # task advanced, report WRONG_STAGE from validate_from! instead of
+        # "not found in source stage".
+        Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+      end
 
       def resolve_destination(task)
         return resolve_explicit_to(@to) if @to
@@ -307,6 +322,7 @@ module Hive
       end
 
       def emit_success(task, dest_stage, new_folder, marker, commit_action, direction)
+        dest_idx, = Hive::Stages.parse(dest_stage)
         if @json
           puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
         else
@@ -315,7 +331,7 @@ module Hive
           puts "  to:   #{new_folder}"
           # Hint goes to stderr so a `| jq` consumer doesn't get prose mixed
           # with data when the user forgot --json.
-          warn "next: hive run #{new_folder}"
+          warn "next: #{workflow_command_for(task.slug, dest_idx)}"
         end
       end
 
@@ -346,11 +362,21 @@ module Hive
 
       def json_next_action(new_folder, dest_idx)
         kind = Hive::Schemas::NextActionKind
-        if Hive::Stages.next_dir(dest_idx)
-          { "kind" => kind::RUN, "folder" => new_folder, "command" => "hive run #{new_folder}" }
-        else
-          { "kind" => kind::NO_OP, "reason" => "final_stage" }
-        end
+        task = Hive::Task.new(new_folder)
+        { "kind" => kind::RUN, "folder" => new_folder, "command" => workflow_command_for(task.slug, dest_idx) }
+      rescue Hive::InvalidTaskPath
+        { "kind" => kind::RUN, "folder" => new_folder, "command" => "hive run #{new_folder}" }
+      end
+
+      def workflow_command_for(slug, stage_index)
+        verb = {
+          2 => "brainstorm",
+          3 => "plan",
+          4 => "develop",
+          5 => "pr",
+          6 => "archive"
+        }[stage_index]
+        verb ? "hive #{verb} #{slug}" : "hive run #{slug}"
       end
 
       def emit_error_envelope(error)

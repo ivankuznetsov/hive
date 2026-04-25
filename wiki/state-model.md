@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/findings.rb, lib/hive/commit_or_rollback.rb
 created: 2026-04-25
 updated: 2026-04-25
 tags: [state, filesystem, model, architecture]

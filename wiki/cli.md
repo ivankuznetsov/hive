@@ -75,6 +75,8 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 | `Hive::TaskInErrorState` | `Commands::Run#report` when the stage marker is `:error` |
 | `Hive::WrongStage` | `Stages::Inbox#run!` (running an agent on an inert stage) |
 | `Hive::AlreadyInitialized` | `Commands::Init#call` when `hive/state` branch already exists |
+| `Hive::NoSelection` | `Commands::FindingToggle#select_target_ids` when no IDs/severity/--all selected (exit 64) |
+| `Hive::RollbackFailed` | `Hive::CommitOrRollback.attempt!` when commit fails AND undo also fails — fs/git may diverge (exit 1) |
 
 A few stage runners still call `warn`/`exit N` directly for non-bug user errors that don't yet have a typed class — most notably `Init#validate_git_repo!` / `validate_clean_tree!` (exit 1), `Execute#run!` for `plan.md missing` (exit 1), and the `Pr` stage's network/auth abort paths. Migrating these to typed exceptions is tracked as Phase 2 follow-up work.
 

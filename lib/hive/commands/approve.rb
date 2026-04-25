@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "hive/config"
 require "hive/task"
+require "hive/task_resolver"
 require "hive/markers"
 require "hive/lock"
 require "hive/git_ops"
@@ -60,10 +61,10 @@ module Hive
 
       private
 
+      # ── Pipeline ────────────────────────────────────────────────────────
+
       def do_call
-        folder = resolve_target
-        task = Hive::Task.new(folder)
-        validate_project_path_match!(task)
+        task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
 
@@ -77,71 +78,7 @@ module Hive
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
       end
 
-      # ── Resolution ──────────────────────────────────────────────────────
-
-      def resolve_target
-        # File.realpath resolves any symlink in the path. A slug-named
-        # symlink at `.hive-state/stages/<N>/<slug>` pointing to
-        # `/tmp/leaked` realpaths to `/tmp/leaked`, which Task.new's
-        # PATH_RE then refuses — the real path doesn't match the
-        # .hive-state/stages/ shape. Applies to both the explicit-folder
-        # path and the slug-search return so neither code path can be
-        # used to mv a slug-shaped symlink onto external data.
-        if path_target?
-          expanded = File.expand_path(@target)
-          return File.realpath(expanded) if File.directory?(expanded)
-        end
-
-        matches = find_slug_across_projects(@target)
-        case matches.size
-        when 0
-          raise Hive::InvalidTaskPath,
-                "no task folder for slug '#{@target}'#{project_hint}"
-        when 1
-          File.realpath(matches.first[:folder])
-        else
-          raise Hive::AmbiguousSlug.new(
-            ambiguity_message(matches),
-            slug: @target,
-            candidates: matches
-          )
-        end
-      end
-
-      def path_target?
-        @target.include?("/") || @target.start_with?("~", ".")
-      end
-
-      def project_hint
-        @project_filter ? " in project '#{@project_filter}'" : ""
-      end
-
-      def ambiguity_message(matches)
-        projects = matches.map { |m| m[:project] }.uniq
-        if projects.size > 1
-          "slug '#{@target}' is ambiguous (in #{projects.join(', ')}); pass --project <name>"
-        else
-          stages = matches.map { |m| m[:stage] }
-          "slug '#{@target}' is ambiguous (multiple stages in '#{projects.first}': #{stages.join(', ')}); " \
-            "pass an absolute folder path"
-        end
-      end
-
-      # Returns every stage hit across registered projects (filtered by
-      # --project if given) as { project:, stage:, folder: } hashes. The
-      # caller is responsible for handling 0, 1, or many results.
-      def find_slug_across_projects(slug)
-        projects = Hive::Config.registered_projects
-        projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
-        projects.flat_map do |project|
-          Hive::Stages::DIRS.filter_map do |stage|
-            folder = File.join(project["hive_state_path"], "stages", stage, slug)
-            next nil unless File.directory?(folder)
-
-            { project: project["name"], stage: stage, folder: folder }
-          end
-        end
-      end
+      # ── Destination resolution ──────────────────────────────────────────
 
       def resolve_destination(task)
         return resolve_explicit_to(@to) if @to
@@ -161,18 +98,6 @@ module Hive
       end
 
       # ── Validation ──────────────────────────────────────────────────────
-
-      def validate_project_path_match!(task)
-        return unless @project_filter
-        return unless path_target?
-
-        matching = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
-        actual_name = matching ? matching["name"] : File.basename(task.project_root)
-        return if actual_name == @project_filter
-
-        raise Hive::InvalidTaskPath,
-              "TARGET path is in project '#{actual_name}' but --project says '#{@project_filter}'"
-      end
 
       def validate_from!(task)
         expected = Hive::Stages.resolve(@from) ||

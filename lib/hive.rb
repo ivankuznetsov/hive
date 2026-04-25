@@ -10,7 +10,8 @@ module Hive
     SCHEMA_VERSIONS = {
       "hive-status" => 1,
       "hive-run" => 1,
-      "hive-approve" => 1
+      "hive-approve" => 1,
+      "hive-findings" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
@@ -195,6 +196,30 @@ module Hive
     def initialize(message, stage:)
       super(message)
       @stage = stage
+    end
+  end
+
+  # The task has no review file at the requested (or default-latest) pass
+  # — `hive findings` / `accept-finding` / `reject-finding` only make sense
+  # against an existing `reviews/ce-review-NN.md`.
+  class NoReviewFile < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  # An ID was passed to accept-finding / reject-finding that doesn't
+  # match any finding in the targeted review file.
+  class UnknownFinding < Error
+    attr_reader :id
+
+    def initialize(message, id: nil)
+      super(message)
+      @id = id
+    end
+
+    def exit_code
+      ExitCodes::USAGE
     end
   end
 end

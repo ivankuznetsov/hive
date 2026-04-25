@@ -185,6 +185,39 @@ Append-only log of all wiki operations.
 **Tests:** 7 new (149 / 576 green), RuboCop clean.
 
 - `test/unit/stages_test.rb` (new) — validation semantics for `next_dir` (raises on bad index), `parse` (nil for unknown stages), `resolve`, and constant frozen-ness.
+
+## [2026-04-25T23:00:00Z] hive findings / accept-finding / reject-finding (Phase 2 PR3)
+
+**Driver:** Continuation of Phase 2 agent-callable contract work. `hive approve` (PR #4, merged) replaced shell `mv`; this commit replaces the second hand-edit step in the pipeline — ticking `[x]` on review findings in `reviews/ce-review-NN.md` to mark which findings the next implementation pass should address. The reviewer prompt writes all findings unchecked; the user (now an agent) flips a subset to accepted; `Hive::Stages::Execute#collect_accepted_findings` re-injects only the `[x]` lines into the next pass's prompt.
+
+**Code changes:**
+
+- **`Hive::Findings`** module (`lib/hive/findings.rb`, new) — parser + writer for review files. `Document.new(path)` reads the file, parses each `- [ ]` / `- [x]` line into a `Data.define` value object with `id` (1-based stable; document order), `severity` (lowercased heading), `accepted`, `title`, `justification`, `line_index`. `toggle!(id, accepted:)` flips a single checkbox character without touching surrounding bytes — verified by a unit test that asserts every non-target line is byte-identical after a write. `write!` uses tempfile + rename. `summary` returns total / accepted / by_severity. `Hive::Findings.review_path_for(task, pass:)` resolves the latest or named-pass review file.
+- **`Hive::TaskResolver`** (`lib/hive/task_resolver.rb`, new) — extracted from `Hive::Commands::Approve#resolve_target` + `find_slug_across_projects` + `validate_project_path_match!`. ~80 LOC of slug-or-folder resolution now shared between four commands (`approve`, `findings`, `accept-finding`, `reject-finding`); `Approve#do_call` is one line shorter and the duplication that would have appeared in three new commands is collapsed at extraction time.
+- **`Hive::Commands::Findings`** (`lib/hive/commands/findings.rb`, new) — read-only list. Resolves task via `TaskResolver`; loads document; emits text table or single-line `hive-findings` JSON. JSON includes per-finding `to_h` plus `summary` block.
+- **`Hive::Commands::FindingToggle`** (`lib/hive/commands/finding_toggle.rb`, new) — shared accept/reject. Combines `ID...` positionals + `--severity <s>` + `--all` into a unioned ID list (empty union is an error). Validates every ID exists; flips checkboxes; atomic write; commits to `hive/state` (slug-scoped `git add` of the review file). Acquires `Hive::Lock.with_task_lock(task.folder)` so a concurrent `hive run` can't race against the toggle. Idempotent: already-correct entries are no-ops and excluded from the JSON `changes` array. `next_action` in the JSON points at `hive run <task.folder>` so an agent driving the pipeline knows the immediate next step.
+- **CLI wiring** (`lib/hive/cli.rb`): three new Thor subcommands. `--severity` Thor `enum:` constraint against `%w[high medium low nit]`; `--pass` numeric; `--all` boolean; positional `IDs` is variadic (`*ids`).
+- **Typed exceptions** (`lib/hive.rb`): `Hive::NoReviewFile` (exit 64), `Hive::UnknownFinding` (exit 64, carries `id`).
+- **`Hive::Schemas::SCHEMA_VERSIONS["hive-findings"] = 1`** added.
+- **`schemas/hive-findings.v1.json`** — draft 2020-12 schema with `oneOf` over `ListPayload`, `TogglePayload`, and `ErrorPayload`. Per-finding shape, summary, error-kind enum (`ambiguous_slug`, `no_review_file`, `unknown_finding`, `invalid_task_path`, `error`), and the closed `NextAction.kind` enum.
+
+**Wiki updates:**
+
+- `wiki/commands/findings.md` (new) — full page for the three commands. Data model, JSON contract for both list and toggle paths, error envelope, exit-code table, locking section, "why not just edit the file" rationale, backlinks.
+- `wiki/cli.md` — TLDR updated to "eight commands"; command table grew three rows; `--json` honour list extended.
+- `wiki/index.md` — new entry under Commands; page count bumped 27 → 29.
+- `README.md` — daily-usage table grew three rows.
+
+**Tests:** 27 new (176 / 699 green; was 149 / 576 on round-3-merged main). RuboCop clean.
+
+- `test/unit/findings_test.rb` — 9 cases on the parser: severity/order/state pinning, missing-justification handling, summary counts, byte-for-byte round-trip preservation, idempotent toggle, unknown-id raises typed, missing-file raises typed, latest-pass resolution, named-pass missing.
+- `test/integration/run_findings_test.rb` — 13 cases on the three commands: text output shape, full JSON-key-set pin, named-pass selection, no-review-file error envelope, accept by ID, accept --severity, accept --all (with no-op detection on already-accepted entries), idempotent re-accept, unknown-id typed error, no-selectors error, reject behaviour, reject idempotency, task-lock contention surfaces ConcurrentRunError (TEMPFAIL/75).
+- `test/unit/schema_files_test.rb` — 4 new pins for hive-findings: file existence + draft, ListPayload required keys, TogglePayload required keys, error_kind enum drift.
+- `test/unit/exit_codes_test.rb` — pinned `NoReviewFile` (64), `UnknownFinding` (64), `InternalError` (70) exit codes; pinned `hive-findings` schema-versions key.
+
+**Refactor:**
+
+- `Hive::Commands::Approve` was simplified to delegate to `Hive::TaskResolver`. ~80 LOC removed from `approve.rb`; one line in `do_call` (`task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve`). All 32 existing approve tests still pass.
 - `test_commit_failure_rolls_mv_back_to_source` — installs a real `pre-commit` hook that exits 1, asserts mv reverses, exit 70 (GitError), and source restored.
 - `test_rollback_failure_surfaces_combined_error_message` — pre-commit hook recreates the source path so rollback can't proceed; asserts the combined "rollback NOT possible / manual recovery" message branch.
 - `test_json_error_envelope_on_from_mismatch_carries_wrong_stage_kind` — exercises the JSON error envelope on a `--from` mismatch with `--json`.

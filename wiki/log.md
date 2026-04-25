@@ -2,6 +2,29 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-25T22:00:00Z] U8 ship — Browser-test phase (soft-warn + JSON result protocol)
+
+**Action:** Phase 2's fourth primitive. Optional. Skipped entirely when `review.browser_test.enabled` is false (default). When enabled, runs after Phase 2 produced zero findings and before the runner finalizes. Spawns the configured agent (typically claude with the `/ce-test-browser` skill) up to `review.browser_test.max_attempts` times. Each attempt is expected to write `reviews/browser-result-<pass>-<attempt>.json` with `{status, summary, details, duration_sec}`.
+
+**Soft-warn semantics (per plan R11):** persistent failure does NOT hard-block the loop. After the cap, the runner writes `reviews/browser-blocked-<pass>.md` (embedding every attempt's summary + details) and returns `:warned` so `REVIEW_COMPLETE browser=warned` lands. The 6-pr stage surfaces the warning in the PR body. Browser flakiness is common; the user decides whether to ship anyway.
+
+**Code:** `lib/hive/stages/review/browser_test.rb`. `BrowserTest.run!(cfg:, ctx:) → Result(status, attempts, summary, details, error_message)`. Status values: `:passed`, `:warned` (cap reached), `:skipped` (disabled). Per-attempt JSON parsing tolerates malformed / missing files by treating them as `:failed` with an explanatory summary — the runner moves to the next attempt either way.
+
+**Code (template):** `templates/browser_test_prompt.md.erb`. Receives project_name, worktree_path, task_folder, attempt, pass, result_path, skill_invocation, user_supplied_tag. Instructs the agent to **invoke the `<%= skill_invocation %>` skill** (rendered as `/ce-test-browser` for claude/codex/pi via `profile.skill_syntax_format`) on the worktree, then write the structured JSON result. Explicit instruction: "you do not run test commands directly; you invoke the skill and let it drive."
+
+**Spawn:** uses `status_mode: :output_file_exists` keyed on the per-attempt JSON path. Combined with U4's per-spawn mode override, the orchestrator's `REVIEW_WORKING phase=browser` marker survives across both attempts without `:agent_working` clobber.
+
+**Key decisions:**
+- **JSON result protocol over exit-code or marker.** A browser test does more than pass/fail (multiple flows, screenshots, duration); the structured JSON gives the runner enough to surface a useful warning if every attempt fails. Exit-code-only would lose summary/details. State-file marker would conflate with the orchestrator's `REVIEW_WORKING`.
+- **Tolerate malformed JSON.** Agent crashed mid-write, network blip, partial file — all classified as `:failed` for that attempt with a one-line "produced no result file" or "produced unparseable JSON" summary. Loop continues to the next attempt rather than escalating to `:error`. Browser tests are expected to be flaky.
+- **Browser-blocked doc embeds every attempt.** When all attempts fail, the user gets the full progression in `reviews/browser-blocked-<pass>.md` (Attempt 1 summary/details, Attempt 2 summary/details). Picking only the last attempt would lose context — the failure mode might have shifted between attempts.
+
+**Tests (+8):** disabled (no spawn); passes attempt 1 (single fake-claude write); passes attempt 2 (custom counter-flipper bash script — attempt 1 writes failed, attempt 2 writes passed); fails twice → `:warned` + browser-blocked.md with both attempts embedded; missing JSON counts as failed; unparseable JSON counts as failed; agent timeout counts as failed; prompt invokes `/ce-test-browser` via `profile.skill_syntax_format` (proves the per-CLI skill-invocation path works end-to-end). Plus 2 unit-level tests for `parse_result_file` (passed/unknown status handling).
+
+259 tests passing (was 251). Rubocop clean.
+
+**Wiki pages updated:** this entry. Larger pass deferred to U10.
+
 ## [2026-04-25T21:30:00Z] U7 ship — CI-fix loop with output capture
 
 **Action:** Phase 2's third primitive. Runs the project's local CI command (`review.ci.command`, e.g. `bin/ci` or `bin/rails test`); on failure, captures the failure log and spawns a fix agent that reads the error, edits the offending files, commits, and lets the loop re-run CI. Caps at `review.ci.max_attempts` (default 3); after the cap returns `:stale` so the U9 runner can write `reviews/ci-blocked.md` and set `REVIEW_CI_STALE`. Reviewers must NOT run on red CI per the plan's hard-block contract.

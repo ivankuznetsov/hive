@@ -2,9 +2,11 @@
 
 **Date captured:** 2026-04-25
 **Spike unit:** U11 (per `docs/plans/2026-04-25-001-feat-5-review-stage-plan.md`)
-**Purpose:** Document the headless invocation contract for every agent CLI hive supports as an `AgentProfile` in U12, so the user can pick any of them per role (CI-fix, reviewer, triage, fix, browser-test) per project config.
+**Purpose:** Document the headless invocation contract for every agent CLI hive evaluates as a candidate `AgentProfile` in U12, so the user can pick any supported CLI per role (CI-fix, reviewer, triage, fix, browser-test) per project config.
 
-This doc is the authoritative source for the four `AgentProfile` instances under `lib/hive/agent_profiles/` (created in U12). If a CLI's behavior changes upstream, update this doc and the corresponding profile in lockstep.
+This doc is the authoritative source for the `AgentProfile` instances under `lib/hive/agent_profiles/` (created in U12). If a CLI's behavior changes upstream, update this doc and the corresponding profile in lockstep.
+
+> **Scope decision (2026-04-25, post-spike):** **opencode is dropped from v1 scope.** Reasons captured in the per-CLI summary below: (a) no native CE plugin → hive must inline SKILL.md content, losing plugin-update propagation; (b) per-spawn filesystem isolation requires temp-config writing rather than a simple flag, which is non-trivial to implement and harder to reason about than the per-spawn `--add-dir` model; (c) hive's v1 default reviewer set already covers two profile-supported CLIs (claude + codex), so opencode adds maintenance surface without unique signal. The opencode column below is preserved as evidence of evaluation; U12 ships profiles for **claude, codex, and pi only**. Opencode can be revisited in v1.1 if a user needs it (e.g., for OpenCode Zen cost reasons).
 
 ---
 
@@ -158,7 +160,7 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
 | **claude** | full-profile | yes (today's behavior preserved) | intact (`--add-dir <task folder>` per ADR-008) |
 | **codex** | full-profile | yes (added in v1) | intact (`--add-dir <task folder>` flag exists, semantically equivalent) |
 | **pi** | partial-profile-with-caveats | **no** (opt-in per project) | **weakened** — no `--add-dir` equivalent, no permission gate. ADR-018 amends ADR-008 for pi. Tool-level restriction (`--tools read,edit,write` minus `bash`) is the only mitigation for the reviewer phase; not effective for fix/CI-fix roles. |
-| **opencode** | partial-profile-with-caveats | **no** (opt-in per project) | **partial** — no per-spawn `--add-dir`, but config-level `external_directory` permission patterns can bound a spawn (requires hive to write a temp config per spawn). ADR-018 documents the temp-config pattern. |
+| **opencode** | **out of scope for v1** | n/a | not applicable — see scope decision callout at the top of this doc. Evaluation column retained below for transparency but opencode does not ship as an `AgentProfile` in v1. |
 
 ### Plan adjustments locked in (consumed by Task #7's plan-edit pass)
 
@@ -175,10 +177,9 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
    - `pr-review-toolkit` (claude profile + `/pr-review-toolkit:review-pr` skill)
    - Linters as additional reviewer entries (already in plan; ship as commented-out config per origin recommendation)
 3. **ADR-018 must be added to U10 with concrete content:** the trust-model amendment when the configured agent CLI lacks `--add-dir` equivalence. Pi and opencode go through this path; claude and codex don't. The amendment names: (a) tool-level restriction as the pi mitigation, (b) temp-config writing as the opencode mitigation, (c) explicit warning at `spawn_agent` time when a profile lacks `add_dir_flag`.
-4. **U12 profile defaults locked in:**
+4. **U12 profile defaults locked in (3 profiles ship in v1; opencode dropped per scope decision above):**
    - claude: `add_dir_flag: "--add-dir"` (variadic), `permission_skip_flag: "--dangerously-skip-permissions"`, `headless_flag: "-p"`, `budget_flag: "--max-budget-usd"`, `output_format: "--output-format stream-json"`, `version_flag: "--version"`, `status_detection_mode: :state_file_marker`, `min_version: "2.1.118"`
    - codex: `add_dir_flag: "--add-dir"` (single-arg, repeated), `permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox"`, `headless_flag: ["exec"]` (subcommand-style), `budget_flag: nil`, `output_format: "--json"` plus `-o, --output-last-message <path>`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "0.125.0"`
    - pi: `add_dir_flag: nil` (gap), `permission_skip_flag: nil` (gap), `headless_flag: "-p"`, `budget_flag: nil`, `output_format: "--mode json"`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "0.70.2"`, `headless_supported: true`
-   - opencode: `add_dir_flag: nil` (gap; use `--dir` for cwd narrowing only), `permission_skip_flag: "--dangerously-skip-permissions"`, `headless_flag: ["run"]` (subcommand-style), `budget_flag: nil`, `output_format: "--format json"`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "1.14.25"`
 5. **Pi auth precondition:** pi cannot be exercised on this machine until the user runs `pi` interactively and logs into a provider. Document in the Pi profile's `headless_supported` check or add a `Hive::AgentProfile#preflight!` method that raises a friendly error if auth isn't set up.
 6. **CHANGELOG note for v1:** "v1's default reviewer set is claude + codex. Pi and opencode are supported as opt-in agent CLIs per project; users opting in accept the ADR-018 trust-model trade-off documented in `wiki/decisions.md`."

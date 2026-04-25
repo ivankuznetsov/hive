@@ -24,7 +24,7 @@ module Hive
 
         case task_state(task)
         when :complete
-          puts "hive: already complete; mv this folder to 5-pr/ to continue"
+          puts "hive: already complete; mv this folder to 6-pr/ to continue"
           return { commit: nil, status: :execute_complete }
         when :stale
           warn "hive: EXECUTE_STALE — edit reviews/, lower pass:, remove the marker, then re-run"

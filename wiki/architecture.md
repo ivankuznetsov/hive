@@ -103,7 +103,7 @@ stateDiagram-v2
 ## Key external integrations
 
 - **`claude` CLI** ≥ 2.1.118 — verified via `claude --version` at agent spawn time (`Hive::Agent.check_version!`).
-- **`gh` CLI** — used by `5-pr` for `gh auth status`, `gh pr list`, `gh pr create`.
+- **`gh` CLI** — used by `6-pr` for `gh auth status`, `gh pr list`, `gh pr create`.
 - **`git`** ≥ 2.40 — uses `worktree add --no-checkout --detach`, `worktree list --porcelain`, `worktree remove`, `commit`, `show-ref`, `symbolic-ref`. All invoked through `Open3.capture3` array form (no shell).
 
 ## Code conventions

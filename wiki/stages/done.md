@@ -1,5 +1,5 @@
 ---
-title: 6-done stage
+title: 7-done stage
 type: stage
 source: lib/hive/stages/done.rb
 created: 2026-04-25

@@ -7,7 +7,7 @@
 Hive is a local, folder-based pipeline for taking a software idea from rough note to pull request. Each task is a directory, and the directory's location is the task's stage:
 
 ```text
-1-inbox -> 2-brainstorm -> 3-plan -> 4-execute -> 5-pr -> 6-done
+1-inbox -> 2-brainstorm -> 3-plan -> 4-execute -> 6-pr -> 7-done
 ```
 
 Stage agents run as `claude -p` subprocesses. They read the task folder, write their result back into that folder, and exit. You stay in control at each stage by approving the next move.
@@ -37,7 +37,7 @@ ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive   # or add bin/ to PATH
 |------|-------------|-----|
 | Ruby | 3.4 | the runtime |
 | `claude` CLI | 2.1.118 | every active stage; verified at runtime |
-| `gh` CLI | recent | `5-pr` stage (`gh pr create`); must be authenticated |
+| `gh` CLI | recent | `6-pr` stage (`gh pr create`); must be authenticated |
 | `git` | 2.40 | worktrees, orphan branches |
 
 Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep works as fallback).
@@ -106,8 +106,8 @@ Your default branch (`master` or `main`) never receives `.hive-state/` content. 
 | `2-brainstorm` | `brainstorm.md` | no | `WAITING` (your turn) / `COMPLETE` |
 | `3-plan` | `plan.md` | no | `WAITING` / `COMPLETE` |
 | `4-execute` | `task.md` (+ `reviews/`, `worktree.yml`) | yes — in the feature worktree | `EXECUTE_WAITING` / `EXECUTE_COMPLETE` / `EXECUTE_STALE` |
-| `5-pr` | `pr.md` | only `git push` + `gh pr create` | `COMPLETE` |
-| `6-done` | `task.md` | no — prints cleanup commands | `COMPLETE` |
+| `6-pr` | `pr.md` | only `git push` + `gh pr create` | `COMPLETE` |
+| `7-done` | `task.md` | no — prints cleanup commands | `COMPLETE` |
 
 Markers are HTML comments at end-of-file; the last one wins. The full vocabulary: `<!-- WAITING -->`, `<!-- COMPLETE -->`, `<!-- AGENT_WORKING pid=… started=… -->` (set while `claude -p` is running, replaced on exit), `<!-- ERROR reason=… -->`, plus the `4-execute`-only `EXECUTE_WAITING` / `EXECUTE_COMPLETE` / `EXECUTE_STALE`. `hive status` renders 🤖 on a live `AGENT_WORKING`, ⚠ on a stale one.
 
@@ -160,7 +160,7 @@ Override individual keys; deep-merge keeps the rest at defaults. Budgets are san
 - **`not a git repository`** — run `git init` first.
 - **`uncommitted modifications to tracked files`** at init — commit/stash tracked changes, or pass `hive init --force`. Untracked files alone don't block init.
 - **`plan.md missing`** in 4-execute — task didn't pass through `3-plan/`. Move it back, run plan, then forward again.
-- **`no worktree pointer`** in 5-pr — task didn't pass through `4-execute/`. Move it back through execute first.
+- **`no worktree pointer`** in 6-pr — task didn't pass through `4-execute/`. Move it back through execute first.
 - **`worktree pointer present but worktree missing`** — `git -C <project> worktree prune`, delete `worktree.yml`, then re-run.
 - **`slug ... is ambiguous`** — the same slug exists in multiple projects or stages. Pass `--project <name>` for cross-project ambiguity, `--from <stage>` on workflow verbs, `--stage <stage>` on `run`/`findings`, or a full task folder path.
 - **`no finding with id=...`** — run `hive findings <slug>` again and use the IDs from the current review file. IDs are assigned by document order.

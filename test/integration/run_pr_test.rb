@@ -32,7 +32,7 @@ class RunPrTest < Minitest::Test
       Hive::Commands::Init.new(dir).call
     end
     slug = "fix-bug-260424-aaaa"
-    pr_dir = File.join(dir, ".hive-state", "stages", "5-pr", slug)
+    pr_dir = File.join(dir, ".hive-state", "stages", "6-pr", slug)
     FileUtils.mkdir_p(pr_dir)
     File.write(File.join(pr_dir, "plan.md"), "plan content")
     worktree_path = Dir.mktmpdir("wt-#{slug}-")
@@ -122,7 +122,7 @@ class RunPrTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         slug = "no-pointer-260424-aaaa"
-        pr_dir = File.join(dir, ".hive-state", "stages", "5-pr", slug)
+        pr_dir = File.join(dir, ".hive-state", "stages", "6-pr", slug)
         FileUtils.mkdir_p(pr_dir)
         _, err, status = with_captured_exit { Hive::Commands::Run.new(pr_dir).call }
         assert_equal 1, status

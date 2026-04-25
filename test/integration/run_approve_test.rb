@@ -304,7 +304,7 @@ class RunApproveTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
-        done = File.join(dir, ".hive-state", "stages", "6-done", slug)
+        done = File.join(dir, ".hive-state", "stages", "7-done", slug)
         FileUtils.mkdir_p(File.dirname(done))
         FileUtils.mv(inbox, done)
         write_marker(done, :complete)
@@ -467,14 +467,14 @@ class RunApproveTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
-        pr_dir = File.join(dir, ".hive-state", "stages", "5-pr", slug)
+        pr_dir = File.join(dir, ".hive-state", "stages", "6-pr", slug)
         FileUtils.mkdir_p(File.dirname(pr_dir))
         FileUtils.mv(inbox, pr_dir)
         write_marker(pr_dir, :complete)
 
         out, _err = capture_io { Hive::Commands::Approve.new(slug, json: true).call }
         payload = JSON.parse(out)
-        assert_equal "6-done", payload["to_stage_dir"]
+        assert_equal "7-done", payload["to_stage_dir"]
         assert_equal Hive::Schemas::NextActionKind::NO_OP, payload["next_action"]["kind"]
         assert_equal "final_stage", payload["next_action"]["reason"]
       end
@@ -579,7 +579,7 @@ class RunApproveTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
-        done = File.join(dir, ".hive-state", "stages", "6-done", slug)
+        done = File.join(dir, ".hive-state", "stages", "7-done", slug)
         FileUtils.mkdir_p(File.dirname(done))
         FileUtils.mv(inbox, done)
         write_marker(done, :complete)
@@ -590,7 +590,7 @@ class RunApproveTest < Minitest::Test
         payload = JSON.parse(out)
         assert_equal "FinalStageReached", payload["error_class"]
         assert_equal "final_stage", payload["error_kind"]
-        assert_equal "6-done", payload["stage"]
+        assert_equal "7-done", payload["stage"]
       end
     end
   end

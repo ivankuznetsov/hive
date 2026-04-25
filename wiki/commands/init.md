@@ -30,7 +30,7 @@ hive init [PROJECT_PATH] [--force]
    - `git worktree add --no-checkout --detach <path>/.hive-state <default_branch>`
    - `git -C .hive-state checkout --orphan hive/state`
    - `git rm -rf .` plus glob cleanup of any leftover dotfiles (preserving `.git`).
-   - Create `stages/{1-inbox,2-brainstorm,3-plan,4-execute,5-pr,6-done}/` with `.gitkeep` markers and `logs/.gitkeep`.
+   - Create `stages/{1-inbox,2-brainstorm,3-plan,4-execute,6-pr,7-done}/` with `.gitkeep` markers and `logs/.gitkeep`.
    - Initial commit `hive: bootstrap` on `hive/state`.
 2. **Render `<path>/.hive-state/config.yml`** from `templates/project_config.yml.erb`. Skipped if the file already exists.
 3. **Ignore `.hive-state/` on master** via `GitOps#add_hive_state_to_master_gitignore!`: appends `/.hive-state/` to `.gitignore` (idempotent), then commits `chore: ignore .hive-state worktree` on master.

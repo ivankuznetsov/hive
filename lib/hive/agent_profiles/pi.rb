@@ -18,18 +18,48 @@ module Hive
     # Source of truth: docs/notes/headless-agent-cli-matrix.md (pi column).
     # Verify pi is logged in to a provider. ~/.pi/agent/auth.json being
     # empty {} means the user hasn't run `pi` interactively to log in yet.
+    #
+    # Every error path translates to Hive::AgentError so the spawn_agent
+    # error contract holds for callers (who only rescue AgentError, not raw
+    # Errno or ArgumentError). Edge cases handled:
+    # - HOME unset → File.expand_path raises ArgumentError
+    # - auth.json unreadable (permissions, broken symlink) → File.read raises Errno::*
+    # - content is empty / whitespace / "{}" / has no real fields → not logged in
     PI_PREFLIGHT = -> {
-      auth_path = File.expand_path("~/.pi/agent/auth.json")
+      auth_path =
+        begin
+          File.expand_path("~/.pi/agent/auth.json")
+        rescue ArgumentError => e
+          raise Hive::AgentError,
+                "pi profile preflight failed: cannot resolve home directory (#{e.message}). " \
+                "Set $HOME or run `pi` interactively and log in to a provider."
+        end
+
       unless File.exist?(auth_path)
         raise Hive::AgentError,
               "pi profile preflight failed: #{auth_path} not found. " \
               "Run `pi` interactively and log in to a provider before using pi as a hive agent CLI."
       end
 
-      content = File.read(auth_path).strip
-      if content.empty? || content == "{}"
+      content =
+        begin
+          File.read(auth_path)
+        rescue SystemCallError => e
+          raise Hive::AgentError,
+                "pi profile preflight failed: cannot read #{auth_path} (#{e.class.name.split('::').last}: #{e.message})."
+        end
+
+      stripped = content.strip
+      # Treat anything that isn't a non-trivial JSON object as "not logged in".
+      # Whitespace, "{}", and JSON whose only content is whitespace all count
+      # as the empty case. Avoids depending on a specific upstream pi schema.
+      not_logged_in = stripped.empty? ||
+                      stripped == "{}" ||
+                      stripped.match?(/\A\{\s*\}\z/m)
+
+      if not_logged_in
         raise Hive::AgentError,
-              "pi profile preflight failed: no provider configured. " \
+              "pi profile preflight failed: no provider configured in #{auth_path}. " \
               "Run `pi` interactively and log in to a provider before using pi as a hive agent CLI."
       end
 

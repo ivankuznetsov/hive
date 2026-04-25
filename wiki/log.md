@@ -14,6 +14,41 @@ Append-only log of all wiki operations.
 
 **Pages updated:** `cli.md`, `commands/run.md`, `commands/status.md`, `commands/findings.md`, `modules/task_resolver.md`.
 
+## [2026-04-25T19:00:00Z] U11 + U12 ship — multi-CLI matrix + AgentProfile abstraction
+
+**Action:** Phase 0 of the 5-review-stage plan landed on `feat/5-review-stage`. Two units shipped:
+
+- **U11 (research spike):** Verified headless invocation contracts for `claude`, `codex`, `pi`, `opencode` across 13 dimensions. Output: `docs/notes/headless-agent-cli-matrix.md`. Outcome: claude + codex full-profile (in v1 default reviewer set); pi partial-profile-with-caveats (opt-in per project; no `--add-dir` equivalent → ADR-018 trust-model amendment pending); opencode dropped from v1 scope (no native CE plugin, per-spawn isolation requires temp-config writing).
+- **U12 (Agent refactor):** Replaced `Hive::Agent`'s class-level claude singleton with per-spawn `AgentProfile` data object. Three v1 profiles registered (claude/codex/pi). Backward compat: existing 4-execute / brainstorm / plan / pr stages keep working unchanged via default `profile: nil → :claude` lookup.
+
+**Key decisions:**
+- **Skill name correction:** actual CE skill is `ce-code-review`, not `ce-review` (corrected throughout the plan).
+- **Per-spawn nonce (ADR-019, pending wiki/decisions.md update):** each `Stages::Base.user_supplied_tag` call returns fresh `SecureRandom.hex(8)`. Closes ADR-008's per-process scope; SEC-1 attack surface (leaked nonce forging a sibling spawn's closing tag) is closed.
+- **Three status_detection_modes:** `:state_file_marker` (claude — agent writes marker), `:exit_code_only` (CI-fix), `:output_file_exists` (reviewer/triage — exit 0 + named file present).
+- **Pi profile is registered but flagged ADR-008-weakened:** no `--add-dir` equivalent, no permission gate. `Stages::Base.spawn_agent` writes `<task>/logs/isolation-warnings.log` when a profile without `add_dir_flag` is spawned with non-empty `add_dirs`. Hive's own default reviewer set ships claude + codex only.
+
+**Code review (ce-code-review run `20260425-b80fcfc5`):** 9 reviewer personas; 1 P0 + 5 P1 + 6 P2 + 8 P3 = 20 findings. LFG dispatch applied 12 safe_auto fixes:
+- Pi preflight robustness (#3): 3 failure paths tested; raw `Errno::*` and `ArgumentError` translate to `Hive::AgentError`.
+- check_version! Open3.capture3 timeout (#4): 10s cap prevents hangs on credential-prompting wrappers.
+- warn_isolation_reduced (#10): tests added; non-Array `add_dirs` raises `ArgumentError` (#20).
+- spawn_agent direct tests (#11): default-profile, preflight-ordering, isolation-warning trigger.
+- Cross-spawn nonce isolation property test (#12): asserts SEC-1 property, not just "different strings".
+- prompt_injection_test cleanup (#18): dead `@user_supplied_tag` ivar manipulation removed.
+- Maintainability: `DEFAULT_BIN` removed (#13), `extra_flags` folded into `output_format_flags` (#14), lazy-block registration path dropped (#16), dead nil-guards removed (#17).
+- This wiki/log entry (#5).
+
+**Deferred from review (residual actionable work for follow-up units):**
+- #1 P0: Pi `--tools read,edit,write` allowlist for reviewer mode → lands with U2 (per-role config).
+- #2 P1: stale `expected_output` invalidation → folds into U4 reviewer adapter.
+- #6 P1: `wiki/modules/agent.md` rewrite → folds into U10 wiki update.
+- #8 P2: `wiki/cli.md` stage + commit → small, lands with this wiki/log entry.
+
+**Skipped (deliberate, not bugs):** #7 P2 stale version cache mid-binary-swap (accepted), #9 P2 `Hive::Agent.bin` BC shim policy (keep until callers routed), #15 P3 `skill_syntax_format` (will wire in U4), #19 P3 `reset_for_tests!` placement (fine under serial Minitest).
+
+**Code:** `feat/5-review-stage` branch. 194 tests passing, rubocop clean.
+
+**Wiki pages updated:** `wiki/cli.md` (AgentProfile-aware authentication line); this entry. Larger pass (`wiki/modules/agent.md`, `wiki/decisions.md` ADR-014–019, `wiki/architecture.md`) deferred to U10.
+
 ## [2026-04-25T18:00:00Z] brainstorm: 5-review stage
 
 **Action:** Captured requirements for splitting 4-execute into impl-only + a new 5-review stage that runs CI-fix → multi-reviewer (parallel) → auto-triage → fix → browser-test as a fully autonomous loop. Renumbers pr/done.

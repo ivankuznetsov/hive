@@ -226,4 +226,58 @@ class FindingsTest < Minitest::Test
     assert_equal 12, Hive::Findings.pass_from_path("ce-review-12.md")
     assert_nil Hive::Findings.pass_from_path("not-a-review.md")
   end
+
+  # Headings and finding-shaped lines inside a fenced code block are
+  # content (e.g. an example in justification), not structure. Skipping
+  # them in the parser closes a latent bug where a future reviewer
+  # template that emits fenced examples would silently produce phantom
+  # findings or carry-over the wrong severity.
+  def test_fenced_code_block_lines_are_ignored_by_parser
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "ce-review-06.md")
+      File.write(path, <<~MD)
+        ## High
+        - [ ] real high finding: production code
+
+        Example reviewer output that mentions a checkbox in fenced code:
+
+        ```
+        ## High
+        - [ ] this is example text inside a fence, not a finding
+        - [x] also example, definitely not accepted
+        ```
+
+        ## Medium
+        - [ ] real medium finding: keep me
+      MD
+
+      doc = Hive::Findings::Document.new(path)
+      assert_equal 2, doc.findings.size,
+                   "fenced-block lines must not register as findings"
+      assert_equal "high", doc.findings[0].severity
+      assert_equal "real high finding", doc.findings[0].title
+      assert_equal "medium", doc.findings[1].severity,
+                   "fenced ## High must not leak severity into the next real heading"
+      assert_equal "real medium finding", doc.findings[1].title
+    end
+  end
+
+  def test_tilde_fenced_code_block_also_ignored
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "ce-review-07.md")
+      File.write(path, <<~MD)
+        ## High
+        - [ ] real: yes
+
+        ~~~
+        - [ ] tilde-fenced example
+        ~~~
+
+        - [ ] another real one: post-fence
+      MD
+
+      doc = Hive::Findings::Document.new(path)
+      assert_equal 2, doc.findings.size
+    end
+  end
 end

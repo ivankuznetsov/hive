@@ -1,4 +1,5 @@
 require "fileutils"
+require "securerandom"
 
 module Hive
   # Parser + writer for the `reviews/ce-review-NN.md` finding files written
@@ -19,6 +20,10 @@ module Hive
     # justification body, and the trailing line ending separately so the
     # writer can preserve `\n` vs `\r\n` when rebuilding the line.
     FINDING_RE = /\A(\s*-\s+)\[([ xX])\]\s+(.*?)([\r\n]*)\z/
+    # Triple-backtick fence (and triple-tilde for completeness). Tracked
+    # so a `## High` or `- [ ] foo` *inside* a fenced code block doesn't
+    # accidentally register as a heading or a finding.
+    FENCE_RE = /\A\s*(?:```|~~~)/
 
     # Parses a review file into a list of `Finding` records. Preserves the
     # raw line array so writes can flip a single checkbox character without
@@ -58,9 +63,12 @@ module Hive
 
       # Atomic write: tempfile + rename. The reviewer agent might be
       # editing this file too in some failure modes, so we go through the
-      # same tempfile + rename pattern Hive::Markers uses.
+      # same tempfile + rename pattern Hive::Markers uses. The PID-plus-
+      # random-suffix tempfile name defends against PID reuse: if a prior
+      # process crashed between write and rename, leaving `.tmp.<pid>`
+      # stale, a new process with the same PID won't collide.
       def write!
-        tmp = "#{@path}.tmp.#{Process.pid}"
+        tmp = "#{@path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
         File.write(tmp, @lines.join)
         File.rename(tmp, @path)
       ensure
@@ -89,8 +97,18 @@ module Hive
 
       def parse_lines(lines)
         current_severity = nil
+        in_fence = false
         next_id = 1
         lines.each_with_index.filter_map do |line, idx|
+          if FENCE_RE.match?(line)
+            in_fence = !in_fence
+            next nil
+          end
+          # Inside a fenced code block, headings and finding-shaped lines
+          # are content, not structure — skip them so a `## High` or a
+          # `- [ ] foo` example in justification can't false-positive.
+          next nil if in_fence
+
           if (m = SEVERITY_HEADING_RE.match(line))
             # Any `##` heading resets severity; a non-canonical heading
             # (e.g. `## Detailed Analysis`) clears it instead of leaking

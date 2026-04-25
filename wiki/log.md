@@ -269,11 +269,31 @@ Append-only log of all wiki operations.
 - Adversarial reviewer's `path_target?` containment concern — same behaviour as `approve.rb`'s, intentional.
 - Maintainability reviewer's "premature TaskResolver extraction" framing — 4 consumers and the realpath/ambiguity rules are exactly the kind of thing that benefits from one source of truth.
 
-**Findings deferred (P3, separate PRs):**
+## [2026-04-26T00:30:00Z] hive findings — P3 follow-ups (rollback abstraction, fence awareness, tempfile uniqueness)
 
-- Pattern duplication between `Approve#record_commit_or_rollback!` and `FindingToggle#write_and_commit_change` — both implement the same conceptual rollback-on-commit-failure pattern. A `Hive::CommitOrRollback.run(do_undo:)` extraction would centralise the contract for the next command that needs it.
-- Tempfile-naming collision under PID reuse (`findings.rb`) — defer; not a hot path.
-- Fenced-code-block awareness in `parse_lines` — current reviewer prompt doesn't emit fenced blocks containing `## High` headings; defer until the prompt changes.
+**Driver:** Closing the three deferred P3 items from the round-2 review entry above. All three landed together so the rollback contract is consistent across approve and the finding commands.
+
+**Code changes:**
+
+- **`Hive::CommitOrRollback.attempt!` helper** (`lib/hive/commit_or_rollback.rb`, new): consolidates the dual-rescue rollback pattern shared by `Hive::Commands::Approve#attempt_rollback!` and `Hive::Commands::FindingToggle#rollback_review_change!`. The helper owns the rescue + re-raise contract: on undo success, it re-raises the original typed `Hive::Error` (preserving exit codes like `GitError → 70`) or wraps non-typed errors in a generic `Hive::Error`; on undo failure, it raises `Hive::RollbackFailed` carrying both the original cause and the rollback failure. Caller-specific concerns (approve's "source path now exists" precondition, the message templates) stay in the caller. ~30 LOC of duplication removed across the two callers.
+- **`Hive::RollbackFailed`** (`lib/hive.rb`, new): typed exception (exit 1 / GENERIC) so the JSON envelope can surface `error_kind: "rollback_failed"`. Lets agents distinguish "commit failed but rollback succeeded → safe to retry" from "commit failed AND rollback failed → fs/git may be inconsistent." Both `hive-findings` and `hive-approve` schemas gained `rollback_failed` in the `error_kind` enum; both commands' `error_kind_for` map the new class.
+- **Fenced-code-block awareness** (`Hive::Findings::Document#parse_lines`): triple-backtick / triple-tilde fence tracking. Lines inside a fenced block don't register as headings or findings, so an example finding-shaped line in a reviewer's justification block can't false-positive. Closes a latent bug that would surface as soon as the reviewer prompt template emits fenced examples.
+- **Tempfile uniqueness** (`Hive::Findings::Document#write!`, `Hive::Lock.update_task_lock`): tempfile names now append `SecureRandom.hex(4)` to the `Process.pid` suffix. Defends against PID reuse-after-crash where a new process with the same PID would otherwise collide on a stale tempfile path.
+
+**Refactors:**
+
+- `Hive::Commands::Approve#attempt_rollback!` now delegates to the helper. The "source path now exists, can't roll back" precondition stays at the caller; the typed-vs-generic re-raise contract moves to the helper.
+- `Hive::Commands::FindingToggle#rollback_review_change!` collapses to the same helper-call shape. Identical contract; only the on_undo block (binwrite + git reset) and message lambdas differ.
+
+**Tests:** 5 new unit tests, 191/758 green (was 186/735). RuboCop clean.
+
+- `test/unit/commit_or_rollback_test.rb` (new) — pins the three helper paths: typed re-raise on undo success, generic wrap on undo success with non-typed original, RollbackFailed on undo failure.
+- `test_fenced_code_block_lines_are_ignored_by_parser` — backtick fences with `## High` and `- [ ] foo` content; asserts only real findings are parsed.
+- `test_tilde_fenced_code_block_also_ignored` — `~~~` fences too.
+- `test_error_subclasses_map_to_their_contract_code` updated to pin `RollbackFailed` exit code.
+- Both `hive-findings` and `hive-approve` `test_*_error_kinds_match_producer*` tests updated to include `rollback_failed`.
+
+**Wiki:** No new pages this round (the helper module is small and consumer-focused; documenting it inline in the source comment is sufficient). CHANGELOG covers the user-facing surface.
 - `test_commit_failure_rolls_mv_back_to_source` — installs a real `pre-commit` hook that exits 1, asserts mv reverses, exit 70 (GitError), and source restored.
 - `test_rollback_failure_surfaces_combined_error_message` — pre-commit hook recreates the source path so rollback can't proceed; asserts the combined "rollback NOT possible / manual recovery" message branch.
 - `test_json_error_envelope_on_from_mismatch_carries_wrong_stage_kind` — exercises the JSON error envelope on a `--from` mismatch with `--json`.

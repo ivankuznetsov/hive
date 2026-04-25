@@ -6,6 +6,7 @@ require "hive/findings"
 require "hive/task_resolver"
 require "hive/lock"
 require "hive/git_ops"
+require "hive/commit_or_rollback"
 
 module Hive
   module Commands
@@ -150,38 +151,27 @@ module Hive
         ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?
       end
 
-      # Restore the review file's pre-toggle bytes and unstage the
-      # aborted change. Two failure paths:
-      #   1. Rollback succeeds → re-raise the original error so the
-      #      contract exit code (e.g. GitError → 70) is preserved.
-      #   2. Rollback ITSELF fails (binwrite EACCES, git reset failure)
-      #      → raise a combined Hive::Error with both the original cause
-      #      and the rollback failure.
-      # The previous shape used a method-level rescue that caught the
-      # intentional re-raise on path 1 and falsely reported "rollback
-      # ALSO failed". The flat begin/rescue below makes the success path
-      # impossible to mis-classify because the re-raise leaves the method
-      # without re-entering any rescue.
       def rollback_review_change!(task, review_path, original, original_error)
         rel = review_path.sub("#{task.hive_state_path}/", "")
-        begin
-          File.binwrite(review_path, original)
-          ops = Hive::GitOps.new(task.project_root)
-          ops.run_git!("-C", task.hive_state_path, "reset", "--", rel)
-        rescue StandardError => rollback_error
-          raise Hive::Error,
-                "finding toggle aborted AND rollback failed. " \
-                "review file: #{review_path}. " \
-                "commit error: #{original_error.class}: #{original_error.message}. " \
-                "rollback error: #{rollback_error.class}: #{rollback_error.message}"
-        end
+        ops = Hive::GitOps.new(task.project_root)
 
-        # Rollback succeeded. Preserve the typed exit code when possible.
-        raise original_error if original_error.is_a?(Hive::Error)
-
-        raise Hive::Error,
-              "finding toggle aborted; review file rolled back. " \
-              "underlying: #{original_error.class}: #{original_error.message}"
+        Hive::CommitOrRollback.attempt!(
+          original_error,
+          on_undo: lambda do
+            File.binwrite(review_path, original)
+            ops.run_git!("-C", task.hive_state_path, "reset", "--", rel)
+          end,
+          rolled_back_message: lambda do |e|
+            "finding toggle aborted; review file rolled back. " \
+              "underlying: #{e.class}: #{e.message}"
+          end,
+          rollback_failed_message: lambda do |orig, rb|
+            "finding toggle aborted AND rollback failed. " \
+              "review file: #{review_path}. " \
+              "commit error: #{orig.class}: #{orig.message}. " \
+              "rollback error: #{rb.class}: #{rb.message}"
+          end
+        )
       end
 
       def emit_report(task, review_path, doc, target_ids, changes)
@@ -255,6 +245,7 @@ module Hive
         when Hive::NoReviewFile then "no_review_file"
         when Hive::UnknownFinding then "unknown_finding"
         when Hive::NoSelection then "no_selection"
+        when Hive::RollbackFailed then "rollback_failed"
         when Hive::InvalidTaskPath then "invalid_task_path"
         else "error"
         end

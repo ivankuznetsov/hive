@@ -259,4 +259,16 @@ module Hive
       ExitCodes::USAGE
     end
   end
+
+  # A rollback attempt itself failed after a commit failure. Distinct
+  # from a plain Hive::Error so the agent contract can differentiate:
+  # a typed re-raise (commit failed but rollback succeeded → fs and git
+  # are pristine; safe to retry) from this class (commit failed AND
+  # rollback failed → fs/git may be inconsistent; manual intervention
+  # required before retry).
+  class RollbackFailed < Error
+    def exit_code
+      ExitCodes::GENERIC
+    end
+  end
 end

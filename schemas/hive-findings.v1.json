@@ -119,6 +119,7 @@
             "no_review_file",
             "unknown_finding",
             "no_selection",
+            "rollback_failed",
             "invalid_task_path",
             "error"
           ]

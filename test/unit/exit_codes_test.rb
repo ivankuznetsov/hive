@@ -35,6 +35,7 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE,               Hive::UnknownFinding.new("x", id: 1).exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoSelection.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::InternalError.new("x").exit_code
+    assert_equal Hive::ExitCodes::GENERIC,             Hive::RollbackFailed.new("x").exit_code
   end
 
   # The `schema_version` emit sites in run.rb / status.rb / approve.rb call

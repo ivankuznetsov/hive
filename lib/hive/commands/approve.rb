@@ -8,6 +8,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/git_ops"
 require "hive/stages"
+require "hive/commit_or_rollback"
 
 module Hive
   module Commands
@@ -268,31 +269,31 @@ module Hive
       end
 
       def attempt_rollback!(task, new_folder, original_error)
-        if new_folder && File.directory?(new_folder) && !File.exist?(task.folder)
-          begin
-            FileUtils.mv(new_folder, task.folder)
-          rescue StandardError => rollback_err
-            raise Hive::Error,
-                  "approve aborted AND rollback failed. " \
-                  "task is at #{new_folder}, original was #{task.folder}. " \
-                  "commit error: #{original_error.class}: #{original_error.message}. " \
-                  "rollback error: #{rollback_err.class}: #{rollback_err.message}"
-          end
-
-          # If the underlying error was a typed Hive::Error, re-raise it
-          # so the contract exit code (e.g. GitError → 70) is preserved
-          # rather than collapsed to GENERIC (1).
-          raise original_error if original_error.is_a?(Hive::Error)
-
+        # The pre-condition check stays in this caller — the helper only
+        # owns the rescue + re-raise contract. If the source path now
+        # exists, an undo would clobber it; surface a manual-recovery
+        # error instead of attempting and failing.
+        unless new_folder && File.directory?(new_folder) && !File.exist?(task.folder)
           raise Hive::Error,
-                "approve aborted; mv rolled back to #{task.folder}. " \
+                "approve aborted but rollback NOT possible (source path now exists); " \
+                "manual recovery: task is at #{new_folder}, original was #{task.folder}. " \
                 "underlying: #{original_error.class}: #{original_error.message}"
         end
 
-        raise Hive::Error,
-              "approve aborted but rollback NOT possible (source path now exists); " \
-              "manual recovery: task is at #{new_folder}, original was #{task.folder}. " \
-              "underlying: #{original_error.class}: #{original_error.message}"
+        Hive::CommitOrRollback.attempt!(
+          original_error,
+          on_undo: -> { FileUtils.mv(new_folder, task.folder) },
+          rolled_back_message: lambda do |e|
+            "approve aborted; mv rolled back to #{task.folder}. " \
+              "underlying: #{e.class}: #{e.message}"
+          end,
+          rollback_failed_message: lambda do |orig, rb|
+            "approve aborted AND rollback failed. " \
+              "task is at #{new_folder}, original was #{task.folder}. " \
+              "commit error: #{orig.class}: #{orig.message}. " \
+              "rollback error: #{rb.class}: #{rb.message}"
+          end
+        )
       end
 
       # ── Reporting ───────────────────────────────────────────────────────
@@ -374,6 +375,7 @@ module Hive
         when Hive::DestinationCollision then "destination_collision"
         when Hive::FinalStageReached then "final_stage"
         when Hive::WrongStage then "wrong_stage"
+        when Hive::RollbackFailed then "rollback_failed"
         when Hive::InvalidTaskPath then "invalid_task_path"
         else "error"
         end

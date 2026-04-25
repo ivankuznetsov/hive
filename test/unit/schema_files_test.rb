@@ -48,7 +48,7 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage invalid_task_path error
+      wrong_stage rollback_failed invalid_task_path error
     ].sort
 
     assert_equal producer_kinds, schema_kinds,
@@ -104,7 +104,7 @@ class SchemaFilesTest < Minitest::Test
     schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
     producer_kinds = %w[
       ambiguous_slug no_review_file unknown_finding no_selection
-      invalid_task_path error
+      rollback_failed invalid_task_path error
     ].sort
     assert_equal producer_kinds, schema_kinds
   end

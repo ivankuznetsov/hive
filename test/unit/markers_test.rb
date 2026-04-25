@@ -98,4 +98,141 @@ class MarkersTest < Minitest::Test
       assert_equal :waiting, state.name, "terminal marker must win even with stale AGENT_WORKING above"
     end
   end
+
+  # --- REVIEW_* markers (U3) ---------------------------------------------
+
+  # The 5-review stage's state machine carries six new markers. Each must
+  # round-trip through set/current with attributes intact. KNOWN_NAMES and
+  # MARKER_RE are two sources of truth — these tests exercise both at once
+  # by writing via set (validates KNOWN_NAMES) and reading via current
+  # (validates MARKER_RE).
+
+  def test_review_working_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_working, phase: :ci, pass: 1)
+      state = Hive::Markers.current(file)
+      assert_equal :review_working, state.name
+      assert_equal "ci", state.attrs["phase"]
+      assert_equal "1", state.attrs["pass"]
+    end
+  end
+
+  def test_review_waiting_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_waiting, escalations: 3, pass: 2)
+      state = Hive::Markers.current(file)
+      assert_equal :review_waiting, state.name
+      assert_equal "3", state.attrs["escalations"]
+      assert_equal "2", state.attrs["pass"]
+    end
+  end
+
+  def test_review_ci_stale_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_ci_stale, attempts: 3)
+      state = Hive::Markers.current(file)
+      assert_equal :review_ci_stale, state.name
+      assert_equal "3", state.attrs["attempts"]
+    end
+  end
+
+  def test_review_stale_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_stale, pass: 4)
+      state = Hive::Markers.current(file)
+      assert_equal :review_stale, state.name
+      assert_equal "4", state.attrs["pass"]
+    end
+  end
+
+  def test_review_complete_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_complete, pass: 3, browser: :passed)
+      state = Hive::Markers.current(file)
+      assert_equal :review_complete, state.name
+      assert_equal "3", state.attrs["pass"]
+      assert_equal "passed", state.attrs["browser"]
+    end
+  end
+
+  def test_review_error_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_error, phase: :reviewers, reason: "all_failed")
+      state = Hive::Markers.current(file)
+      assert_equal :review_error, state.name
+      assert_equal "reviewers", state.attrs["phase"]
+      assert_equal "all_failed", state.attrs["reason"]
+    end
+  end
+
+  # ADR-005 last-marker-wins rule: writing REVIEW_WORKING phase=triage over
+  # an existing REVIEW_WORKING phase=reviewers leaves only the new one as
+  # the active marker. set replaces the LAST marker in the file (per
+  # replace_last_marker), so a transient phase update doesn't accumulate.
+  def test_review_working_phase_update_overwrites_previous
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_working, phase: :reviewers, pass: 1)
+      Hive::Markers.set(file, :review_working, phase: :triage, pass: 1)
+      content = File.read(file)
+      assert_includes content, "<!-- REVIEW_WORKING phase=triage pass=1 -->"
+      refute_includes content, "<!-- REVIEW_WORKING phase=reviewers pass=1 -->",
+                      "previous transient marker must be replaced, not accumulated"
+      state = Hive::Markers.current(file)
+      assert_equal :review_working, state.name
+      assert_equal "triage", state.attrs["phase"]
+    end
+  end
+
+  # The orchestrator-owns-terminal-marker rule (ADR-005) means a transient
+  # REVIEW_WORKING is replaced by the terminal marker when the phase
+  # finalizes. Verify the transition from REVIEW_WORKING phase=fix to
+  # REVIEW_WAITING (a typical "found escalations" outcome).
+  def test_review_working_to_review_waiting_transition
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, :review_working, phase: :fix, pass: 2)
+      Hive::Markers.set(file, :review_waiting, escalations: 1, pass: 2)
+      state = Hive::Markers.current(file)
+      assert_equal :review_waiting, state.name
+      assert_equal "1", state.attrs["escalations"]
+    end
+  end
+
+  # The current Markers.set replaces the LAST marker in the file. A noisy
+  # task.md (e.g., a stale AGENT_WORKING from the spawn followed by a
+  # REVIEW_WORKING the runner set) means set replaces the REVIEW_WORKING,
+  # not the AGENT_WORKING. Verify Markers.current still returns the last.
+  def test_review_complete_after_noisy_history
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, <<~MD)
+        <!-- AGENT_WORKING pid=999 started=2026-04-25T20:00Z -->
+
+        ## Implementation
+
+        <!-- REVIEW_WORKING phase=browser pass=2 -->
+      MD
+      Hive::Markers.set(file, :review_complete, pass: 2, browser: :passed)
+      state = Hive::Markers.current(file)
+      assert_equal :review_complete, state.name
+      assert_equal "2", state.attrs["pass"]
+      content = File.read(file)
+      assert_includes content, "<!-- AGENT_WORKING pid=999",
+                      "stale AGENT_WORKING must remain (set replaces only the last marker)"
+    end
+  end
+
+  def test_unknown_review_marker_name_raises
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      assert_raises(ArgumentError) { Hive::Markers.set(file, :review_typo) }
+    end
+  end
 end

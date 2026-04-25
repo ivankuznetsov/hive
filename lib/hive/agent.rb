@@ -1,14 +1,25 @@
 require "fileutils"
 require "json"
+require "open3"
 require "time"
+require "hive/agent_profiles"
 
 module Hive
   class Agent
+    # Backward compat: the `bin` reader is preserved at the class level so
+    # external callers that still ask for `Hive::Agent.bin` (without holding
+    # a profile) get the claude binary path. Production call sites all pass
+    # a profile via Stages::Base.spawn_agent. Tests historically stub
+    # ENV["HIVE_CLAUDE_BIN"] — the claude profile honors that env var, so
+    # the test pattern keeps working unchanged after the refactor.
     DEFAULT_BIN = "claude".freeze
 
-    attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec
+    attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
+                :profile, :expected_output
 
-    def initialize(task:, prompt:, max_budget_usd:, timeout_sec:, add_dirs: [], cwd: nil, log_label: nil)
+    def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
+                   add_dirs: [], cwd: nil, log_label: nil,
+                   profile: nil, expected_output: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -16,10 +27,18 @@ module Hive
       @max_budget_usd = max_budget_usd
       @timeout_sec = timeout_sec
       @log_label = log_label || task.stage_name
+      @profile = profile || Hive::AgentProfiles.lookup(:claude)
+      @expected_output = expected_output
     end
 
+    # Backward-compat class methods. Resolve to the claude profile so legacy
+    # call sites (Hive::Agent.bin, Hive::Agent.check_version!) keep working.
     def self.bin
-      ENV["HIVE_CLAUDE_BIN"] || DEFAULT_BIN
+      Hive::AgentProfiles.lookup(:claude).bin
+    end
+
+    def self.check_version!
+      Hive::AgentProfiles.lookup(:claude).check_version!
     end
 
     def run!
@@ -122,17 +141,34 @@ module Hive
       }
     end
 
+    # Build the argv for the configured profile.
+    #
+    # Order is fixed:
+    #   bin, headless_flag, permission_skip_flag (if any),
+    #   --add-dir <dir> repeated for each add_dir (if profile supports),
+    #   budget_flag <amount> (if profile supports),
+    #   output_format_flags...,
+    #   extra_flags...,
+    #   prompt
+    #
+    # The claude profile reproduces today's hardcoded argv exactly (verified
+    # by test/unit/agent_test.rb#test_args_include_dangerous_flag_and_add_dir
+    # and #test_argv_includes_verbose_when_stream_json which still pass after
+    # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
-      cmd = [ Agent.bin, "-p" ]
-      cmd << "--dangerously-skip-permissions"
-      @add_dirs.each do |d|
-        cmd << "--add-dir" << d
+      cmd = [ @profile.bin ]
+      cmd << @profile.headless_flag if @profile.headless_flag
+      cmd << @profile.permission_skip_flag if @profile.permission_skip_flag
+      if @profile.add_dir_flag
+        @add_dirs.each do |d|
+          cmd << @profile.add_dir_flag << d
+        end
       end
-      cmd << "--max-budget-usd" << @max_budget_usd.to_s
-      cmd << "--output-format" << "stream-json"
-      cmd << "--include-partial-messages"
-      cmd << "--verbose"
-      cmd << "--no-session-persistence"
+      if @profile.budget_flag && @max_budget_usd
+        cmd << @profile.budget_flag << @max_budget_usd.to_s
+      end
+      cmd.concat(@profile.output_format_flags) if @profile.output_format_flags
+      cmd.concat(@profile.extra_flags) if @profile.extra_flags
       cmd << @prompt
       cmd
     end
@@ -159,13 +195,38 @@ module Hive
       nil
     end
 
+    # Determine result[:status] from exit_code + profile.status_detection_mode.
+    #
+    # - :state_file_marker  — read marker from task.state_file (today's
+    #   claude behavior; the agent writes its terminal marker itself).
+    # - :exit_code_only     — exit 0 = :ok, anything else = :error. Used by
+    #   CI-fix style spawns where success is "the underlying command worked."
+    # - :output_file_exists — exit 0 AND expected_output present + non-empty
+    #   = :ok. Used by reviewer/triage spawns where a structured artifact
+    #   is the success criterion.
     def handle_exit(result)
       if result[:timed_out]
         Hive::Markers.set(@task.state_file, :error,
                           reason: "timeout",
                           timeout_sec: @timeout_sec)
         result[:status] = :timeout
-      elsif result[:exit_code].nil? || result[:exit_code].zero?
+        return
+      end
+
+      case @profile.status_detection_mode
+      when :state_file_marker
+        handle_exit_state_file_marker(result)
+      when :exit_code_only
+        handle_exit_exit_code_only(result)
+      when :output_file_exists
+        handle_exit_output_file_exists(result)
+      end
+    end
+
+    private
+
+    def handle_exit_state_file_marker(result)
+      if result[:exit_code].nil? || result[:exit_code].zero?
         # exit_code 0 = success; trust the marker the agent wrote.
         # exit_code nil = capture failed but child returned without timeout —
         # if no marker was written, that's a corrupted state, not silent OK.
@@ -184,6 +245,47 @@ module Hive
       end
     end
 
+    def handle_exit_exit_code_only(result)
+      if result[:exit_code] == 0
+        result[:status] = :ok
+      else
+        Hive::Markers.set(@task.state_file, :error,
+                          reason: "exit_code",
+                          exit_code: result[:exit_code])
+        result[:status] = :error
+      end
+    end
+
+    def handle_exit_output_file_exists(result)
+      if result[:exit_code] != 0
+        Hive::Markers.set(@task.state_file, :error,
+                          reason: "exit_code",
+                          exit_code: result[:exit_code])
+        result[:status] = :error
+        return
+      end
+
+      path = @expected_output
+      if path.nil? || path.to_s.empty?
+        Hive::Markers.set(@task.state_file, :error,
+                          reason: "missing_expected_output_path")
+        result[:status] = :error
+        result[:error_message] = "profile #{@profile.name} uses :output_file_exists but no expected_output was provided"
+        return
+      end
+
+      unless File.exist?(path) && File.size(path) > 0
+        Hive::Markers.set(@task.state_file, :error,
+                          reason: "missing_or_empty_output",
+                          path: path)
+        result[:status] = :error
+        result[:error_message] = "expected output file missing or empty: #{path}"
+        return
+      end
+
+      result[:status] = :ok
+    end
+
     def log_path
       ts = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
       File.join(@task.log_dir, "#{@log_label}-#{ts}.log")
@@ -192,27 +294,5 @@ module Hive
     def ensure_log_dir
       FileUtils.mkdir_p(@task.log_dir)
     end
-
-    def self.check_version!
-      cached = (@verified_versions ||= {})[bin]
-      return cached if cached
-
-      out, _err, status = Open3.capture3(bin, "--version")
-      raise AgentError, "claude binary not runnable: #{bin}" unless status.success?
-
-      version = out[/\d+\.\d+\.\d+/]
-      raise AgentError, "could not parse claude --version output: #{out.inspect}" unless version
-
-      compare = version_tuple(version) <=> version_tuple(Hive::MIN_CLAUDE_VERSION)
-      raise AgentError, "claude #{version} below minimum #{Hive::MIN_CLAUDE_VERSION}" if compare.nil? || compare.negative?
-
-      @verified_versions[bin] = version
-    end
-
-    def self.version_tuple(version_string)
-      version_string.split(".").map(&:to_i)
-    end
   end
 end
-
-require "open3"

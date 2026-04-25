@@ -2,6 +2,39 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-25T21:00:00Z] U6 ship — Auto-triage step + courageous/safetyist prompts
+
+**Action:** Phase 2's second primitive. Reads every `reviews/<*>-<pass>.md` produced by U4's reviewers, hands them to a triage agent (configured via `review.triage.agent`), and expects the agent to (a) edit each file in place adding `[x]` on auto-fix items + `<!-- triage: <reason> -->` annotations, and (b) write `reviews/escalations-<pass>.md` listing only the still-`[ ]` items grouped by source-reviewer. The U9 runner uses `escalations.md` to decide between `REVIEW_WAITING` (escalations remain) and Phase 4 (fix `[x]` items).
+
+**Code:**
+- `lib/hive/stages/review/triage.rb` — `Triage.run!(cfg:, ctx:)` entry point. Discovers reviewer files for `ctx.pass` (excluding `escalations-NN.md` itself), resolves the bias preset or custom prompt, renders, spawns via `Stages::Base.spawn_agent` with `status_mode: :output_file_exists` keyed on `escalations-NN.md`. SHA-256 protected-files check (plan.md, worktree.yml, task.md) wraps the spawn — tampering yields `:tampered` status with the offending file list (per ADR-013-style guarding).
+- `templates/triage_courageous.md.erb` — default action-biased preset. Encodes origin R9 rules: auto-fix polish/clarity/dead-code/doc/lint/missing-tests/simple-bug/perf-with-mechanism/security-with-known-pattern. Escalate only architecture / auth / data-integrity / contradictions / low-confidence. Explicit instruction "do NOT postpone polishes" per the user's stated frustration.
+- `templates/triage_safetyist.md.erb` — escalation-biased opt-in. Auto-fix only the truly mechanical (typos, lint, dead code, doc); escalate everything else by default. For projects where the human gate matters more than throughput.
+- Custom prompt path resolution: `cfg.review.triage.custom_prompt` (a basename relative to `<.hive-state>/templates/`) overrides the bias-preset selection. Path-escape attempts (`../`, absolute path, missing file, symlink to outside) raise `Hive::ConfigError`. Resolved via `File.realpath` + prefix check.
+- Empty-reviewer-files path: when no reviewer files exist for the current pass, `Triage.run!` skips the agent spawn entirely and writes a sentinel `# Escalations for pass NN — _No reviewer findings ..._` doc. Lets the U9 runner branch deterministically.
+
+**Key decisions:**
+- **Per-spawn nonce wrapping (ADR-019) carries over.** Each reviewer file's content is wrapped in its own `<user_supplied_<nonce> content_type="reviewer_md" path="...">` block. The same nonce is shared across blocks within ONE triage spawn but is fresh per spawn — a hostile reviewer file containing `</user_supplied>` cannot escape the wrapper because the per-spawn nonce is unguessable.
+- **Reviewer files are NOT in the protected-set.** Triage's *job* is to edit them in place. Only plan.md / worktree.yml / task.md are SHA-checked.
+- **`status_mode: :output_file_exists`** keyed on `escalations-<pass>.md`. Combined with U4's per-spawn mode override, the orchestrator's `REVIEW_WORKING phase=triage` marker survives the triage spawn (no `:agent_working` clobber).
+- **Prompt content lives in templates, not in code.** Future bias presets can land as additional templates without touching `triage.rb`.
+
+**Tests (+10):**
+- Empty reviewer files → sentinel escalations doc + `:ok`.
+- Courageous mode: prompt mentions "courageous mode", references reviewer file paths and the escalations target, includes per-spawn nonce wrapper.
+- Safetyist mode: prompt mentions "safetyist mode", does NOT mention "courageous mode".
+- Custom prompt: user-supplied template at `<.hive-state>/templates/triage_custom.md.erb` is rendered; preset content is absent from the prompt.
+- Custom prompt path-escape (`../../../etc/passwd`) raises `ConfigError`.
+- Custom prompt missing file raises `ConfigError`.
+- Unknown bias preset (`yolo`) raises `ConfigError`.
+- SHA-256 protected files: a tampering fake-claude that mutates `plan.md` is caught — `:tampered` status with `tampered_files: ["plan.md"]`.
+- Missing escalations output → `:error` with "missing or empty" in error_message.
+- `discover_reviewer_files` excludes `escalations-NN.md` and other-pass reviewer files.
+
+241 tests passing (was 231). Rubocop clean.
+
+**Wiki pages updated:** this entry. Larger pass (`wiki/stages/review.md` new page) deferred to U10.
+
 ## [2026-04-25T20:30:00Z] U4 ship — Reviewer adapter abstraction (agent-only in v1)
 
 **Action:** Phase 2's first primitive. Common interface for "anything that produces `reviews/<name>-<pass>.md`" so the 5-review runner's per-reviewer loop is shape-uniform across reviewer types. Plus a per-spawn `status_mode:` override on `Hive::Agent` so the same claude binary serves both `:state_file_marker` mode (4-execute) and `:output_file_exists` mode (reviewer adapter) — the orchestrator's `REVIEW_WORKING` marker now survives each reviewer's spawn.

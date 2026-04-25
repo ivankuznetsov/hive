@@ -1,0 +1,7 @@
+---
+# Global hive config — auto-managed; edit only if you know what you're doing.
+registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
+<% registered_projects.each do |p| %>  - name: <%= p["name"] %>
+    path: <%= p["path"] %>
+    hive_state_path: <%= p["hive_state_path"] %>
+<% end %>

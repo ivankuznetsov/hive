@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Minimal fake claude for tests. Captures argv, optionally writes content
+# to the state file, exits with HIVE_FAKE_CLAUDE_EXIT (default 0).
+set -u
+
+LOG_DIR="${HIVE_FAKE_CLAUDE_LOG_DIR:-/tmp}"
+mkdir -p "$LOG_DIR"
+ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"
+{
+  echo "---"
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+  echo "cwd=$(pwd)"
+  for a in "$@"; do
+    printf 'arg=%s\n' "$a"
+  done
+} >> "$ARGV_LOG"
+
+if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
+  printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_WRITE_FILE:-}" && -n "${HIVE_FAKE_CLAUDE_WRITE_CONTENT:-}" ]]; then
+  printf '%s' "${HIVE_FAKE_CLAUDE_WRITE_CONTENT}" > "${HIVE_FAKE_CLAUDE_WRITE_FILE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_HANG:-}" ]]; then
+  sleep "${HIVE_FAKE_CLAUDE_HANG}"
+fi
+
+exit "${HIVE_FAKE_CLAUDE_EXIT:-0}"

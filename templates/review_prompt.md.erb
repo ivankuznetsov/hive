@@ -1,0 +1,37 @@
+You are running the review pass of stage 4-execute for project <%= project_name %>.
+
+Worktree (cwd): <%= worktree_path %>
+Task folder (--add-dir): <%= task_folder %>
+Default branch (compare against): <%= default_branch %>
+Pass: <%= pass %>
+
+Behavior:
+
+1. Use the `/compound-engineering:ce-review` skill on the diff
+   `git diff <%= default_branch %>..HEAD` in the current worktree.
+2. Output structured findings to <%= task_folder %>/reviews/ce-review-<%= "%02d" % pass %>.md
+   using GFM checkboxes grouped by severity:
+
+   ```
+   ## High
+   - [ ] <finding>: <one-line justification>
+
+   ## Medium
+   - [ ] <finding>: <one-line justification>
+
+   ## Nit
+   - [ ] <finding>: <one-line justification>
+   ```
+
+   Use `[ ]` (unchecked) for every finding. The user will tick `[x]` for the
+   ones they want addressed in the next pass.
+3. Do not modify any code file in the worktree.
+4. Do not edit `<%= task_folder %>/plan.md`, `<%= task_folder %>/task.md`,
+   or `<%= task_folder %>/worktree.yml`.
+5. After writing the review file, write to <%= task_folder %>/task.md a
+   trailing marker:
+   - `<!-- EXECUTE_WAITING findings_count=N pass=<%= pass %> -->` if there
+     are 1 or more findings.
+   - `<!-- EXECUTE_COMPLETE pass=<%= pass %> -->` if there are 0 findings.
+
+   Update the `pass:` value in task.md frontmatter to <%= pass %>.

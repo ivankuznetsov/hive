@@ -1,0 +1,13 @@
+/.bundle/
+/vendor/bundle/
+/tmp/
+*.gem
+.byebug_history
+/coverage/
+/.qmd/
+# Runtime registry of installed projects — machine-specific, not source.
+# See config.example.yml for the schema.
+/config.yml
+# Per-developer Claude Code config and Codex CLI marker.
+/.claude/
+/.codex

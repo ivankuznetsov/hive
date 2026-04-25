@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Minimal fake gh for tests. Reads scenario from HIVE_FAKE_GH_SCENARIO env.
+set -u
+
+LOG_DIR="${HIVE_FAKE_GH_LOG_DIR:-/tmp}"
+mkdir -p "$LOG_DIR"
+ARGV_LOG="${LOG_DIR}/fake-gh-argv.log"
+{
+  echo "---"
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+  for a in "$@"; do
+    printf 'arg=%s\n' "$a"
+  done
+} >> "$ARGV_LOG"
+
+case "${1:-}" in
+  auth)
+    case "${2:-}" in
+      status) exit "${HIVE_FAKE_GH_AUTH_EXIT:-0}" ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "${2:-}" in
+      list)
+        if [[ -n "${HIVE_FAKE_GH_PR_EXISTS:-}" ]]; then
+          printf '[{"url":"https://example.com/pr/1","number":1}]\n'
+        else
+          printf '[]\n'
+        fi
+        exit 0
+        ;;
+      create)
+        printf 'https://example.com/pr/2\n'
+        exit "${HIVE_FAKE_GH_CREATE_EXIT:-0}"
+        ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac

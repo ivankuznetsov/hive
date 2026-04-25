@@ -1,0 +1,12 @@
+---
+slug: <%= slug %>
+created_at: <%= created_at %>
+original_text: |
+  <%= original_text.lines.map { |l| "  " + l.chomp }.join("\n").strip %>
+---
+
+# <%= slug %>
+
+<%= original_text %>
+
+<!-- WAITING -->

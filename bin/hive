@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "hive"
+require "hive/cli"
+
+begin
+  Hive::CLI.start(ARGV)
+rescue Hive::Error => e
+  warn "hive: #{e.message}"
+  exit(e.respond_to?(:exit_code) ? e.exit_code : 1)
+end

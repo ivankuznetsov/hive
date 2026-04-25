@@ -146,9 +146,26 @@ timeout_sec:
   execute_implementation: 2700
   execute_review: 600
   pr: 300
+  review_ci: 600
+  review_triage: 300
+  review_fix: 2700
+  review_browser: 900
+agents:                 # per-CLI profile overrides (claude, codex, pi)
+  claude: { bin: claude, env_override: HIVE_CLAUDE_BIN, min_version: 2.1.118 }
+  codex:  { bin: codex,  env_override: HIVE_CODEX_BIN,  min_version: 0.125.0 }
+  pi:     { bin: pi,     env_override: HIVE_PI_BIN,     min_version: 0.70.2 }
+review:                 # 5-review stage config (U2)
+  ci:           { command: null, max_attempts: 3, agent: claude, prompt_template: ci_fix_prompt.md.erb }
+  triage:       { enabled: true, agent: claude, bias: courageous, prompt_template: null, custom_prompt: null }
+  fix:          { agent: claude, prompt_template: fix_prompt.md.erb }
+  browser_test: { enabled: false, agent: claude, prompt_template: browser_test_prompt.md.erb, max_attempts: 2 }
+  max_passes: 4
+  max_wall_clock_sec: 5400
+  reviewers: [...]      # Array — REPLACED wholesale on override (no per-element merge)
+budget_usd: { ..., review_ci: 25, review_triage: 15, review_fix: 100, review_browser: 25 }
 ```
 
-Loaded by `Hive::Config.load`, merged onto `Hive::Config::DEFAULTS` (`lib/hive/config.rb:6`). Templated from `templates/project_config.yml.erb`.
+Loaded by `Hive::Config.load`, recursively deep-merged onto `Hive::Config::DEFAULTS` (`lib/hive/config.rb:6`) and validated via `Config.validate!` before return. Templated from `templates/project_config.yml.erb`. The `review.reviewers` Array is replaced wholesale (not per-element merged) — see [[modules/config]].
 
 ## Logs
 

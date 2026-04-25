@@ -226,6 +226,83 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_raises_when_reviewers_key_is_nil
+    # User typed `reviewers:` with no value — YAML parses to nil. Without
+    # this guard the early-return swallowed the typo and downstream code
+    # NoMethodError'd on .each. Closes ce-code-review #12.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers/, err.message)
+      assert_match(/is nil/, err.message)
+    end
+  end
+
+  def test_load_raises_on_empty_output_basename
+    # output_basename: "" would yield reviews/-NN.md filenames. Closes
+    # ce-code-review #11.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: empty-basename
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: ""
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/output_basename/, err.message)
+      assert_match(/must not be empty/, err.message)
+    end
+  end
+
+  def test_load_raises_on_whitespace_only_output_basename
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: ws-basename
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: "   "
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/output_basename/, err.message)
+      assert_match(/must not be empty/, err.message)
+    end
+  end
+
+  def test_validation_error_message_notes_when_no_config_file_present
+    # When there is no config.yml on disk, validation errors mentioning
+    # the source path should call that out so the user isn't sent to a
+    # phantom file. Closes ce-code-review #13.
+    #
+    # Reproducing the no-file-present validation failure requires the
+    # defaults to themselves fail validation, which they don't by design
+    # (only user input fails validation). So we exercise the
+    # `describe_source` helper indirectly by registering a tampered
+    # claude profile name and writing a config that picks an unknown
+    # agent — but the source_path describe applies regardless.
+    #
+    # Direct unit test of the helper:
+    msg = Hive::Config.send(:describe_source, "/no/such/file.yml")
+    assert_match %r{/no/such/file\.yml \(defaults; no file present\)}, msg
+    # When the file does exist, no annotation:
+    Tempfile.create([ "config", ".yml" ]) do |f|
+      f.write("---\n")
+      f.flush
+      assert_equal f.path, Hive::Config.send(:describe_source, f.path)
+    end
+  end
+
   # --- New defaults present ----------------------------------------------
 
   def test_new_review_defaults_are_present

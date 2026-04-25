@@ -45,4 +45,30 @@ module HiveTestHelper
       end
     end
   end
+
+  # Run a block that may either call `exit N` directly or `raise Hive::Error`.
+  # Captures stdout/stderr and returns [out, err, exit_code]. Mirrors what
+  # `bin/hive` does in production: a raised Hive::Error is mapped to its
+  # exit_code and its message is sent to stderr as `hive: <message>`.
+  def with_captured_exit
+    out_pipe = StringIO.new
+    err_pipe = StringIO.new
+    real_stdout = $stdout
+    real_stderr = $stderr
+    $stdout = out_pipe
+    $stderr = err_pipe
+    status = 0
+    begin
+      yield
+    rescue SystemExit => e
+      status = e.status
+    rescue Hive::Error => e
+      err_pipe.puts "hive: #{e.message}"
+      status = e.exit_code
+    ensure
+      $stdout = real_stdout
+      $stderr = real_stderr
+    end
+    [ out_pipe.string, err_pipe.string, status ]
+  end
 end

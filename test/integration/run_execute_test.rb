@@ -212,7 +212,8 @@ class RunExecuteTest < Minitest::Test
         ENV["HIVE_EXEC_DRIVER_FINDINGS"] = "1"
         ENV["HIVE_EXEC_DRIVER_TAMPER"] = "1"
         _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal 1, status
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "marker :error must map to TASK_IN_ERROR (3)"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name
@@ -246,7 +247,8 @@ class RunExecuteTest < Minitest::Test
         File.chmod(0o755, @driver_bin)
 
         _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal 1, status, "Run.report must exit 1 when execute records :error"
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "Run.report must exit 3 (TASK_IN_ERROR) when execute records :error"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name,
@@ -284,7 +286,8 @@ class RunExecuteTest < Minitest::Test
         File.chmod(0o755, @driver_bin)
 
         _, _, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal 1, status, "Run.report must exit 1 when execute records :error"
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "Run.report must exit 3 (TASK_IN_ERROR) when execute records :error"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name,
@@ -312,24 +315,5 @@ class RunExecuteTest < Minitest::Test
         assert_includes err, "plan.md missing"
       end
     end
-  end
-
-  def with_captured_exit
-    out_pipe = StringIO.new
-    err_pipe = StringIO.new
-    real_out = $stdout
-    real_err = $stderr
-    $stdout = out_pipe
-    $stderr = err_pipe
-    status = 0
-    begin
-      yield
-    rescue SystemExit => e
-      status = e.status
-    ensure
-      $stdout = real_out
-      $stderr = real_err
-    end
-    [ out_pipe.string, err_pipe.string, status ]
   end
 end

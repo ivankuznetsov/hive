@@ -1,3 +1,4 @@
+require "json"
 require "time"
 require "hive/config"
 require "hive/task"
@@ -19,8 +20,17 @@ module Hive
       }.freeze
       STAGE_ORDER = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done].freeze
 
+      def initialize(json: false)
+        @json = json
+      end
+
       def call
         projects = Hive::Config.registered_projects
+        if @json
+          puts JSON.generate(json_payload(projects))
+          return
+        end
+
         if projects.empty?
           puts "(no projects registered; run `hive init <path>`)"
           return
@@ -29,6 +39,51 @@ module Hive
         projects.each do |project|
           render_project(project)
         end
+      end
+
+      # Stable schema for agent / wrapper consumption. Adding new keys is
+      # non-breaking; removing or renaming keys must bump a documented
+      # version. `tasks[].marker` is the lowercased symbol name as a string;
+      # `tasks[].attrs` is the marker's attribute map.
+      def json_payload(projects)
+        {
+          "schema" => "hive-status",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+          "generated_at" => Time.now.utc.iso8601,
+          "projects" => projects.map { |p| project_payload(p) }
+        }
+      end
+
+      def project_payload(project)
+        path = project["path"]
+        hive_state = project["hive_state_path"]
+        base = {
+          "name" => project["name"],
+          "path" => path,
+          "hive_state_path" => hive_state
+        }
+        if !File.directory?(path)
+          base.merge("error" => "missing_project_path", "tasks" => [])
+        elsif !File.directory?(hive_state)
+          base.merge("error" => "not_initialised", "tasks" => [])
+        else
+          base.merge("tasks" => collect_rows(hive_state).map { |r| task_payload(r) })
+        end
+      end
+
+      def task_payload(row)
+        {
+          "stage" => row[:stage],
+          "slug" => row[:slug],
+          "folder" => row[:folder],
+          "state_file" => row[:state_file],
+          "marker" => row[:marker_name].to_s,
+          "attrs" => row[:marker_attrs],
+          "mtime" => row[:mtime].utc.iso8601,
+          "age_seconds" => (Time.now - row[:mtime]).to_i,
+          "claude_pid" => row[:claude_pid],
+          "claude_pid_alive" => row[:claude_pid_alive]
+        }
       end
 
       def render_project(project)
@@ -79,13 +134,20 @@ module Hive
             marker = Hive::Markers.current(task.state_file)
             mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : File.mtime(entry)
             icon, state_label = decorate(task, marker)
+            claude_pid = lookup_claude_pid(task)
             rows << {
               stage: stage,
               slug: slug,
+              folder: entry,
+              state_file: task.state_file,
+              marker_name: marker.name,
+              marker_attrs: marker.attrs,
               icon: icon,
               state_label: state_label,
               mtime: mtime,
-              age: humanise_age(mtime)
+              age: humanise_age(mtime),
+              claude_pid: claude_pid,
+              claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil
             }
           end
         end

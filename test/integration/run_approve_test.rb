@@ -614,6 +614,103 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  # ── Symlink hardening ───────────────────────────────────────────────────
+
+  def test_symlink_target_outside_hive_state_is_rejected
+    # A slug-named symlink at .hive-state/stages/<N>/<slug> pointing outside
+    # the hive-state hierarchy must be rejected via realpath. Otherwise an
+    # attacker who can write into stages/ could trick approve into mv'ing
+    # an arbitrary external directory.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        seed_project_with_inbox_task(dir)
+        Dir.mktmpdir("decoy-target") do |external|
+          File.write(File.join(external, "decoy.md"), "should never be touched")
+          slug = "evil-symlink-260424-abcd"
+          symlink_path = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+          FileUtils.mkdir_p(File.dirname(symlink_path))
+          File.symlink(external, symlink_path)
+
+          _, err, status = with_captured_exit { Hive::Commands::Approve.new(symlink_path, force: true).call }
+          assert_equal Hive::ExitCodes::USAGE, status,
+                       "symlink to external path must be refused at the PATH_RE check"
+          assert_includes err, "task path must match"
+          # External target untouched.
+          assert File.exist?(File.join(external, "decoy.md")),
+                 "symlink-target's contents must never be moved"
+        end
+      end
+    end
+  end
+
+  def test_symlink_in_slug_lookup_is_resolved_via_realpath
+    # When a hit returned by find_slug_across_projects is itself a symlink,
+    # realpath kicks in and Task.new validates the REAL path, not the link.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        seed_project_with_inbox_task(dir)
+        Dir.mktmpdir("external") do |external|
+          slug = "evil-link-260424-abcd"
+          link_path = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+          FileUtils.mkdir_p(File.dirname(link_path))
+          File.symlink(external, link_path)
+
+          _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug, force: true).call }
+          assert_equal Hive::ExitCodes::USAGE, status
+          assert_includes err, "task path must match"
+        end
+      end
+    end
+  end
+
+  # ── TOCTOU concurrent-mkdir ─────────────────────────────────────────────
+
+  def test_concurrent_mkdir_of_non_empty_destination_is_caught_by_rescue
+    # Even with the pre-check + commit-lock, a non-hive process could mkdir
+    # (and populate) the destination between check and rename. The rescue
+    # in move_task! must surface this as DestinationCollision (not as a
+    # bare Errno::ENOTEMPTY trace).
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(File.dirname(brainstorm))
+        FileUtils.mv(inbox, brainstorm)
+        write_marker(brainstorm, :complete)
+
+        # Stub File.exist? to lie on the pre-check (so we reach the rescue
+        # rather than the early-exit), then create a non-empty dir at the
+        # destination so File.rename raises ENOTEMPTY.
+        plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(plan)
+        File.write(File.join(plan, "stale.md"), "concurrent process left this")
+
+        # Bypass the pre-check by monkey-patching for one assertion. The
+        # rescue must catch the rename's ENOTEMPTY and re-raise typed.
+        File.singleton_class.alias_method(:__orig_exist?, :exist?)
+        first_call_for_dest = true
+        File.define_singleton_method(:exist?) do |p|
+          if first_call_for_dest && p == plan
+            first_call_for_dest = false
+            false
+          else
+            __orig_exist?(p)
+          end
+        end
+
+        begin
+          _, err, status = with_captured_exit { Hive::Commands::Approve.new(brainstorm).call }
+          assert_equal Hive::ExitCodes::GENERIC, status,
+                       "concurrent-mkdir collision must surface as DestinationCollision"
+          assert_includes err, "destination already exists"
+        ensure
+          File.singleton_class.alias_method(:exist?, :__orig_exist?)
+          File.singleton_class.send(:remove_method, :__orig_exist?)
+        end
+      end
+    end
+  end
+
   # ── Plain-text output ───────────────────────────────────────────────────
 
   def test_text_output_includes_next_hint_on_stderr

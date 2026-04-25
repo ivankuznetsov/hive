@@ -70,9 +70,16 @@ module Hive
       # ── Resolution ──────────────────────────────────────────────────────
 
       def resolve_target
+        # File.realpath resolves any symlink in the path. A slug-named
+        # symlink at `.hive-state/stages/<N>/<slug>` pointing to
+        # `/tmp/leaked` realpaths to `/tmp/leaked`, which Task.new's
+        # PATH_RE then refuses — the real path doesn't match the
+        # .hive-state/stages/ shape. Applies to both the explicit-folder
+        # path and the slug-search return so neither code path can be
+        # used to mv a slug-shaped symlink onto external data.
         if path_target?
           expanded = File.expand_path(@target)
-          return expanded if File.directory?(expanded)
+          return File.realpath(expanded) if File.directory?(expanded)
         end
 
         matches = find_slug_across_projects(@target)
@@ -81,7 +88,7 @@ module Hive
           raise Hive::InvalidTaskPath,
                 "no task folder for slug '#{@target}'#{project_hint}"
         when 1
-          matches.first[:folder]
+          File.realpath(matches.first[:folder])
         else
           raise Hive::AmbiguousSlug.new(
             ambiguity_message(matches),
@@ -223,15 +230,31 @@ module Hive
         FileUtils.mkdir_p(new_parent)
         new_folder = File.join(new_parent, task.slug)
 
-        if File.directory?(new_folder)
-          raise Hive::DestinationCollision.new(
-            "destination already exists: #{new_folder} (slug collision; archive or rename the existing folder)",
-            path: new_folder
-          )
-        end
+        # Pre-check is the early-exit fast path; the rescue below is the
+        # real safety net. A concurrent process can mkdir the destination
+        # between this check and File.rename — an empty dir there would
+        # cause rename to silently REPLACE it (POSIX rename(2) semantics),
+        # and a non-empty dir surfaces as ENOTEMPTY which we catch.
+        raise_destination_collision(new_folder) if File.exist?(new_folder)
 
-        FileUtils.mv(task.folder, new_folder)
+        begin
+          File.rename(task.folder, new_folder)
+        rescue Errno::ENOTEMPTY, Errno::EEXIST, Errno::EISDIR
+          raise_destination_collision(new_folder)
+        rescue Errno::EXDEV
+          # Cross-device move (rare; .hive-state lives under the project
+          # root by construction). Fall back to copy + remove.
+          FileUtils.cp_r(task.folder, new_folder)
+          FileUtils.rm_rf(task.folder)
+        end
         new_folder
+      end
+
+      def raise_destination_collision(path)
+        raise Hive::DestinationCollision.new(
+          "destination already exists: #{path} (slug collision; archive or rename the existing folder)",
+          path: path
+        )
       end
 
       def cleanup_orphan_task_lock(new_folder)

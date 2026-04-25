@@ -25,7 +25,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 
 ## Steps performed (`Commands::Approve#call`)
 
-1. `resolve_target`: path-shaped `TARGET` (contains `/` or starts with `~`/`.`) is used directly; bare slugs are searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous.
+1. `resolve_target`: path-shaped `TARGET` (contains `/` or starts with `~`/`.`) is used directly; bare slugs are searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous. The resolved folder is then `File.realpath`'d so slug-named symlinks pointing outside the `.hive-state` hierarchy are rejected at the PATH_RE check.
 2. `Hive::Task.new(folder)` parses the path into `{project, stage, slug}`.
 3. `validate_project_path_match!`: when both an absolute path and `--project` are given, the path's project must match the named project (no silent override).
 4. `validate_from!`: if `--from` was passed, assert the task is at the named stage; raise `WrongStage` (4) on mismatch.
@@ -35,7 +35,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 8. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
-9. `move_task!`: `FileUtils.mv` from source to destination; aborts on destination collision (`Hive::DestinationCollision`).
+9. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision` (covers the TOCTOU window where a non-hive process `mkdir`s the destination between the pre-check and the rename). Cross-device fallback uses `cp_r` + `rm_rf`.
 10. Cleanup: the task `.lock` file moves with the folder; the orphan at the destination is deleted before commit so per-process lock metadata isn't tracked in hive/state.
 11. `record_hive_commit`: **slug-scoped** `git add -A stages/<src>/<slug> stages/<dst>/<slug>` (the source side is added only if it has tracked files; the destination is always added). Sibling-task changes in the same parent stage directory do NOT get swept into the commit message. Commit message: `hive: <from>/<slug> approve <from> -> <to>`.
 12. **Rollback**: if the commit fails (pre-commit hook abort, disk full, lock contention mid-flight), the move is reversed (`FileUtils.mv` back) and the original error is re-raised wrapped in `Hive::Error` so filesystem and git history don't diverge.
@@ -99,7 +99,7 @@ Different errors carry different structured fields:
 
 The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hive run --json`'s dual-signal pattern (JSON document + non-zero exit code).
 
-Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration/run_approve_test.rb` (`test_json_output_emits_stable_schema` for the success path; one test per error class for envelopes).
+Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration/run_approve_test.rb` (`test_json_output_emits_stable_schema` for the success path; one test per error class for envelopes). External consumers can validate emitted documents against the published JSON Schema at `schemas/hive-approve.v1.json` (draft 2020-12); resolve the absolute path via `Hive::Schemas.schema_path("hive-approve")` from Ruby, or use any draft-2020-12 validator (ajv, json_schemer, etc.) directly. `test/unit/schema_files_test.rb` pins the schema file's required-key set against the producer so code-vs-schema drift fails at test time.
 
 ## Slug resolution rules
 

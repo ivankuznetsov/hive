@@ -52,7 +52,7 @@ class ExitCodesTest < Minitest::Test
   # ALL is impossible — but pin the membership here to catch a refactor that
   # accidentally changes the derivation.
   def test_next_action_kind_closed_enum_membership
-    expected = %w[edit mv run recover_stale no_op].sort
+    expected = %w[edit mv approve run recover_stale no_op].sort
     assert_equal expected, Hive::Schemas::NextActionKind::ALL.sort
   end
 end

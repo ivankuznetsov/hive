@@ -104,24 +104,38 @@ module Hive
         when :waiting, :execute_waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => "hive run #{task.folder}" }
         when :complete
-          next_stage = next_stage_dir(task)
-          if next_stage
-            { "kind" => kind::MV, "from" => task.folder, "to" => "#{next_stage}/" }
-          else
-            { "kind" => kind::NO_OP }
-          end
+          approve_action(task, next_stage_dir(task))
         when :execute_complete
-          { "kind" => kind::MV,
-            "from" => task.folder,
-            "to" => "#{File.join(task.hive_state_path, 'stages', '5-pr')}/" }
+          approve_action(task, File.join(task.hive_state_path, "stages", "5-pr"))
         when :execute_stale
           { "kind" => kind::RECOVER_STALE,
             "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }
         when :error
-          { "kind" => kind::NO_OP, "error" => marker.attrs }
+          { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
         else
-          { "kind" => kind::NO_OP }
+          { "kind" => Hive::Schemas::NextActionKind::NO_OP }
         end
+      end
+
+      # APPROVE replaces the old MV emission: the canonical agent action
+      # for a terminal marker is now `hive approve <slug>`, not literal
+      # /bin/mv. The `command` field includes `--from <stage>` so a retry
+      # is idempotent — the same call after a partial success fails with
+      # WRONG_STAGE (4) instead of advancing again.
+      def approve_action(task, dest_path)
+        kind = Hive::Schemas::NextActionKind
+        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless dest_path
+
+        from_stage_dir = "#{task.stage_index}-#{task.stage_name}"
+        {
+          "kind" => kind::APPROVE,
+          "slug" => task.slug,
+          "from" => task.folder,
+          "from_stage" => from_stage_dir,
+          "to" => "#{dest_path}/",
+          "to_stage" => File.basename(dest_path),
+          "command" => "hive approve #{task.slug} --from #{from_stage_dir}"
+        }
       end
 
       def report_text(task, _result, marker)

@@ -135,3 +135,21 @@ Append-only log of all wiki operations.
 - TOCTOU on destination check (adversarial #8) — covered indirectly by `with_task_lock` but not eliminated.
 - Published JSON Schema files (api-contract #4) — `schemas/hive-approve.v1.json` for external consumers.
 - Pre-existing `.lock` files committed by `hive run` — would need `.gitignore` inside `.hive-state/`.
+
+## [2026-04-25T20:00:00Z] hive approve P3 follow-up — symlink, TOCTOU, schemas, .gitignore
+
+**Driver:** Continuation of the ce-code-review PR #4 remediation: addressing the four P3 items deferred from the prior commit. All four turned out to be sub-day fixes; bundling them into the same PR keeps the work coherent.
+
+**Code changes:**
+
+- **Symlink hardening** (`lib/hive/commands/approve.rb`): `resolve_target` now `File.realpath`s the resolved folder for both the path-target and slug-search return paths. A slug-named symlink at `.hive-state/stages/<N>/<slug>` pointing to `/tmp/leaked` realpaths to `/tmp/leaked` and gets refused by `Hive::Task.new`'s PATH_RE check (real path doesn't match the `.hive-state/stages/` shape). Two integration tests pin both the path-target and slug-lookup branches.
+- **TOCTOU robustness** (`move_task!`): switched from `FileUtils.mv` to direct `File.rename` wrapped in a `rescue Errno::ENOTEMPTY, EEXIST, EISDIR` that surfaces as typed `Hive::DestinationCollision`. The pre-check + commit-lock cover the hive-process-vs-hive-process race; the rescue covers the non-hive-process race (a stray `mkdir` between pre-check and rename). Cross-device fallback (rare; `.hive-state` lives under the project root) goes through `cp_r` + `rm_rf`. One integration test stubs `File.exist?` to bypass the pre-check and asserts the rescue produces a clean `DestinationCollision`.
+- **NextActionKind::APPROVE** (`lib/hive.rb`, `lib/hive/commands/run.rb`): added to the closed enum (additive). `hive run --json` now emits `kind: "approve"` for `:complete` and `:execute_complete` markers (was `kind: "mv"`), with a new `command: "hive approve <slug> --from <stage>"` field that the agent can copy-paste-execute. Back-compat `from` / `to` fields are kept on the next_action object so old callers parsing the MV shape still get the data they need. `MV` stays in the closed enum per the additive-only policy. Test `test_run_json_on_complete_marker_returns_approve_next_action` (renamed from `_returns_mv_next_action`) pins the new shape; the closed-enum membership test covers both kinds.
+- **Published JSON Schema** (`schemas/hive-approve.v1.json`): draft 2020-12 schema with `oneOf` over `SuccessPayload` and `ErrorPayload` definitions, per-stage enums, and the closed `NextAction.kind` enum. `Hive::Schemas.schema_dir` and `Hive::Schemas.schema_path(name)` helpers resolve the absolute path. `test/unit/schema_files_test.rb` pins the schema's required-key set, error_kind enum, and NextAction.kind enum against the producer's emission so a code-vs-schema drift fails at test time. External consumers (non-Ruby SDKs, CI validators) can validate emitted documents with any draft-2020-12 validator (ajv, json_schemer, etc.) without re-implementing the contract.
+- **`.hive-state/.gitignore`** (`lib/hive/git_ops.rb`): `hive_state_init` now bootstraps a gitignore at the `.hive-state` root excluding per-task `.lock`, atomic-write `.lock.tmp.*`, per-marker `*.markers-lock`, and per-project `.commit-lock`. Pre-existing pre-bug: `Hive::GitOps#hive_commit` does `git add stages/<stage>/<slug>` which was tracking the per-task `.lock` files into hive/state on every `hive run` (committed PIDs and process_start_time values). Existing projects need to add the `.gitignore` manually; new projects get it via `init`.
+
+**Tests:** 7 new integration / unit cases covering symlink-target rejection (path-target + slug-lookup), concurrent-mkdir collision rescue, schema file existence and key-set drift, schema error_kind drift, schema NextAction.kind drift. `test_run_json_on_complete_marker_returns_approve_next_action` renamed and rewritten. Suite: 142 / 529 assertions, all green. RuboCop clean.
+
+**Wiki updates:**
+- `wiki/commands/approve.md` — symlink hardening note in Steps section, TOCTOU rescue noted, JSON Schema file referenced under JSON contract.
+- `wiki/cli.md` — `Hive::Schemas.schema_path("hive-approve")` mentioned for external consumers.

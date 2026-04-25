@@ -13,6 +13,19 @@ module Hive
       "hive-approve" => 1
     }.freeze
 
+    # Absolute path to the published JSON Schema files. Use
+    # `Hive::Schemas.schema_path("hive-approve")` to get the full path for a
+    # specific schema; external consumers can validate emitted documents
+    # with any draft-2020-12 validator (ajv, json_schemer, etc.).
+    def self.schema_dir
+      File.expand_path("../schemas", __dir__)
+    end
+
+    def self.schema_path(name)
+      version = SCHEMA_VERSIONS.fetch(name)
+      File.join(schema_dir, "#{name}.v#{version}.json")
+    end
+
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.
     # `ALL` is self-derived from the constants in this module so adding a
     # new kind without updating ALL is impossible.
@@ -23,6 +36,7 @@ module Hive
     module NextActionKind
       EDIT          = "edit".freeze
       MV            = "mv".freeze
+      APPROVE       = "approve".freeze
       RUN           = "run".freeze
       RECOVER_STALE = "recover_stale".freeze
       NO_OP         = "no_op".freeze

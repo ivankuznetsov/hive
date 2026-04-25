@@ -94,7 +94,7 @@ class JsonOutputTest < Minitest::Test
     end
   end
 
-  def test_run_json_on_complete_marker_returns_mv_next_action
+  def test_run_json_on_complete_marker_returns_approve_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
@@ -110,8 +110,16 @@ class JsonOutputTest < Minitest::Test
         out, _err = capture_io { Hive::Commands::Run.new(brainstorm_dir, json: true).call }
         payload = JSON.parse(out)
         assert_equal "complete", payload["marker"]
-        assert_equal Hive::Schemas::NextActionKind::MV, payload["next_action"]["kind"]
-        assert payload["next_action"]["to"].end_with?("3-plan/")
+
+        next_action = payload["next_action"]
+        assert_equal Hive::Schemas::NextActionKind::APPROVE, next_action["kind"]
+        assert_equal slug, next_action["slug"]
+        assert_equal "2-brainstorm", next_action["from_stage"]
+        assert_equal "3-plan", next_action["to_stage"]
+        assert_equal "hive approve #{slug} --from 2-brainstorm", next_action["command"]
+        # Back-compat fields kept for callers that parsed the old MV shape.
+        assert next_action["to"].end_with?("3-plan/")
+        assert_equal brainstorm_dir, next_action["from"]
       end
     end
   end
@@ -156,7 +164,7 @@ class JsonOutputTest < Minitest::Test
         expected_kind: Hive::Schemas::NextActionKind::EDIT },
       { content: "## Requirements\n- foo\n<!-- COMPLETE -->\n",
         env: {},
-        expected_kind: Hive::Schemas::NextActionKind::MV },
+        expected_kind: Hive::Schemas::NextActionKind::APPROVE },
       { content: nil,                       # exit 1 → :error marker
         env: { "HIVE_FAKE_CLAUDE_EXIT" => "1" },
         expected_kind: Hive::Schemas::NextActionKind::NO_OP }

@@ -12,7 +12,9 @@ tags: [git, init, commit]
 ## Constants
 
 - `HIVE_BRANCH = "hive/state"` — the orphan branch name.
-- `STAGE_DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done]` — canonical stage list (used during bootstrap to create stage subdirs).
+- `HIVE_STATE_GITIGNORE` — patterns for `<.hive-state>/.gitignore` so per-task `.lock`, `.lock.tmp.*`, `*.markers-lock`, and `.commit-lock` files don't get tracked.
+
+The bootstrap reads stage names from `Hive::Stages::DIRS` (see [[modules/stages]]); there is no module-local stage-list constant.
 
 ## Constructor
 

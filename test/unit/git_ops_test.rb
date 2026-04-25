@@ -25,7 +25,7 @@ class GitOpsTest < Minitest::Test
       assert_equal :created, ops.hive_state_init
       assert ops.hive_state_branch_exists?, "hive/state branch should exist"
       assert File.directory?(File.join(dir, ".hive-state")), ".hive-state worktree should be created"
-      Hive::GitOps::STAGE_DIRS.each do |stage|
+      Hive::Stages::DIRS.each do |stage|
         assert File.directory?(File.join(dir, ".hive-state", "stages", stage)),
                "stage dir #{stage} should exist"
       end

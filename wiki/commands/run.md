@@ -31,8 +31,8 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 | Marker | `report` output |
 |--------|-----------------|
 | `:waiting` / `:execute_waiting` | `next: edit the file, then `hive run <folder>` again` |
-| `:complete` | `next: mv <folder> <hive-state>/stages/<next>/` (resolved by `next_stage_dir`) |
-| `:execute_complete` | `next: mv <folder> <hive-state>/stages/5-pr/` |
+| `:complete` | `next: mv <folder> <hive-state>/stages/<next>/` (resolved by `next_stage_dir`); JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from <stage>"` |
+| `:execute_complete` | `next: mv <folder> <hive-state>/stages/5-pr/`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
 | `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 
@@ -69,6 +69,6 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 
 ## Backlinks
 
-- [[cli]] · [[commands/init]] · [[commands/status]]
+- [[cli]] · [[commands/init]] · [[commands/status]] · [[commands/approve]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]] · [[stages/done]]
 - [[modules/task]] · [[modules/lock]] · [[modules/markers]] · [[modules/git_ops]]

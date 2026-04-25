@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/task"
 require "hive/markers"
 require "hive/lock"
+require "hive/stages"
 
 module Hive
   module Commands
@@ -18,7 +19,6 @@ module Hive
         execute_stale: "⚠",
         error: "⚠"
       }.freeze
-      STAGE_ORDER = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-pr 6-done].freeze
 
       def initialize(json: false)
         @json = json
@@ -105,7 +105,7 @@ module Hive
           return
         end
 
-        STAGE_ORDER.each do |stage|
+        Hive::Stages::DIRS.each do |stage|
           stage_rows = rows.select { |r| r[:stage] == stage }
           next if stage_rows.empty?
 
@@ -118,7 +118,7 @@ module Hive
 
       def collect_rows(hive_state)
         rows = []
-        STAGE_ORDER.each do |stage|
+        Hive::Stages::DIRS.each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 

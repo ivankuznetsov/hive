@@ -22,4 +22,4 @@ All four active stages share `Hive::Stages::Base.spawn_agent` for the `claude -p
 
 ## Backlinks
 
-- [[architecture]] · [[state-model]] · [[cli]]
+- [[architecture]] · [[state-model]] · [[cli]] · [[commands/approve]]

@@ -28,17 +28,31 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::TASK_IN_ERROR,       Hive::TaskInErrorState.new("x").exit_code
     assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::WrongStage.new("x").exit_code
     assert_equal Hive::ExitCodes::ALREADY_INITIALIZED, Hive::AlreadyInitialized.new("x").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::AmbiguousSlug.new("x", slug: "s", candidates: []).exit_code
+    assert_equal Hive::ExitCodes::GENERIC,             Hive::DestinationCollision.new("x", path: "/p").exit_code
+    assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "6-done").exit_code
   end
 
-  # The `schema_version` emit sites in run.rb / status.rb call
-  # SCHEMA_VERSIONS.fetch("hive-run") / .fetch("hive-status") with literal
-  # strings. Pin both keys so a rename of either constant key without
-  # updating the call sites fails at test time, not at runtime as a
-  # cryptic KeyError out of a real `hive run`.
+  # The `schema_version` emit sites in run.rb / status.rb / approve.rb call
+  # SCHEMA_VERSIONS.fetch("hive-...") with literal strings. Pin every key so
+  # a rename of either constant key without updating the call sites fails
+  # at test time, not at runtime as a cryptic KeyError out of a real CLI
+  # invocation.
   def test_schema_versions_keys_match_emit_sites
     assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-status"),
            "Hive::Commands::Status emits payload['schema'] = 'hive-status' and fetches the version by that key"
     assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-run"),
            "Hive::Commands::Run emits payload['schema'] = 'hive-run' and fetches the version by that key"
+    assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-approve"),
+           "Hive::Commands::Approve emits payload['schema'] = 'hive-approve' and fetches the version by that key"
+  end
+
+  # Closed enum NextActionKind is shared across schemas. ALL is self-derived
+  # from the constants in the module so adding a new kind without updating
+  # ALL is impossible — but pin the membership here to catch a refactor that
+  # accidentally changes the derivation.
+  def test_next_action_kind_closed_enum_membership
+    expected = %w[edit mv approve run recover_stale no_op].sort
+    assert_equal expected, Hive::Schemas::NextActionKind::ALL.sort
   end
 end

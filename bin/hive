@@ -5,6 +5,25 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "hive"
 require "hive/cli"
 
+# Thor only honours `--help` *before* the subcommand name (`hive help approve`);
+# `hive approve --help` would be consumed as the TARGET positional. Intercept
+# the help flag before Thor dispatch so the convention agents try first works.
+def rewrite_help_flag!(argv)
+  return if argv.empty?
+
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return unless cmd_idx
+
+  help_idx = argv[(cmd_idx + 1)..]&.index { |a| a == "--help" || a == "-h" }
+  return unless help_idx
+
+  cmd = argv.delete_at(cmd_idx)
+  argv.delete_at(cmd_idx + help_idx)
+  argv.unshift("help", cmd)
+end
+
+rewrite_help_flag!(ARGV)
+
 begin
   Hive::CLI.start(ARGV)
 rescue Hive::Error => e

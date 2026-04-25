@@ -9,8 +9,21 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 1,
-      "hive-run" => 1
+      "hive-run" => 1,
+      "hive-approve" => 1
     }.freeze
+
+    # Absolute path to the published JSON Schema files. Use
+    # `Hive::Schemas.schema_path(name)` for a specific schema; external
+    # consumers validate emitted documents with any draft-2020-12 validator.
+    def self.schema_dir
+      File.expand_path("../schemas", __dir__)
+    end
+
+    def self.schema_path(name)
+      version = SCHEMA_VERSIONS.fetch(name)
+      File.join(schema_dir, "#{name}.v#{version}.json")
+    end
 
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.
     # `ALL` is self-derived from the constants in this module so adding a
@@ -22,6 +35,8 @@ module Hive
     module NextActionKind
       EDIT          = "edit".freeze
       MV            = "mv".freeze
+      APPROVE       = "approve".freeze
+      RUN           = "run".freeze
       RECOVER_STALE = "recover_stale".freeze
       NO_OP         = "no_op".freeze
       # Self-derived: every constant in this module other than ALL itself.
@@ -109,6 +124,15 @@ module Hive
     end
   end
 
+  # Catch-all wrapper for unexpected non-Hive errors that escape into the
+  # CLI's top-level rescue. Translates to SOFTWARE (70) so wrappers can
+  # treat it like other internal failures rather than the generic 1.
+  class InternalError < Error
+    def exit_code
+      ExitCodes::SOFTWARE
+    end
+  end
+
   # Raised by `hive run` when the stage's terminal marker is :error. The
   # runner itself succeeded — the agent recorded a task-level failure.
   # Distinct from StageError (which signals a runner bug / git failure).
@@ -132,6 +156,45 @@ module Hive
   class AlreadyInitialized < Error
     def exit_code
       ExitCodes::ALREADY_INITIALIZED
+    end
+  end
+
+  # A slug resolved to folders in multiple registered projects, or in
+  # multiple stages of one project. Carries the structured candidate list
+  # so a JSON error envelope can surface it without re-parsing prose.
+  # Inherits from InvalidTaskPath for the USAGE (64) exit code; the IS-A is
+  # exit-code convenience, not a path-type relationship.
+  class AmbiguousSlug < InvalidTaskPath
+    attr_reader :slug, :candidates
+
+    def initialize(message, slug:, candidates:)
+      super(message)
+      @slug = slug
+      @candidates = candidates
+    end
+  end
+
+  # The destination folder for a stage move already exists. Distinct class
+  # so callers (and the JSON error envelope) can distinguish a real
+  # collision from a generic error sharing exit code 1.
+  class DestinationCollision < Error
+    attr_reader :path
+
+    def initialize(message, path:)
+      super(message)
+      @path = path
+    end
+  end
+
+  # Forward auto-advance was asked but the task is at the final stage.
+  # Maps to WRONG_STAGE (4) so wrappers can branch cleanly between
+  # "real collision (1)" and "no further stage (4)".
+  class FinalStageReached < WrongStage
+    attr_reader :stage
+
+    def initialize(message, stage:)
+      super(message)
+      @stage = stage
     end
   end
 end

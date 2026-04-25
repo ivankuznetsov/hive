@@ -5,6 +5,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/git_ops"
 require "hive/agent"
+require "hive/stages"
 
 module Hive
   module Commands
@@ -103,24 +104,36 @@ module Hive
         when :waiting, :execute_waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => "hive run #{task.folder}" }
         when :complete
-          next_stage = next_stage_dir(task)
-          if next_stage
-            { "kind" => kind::MV, "from" => task.folder, "to" => "#{next_stage}/" }
-          else
-            { "kind" => kind::NO_OP }
-          end
+          approve_action(task, next_stage_dir(task))
         when :execute_complete
-          { "kind" => kind::MV,
-            "from" => task.folder,
-            "to" => "#{File.join(task.hive_state_path, 'stages', '5-pr')}/" }
+          approve_action(task, File.join(task.hive_state_path, "stages", "5-pr"))
         when :execute_stale
           { "kind" => kind::RECOVER_STALE,
             "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }
         when :error
-          { "kind" => kind::NO_OP, "error" => marker.attrs }
+          { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
         else
-          { "kind" => kind::NO_OP }
+          { "kind" => Hive::Schemas::NextActionKind::NO_OP }
         end
+      end
+
+      # Emit an APPROVE action with `--from <stage>` so a retry after a
+      # partial success fails with WRONG_STAGE (4) instead of advancing
+      # twice. The `command` field is a copy-paste-executable shell line.
+      def approve_action(task, dest_path)
+        kind = Hive::Schemas::NextActionKind
+        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless dest_path
+
+        from_stage_dir = "#{task.stage_index}-#{task.stage_name}"
+        {
+          "kind" => kind::APPROVE,
+          "slug" => task.slug,
+          "from" => task.folder,
+          "from_stage" => from_stage_dir,
+          "to" => "#{dest_path}/",
+          "to_stage" => File.basename(dest_path),
+          "command" => "hive approve #{task.slug} --from #{from_stage_dir}"
+        }
       end
 
       def report_text(task, _result, marker)
@@ -143,14 +156,7 @@ module Hive
       end
 
       def next_stage_dir(task)
-        next_idx = task.stage_index + 1
-        next_name = case next_idx
-        when 2 then "2-brainstorm"
-        when 3 then "3-plan"
-        when 4 then "4-execute"
-        when 5 then "5-pr"
-        when 6 then "6-done"
-        end
+        next_name = Hive::Stages.next_dir(task.stage_index)
         return nil unless next_name
 
         File.join(task.hive_state_path, "stages", next_name)

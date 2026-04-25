@@ -17,6 +17,10 @@ class RunExecuteTest < Minitest::Test
     @driver_bin = File.join(@driver_path, "claude")
     File.write(@driver_bin, <<~SH)
       #!/usr/bin/env bash
+      if [[ "${1:-}" == "--version" ]]; then
+        echo "2.1.118 (Claude Code)"
+        exit 0
+      fi
       exec ruby "#{@driver_script}" "$@"
     SH
     File.chmod(0o755, @driver_bin)

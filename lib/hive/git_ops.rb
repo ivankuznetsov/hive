@@ -37,6 +37,12 @@ module Hive
         return :existed
       end
 
+      # Pre-flight: worktree-add requires a reachable ref. A freshly init'd
+      # repo with zero commits has no <default_branch> ref and would fail
+      # mid-init with a partial state.
+      _, _, head_ok = Open3.capture3("git", "-C", @project_root, "rev-parse", "--verify", "HEAD")
+      raise GitError, "hive init requires at least one commit on #{default_branch}" unless head_ok.success?
+
       run_git!("-C", @project_root, "worktree", "add", "--no-checkout", "--detach",
                hive_state_path, default_branch)
       run_git!("-C", hive_state_path, "checkout", "--orphan", HIVE_BRANCH)
@@ -77,9 +83,14 @@ module Hive
       :added
     end
 
+    # Scoped add: only stage files under stages/<stage_name>/<slug>/ and the
+    # logs/ directory so a crashed prior run's leftover staging cannot cross-
+    # contaminate this commit's message.
     def hive_commit(stage_name:, slug:, action:)
       message = "hive: #{stage_name}/#{slug} #{action}"
-      run_git!("-C", hive_state_path, "add", ".")
+      task_path = File.join("stages", stage_name, slug)
+      run_git!("-C", hive_state_path, "add", task_path) if File.directory?(File.join(hive_state_path, task_path))
+      run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
       _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
       if status.success?
         :nothing_to_commit

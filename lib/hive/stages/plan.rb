@@ -13,14 +13,16 @@ module Hive
           Hive::Stages::Base::TemplateBindings.new(
             project_name: File.basename(task.project_root),
             task_folder: task.folder,
-            brainstorm_text: brainstorm_text
+            brainstorm_text: brainstorm_text,
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
+        # See brainstorm.rb: add-dir narrowed to the task folder so a
+        # prompt-injected brainstorm.md cannot reach the project source.
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
-          add_dirs: [task.project_root],
+          add_dirs: [task.folder],
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "plan"),
           timeout_sec: cfg.dig("timeout_sec", "plan"),

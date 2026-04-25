@@ -22,12 +22,12 @@ tags: [roadmap, status]
 | Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,config}.rb` | Implemented + unit-tested |
 | Templates | `templates/*.erb` (8 files) | Drafted |
 | Tests | `test/unit/*.rb` (7 files), `test/integration/*.rb` (10 files) | Local; CI not yet wired |
-| Docs | `docs/brainstorms/hive-pipeline-requirements.md`, `docs/plans/2026-04-24-001-feat-hive-phase-1-mvp-plan.md`, `README.md` | Authored |
+| Docs | `README.md`, `wiki/` knowledge base | Authored |
 
-## Phase 1 deferred work (per `docs/plans/...mvp-plan.md` "Deferred to Follow-Up Work")
+## Phase 1 deferred work
 
 - Additional reviewers in `4-execute` (Codex local, pr-review-toolkit, rubocop-as-reviewer).
-- Second pilot project (candidate: `seyarabata-new` or `todero`) and cross-project `hive status`.
+- Second pilot project and cross-project `hive status`.
 - Atomic rollback via snapshot tags on `hive/state` per stage transition (Phase 3).
 - `hive reinit <new-path>` for migrating registered project paths.
 - `--stage` / `--slug` flags on `hive new` if ergonomics warrants it.

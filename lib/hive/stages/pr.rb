@@ -1,10 +1,26 @@
 require "open3"
+require "timeout"
 require "hive/stages/base"
 require "hive/worktree"
 
 module Hive
   module Stages
     module Pr
+      NETWORK_TIMEOUT_SEC = 60
+
+      # Regex for spotting common secret patterns leaking into PR bodies.
+      # Single-developer trust model still wants belt-and-suspenders here:
+      # the prompt instruction alone is advisory, this scan is a programmatic
+      # gate. A false positive blocks the PR, which is the safe failure mode.
+      SECRET_PATTERNS = [
+        %r{(?i)(?:api[_-]?key|secret|password|passwd|bearer\s+token|access[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9+/_-]{16,}},
+        /AKIA[0-9A-Z]{16}/, # AWS access key
+        /ghp_[A-Za-z0-9]{30,}/,             # GitHub PAT
+        /gho_[A-Za-z0-9]{30,}/,             # GitHub OAuth
+        /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/,  # OpenAI / OpenRouter
+        /-----BEGIN [A-Z ]+PRIVATE KEY-----/
+      ].freeze
+
       module_function
 
       def run!(task, cfg)
@@ -39,11 +55,11 @@ module Hive
             worktree_path: worktree_path,
             slug: task.slug,
             plan_text: plan_text,
-            reviews_summary: reviews_summary
+            reviews_summary: reviews_summary,
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
 
-        FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -55,11 +71,34 @@ module Hive
         )
 
         marker = Hive::Markers.current(task.state_file)
-        { commit: marker.name == :complete ? "pr_opened" : marker.name.to_s, status: marker.name }
+        # Only commit on the success path. A stuck :agent_working / :error /
+        # other marker is a real failure — don't pollute hive/state with
+        # action='agent_working' commits that mask it.
+        return { commit: nil, status: marker.name } unless marker.name == :complete
+
+        if (hits = scan_for_secrets(task, marker)).any?
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "secret_in_pr_body",
+                            patterns: hits.uniq.first(3).join(","))
+          return { commit: "pr_secret_blocked", status: :error }
+        end
+
+        { commit: "pr_opened", status: :complete }
+      end
+
+      def scan_for_secrets(task, marker)
+        sources = [File.read(task.state_file)]
+        if (url = marker.attrs["pr_url"]) && !url.empty?
+          out, _err, status = Open3.capture3("gh", "pr", "view", url, "--json", "body", "-q", ".body")
+          sources << out if status.success? && !out.empty?
+        end
+        sources.flat_map { |s| s.scan(Regexp.union(SECRET_PATTERNS)) }
+      rescue StandardError
+        []
       end
 
       def ensure_gh_authenticated!
-        out, err, status = Open3.capture3("gh", "auth", "status")
+        out, err, status = with_network_timeout { Open3.capture3("gh", "auth", "status") }
         return if status.success?
 
         warn "hive: gh not authenticated (`gh auth login`):\n#{err.empty? ? out : err}"
@@ -67,7 +106,9 @@ module Hive
       end
 
       def push_branch!(worktree_path, branch)
-        out, err, status = Open3.capture3("git", "-C", worktree_path, "push", "-u", "origin", branch)
+        out, err, status = with_network_timeout do
+          Open3.capture3("git", "-C", worktree_path, "push", "-u", "origin", branch)
+        end
         return if status.success?
 
         warn "hive: git push failed: #{err.strip.empty? ? out : err}"
@@ -75,8 +116,12 @@ module Hive
       end
 
       def lookup_existing_pr(_worktree_path, branch)
-        out, _err, status = Open3.capture3("gh", "pr", "list", "--head", branch, "--state", "open",
-                                           "--json", "url,number")
+        # Include closed PRs too — a previous attempt that closed without
+        # merging would otherwise create a duplicate on retry.
+        out, _err, status = with_network_timeout do
+          Open3.capture3("gh", "pr", "list", "--head", branch,
+                         "--state", "all", "--json", "url,number,state")
+        end
         return nil unless status.success?
 
         require "json"
@@ -85,7 +130,15 @@ module Hive
         rescue StandardError
           []
         end
-        list.first
+        # Prefer open PRs; fall back to most recent for idempotency reporting.
+        list.find { |p| p["state"] == "OPEN" } || list.first
+      end
+
+      def with_network_timeout(&block)
+        Timeout.timeout(NETWORK_TIMEOUT_SEC, &block)
+      rescue Timeout::Error
+        warn "hive: network operation exceeded #{NETWORK_TIMEOUT_SEC}s; aborting"
+        exit 1
       end
 
       def write_pr_md(task, existing, idempotent: false)

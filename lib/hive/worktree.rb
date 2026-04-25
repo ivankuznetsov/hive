@@ -81,15 +81,25 @@ module Hive
       data
     end
 
+    # Resolve symlinks before the prefix check — File.expand_path normalises
+    # `..` and `~` lexically but does not follow symlinks. An agent that
+    # writes a symlink at the worktree path could otherwise escape the root.
     def self.validate_pointer_path(pointer_path, expected_root)
-      expanded = File.expand_path(pointer_path)
-      expected_prefix = File.expand_path(expected_root)
+      expanded = realpath_or_expand(pointer_path)
+      expected_prefix = realpath_or_expand(expected_root)
       unless expanded.start_with?(expected_prefix + File::SEPARATOR) || expanded == expected_prefix
         raise WorktreeError,
               "worktree path #{expanded} is outside expected root #{expected_prefix}"
       end
 
       expanded
+    end
+
+    def self.realpath_or_expand(path)
+      File.realpath(path)
+    rescue Errno::ENOENT
+      # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
+      File.expand_path(path)
     end
   end
 end

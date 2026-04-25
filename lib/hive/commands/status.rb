@@ -92,9 +92,11 @@ module Hive
         rows
       end
 
-      def decorate(_task, marker)
+      def decorate(task, marker)
         if marker.name == :agent_working
-          pid = marker.attrs["claude_pid"] || marker.attrs["pid"]
+          # Marker only carries the hive runner PID; the claude subprocess PID
+          # is recorded in the per-task .lock file by Hive::Agent.
+          pid = lookup_claude_pid(task) || marker.attrs["pid"]
           if pid && pid_alive?(pid.to_i)
             ["🤖", "agent_working pid=#{pid}"]
           else
@@ -117,6 +119,16 @@ module Hive
         false
       rescue Errno::EPERM
         true
+      end
+
+      def lookup_claude_pid(task)
+        lock_file = File.join(task.folder, ".lock")
+        return nil unless File.exist?(lock_file)
+
+        data = YAML.safe_load(File.read(lock_file)) || {}
+        data.is_a?(Hash) ? data["claude_pid"] : nil
+      rescue StandardError
+        nil
       end
 
       def humanise_age(mtime)

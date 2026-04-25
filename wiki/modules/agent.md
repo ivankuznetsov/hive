@@ -7,7 +7,7 @@ updated: 2026-04-25
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: `claude -p` subprocess wrapper. Sets `AGENT_WORKING` pre-spawn, streams stdout/stderr to the per-stage log, enforces budget + timeout, kills on signal or timeout, detects concurrent edits via inode tracking, and translates the exit into a marker (`COMPLETE` / `WAITING` / `ERROR`).
+**TLDR**: `claude -p` subprocess wrapper. Sets `AGENT_WORKING` pre-spawn, streams stdout/stderr to the per-stage log, enforces budget + timeout, kills on signal or timeout, and translates the exit into a marker (`COMPLETE` / `WAITING` / `ERROR`). The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
 ## Class shape
 
@@ -31,13 +31,12 @@ Hive::Agent.new(
 ## `run!` (the main entry)
 
 1. `ensure_log_dir`.
-2. Snapshot `pre_inode = File.stat(state_file).ino`. Used later for concurrent-edit detection.
-3. `Markers.set(state_file, :agent_working, pid: Process.pid, started: now)`.
-4. `spawn_and_wait` — see below.
-5. `post_inode = File.stat(state_file).ino`.
-6. If `pre_inode != post_inode`, the state file was atomically replaced by an editor save (VSCode, vim "rename-then-mv"); set `<!-- ERROR reason=concurrent_edit_detected pre_inode=… post_inode=… -->` and mark `result[:status] = :concurrent_edit`.
-7. `handle_exit`: translate timeout / non-zero exit / concurrent edit into the appropriate marker.
-8. Return the result hash.
+2. `Markers.set(state_file, :agent_working, pid: Process.pid, started: now)`.
+3. `spawn_and_wait` — see below.
+4. `handle_exit`: translate timeout / non-zero exit / missing-marker-after-clean-exit into the appropriate marker.
+5. Return the result hash.
+
+There is **no inode-tracking concurrent-edit detection.** It was tried in early Phase 1 and removed — claude's own `Edit` and `Write` tools rewrite atomically (write tempfile + rename), changing the state file's inode every time. Inode mismatch was 100% false-positive. The current safety net for "user edits state file mid-run" is the documented "don't edit during AGENT_WORKING" rule plus the per-task `.lock` file's PID-liveness probe.
 
 ## `build_cmd`
 
@@ -48,11 +47,12 @@ claude -p
   --max-budget-usd <amount>
   --output-format stream-json
   --include-partial-messages
+  --verbose
   --no-session-persistence
   <prompt>
 ```
 
-`--no-session-persistence` ensures every invocation starts fresh — no surprises from a previous session's state.
+`--verbose` is required by `claude` whenever `-p` is paired with `--output-format stream-json`; without it claude rejects the invocation with `"Error: When using --print, --output-format=stream-json requires --verbose"`. `--no-session-persistence` ensures every invocation starts fresh — no surprises from a previous session's state.
 
 ## `spawn_and_wait` (the long part)
 
@@ -74,9 +74,11 @@ claude -p
 | Condition | Marker set |
 |-----------|------------|
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N -->` |
-| `result[:status] == :concurrent_edit` | already set by run! |
-| `exit_code != 0` | `<!-- ERROR reason=exit_code exit_code=N -->` |
-| Otherwise | `result[:status] = Markers.current(state_file).name` (read whatever marker the agent wrote) |
+| `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N -->` |
+| `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code -->` (corrupted state, not silent OK) |
+| Otherwise | `result[:status] = Markers.current(state_file).name` (trust the marker the agent wrote) |
+
+`exit_code` can come back nil when claude streams large output and the parent's pipe-drain race loses the WNOHANG status; in that case we trust the marker the agent wrote. The nil-and-`:none` combination is treated as failure because a successful agent always writes a known marker.
 
 ## `check_version!`
 

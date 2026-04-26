@@ -64,10 +64,13 @@ module Hive
               description: "lockfile churn during a fix pass: verify the change is an intended bump, not an accidental downgrade or arbitrary version drift."
             },
             permission_change: {
-              regex: /\A(?:old mode|new mode|deleted file mode|new file mode) 100755$/,
+              # Catch any executable / setuid / setgid / world-writable bit
+              # in the trailing octal triple (1, 3, 5, or 7 → exec bit set):
+              # 100755, 100777, 104755 (setuid), 102755 (setgid), …
+              regex: /\A(?:old mode|new mode|deleted file mode|new file mode) 10[0-9][0-9][0-9][1357]$/,
               severity: :medium,
               targets: :raw_diff_header,
-              description: "executable bit added: a fix that flips file mode to 100755 may be granting execution rights to a script the user didn't expect."
+              description: "executable / setuid / setgid bit added: a fix that flips file mode to an executable or privileged mode may be granting execution rights to a script the user didn't expect."
             }
           }.freeze
         end

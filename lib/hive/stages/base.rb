@@ -23,15 +23,77 @@ module Hive
         "user_supplied_#{SecureRandom.hex(8)}"
       end
 
-      # Retained as a no-op for any test that historically called it. With
-      # per-spawn nonces there is no shared state to reset.
-      def reset_user_supplied_tag!
-        nil
-      end
-
       def render(template_name, bindings_obj)
         path = File.expand_path("../../../templates/#{template_name}", __dir__)
         ERB.new(File.read(path), trim_mode: "-").result(bindings_obj.binding_for_erb)
+      end
+
+      # Like #render, but the caller already resolved + validated the
+      # absolute path via #resolve_template_path. Used by review-stage
+      # consumers that accept user-configurable prompt_template values.
+      def render_resolved_path(absolute_path, bindings_obj)
+        ERB.new(File.read(absolute_path), trim_mode: "-").result(bindings_obj.binding_for_erb)
+      end
+
+      # Walk up from a task_folder (`.../<.hive-state>/stages/<N>-<name>/<slug>`)
+      # to the matching `.hive-state` directory. Used by every consumer
+      # of resolve_template_path that has a Reviewers::Context but not a
+      # full Task.
+      def hive_state_dir_for_task_folder(task_folder)
+        File.expand_path(File.join(task_folder, "..", "..", ".."))
+      end
+
+      # Resolve a prompt-template name to an absolute, validated path.
+      # Two cases:
+      #   1. A bare basename (no slashes) → built-in template under
+      #      lib/../templates/. Existence is checked but no escape
+      #      check is needed: built-ins ship with the gem.
+      #   2. A path with a slash → user-supplied custom template. Must
+      #      land under `<hive_state_dir>/templates/` after `realpath`
+      #      resolution. Path-escape attempts (`../`, absolute paths
+      #      outside the allowed root, symlinks pointing outside) raise
+      #      Hive::ConfigError.
+      #
+      # `hive_state_dir` is required for case 2; pass `nil` for callers
+      # that only support built-ins.
+      def resolve_template_path(name, hive_state_dir: nil)
+        raise Hive::ConfigError, "prompt_template name cannot be blank" if name.nil? || name.to_s.empty?
+
+        if !name.include?("/") && !File.absolute_path?(name)
+          # Built-in template lookup.
+          builtin = File.expand_path("../../../templates/#{name}", __dir__)
+          unless File.exist?(builtin)
+            raise Hive::ConfigError,
+                  "prompt_template #{name.inspect} not found among built-ins (#{builtin})"
+          end
+          return builtin
+        end
+
+        # Custom template — must resolve under <state_dir>/templates/.
+        unless hive_state_dir
+          raise Hive::ConfigError,
+                "prompt_template #{name.inspect} looks like a custom path but no hive_state_dir was provided"
+        end
+
+        templates_root_raw = File.join(hive_state_dir, "templates")
+        unless File.directory?(templates_root_raw)
+          raise Hive::ConfigError,
+                "prompt_template #{name.inspect} requires #{templates_root_raw} to exist"
+        end
+        templates_root = File.realpath(templates_root_raw)
+
+        candidate = File.expand_path(name, templates_root)
+        unless File.exist?(candidate)
+          raise Hive::ConfigError,
+                "prompt_template #{name.inspect} not found at #{candidate}"
+        end
+
+        resolved = File.realpath(candidate)
+        unless resolved.start_with?(templates_root + File::SEPARATOR) || resolved == templates_root
+          raise Hive::ConfigError,
+                "prompt_template #{name.inspect} resolves outside #{templates_root}"
+        end
+        resolved
       end
 
       # Spawn an agent and return its result hash.
@@ -67,10 +129,6 @@ module Hive
           expected_output: expected_output,
           status_mode: status_mode
         ).run!
-      end
-
-      def stage_dir_for(task)
-        "#{task.stage_index}-#{task.stage_name}"
       end
 
       class TemplateBindings

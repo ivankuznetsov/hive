@@ -348,4 +348,77 @@ class FixGuardrailTest < Minitest::Test
     end
     assert_match(/regex/, err.message)
   end
+
+  # --- R2: capture_diff failure raises (no silent :clean) -------------
+
+  def test_capture_diff_raises_when_git_fails
+    with_tmp_git_repo do |dir|
+      base = `git -C #{dir} rev-parse HEAD`.strip
+      err = assert_raises(Hive::AgentError) do
+        Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg, ctx: make_ctx(dir),
+          base_sha: base, head_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        )
+      end
+      assert_match(/git diff failed/, err.message)
+    end
+  end
+
+  # --- DP4: unicode paths surface verbatim in the diff -----------------
+
+  def test_unicode_path_with_secret_trips_guardrail_with_path_in_snippet
+    # `core.quotePath=false` ensures `tëst.rb` shows up unicode-encoded
+    # rather than as `t\303\253st.rb`. The secret pattern needs the
+    # added line, but file_path patterns also depend on the unencoded
+    # path; this test stresses the path-emission half.
+    with_tmp_git_repo do |dir|
+      base = `git -C #{dir} rev-parse HEAD`.strip
+      target = File.join(dir, "tëst.rb")
+      File.write(target, %(API_KEY = "AKIA1234567890123456"\n))
+      run!("git", "-C", dir, "add", "tëst.rb")
+      run!("git", "-C", dir, "commit", "-m", "add unicode-named file with secret", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status
+      paths_seen = result.matches.map(&:file).compact
+      assert(paths_seen.any? { |p| p.include?("tëst.rb") },
+             "unicode path must surface verbatim; got #{paths_seen.inspect}")
+    end
+  end
+
+  # --- permission_change pattern direct coverage -----------------------
+
+  def test_permission_change_regex_matches_100755_executable_bit
+    regex = Hive::Stages::Review::FixGuardrail::Patterns::DEFAULTS[:permission_change][:regex]
+    assert regex =~ "new mode 100755"
+    assert regex =~ "old mode 100755"
+  end
+
+  def test_permission_change_regex_matches_100777_world_writable_executable
+    # Pre-fix the regex hard-coded `100755` and missed every other
+    # executable mode (100777, 100711, …). 100777 is a world-writable
+    # executable — clearly a finding the user should be told about.
+    regex = Hive::Stages::Review::FixGuardrail::Patterns::DEFAULTS[:permission_change][:regex]
+    assert regex =~ "new mode 100777",
+           "100777 (world-writable executable) must trip permission_change"
+  end
+
+  def test_permission_change_regex_matches_104755_setuid_bit
+    # 104755 = setuid + executable. Setuid binaries are a privilege-
+    # escalation vector; an autonomous fix must never grant the bit
+    # silently.
+    regex = Hive::Stages::Review::FixGuardrail::Patterns::DEFAULTS[:permission_change][:regex]
+    assert regex =~ "new mode 104755",
+           "104755 (setuid + executable) must trip permission_change"
+  end
+
+  def test_permission_change_regex_does_not_match_plain_644
+    regex = Hive::Stages::Review::FixGuardrail::Patterns::DEFAULTS[:permission_change][:regex]
+    refute regex =~ "new mode 100644",
+           "100644 (regular non-executable file) must NOT trip permission_change"
+  end
 end

@@ -135,4 +135,45 @@ class RunReviewersTest < Minitest::Test
                    "with no marker pass, fall back to disk-derived max"
     end
   end
+
+  # --- R5: hostile NN cap ----------------------------------------------
+
+  def test_max_review_pass_raises_when_disk_NN_exceeds_max_passes_plus_one
+    # A user (or a hostile environment) drops claude-99.md into reviews/.
+    # With max_passes=4 and the +1 head-room for "next pass after the
+    # max one already on disk", anything > 5 must loudly fail rather
+    # than driving the loop into pass 99.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "claude-99.md"), "## High\n- [ ] x\n")
+
+      cfg = { "review" => { "max_passes" => 4 } }
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review.max_review_pass(dir, cfg)
+      end
+      assert_match(/99/, err.message)
+      assert_match(/max_passes/, err.message)
+      assert_match(/claude-99\.md/, err.message)
+    end
+  end
+
+  def test_max_review_pass_does_not_raise_within_cap
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "claude-04.md"), "## High\n")
+
+      cfg = { "review" => { "max_passes" => 4 } }
+      assert_equal 4, Hive::Stages::Review.max_review_pass(dir, cfg)
+    end
+  end
+
+  def test_max_review_pass_without_cfg_skips_the_cap
+    # Backward-compatible: existing call sites that pass no cfg get
+    # the pre-R5 behaviour.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "claude-99.md"), "## High\n")
+      assert_equal 99, Hive::Stages::Review.max_review_pass(dir)
+    end
+  end
 end

@@ -303,6 +303,48 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  # --- PE1: prompt_template path-escape is ConfigError -----------------
+
+  def test_path_escape_in_ci_prompt_template_raises_config_error
+    with_ci_dir do |dir, task_folder|
+      # max_attempts=2 so the fix-agent spawn (which uses prompt_template)
+      # is reached after the first failing CI.
+      ci = write_ci_script(dir, %(echo fail >&2; exit 1))
+      cfg = cfg_with(ci, "review" => { "ci" => { "max_attempts" => 2, "prompt_template" => "../../../etc/passwd" } })
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review::CiFix.run!(
+          cfg: cfg,
+          ctx: make_ctx(dir, task_folder)
+        )
+      end
+    end
+  end
+
+  # --- DP2: wall-clock cap short-circuits between attempts -------------
+
+  def test_wall_clock_exceeded_short_circuits_after_first_attempt
+    with_ci_dir do |dir, task_folder|
+      # Always-failing CI; max_attempts high enough to enter the loop.
+      ci = write_ci_script(dir, %(echo "fail" >&2; exit 7))
+      cfg = cfg_with(ci, "review" => { "ci" => { "max_attempts" => 5 } })
+
+      # Pretend we entered the loop one hour ago with a 10-second cap —
+      # the second attempt's wall-clock check trips before run_ci_once.
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg,
+        ctx: make_ctx(dir, task_folder),
+        started_at: Time.now - 3600,
+        max_wall_clock_sec: 10
+      )
+
+      assert_equal :stale, result.status
+      assert_equal 1, result.attempts,
+                   "loop must short-circuit after the first attempt and not retry"
+      assert_equal "wall_clock_exceeded", result.error_message
+    end
+  end
+
   # --- captured output reaches agent prompt -----------------------------
 
   def test_captured_output_is_passed_to_fix_agent_via_user_supplied_wrapper

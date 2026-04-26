@@ -292,6 +292,19 @@ class BrowserTestTest < Minitest::Test
     end
   end
 
+  # --- PE1: prompt_template path-escape is ConfigError -----------------
+
+  def test_path_escape_in_browser_prompt_template_raises_config_error
+    with_browser_dir do |_dir, _task_folder, ctx|
+      cfg = cfg_with(
+        "review" => { "browser_test" => { "prompt_template" => "../../../etc/passwd" } }
+      )
+      assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review::BrowserTest.run!(cfg: cfg, ctx: ctx)
+      end
+    end
+  end
+
   # --- result-path layout ----------------------------------------------
 
   def test_result_path_includes_pass_and_attempt_zero_padded

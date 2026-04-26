@@ -3,6 +3,8 @@ require "fileutils"
 require "shellwords"
 require "digest"
 require "hive/agent_profiles"
+require "hive/protected_files"
+require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 
 module Hive
@@ -37,11 +39,11 @@ module Hive
 
         DEFAULT_TAIL_LINES = 200
         DEFAULT_MAX_LOG_BYTES = 256 * 1024 # 256 KB hard cap on captured output
-        PROTECTED_FILES = %w[plan.md worktree.yml task.md].freeze
+        PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
 
         module_function
 
-        def run!(cfg:, ctx:)
+        def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil)
           command = cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
@@ -60,6 +62,20 @@ module Hive
           last_output = nil
 
           loop do
+            # DP2: enforce the runner's wall-clock cap between attempts so
+            # a slow CI command can't blow the per-task budget. Skip the
+            # check on attempt 1 — at least one CI invocation is always
+            # allowed once we've decided to enter the loop.
+            if attempts.positive? && started_at && max_wall_clock_sec &&
+               (Time.now - started_at) >= max_wall_clock_sec
+              return Result.new(
+                status: :stale,
+                attempts: attempts,
+                last_output: last_output,
+                error_message: "wall_clock_exceeded"
+              )
+            end
+
             attempts += 1
             run_result = run_ci_once(command, ctx.worktree_path, max_bytes)
             return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
@@ -83,7 +99,7 @@ module Hive
               )
             end
 
-            before = sha256_protected(ctx)
+            before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
             spawn_result = spawn_fix_agent(
               cfg: cfg,
               ctx: ctx,
@@ -92,8 +108,8 @@ module Hive
               max_attempts: max_attempts,
               captured_output: output
             )
-            after = sha256_protected(ctx)
-            tampered = before.keys.reject { |f| before[f] == after[f] }
+            after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
+            tampered = Hive::ProtectedFiles.diff(before, after)
             if tampered.any?
               return Result.new(
                 status: :error,
@@ -165,23 +181,15 @@ module Hive
           combined.force_encoding(Encoding::UTF_8)
           combined.scrub!("?") # replace invalid UTF-8 sequences
 
-          Run.new(combined, status.exitstatus, false)
+          Run.new(combined, status.exitstatus)
         end
 
-        Run = Struct.new(:combined, :exit_code, :error_flag) do
-          def error?
-            error_flag
-          end
-        end
+        Run = Struct.new(:combined, :exit_code)
 
         # Wrap a launch failure as a Result :error directly so the
         # caller doesn't have to distinguish "command exited non-zero"
         # from "command couldn't even start."
         CommandError = Struct.new(:reason) do
-          def error?
-            true
-          end
-
           def to_result(attempts: 0)
             CiFix::Result.new(
               status: :error,
@@ -189,13 +197,6 @@ module Hive
               last_output: nil,
               error_message: reason
             )
-          end
-        end
-
-        def sha256_protected(ctx)
-          PROTECTED_FILES.each_with_object({}) do |name, h|
-            path = File.join(ctx.task_folder, name)
-            h[name] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
           end
         end
 
@@ -214,10 +215,14 @@ module Hive
           profile = Hive::AgentProfiles.lookup(profile_name)
 
           template = cfg.dig("review", "ci", "prompt_template") || "ci_fix_prompt.md.erb"
+          template_path = Hive::Stages::Base.resolve_template_path(
+            template,
+            hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
+          )
           tag = Hive::Stages::Base.user_supplied_tag
 
-          prompt = Hive::Stages::Base.render(
-            template,
+          prompt = Hive::Stages::Base.render_resolved_path(
+            template_path,
             Hive::Stages::Base::TemplateBindings.new(
               project_name: File.basename(ctx.worktree_path),
               worktree_path: ctx.worktree_path,
@@ -245,15 +250,8 @@ module Hive
         end
 
         def synthetic_task(ctx)
-          SyntheticTask.new(
-            folder: ctx.task_folder,
-            state_file: File.join(ctx.task_folder, "task.md"),
-            log_dir: File.join(ctx.task_folder, "logs"),
-            stage_name: "5-review"
-          )
+          Hive::Reviewers.synthetic_task_for(ctx)
         end
-
-        SyntheticTask = Struct.new(:folder, :state_file, :log_dir, :stage_name, keyword_init: true)
       end
     end
   end

@@ -101,6 +101,37 @@ class MetricsTest < Minitest::Test
     end
   end
 
+  # --- R4: reverted? prefix-collision false positive --------------------
+
+  def test_reverted_does_not_false_positive_on_shared_seven_char_prefix
+    # Two commits sharing the same 7-char prefix but DIFFERENT full SHAs.
+    # A Revert citing only the first commit's full SHA must NOT mark the
+    # second commit as reverted.
+    fix_a_sha = "abcdef0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    fix_b_sha = "abcdef0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    fix_a = { sha: fix_a_sha, subject: "fix(a): one", body: "" }
+    fix_b = { sha: fix_b_sha, subject: "fix(b): two", body: "" }
+
+    revert_subjects = {} # no subject matches
+    # Revert cites fix_a's FULL sha — only fix_a should be considered reverted.
+    revert_shas = { fix_a_sha => [ "rev1234567890" ] }
+
+    assert Hive::Metrics.reverted?(fix_a, revert_subjects, revert_shas),
+           "the cited fix commit must be detected as reverted"
+    refute Hive::Metrics.reverted?(fix_b, revert_subjects, revert_shas),
+           "an unrelated fix sharing only the first 7 chars must NOT be detected as reverted"
+  end
+
+  def test_reverted_handles_short_sha_prefix_in_revert_body
+    # `This reverts commit <short>` is allowed to cite a 7+ char prefix.
+    # The fix commit's full SHA must START with the cited prefix for the
+    # match to count.
+    fix = { sha: "abcdef01234567890123456789012345678901ab", subject: "fix(x)", body: "" }
+    revert_shas = { "abcdef0" => [ "rev1" ] } # 7-char prefix of fix
+    assert Hive::Metrics.reverted?(fix, {}, revert_shas)
+  end
+
   def test_since_filter_excludes_old_commits
     with_tmp_git_repo do |dir|
       commit_with(dir, file: "a.rb", content: "1\n", subject: "fix(a): old",

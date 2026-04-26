@@ -1,6 +1,7 @@
-require "fileutils"
 require "digest"
+require "fileutils"
 require "open3"
+require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
@@ -43,7 +44,23 @@ module Hive
       # phase=fix reason=fix_tampered. Same pattern as ADR-013 for
       # 4-execute, narrowed to the orchestrator-owned files plus the
       # current pass's escalations doc (which only Triage may write).
-      FIX_PROTECTED_FILES = %w[plan.md worktree.yml task.md].freeze
+      FIX_PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+
+      # Filenames in `reviews/` that the orchestrator (not a reviewer)
+      # writes. Triage's `discover_reviewer_files` and the runner's
+      # max_review_pass / collect_accepted_findings / reviewer_sources_for
+      # all need to skip these — otherwise a `fix-guardrail-NN.md` user
+      # tick `[x]` would re-flow into the next pass's fix prompt and
+      # over-amplify guardrail findings.
+      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail-].freeze
+
+      # True for filenames that originate from a reviewer (not the
+      # orchestrator). Used by every consumer of `reviews/*.md` so
+      # adding a new orchestrator-owned file family means changing this
+      # one constant.
+      def reviewer_file?(name)
+        ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
+      end
 
       def run!(task, cfg)
         # Track the current phase in a module-instance variable so the
@@ -105,7 +122,10 @@ module Hive
         unless marker.name == :review_waiting
           @current_phase = :ci
           mark_working(task, phase: :ci, pass: 1)
-          ci_result = Hive::Stages::Review::CiFix.run!(cfg: cfg, ctx: ctx)
+          ci_result = Hive::Stages::Review::CiFix.run!(
+            cfg: cfg, ctx: ctx,
+            started_at: started_at, max_wall_clock_sec: max_wall_clock
+          )
           if wall_clock_exceeded?(started_at, max_wall_clock)
             return finalize_wall_clock_stale(task, started_at, pass: 1)
           end
@@ -125,7 +145,7 @@ module Hive
         end
 
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
-        pass = next_pass_for(task, marker)
+        pass = next_pass_for(task, marker, cfg)
         max_passes = cfg.dig("review", "max_passes") || 4
 
         loop do
@@ -139,6 +159,21 @@ module Hive
           end
 
           ctx_pass = ctx.with(pass: pass)
+
+          # On REVIEW_WAITING resume, validate that at least one
+          # reviewer file exists for this pass before short-circuiting
+          # to Phase 4. If the user edited the marker but deleted /
+          # renamed every per-reviewer file, the fix-agent prompt
+          # would be empty and we'd loop indefinitely. Surface as
+          # REVIEW_ERROR resume_no_findings instead.
+          if resuming_from_waiting?(marker, pass) &&
+             Hive::Stages::Review::Triage.discover_reviewer_files(ctx_pass).empty?
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :resume, reason: "resume_no_findings",
+                              pass: pass)
+            return { commit: "resume_no_findings_pass_#{format('%02d', pass)}",
+                     status: :review_error }
+          end
 
           # If we resumed from REVIEW_WAITING, skip Phase 2/3 — user
           # already edited [x] marks; go directly to Phase 4.
@@ -201,14 +236,19 @@ module Hive
           # --- Phase 4: fix ---
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
-          before_fix_sha = sha256_for(task, FIX_PROTECTED_FILES)
+          # Protect orchestrator-owned files PLUS the current pass's
+          # escalations doc — only Triage may write that file, so a fix
+          # agent rewriting it (e.g. flipping `[ ]` → `[x]` to short-
+          # circuit human review) trips fix_tampered.
+          protected_set = FIX_PROTECTED_FILES + [ "reviews/escalations-#{format('%02d', pass)}.md" ]
+          before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           before_fix_head = git_head(worktree_path)
 
           fix_result = spawn_fix_agent(task, cfg, ctx_pass, accepted: accepted)
-          after_fix_sha = sha256_for(task, FIX_PROTECTED_FILES)
+          after_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           after_fix_head = git_head(worktree_path)
 
-          if (tampered = diff_hashes(before_fix_sha, after_fix_sha)).any?
+          if (tampered = Hive::ProtectedFiles.diff(before_fix_sha, after_fix_sha)).any?
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :fix, reason: "fix_tampered",
                               files: tampered.join(","), pass: pass)
@@ -312,8 +352,8 @@ module Hive
 
       # Pass to start at on a fresh hive run. Falls back to 1 when no
       # reviewer files exist yet.
-      def next_pass_for(task, marker)
-        max = max_review_pass(task.folder)
+      def next_pass_for(task, marker, cfg = nil)
+        max = max_review_pass(task.folder, cfg)
         case marker.name
         when :review_waiting
           # Prefer the marker-recorded pass over the disk-derived max.
@@ -336,21 +376,33 @@ module Hive
           marker.attrs["pass"].to_i == pass
       end
 
-      def max_review_pass(task_folder)
+      def max_review_pass(task_folder, cfg = nil)
         glob = File.join(task_folder, "reviews", "*-*.md")
         max = 0
+        offending = nil
         Dir[glob].each do |path|
           name = File.basename(path)
-          next if name.start_with?("escalations-")
-          next if name.start_with?("ci-blocked")
-          next if name.start_with?("browser-")
-          next if name.start_with?("fix-guardrail-")
+          next unless reviewer_file?(name)
 
           if name =~ /-(\d{2})\.md\z/
             n = Regexp.last_match(1).to_i
-            max = n if n > max
+            if n > max
+              max = n
+              offending = path
+            end
           end
         end
+
+        # Defend against hostile / stale `*-99.md` files by capping at
+        # max_passes + 1. A user manually editing a reviewer file with
+        # a wildly higher NN would otherwise drive the loop past
+        # `review.max_passes` and overwrite real findings.
+        max_passes = cfg ? (cfg.dig("review", "max_passes") || 4) : nil
+        if max_passes && max > max_passes + 1
+          raise Hive::ConfigError,
+                "review pass NN=#{max} exceeds review.max_passes=#{max_passes}; remove or rename #{offending}"
+        end
+
         max
       end
 
@@ -405,10 +457,7 @@ module Hive
         out = +""
         Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")].sort.each do |path|
           name = File.basename(path)
-          next if name.start_with?("escalations-")
-          next if name.start_with?("ci-blocked")
-          next if name.start_with?("browser-")
-          next if name.start_with?("fix-guardrail-")
+          next unless reviewer_file?(name)
 
           File.readlines(path).each do |line|
             out << "[#{name}] #{line}" if line =~ /^\s*-\s+\[x\]\s+/
@@ -448,9 +497,13 @@ module Hive
         profile_name = cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name)
         template = cfg.dig("review", "fix", "prompt_template") || "fix_prompt.md.erb"
-
-        prompt = Hive::Stages::Base.render(
+        template_path = Hive::Stages::Base.resolve_template_path(
           template,
+          hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
+        )
+
+        prompt = Hive::Stages::Base.render_resolved_path(
+          template_path,
           Hive::Stages::Base::TemplateBindings.new(
             project_name: File.basename(task.project_root),
             worktree_path: ctx.worktree_path,
@@ -492,7 +545,7 @@ module Hive
       def reviewer_sources_for(ctx)
         sources = Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")]
                   .map { |p| File.basename(p, ".md") }
-                  .reject { |n| n.start_with?("escalations-", "ci-blocked", "browser-", "fix-guardrail-") }
+                  .select { |n| reviewer_file?("#{n}.md") }
                   .map { |n| n.sub(/-\d{2}\z/, "") }
                   .uniq
                   .sort
@@ -541,17 +594,6 @@ module Hive
       def worktree_dirty?(worktree_path)
         out, _err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
         !status.success? || !out.empty?
-      end
-
-      def sha256_for(task, names)
-        names.each_with_object({}) do |name, h|
-          path = File.join(task.folder, name)
-          h[name] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
-        end
-      end
-
-      def diff_hashes(before, after)
-        before.keys.reject { |k| before[k] == after[k] }
       end
 
       def agent_failed?(result)

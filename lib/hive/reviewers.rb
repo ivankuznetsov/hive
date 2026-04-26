@@ -1,4 +1,5 @@
 require "hive/reviewers/base"
+require "hive/reviewers/synthetic_task"
 require "hive/reviewers/agent"
 
 module Hive

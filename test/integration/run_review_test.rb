@@ -321,6 +321,91 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # --- PE1: fix prompt_template path-escape is ConfigError -------------
+
+  def test_path_escape_in_fix_prompt_template_raises_config_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "fix" => { "prompt_template" => "../../../etc/passwd" } }
+        })
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] needs work\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting,
+                          pass: 1, escalations: 1)
+
+        # The runner's top-level rescue translates ConfigError to
+        # REVIEW_ERROR + re-raises; with_captured_exit catches the raise.
+        out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        # The exact exit code depends on the rescue chain; what matters
+        # is the marker landed REVIEW_ERROR rather than a silent path
+        # escape attempting to read /etc/passwd.
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name,
+                     "path escape must land REVIEW_ERROR; got status=#{status} err=#{err.inspect} out=#{out.inspect}"
+      end
+    end
+  end
+
+  # --- DP1: REVIEW_WAITING resume with no findings yields REVIEW_ERROR ---
+
+  def test_review_waiting_resume_with_no_reviewer_files_yields_resume_no_findings
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        # Marker says we're waiting on pass=2 — but reviews/ is empty.
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting,
+                          pass: 2, escalations: 1)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "resume", marker.attrs["phase"]
+        assert_equal "resume_no_findings", marker.attrs["reason"]
+        assert_equal "2", marker.attrs["pass"]
+      end
+    end
+  end
+
+  # --- R3: fix-agent rewriting escalations-NN.md is fix_tampered ------
+
+  def test_review_fix_agent_rewriting_escalations_yields_fix_tampered
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        # Simulate triage having written escalations-01.md.
+        escalations = File.join(folder, "reviews", "escalations-01.md")
+        File.write(escalations, "# Escalations for pass 01\n\n- [ ] needs human review\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        # Fix agent rewrites the escalations doc to short-circuit human review.
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          printf '# Escalations for pass 01\\n\\n- [x] AUTO-RESOLVED\\n' > "#{escalations}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "fix_tampered", marker.attrs["reason"]
+        assert_includes marker.attrs["files"], "escalations-01.md"
+      end
+    end
+  end
+
   # --- top-level rescue: helper exception lands REVIEW_ERROR ----------
 
   def test_unexpected_helper_exception_lands_review_error_marker

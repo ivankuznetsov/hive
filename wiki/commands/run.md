@@ -39,7 +39,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 | `:review_waiting` | `next: edit reviews/escalations-NN.md or reviewer files, then `hive run <folder>` again` |
 | `:review_ci_stale` | `next: fix CI, edit reviews/ci-blocked.md, remove REVIEW_CI_STALE marker, re-run` |
 | `:review_stale` | `next: edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, remove REVIEW_STALE marker, re-run` |
-| `:review_error` | investigate, clear the marker, then re-run |
+| `:review_error` | `next: investigate <reason>, then `hive markers clear FOLDER --name REVIEW_ERROR`, then re-run`. JSON: `next_action.kind = "review_error"` with `phase`, `reason`, and the full marker `attrs` surfaced so polling agents can branch without re-parsing the marker. Raises `Hive::TaskInErrorState` → exit 3 (`TASK_IN_ERROR`) after the JSON payload is emitted. |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 
 `next_stage_dir` increments `task.stage_index`; `7-done` has no `next:`.

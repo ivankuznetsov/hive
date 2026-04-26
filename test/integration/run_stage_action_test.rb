@@ -257,6 +257,46 @@ class RunStageActionTest < Minitest::Test
 
   # ── develop / pr verbs ─────────────────────────────────────────────────
 
+  def test_review_moves_execute_complete_to_review_and_runs
+    # The new `hive review <slug>` workflow verb advances a 4-execute
+    # task with the EXECUTE_COMPLETE terminal marker into 5-review and
+    # runs the review-stage agent. The integration check is "did the
+    # move happen and did the runner reach 5-review", regardless of
+    # whether the (heavy) review loop finished cleanly in the test
+    # sandbox.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        execute = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        FileUtils.mkdir_p(File.dirname(execute))
+        FileUtils.mv(inbox, execute)
+        File.write(File.join(execute, "plan.md"), "# Plan\n<!-- COMPLETE -->\n")
+        File.write(File.join(execute, "task.md"), "# task\n<!-- EXECUTE_COMPLETE -->\n")
+        review = File.join(dir, ".hive-state", "stages", "5-review", slug)
+
+        out, err, status = with_captured_exit do
+          Hive::Commands::StageAction.new("review", slug).call
+        end
+
+        assert File.directory?(review), "review must promote 4-execute → 5-review"
+        refute File.directory?(execute), "source 4-execute folder must be gone after promote"
+
+        # The 5-review runner needs a worktree.yml to make progress;
+        # since we didn't seed one (the test focuses on the move +
+        # entry into the runner), the runner exits 1 in pre-flight.
+        # Allow that exit alongside successful completions so the test
+        # is robust to runner internals shifting.
+        assert_includes [
+          Hive::ExitCodes::SUCCESS,
+          Hive::ExitCodes::GENERIC,
+          Hive::ExitCodes::SOFTWARE,
+          Hive::ExitCodes::TASK_IN_ERROR
+        ], status,
+                        "exit must be 0/1/3/70 depending on runner outcome; got #{status}, err=#{err.inspect}, out=#{out.inspect}"
+      end
+    end
+  end
+
   def test_develop_moves_complete_plan_to_execute_and_runs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

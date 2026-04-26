@@ -107,8 +107,8 @@ class RunExecuteTest < Minitest::Test
         ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
         capture_io { Hive::Commands::Run.new(folder).call }
         # Re-run; runner should detect EXECUTE_COMPLETE and short-circuit.
-        out, _err = capture_io { Hive::Commands::Run.new(folder).call }
-        assert_match(/already complete/, out)
+        out, err = capture_io { Hive::Commands::Run.new(folder).call }
+        assert_match(/already complete/, err)
         assert_match(/5-review/, out)
       ensure
         wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]

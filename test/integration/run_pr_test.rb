@@ -117,6 +117,40 @@ class RunPrTest < Minitest::Test
     end
   end
 
+  def test_pr_runner_blocks_when_pr_body_contains_anthropic_key
+    # PR-body secret-scan must catch every family Hive::SecretPatterns
+    # knows — not just the legacy GitHub/AWS/PEM list. Anthropic
+    # `sk-ant-…` is in the shared module; if the local list is back,
+    # this test fails.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        pr_dir, worktree_path = setup_pr_task(dir)
+        stub_push(worktree_path)
+        pr_md = File.join(pr_dir, "pr.md")
+        leaked_key = "sk-ant-#{'A' * 40}"
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://example.com/pr/leak
+          ---
+
+          ## Summary
+          accidentally committed: #{leaked_key}
+
+          <!-- COMPLETE pr_url=https://example.com/pr/leak -->
+        MD
+        # `hive run` raises TaskInErrorState (exit 3) for :error markers.
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(pr_dir).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                     "PR-body secret detection lands :error → run must exit TASK_IN_ERROR"
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name, "PR-body Anthropic key must trip the secret-scan gate"
+        assert_equal "secret_in_pr_body", marker.attrs["reason"]
+        assert_includes marker.attrs["patterns"], "anthropic_api_key"
+      end
+    end
+  end
+
   def test_pr_runner_aborts_if_no_worktree_pointer
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

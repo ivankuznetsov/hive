@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/commands/init"
 require "hive/commands/run"
 require "hive/markers"
@@ -97,8 +98,8 @@ class RunReviewTest < Minitest::Test
         folder = setup_review_task(dir)
         File.write(File.join(folder, "task.md"), "<!-- REVIEW_COMPLETE pass=2 browser=passed -->\n")
 
-        out, _err = capture_io { Hive::Commands::Run.new(folder).call }
-        assert_match(/already complete/, out)
+        _out, err = capture_io { Hive::Commands::Run.new(folder).call }
+        assert_match(/already complete/, err)
         # Marker untouched.
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_complete, marker.name
@@ -141,12 +142,30 @@ class RunReviewTest < Minitest::Test
         File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=triage reason=triage_tampered -->\n")
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        # Run.report exits TASK_IN_ERROR for :error states. Implementation
-        # may or may not propagate REVIEW_ERROR through that path; assert
-        # the marker stays terminal regardless.
+        # Run.report raises TaskInErrorState (exit 3) for both :error and
+        # :review_error markers; polling agents must see the non-zero exit.
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
-        assert_match(/REVIEW_ERROR/, err) if status != 0
+        assert_match(/review_error/, err)
+      end
+    end
+  end
+
+  def test_review_error_marker_json_emits_envelope_and_exits_task_in_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=2 -->\n")
+
+        out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder, json: true).call }
+        # Hive run --json on a :review_error pre-flight emits a parseable
+        # JSON envelope on stdout AND exits 3 (TASK_IN_ERROR) so polling
+        # agents see the failure as a dual signal.
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        payload = JSON.parse(out)
+        assert_equal "review_error", payload["marker"]
+        assert_equal "hive-run", payload["schema"]
       end
     end
   end
@@ -220,6 +239,121 @@ class RunReviewTest < Minitest::Test
         # ci-blocked.md is written for the user to inspect.
         assert File.exist?(File.join(folder, "reviews", "ci-blocked.md"))
         assert_includes File.read(File.join(folder, "reviews", "ci-blocked.md")), "FAIL"
+      end
+    end
+  end
+
+  def test_triage_disabled_escalates_reviewer_findings_without_agent_spawn
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          prompt="${@: -1}"
+          output_path="$(printf '%s' "$prompt" | sed -n 's/^.*Output structured findings to \\(.*\\)$/\\1/p' | head -n 1)"
+          mkdir -p "$(dirname "$output_path")"
+          printf '## High\\n- [ ] needs human review: reason\\n' > "$output_path"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => {
+            "triage" => { "enabled" => false },
+            "reviewers" => [
+              {
+                "name" => "local-reviewer",
+                "kind" => "agent",
+                "agent" => "claude",
+                "skill" => "ce-code-review",
+                "output_basename" => "local-reviewer",
+                "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+                "timeout_sec" => 5
+              }
+            ]
+          }
+        })
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        assert_equal "1", marker.attrs["escalations"]
+        escalations = File.read(File.join(folder, "reviews", "escalations-01.md"))
+        assert_includes escalations, "Triage disabled"
+        assert_includes escalations, "needs human review"
+      end
+    end
+  end
+
+  def test_review_fix_agent_dirty_worktree_yields_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        dirty_file = File.join(worktree, "dirty-fix.txt")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          printf 'uncommitted\\n' > "#{dirty_file}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        # `hive run` raises TaskInErrorState (exit 3) for :review_error
+        # markers (Finding #5) so polling agents see the failure.
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix_dirty_worktree", marker.attrs["reason"]
+      end
+    end
+  end
+
+  # --- top-level rescue: helper exception lands REVIEW_ERROR ----------
+
+  def test_unexpected_helper_exception_lands_review_error_marker
+    # No top-level rescue used to leave REVIEW_WORKING orphaned on disk.
+    # Now any helper raising in Phase 2/3/4 must be translated to
+    # REVIEW_ERROR with the best-known phase, then re-raised so the
+    # underlying bug is still surfaced.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        # Stub mark_working to raise mid-CI so the rescue path fires
+        # well past pre-flight (proving the phase tracker did its job).
+        Hive::Stages::Review.singleton_class.alias_method(:__orig_mark_working, :mark_working)
+        Hive::Stages::Review.define_singleton_method(:mark_working) do |task, phase:, pass:|
+          raise "synthetic helper failure" if phase == :ci
+
+          __orig_mark_working(task, phase: phase, pass: pass)
+        end
+
+        begin
+          assert_raises(RuntimeError) { Hive::Commands::Run.new(folder).call }
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name,
+                       "helper exception must land REVIEW_ERROR, not leave REVIEW_WORKING"
+          assert_equal "ci", marker.attrs["phase"],
+                       "the rescue must record the phase that was active when the exception fired"
+          assert_equal "runner_exception", marker.attrs["reason"]
+          assert_equal "RuntimeError", marker.attrs["exception_class"]
+        ensure
+          Hive::Stages::Review.singleton_class.alias_method(:mark_working, :__orig_mark_working)
+          Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_mark_working)
+        end
       end
     end
   end

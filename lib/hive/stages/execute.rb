@@ -40,7 +40,7 @@ module Hive
 
         case task_state(task)
         when :complete
-          puts "hive: already complete; mv this folder to 5-review/ to continue"
+          warn "hive: already complete; mv this folder to 5-review/ to continue"
           return { commit: nil, status: :execute_complete }
         when :worktree_missing
           warn "hive: worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"

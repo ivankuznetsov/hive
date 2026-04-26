@@ -66,4 +66,28 @@ class StatusTest < Minitest::Test
       end
     end
   end
+
+  def test_review_markers_render_status_icons
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        markers = {
+          "review-waiting-260426-aaaa" => "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n",
+          "review-ci-stale-260426-aaab" => "<!-- REVIEW_CI_STALE attempts=3 -->\n",
+          "review-complete-260426-aaac" => "<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n"
+        }
+        markers.each do |slug, marker|
+          folder = File.join(dir, ".hive-state", "stages", "5-review", slug)
+          FileUtils.mkdir_p(folder)
+          File.write(File.join(folder, "task.md"), marker)
+        end
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+        assert_includes out, "5-review/"
+        assert_includes out, "⏸ review-waiting"
+        assert_includes out, "⚠ review-ci-stale"
+        assert_includes out, "✓ review-complete"
+      end
+    end
+  end
 end

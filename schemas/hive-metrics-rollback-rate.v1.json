@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-metrics-rollback-rate.v1.json",
+  "title": "hive metrics rollback-rate output (v1)",
+  "description": "Stable contract emitted by `hive metrics rollback-rate --json`. A successful invocation emits a SuccessPayload on stdout. Usage failures (unknown subcommand, unknown project, no projects registered) emit an ErrorPayload on stdout and exit 64.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "since",
+        "projects"
+      ],
+      "properties": {
+        "schema": { "const": "hive-metrics-rollback-rate" },
+        "schema_version": { "const": 1 },
+        "since": {
+          "type": ["string", "null"],
+          "description": "git --since= argument (e.g. \"30 days ago\") when --days N was passed; null when reporting full history."
+        },
+        "projects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Project" }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-metrics-rollback-rate" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "unknown_subcommand",
+            "unknown_project",
+            "no_projects_registered"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [64]
+        },
+        "message": { "type": "string" }
+      }
+    },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project",
+        "project_root",
+        "total_fix_commits",
+        "reverted_commits",
+        "rollback_rate",
+        "by_bias",
+        "by_phase"
+      ],
+      "properties": {
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "total_fix_commits": { "type": "integer", "minimum": 0 },
+        "reverted_commits": { "type": "integer", "minimum": 0 },
+        "rollback_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "reverted_commits / total_fix_commits (0 when total_fix_commits is 0)."
+        },
+        "by_bias": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Bucket" },
+          "description": "Per-triage-bias breakdown keyed by Hive-Triage-Bias trailer value."
+        },
+        "by_phase": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Bucket" },
+          "description": "Per-fix-phase breakdown keyed by Hive-Fix-Phase trailer value."
+        }
+      }
+    },
+    "Bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "reverted", "rate"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "reverted": { "type": "integer", "minimum": 0 },
+        "rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

@@ -2,24 +2,12 @@ require "open3"
 require "timeout"
 require "hive/stages/base"
 require "hive/worktree"
+require "hive/secret_patterns"
 
 module Hive
   module Stages
     module Pr
       NETWORK_TIMEOUT_SEC = 60
-
-      # Regex for spotting common secret patterns leaking into PR bodies.
-      # Single-developer trust model still wants belt-and-suspenders here:
-      # the prompt instruction alone is advisory, this scan is a programmatic
-      # gate. A false positive blocks the PR, which is the safe failure mode.
-      SECRET_PATTERNS = [
-        %r{(?i)(?:api[_-]?key|secret|password|passwd|bearer\s+token|access[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9+/_-]{16,}},
-        /AKIA[0-9A-Z]{16}/, # AWS access key
-        /ghp_[A-Za-z0-9]{30,}/,             # GitHub PAT
-        /gho_[A-Za-z0-9]{30,}/,             # GitHub OAuth
-        /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/,  # OpenAI / OpenRouter
-        /-----BEGIN [A-Z ]+PRIVATE KEY-----/
-      ].freeze
 
       module_function
 
@@ -77,9 +65,14 @@ module Hive
         return { commit: nil, status: marker.name } unless marker.name == :complete
 
         if (hits = scan_for_secrets(task, marker)).any?
+          # `hits` is an Array of `{name:, snippet:}` Hashes from
+          # Hive::SecretPatterns.scan; first-three pattern *names* are the
+          # useful breadcrumb (snippets are the actual secret material —
+          # avoid logging them into hive/state).
+          pattern_names = hits.map { |h| h[:name].to_s }.uniq.first(3).join(",")
           Hive::Markers.set(task.state_file, :error,
                             reason: "secret_in_pr_body",
-                            patterns: hits.uniq.first(3).join(","))
+                            patterns: pattern_names)
           return { commit: "pr_secret_blocked", status: :error }
         end
 
@@ -92,7 +85,7 @@ module Hive
           out, _err, status = Open3.capture3("gh", "pr", "view", url, "--json", "body", "-q", ".body")
           sources << out if status.success? && !out.empty?
         end
-        sources.flat_map { |s| s.scan(Regexp.union(SECRET_PATTERNS)) }
+        sources.flat_map { |s| Hive::SecretPatterns.scan(s) }
       rescue StandardError
         []
       end

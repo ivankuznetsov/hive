@@ -105,22 +105,47 @@ module Hive
           diff.each_line do |line|
             chomped = line.chomp
 
-            # Track current file via "+++ b/<path>" diff headers.
-            if (m = chomped.match(%r{\A\+\+\+ b/(.+)\z}))
-              current_file = m[1]
+            # Reset current_file at the start of every file pair so a
+            # subsequent +++ /dev/null (deletion) doesn't carry the
+            # previous file's path forward.
+            if chomped.start_with?("diff --git ")
+              current_file = nil
+              # Don't `next` — fall through so other targets (e.g.
+              # raw_diff_header for permission_change) can still match
+              # on the diff-git header line.
+            end
+
+            # Track current file via BOTH "--- a/<path>" and "+++ b/<path>"
+            # diff headers so deletion-vector attacks (a fix agent that
+            # DELETES `.github/workflows/*.yml` — header reads `+++ /dev/null`,
+            # path lives only on the `--- a/` side) trip :file_path
+            # patterns just like additions and modifications do.
+            header_match = chomped.match(%r{\A--- a/(.+)\z}) ||
+                           chomped.match(%r{\A\+\+\+ b/(.+)\z})
+            if header_match
+              path = header_match[1]
+              current_file = path
 
               patterns.each do |name, spec|
                 next unless spec[:targets] == :file_path
-                next unless spec[:regex] =~ current_file
+                next unless spec[:regex] =~ path
 
                 matches << Match.new(
                   pattern_name: name.to_s,
-                  file: current_file,
+                  file: path,
                   line: nil,
-                  snippet: current_file,
+                  snippet: path,
                   severity: spec[:severity]
                 )
               end
+              next
+            end
+
+            # Treat `+++ /dev/null` (and `--- /dev/null`) as nil so a
+            # subsequent added/removed line isn't attributed to the
+            # previous file.
+            if chomped == "+++ /dev/null" || chomped == "--- /dev/null"
+              current_file = nil
               next
             end
 

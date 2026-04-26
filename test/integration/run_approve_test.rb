@@ -52,7 +52,10 @@ class RunApproveTest < Minitest::Test
 
         _, err, status = with_captured_exit { Hive::Commands::Approve.new(slug).call }
         assert_equal Hive::ExitCodes::WRONG_STAGE, status
-        assert_includes err, "forward approve requires a terminal marker"
+        assert_includes err, "forward approve requires one of"
+        assert_includes err, ":complete"
+        assert_includes err, ":execute_complete"
+        assert_includes err, ":review_complete"
 
         capture_io { Hive::Commands::Approve.new(slug, force: true).call }
         assert File.directory?(File.join(dir, ".hive-state", "stages", "2-brainstorm", slug))
@@ -90,6 +93,23 @@ class RunApproveTest < Minitest::Test
         capture_io { Hive::Commands::Approve.new(slug, to: "execute").call }
 
         assert File.directory?(File.join(dir, ".hive-state", "stages", "4-execute", slug))
+      end
+    end
+  end
+
+  def test_review_complete_advances_to_pr_without_force
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        FileUtils.mkdir_p(File.dirname(review_dir))
+        FileUtils.mv(inbox, review_dir)
+        write_marker(review_dir, :review_complete, pass: 1, browser: :skipped)
+
+        capture_io { Hive::Commands::Approve.new(slug).call }
+
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "6-pr", slug)),
+               "review-complete task must have moved into 6-pr"
       end
     end
   end

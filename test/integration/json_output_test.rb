@@ -126,6 +126,54 @@ class JsonOutputTest < Minitest::Test
     end
   end
 
+  def test_run_json_on_review_complete_marker_returns_approve_next_action
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "review-complete-260426-aaaa"
+        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        FileUtils.mkdir_p(review_dir)
+        File.write(File.join(review_dir, "task.md"), "<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
+
+        out, _err = capture_io { Hive::Commands::Run.new(review_dir, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal "review_complete", payload["marker"]
+
+        next_action = payload["next_action"]
+        assert_equal Hive::Schemas::NextActionKind::APPROVE, next_action["kind"]
+        assert_equal slug, next_action["slug"]
+        assert_equal "5-review", next_action["from_stage"]
+        assert_equal "6-pr", next_action["to_stage"]
+        assert_equal "hive approve #{slug} --from 5-review", next_action["command"]
+      end
+    end
+  end
+
+  def test_run_json_on_execute_complete_marker_returns_review_approve_next_action
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "execute-complete-260426-aaaa"
+        execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        FileUtils.mkdir_p(execute_dir)
+        File.write(File.join(execute_dir, "plan.md"), "# Plan\n")
+        File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+
+        out, _err = capture_io { Hive::Commands::Run.new(execute_dir, json: true).call }
+        assert_equal 1, out.lines.count, "JSON output must be a single line on stdout (no stray puts)"
+        payload = JSON.parse(out)
+        assert_equal "execute_complete", payload["marker"]
+
+        next_action = payload["next_action"]
+        assert_equal Hive::Schemas::NextActionKind::APPROVE, next_action["kind"]
+        assert_equal slug, next_action["slug"]
+        assert_equal "4-execute", next_action["from_stage"]
+        assert_equal "5-review", next_action["to_stage"]
+        assert_equal "hive approve #{slug} --from 4-execute", next_action["command"]
+      end
+    end
+  end
+
   # Pin the JSON-mode :error contract: a dual signal where the JSON document
   # carries the marker + attrs AND the process exits with TASK_IN_ERROR (3).
   # A future refactor that drops the post-puts raise (or wraps it in a

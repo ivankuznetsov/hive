@@ -176,4 +176,34 @@ class SchemaFilesTest < Minitest::Test
     assert_equal enum_keys, schema_keys,
                  "schema NextAction.key enum must mirror Hive::Schemas::TaskActionKind::ALL"
   end
+
+  # ── hive-metrics-rollback-rate ─────────────────────────────────────────
+
+  def test_hive_metrics_rollback_rate_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-metrics-rollback-rate")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-metrics-rollback-rate",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const"),
+                 "SuccessPayload.schema.const must pin the schema name"
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
+                 "SuccessPayload.schema_version.const must pin v1"
+  end
+
+  def test_hive_metrics_rollback_rate_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-metrics-rollback-rate")))
+    success_required = doc.dig("$defs", "SuccessPayload", "required").sort
+
+    assert_equal %w[projects schema schema_version since].sort, success_required,
+                 "schema/producer required-key drift in hive-metrics-rollback-rate.v1.json (envelope)"
+
+    project_required = doc.dig("$defs", "Project", "required").sort
+    assert_equal %w[
+      by_bias by_phase project project_root reverted_commits rollback_rate total_fix_commits
+    ].sort, project_required,
+                 "schema/producer required-key drift in hive-metrics-rollback-rate.v1.json (project)"
+  end
 end

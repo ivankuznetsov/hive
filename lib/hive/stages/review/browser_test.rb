@@ -152,7 +152,11 @@ module Hive
           parsed =
             begin
               JSON.parse(raw)
-            rescue JSON::ParserError => e
+            rescue JSON::ParserError, TypeError => e
+              # TypeError fires when the input isn't a String at all
+              # (very rare from File.read, but `parsed["status"]` below
+              # would TypeError if `parsed` is something other than Hash
+              # — covered separately below).
               return {
                 status: :failed,
                 summary: "browser test produced unparseable JSON",
@@ -162,16 +166,43 @@ module Hive
               }
             end
 
-          status_str = parsed["status"].to_s
-          status = status_str == "passed" ? :passed : :failed
+          # Valid JSON whose root is an Array / String / Integer would
+          # crash `parsed["status"]` with TypeError mid-Phase-5. Treat
+          # any non-Hash root as a malformed-result :failed so the
+          # runner can move to the next attempt.
+          unless parsed.is_a?(Hash)
+            return {
+              status: :failed,
+              summary: "browser test produced malformed JSON (non-hash root)",
+              details: "non-hash JSON: #{parsed.class}\nRaw content (first 500 chars):\n#{raw[0, 500]}",
+              duration_sec: nil,
+              error_message: nil
+            }
+          end
 
-          {
-            status: status,
-            summary: parsed["summary"].to_s,
-            details: parsed["details"].to_s,
-            duration_sec: parsed["duration_sec"],
-            error_message: nil
-          }
+          status_str = parsed["status"].to_s
+          if status_str == "passed"
+            {
+              status: :passed,
+              summary: parsed["summary"].to_s,
+              details: parsed["details"].to_s,
+              duration_sec: parsed["duration_sec"],
+              error_message: nil
+            }
+          else
+            # Preserve the raw status_str in details so the user sees
+            # WHAT the agent reported (e.g. "skipped", "errored", "")
+            # instead of a flat ":failed" with no clue.
+            details = parsed["details"].to_s
+            details = "agent reported status=#{status_str.inspect}#{details.empty? ? '' : "\n#{details}"}"
+            {
+              status: :failed,
+              summary: parsed["summary"].to_s,
+              details: details,
+              duration_sec: parsed["duration_sec"],
+              error_message: nil
+            }
+          end
         end
 
         def browser_result_path(ctx, attempt)

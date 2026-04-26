@@ -26,15 +26,16 @@ module Hive
     #     destination, not the source).
     #
     # Forward auto-advance requires a terminal marker (`:complete` /
-    # `:execute_complete`). Backward `--to <stage>` is a recovery action and
-    # bypasses the marker check; `--force` bypasses it on forward moves too.
+    # `:execute_complete` / `:review_complete`). Backward `--to <stage>` is a
+    # recovery action and bypasses the marker check; `--force` bypasses it on
+    # forward moves too.
     #
     # `--from STAGE` is the agent-side idempotency lever: pass the stage the
     # caller *believes* the task is at; if the task has already been advanced
     # by a prior call, the assertion fails with WRONG_STAGE (4) so retry
     # loops can branch deterministically.
     class Approve
-      VALID_TERMINAL_MARKERS = %i[complete execute_complete].freeze
+      VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
         @target = target
@@ -138,9 +139,10 @@ module Hive
         return if dest_idx <= task.stage_index || @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
+        valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")
         raise Hive::WrongStage,
-              "task #{task.slug} marker is :#{marker.name}; forward approve requires a terminal marker " \
-              "(:complete or :execute_complete). Use --force to override or --to to move backward."
+              "task #{task.slug} marker is :#{marker.name}; forward approve requires one of #{valid}. " \
+              "Use --force to override or --to to move backward."
       end
 
       def same_stage?(task, dest_stage)

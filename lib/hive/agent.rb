@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "time"
 require "hive/agent_profiles"
+require "hive/lock"
 
 module Hive
   class Agent

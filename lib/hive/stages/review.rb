@@ -1,5 +1,6 @@
 require "fileutils"
 require "digest"
+require "open3"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
@@ -45,11 +46,17 @@ module Hive
       FIX_PROTECTED_FILES = %w[plan.md worktree.yml task.md].freeze
 
       def run!(task, cfg)
+        # Track the current phase in a module-instance variable so the
+        # top-level rescue at the end of this method can record it on
+        # REVIEW_ERROR. The hive runner is single-task per process, so
+        # cross-invocation contamination isn't a concern.
+        @current_phase = :pre_flight
+
         # Pre-flight terminal markers
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          puts "hive: already complete; mv this folder to 6-pr/ to continue"
+          warn "hive: already complete; mv this folder to 6-pr/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
           warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, remove the marker, then re-run"
@@ -96,6 +103,7 @@ module Hive
         # Skip CI on REVIEW_WAITING resume to honor the user's manual
         # edits without re-running everything.
         unless marker.name == :review_waiting
+          @current_phase = :ci
           mark_working(task, phase: :ci, pass: 1)
           ci_result = Hive::Stages::Review::CiFix.run!(cfg: cfg, ctx: ctx)
           if wall_clock_exceeded?(started_at, max_wall_clock)
@@ -135,6 +143,7 @@ module Hive
           # If we resumed from REVIEW_WAITING, skip Phase 2/3 — user
           # already edited [x] marks; go directly to Phase 4.
           unless resuming_from_waiting?(marker, pass)
+            @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
             reviewers_result = run_reviewers(cfg, ctx_pass, task)
             if reviewers_result == :all_failed
@@ -148,20 +157,25 @@ module Hive
               return finalize_wall_clock_stale(task, started_at, pass: pass)
             end
 
-            mark_working(task, phase: :triage, pass: pass)
-            triage_result = Hive::Stages::Review::Triage.run!(cfg: cfg, ctx: ctx_pass)
-            case triage_result.status
-            when :tampered
-              Hive::Markers.set(task.state_file, :review_error,
-                                phase: :triage, reason: "triage_tampered",
-                                files: triage_result.tampered_files.join(","), pass: pass)
-              return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
-                       status: :review_error }
-            when :error
-              Hive::Markers.set(task.state_file, :review_error,
-                                phase: :triage, reason: "triage_failed", pass: pass)
-              return { commit: "triage_error_pass_#{format('%02d', pass)}",
-                       status: :review_error }
+            if triage_enabled?(cfg)
+              @current_phase = :triage
+              mark_working(task, phase: :triage, pass: pass)
+              triage_result = Hive::Stages::Review::Triage.run!(cfg: cfg, ctx: ctx_pass)
+              case triage_result.status
+              when :tampered
+                Hive::Markers.set(task.state_file, :review_error,
+                                  phase: :triage, reason: "triage_tampered",
+                                  files: triage_result.tampered_files.join(","), pass: pass)
+                return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
+                         status: :review_error }
+              when :error
+                Hive::Markers.set(task.state_file, :review_error,
+                                  phase: :triage, reason: "triage_failed", pass: pass)
+                return { commit: "triage_error_pass_#{format('%02d', pass)}",
+                         status: :review_error }
+              end
+            else
+              write_manual_escalations(ctx_pass)
             end
           end
 
@@ -185,6 +199,7 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
           before_fix_sha = sha256_for(task, FIX_PROTECTED_FILES)
           before_fix_head = git_head(worktree_path)
@@ -205,6 +220,13 @@ module Hive
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :fix, reason: "fix_failed", pass: pass)
             return { commit: "fix_error_pass_#{format('%02d', pass)}",
+                     status: :review_error }
+          end
+
+          if worktree_dirty?(worktree_path)
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :fix, reason: "fix_dirty_worktree", pass: pass)
+            return { commit: "fix_dirty_worktree_pass_#{format('%02d', pass)}",
                      status: :review_error }
           end
 
@@ -229,6 +251,7 @@ module Hive
         end
 
         # --- Phase 5: browser test ---
+        @current_phase = :browser
         mark_working(task, phase: :browser, pass: pass)
         browser_result = Hive::Stages::Review::BrowserTest.run!(cfg: cfg, ctx: ctx.with(pass: pass))
 
@@ -243,6 +266,22 @@ module Hive
                             phase: :browser, reason: "browser_unexpected", pass: pass)
           { commit: "browser_error_pass_#{format('%02d', pass)}", status: :review_error }
         end
+      rescue SystemExit
+        # `exit 1` calls in pre-flight (worktree.yml missing, worktree
+        # path missing) are intentional terminations — let them through
+        # so the existing test contract is preserved.
+        raise
+      rescue StandardError => e
+        # Any uncaught helper exception would otherwise leave a stale
+        # REVIEW_WORKING marker on disk. Translate to REVIEW_ERROR with
+        # the best-known phase so the user (and `hive run --json`) sees
+        # the failure state, then re-raise so the runner / test suite
+        # still surfaces the underlying bug.
+        Hive::Markers.set(task.state_file, :review_error,
+                          phase: @current_phase || :pre_flight,
+                          reason: "runner_exception",
+                          exception_class: e.class.name)
+        raise
       end
 
       # --- helpers ---------------------------------------------------------
@@ -253,6 +292,10 @@ module Hive
 
       def mark_working(task, phase:, pass:)
         Hive::Markers.set(task.state_file, :review_working, phase: phase, pass: pass)
+      end
+
+      def triage_enabled?(cfg)
+        cfg.dig("review", "triage", "enabled") != false
       end
 
       def wall_clock_exceeded?(started_at, max_seconds)
@@ -273,6 +316,13 @@ module Hive
         max = max_review_pass(task.folder)
         case marker.name
         when :review_waiting
+          # Prefer the marker-recorded pass over the disk-derived max.
+          # Drift (e.g. user wrote a higher reviews/foo-NN.md than the
+          # marker's pass) would otherwise cause Phase 2/3 to re-run
+          # against a higher pass and overwrite the user's [x] marks.
+          recorded = marker.attrs["pass"].to_i
+          return recorded if recorded >= 1
+
           # Resume on the same pass — user toggled [x] in current pass's
           # files and wants a fix run on it.
           [ max, 1 ].max
@@ -316,7 +366,22 @@ module Hive
         statuses = []
         specs.each do |spec|
           adapter = Hive::Reviewers.dispatch(spec, ctx)
-          result = adapter.run!
+          # Wrap adapter.run! so a single reviewer raising (spawn-time
+          # SystemCallError, network timeout in a custom adapter, …)
+          # doesn't abort the whole reviewers phase. Treat as :error,
+          # write the stub finding (matches the result.error? path), and
+          # continue with the next reviewer.
+          result =
+            begin
+              adapter.run!
+            rescue StandardError => e
+              Hive::Reviewers::Result.new(
+                name: spec["name"],
+                output_path: adapter.output_path,
+                status: :error,
+                error_message: "#{e.class}: #{e.message}"
+              )
+            end
           statuses << result.status
 
           if result.error?
@@ -357,6 +422,26 @@ module Hive
         return 0 unless File.exist?(path)
 
         File.readlines(path).count { |l| l =~ /^\s*-\s+\[\s*\]\s+/ }
+      end
+
+      def write_manual_escalations(ctx)
+        path = Hive::Stages::Review::Triage.escalations_path(ctx)
+        reviewer_files = Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+        FileUtils.mkdir_p(File.dirname(path))
+
+        body = +"# Escalations for pass #{format('%02d', ctx.pass)}\n\n"
+        body << "_Triage disabled; all unchecked reviewer findings require user review._\n\n"
+
+        reviewer_files.each do |reviewer_file|
+          findings = File.readlines(reviewer_file).select { |line| line =~ /^\s*-\s+\[\s*\]\s+/ }
+          next if findings.empty?
+
+          body << "## #{File.basename(reviewer_file)}\n\n"
+          findings.each { |line| body << line }
+          body << "\n"
+        end
+
+        File.write(path, body)
       end
 
       def spawn_fix_agent(task, cfg, ctx, accepted:)
@@ -453,6 +538,11 @@ module Hive
         status.success? ? out.strip : nil
       end
 
+      def worktree_dirty?(worktree_path)
+        out, _err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
+        !status.success? || !out.empty?
+      end
+
       def sha256_for(task, names)
         names.each_with_object({}) do |name, h|
           path = File.join(task.folder, name)
@@ -472,5 +562,3 @@ module Hive
     end
   end
 end
-
-require "open3"

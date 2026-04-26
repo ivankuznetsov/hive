@@ -1,7 +1,13 @@
 require "open3"
+require "hive/trailers"
 
 module Hive
   # Rollback-rate metric for hive fix-agent commits (ADR-020 / U14).
+  #
+  # The canonical trailer schema lives in lib/hive/trailers.rb
+  # (`Hive::Trailers::KNOWN`, `SCHEMA_VERSION`). `parse_trailers` below
+  # accepts any `^([A-Za-z][A-Za-z0-9-]*):` line in a commit body — the
+  # `KNOWN` constant is documentation, not an allowlist.
   #
   # Each fix-agent (Phase 4 review-fix and Phase 1 ci-fix) commits with
   # the trailers documented in templates/fix_prompt.md.erb and
@@ -25,15 +31,17 @@ module Hive
   module Metrics
     module_function
 
-    # Returns:
+    # Returns a string-keyed Hash (matches the JSON emission contract so
+    # two consumers of the same library API can't drift on key style —
+    # closes ce-code-review AC-3):
     #   {
-    #     total_fix_commits: N,
-    #     reverted_commits:  M,
-    #     rollback_rate:     M/N (Float, 0.0 when N == 0),
-    #     by_bias: { "courageous" => {total:, reverted:, rate:}, ... },
-    #     by_phase: { "ci" => {total:, reverted:}, "fix" => {total:, reverted:} },
-    #     since: <ISO8601 cutoff>,
-    #     project_root: <abs path>
+    #     "total_fix_commits" => N,
+    #     "reverted_commits"  => M,
+    #     "rollback_rate"     => M/N (Float, 0.0 when N == 0),
+    #     "by_bias"  => { "courageous" => {"total" => …, "reverted" => …, "rate" => …}, … },
+    #     "by_phase" => { "ci" => {…}, "fix" => {…} },
+    #     "since" => <since arg>,
+    #     "project_root" => <abs path>
     #   }
     def rollback_rate(project_root, since: nil)
       raise ArgumentError, "project_root #{project_root.inspect} is not a directory" unless File.directory?(project_root)
@@ -50,32 +58,32 @@ module Hive
       revert_shas = collect_revert_shas(commits)
 
       reverted_count = 0
-      by_bias = Hash.new { |h, k| h[k] = { total: 0, reverted: 0 } }
-      by_phase = Hash.new { |h, k| h[k] = { total: 0, reverted: 0 } }
+      by_bias = Hash.new { |h, k| h[k] = { "total" => 0, "reverted" => 0 } }
+      by_phase = Hash.new { |h, k| h[k] = { "total" => 0, "reverted" => 0 } }
 
       fix_commits.each do |c|
         bias = c[:trailers]["hive-triage-bias"] || "unknown"
         phase = c[:trailers]["hive-fix-phase"] || "fix"
         was_reverted = reverted?(c, revert_subjects, revert_shas)
 
-        by_bias[bias][:total] += 1
-        by_phase[phase][:total] += 1
+        by_bias[bias]["total"] += 1
+        by_phase[phase]["total"] += 1
         if was_reverted
           reverted_count += 1
-          by_bias[bias][:reverted] += 1
-          by_phase[phase][:reverted] += 1
+          by_bias[bias]["reverted"] += 1
+          by_phase[phase]["reverted"] += 1
         end
       end
 
       total = fix_commits.size
       {
-        total_fix_commits: total,
-        reverted_commits: reverted_count,
-        rollback_rate: total.zero? ? 0.0 : (reverted_count.to_f / total).round(4),
-        by_bias: by_bias.transform_values { |h| h.merge(rate: rate_of(h)) },
-        by_phase: by_phase.transform_values { |h| h.merge(rate: rate_of(h)) },
-        since: since,
-        project_root: File.expand_path(project_root)
+        "total_fix_commits" => total,
+        "reverted_commits" => reverted_count,
+        "rollback_rate" => total.zero? ? 0.0 : (reverted_count.to_f / total).round(4),
+        "by_bias" => by_bias.transform_values { |h| h.merge("rate" => rate_of(h)) },
+        "by_phase" => by_phase.transform_values { |h| h.merge("rate" => rate_of(h)) },
+        "since" => since,
+        "project_root" => File.expand_path(project_root)
       }
     end
 
@@ -162,7 +170,7 @@ module Hive
     end
 
     def rate_of(bucket)
-      bucket[:total].zero? ? 0.0 : (bucket[:reverted].to_f / bucket[:total]).round(4)
+      bucket["total"].zero? ? 0.0 : (bucket["reverted"].to_f / bucket["total"]).round(4)
     end
   end
 end

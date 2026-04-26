@@ -67,19 +67,28 @@ module Hive
         end
 
         # Apply config overrides on top of the default pattern set.
-        # `false` value disables a default pattern; a Hash value adds a
-        # custom pattern (must include :regex, :severity, :targets,
-        # :description).
+        # Strict schema (closes ce-code-review AC-7):
+        #   - `false` (boolean) disables a default pattern.
+        #   - Hash adds (or replaces) a custom pattern; must include
+        #     `regex`.
+        # Anything else (true, "false", integer, nil, …) raises
+        # `Hive::ConfigError` so a typo at the YAML level fails fast at
+        # `hive run` startup instead of silently no-op-ing the override.
         def resolve_patterns(cfg)
           overrides = cfg.dig("review", "fix", "guardrail", "patterns_override") || {}
           patterns = Patterns::DEFAULTS.dup
 
           overrides.each do |name, value|
             sym = name.to_sym
-            if value == false || value == "false"
+            case value
+            when false
               patterns.delete(sym)
-            elsif value.is_a?(Hash)
+            when Hash
               patterns[sym] = normalize_custom_pattern(name, value)
+            else
+              raise Hive::ConfigError,
+                    "review.fix.guardrail.patterns_override.#{name}: must be `false` (to disable) " \
+                    "or a Hash (to add custom); got #{value.inspect}"
             end
           end
 

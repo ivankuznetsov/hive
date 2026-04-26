@@ -77,6 +77,7 @@ review:
       agent: claude
       skill: ce-code-review
       output_basename: claude-ce-code-review
+      prompt_template: reviewer_claude_ce_code_review.md.erb
       budget_usd: 50
       timeout_sec: 600
     - name: codex-ce-code-review
@@ -84,6 +85,7 @@ review:
       agent: codex
       skill: ce-code-review
       output_basename: codex-ce-code-review
+      prompt_template: reviewer_codex_ce_code_review.md.erb
       budget_usd: 50
       timeout_sec: 600
     - name: pr-review-toolkit
@@ -91,5 +93,6 @@ review:
       agent: claude
       skill: pr-review-toolkit:review-pr
       output_basename: pr-review-toolkit
+      prompt_template: reviewer_pr_review_toolkit.md.erb
       budget_usd: 50
       timeout_sec: 600

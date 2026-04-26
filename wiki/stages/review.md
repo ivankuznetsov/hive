@@ -93,9 +93,9 @@ Per-project override via `review.fix.guardrail.patterns_override`: `false` to di
 
 ## Phase 5 — browser test (`Hive::Stages::Review::BrowserTest`)
 
-Only when Phase 2 produced zero findings (`pass=NN-1` was clean). Spawns the configured CE skill (`/compound-engineering:ce-test-browser` via `cfg.review.browser.agent`) which the agent invokes against the worktree. Returns one of `:passed`, `:warned`, `:skipped`, `:failed`. `:failed` is treated as `:warned` after `review.browser.max_attempts` (default 2) — the runner writes `browser-blocked-NN.md` and sets `REVIEW_COMPLETE browser=warned` rather than blocking the loop indefinitely.
+Only when Phase 2 produced zero findings (`pass=NN-1` was clean). Spawns the configured CE skill (`/compound-engineering:ce-test-browser` via `cfg.review.browser_test.agent`) which the agent invokes against the worktree. Returns one of `:passed`, `:warned`, `:skipped`, `:failed`. `:failed` is treated as `:warned` after `review.browser_test.max_attempts` (default 2) — the runner writes `browser-blocked-NN.md` and sets `REVIEW_COMPLETE browser=warned` rather than blocking the loop indefinitely.
 
-`review.browser.enabled: false` skips the phase entirely; `:skipped` lands `browser=skipped` on the terminal marker.
+`review.browser_test.enabled: false` skips the phase entirely; `:skipped` lands `browser=skipped` on the terminal marker.
 
 ## Stale-`REVIEW_WORKING` recovery (closes doc-review C-7 / ADV-12)
 

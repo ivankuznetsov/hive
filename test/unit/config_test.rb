@@ -127,6 +127,7 @@ class ConfigTest < Minitest::Test
               agent: claude
               skill: ce-code-review
               output_basename: only-one
+              prompt_template: reviewer_claude_ce_code_review.md.erb
       YAML
       cfg = Hive::Config.load(dir)
       reviewers = cfg.dig("review", "reviewers")
@@ -162,11 +163,13 @@ class ConfigTest < Minitest::Test
               agent: claude
               skill: ce-code-review
               output_basename: a
+              prompt_template: reviewer_claude_ce_code_review.md.erb
             - name: dup-reviewer
               kind: agent
               agent: codex
               skill: ce-code-review
               output_basename: b
+              prompt_template: reviewer_codex_ce_code_review.md.erb
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/duplicate name "dup-reviewer"/, err.message)
@@ -184,11 +187,13 @@ class ConfigTest < Minitest::Test
               agent: claude
               skill: ce-code-review
               output_basename: collision
+              prompt_template: reviewer_claude_ce_code_review.md.erb
             - name: b
               kind: agent
               agent: codex
               skill: ce-code-review
               output_basename: collision
+              prompt_template: reviewer_codex_ce_code_review.md.erb
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/duplicate output_basename "collision"/, err.message)
@@ -209,6 +214,84 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # ── Required fields on each reviewer entry (closes AC-6) ───────────────
+  # validate_reviewers! must reject missing name / skill / prompt_template
+  # at config-load time; otherwise a misconfigured reviewer NoMethodError-s
+  # mid-spawn instead of raising Hive::ConfigError at `hive run` startup.
+
+  def test_load_raises_when_reviewer_name_is_missing
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: bad
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.name/, err.message)
+      assert_match(/is missing/, err.message)
+    end
+  end
+
+  def test_load_raises_when_reviewer_skill_is_missing
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: needs-skill
+              kind: agent
+              agent: claude
+              output_basename: needs-skill
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.skill/, err.message)
+      assert_match(/is missing/, err.message)
+    end
+  end
+
+  def test_load_raises_when_reviewer_prompt_template_is_missing
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: needs-template
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: needs-template
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.prompt_template/, err.message)
+      assert_match(/is missing/, err.message)
+    end
+  end
+
+  def test_load_raises_when_reviewer_skill_is_blank_string
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: blank-skill
+              kind: agent
+              agent: claude
+              skill: "   "
+              output_basename: blank-skill
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\]\.skill/, err.message)
+      assert_match(/is missing/, err.message)
+    end
+  end
+
   def test_load_raises_when_reviewer_agent_is_unknown_profile
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -220,6 +303,7 @@ class ConfigTest < Minitest::Test
               agent: nonexistent_profile
               skill: ce-code-review
               output_basename: bad-reviewer
+              prompt_template: reviewer_claude_ce_code_review.md.erb
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/review\.reviewers\[0\]\.agent "nonexistent_profile"/, err.message)
@@ -255,6 +339,7 @@ class ConfigTest < Minitest::Test
               agent: claude
               skill: ce-code-review
               output_basename: ""
+              prompt_template: reviewer_claude_ce_code_review.md.erb
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/output_basename/, err.message)
@@ -273,6 +358,7 @@ class ConfigTest < Minitest::Test
               agent: claude
               skill: ce-code-review
               output_basename: "   "
+              prompt_template: reviewer_claude_ce_code_review.md.erb
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/output_basename/, err.message)

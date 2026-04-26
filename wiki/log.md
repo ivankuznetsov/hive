@@ -2,7 +2,23 @@
 
 Append-only log of all wiki operations.
 
-## [2026-04-26T19:00:00Z] U10 ship — Full wiki sweep for 5-review + opt-in live-claude review smoke
+## [2026-04-26T22:00:00Z] U10b — wiki sweep for new modules
+
+**Action:** Round-3 ce-code-review remediation flagged five new `lib/hive/` modules added across U9–U14 that lacked dedicated wiki pages. Created the missing pages, refreshed `wiki/templates.md` to catalogue every ERB shipped in the 5-review stage, and corrected the `review.browser_test` config-key drift in `wiki/stages/review.md`.
+
+**New module pages:**
+- `wiki/modules/agent_profile.md` — `Hive::AgentProfile` + `Hive::AgentProfiles` registry; built-in claude / codex / pi profiles; references ADR-017 / ADR-018 / ADR-019.
+- `wiki/modules/reviewers.md` — `Hive::Reviewers.dispatch`, Context, Result, Base, Agent, SyntheticTask; references ADR-014 / ADR-015.
+- `wiki/modules/metrics.md` — `Hive::Metrics.rollback_rate`, parse_commits, parse_trailers, reverted?; trailer schema cross-referenced to `lib/hive/trailers.rb`.
+- `wiki/modules/secret_patterns.md` — `Hive::SecretPatterns.PATTERNS` + `scan`; consumers (PR body scan, post-fix diff guardrail).
+- `wiki/modules/protected_files.md` — `ORCHESTRATOR_OWNED`, snapshot, diff; consumers (4-execute, 5-review's runner / triage / ci-fix).
+
+**Refreshed pages:**
+- `wiki/templates.md` — TLDR now reads "Seventeen ERB templates" (matches `ls templates/*.erb`); catalogue table extended with eight 5-review templates (`fix_prompt`, `ci_fix_prompt`, `browser_test_prompt`, `triage_courageous`, `triage_safetyist`, three reviewer prompts); legacy `review_prompt.md.erb` annotated as no-longer-wired.
+- `wiki/stages/review.md` — corrected `cfg.review.browser` → `cfg.review.browser_test` (matches `lib/hive/stages/review/browser_test.rb`).
+- `wiki/index.md` — Modules section adds five new entries; page count updated.
+
+
 
 **Action:** Replaces the earlier "U10 partial sweep" note. Closes the deferred-page list by writing the full `wiki/stages/review.md`, rewriting `wiki/stages/execute.md` for the impl-only contract (ADR-014), extending `wiki/decisions.md` with ADRs 014–021, refreshing `wiki/architecture.md` and `wiki/index.md`, and updating `wiki/active-areas.md` to mark the 5-review backlog as shipped. Adds `test/smoke/live_review_smoke_test.rb` so `rake smoke` covers the autonomous loop end-to-end against the real claude binary.
 

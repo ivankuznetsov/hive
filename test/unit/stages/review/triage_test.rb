@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/stages/review/triage"
 require "hive/reviewers"
 require "hive/agent_profiles"
+require "hive/protected_files"
 
 # Direct coverage for the triage step of the 5-review autonomous loop.
 class TriageTest < Minitest::Test
@@ -221,32 +222,40 @@ class TriageTest < Minitest::Test
 
   # --- SHA-256 protected files ------------------------------------------
 
-  def test_protected_file_tampering_yields_tampered_status
-    with_triage_dir do |dir, task_folder|
-      ctx = make_ctx(dir, task_folder)
-      File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"), "## Nit\n- [ ] x: y\n")
-      File.write(File.join(task_folder, "plan.md"), "original plan content\n")
+  # Parameterized over every file in Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+  # (post-LFG-2 refactor). Each protected file's mutation must yield
+  # :tampered with that filename surfaced in tampered_files.
+  Hive::ProtectedFiles::ORCHESTRATOR_OWNED.each do |protected_file|
+    define_method("test_protected_file_tampering_#{protected_file.tr('.', '_')}_yields_tampered_status") do
+      with_triage_dir do |dir, task_folder|
+        ctx = make_ctx(dir, task_folder)
+        File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"), "## Nit\n- [ ] x: y\n")
+        File.write(File.join(task_folder, protected_file), "original #{protected_file} content\n")
 
-      escalations = File.join(task_folder, "reviews", "escalations-01.md")
-      tamper_script = File.join(dir, "tampering-fake-claude")
-      File.write(tamper_script, <<~SH)
-        #!/usr/bin/env bash
-        if [[ "${1:-}" == "--version" ]]; then
-          echo "2.1.118 (Claude Code)"
+        escalations = File.join(task_folder, "reviews", "escalations-01.md")
+        target = File.join(task_folder, protected_file)
+        tamper_script = File.join(dir, "tampering-fake-claude")
+        File.write(tamper_script, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          echo "TAMPERED" >> "#{target}"
+          printf '# Escalations\\n' > "#{escalations}"
           exit 0
-        fi
-        echo "TAMPERED" >> "#{File.join(task_folder, 'plan.md')}"
-        printf '# Escalations\\n' > "#{escalations}"
-        exit 0
-      SH
-      File.chmod(0o755, tamper_script)
-      ENV["HIVE_CLAUDE_BIN"] = tamper_script
+        SH
+        File.chmod(0o755, tamper_script)
+        ENV["HIVE_CLAUDE_BIN"] = tamper_script
 
-      result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+        result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
 
-      assert_equal :tampered, result.status
-      assert_includes result.tampered_files, "plan.md"
-      assert_match(/protected files/, result.error_message)
+        assert_equal :tampered, result.status,
+                     "#{protected_file}: expected :tampered, got #{result.status}"
+        assert_includes result.tampered_files, protected_file,
+                        "#{protected_file}: expected in tampered_files=#{result.tampered_files.inspect}"
+        assert_match(/protected files/, result.error_message)
+      end
     end
   end
 

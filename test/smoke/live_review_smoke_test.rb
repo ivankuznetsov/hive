@@ -69,7 +69,15 @@ class LiveReviewSmokeTest < Minitest::Test
         Hive::Commands::Run.new(review_dir).call
 
         marker = Hive::Markers.current(File.join(review_dir, "task.md"))
-        assert_includes %i[review_complete review_waiting],
+        # Any of the three is a clean terminal exit:
+        #   :review_complete — clean run, no findings
+        #   :review_waiting  — escalations needed user input
+        #   :review_stale    — hit max_passes (1 in this smoke; expected
+        #                      when the reviewer finds anything since the
+        #                      loop has no room for a fix iteration)
+        # The smoke's job is to prove the runner reaches a terminal state
+        # against real claude — not to converge to clean.
+        assert_includes %i[review_complete review_waiting review_stale],
                         marker.name,
                         "review must terminate cleanly (got #{marker.name}: #{marker.attrs.inspect})"
       end
@@ -88,6 +96,7 @@ class LiveReviewSmokeTest < Minitest::Test
             "name" => "claude-ce-code-review",
             "kind" => "agent",
             "agent" => "claude",
+            "skill" => "compound-engineering:ce-code-review",
             "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
             "output_basename" => "claude-ce-code-review"
           }

@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "yaml"
+require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
@@ -27,6 +28,9 @@ module Hive
     module Execute
       module_function
 
+      # 4-execute owns plan.md and worktree.yml; task.md is owned but
+      # the implementer agent writes the AGENT_WORKING marker into it,
+      # so it's deliberately NOT in the SHA-protected set here.
       PROTECTED_FILES = %w[plan.md worktree.yml].freeze
 
       def run!(task, cfg)
@@ -107,11 +111,11 @@ module Hive
       # worktree.yml around it, finalize EXECUTE_COMPLETE on clean
       # spawn or :error on tamper / agent failure.
       def run_pass(task, cfg, worktree_path)
-        before_impl = sha256_for(task, PROTECTED_FILES)
+        before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         impl_result = spawn_implementation(task, cfg, worktree_path)
-        after_impl = sha256_for(task, PROTECTED_FILES)
+        after_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
 
-        if (tampered = diff_hashes(before_impl, after_impl)).any?
+        if (tampered = Hive::ProtectedFiles.diff(before_impl, after_impl)).any?
           return record_tamper(task, tampered, who: "implementer")
         end
 
@@ -173,17 +177,6 @@ module Hive
           <!-- AGENT_WORKING -->
         MD
         File.write(task.state_file, content)
-      end
-
-      def sha256_for(task, names)
-        names.each_with_object({}) do |name, h|
-          path = File.join(task.folder, name)
-          h[name] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
-        end
-      end
-
-      def diff_hashes(before, after)
-        before.keys.reject { |k| before[k] == after[k] }
       end
     end
   end

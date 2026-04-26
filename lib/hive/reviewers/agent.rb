@@ -53,8 +53,12 @@ module Hive
       private
 
       def render_prompt(profile, skill)
-        Hive::Stages::Base.render(
+        template_path = Hive::Stages::Base.resolve_template_path(
           spec.fetch("prompt_template"),
+          hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
+        )
+        Hive::Stages::Base.render_resolved_path(
+          template_path,
           Hive::Stages::Base::TemplateBindings.new(
             project_name: File.basename(ctx.worktree_path),
             worktree_path: ctx.worktree_path,
@@ -69,22 +73,12 @@ module Hive
       end
 
       # spawn_agent expects a task-shaped object with folder, state_file,
-      # log_dir, and stage_name. The 5-review runner has the real Task
-      # but the reviewer adapter receives a Context with paths only —
-      # build a minimal facade. This is the only place state_file is
-      # named; the agent never writes to it because :output_file_exists
-      # mode bypasses task.state_file marker writes (see agent.rb mode
-      # gating).
+      # log_dir, and stage_name. Use the shared
+      # Hive::Reviewers.synthetic_task_for helper so every 5-review
+      # sub-spawn agrees on the facade layout (M-04).
       def synthetic_task
-        SyntheticTask.new(
-          folder: ctx.task_folder,
-          state_file: File.join(ctx.task_folder, "task.md"),
-          log_dir: File.join(ctx.task_folder, "logs"),
-          stage_name: "5-review"
-        )
+        Hive::Reviewers.synthetic_task_for(ctx)
       end
-
-      SyntheticTask = Struct.new(:folder, :state_file, :log_dir, :stage_name, keyword_init: true)
     end
   end
 end

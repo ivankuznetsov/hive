@@ -265,6 +265,55 @@ class TriageTest < Minitest::Test
 
   # --- discovery -------------------------------------------------------
 
+  # --- R1: reviewer-file read failure is tolerated --------------------
+
+  def test_unreadable_reviewer_file_substitutes_placeholder_in_block
+    with_triage_dir do |_dir, task_folder|
+      ctx = make_ctx(nil, task_folder)
+      reviews_dir = File.join(task_folder, "reviews")
+      good = File.join(reviews_dir, "claude-ce-code-review-01.md")
+      bad = File.join(reviews_dir, "codex-ce-code-review-01.md")
+      File.write(good, "## High\n- [ ] real\n")
+      File.write(bad, "doesn't matter — read will be stubbed to raise\n")
+
+      Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_block, :build_reviewer_contents_block)
+      begin
+        File.stub(:read, ->(p, *args) {
+          raise Errno::ENOENT, p if p == bad
+
+          File.send(:__orig_read_for_test, p, *args) if File.respond_to?(:__orig_read_for_test)
+          # Fall through: re-read normally for any other path.
+          IO.read(p)
+        }) do
+          block = Hive::Stages::Review::Triage.build_reviewer_contents_block([ good, bad ], "tag1")
+          assert_includes block, "real", "good reviewer content must still be included"
+          assert_includes block, "reviewer file unreadable", "bad path must yield a placeholder"
+        end
+      ensure
+        Hive::Stages::Review::Triage.singleton_class.alias_method(:build_reviewer_contents_block, :__orig_block)
+        Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_block)
+      end
+    end
+  end
+
+  # --- M-06: triage filters all orchestrator-owned families ----------
+
+  def test_discover_reviewer_files_excludes_fix_guardrail_and_browser
+    with_triage_dir do |_dir, task_folder|
+      ctx = make_ctx(nil, task_folder, pass: 1)
+      reviews_dir = File.join(task_folder, "reviews")
+      File.write(File.join(reviews_dir, "claude-01.md"), "## High\n- [ ] real\n")
+      File.write(File.join(reviews_dir, "fix-guardrail-01.md"), "- [x] orchestrator-owned\n")
+      File.write(File.join(reviews_dir, "browser-blocked-01.md"), "browser stuff\n")
+      File.write(File.join(reviews_dir, "ci-blocked.md"), "ci stuff\n")
+
+      files = Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+      basenames = files.map { |f| File.basename(f) }
+      assert_equal [ "claude-01.md" ], basenames,
+                   "triage must only see reviewer-authored files; got #{basenames.inspect}"
+    end
+  end
+
   def test_discover_reviewer_files_excludes_escalations_and_other_passes
     with_triage_dir do |dir, task_folder|
       ctx = make_ctx(dir, task_folder, pass: 2)

@@ -20,6 +20,21 @@ These are the `[x]` lines collected from `<%= task_folder %>/reviews/*-<%= "%02d
 3. Run any relevant test or assertion locally to confirm your fix doesn't regress neighboring behavior.
 4. Commit your changes with one or more conventional messages (`fix(scope): …` or `refactor(scope): …`). Multiple findings can land in one commit if they share a scope; otherwise prefer separate commits.
 
+## Required commit trailers
+
+Every commit you make in this fix pass MUST end with these git trailers (after a blank line, one per line). The hive runner consumes them via `hive metrics rollback-rate`; commits without trailers are silently excluded from the rollback metric, so missing trailers degrade the project's signal.
+
+```
+Hive-Task-Slug: <%= task_slug %>
+Hive-Fix-Pass: <%= "%02d" % pass %>
+Hive-Fix-Findings: <count of [x] items applied in this commit>
+Hive-Triage-Bias: <%= triage_bias %>
+Hive-Reviewer-Sources: <%= reviewer_sources %>
+Hive-Fix-Phase: fix
+```
+
+Fill `Hive-Fix-Findings` with the integer number of `[x]` items this single commit addresses (so a 3-finding commit reports `3`). Other trailer values are pre-filled above; copy them verbatim.
+
 ## Constraints
 
 - **Edit only files in the worktree** (`<%= worktree_path %>`).

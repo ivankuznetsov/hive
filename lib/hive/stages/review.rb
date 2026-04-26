@@ -372,6 +372,9 @@ module Hive
             task_folder: ctx.task_folder,
             pass: ctx.pass,
             accepted_findings: accepted,
+            task_slug: task.slug,
+            triage_bias: triage_bias_for(cfg),
+            reviewer_sources: reviewer_sources_for(ctx),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
@@ -387,6 +390,29 @@ module Hive
           profile: profile,
           status_mode: :exit_code_only
         )
+      end
+
+      # The triage bias configured for this run, surfaced into commit
+      # trailers so `hive metrics rollback-rate` can compare bias presets.
+      # Defaults to "courageous" — same default as Triage.run! itself.
+      def triage_bias_for(cfg)
+        cfg.dig("review", "triage", "bias") || "courageous"
+      end
+
+      # Comma-separated reviewer file basenames (sans extension and pass
+      # suffix) for the current pass. Surfaced as the `Hive-Reviewer-Sources`
+      # trailer so the metric can show which reviewers' findings drove
+      # which fix commits. Excludes orchestrator-owned files (escalations,
+      # ci-blocked, browser-, fix-guardrail-).
+      def reviewer_sources_for(ctx)
+        sources = Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")]
+                  .map { |p| File.basename(p, ".md") }
+                  .reject { |n| n.start_with?("escalations-", "ci-blocked", "browser-", "fix-guardrail-") }
+                  .map { |n| n.sub(/-\d{2}\z/, "") }
+                  .uniq
+                  .sort
+
+        sources.empty? ? "none" : sources.join(",")
       end
 
       def write_ci_blocked(task, ci_result)

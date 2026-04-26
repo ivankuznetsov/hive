@@ -7,19 +7,20 @@ updated: 2026-04-25
 tags: [command, dispatcher, stages, json]
 ---
 
-**TLDR**: `hive run FOLDER` is the dispatcher: parses `FOLDER` into a `Hive::Task`, takes the per-task lock, picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a `next:` hint. With `--json`, emits a single machine-readable document; exit codes are stable per `Hive::ExitCodes` (see [[cli]]).
+**TLDR**: `hive run TARGET` is the lower-level dispatcher for a slug or task folder. It resolves `TARGET` into a `Hive::Task`, takes the per-task lock, picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a workflow-oriented `next:` hint. Most humans should start with `hive status` and use `hive brainstorm|plan|develop|pr|archive <slug>`.
 
 ## Usage
 
 ```
+hive run <slug> [--project NAME] [--stage STAGE] [--json]
 hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 ```
 
-`FOLDER` is `File.expand_path`-ed and parsed by `Hive::Task#initialize`; mismatches against `Hive::Task::PATH_RE` raise `InvalidTaskPath`.
+`TARGET` is resolved by `Hive::TaskResolver`. Bare slugs search registered projects; `--project` scopes cross-project collisions; `--stage` scopes same-slug stage collisions. Folder paths remain exact and authoritative.
 
 ## Steps performed (`Commands::Run#call`)
 
-1. Build `Hive::Task.new(folder)` and load merged config via `Hive::Config.load(task.project_root)`.
+1. Resolve `TARGET` via `Hive::TaskResolver` and load merged config via `Hive::Config.load(task.project_root)`.
 2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
 3. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,Pr,Done}.method(:run!)`. Unknown stage → `StageError`.
 4. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
@@ -30,9 +31,9 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 
 | Marker | `report` output |
 |--------|-----------------|
-| `:waiting` / `:execute_waiting` | `next: edit the file, then `hive run <folder>` again` |
-| `:complete` | `next: mv <folder> <hive-state>/stages/<next>/` (resolved by `next_stage_dir`); JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from <stage>"` |
-| `:execute_complete` | `next: mv <folder> <hive-state>/stages/5-pr/`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
+| `:waiting` / `:execute_waiting` | `next: edit the file, then `hive <stage-verb> <slug>` again` |
+| `:complete` | `next: hive plan <slug>`, `hive develop <slug>`, or `hive archive <slug>` depending on current stage; JSON keeps path fields and uses the workflow command |
+| `:execute_complete` | `next: hive pr <slug>`; JSON keeps path fields and uses the workflow command |
 | `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 

@@ -7,7 +7,7 @@ updated: 2026-04-25
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI with eight commands: `init`, `new`, `run`, `status`, `approve`, `findings`, `accept-finding`, `reject-finding`. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, `approve`, `findings`, `accept-finding`, and `reject-finding` support `--json` for machine-readable output (with a structured error envelope on every failure path), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, and findings commands remain the lower-level agent/script surface. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface.
 
 ## Entry point
 
@@ -19,17 +19,23 @@ tags: [cli, api]
 |---------|----------|-----------|------|
 | `hive init [PROJECT_PATH]` | Bootstrap `.hive-state` orphan branch + worktree in a git project | `Hive::Commands::Init` | [[commands/init]] |
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project | `Hive::Commands::New` | [[commands/new]] |
-| `hive run FOLDER` | Run the stage agent for the task at `FOLDER` | `Hive::Commands::Run` → stage runner | [[commands/run]] |
-| `hive status` | Tabular status across registered projects | `Hive::Commands::Status` | [[commands/status]] |
+| `hive status` | Action-grouped task list across registered projects | `Hive::Commands::Status` | [[commands/status]] |
+| `hive brainstorm TARGET [--from STAGE]` | Start or re-run brainstorm by slug/path | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
+| `hive plan TARGET [--from STAGE]` | Promote completed brainstorm to plan, or re-run plan | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
+| `hive develop TARGET [--from STAGE]` | Promote completed plan to execute, or re-run execute | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
+| `hive pr TARGET [--from STAGE]` | Promote completed execute to PR, or re-run PR | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
+| `hive archive TARGET [--from STAGE]` | Promote completed PR to done, or re-run done | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
+| `hive run TARGET` | Lower-level dispatcher for a slug or task folder | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
-| `hive findings TARGET [--pass N]` | List GFM-checkbox findings in `reviews/ce-review-NN.md` (latest by default) | `Hive::Commands::Findings` | [[commands/findings]] |
-| `hive accept-finding TARGET [ID...] [--severity S] [--all]` | Tick `[x]` on review findings; selectors are unioned | `Hive::Commands::FindingToggle` (accept) | [[commands/findings]] |
-| `hive reject-finding TARGET [ID...] [--severity S] [--all]` | Untick `[x]` on review findings | `Hive::Commands::FindingToggle` (reject) | [[commands/findings]] |
+| `hive findings TARGET [--pass N] [--stage STAGE]` | List GFM-checkbox findings in `reviews/ce-review-NN.md` (latest by default) | `Hive::Commands::Findings` | [[commands/findings]] |
+| `hive accept-finding TARGET [ID...] [--severity S] [--all] [--stage STAGE]` | Tick `[x]` on review findings; selectors are unioned | `Hive::Commands::FindingToggle` (accept) | [[commands/findings]] |
+| `hive reject-finding TARGET [ID...] [--severity S] [--all] [--stage STAGE]` | Untick `[x]` on review findings | `Hive::Commands::FindingToggle` (reject) | [[commands/findings]] |
 
 `Hive::CLI` (`lib/hive/cli.rb`) is the Thor class. Notable mappings:
 
 - `new_task` is mapped to the user-visible `new` (Thor reserves `new`).
 - `run_task` is mapped to `run`.
+- Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check).
 - `--json` is a `class_option` honoured by `status`, `run`, `approve`, `findings`, `accept-finding`, and `reject-finding`; other commands accept the flag silently so an automated caller can pass it uniformly. Each emits a typed JSON document on success AND a structured error envelope on every failure path.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works (without the rewrite, Thor would consume `--help` as the next positional argument).

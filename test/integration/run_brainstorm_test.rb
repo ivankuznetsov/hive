@@ -51,6 +51,22 @@ class RunBrainstormTest < Minitest::Test
     end
   end
 
+  def test_run_accepts_slug_with_stage_filter
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = make_task_at_brainstorm(dir)
+        slug = File.basename(folder)
+        brainstorm_md = File.join(folder, "brainstorm.md")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = brainstorm_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+        capture_io { Hive::Commands::Run.new(slug, stage: "brainstorm").call }
+
+        assert_equal :waiting, Hive::Markers.current(brainstorm_md).name
+      end
+    end
+  end
+
   def test_brainstorm_complete_marker
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

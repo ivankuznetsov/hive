@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-stage-action.v1.json",
+  "title": "hive workflow-verb output (v1)",
+  "description": "Stable contract emitted by `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, and `hive archive` when invoked with `--json`. Each verb is a promote-or-run dispatcher; the envelope's `phase` field reports which path executed.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "verb",
+        "phase",
+        "noop",
+        "slug",
+        "from_stage_dir",
+        "to_stage_dir",
+        "task_folder",
+        "marker_after",
+        "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-stage-action" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "verb": {
+          "type": "string",
+          "enum": ["brainstorm", "plan", "develop", "pr", "archive"]
+        },
+        "phase": {
+          "type": "string",
+          "enum": ["promoted_and_ran", "ran", "noop"],
+          "description": "Which dispatch path executed: `promoted_and_ran` (Approve then Run), `ran` (already at target), `noop` (archive against an already-archived task)."
+        },
+        "noop": {
+          "type": "boolean",
+          "description": "True when nothing was promoted, run, or committed. Currently set only by `archive` against a task already at 6-done with :complete marker."
+        },
+        "slug": { "type": "string" },
+        "from_stage_dir": {
+          "type": "string",
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr"],
+          "description": "The verb's documented source stage."
+        },
+        "to_stage_dir": {
+          "type": "string",
+          "enum": ["2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"],
+          "description": "The verb's documented target stage."
+        },
+        "task_folder": {
+          "type": "string",
+          "description": "Absolute path to the task folder after the verb completed."
+        },
+        "marker_after": {
+          "type": "string",
+          "description": "Marker name on the task's state file after the verb completed."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Present when phase=noop; explains why nothing was done (e.g. `already_archived`)."
+        },
+        "next_action": { "$ref": "#/$defs/NextAction" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "verb", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-stage-action" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "verb": {
+          "type": "string",
+          "enum": ["brainstorm", "plan", "develop", "pr", "archive"]
+        },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "ambiguous_slug",
+            "destination_collision",
+            "final_stage",
+            "wrong_stage",
+            "rollback_failed",
+            "invalid_task_path",
+            "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "enum": [1, 4, 64, 70, 75, 78] },
+        "message": { "type": "string" },
+        "candidates": { "type": "array" },
+        "id": { "type": "integer", "minimum": 1 },
+        "path": { "type": "string" },
+        "stage": { "type": "string" }
+      }
+    },
+    "NextAction": {
+      "type": "object",
+      "required": ["key", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "enum": [
+            "ready_to_brainstorm",
+            "ready_to_plan",
+            "ready_to_develop",
+            "ready_for_pr",
+            "ready_to_archive",
+            "needs_input",
+            "review_findings",
+            "recover_execute",
+            "agent_running",
+            "archived",
+            "error"
+          ]
+        },
+        "label": { "type": "string" },
+        "command": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

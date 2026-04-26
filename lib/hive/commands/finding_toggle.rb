@@ -23,7 +23,7 @@ module Hive
       REJECT = :reject
 
       def initialize(operation, target, ids: [], all: false, severity: nil,
-                     pass: nil, project: nil, json: false)
+                     pass: nil, project: nil, stage: nil, json: false)
         @operation = operation
         @target = target
         @ids = ids || []
@@ -31,6 +31,7 @@ module Hive
         @severity = severity
         @pass = pass
         @project_filter = project
+        @stage_filter = stage
         @json = json
       end
 
@@ -55,7 +56,11 @@ module Hive
       #   - task_lock INNER blocks a concurrent `hive run` on the same
       #     task while we read + mutate the review file.
       def do_call
-        task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+        task = Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
         review_path = Hive::Findings.review_path_for(task, pass: @pass)
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -206,13 +211,15 @@ module Hive
         if changes.empty?
           puts "  (no-op: every selected finding was already #{verb})"
         else
-          warn "next: hive run #{task.folder}"
+          warn "next: hive develop #{task.slug} --from #{task.stage_index}-#{task.stage_name}"
         end
       end
 
       # Both `kind: run` branches carry a `reason` so consumers see a
       # consistent shape. The agent's natural next step is the same in
       # both cases — re-run the execute stage; only the rationale differs.
+      # The command always carries `--from <stage>` so a retry after a
+      # successful run fails with WRONG_STAGE (4) instead of advancing.
       def next_action(task, doc)
         kind = Hive::Schemas::NextActionKind
         accepted = doc.summary["accepted"]
@@ -225,8 +232,9 @@ module Hive
         else
           "no accepted findings; re-run to mark execute_complete"
         end
+        stage_dir = "#{task.stage_index}-#{task.stage_name}"
         { "kind" => kind::RUN, "folder" => task.folder,
-          "command" => "hive run #{task.folder}", "reason" => reason }
+          "command" => "hive develop #{task.slug} --from #{stage_dir}", "reason" => reason }
       end
 
       def emit_error_envelope(error)

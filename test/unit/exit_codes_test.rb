@@ -52,6 +52,8 @@ class ExitCodesTest < Minitest::Test
            "Hive::Commands::Approve emits payload['schema'] = 'hive-approve' and fetches the version by that key"
     assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-findings"),
            "Hive::Commands::Findings + FindingToggle emit payload['schema'] = 'hive-findings'"
+    assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-stage-action"),
+           "Hive::Commands::StageAction emits payload['schema'] = 'hive-stage-action'"
   end
 
   # Closed enum NextActionKind is shared across schemas. ALL is self-derived
@@ -61,5 +63,13 @@ class ExitCodesTest < Minitest::Test
   def test_next_action_kind_closed_enum_membership
     expected = %w[edit mv approve run recover_stale no_op].sort
     assert_equal expected, Hive::Schemas::NextActionKind::ALL.sort
+  end
+
+  def test_task_action_kind_closed_enum_membership
+    expected = %w[
+      ready_to_brainstorm ready_to_plan ready_to_develop ready_for_pr ready_to_archive
+      needs_input review_findings recover_execute agent_running archived error
+    ].sort
+    assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort
   end
 end

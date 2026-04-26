@@ -217,6 +217,35 @@ module Hive
     def validate!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
+      validate_review_attempts!(cfg, source_path)
+    end
+
+    # Numeric review-loop knobs that must be positive integers.
+    #
+    # Path        | Why must be ≥ 1
+    # ------------|----------------
+    # review.ci.max_attempts            | 0 → CiFix runs once and bails before spawning fix
+    # review.browser_test.max_attempts  | 0 → BrowserTest writes browser-blocked.md without spawning
+    # review.max_passes                 | 0 → pass loop exits before Phase 2 runs
+    # review.max_wall_clock_sec         | 0 → wall_clock_exceeded? trips on first check
+    POSITIVE_INTEGER_KEYS = [
+      [ %w[review ci max_attempts], "review.ci.max_attempts" ],
+      [ %w[review browser_test max_attempts], "review.browser_test.max_attempts" ],
+      [ %w[review max_passes], "review.max_passes" ],
+      [ %w[review max_wall_clock_sec], "review.max_wall_clock_sec" ]
+    ].freeze
+
+    def validate_review_attempts!(cfg, source_path)
+      POSITIVE_INTEGER_KEYS.each do |path, label|
+        value = cfg.dig(*path)
+        next if value.nil?
+
+        unless value.is_a?(Integer) && value.positive?
+          raise ConfigError,
+                "#{label} in #{describe_source(source_path)} must be a positive integer (>= 1); " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
     end
 
     def validate_reviewers!(cfg, source_path)

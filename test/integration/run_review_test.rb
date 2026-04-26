@@ -712,17 +712,27 @@ class RunReviewTest < Minitest::Test
   def test_wall_clock_cap_yields_review_stale_with_reason_wall_clock
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        # max_wall_clock_sec=0 forces the runner to trip the cap on the
-        # first phase boundary check (CI is skipped, then the wall-clock
-        # check at the start of the pass loop fires).
+        # Stub wall_clock_exceeded? to trip on the first phase boundary
+        # check. The previous form (`max_wall_clock_sec: 0`) is now
+        # rejected by Hive::Config.validate_review_attempts! (positive
+        # integers only), so we trip the cap with a stub instead. The
+        # runner's wall-clock check is a single helper, so this is the
+        # narrowest possible stub.
         folder = setup_review_task(dir, cfg_overrides: {
-          "review" => { "max_wall_clock_sec" => 0 }
+          "review" => { "max_wall_clock_sec" => 1 }
         })
 
-        capture_io { Hive::Commands::Run.new(folder).call }
-        marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_stale, marker.name
-        assert_equal "wall_clock", marker.attrs["reason"]
+        Hive::Stages::Review.singleton_class.alias_method(:__orig_wall_clock_exceeded?, :wall_clock_exceeded?)
+        Hive::Stages::Review.define_singleton_method(:wall_clock_exceeded?) { |_started_at, _max| true }
+        begin
+          capture_io { Hive::Commands::Run.new(folder).call }
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_stale, marker.name
+          assert_equal "wall_clock", marker.attrs["reason"]
+        ensure
+          Hive::Stages::Review.singleton_class.alias_method(:wall_clock_exceeded?, :__orig_wall_clock_exceeded?)
+          Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_wall_clock_exceeded?)
+        end
       end
     end
   end

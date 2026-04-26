@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-markers-clear.v1.json",
+  "title": "hive markers clear output (v1)",
+  "description": "Stable contract emitted by `hive markers clear FOLDER --name <NAME> --json`. v1 baseline. Successful invocations emit a SuccessPayload; every failure path emits an ErrorPayload with a stable error_kind and the same exit code semantics as `hive approve --json`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "folder",
+        "slug",
+        "marker_cleared"
+      ],
+      "properties": {
+        "schema": { "const": "hive-markers-clear" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "folder": {
+          "type": "string",
+          "description": "Absolute path of the task folder whose marker was cleared."
+        },
+        "slug": { "type": "string" },
+        "marker_cleared": {
+          "type": "string",
+          "enum": [
+            "REVIEW_STALE",
+            "REVIEW_CI_STALE",
+            "REVIEW_ERROR",
+            "EXECUTE_STALE",
+            "ERROR"
+          ],
+          "description": "The marker name that was removed from the state file. Allowlist mirrors lib/hive/commands/markers.rb#ALLOWED_NAMES."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-markers-clear" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "The Hive::Error subclass without the Hive:: prefix (e.g. \"WrongStage\")."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "ambiguous_slug",
+            "wrong_stage",
+            "invalid_task_path",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 4, 64, 70],
+          "description": "Process exit code (Hive::ExitCodes). 1=GENERIC, 4=WRONG_STAGE, 64=USAGE, 70=SOFTWARE."
+        },
+        "message": { "type": "string" },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

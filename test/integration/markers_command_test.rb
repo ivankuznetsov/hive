@@ -1,0 +1,211 @@
+require "test_helper"
+require "json"
+require "hive/commands/init"
+require "hive/commands/new"
+require "hive/commands/markers"
+
+# Integration coverage for `hive markers clear FOLDER --name <NAME>`.
+#
+# Hits the resolver (path + slug + ambiguity error), the allowlist
+# enforcement (terminal-success markers refused, unknown markers
+# refused), the marker-vs-state guard (mismatched marker refused with
+# WrongStage), the atomic file edit (only the marker line goes,
+# surrounding content stays), and the JSON envelope (success +
+# allowlist-rejection error envelope).
+class MarkersCommandTest < Minitest::Test
+  include HiveTestHelper
+
+  def seed_review_task(dir, marker:)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    project = File.basename(dir)
+    capture_io { Hive::Commands::New.new(project, "markers probe").call }
+    inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+    review = File.join(dir, ".hive-state", "stages", "5-review", File.basename(inbox))
+    FileUtils.mkdir_p(File.dirname(review))
+    FileUtils.mv(inbox, review)
+
+    state = File.join(review, "task.md")
+    FileUtils.touch(state)
+    File.write(state, "# my task\n\n## Implementation\n\nwip\n")
+    Hive::Markers.set(state, marker)
+
+    [ project, review, File.basename(review) ]
+  end
+
+  # ── Happy path ─────────────────────────────────────────────────────────
+
+  def test_clears_review_stale_and_preserves_surrounding_content
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+        state = File.join(folder, "task.md")
+
+        before = File.read(state)
+        assert_includes before, "REVIEW_STALE", "fixture must include the marker"
+        assert_includes before, "wip\n", "fixture body must include surrounding content"
+
+        capture_io do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_STALE").call
+        end
+
+        after = File.read(state)
+        refute_includes after, "REVIEW_STALE",
+                        "REVIEW_STALE marker must be removed from task.md"
+        assert_includes after, "wip\n",
+                        "surrounding content must be preserved verbatim"
+        assert_includes after, "## Implementation",
+                        "headings must survive"
+
+        marker = Hive::Markers.current(state)
+        assert_equal :none, marker.name,
+                     "after clearing the only marker the file is markerless"
+
+        # hive_commit was recorded on the hive/state branch.
+        log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
+        assert_match(/markers clear REVIEW_STALE/, log,
+                     "hive_commit must record the clear action")
+      end
+    end
+  end
+
+  def test_clears_review_ci_stale_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_ci_stale)
+        capture_io do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_CI_STALE").call
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :none, marker.name
+      end
+    end
+  end
+
+  def test_clears_review_error_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_error)
+        capture_io do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_ERROR").call
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :none, marker.name
+      end
+    end
+  end
+
+  # ── Allowlist enforcement ──────────────────────────────────────────────
+
+  def test_rejects_unknown_marker_name
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "WHATEVER").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+      end
+    end
+  end
+
+  def test_rejects_terminal_success_marker_complete
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_complete)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_COMPLETE").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_match(/allowlist|use `hive approve`/, err,
+                     "rejection error must point the user at the right tool")
+      end
+    end
+  end
+
+  # ── Marker-vs-state guard ──────────────────────────────────────────────
+
+  def test_refuses_when_named_marker_does_not_match_actual
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_ERROR").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_match(/REVIEW_ERROR.*REVIEW_STALE|REVIEW_STALE.*REVIEW_ERROR/, err,
+                     "error must mention both the requested name and the actual marker")
+      end
+    end
+  end
+
+  # ── JSON envelope ──────────────────────────────────────────────────────
+
+  def test_json_success_envelope
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, slug = seed_review_task(dir, marker: :review_stale)
+
+        out, _err = capture_io do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_STALE", json: true).call
+        end
+        payload = JSON.parse(out)
+
+        assert_equal "hive-markers-clear", payload["schema"]
+        assert_equal 1, payload["schema_version"]
+        assert_equal true, payload["ok"]
+        assert_equal slug, payload["slug"]
+        assert_equal folder, payload["folder"]
+        assert_equal "REVIEW_STALE", payload["marker_cleared"]
+      end
+    end
+  end
+
+  def test_json_error_envelope_on_allowlist_rejection
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_COMPLETE", json: true).call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        payload = JSON.parse(out)
+
+        assert_equal "hive-markers-clear", payload["schema"]
+        assert_equal 1, payload["schema_version"]
+        assert_equal false, payload["ok"]
+        assert_equal "wrong_stage", payload["error_kind"]
+        assert_equal Hive::ExitCodes::WRONG_STAGE, payload["exit_code"]
+        assert_match(/REVIEW_COMPLETE/, payload["message"])
+      end
+    end
+  end
+
+  # ── Subcommand dispatch ─────────────────────────────────────────────────
+
+  def test_unknown_subcommand_raises_invalid_task_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new("nuke", folder, name: "REVIEW_STALE").call
+        end
+        assert_equal Hive::ExitCodes::USAGE, status
+      end
+    end
+  end
+
+  # ── Schema-version registration ─────────────────────────────────────────
+
+  def test_schema_version_registered
+    assert Hive::Schemas::SCHEMA_VERSIONS.key?("hive-markers-clear"),
+           "hive-markers-clear must be registered in SCHEMA_VERSIONS"
+    assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS["hive-markers-clear"]
+  end
+end

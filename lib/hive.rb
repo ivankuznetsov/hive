@@ -10,21 +10,25 @@ module Hive
     SCHEMA_VERSIONS = {
       "hive-status" => 1,
       "hive-run" => 1,
-      "hive-approve" => 1,
+      "hive-approve" => 2,
       "hive-findings" => 1,
       "hive-stage-action" => 1,
-      "hive-metrics-rollback-rate" => 1
+      "hive-metrics-rollback-rate" => 1,
+      "hive-markers-clear" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
-    # `Hive::Schemas.schema_path(name)` for a specific schema; external
-    # consumers validate emitted documents with any draft-2020-12 validator.
+    # `Hive::Schemas.schema_path(name)` for the current version of a
+    # schema; external consumers validate emitted documents with any
+    # draft-2020-12 validator. Pass an explicit `version:` to load an
+    # older revision (e.g. for back-compat tests against pinned
+    # consumers).
     def self.schema_dir
       File.expand_path("../schemas", __dir__)
     end
 
-    def self.schema_path(name)
-      version = SCHEMA_VERSIONS.fetch(name)
+    def self.schema_path(name, version: nil)
+      version ||= SCHEMA_VERSIONS.fetch(name)
       File.join(schema_dir, "#{name}.v#{version}.json")
     end
 

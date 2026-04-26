@@ -2,6 +2,37 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-26T23:00:00Z] Round-4 — `hive markers clear`, schema v2, marker-policy refresh
+
+**Action:** Round-4 ce-code-review remediation. Added `hive markers clear FOLDER --name <NAME>` as the agent-callable surface for recovery markers (`REVIEW_STALE` / `REVIEW_CI_STALE` / `REVIEW_ERROR` / `EXECUTE_STALE` / `ERROR`); bumped the `hive-approve` JSON contract to v2 (the v1 → v2 transition added `5-review` and renumbered `5-pr → 6-pr` / `6-done → 7-done`); refreshed `wiki/commands/approve.md`'s marker-policy table to reflect the post-LFG-1 reality where `:review_complete` is in `VALID_TERMINAL_MARKERS`; and pointed `Stages::Review.run!`'s pre-flight `warn` lines at the new command.
+
+**New pages:**
+- `wiki/commands/markers.md` — full command reference: usage, allowlist, JSON contract, exit codes, "why a typed command instead of `sed -i`" rationale.
+
+**Refreshed pages:**
+- `wiki/commands/approve.md` — marker-policy section now has a per-marker table (which marker is written by which stage and unblocks which transition) and a forward note to `[[commands/markers]]` for the recovery markers. Frontmatter `updated: 2026-04-26`.
+- `wiki/stages/review.md` — pre-flight table and REVIEW_STALE recovery section both reference the new command.
+- `wiki/cli.md` — TLDR says seven commands (was six); command table adds `markers` row.
+- `wiki/index.md` — Commands list adds `[[commands/markers]]`.
+
+**Code changes (referenced from wiki):**
+- `lib/hive/commands/markers.rb` (new) — `Hive::Commands::Markers#call` with subcommand dispatch, allowlist enforcement, marker-vs-state guard, atomic write via `Hive::Markers.write_atomic`, `hive_commit` audit-trail, JSON success and error envelopes.
+- `lib/hive/cli.rb` — registers `hive markers SUBCOMMAND`.
+- `lib/hive/stages/review.rb` — pre-flight `warn` text now embeds the exact `hive markers clear FOLDER --name <NAME>` invocation.
+- `schemas/hive-markers-clear.v1.json` (new) — published JSON Schema (draft 2020-12).
+- `schemas/hive-approve.v1.json` — restored to its original 6-stage shape (no `review`, ends at `5-pr` / `6-done`) so external validators pinned to v1 still validate.
+- `schemas/hive-approve.v2.json` (new) — widened enum (`5-review`, `6-pr`, `7-done`); marked `schema_version: 2`. `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"] = 2`. `Hive::Schemas.schema_path` learned an optional `version:` kwarg so back-compat tests can load v1.
+- `lib/hive/stages/review/context.rb` (new) — canonical home for the `Hive::Stages::Review::Context` Data type. `Hive::Reviewers::Context` retained as an alias for the reviewer adapter (`Hive::Reviewers::Agent`) and any custom registered reviewer.
+- `lib/hive/agent_profile.rb` — explicit "Public API — do not break" comment block on `AgentProfile.new`; `status_detection_mode:` got a default of `:output_file_exists` so a future kwarg addition can't silently break custom profile registrations.
+- `lib/hive/config.rb` — new `validate_review_attempts!` rejects `0` / negative / non-integer values for `review.ci.max_attempts`, `review.browser_test.max_attempts`, `review.max_passes`, `review.max_wall_clock_sec`.
+- `lib/hive/stages/review/triage.rb` — error path now deletes any partial `reviews/escalations-NN.md` before returning so the next `hive run` doesn't read `escalations_count > 0` from a corrupt artifact.
+- `lib/hive/agent.rb` — `Hive::Agent.bin` / `Hive::Agent.check_version!` now emit a one-shot deprecation warning outside the test suite (claude-specific; bypasses per-spawn profile selection).
+
+**Key decisions:**
+- **Schema v2 (Option A) over an in-place v1 break.** External consumers pinned to last week's v1 reject post-upgrade output. Restoring v1 to its original shape and bumping to v2 honors the published-contract semantics.
+- **Allowlist excludes terminal-success markers.** `REVIEW_COMPLETE` / `EXECUTE_COMPLETE` / `COMPLETE` gate `hive approve`'s forward-advance check; clearing them silently would let an agent skip the approval gesture. Use `hive approve` instead.
+- **Marker-vs-state guard refuses mismatch.** `hive markers clear FOLDER --name REVIEW_ERROR` on a folder whose actual marker is `REVIEW_STALE` raises `Hive::WrongStage` (exit 4) — the failure surfaces an agent's confusion before it edits the wrong file.
+
 ## [2026-04-26T22:00:00Z] U10b — wiki sweep for new modules
 
 **Action:** Round-3 ce-code-review remediation flagged five new `lib/hive/` modules added across U9–U14 that lacked dedicated wiki pages. Created the missing pages, refreshed `wiki/templates.md` to catalogue every ERB shipped in the 5-review stage, and corrected the `review.browser_test` config-key drift in `wiki/stages/review.md`.

@@ -7,8 +7,12 @@ module Hive
       true
     end
 
-    # `--json` is honoured by `status`, `run`, and `approve`; other commands
-    # accept the flag silently so an automated caller can pass it uniformly.
+    # `--json` is honoured by `status`, `run`, `approve`, `findings`,
+    # `accept-finding`, `reject-finding`, and the workflow verbs
+    # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `init` and `new`
+    # accept the flag silently so an automated caller can pass it
+    # uniformly. Each emitting command produces a typed JSON document on
+    # success and a structured error envelope on every failure path.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 

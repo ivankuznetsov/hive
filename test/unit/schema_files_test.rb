@@ -129,4 +129,51 @@ class SchemaFilesTest < Minitest::Test
     ].sort
     assert_equal producer_codes, schema_codes
   end
+
+  # ── hive-stage-action ───────────────────────────────────────────────────
+
+  def test_hive_stage_action_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-stage-action")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-stage-action",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+  end
+
+  def test_hive_stage_action_success_required_keys_match_producer
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    producer_required = %w[
+      schema schema_version ok verb phase noop slug
+      from_stage_dir to_stage_dir task_folder marker_after next_action
+    ].sort
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-stage-action SuccessPayload"
+  end
+
+  def test_hive_stage_action_phase_enum_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action")))
+    schema_phases = doc.dig("$defs", "SuccessPayload", "properties", "phase", "enum").sort
+    producer_phases = %w[promoted_and_ran ran noop].sort
+    assert_equal producer_phases, schema_phases
+  end
+
+  def test_hive_stage_action_verb_enum_matches_workflows
+    require "hive/workflows"
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action")))
+    schema_verbs = doc.dig("$defs", "SuccessPayload", "properties", "verb", "enum").sort
+    workflow_verbs = Hive::Workflows::VERBS.keys.sort
+    assert_equal workflow_verbs, schema_verbs,
+                 "schema/Workflows verb-enum drift"
+  end
+
+  def test_hive_stage_action_next_action_key_enum_matches_task_action_kind
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action")))
+    schema_keys = doc.dig("$defs", "NextAction", "properties", "key", "enum").sort
+    enum_keys = Hive::Schemas::TaskActionKind::ALL.sort
+    assert_equal enum_keys, schema_keys,
+                 "schema NextAction.key enum must mirror Hive::Schemas::TaskActionKind::ALL"
+  end
 end

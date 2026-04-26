@@ -4,10 +4,12 @@ require "open3"
 require "hive/config"
 require "hive/task"
 require "hive/task_resolver"
+require "hive/task_action"
 require "hive/markers"
 require "hive/lock"
 require "hive/git_ops"
 require "hive/stages"
+require "hive/workflows"
 require "hive/commit_or_rollback"
 
 module Hive
@@ -34,19 +36,23 @@ module Hive
     class Approve
       VALID_TERMINAL_MARKERS = %i[complete execute_complete].freeze
 
-      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false)
+      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
         @target = target
         @to = to
         @from = from
         @project_filter = project
         @force = force
         @json = json
+        # Suppress all stdout/stderr emission. Used by composing callers
+        # (e.g. StageAction) that emit their own unified envelope.
+        # State changes and typed exceptions still propagate normally.
+        @quiet = quiet
       end
 
       def call
         do_call
       rescue Hive::Error => e
-        emit_error_envelope(e) if @json
+        emit_error_envelope(e) if @json && !@quiet
         raise
       rescue StandardError => e
         # Anything that isn't a typed Hive::Error is an internal bug or an
@@ -56,7 +62,7 @@ module Hive
         # envelope on stdout instead of a Ruby trace on stderr, and the
         # exit code is the documented SOFTWARE (70) rather than nothing.
         wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
+        emit_error_envelope(wrapped) if @json && !@quiet
         raise wrapped
       end
 
@@ -314,6 +320,8 @@ module Hive
       # ── Reporting ───────────────────────────────────────────────────────
 
       def emit_noop(task, dest_stage)
+        return if @quiet
+
         if @json
           puts JSON.generate(success_payload(task, dest_stage, task.folder, nil, nil, "same", noop: true))
         else
@@ -322,6 +330,8 @@ module Hive
       end
 
       def emit_success(task, dest_stage, new_folder, marker, commit_action, direction)
+        return if @quiet
+
         dest_idx, = Hive::Stages.parse(dest_stage)
         if @json
           puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
@@ -362,21 +372,31 @@ module Hive
 
       def json_next_action(new_folder, dest_idx)
         kind = Hive::Schemas::NextActionKind
+        # No verb advances out of the final stage; signal completion to
+        # the agent so a retry-loop terminates instead of running
+        # `hive archive` (which would no-op anyway after this round).
+        return { "kind" => kind::NO_OP, "reason" => "final_stage" } unless Hive::Stages.next_dir(dest_idx)
+
         task = Hive::Task.new(new_folder)
-        { "kind" => kind::RUN, "folder" => new_folder, "command" => workflow_command_for(task.slug, dest_idx) }
+        marker = Hive::Markers.current(task.state_file)
+        action = Hive::TaskAction.for(task, marker)
+        { "kind" => kind::RUN, "folder" => new_folder, "command" => action.command || "hive run #{new_folder}" }
       rescue Hive::InvalidTaskPath
         { "kind" => kind::RUN, "folder" => new_folder, "command" => "hive run #{new_folder}" }
       end
 
       def workflow_command_for(slug, stage_index)
-        verb = {
-          2 => "brainstorm",
-          3 => "plan",
-          4 => "develop",
-          5 => "pr",
-          6 => "archive"
-        }[stage_index]
-        verb ? "hive #{verb} #{slug}" : "hive run #{slug}"
+        # After advancing INTO `stage_index`, the next user-facing
+        # command is "run the stage's agent" — i.e. the verb whose
+        # target is this stage. `hive plan <slug> --from 3-plan` after
+        # arriving at 3-plan hits StageAction's at-target branch and
+        # runs the plan agent (rather than emitting a verb that would
+        # try to advance OUT and refuse on a non-terminal marker).
+        stage_dir = Hive::Stages::DIRS[stage_index - 1]
+        return "hive run #{slug}" unless stage_dir
+
+        verb = Hive::Workflows.verb_arriving_at(stage_dir)
+        verb ? "hive #{verb} #{slug} --from #{stage_dir}" : "hive run #{slug}"
       end
 
       def emit_error_envelope(error)

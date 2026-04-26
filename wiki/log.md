@@ -311,3 +311,35 @@ Append-only log of all wiki operations.
 - `test_json_error_envelope_on_from_mismatch_carries_wrong_stage_kind` — exercises the JSON error envelope on a `--from` mismatch with `--json`.
 - AmbiguousSlug envelope test now pins the full per-candidate key set (`folder`, `project`, `stage`).
 - The tautological `test_to_accepts_every_short_stage_name` was deleted; the new `stages_test.rb` covers the constants directly.
+
+
+## [2026-04-26T08:00:00Z] PR #6 status-workflow-verbs — review remediation (round 1)
+
+**Driver:** /compound-engineering:ce-code-review on PR #6 plus an additional independent review surfaced 5 P1s + 8 P2s. Two P1s — "next-action commands drop --from/--project disambiguators" and "workflow verbs emit no JSON envelope" — were flagged by 4 independent reviewers each.
+
+**Code changes:**
+
+- **`Hive::Workflows`** (`lib/hive/workflows.rb`, new): SSOT for the verb→source/target stage map. `VERBS` hash + `verb_advancing_from(stage_dir)` + `verb_arriving_at(stage_dir)` reverse lookups. `StageAction`, `TaskAction`, `Approve#workflow_command_for`, and CLI Thor verbs all delegate. Renaming `develop` → `execute` is now a one-file change.
+- **`Hive::Schemas::TaskActionKind`** (`lib/hive.rb`): self-derived closed enum mirroring `NextActionKind`. Constants for every TaskAction key (READY_TO_BRAINSTORM, READY_TO_PLAN, …, AGENT_RUNNING, ARCHIVED, ERROR). Adding a new bucket without updating ALL is impossible.
+- **`Hive::TaskAction` carve-outs** (`lib/hive/task_action.rb`): `:agent_working` → `agent_running` action with `command: nil` (was: misclassified as "Needs your input" with a "rerun the verb" command, sending agents into ConcurrentRunError loops). `:execute_stale` → `recover_execute` with command `findings` (was: `develop`, which would refuse on the non-terminal marker and loop). Workflow-verb commands ALWAYS include `--from <stage>` (was: only when stage_collision was true) so status-suggested commands are retry-safe by default.
+- **`Hive::Commands::StageAction`** rewrite:
+  - Uses `Hive::Workflows::VERBS` instead of own ACTIONS.
+  - `--from` retry-after-success rescue: on `InvalidTaskPath` from stage-filtered lookup, re-resolves without `stage_filter` so a retry after a successful advance raises `WrongStage` (4) instead of "no task folder" (64). Mirrors the pattern in Approve.
+  - Archive idempotency at 6-done: detects already-archived state (current_stage=6-done with :complete marker) and emits a `noop` payload instead of re-running the Done agent.
+  - Single JSON envelope: passes `quiet: @json` to inner Approve and Run; rescues Hive::Error and emits a unified `hive-stage-action` envelope. No more mixed Approve-prose-then-Run-JSON output under `--json`.
+- **`quiet:` kwarg on Approve and Run**: when set, the inner command does its work but emits nothing to stdout/stderr. Errors still raise typed. Used by StageAction in JSON mode.
+- **`Hive::Commands::Approve#json_next_action`**: at the final stage emits `{ kind: NO_OP, reason: "final_stage" }` instead of `kind: RUN` with `hive archive <slug>` (which would loop the Done agent on retry).
+- **`workflow_command_for`** in Approve: now uses `Hive::Workflows.verb_arriving_at` so the post-advance `next_action.command` and text-mode `next:` hint name the verb-to-run-at-the-new-stage (e.g. `hive plan <slug> --from 3-plan` after advancing into 3-plan), not the verb-to-advance-out. The named verb hits StageAction's at-target branch and runs the stage's agent.
+- **`Hive::Commands::FindingToggle`**: the `next_action.command` and text-mode `next:` hint now include `--from <stage>` for retry idempotency.
+- **`schemas/hive-stage-action.v1.json`** (new): draft 2020-12 oneOf SuccessPayload/ErrorPayload. Phase enum `promoted_and_ran` / `ran` / `noop`. Error-kind enum mirrors hive-approve plus `rollback_failed`.
+
+**Wiki updates:**
+
+- `wiki/modules/task_action.md` (new) — public surface, action map, marker carve-outs, command emission rules.
+- `wiki/modules/workflows.md` (new) — VERBS table, reverse-lookup helpers, design rationale.
+- `wiki/commands/stage_action.md` (new) — Steps Performed + JSON contract + idempotency contract for the five workflow verbs.
+- `wiki/index.md` page count bumped 31 → 34.
+- `lib/hive/cli.rb` `class_option :json` comment refreshed to list all eight commands that honour the flag.
+
+**Tests:** 5 existing tests updated (intentional behavior changes around --from inclusion + final-stage no-op). RuboCop expected clean. New tests pending in next pass.
+

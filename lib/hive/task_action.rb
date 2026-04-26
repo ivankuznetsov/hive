@@ -1,71 +1,94 @@
 require "shellwords"
 require "hive/stages"
+require "hive/workflows"
 
 module Hive
+  # Classifier that turns a (Task, Marker) pair into a user-facing
+  # action: a stable key (matching `Hive::Schemas::TaskActionKind`),
+  # a human label for `hive status` output, and a copy-paste-executable
+  # `command` string for the next step.
+  #
+  # Used by `hive status` (per-row action grouping) and by
+  # `hive run` / `hive approve` / `hive accept-finding` JSON
+  # `next_action` emission.
   class TaskAction
     ACTIONS = {
       inbox: {
-        key: "ready_to_brainstorm",
+        key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
         label: "Ready to brainstorm",
         command: "brainstorm"
       },
       brainstorm_waiting: {
-        key: "needs_input",
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
         command: "brainstorm"
       },
       brainstorm_complete: {
-        key: "ready_to_plan",
+        key: Hive::Schemas::TaskActionKind::READY_TO_PLAN,
         label: "Ready to plan",
         command: "plan"
       },
       plan_waiting: {
-        key: "needs_input",
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
         command: "plan"
       },
       plan_complete: {
-        key: "ready_to_develop",
+        key: Hive::Schemas::TaskActionKind::READY_TO_DEVELOP,
         label: "Ready to develop",
         command: "develop"
       },
       execute_findings: {
-        key: "review_findings",
+        key: Hive::Schemas::TaskActionKind::REVIEW_FINDINGS,
         label: "Review findings",
         command: "findings"
       },
       execute_waiting: {
-        key: "needs_input",
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
         command: "develop"
       },
       execute_complete: {
-        key: "ready_for_pr",
+        key: Hive::Schemas::TaskActionKind::READY_FOR_PR,
         label: "Ready for PR",
         command: "pr"
       },
       execute_stale: {
-        key: "recover_execute",
+        # Recovery path: the user must edit reviews/, lower task.md
+        # frontmatter `pass:`, remove the EXECUTE_STALE marker, then
+        # re-run. There is no single command that recovers; the closest
+        # agent-callable step is reviewing the findings and toggling
+        # accept-finding so the next run sees a smaller accepted set.
+        key: Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
         label: "Needs recovery",
-        command: "develop"
+        command: "findings"
       },
       pr_waiting: {
-        key: "needs_input",
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
         command: "pr"
       },
       pr_complete: {
-        key: "ready_to_archive",
+        key: Hive::Schemas::TaskActionKind::READY_TO_ARCHIVE,
         label: "Ready to archive",
         command: "archive"
       },
       done: {
-        key: "archived",
+        key: Hive::Schemas::TaskActionKind::ARCHIVED,
         label: "Archived",
         command: nil
       },
+      agent_running: {
+        # Marker is `:agent_working` — a `hive run` is in flight. Surfacing
+        # a workflow command here would send the user (or an agent loop)
+        # straight into ConcurrentRunError on every retry. The right
+        # action is wait-and-watch.
+        key: Hive::Schemas::TaskActionKind::AGENT_RUNNING,
+        label: "Agent running",
+        command: nil
+      },
       error: {
-        key: "error",
+        key: Hive::Schemas::TaskActionKind::ERROR,
         label: "Error",
         command: nil
       }
@@ -93,13 +116,21 @@ module Hive
       action[:label]
     end
 
+    # Returns a copy-paste-executable shell command, or nil for actions
+    # whose state requires manual recovery (agent_running, archived, error).
+    #
+    # Workflow-verb commands ALWAYS include `--from <stage>`: that's the
+    # idempotency lever — a retry after a successful advance fails with
+    # WRONG_STAGE (4) instead of silently advancing twice. Generic verbs
+    # (findings/accept-finding/reject-finding) only include `--stage`
+    # when slug-stage ambiguity actually exists.
     def command
       verb = action[:command]
       return nil unless verb
 
       parts = [ "hive", verb, task.slug ]
       parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
-      parts.concat([ from_or_stage_option, stage_dir ]) if @stage_collision
+      parts.concat([ from_or_stage_option(verb), stage_dir ]) if include_stage_filter?(verb)
       parts.shelljoin
     end
 
@@ -114,6 +145,10 @@ module Hive
     private
 
     def action
+      # `:agent_working` overrides every (stage, marker) pair — a live
+      # agent run on the task pre-empts whatever workflow advice the
+      # state-machine would otherwise produce.
+      return ACTIONS.fetch(:agent_running) if marker.name == :agent_working
       return ACTIONS.fetch(:error) if marker.name == :error
 
       case task.stage_name
@@ -151,8 +186,17 @@ module Hive
       end
     end
 
-    def from_or_stage_option
-      action[:command] == "findings" ? "--stage" : "--from"
+    # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for
+    # the source-stage assertion; generic verbs (findings/accept-finding/
+    # reject-finding) use --stage for ambiguity disambiguation.
+    def from_or_stage_option(verb)
+      Hive::Workflows.workflow_verb?(verb) ? "--from" : "--stage"
+    end
+
+    # Workflow verbs always carry --from for retry idempotency.
+    # Generic verbs only when ambiguity demands disambiguation.
+    def include_stage_filter?(verb)
+      Hive::Workflows.workflow_verb?(verb) || @stage_collision
     end
 
     def stage_dir

@@ -12,11 +12,12 @@ require "hive/task_resolver"
 module Hive
   module Commands
     class Run
-      def initialize(target, project: nil, stage: nil, json: false)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false)
         @target = target
         @project_filter = project
         @stage_filter = stage
         @json = json
+        @quiet = quiet
       end
 
       def call
@@ -73,7 +74,12 @@ module Hive
 
       def report(task, result)
         marker = Hive::Markers.current(task.state_file)
-        if @json
+        if @quiet
+          # Quiet mode: skip stdout/stderr but preserve the dual-signal
+          # raise on :error markers so composing callers (StageAction)
+          # can surface them in their own envelope.
+          raise Hive::TaskInErrorState, "stage recorded :error (#{marker.attrs.inspect})" if marker.name == :error
+        elsif @json
           report_json(task, result, marker)
         else
           report_text(task, result, marker)

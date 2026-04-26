@@ -211,13 +211,15 @@ module Hive
         if changes.empty?
           puts "  (no-op: every selected finding was already #{verb})"
         else
-          warn "next: hive develop #{task.slug}"
+          warn "next: hive develop #{task.slug} --from #{task.stage_index}-#{task.stage_name}"
         end
       end
 
       # Both `kind: run` branches carry a `reason` so consumers see a
       # consistent shape. The agent's natural next step is the same in
       # both cases — re-run the execute stage; only the rationale differs.
+      # The command always carries `--from <stage>` so a retry after a
+      # successful run fails with WRONG_STAGE (4) instead of advancing.
       def next_action(task, doc)
         kind = Hive::Schemas::NextActionKind
         accepted = doc.summary["accepted"]
@@ -230,8 +232,9 @@ module Hive
         else
           "no accepted findings; re-run to mark execute_complete"
         end
+        stage_dir = "#{task.stage_index}-#{task.stage_name}"
         { "kind" => kind::RUN, "folder" => task.folder,
-          "command" => "hive develop #{task.slug}", "reason" => reason }
+          "command" => "hive develop #{task.slug} --from #{stage_dir}", "reason" => reason }
       end
 
       def emit_error_envelope(error)

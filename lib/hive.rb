@@ -11,7 +11,8 @@ module Hive
       "hive-status" => 1,
       "hive-run" => 1,
       "hive-approve" => 1,
-      "hive-findings" => 1
+      "hive-findings" => 1,
+      "hive-stage-action" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
@@ -70,6 +71,26 @@ module Hive
       # Self-derived: every constant in this module other than ALL itself.
       # Defined last so the `constants` lookup runs after every value-bearing
       # constant is in place but before ALL is added.
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `tasks[].action` (and `tasks[].action_label` lookup
+    # keys) emitted by `hive status --json`. Same self-derived ALL pattern
+    # as NextActionKind so adding a new bucket without updating ALL is
+    # impossible. Adding a new value is non-breaking by contract; renaming
+    # or removing a value bumps SCHEMA_VERSIONS["hive-status"].
+    module TaskActionKind
+      READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
+      READY_TO_PLAN       = "ready_to_plan".freeze
+      READY_TO_DEVELOP    = "ready_to_develop".freeze
+      READY_FOR_PR        = "ready_for_pr".freeze
+      READY_TO_ARCHIVE    = "ready_to_archive".freeze
+      NEEDS_INPUT         = "needs_input".freeze
+      REVIEW_FINDINGS     = "review_findings".freeze
+      RECOVER_EXECUTE     = "recover_execute".freeze
+      AGENT_RUNNING       = "agent_running".freeze
+      ARCHIVED            = "archived".freeze
+      ERROR               = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
   end

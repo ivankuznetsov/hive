@@ -20,6 +20,16 @@ The CI command failed. Below is the captured stdout + stderr, ANSI color codes s
 3. Run the relevant test or assertion locally to confirm your fix before committing.
 4. Commit your changes with a conventional message describing the fix (`fix(scope): <one-line>`).
 
+## Required commit trailers
+
+Every commit you make in this CI-fix attempt MUST end with these git trailers (after a blank line, one per line). The hive runner consumes them via `hive metrics rollback-rate`.
+
+```
+Hive-Task-Slug: <%= task_slug %>
+Hive-Fix-Pass: <%= "%02d" % attempt %>
+Hive-Fix-Phase: ci
+```
+
 ## Constraints
 
 - **Edit only files in the worktree** (`<%= worktree_path %>`).

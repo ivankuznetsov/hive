@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb
 created: 2026-04-25
 updated: 2026-04-26
 tags: [state, filesystem, model, architecture]
@@ -182,6 +182,21 @@ Loaded by `Hive::Config.load`, recursively deep-merged onto `Hive::Config::DEFAU
 - `idea.md` (Step 0 capture): `slug`, `created_at`, `original_text` (multiline).
 - `task.md` (4-execute / 7-done): `slug`, `started_at`, `pass`. Reviewer agents must update `pass:` to match marker `pass=`.
 - `pr.md`: `pr_url`, `pr_number` (when populated by 6-pr runner from existing PR lookup).
+
+## Commit trailers (fix-agent metric)
+
+Fix-agent commits (Phase 4 review-fix and Phase 1 ci-fix) MUST end with these git trailers — the templates `templates/fix_prompt.md.erb` and `templates/ci_fix_prompt.md.erb` instruct the LLM to emit them, and `Hive::Metrics.rollback_rate` is the consumer.
+
+| Trailer | Phase | Source |
+|---------|-------|--------|
+| `Hive-Task-Slug: <slug>` | ci, fix | template var `task_slug` |
+| `Hive-Fix-Pass: <NN>` | ci, fix | `attempt` (ci) / `pass` (fix) |
+| `Hive-Fix-Phase: <ci\|fix>` | ci, fix | template literal |
+| `Hive-Fix-Findings: <int>` | fix only | filled by LLM (count of `[x]` items applied in this commit) |
+| `Hive-Triage-Bias: <courageous\|safetyist\|custom>` | fix only | `cfg.review.triage.bias` via `Stages::Review#triage_bias_for` |
+| `Hive-Reviewer-Sources: <names>` | fix only | sorted, comma-joined reviewer-file basenames for the pass via `Stages::Review#reviewer_sources_for`; orchestrator-owned files (escalations-/ci-blocked/browser-/fix-guardrail-) excluded; `none` when empty |
+
+Trailers are not validated server-side — commits without trailers are silently excluded from the rollback metric, so missing trailers degrade signal but never block work. `Hive::Metrics.parse_trailers` (`lib/hive/metrics.rb:104`) lower-cases keys and accepts any `[A-Za-z][A-Za-z0-9-]*: value` line in the body. See [[modules/metrics]] · [[commands/metrics]].
 
 ## State machine diagram
 

@@ -205,6 +205,29 @@ module Hive
     end
     map "reject-finding" => :reject_finding
 
+    desc "metrics SUBCOMMAND", "Report metrics across registered projects (rollback-rate)"
+    long_desc <<~DESC
+      Subcommands:
+        rollback-rate    Fraction of hive fix-agent commits later reverted.
+
+      A high rollback rate signals the triage bias is too courageous for the
+      project; a low rate validates the autonomous loop. Trailers emitted by
+      fix-prompt / ci-fix-prompt templates (Hive-Fix-Pass, Hive-Triage-Bias,
+      Hive-Fix-Phase) are the source of truth for what counts as a fix-agent
+      commit.
+    DESC
+    option :days, type: :numeric, desc: "limit window to commits within N days"
+    option :project, type: :string, desc: "scope to one registered project"
+    def metrics(subcommand = "rollback-rate")
+      require "hive/commands/metrics"
+      Hive::Commands::Metrics.new(
+        subcommand,
+        days: options[:days],
+        project: options[:project],
+        json: options[:json]
+      ).call
+    end
+
     no_commands do
       def run_stage_action(verb, target)
         require "hive/commands/stage_action"

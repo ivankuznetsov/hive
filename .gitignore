@@ -20,3 +20,8 @@
 /docs/plans
 /docs/plans/
 /raw/
+# Per-skill scratchpad and run artefacts (e.g. .context/compound-engineering/
+# ce-code-review/<run-id>/*.json from the /ce-code-review skill). These are
+# locally-scoped runtime outputs, not source.
+/.context
+/.context/

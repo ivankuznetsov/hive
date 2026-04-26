@@ -60,7 +60,7 @@ module Hive
 
           template_name = resolve_template(cfg, ctx)
           profile_name = cfg.dig("review", "triage", "agent") || "claude"
-          profile = Hive::AgentProfiles.lookup(profile_name)
+          profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
 
           prompt = render_prompt(
             template_name: template_name,

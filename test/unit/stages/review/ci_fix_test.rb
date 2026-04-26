@@ -345,6 +345,57 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  # --- per-process timeout + byte-cap during read -----------------------
+
+  def test_ci_command_timeout_returns_error
+    with_ci_dir do |dir, task_folder|
+      # CI script that sleeps well beyond the timeout the cfg sets.
+      ci = write_ci_script(dir, %(echo started; sleep 30; echo never_printed))
+      cfg = cfg_with(ci,
+                     "review" => { "ci" => { "max_attempts" => 1 } },
+                     "timeout_sec" => { "review_ci" => 2 })
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg,
+        ctx: make_ctx(dir, task_folder)
+      )
+
+      assert_equal :error, result.status
+      assert_match(/timed out/, result.error_message)
+    end
+  end
+
+  def test_ci_output_byte_cap_during_read
+    with_ci_dir do |dir, task_folder|
+      # 1 MB cap configured; emit ~3 MB. The reader must stop appending
+      # once the cap is hit so we never hold the full stream in memory.
+      ci = write_ci_script(dir, <<~SH.strip)
+        for i in $(seq 1 3000); do
+          # 1 KB per line so 3000 lines = ~3 MB
+          printf 'X%.0s' {1..1023}
+          echo
+        done
+        exit 1
+      SH
+
+      cfg = cfg_with(ci,
+                     "review" => { "ci" => { "max_attempts" => 1, "max_log_bytes" => 1024 * 1024, "tail_lines" => 100_000 } },
+                     "timeout_sec" => { "review_ci" => 30 })
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg,
+        ctx: make_ctx(dir, task_folder)
+      )
+
+      assert_equal :stale, result.status
+      # last_output may include the truncation header from clean_output;
+      # what matters is that the captured text is bounded by max_log_bytes.
+      # The header itself adds < 1 KB, so 1 MB + 1 KB is a safe upper bound.
+      assert_operator result.last_output.bytesize, :<=, 1024 * 1024 + 1024,
+                      "last_output must respect the byte cap during read"
+    end
+  end
+
   # --- captured output reaches agent prompt -----------------------------
 
   def test_captured_output_is_passed_to_fix_agent_via_user_supplied_wrapper

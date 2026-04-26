@@ -23,12 +23,26 @@ module Hive
         end
       end
 
-      def lookup(name)
+      # Resolve a profile by name, optionally overlaying
+      # `cfg.dig("agents", name)` overrides from the merged project
+      # config. Without `cfg:` the registry-stored profile is returned
+      # unchanged (preserving the call sites that don't have cfg in
+      # scope, like Hive::Agent's legacy class-method shims). With
+      # `cfg:` set, an `agents.<name>.<key>` block is overlaid via
+      # AgentProfile#with_overrides — `bin`, `env_override`, and
+      # `min_version` are the documented keys; an unknown key raises
+      # Hive::ConfigError loudly.
+      def lookup(name, cfg: nil)
         sym = name.to_sym
         entry = @mutex.synchronize { @profiles[sym] }
         raise UnknownAgent, "unknown agent profile: #{name.inspect} (registered: #{registered_names.inspect})" if entry.nil?
 
-        entry
+        return entry if cfg.nil?
+
+        overrides = cfg.dig("agents", name.to_s)
+        return entry if overrides.nil? || overrides.empty?
+
+        entry.with_overrides(overrides)
       end
 
       def registered?(name)

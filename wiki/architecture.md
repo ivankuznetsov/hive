@@ -55,7 +55,8 @@ Concurrency: any number of `hive run` processes on **different** tasks can proce
 | `inbox` | `Stages::Inbox` | no | no |
 | `brainstorm` | `Stages::Brainstorm` | yes | no |
 | `plan` | `Stages::Plan` | yes | no |
-| `execute` | `Stages::Execute` | yes (twice — impl + reviewer) | yes (in feature worktree) |
+| `execute` | `Stages::Execute` | yes (impl-only since ADR-014) | yes (in feature worktree) |
+| `review` | `Stages::Review` (orchestrator) → `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | yes (CI-fix + reviewers + triage + fix + browser; sub-spawns use `status_mode: :exit_code_only` per ADR-021) | yes (fix agent commits in feature worktree) |
 | `pr` | `Stages::Pr` | yes (unless idempotent) | yes (`git push`, `gh pr create`) |
 | `done` | `Stages::Done` | no | no |
 
@@ -79,7 +80,7 @@ claude -p
 
 `HIVE_CLAUDE_BIN` env var overrides the binary (used by tests with `test/fixtures/fake-claude`). `--verbose` is mandatory whenever `-p` is paired with `--output-format stream-json` (claude rejects the invocation otherwise).
 
-`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **prompt-injection wrapping with a per-run random nonce** (`<user_supplied_<hex16>>…</user_supplied_<hex16>>`) so attacker-supplied closing tags can't terminate the wrapper, (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source), and (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` around **both** the implementation and reviewer passes; tampering yields `<!-- ERROR reason=implementer_tampered|reviewer_tampered -->`. A separate post-PR secret-scan in `Stages::Pr` blocks publishing on api-key/AWS/GH-token regex hits.
+`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 5-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), and (d) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. A separate post-PR secret-scan in `Stages::Pr` blocks publishing on api-key/AWS/GH-token regex hits.
 
 ## State machine (cross-stage)
 
@@ -92,10 +93,11 @@ stateDiagram-v2
     S2_brainstorm --> S3_plan: user mv (COMPLETE)
     S3_plan --> S3_plan: hive run (refine)
     S3_plan --> S4_execute: user mv (COMPLETE)
-    S4_execute --> S4_execute: hive run (review pass)
-    S4_execute --> S5_pr: user mv (EXECUTE_COMPLETE)
-    S5_pr --> S6_done: user mv (after merge)
-    S6_done --> [*]
+    S4_execute --> S5_review: user mv (EXECUTE_COMPLETE)
+    S5_review --> S5_review: hive run (autonomous loop: CI → reviewers → triage → fix → guardrail → browser)
+    S5_review --> S6_pr: user mv (REVIEW_COMPLETE)
+    S6_pr --> S7_done: user mv (after merge)
+    S7_done --> [*]
 ```
 
 `mv` between directories is the only approval gesture. The user can always interrupt by editing files in place.

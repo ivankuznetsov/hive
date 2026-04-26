@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside the initial implementation; once `git log` accumulates substantive merges, future ADRs should anchor on those.
+**TLDR**: ADRs below were authored alongside the initial implementation; once `git log` accumulates substantive merges, future ADRs should anchor on those. ADRs 014–021 added 2026-04-26 alongside the 5-review stage.
 
 ## ADR-001: Folder-as-task, not single markdown file
 
@@ -103,8 +103,68 @@ tags: [decisions, adr]
 
 **Status:** Active
 **Context:** Reviewer is invoked with the same `--dangerously-skip-permissions` as the implementation agent. Convention says "don't write code"; convention alone is not enforcement.
-**Decision:** Before reviewer spawn, hash `plan.md` and `worktree.yml` (the two files the reviewer must absolutely not touch). After spawn, re-hash; mismatch → `<!-- ERROR reason=reviewer_tampered files=… -->`. `task.md` is intentionally **not** in the protected set because the reviewer legitimately writes the marker there.
+**Decision:** Before reviewer spawn, hash `plan.md` and `worktree.yml` (the two files the reviewer must absolutely not touch). After spawn, re-hash; mismatch → `<!-- ERROR reason=reviewer_tampered files=… -->`. `task.md` is intentionally **not** in the protected set because the reviewer legitimately writes the marker there. Extended in U6/U9 to also protect during triage and fix spawns (`plan.md` + `worktree.yml` + `task.md`).
+
 **Consequences:** Reviewer mistakes (or prompt injections) that touch the wrong files surface as errors instead of silent corruption. Cost: one extra hash pair per review pass (negligible).
+
+## ADR-014: 5-review is its own stage; 4-execute drops to impl-only
+
+**Status:** Active (shipped in feat/5-review-stage; U1 + U9)
+**Context:** Pre-U9 the review pass was an iteration loop inside `4-execute`. As soon as we wanted multiple reviewers, a triage pass, a CI-fix loop, a fix-guardrail, and a browser-test phase, the iteration loop became the dominant mass of `Stages::Execute` and obscured what the stage was for. The user owns the "implementation done" → "review starts" transition by `mv`-ing the folder.
+**Decision:** Add `5-review/` to `Hive::Stages::DIRS`. `Stages::Execute` becomes impl-only — runs `spawn_implementation`, SHA-protects `plan.md`/`worktree.yml`, sets `EXECUTE_COMPLETE`, exits. The user `mv`s the task to `5-review/`, which runs the new `Hive::Stages::Review.run!` autonomous loop (CI → reviewers → triage → fix → guardrail → browser → REVIEW_COMPLETE). One `hive run` lands a terminal marker or exhausts budgets; no partial-run states.
+**Consequences:** Stage runners stay shape-uniform — each stage is one phase. The `mv` is the explicit gate between "agent wrote code" and "agents review code" — important because the review loop has different cost / safety properties (multiple agents, fix-guardrail, etc.). Cost: a dedicated stage means more files to maintain (review.rb is 450+ lines), but the alternative (re-cramming everything into 4-execute) was already untenable.
+
+## ADR-015: Sequential reviewers; parallel deferred
+
+**Status:** Active
+**Context:** Phase 2 of the 5-review loop runs every configured reviewer adapter. The plan considered running them in parallel (each in its own thread / subprocess) versus sequentially.
+**Decision:** Sequential by default. The reviewers we ship (claude `/ce-code-review`, codex `/ce-code-review`, `pr-review-toolkit`) overlap heavily on findings — running them in parallel mostly produces near-duplicate `[x]` marks for triage to dedupe, at the cost of more concurrent agent processes (subprocess management, OOM risk, harder logs).
+**Consequences:** Phase 2 wall-clock is the sum of per-reviewer durations. With three reviewers averaging ~3 minutes each, that's ~9 minutes per pass — fits well inside `review.max_wall_clock_sec` (default 5400). Parallel execution can be added behind a config flag if the wall-clock cost becomes painful.
+
+## ADR-016: Triage bias presets — `courageous` default, `safetyist` opt-in
+
+**Status:** Active
+**Context:** The triage agent decides which findings to auto-fix and which to escalate. The bias is the single biggest knob on whether the autonomous loop is worth running. Three labels were considered: `aggressive`, `liberal_auto_fix`, `conservative`.
+**Decision:** Two presets ship: `courageous` (default — apply max review fixes in automatic mode; escalate only sketchy / architecture-level findings) and `safetyist` (opt-in — escalate when in doubt). `review.triage.custom_prompt` overrides both with a path under `templates/`. The `aggressive` preset was dropped — the gap from `courageous` is small enough that the third label was net confusion.
+
+`hive metrics rollback-rate` (U14) gives the user data to revisit the choice — a high rate signals `courageous` is too courageous for the project; a low rate validates the trade.
+
+**Consequences:** Default lands fixes most users want without prompting; safety-conscious users opt into `safetyist`. The `Hive-Triage-Bias` commit trailer threads the choice into `git log` so the metric can break down by preset.
+
+## ADR-017: Agent CLI profile abstraction (`Hive::Agent` parameterized over `AgentProfile`)
+
+**Status:** Active
+**Context:** Pre-U12 `Hive::Agent` hardcoded `claude -p` invocation. The 5-review reviewer set wanted to spawn codex and pi alongside claude with the same lifecycle (per-spawn nonce, status detection, budget capture). Per-CLI behavior differs: codex emits status to stdout, pi exits non-zero on internal-server errors but cleanly on success, claude's `--dangerously-skip-permissions` flag has no codex equivalent.
+**Decision:** Introduce `AgentProfile` (a frozen value object with `name`, `binary`, `args_format`, `add_dir_flag`, `skill_syntax_format`, `status_detection_mode`, `version_check`, `preflight!`) and a registry (`Hive::AgentProfiles`). `Hive::Agent.run!` takes a `profile:` kwarg per spawn (defaults to the configured `agent_profile` or `claude`). Three profiles ship in v1: `claude`, `codex`, `pi`. `opencode` was scoped out — see [[active-areas]].
+**Consequences:** Per-spawn `<user_supplied>` nonce (ADR-019) is profile-independent. CE skills are invoked via `profile.skill_syntax_format` (e.g., `/ce-code-review` for claude/codex, `/run-skill ce-code-review` for pi).
+
+## ADR-018: Amended trust model when isolation flag varies per CLI; supersedes part of ADR-008
+
+**Status:** Active (supersedes part of ADR-008)
+**Context:** ADR-008 baselined `--dangerously-skip-permissions` as the sole permission gate, secured by the `<user_supplied>` nonce wrapper. Codex has no equivalent flag (its sandbox has different semantics); pi runs with explicit per-tool grants. Treating "no isolation flag" as silently identical to claude's flag would be a security regression.
+**Decision:** Each `AgentProfile` declares `add_dir_flag` (the `--add-dir` equivalent for filesystem isolation). When a profile's `add_dir_flag` is `nil`, the runner emits a one-line warning to `<task>/logs/isolation-warnings.log` ("ADR-008 filesystem-isolation boundary is reduced for this spawn") and proceeds. The CE skill prompt's `Constraints` section is the user-facing safety boundary in this case.
+**Consequences:** A reviewer spawning codex without `--add-dir` is observable in logs. The `<user_supplied>` nonce still bounds prompt-injection-as-command. The trust model is "claude has filesystem isolation + nonce; codex has nonce + prompt-level constraint."
+
+## ADR-019: Per-spawn `<user_supplied>` nonce; supersedes per-process memoization in ADR-008
+
+**Status:** Active (supersedes ADR-008's per-process nonce)
+**Context:** ADR-008 set the `<user_supplied>` wrapper nonce once per Ruby process. The 5-review pass spawns multiple agents (CI-fix, several reviewers, triage, fix, browser) in a single run; if every spawn shares the nonce, a hostile reviewer output saved verbatim into `accepted_findings` could escape its wrapper in the *next* spawn. The nonce must be fresh per spawn.
+**Decision:** `Hive::Stages::Base.user_supplied_tag` returns a fresh `<user_supplied_<hex>>` value on every call. `Stages::Base.spawn_agent` calls it once per spawn and threads the value into the rendered template. The runner never memoizes the tag at the stage level.
+**Consequences:** Nonce collision risk is now per-spawn (negligible). One `Stages::Review.run!` invocation that runs 4 passes with 3 reviewers, 1 triage, 1 fix, 1 guardrail-pass, 1 browser-test produces ~24 distinct nonces — all isolated.
+
+## ADR-020: Post-fix diff guardrail (extends ADR-008's secret-scan to fix-time diffs)
+
+**Status:** Active (shipped U13)
+**Context:** The fix agent has commit access to the worktree under `--dangerously-skip-permissions` (or codex's equivalent). A maliciously-crafted reviewer finding could in principle steer it into committing a `curl ... | sh`, editing `.github/workflows/`, or pasting a credential — and the user would only see a green review pass with one extra commit.
+**Decision:** After every Phase 4 fix spawn, before looping to Phase 2, `Hive::Stages::Review::FixGuardrail` takes `git diff base..head` of the new commits and walks it once. Default pattern set: `shell_pipe_to_interpreter`, `ci_workflow_edit`, `secrets_pattern_match` (dispatches to `Hive::SecretPatterns`), `dotenv_edit`, `dependency_lockfile_change`, `permission_change`. Hit → `REVIEW_WAITING reason=fix_guardrail` + `reviews/fix-guardrail-NN.md` so the user inspects before the loop continues.
+**Consequences:** The fix agent's blast radius is bounded by an explicit, project-overridable list. `Hive::SecretPatterns` is shared with the PR-stage body scan (extends, doesn't duplicate, the ADR-008 idea). Per-project override (`review.fix.guardrail.patterns_override`) lets users disable a default (e.g., a project that legitimately commits lockfiles in fix passes) or add custom patterns (e.g., `no_pdb` for Python projects).
+
+## ADR-021: Per-spawn `status_mode` override; orchestrator-owned terminal markers
+
+**Status:** Active
+**Context:** The 5-review orchestrator owns the terminal `REVIEW_*` marker. Sub-agents spawned during a phase (reviewer / triage / fix / browser) must NOT write to `task.state_file`, or they'd race the orchestrator's marker. Pre-U4 every `spawn_agent` call wrote the agent's state to `task.state_file` unconditionally.
+**Decision:** `Stages::Base.spawn_agent` takes a `status_mode:` kwarg per spawn. Three values: `:state_file_marker` (legacy default — agent writes its own state to `task.state_file`), `:exit_code_only` (for sub-spawns inside an orchestrator — runner judges success purely by exit code; agent's task.md writes are no-ops via mode-gating), `:output_file_exists` (for cases where a side-effect file is the truth). 5-review uses `:exit_code_only` for every sub-spawn; `:state_file_marker` is reserved for stages where the agent IS the orchestrator (today: 2-brainstorm, 3-plan, 4-execute, 6-pr).
+**Consequences:** No marker collision between orchestrator and sub-spawns. The runner's mark/finalize logic stays simple — every sub-spawn returns `{status:, error_message:}` from `Hive::Agent.run!`, and the orchestrator decides what to write to disk.
 
 ## Source
 

@@ -1,6 +1,7 @@
 require "open3"
 require "fileutils"
 require "shellwords"
+require "digest"
 require "hive/agent_profiles"
 require "hive/stages/base"
 
@@ -36,6 +37,7 @@ module Hive
 
         DEFAULT_TAIL_LINES = 200
         DEFAULT_MAX_LOG_BYTES = 256 * 1024 # 256 KB hard cap on captured output
+        PROTECTED_FILES = %w[plan.md worktree.yml task.md].freeze
 
         module_function
 
@@ -81,6 +83,7 @@ module Hive
               )
             end
 
+            before = sha256_protected(ctx)
             spawn_result = spawn_fix_agent(
               cfg: cfg,
               ctx: ctx,
@@ -89,12 +92,32 @@ module Hive
               max_attempts: max_attempts,
               captured_output: output
             )
+            after = sha256_protected(ctx)
+            tampered = before.keys.reject { |f| before[f] == after[f] }
+            if tampered.any?
+              return Result.new(
+                status: :error,
+                attempts: attempts,
+                last_output: output,
+                error_message: "ci fix agent modified protected files: #{tampered.join(', ')}"
+              )
+            end
+
             if spawn_result[:status] != :ok
               return Result.new(
                 status: :error,
                 attempts: attempts,
                 last_output: output,
                 error_message: spawn_result[:error_message] || "fix agent failed (#{spawn_result[:status]})"
+              )
+            end
+
+            if git_worktree?(ctx.worktree_path) && worktree_dirty?(ctx.worktree_path)
+              return Result.new(
+                status: :error,
+                attempts: attempts,
+                last_output: output,
+                error_message: "ci fix agent left uncommitted worktree changes"
               )
             end
           end
@@ -167,6 +190,23 @@ module Hive
               error_message: reason
             )
           end
+        end
+
+        def sha256_protected(ctx)
+          PROTECTED_FILES.each_with_object({}) do |name, h|
+            path = File.join(ctx.task_folder, name)
+            h[name] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
+          end
+        end
+
+        def git_worktree?(path)
+          _out, _err, status = Open3.capture3("git", "-C", path, "rev-parse", "--is-inside-work-tree")
+          status.success?
+        end
+
+        def worktree_dirty?(path)
+          out, _err, status = Open3.capture3("git", "-C", path, "status", "--porcelain")
+          status.success? && !out.empty?
         end
 
         def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:)

@@ -31,7 +31,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 4. `validate_from!`: if `--from` was passed, assert the task is at the named stage; raise `WrongStage` (4) on mismatch.
 5. `resolve_destination`: `--to` (long or short stage name), or auto = current stage_index + 1. Past `7-done` raises `FinalStageReached` (also exit 4).
 6. **Same-stage no-op**: if destination resolves to the current stage, emit a `noop: true` payload (or one-line `hive: noop —` text) and return success. No mv, no commit.
-7. `validate_move!`: forward auto-advance requires `:complete` or `:execute_complete` marker. `--to` (backward direction) and `--force` both bypass.
+7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. `--to` (backward direction) and `--force` both bypass.
 8. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
@@ -72,7 +72,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 }
 ```
 
-The split `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined) shape mirrors `hive-run`'s `stage` / `stage_index` so a consumer can compare across schemas without string parsing. `next_action.kind` is drawn from the closed `Hive::Schemas::NextActionKind` enum (`edit`, `mv`, `approve`, `run`, `recover_stale`, `no_op`). `hive run --json` now emits `kind=approve` for `:complete` / `:execute_complete` (was `mv`); the `mv` value is retained in the enum for back-compat.
+The split `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined) shape mirrors `hive-run`'s `stage` / `stage_index` so a consumer can compare across schemas without string parsing. `next_action.kind` is drawn from the closed `Hive::Schemas::NextActionKind` enum (`edit`, `mv`, `approve`, `run`, `recover_stale`, `no_op`). `hive run --json` now emits `kind=approve` for `:complete`, `:execute_complete`, and `:review_complete` (was `mv`); the `mv` value is retained in the enum for back-compat.
 
 ### Error envelope (every failure path under `--json`)
 
@@ -113,8 +113,8 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration
 
 | Direction | Marker required | Override |
 |-----------|-----------------|----------|
-| Forward auto (no `--to`) | `:complete` or `:execute_complete` | `--force` |
-| Forward via `--to`       | `:complete` or `:execute_complete` | `--force` |
+| Forward auto (no `--to`) | `:complete`, `:execute_complete`, or `:review_complete` | `--force` |
+| Forward via `--to`       | `:complete`, `:execute_complete`, or `:review_complete` | `--force` |
 | Backward via `--to`      | none                                | n/a      |
 | Same stage (no-op)       | none                                | n/a      |
 

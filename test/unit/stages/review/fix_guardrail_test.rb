@@ -129,6 +129,34 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_trips_on_github_workflow_deletion
+    # A fix agent that DELETES `.github/workflows/deploy.yml` (rather
+    # than editing it) emits `+++ /dev/null` in the diff header — the
+    # path lives only on the `--- a/...` side. Pre-fix, scan_diff only
+    # tracked `+++ b/<path>` headers and missed this attack vector.
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      File.write(File.join(dir, ".github", "workflows", "deploy.yml"),
+                 "name: deploy\non: push\njobs:\n  d:\n    runs-on: ubuntu-latest\n")
+      run!("git", "-C", dir, "add", ".github")
+      run!("git", "-C", dir, "commit", "-m", "add deploy workflow", "--quiet")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+
+      run!("git", "-C", dir, "rm", ".github/workflows/deploy.yml")
+      run!("git", "-C", dir, "commit", "-m", "delete deploy workflow", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "deletion of a CI workflow file must trip ci_workflow_edit (not slip past via +++ /dev/null)"
+      assert(result.matches.any? { |m| m.pattern_name == "ci_workflow_edit" },
+             "expected a ci_workflow_edit match for the deleted workflow")
+    end
+  end
+
   def test_trips_on_jenkinsfile_edit
     with_two_commits(file: "Jenkinsfile",
                      content: "pipeline { agent any }\n") do |dir, base, head|
@@ -179,6 +207,34 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_trips_on_nested_dotenv_in_monorepo
+    # Rails / monorepos place env files in subdirectories
+    # (apps/web/.env, config/credentials.yml.enc). The pre-fix regex
+    # used `\A` and missed every non-repo-root path.
+    with_two_commits(file: "apps/web/.env",
+                     content: "API_KEY=monorepo-leak\n") do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "monorepo apps/web/.env must trip dotenv_edit"
+      assert(result.matches.any? { |m| m.pattern_name == "dotenv_edit" })
+    end
+  end
+
+  def test_trips_on_rails_credentials_yml_enc
+    with_two_commits(file: "config/credentials.yml.enc",
+                     content: "----encrypted----\n") do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "Rails config/credentials.yml.enc must trip dotenv_edit"
+    end
+  end
+
   # --- dependency_lockfile_change ----------------------------------------
 
   def test_trips_on_gemfile_lock_change
@@ -201,6 +257,21 @@ class FixGuardrailTest < Minitest::Test
         base_sha: base, head_sha: head
       )
       assert_equal :tripped, result.status
+    end
+  end
+
+  def test_trips_on_nested_package_lock_in_monorepo
+    # Monorepos: packages/api/package-lock.json. Pre-fix the regex
+    # used `\A` and missed any non-root lockfile.
+    with_two_commits(file: "packages/api/package-lock.json",
+                     content: %({"name":"api","lockfileVersion":3}\n)) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "monorepo packages/api/package-lock.json must trip dependency_lockfile_change"
+      assert(result.matches.any? { |m| m.pattern_name == "dependency_lockfile_change" })
     end
   end
 

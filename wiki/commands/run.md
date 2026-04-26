@@ -33,8 +33,13 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 |--------|-----------------|
 | `:waiting` / `:execute_waiting` | `next: edit the file, then `hive <stage-verb> <slug>` again` |
 | `:complete` | `next: hive plan <slug>`, `hive develop <slug>`, or `hive archive <slug>` depending on current stage; JSON keeps path fields and uses the workflow command |
-| `:execute_complete` | `next: hive pr <slug>`; JSON keeps path fields and uses the workflow command |
+| `:execute_complete` | `next: hive develop <slug>` (advances to 5-review); JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
+| `:review_complete` | `next: hive pr <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 5-review"` |
 | `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
+| `:review_waiting` | `next: edit reviews/escalations-NN.md or reviewer files, then `hive run <folder>` again` |
+| `:review_ci_stale` | `next: fix CI, edit reviews/ci-blocked.md, remove REVIEW_CI_STALE marker, re-run` |
+| `:review_stale` | `next: edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, remove REVIEW_STALE marker, re-run` |
+| `:review_error` | investigate, clear the marker, then re-run |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 
 `next_stage_dir` increments `task.stage_index`; `7-done` has no `next:`.
@@ -65,6 +70,7 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 - `test/integration/run_brainstorm_test.rb`
 - `test/integration/run_plan_test.rb`
 - `test/integration/run_execute_test.rb`
+- `test/integration/run_review_test.rb`
 - `test/integration/run_pr_test.rb`
 - `test/integration/run_done_test.rb`
 - `test/integration/full_flow_test.rb` (chains all stages)

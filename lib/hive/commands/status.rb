@@ -18,6 +18,12 @@ module Hive
         execute_waiting: "⏸",
         execute_complete: "✓",
         execute_stale: "⚠",
+        review_working: "🤖",
+        review_waiting: "⏸",
+        review_ci_stale: "⚠",
+        review_stale: "⚠",
+        review_complete: "✓",
+        review_error: "⚠",
         error: "⚠"
       }.freeze
 

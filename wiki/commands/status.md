@@ -28,10 +28,10 @@ tags: [command, status, observability, json]
 | Icon | Marker name |
 |------|-------------|
 | `·` | `:none` (no marker yet, e.g. fresh `1-inbox` capture before WAITING was added) |
-| `⏸` | `:waiting`, `:execute_waiting` |
-| `✓` | `:complete`, `:execute_complete` |
-| `🤖` | `:agent_working` with a live PID |
-| `⚠` | `:execute_stale`, `:error`, or `:agent_working` with a dead PID |
+| `⏸` | `:waiting`, `:execute_waiting`, `:review_waiting` |
+| `✓` | `:complete`, `:execute_complete`, `:review_complete` |
+| `🤖` | `:agent_working` with a live PID, `:review_working` |
+| `⚠` | `:execute_stale`, `:review_ci_stale`, `:review_stale`, `:review_error`, `:error`, or `:agent_working` with a dead PID |
 
 `decorate` (`lib/hive/commands/status.rb:95`) special-cases `:agent_working`: reads `claude_pid` (or fallback `pid`) from the marker attrs and runs `Process.kill(0, pid)` to decide between 🤖 and ⚠ "stale lock".
 
@@ -47,7 +47,7 @@ tags: [command, status, observability, json]
 
 ## How tasks are discovered
 
-For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`; mtime falls back to the directory mtime if the state file doesn't exist yet.
+For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-review 6-pr 7-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`; mtime falls back to the directory mtime if the state file doesn't exist yet.
 
 Rows are then classified by `Hive::TaskAction`, which emits an action key, label, and suggested command such as `hive brainstorm <slug>`, `hive develop <slug>`, `hive findings <slug>`, or `hive pr <slug>`. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
 

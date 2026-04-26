@@ -149,6 +149,57 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_returns_error_when_fix_agent_leaves_uncommitted_changes
+    with_tmp_dir do |task_root|
+      with_tmp_git_repo do |worktree|
+        task_folder = File.join(task_root, ".hive-state", "stages", "5-review", "ci-dirty")
+        FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        File.write(File.join(task_folder, "task.md"), "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
+        File.write(File.join(task_folder, "plan.md"), "plan\n")
+        File.write(File.join(task_folder, "worktree.yml"), { "path" => worktree }.to_yaml)
+
+        dirty_file = File.join(worktree, "dirty.txt")
+        ci = write_ci_script(task_root, "echo fail >&2\nexit 1")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = dirty_file
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "uncommitted\n"
+
+        result = Hive::Stages::Review::CiFix.run!(
+          cfg: cfg_with(ci),
+          ctx: make_ctx(worktree, task_folder)
+        )
+
+        assert_equal :error, result.status
+        assert_match(/uncommitted worktree changes/, result.error_message)
+      end
+    end
+  end
+
+  def test_returns_error_when_fix_agent_tampers_with_protected_task_files
+    with_tmp_dir do |task_root|
+      with_tmp_git_repo do |worktree|
+        task_folder = File.join(task_root, ".hive-state", "stages", "5-review", "ci-tamper")
+        FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        task_md = File.join(task_folder, "task.md")
+        File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
+        File.write(File.join(task_folder, "plan.md"), "plan\n")
+        File.write(File.join(task_folder, "worktree.yml"), { "path" => worktree }.to_yaml)
+
+        ci = write_ci_script(task_root, "echo fail >&2\nexit 1")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "<!-- REVIEW_COMPLETE -->\n"
+
+        result = Hive::Stages::Review::CiFix.run!(
+          cfg: cfg_with(ci),
+          ctx: make_ctx(worktree, task_folder)
+        )
+
+        assert_equal :error, result.status
+        assert_match(/protected files/, result.error_message)
+        assert_match(/task\.md/, result.error_message)
+      end
+    end
+  end
+
   # --- capped → :stale --------------------------------------------------
 
   def test_returns_stale_when_max_attempts_reached

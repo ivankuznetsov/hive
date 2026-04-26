@@ -8,8 +8,22 @@ module Hive
     #
     # See lib/hive/metrics.rb for the trailer + revert-detection rules.
     class Metrics
-      EXIT_OK = 0
-      EXIT_USAGE = 2
+      # Typed usage error for hive metrics. Exits with the canonical
+      # sysexits(3) USAGE code (64) — distinct from
+      # ExitCodes::ALREADY_INITIALIZED (2), which the metrics command
+      # was previously colliding with.
+      class UsageError < Hive::Error
+        attr_reader :error_kind
+
+        def initialize(message, error_kind:)
+          super(message)
+          @error_kind = error_kind
+        end
+
+        def exit_code
+          Hive::ExitCodes::USAGE
+        end
+      end
 
       def initialize(subcommand, days: nil, project: nil, json: false)
         @subcommand = subcommand
@@ -23,8 +37,10 @@ module Hive
         when "rollback-rate", nil
           run_rollback_rate
         else
-          warn "hive metrics: unknown subcommand #{@subcommand.inspect} (expected: rollback-rate)"
-          exit EXIT_USAGE
+          fail_usage!(
+            "hive metrics: unknown subcommand #{@subcommand.inspect} (expected: rollback-rate)",
+            kind: "unknown_subcommand"
+          )
         end
       end
 
@@ -32,11 +48,12 @@ module Hive
         roots = resolve_project_roots
         if roots.empty?
           if @project
-            warn "hive metrics: unknown project: #{@project}"
-            exit EXIT_USAGE
+            fail_usage!("hive metrics: unknown project: #{@project}", kind: "unknown_project")
           else
-            warn "hive metrics: no projects registered; run `hive init <path>` first"
-            exit EXIT_USAGE
+            fail_usage!(
+              "hive metrics: no projects registered; run `hive init <path>` first",
+              kind: "no_projects_registered"
+            )
           end
         end
 
@@ -53,6 +70,27 @@ module Hive
         end
       end
 
+      # Emit a JSON error envelope on stdout (mirrors the
+      # `Hive::Commands::Approve#emit_error_envelope` pattern) when --json
+      # is on, then raise the typed Hive::Error so bin/hive's rescue path
+      # produces the documented USAGE (64) exit code.
+      def fail_usage!(message, kind:)
+        error = UsageError.new(message, error_kind: kind)
+        if @json
+          puts JSON.generate(
+            "schema" => "hive-metrics-rollback-rate",
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-metrics-rollback-rate"),
+            "ok" => false,
+            "error_kind" => kind,
+            "exit_code" => Hive::ExitCodes::USAGE,
+            "message" => message
+          )
+        else
+          warn message
+        end
+        raise error
+      end
+
       def resolve_project_roots
         projects = Hive::Config.registered_projects
         return projects if @project.nil?
@@ -64,7 +102,7 @@ module Hive
       def json_payload(per_project, since)
         {
           "schema" => "hive-metrics-rollback-rate",
-          "schema_version" => 1,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-metrics-rollback-rate"),
           "since" => since,
           "projects" => per_project.map { |stats| project_json(stats) }
         }

@@ -55,33 +55,87 @@ class MetricsCommandTest < Minitest::Test
     end
   end
 
-  def test_rollback_rate_unknown_project_exits_2
+  def test_rollback_rate_unknown_project_exits_usage
     with_registered_project do |_dir, _project|
       _out, err, status = with_captured_exit do
         Hive::Commands::Metrics.new("rollback-rate", project: "no-such-project").call
       end
-      assert_equal 2, status
+      assert_equal Hive::ExitCodes::USAGE, status
       assert_match(/unknown project: no-such-project/, err)
     end
   end
 
-  def test_unknown_subcommand_exits_2
+  def test_unknown_subcommand_exits_usage
     with_registered_project do |_dir, _project|
       _out, err, status = with_captured_exit do
         Hive::Commands::Metrics.new("totally-bogus").call
       end
-      assert_equal 2, status
+      assert_equal Hive::ExitCodes::USAGE, status
       assert_match(/unknown subcommand/, err)
     end
   end
 
-  def test_no_registered_projects_exits_2
+  def test_no_registered_projects_exits_usage
     with_tmp_global_config do
       _out, err, status = with_captured_exit do
         Hive::Commands::Metrics.new("rollback-rate").call
       end
-      assert_equal 2, status
+      assert_equal Hive::ExitCodes::USAGE, status
       assert_match(/no projects registered/, err)
+    end
+  end
+
+  # ── --json error envelopes ──────────────────────────────────────────────
+  # bin/hive's rescue clause emits the typed Hive::Error with its
+  # contract exit code (USAGE = 64) AND, when --json is on, the producer
+  # writes a parseable JSON envelope on stdout BEFORE raising — so a
+  # caller piping to jq still gets a parseable document and a non-zero
+  # exit code as a dual signal.
+
+  def test_rollback_rate_unknown_project_json_emits_envelope
+    with_registered_project do |_dir, _project|
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", project: "no-such-project", json: true).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+
+      payload = JSON.parse(out)
+      assert_equal "hive-metrics-rollback-rate", payload["schema"]
+      assert_equal 1, payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "unknown_project", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/unknown project: no-such-project/, payload["message"])
+    end
+  end
+
+  def test_unknown_subcommand_json_emits_envelope
+    with_registered_project do |_dir, _project|
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("totally-bogus", json: true).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+
+      payload = JSON.parse(out)
+      assert_equal "hive-metrics-rollback-rate", payload["schema"]
+      assert_equal "unknown_subcommand", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/unknown subcommand/, payload["message"])
+    end
+  end
+
+  def test_no_registered_projects_json_emits_envelope
+    with_tmp_global_config do
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", json: true).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+
+      payload = JSON.parse(out)
+      assert_equal "hive-metrics-rollback-rate", payload["schema"]
+      assert_equal "no_projects_registered", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/no projects registered/, payload["message"])
     end
   end
 end

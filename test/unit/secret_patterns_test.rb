@@ -56,4 +56,32 @@ class SecretPatternsTest < Minitest::Test
     assert_empty Hive::SecretPatterns.scan("")
     assert_empty Hive::SecretPatterns.scan(nil)
   end
+
+  # ── multi-pattern + truncation pinning ─────────────────────────────────
+
+  def test_multi_pattern_input_returns_matches_for_each_pattern
+    # An AWS access key AND an Anthropic API key in the same blob —
+    # both must surface; neither pattern's scan can short-circuit.
+    text = "AKIA1234567890123456 sk-ant-abcdefghijklmnopqrst"
+    matches = Hive::SecretPatterns.scan(text)
+    names = matches.map { |m| m[:name] }
+    assert_includes names, :aws_access_key,
+                    "AWS pattern must match in multi-pattern input"
+    assert_includes names, :anthropic_api_key,
+                    "Anthropic pattern must match in multi-pattern input"
+  end
+
+  def test_long_secret_is_truncated_in_snippet_per_eighty_char_rule
+    # Long generic API key value (well over 80 chars) must be
+    # truncated in `snippet` so callers can include the snippet in
+    # error messages without leaking the full secret to logs.
+    long_value = "a" * 100
+    text = %(api_key = "#{long_value}")
+    matches = Hive::SecretPatterns.scan(text)
+    snippet = matches.find { |m| m[:name] == :generic_api_key }[:snippet]
+    assert_operator snippet.length, :<=, 81,
+                    "snippet truncated at 80 chars + ellipsis (= 81 max)"
+    assert snippet.end_with?("…"),
+           "truncated snippet ends with the ellipsis character"
+  end
 end

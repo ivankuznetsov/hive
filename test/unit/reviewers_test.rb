@@ -93,4 +93,33 @@ class ReviewersTest < Minitest::Test
       assert_equal expected, reviewer.output_path
     end
   end
+
+  # ── Context alias coverage ─────────────────────────────────────────────
+
+  # The canonical home of the per-spawn Context Data type is
+  # Hive::Stages::Review::Context (the 5-review stage owns the type
+  # because triage / ci_fix / browser_test / fix_guardrail all consume
+  # it, none of which are reviewers). The legacy
+  # Hive::Reviewers::Context alias must keep pointing at the same class
+  # so external callers and the existing Reviewers::Agent adapter keep
+  # working.
+  def test_reviewers_context_is_alias_of_stages_review_context
+    require "hive/stages/review/context"
+    assert_equal Hive::Stages::Review::Context, Hive::Reviewers::Context,
+                 "Reviewers::Context must alias Stages::Review::Context"
+  end
+
+  def test_constructing_via_either_name_yields_same_data_class_instance
+    require "hive/stages/review/context"
+    canonical = Hive::Stages::Review::Context.new(
+      worktree_path: "/wt", task_folder: "/tf", default_branch: "main", pass: 1
+    )
+    via_alias = Hive::Reviewers::Context.new(
+      worktree_path: "/wt", task_folder: "/tf", default_branch: "main", pass: 1
+    )
+    assert_equal canonical.class, via_alias.class,
+                 "instances built via either name share the same Data class"
+    assert_equal canonical, via_alias,
+                 "Data equality holds across the alias because the classes are identical"
+  end
 end

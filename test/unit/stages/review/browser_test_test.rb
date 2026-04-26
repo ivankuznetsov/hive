@@ -305,6 +305,82 @@ class BrowserTestTest < Minitest::Test
     end
   end
 
+  # ── parse_result_file edge cases ─────────────────────────────────────
+
+  def test_empty_result_file_yields_failed_with_descriptive_details
+    # Zero-byte result file: agent exited 0 but wrote nothing useful.
+    # parse_result_file must surface :failed with a descriptive details
+    # string (not crash) so the runner moves to the next attempt.
+    with_browser_dir do |_dir, task_folder, _ctx|
+      result_path = File.join(task_folder, "reviews", "browser-result-01-01.json")
+      FileUtils.mkdir_p(File.dirname(result_path))
+      FileUtils.touch(result_path) # zero bytes
+
+      parsed = Hive::Stages::Review::BrowserTest.parse_result_file(result_path)
+      assert_equal :failed, parsed[:status],
+                   "empty file must surface as :failed, not raise"
+      refute_nil parsed[:details],
+                 "details must be present so the user sees what went wrong"
+      refute_empty parsed[:details].to_s
+    end
+  end
+
+  def test_leading_utf8_bom_in_result_yields_failed_unparseable_json
+    # UTF-8 BOM (0xEF 0xBB 0xBF) prepended to valid JSON. Ruby's JSON
+    # parser does NOT strip the BOM and raises JSON::ParserError.
+    # parse_result_file's existing rescue translates that to a
+    # malformed-result :failed with "unparseable JSON" details — pin
+    # the failure mode so a future BOM-aware parser change explicitly
+    # bumps the contract.
+    with_browser_dir do |_dir, task_folder, _ctx|
+      result_path = File.join(task_folder, "reviews", "browser-result-01-01.json")
+      FileUtils.mkdir_p(File.dirname(result_path))
+      bom = "\xEF\xBB\xBF".dup.force_encoding("UTF-8")
+      File.write(result_path, bom + JSON.generate(status: "passed", summary: "ok"))
+
+      parsed = Hive::Stages::Review::BrowserTest.parse_result_file(result_path)
+      assert_equal :failed, parsed[:status],
+                   "BOM-prefixed JSON currently fails to parse → :failed"
+      assert_match(/unparseable|JSON parse error|malformed/i, parsed[:details].to_s,
+                   "details must explain that parsing failed")
+    end
+  end
+
+  def test_integer_status_yields_failed_with_status_in_details
+    # Some agents emit `status` as an integer (e.g. exit-code-style)
+    # instead of the contract string. `parsed["status"] == "passed"`
+    # is false for integers, so the :failed branch fires; the raw
+    # status_str ("1") must be surfaced in details so the user sees
+    # what the agent reported.
+    with_browser_dir do |_dir, task_folder, _ctx|
+      result_path = File.join(task_folder, "reviews", "browser-result-01-01.json")
+      FileUtils.mkdir_p(File.dirname(result_path))
+      File.write(result_path, JSON.generate(status: 1, summary: "x", details: "ctx"))
+
+      parsed = Hive::Stages::Review::BrowserTest.parse_result_file(result_path)
+      assert_equal :failed, parsed[:status],
+                   "integer status (not the literal \"passed\" string) → :failed"
+      assert_includes parsed[:details], "1",
+                      "raw status (int → \"1\") must appear in details"
+    end
+  end
+
+  def test_boolean_status_yields_failed_with_status_in_details
+    # Same shape as the integer case but for boolean true. `to_s` on
+    # true yields "true", not "passed", so the :failed branch fires
+    # and the raw value is surfaced in details.
+    with_browser_dir do |_dir, task_folder, _ctx|
+      result_path = File.join(task_folder, "reviews", "browser-result-01-01.json")
+      FileUtils.mkdir_p(File.dirname(result_path))
+      File.write(result_path, JSON.generate(status: true, summary: "x", details: "ctx"))
+
+      parsed = Hive::Stages::Review::BrowserTest.parse_result_file(result_path)
+      assert_equal :failed, parsed[:status]
+      assert_includes parsed[:details], "true",
+                      "raw status (true → \"true\") must appear in details"
+    end
+  end
+
   # --- result-path layout ----------------------------------------------
 
   def test_result_path_includes_pass_and_attempt_zero_padded

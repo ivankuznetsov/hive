@@ -132,6 +132,63 @@ class MetricsTest < Minitest::Test
     assert Hive::Metrics.reverted?(fix, {}, revert_shas)
   end
 
+  # ── revert-of-revert and duplicate-revert contract pinning ──────────
+
+  def test_revert_of_revert_re_counts_original_as_active
+    # Sequence: trailered fix(A), Revert "fix(A)" (B), Revert "Revert ..." (C).
+    # The current implementation's `reverted?` matches a fix commit's
+    # subject against any Revert subject in the log; with B present, A
+    # is still flagged as reverted regardless of C resurrecting it.
+    # This test pins the current behaviour so a future tightening
+    # (revert-of-revert chain detection) explicitly bumps the contract.
+    with_tmp_git_repo do |dir|
+      commit_with(dir, file: "a.rb", content: "1\n", subject: "fix(a): targeted",
+                  trailers: { "Hive-Fix-Pass" => "01", "Hive-Triage-Bias" => "courageous", "Hive-Fix-Phase" => "fix" })
+      # B reverts A.
+      File.delete(File.join(dir, "a.rb"))
+      run!("git", "-C", dir, "add", "-A")
+      run!("git", "-C", dir, "commit", "-m", %(Revert "fix(a): targeted"), "--quiet")
+      # C reverts B (i.e. revives A's diff).
+      File.write(File.join(dir, "a.rb"), "1\n")
+      run!("git", "-C", dir, "add", "-A")
+      run!("git", "-C", dir, "commit", "-m", %(Revert "Revert \\"fix(a): targeted\\""), "--quiet")
+
+      stats = Hive::Metrics.rollback_rate(dir)
+      assert_equal 1, stats["total_fix_commits"]
+      # Pin the current behaviour: A still counts as reverted because
+      # B's Revert subject matches A's subject. A future revert-of-
+      # revert resolver would flip this to 0; either way the contract
+      # is pinned and a silent drift fails this test.
+      assert_equal 1, stats["reverted_commits"],
+                   "current behaviour: A is still marked reverted even after C resurrects it"
+    end
+  end
+
+  def test_multiple_reverts_of_same_commit_count_once
+    # Two Revert commits both citing fix(A). The metric counts per fix
+    # commit, not per revert: A is reverted (count=1), regardless of
+    # how many Reverts cited it.
+    with_tmp_git_repo do |dir|
+      commit_with(dir, file: "a.rb", content: "1\n", subject: "fix(a): one",
+                  trailers: { "Hive-Fix-Pass" => "01", "Hive-Triage-Bias" => "courageous", "Hive-Fix-Phase" => "fix" })
+      # First Revert.
+      File.delete(File.join(dir, "a.rb"))
+      run!("git", "-C", dir, "add", "-A")
+      run!("git", "-C", dir, "commit", "-m", %(Revert "fix(a): one"), "--quiet")
+      # Second Revert citing the same subject (e.g. someone re-ran the
+      # revert workflow against a force-pushed branch). Use `--allow-empty`
+      # because the diff is already applied.
+      run!("git", "-C", dir, "commit", "--allow-empty", "-m",
+           %(Revert "fix(a): one"), "--quiet")
+
+      stats = Hive::Metrics.rollback_rate(dir)
+      assert_equal 1, stats["total_fix_commits"]
+      assert_equal 1, stats["reverted_commits"],
+                   "duplicate Reverts of the same fix commit must count once, not twice"
+      assert_in_delta 1.0, stats["rollback_rate"]
+    end
+  end
+
   def test_since_filter_excludes_old_commits
     with_tmp_git_repo do |dir|
       commit_with(dir, file: "a.rb", content: "1\n", subject: "fix(a): old",

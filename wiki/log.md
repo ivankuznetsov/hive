@@ -2,6 +2,26 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-26T19:00:00Z] U10 ship — Full wiki sweep for 5-review + opt-in live-claude review smoke
+
+**Action:** Replaces the earlier "U10 partial sweep" note. Closes the deferred-page list by writing the full `wiki/stages/review.md`, rewriting `wiki/stages/execute.md` for the impl-only contract (ADR-014), extending `wiki/decisions.md` with ADRs 014–021, refreshing `wiki/architecture.md` and `wiki/index.md`, and updating `wiki/active-areas.md` to mark the 5-review backlog as shipped. Adds `test/smoke/live_review_smoke_test.rb` so `rake smoke` covers the autonomous loop end-to-end against the real claude binary.
+
+**Code (wiki):**
+- `wiki/stages/review.md` (new) — full stage page: setup, pre-flight state machine, the pass loop (CI → reviewers → triage → fix → guardrail → browser), per-phase descriptions of `Review::CiFix` / `Reviewers::Agent` / `Review::Triage` / `Review::FixGuardrail` / `Review::BrowserTest`, branching after triage (any `[x]` → fix; escalations only → `REVIEW_WAITING`; all clean → Phase 5), stale-`REVIEW_WORKING` recovery rules per phase, `REVIEW_STALE` recovery, test inventory.
+- `wiki/stages/execute.md` rewritten — impl-only contract. State machine table now has no `:execute_waiting` / `:execute_stale`; success path is `init pass → spawn_implementation → SHA-protect → EXECUTE_COMPLETE`. Re-running an already-complete task announces 5-review. Reviewer sub-agent section deleted entirely.
+- `wiki/decisions.md` — appended ADR-014 (5-review split — 4-execute drops to impl-only), ADR-015 (sequential reviewers; parallel deferred), ADR-016 (triage bias presets `courageous`/`safetyist`; `aggressive` dropped), ADR-017 (`AgentProfile` parameterisation), ADR-018 (per-CLI isolation flag warning, supersedes part of ADR-008), ADR-019 (per-spawn nonce, supersedes ADR-008's per-process memoization), ADR-020 (post-fix diff guardrail extends ADR-008's PR-stage secret-scan to fix-time), ADR-021 (per-spawn `status_mode` override; orchestrator-owned terminal markers).
+- `wiki/architecture.md` — runner-table row for `5-review` (`Stages::Review` orchestrator + sub-runners + `Reviewers::Agent`); state-machine mermaid diagram updated to show `4-execute → 5-review → 6-pr` (was `4-execute → 5-pr`); security paragraph extended to include the per-spawn nonce (ADR-019), per-CLI isolation logging (ADR-018), and the post-fix diff guardrail (ADR-020).
+- `wiki/index.md` — pipeline tagline now says seven-stage; `decisions` link mentions 21 ADRs; stages list adds `[[stages/review]]`; commands list calls out `hive metrics rollback-rate`.
+- `wiki/active-areas.md` — "additional reviewers in 4-execute" struck through with a note that they shipped under [[stages/review]] (and that linters belong in `review.ci.command` per ADR-014); parallel reviewers (Phase 2 of 5-review) listed as future work behind a config flag (per ADR-015 deferral); U14's "trailer-validation log" listed as deliberately dropped — agents that obey the prompt land trailers, the metric's signal is good enough without runner-side enforcement.
+
+**Code (smoke):**
+- `test/smoke/live_review_smoke_test.rb` (new) — opt-in `rake smoke` companion. Skips when `claude` is not on PATH. Reloads `Hive::AgentProfiles` registry in setup/teardown to defeat test pollution from other smoke tests. Sets up a tmp git repo, moves a task into `5-review/`, scaffolds a tiny worktree diff, writes a smoke `config.yml` (one `claude-ce-code-review` reviewer; CI/browser disabled; `max_passes: 1`), runs the loop, asserts the marker terminates as `:review_complete` or `:review_waiting`. Does NOT assert which one — real claude on a real diff may legitimately find findings; both terminal states are clean exits.
+
+**Key decisions:**
+- **The smoke is one test, not a suite.** Live-claude spawns are expensive (~$0.25 per run per the existing smoke comment) and brittle (depend on real claude availability + version + token allotment). Integration tests already cover every branch of `Stages::Review.run!` against fake-claude / stubs. The smoke's job is to prove the templates render through real claude and the per-spawn nonce works under real spawn — one test is enough.
+- **The smoke accepts `REVIEW_COMPLETE` OR `REVIEW_WAITING` as a pass.** Real claude may find findings (we don't control its output); both are clean terminal states. Anything else (`:review_error`, raised exception) means the runner itself broke, which is what the smoke is guarding against.
+- **The wiki sweep documents *current* state, not history.** Per ADR-style convention, stage / module pages describe behavior as it is now. The U-unit history lives in this log; the ADRs explain decisions.
+
 ## [2026-04-26T15:00:00Z] U14 ship — `hive metrics rollback-rate` + fix-commit trailers
 
 **Action:** Adds the rollback-rate metric so the triage bias preset (`courageous` default vs `safetyist` opt-in) becomes a measurable trade-off rather than a vibes choice. The fix prompt and ci-fix prompt now require git trailers on every commit (`Hive-Fix-Pass`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase`); `hive metrics rollback-rate` walks `git log` and reports what fraction of trailered commits were later reverted. Closes doc-review PL-2.

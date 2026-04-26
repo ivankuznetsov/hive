@@ -4,7 +4,7 @@ type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb
 created: 2026-04-25
 updated: 2026-04-26
-tags: [state, filesystem, model, architecture]
+tags: [state, filesystem, model, architecture, review]
 ---
 
 **TLDR**: Hive has no database. Persistent state lives entirely in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/Dev/hive/config.yml`. The "data model" is the directory layout, marker grammar, and YAML schemas described below.
@@ -22,12 +22,13 @@ Per project, every task is a folder in exactly one stage subdirectory. Stage = l
 │   ├── 2-brainstorm/<slug>/
 │   ├── 3-plan/<slug>/
 │   ├── 4-execute/<slug>/
+│   ├── 5-review/<slug>/
 │   ├── 6-pr/<slug>/
 │   └── 7-done/<slug>/
 └── logs/<slug>/<stage>-<UTC-ts>.log
 ```
 
-The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]].
+The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-review 6-pr 7-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. As of U9 the slot `5-review` is filled (no gap). See [[modules/stages]] and [[stages/review]].
 
 `Hive::Task::PATH_RE` (`lib/hive/task.rb:14`) is the only validator for task paths and parses `<root>/.hive-state/stages/<N>-<stage>/<slug>/`.
 
@@ -40,7 +41,8 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `1-inbox` | `idea.md` | `hive new` (rendered from `templates/idea.md.erb`) |
 | `2-brainstorm` | `brainstorm.md` | `Stages::Brainstorm` agent on first run |
 | `3-plan` | `plan.md` | `Stages::Plan` agent on first run |
-| `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`, `pass`) |
+| `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
+| `5-review` | `task.md` | reused from `4-execute`; markers driven by `Stages::Review` orchestrator |
 | `6-pr` | `pr.md` | `Stages::Pr` agent (or `write_pr_md` for idempotent re-entry) |
 | `7-done` | `task.md` | reused from `4-execute` |
 
@@ -64,17 +66,15 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- COMPLETE -->` | stage finished, ready for `mv` to next stage | brainstorm/plan/pr agents; `done` runner |
 | `<!-- AGENT_WORKING pid=N started=ISO -->` | claude subprocess is running right now | `Hive::Agent#run!` pre-spawn |
 | `<!-- ERROR reason=... -->` | runner detected timeout / non-zero exit / concurrent edit / reviewer tamper | `Hive::Agent#handle_exit`, `Stages::Execute#run_review_pass` |
-| `<!-- EXECUTE_WAITING findings_count=N pass=K -->` | review pass produced findings to triage | `Stages::Execute#finalize_review_state` |
-| `<!-- EXECUTE_COMPLETE pass=K -->` | review pass found no findings (or no accepted findings remained) | `Stages::Execute#finalize_review_state` / `run_iteration_pass` |
-| `<!-- EXECUTE_STALE max_passes=N pass=K -->` | hit `cfg["max_review_passes"]` (default 4) | `Stages::Execute#run_iteration_pass` |
-| `<!-- REVIEW_WORKING phase=ci\|reviewers\|triage\|fix\|browser pass=NN -->` | 5-review phase in flight (transient — replaced at phase exit) | `Stages::Review` phase entry (U9, future) |
+| `<!-- EXECUTE_COMPLETE -->` | impl pass committed cleanly; ready for `mv` to `5-review/` | `Stages::Execute#run!` (impl-only since U9) |
+| `<!-- REVIEW_WORKING phase=ci\|reviewers\|triage\|fix\|browser pass=NN -->` | 5-review phase in flight (transient — replaced at phase exit) | `Stages::Review` phase entry |
 | `<!-- REVIEW_WAITING escalations=N pass=NN -->` | review pass produced escalations awaiting human edit | `Stages::Review` orchestrator |
 | `<!-- REVIEW_CI_STALE attempts=N -->` | CI hard-block — `cfg.review.ci.max_attempts` reached without green; reviewers don't run on red CI | `Stages::Review` CI phase |
 | `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 4) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to mv to 6-pr (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=… reason=… -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`) | `Stages::Review` orchestrator |
 
-Marker name allowlist: `Hive::Markers::KNOWN_NAMES` (thirteen names — seven pre-U3 + six REVIEW_* added in U3). Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`).
+Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). U9 dropped `EXECUTE_WAITING` and `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the names remain in `KNOWN_NAMES` for back-compat parsing of historical state files but are never written by current code.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 
@@ -97,27 +97,32 @@ created_at: <UTC-ISO>
 
 ## Review artefacts
 
-Inside `4-execute/<slug>/`:
+Inside `5-review/<slug>/reviews/` (since U9; pre-U9 review iteration lived under `4-execute/<slug>/reviews/`):
 
 ```
 reviews/
-├── ce-review-01.md          # findings from pass 1
-├── ce-review-02.md          # findings from pass 2 after triage
+├── <reviewer-name>-01.md      # per-reviewer finding file, pass 1
+├── <reviewer-name>-02.md      # per-reviewer finding file, pass 2
+├── escalations-01.md          # triage output: items needing user judgment
+├── ci-blocked-NN.md           # written when CI hard-blocks (REVIEW_CI_STALE)
+├── browser-result-NN-AA.json  # per-attempt browser-test result
+├── browser-blocked-NN.md      # written when all browser attempts fail (browser=warned)
+├── fix-guardrail-NN.md        # written when post-fix diff guardrail flags a match
 └── ...
 ```
 
-Format per file:
+Per-reviewer file format (checkbox triage lines):
 
 ```
 ## High
 - [ ] finding A: justification
 ## Medium
-- [x] finding B: justification     # accepted by user
+- [x] finding B: justification     # accepted by triage (or by user during REVIEW_WAITING)
 ## Nit
 - [ ] finding C: justification
 ```
 
-`Stages::Execute#count_findings` counts checkbox lines. `collect_accepted_findings` filters `[x]` rows from the previous pass's review file and feeds them into the next implementation prompt. The `task.md` frontmatter `pass:` integer is the canonical counter; reviewer agents must update it.
+Pass derivation is filesystem-native: `Stages::Review` reads the max `-NN` suffix across per-reviewer files in `reviews/` to derive the current pass. No `pass:` frontmatter or sidecar — recovery is "delete the highest-NN files to drop pass back". Accepted findings (`[x]` lines) are concatenated and passed to the Phase 4 fix agent via the per-spawn nonce wrap; orchestrator-owned files (`escalations-`, `ci-blocked-`, `browser-`, `fix-guardrail-`) are excluded from the `Hive-Reviewer-Sources` trailer derivation.
 
 ## Configs
 
@@ -180,7 +185,7 @@ Loaded by `Hive::Config.load`, recursively deep-merged onto `Hive::Config::DEFAU
 ## Frontmatter conventions
 
 - `idea.md` (Step 0 capture): `slug`, `created_at`, `original_text` (multiline).
-- `task.md` (4-execute / 7-done): `slug`, `started_at`, `pass`. Reviewer agents must update `pass:` to match marker `pass=`.
+- `task.md` (4-execute / 5-review / 7-done): `slug`, `started_at`. Pre-U9 carried `pass:`; the field was dropped when review iteration moved to 5-review and pass became filesystem-derived.
 - `pr.md`: `pr_url`, `pr_number` (when populated by 6-pr runner from existing PR lookup).
 
 ## Commit trailers (fix-agent metric)
@@ -209,20 +214,19 @@ stateDiagram-v2
     S2_brainstorm --> S3_plan: user mv
     S3_plan --> S3_plan: hive run (refine)
     S3_plan --> S4_execute: user mv
-    S4_execute --> S4_execute: hive run (next pass)
-    S4_execute --> S5_review: user mv (U9, future)
+    S4_execute --> S5_review: user mv (EXECUTE_COMPLETE)
     S5_review --> S5_review: hive run (next review pass — ci/reviewers/triage/fix/browser)
     S5_review --> S6_pr: user mv (REVIEW_COMPLETE)
     S6_pr --> S7_done: user mv (after merge)
     S7_done --> [*]
 ```
 
-Slot `5-` is reserved for `5-review/` but not yet added to `Hive::Stages::DIRS` (`lib/hive/stages.rb:6`). Until the U9 orchestrator lands, `Stages.next_dir(4)` returns `"6-pr"` directly.
+Since U9 (2026-04-26), `Hive::Stages::DIRS` has all seven slots filled in order; `Stages.next_dir(4)` returns `"5-review"`, and `Stages.next_dir(5)` returns `"6-pr"`. See [[stages/review]] for the autonomous-loop semantics.
 
 See [[stages/index]] for one page per stage.
 
 ## Backlinks
 
 - [[architecture]]
-- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]] · [[stages/done]]
+- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/review]] · [[stages/pr]] · [[stages/done]]
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]]

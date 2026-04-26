@@ -30,6 +30,23 @@ module Hive
         @days = days
         @project = project
         @json = json
+        validate_days! unless @days.nil?
+      end
+
+      # `--days N` must be a positive integer. Thor coerces with `to_f`
+      # for `type: :numeric`, so a value like `--days 1.5` arrives here
+      # as a Float. Reject non-integer numeric values, zero, and
+      # negatives; let the typed UsageError propagate so the JSON
+      # envelope path emits the documented error_kind.
+      def validate_days!
+        valid = @days.is_a?(Integer) || (@days.respond_to?(:to_i) && @days.to_i == @days)
+        positive = valid && @days > 0
+        return if positive
+
+        fail_usage!(
+          "hive metrics: --days must be a positive integer (got #{@days.inspect})",
+          kind: "invalid_days"
+        )
       end
 
       def call
@@ -60,7 +77,7 @@ module Hive
         since = @days ? "#{@days} days ago" : nil
         per_project = roots.map do |entry|
           stats = Hive::Metrics.rollback_rate(entry["path"], since: since)
-          stats.merge(project: entry["name"])
+          stats.merge("project" => entry["name"])
         end
 
         if @json
@@ -110,20 +127,14 @@ module Hive
 
       def project_json(stats)
         {
-          "project" => stats[:project],
-          "project_root" => stats[:project_root],
-          "total_fix_commits" => stats[:total_fix_commits],
-          "reverted_commits" => stats[:reverted_commits],
-          "rollback_rate" => stats[:rollback_rate],
-          "by_bias" => stringify_bucket(stats[:by_bias]),
-          "by_phase" => stringify_bucket(stats[:by_phase])
+          "project" => stats["project"],
+          "project_root" => stats["project_root"],
+          "total_fix_commits" => stats["total_fix_commits"],
+          "reverted_commits" => stats["reverted_commits"],
+          "rollback_rate" => stats["rollback_rate"],
+          "by_bias" => stats["by_bias"],
+          "by_phase" => stats["by_phase"]
         }
-      end
-
-      def stringify_bucket(bucket)
-        bucket.transform_values do |v|
-          { "total" => v[:total], "reverted" => v[:reverted], "rate" => v[:rate] }
-        end
       end
 
       def render_text(per_project, since)
@@ -131,12 +142,12 @@ module Hive
         puts header
         puts "=" * header.length
         per_project.each do |stats|
-          puts "\n#{stats[:project]} (#{stats[:project_root]})"
-          puts "  total fix commits: #{stats[:total_fix_commits]}"
-          puts "  reverted:          #{stats[:reverted_commits]}"
-          puts "  rate:              #{format('%.2f%%', stats[:rollback_rate] * 100)}"
-          render_bucket("by bias", stats[:by_bias])
-          render_bucket("by phase", stats[:by_phase])
+          puts "\n#{stats['project']} (#{stats['project_root']})"
+          puts "  total fix commits: #{stats['total_fix_commits']}"
+          puts "  reverted:          #{stats['reverted_commits']}"
+          puts "  rate:              #{format('%.2f%%', stats['rollback_rate'] * 100)}"
+          render_bucket("by bias", stats["by_bias"])
+          render_bucket("by phase", stats["by_phase"])
         end
       end
 
@@ -145,7 +156,7 @@ module Hive
 
         puts "  #{label}:"
         bucket.each do |k, v|
-          puts "    #{k}: total=#{v[:total]} reverted=#{v[:reverted]} rate=#{format('%.2f%%', v[:rate] * 100)}"
+          puts "    #{k}: total=#{v['total']} reverted=#{v['reverted']} rate=#{format('%.2f%%', v['rate'] * 100)}"
         end
       end
     end

@@ -110,8 +110,19 @@ module Hive
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
-        profile.check_version!
-        profile.preflight!
+        # Translate preflight/version-check failures (e.g. Pi missing
+        # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
+        # so callers (Review.run!'s spawn_fix_agent etc.) write a
+        # properly-attributed REVIEW_ERROR (`reason="agent_preflight_failed"`)
+        # instead of letting the exception escape and land
+        # `reason="runner_exception"`.
+        begin
+          profile.check_version!
+          profile.preflight!
+        rescue Hive::AgentError => e
+          return { status: :error,
+                   error_message: "preflight failed: #{e.message}" }
+        end
 
         if !profile.add_dir_flag && Array(add_dirs).any?
           warn_isolation_reduced(task, profile, add_dirs)

@@ -55,10 +55,15 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[modules/lock]] — per-task `.lock` + per-project `.commit-lock`.
 - [[modules/worktree]] — git worktree wrapper + path-prefix validation.
 - [[modules/git_ops]] — default-branch detection, hive-state bootstrap, `hive_commit`.
-- [[modules/agent]] — `claude -p` subprocess wrapper with timeout/budget/atomic exit-status capture.
+- [[modules/agent]] — agent CLI subprocess wrapper with timeout/budget/atomic exit-status capture.
+- [[modules/agent_profile]] — per-CLI invocation contract value-object + registry (claude / codex / pi).
 - [[modules/config]] — global + per-project YAML configs with deep-merge defaults.
-- [[modules/stages]] — six-stage list + helpers; single source of truth for `DIRS` / `NAMES` / `SHORT_TO_FULL`.
+- [[modules/stages]] — seven-stage list + helpers; single source of truth for `DIRS` / `NAMES` / `SHORT_TO_FULL`.
 - [[modules/findings]] — parser + writer for `reviews/ce-review-NN.md`; CRLF-safe round-trip toggle.
 - [[modules/task_resolver]] — slug-or-folder TARGET resolution shared by every agent-callable command.
 - [[modules/task_action]] — `(task, marker) → action key/label/command` classifier driving `hive status` and `next_action` emission.
 - [[modules/workflows]] — verb→stage SSOT (brainstorm/plan/develop/pr/archive) consumed by every workflow command.
+- [[modules/reviewers]] — Phase 2 reviewer adapter layer (dispatch, Context, Result, Agent, SyntheticTask).
+- [[modules/metrics]] — `hive metrics rollback-rate` library (trailer parsing, revert detection).
+- [[modules/secret_patterns]] — shared regex set for credential/secret detection.
+- [[modules/protected_files]] — SHA-256 snapshot/diff helper for orchestrator-owned files.

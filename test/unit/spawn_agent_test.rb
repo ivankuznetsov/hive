@@ -64,8 +64,12 @@ class SpawnAgentTest < Minitest::Test
 
   # --- preflight ordering --------------------------------------------------
 
-  def test_preflight_runs_before_agent_spawn
-    # Build a profile whose preflight raises; assert no spawn happens.
+  def test_preflight_runs_before_agent_spawn_returns_error_envelope
+    # Build a profile whose preflight raises; assert spawn_agent
+    # converts it to a typed :error envelope (REL1 — closes
+    # ce-code-review reliability finding) instead of letting the
+    # exception escape. Callers see :error → write a properly-attributed
+    # REVIEW_ERROR with reason="agent_preflight_failed".
     raising_profile = Hive::AgentProfile.new(
       name: :raises_preflight,
       bin_default: FAKE_BIN,
@@ -84,18 +88,59 @@ class SpawnAgentTest < Minitest::Test
       log_dir = Dir.mktmpdir("no-spawn-argv")
       ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
 
-      err = assert_raises(Hive::AgentError) do
-        Hive::Stages::Base.spawn_agent(
-          task,
-          prompt: "x", max_budget_usd: 1, timeout_sec: 5,
-          profile: raising_profile
-        )
-      end
-      assert_match(/preflight blocked/, err.message)
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        profile: raising_profile
+      )
+      assert_equal :error, result[:status]
+      assert_match(/preflight failed/, result[:error_message])
+      assert_match(/preflight blocked/, result[:error_message])
 
       # No argv log written → no spawn happened.
       argv_log = File.join(log_dir, "fake-claude-argv.log")
-      refute File.exist?(argv_log), "agent must not spawn when preflight raises"
+      refute File.exist?(argv_log),
+             "agent must not spawn when preflight raises"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
+  def test_check_version_failure_returns_error_envelope
+    # When the version check raises (e.g., binary missing or below
+    # min_version), spawn_agent must translate to {status: :error}
+    # rather than re-raising, mirroring the preflight! handling.
+    failing_profile = Hive::AgentProfile.new(
+      name: :version_too_old,
+      bin_default: FAKE_BIN,
+      env_bin_override_key: "HIVE_CLAUDE_BIN",
+      headless_flag: "-p",
+      output_format_flags: [ "--verbose" ],
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      status_detection_mode: :state_file_marker,
+      min_version: "99.99.99"
+    )
+
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("no-spawn-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_VERSION"] = "1.0.0" # below 99.99.99
+
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        profile: failing_profile
+      )
+      assert_equal :error, result[:status]
+      assert_match(/preflight failed/, result[:error_message])
+      assert_match(/below minimum/, result[:error_message])
+
+      argv_log = File.join(log_dir, "fake-claude-argv.log")
+      refute File.exist?(argv_log),
+             "agent must not spawn when check_version! fails"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end

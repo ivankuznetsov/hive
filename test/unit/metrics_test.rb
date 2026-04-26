@@ -19,9 +19,9 @@ class MetricsTest < Minitest::Test
   def test_returns_zero_when_no_fix_commits
     with_tmp_git_repo do |dir|
       stats = Hive::Metrics.rollback_rate(dir)
-      assert_equal 0, stats[:total_fix_commits]
-      assert_equal 0, stats[:reverted_commits]
-      assert_in_delta 0.0, stats[:rollback_rate]
+      assert_equal 0, stats["total_fix_commits"]
+      assert_equal 0, stats["reverted_commits"]
+      assert_in_delta 0.0, stats["rollback_rate"]
     end
   end
 
@@ -34,11 +34,11 @@ class MetricsTest < Minitest::Test
       commit_with(dir, file: "c.rb", content: "3\n", subject: "feat(c): unrelated") # no trailer
 
       stats = Hive::Metrics.rollback_rate(dir)
-      assert_equal 2, stats[:total_fix_commits]
-      assert_equal 0, stats[:reverted_commits]
-      assert_equal 1, stats[:by_bias]["courageous"][:total]
-      assert_equal 1, stats[:by_bias]["safetyist"][:total]
-      assert_equal 2, stats[:by_phase]["fix"][:total]
+      assert_equal 2, stats["total_fix_commits"]
+      assert_equal 0, stats["reverted_commits"]
+      assert_equal 1, stats["by_bias"]["courageous"]["total"]
+      assert_equal 1, stats["by_bias"]["safetyist"]["total"]
+      assert_equal 2, stats["by_phase"]["fix"]["total"]
     end
   end
 
@@ -52,10 +52,10 @@ class MetricsTest < Minitest::Test
       run!("git", "-C", dir, "commit", "-m", %(Revert "fix(a): targeted"), "--quiet")
 
       stats = Hive::Metrics.rollback_rate(dir)
-      assert_equal 1, stats[:total_fix_commits]
-      assert_equal 1, stats[:reverted_commits]
-      assert_in_delta 1.0, stats[:rollback_rate]
-      assert_equal 1, stats[:by_bias]["courageous"][:reverted]
+      assert_equal 1, stats["total_fix_commits"]
+      assert_equal 1, stats["reverted_commits"]
+      assert_in_delta 1.0, stats["rollback_rate"]
+      assert_equal 1, stats["by_bias"]["courageous"]["reverted"]
     end
   end
 
@@ -69,7 +69,7 @@ class MetricsTest < Minitest::Test
       run!("git", "-C", dir, "commit", "-m", msg, "--quiet")
 
       stats = Hive::Metrics.rollback_rate(dir)
-      assert_equal 1, stats[:reverted_commits]
+      assert_equal 1, stats["reverted_commits"]
     end
   end
 
@@ -81,8 +81,8 @@ class MetricsTest < Minitest::Test
                   trailers: { "Hive-Fix-Pass" => "02", "Hive-Fix-Phase" => "fix" })
 
       stats = Hive::Metrics.rollback_rate(dir)
-      assert_equal 1, stats[:by_phase]["ci"][:total]
-      assert_equal 1, stats[:by_phase]["fix"][:total]
+      assert_equal 1, stats["by_phase"]["ci"]["total"]
+      assert_equal 1, stats["by_phase"]["fix"]["total"]
     end
   end
 
@@ -91,7 +91,7 @@ class MetricsTest < Minitest::Test
       commit_with(dir, file: "a.rb", content: "1\n", subject: "fix(a): one",
                   trailers: { "Hive-Fix-Pass" => "01", "Hive-Fix-Phase" => "fix" })
       stats = Hive::Metrics.rollback_rate(dir)
-      assert_equal 1, stats[:by_bias]["unknown"][:total]
+      assert_equal 1, stats["by_bias"]["unknown"]["total"]
     end
   end
 
@@ -142,7 +142,7 @@ class MetricsTest < Minitest::Test
       # filesystem clock; use 100 years instead — guaranteed exclusion.
       stats = Hive::Metrics.rollback_rate(dir, since: "100 years from now")
       # git treats `100 years from now` as in the future and yields no commits
-      assert_equal 0, stats[:total_fix_commits]
+      assert_equal 0, stats["total_fix_commits"]
     end
   end
 end

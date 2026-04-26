@@ -326,6 +326,72 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  # AC-7: schema is strict — only `false` (boolean) or a Hash are valid.
+
+  def test_patterns_override_string_false_raises_config_error
+    cfg_override = cfg(
+      "review" => {
+        "fix" => {
+          "guardrail" => {
+            "patterns_override" => { "dependency_lockfile_change" => "false" }
+          }
+        }
+      }
+    )
+    err = assert_raises(Hive::ConfigError) do
+      with_two_commits(file: "x.rb", content: "x\n") do |dir, base, head|
+        Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg_override, ctx: make_ctx(dir),
+          base_sha: base, head_sha: head
+        )
+      end
+    end
+    assert_match(/patterns_override\.dependency_lockfile_change/, err.message)
+    assert_match(/must be `false`/, err.message)
+  end
+
+  def test_patterns_override_true_raises_config_error
+    cfg_override = cfg(
+      "review" => {
+        "fix" => {
+          "guardrail" => {
+            "patterns_override" => { "dependency_lockfile_change" => true }
+          }
+        }
+      }
+    )
+    err = assert_raises(Hive::ConfigError) do
+      with_two_commits(file: "x.rb", content: "x\n") do |dir, base, head|
+        Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg_override, ctx: make_ctx(dir),
+          base_sha: base, head_sha: head
+        )
+      end
+    end
+    assert_match(/patterns_override\.dependency_lockfile_change/, err.message)
+  end
+
+  def test_patterns_override_integer_raises_config_error
+    cfg_override = cfg(
+      "review" => {
+        "fix" => {
+          "guardrail" => {
+            "patterns_override" => { "dependency_lockfile_change" => 42 }
+          }
+        }
+      }
+    )
+    err = assert_raises(Hive::ConfigError) do
+      with_two_commits(file: "x.rb", content: "x\n") do |dir, base, head|
+        Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg_override, ctx: make_ctx(dir),
+          base_sha: base, head_sha: head
+        )
+      end
+    end
+    assert_match(/patterns_override\.dependency_lockfile_change/, err.message)
+  end
+
   def test_custom_pattern_without_regex_raises
     custom = {
       "review" => {

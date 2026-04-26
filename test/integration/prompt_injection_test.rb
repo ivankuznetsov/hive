@@ -150,9 +150,37 @@ class PromptInjectionTest < Minitest::Test
       assert_includes prompt, "</#{tag}>"
       assert_includes prompt, "Hive-Task-Slug: #{task.slug}"
       assert_includes prompt, "Hive-Fix-Pass: 02"
+      assert_includes prompt, "Hive-Fix-Findings:"
       assert_includes prompt, "Hive-Triage-Bias: courageous"
       assert_includes prompt, "Hive-Reviewer-Sources: claude-ce-code-review"
       assert_includes prompt, "Hive-Fix-Phase: fix"
+    end
+  end
+
+  def test_ci_fix_prompt_includes_trailers
+    # Phase 1 CI-fix prompt also emits trailers — Hive-Task-Slug,
+    # Hive-Fix-Pass (per attempt), Hive-Fix-Phase: ci. CI-fix doesn't
+    # carry triage bias / reviewer sources (that's review-fix only).
+    with_tmp_dir do |dir|
+      task = make_task(dir, "5-review")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "ci_fix_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          worktree_path: "/tmp/wt",
+          task_folder: task.folder,
+          task_slug: task.slug,
+          command: "bin/ci",
+          attempt: 2,
+          max_attempts: 3,
+          captured_output: "FAIL\n",
+          user_supplied_tag: tag
+        )
+      )
+      assert_includes prompt, "Hive-Task-Slug: #{task.slug}"
+      assert_includes prompt, "Hive-Fix-Pass: 02"
+      assert_includes prompt, "Hive-Fix-Phase: ci"
     end
   end
 

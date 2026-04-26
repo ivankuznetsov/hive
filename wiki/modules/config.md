@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [config, yaml, validation]
 ---
 
@@ -87,6 +87,12 @@ Runs after merge so a default value can never trigger a failure — only user in
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 
 `describe_source(path)` annotates error messages with `"(defaults; no file present)"` when the candidate config file does not exist, so the user is pointed at the right path even when the failure comes from an injected reviewers list rather than a real file.
+
+## `agents.*` overrides are plumbed at spawn time
+
+`agents.<name>.{bin, env_override, min_version}` in per-project config now actually take effect (LFG-5). `Hive::AgentProfiles.lookup(name, cfg: cfg)` overlays `cfg.dig("agents", name)` onto the registry profile via `AgentProfile#with_overrides`, returning a new frozen profile. Unknown override keys raise `Hive::ConfigError`. Every spawn site in `lib/hive/stages/review.rb`, `review/ci_fix.rb`, `review/triage.rb`, `review/browser_test.rb`, and `reviewers/agent.rb` threads `cfg` into the lookup. Legacy callers passing `cfg: nil` get the registry profile unchanged.
+
+`timeout_sec.review_ci` (default 600) is enforced as a hard per-process kill in `Review::CiFix#run_ci_once` — TERM the pgid on expiry, 3s grace, then KILL — not just as an outer-loop budget check.
 
 ## Stage runners reach into config like this
 

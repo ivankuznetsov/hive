@@ -182,6 +182,7 @@ module Hive
               project_name: File.basename(ctx.worktree_path),
               worktree_path: ctx.worktree_path,
               task_folder: ctx.task_folder,
+              task_slug: File.basename(ctx.task_folder),
               command: Array(command).join(" "),
               attempt: attempt,
               max_attempts: max_attempts,

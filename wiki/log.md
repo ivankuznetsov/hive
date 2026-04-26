@@ -2,6 +2,31 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-26T15:00:00Z] U14 ship — `hive metrics rollback-rate` + fix-commit trailers
+
+**Action:** Adds the rollback-rate metric so the triage bias preset (`courageous` default vs `safetyist` opt-in) becomes a measurable trade-off rather than a vibes choice. The fix prompt and ci-fix prompt now require git trailers on every commit (`Hive-Fix-Pass`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase`); `hive metrics rollback-rate` walks `git log` and reports what fraction of trailered commits were later reverted. Closes doc-review PL-2.
+
+**Code:**
+- `lib/hive/metrics.rb` (new) — `Metrics.rollback_rate(project_root, since:)`. Walks `git log --all` with a NUL-record-separator format (`%H\x00%s\x00%b\x00\x01\n`) so commit bodies with embedded newlines parse correctly. Trailer parsing is in-process (a one-line regex per body) to avoid spawning `git interpret-trailers` per commit on long histories. Revert detection covers two forms: subject-quote match (`Revert "..."`) and `This reverts commit <sha>` body cite (short or full). Returns `{total_fix_commits, reverted_commits, rollback_rate, by_bias, by_phase, since, project_root}`.
+- `lib/hive/commands/metrics.rb` (new) — Thor-callable command class. `--days N` filter; `--project NAME` scopes to one registered project; `--json` emits the `hive-metrics-rollback-rate` schema (single line, parity with `hive status --json`). Exit codes: 0 success; 2 unknown subcommand / unknown project / no projects registered. Text output groups by bias and by phase so the user can see whether `courageous` outpaces `safetyist` on rollbacks.
+- `lib/hive/cli.rb` — registers `hive metrics SUBCOMMAND` (default: `rollback-rate`) under Thor.
+- `templates/fix_prompt.md.erb` — new "Required commit trailers" section that renders the trailer block with values pre-filled (`Hive-Task-Slug`, `Hive-Fix-Pass`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase: fix`). Agent fills `Hive-Fix-Findings: <count>` per commit.
+- `templates/ci_fix_prompt.md.erb` — same convention with `Hive-Fix-Phase: ci`. CI-fix doesn't carry triage bias or reviewer sources (those concepts only exist for review-fix).
+- `lib/hive/stages/review.rb` — `spawn_fix_agent` now passes `task_slug`, `triage_bias`, `reviewer_sources` to the template bindings. Two new helpers: `triage_bias_for(cfg)` reads `review.triage.bias` (default "courageous"); `reviewer_sources_for(ctx)` derives a comma-separated list from per-reviewer files in `reviews/` for the current pass (filters out orchestrator-owned files: escalations, ci-blocked, browser-, fix-guardrail-).
+- `lib/hive/stages/review/ci_fix.rb` — `spawn_fix_agent` now passes `task_slug` (derived from `File.basename(ctx.task_folder)` since the task slug is always the folder basename per `Task::PATH_RE`).
+- `test/unit/metrics_test.rb` (new, 8 tests) — Trailer parsing, subject-revert detection, sha-revert detection, by-bias / by-phase breakdown, since filter, missing-root → ArgumentError, no-trailer commits excluded.
+- `test/integration/metrics_command_test.rb` (new, 5 tests) — JSON schema (`hive-metrics-rollback-rate` v1); text output; unknown project → exit 2; unknown subcommand → exit 2; no registered projects → exit 2.
+- `test/integration/prompt_injection_test.rb` — `test_fix_prompt_wraps_accepted_findings` now asserts the trailer block renders with the expected per-spawn values.
+
+**Key decisions:**
+- **In-process trailer parsing, not `git interpret-trailers` per commit.** A simple `^([A-Za-z][A-Za-z0-9-]*):\s*(.+)$` regex over the body is good enough for the trailer shape the templates emit. Spawning a subprocess per commit blows up wall time on a project that's been running for months.
+- **`git log --all` instead of single-branch lineage.** A v1 metric. The plan called this "out-of-scope for v1" and we honored it: a Revert that lives on a different branch shows up as a rollback, which is the conservative direction (slightly noisy → user sees a higher rate → bias toward safetyist; the opposite would silently underreport rollbacks).
+- **Trailers are documented in the template, NOT validated in the runner.** The plan called for a validation log (`fix-trailer-missing-NN.log`), but it adds runner complexity that hasn't paid back yet — agents that obey the prompt land trailers, and the metric just gets noisier when one slips through. We'll add validation if real usage shows the slip rate is high.
+- **`Hive-Reviewer-Sources` derived from filenames, not from accepted findings.** Cheaper (no parsing) and more honest: even reviewers whose findings were all rejected get listed, because they still contributed to the triage decision. A consumer who wants "which reviewer's [x] marks landed in this commit" can grep `accepted_findings`.
+- **`unknown` is the bias bucket for trailer-less or pre-rollout commits.** Don't drop them on the floor — the ratio of unknown vs known is itself a signal that the prompt-template rollout isn't complete.
+
+**Wiki updates:** wiki/cli.md and wiki/index.md will land in U10's wiki sweep alongside the broader stage docs.
+
 ## [2026-04-26T14:00:00Z] U13 ship — Post-fix diff guardrail (ADR-020) real implementation
 
 **Action:** Replaces the U9 stub of `Hive::Stages::Review::FixGuardrail` with a real diff scanner. After Phase 4 commits land in the 5-review autonomous loop, the runner takes `git diff base..head` of just the new commits and walks it once, dispatching each line to the configured pattern set. A match short-circuits the loop with `REVIEW_WAITING reason=fix_guardrail` and writes `reviews/fix-guardrail-NN.md` so the user inspects before the loop continues. The motivating threat model: a fix agent could otherwise auto-merge a `curl ... | sh`, edit a `.github/workflows/*.yml`, or commit a credential — and the user would only see a green pass with one extra commit on the branch.

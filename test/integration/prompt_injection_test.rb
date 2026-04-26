@@ -140,11 +140,19 @@ class PromptInjectionTest < Minitest::Test
           task_folder: task.folder,
           pass: 2,
           accepted_findings: HOSTILE_IDEA,
+          task_slug: task.slug,
+          triage_bias: "courageous",
+          reviewer_sources: "claude-ce-code-review",
           user_supplied_tag: tag
         )
       )
       assert_includes prompt, "<#{tag} content_type=\"accepted_findings\">"
       assert_includes prompt, "</#{tag}>"
+      assert_includes prompt, "Hive-Task-Slug: #{task.slug}"
+      assert_includes prompt, "Hive-Fix-Pass: 02"
+      assert_includes prompt, "Hive-Triage-Bias: courageous"
+      assert_includes prompt, "Hive-Reviewer-Sources: claude-ce-code-review"
+      assert_includes prompt, "Hive-Fix-Phase: fix"
     end
   end
 

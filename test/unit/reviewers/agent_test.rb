@@ -114,6 +114,20 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # --- PE1: prompt_template path-escape is ConfigError -----------------
+
+  def test_path_escape_in_reviewer_prompt_template_raises_config_error
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(
+        make_spec("prompt_template" => "../../../etc/passwd"), ctx
+      )
+
+      assert_raises(Hive::ConfigError) { reviewer.run! }
+    end
+  end
+
   def test_argv_invokes_claude_with_expected_skill_in_prompt
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)

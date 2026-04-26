@@ -1,6 +1,7 @@
 require "json"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 
 module Hive
@@ -93,9 +94,13 @@ module Hive
           profile_name = cfg.dig("review", "browser_test", "agent") || "claude"
           profile = Hive::AgentProfiles.lookup(profile_name)
           template = cfg.dig("review", "browser_test", "prompt_template") || "browser_test_prompt.md.erb"
-
-          prompt = Hive::Stages::Base.render(
+          template_path = Hive::Stages::Base.resolve_template_path(
             template,
+            hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
+          )
+
+          prompt = Hive::Stages::Base.render_resolved_path(
+            template_path,
             Hive::Stages::Base::TemplateBindings.new(
               project_name: File.basename(ctx.worktree_path),
               worktree_path: ctx.worktree_path,
@@ -244,15 +249,8 @@ module Hive
         end
 
         def synthetic_task(ctx)
-          SyntheticTask.new(
-            folder: ctx.task_folder,
-            state_file: File.join(ctx.task_folder, "task.md"),
-            log_dir: File.join(ctx.task_folder, "logs"),
-            stage_name: "5-review"
-          )
+          Hive::Reviewers.synthetic_task_for(ctx)
         end
-
-        SyntheticTask = Struct.new(:folder, :state_file, :log_dir, :stage_name, keyword_init: true)
       end
     end
   end

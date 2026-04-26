@@ -33,7 +33,7 @@ module Hive
           return Result.new(status: :clean, matches: []) if base_sha == head_sha
 
           diff = capture_diff(ctx.worktree_path, base_sha, head_sha)
-          return Result.new(status: :clean, matches: []) if diff.nil? || diff.empty?
+          return Result.new(status: :clean, matches: []) if diff.empty?
 
           patterns = resolve_patterns(cfg)
           matches = scan_diff(diff, patterns)
@@ -48,11 +48,22 @@ module Hive
         # Capture the diff between two commits in the worktree. Returns
         # the raw `git diff` output (unified) so file-path scanning,
         # added-line scanning, and mode-change scanning can all share
-        # one pass.
+        # one pass. `-c core.quotePath=false` so unicode paths are
+        # emitted verbatim instead of as `"src/\303\251.rb"` octal-
+        # escaped sequences (otherwise file_path patterns miss them).
+        # On `git diff` failure, raise — we don't want to silently
+        # short-circuit the guardrail to :clean and let a bad diff slip
+        # through. The runner's top-level rescue maps the exception to
+        # REVIEW_ERROR.
         def capture_diff(worktree_path, base, head)
-          out, _err, status = Open3.capture3("git", "-C", worktree_path,
-                                              "diff", "--unified=0", "#{base}..#{head}")
-          status.success? ? out : nil
+          out, err, status = Open3.capture3("git", "-c", "core.quotePath=false",
+                                            "-C", worktree_path,
+                                            "diff", "--unified=0", "#{base}..#{head}")
+          unless status.success?
+            raise Hive::AgentError,
+                  "git diff failed in #{worktree_path}: #{err.to_s.strip}"
+          end
+          out
         end
 
         # Apply config overrides on top of the default pattern set.

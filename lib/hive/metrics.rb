@@ -149,8 +149,14 @@ module Hive
       return true if revert_subjects.key?(commit[:subject])
 
       sha = commit[:sha]
+      # Match only the prefix direction: a Revert that cites our sha
+      # (`This reverts commit <sha-or-prefix>`) reverts us. The
+      # symmetric `cited.start_with?(sha[0, 7])` clause used to fire
+      # whenever the cited sha and our sha shared their first 7 chars
+      # — a false positive any time two unrelated commits collide on a
+      # short hash. Drop it.
       revert_shas.each_key do |cited|
-        return true if sha.start_with?(cited) || cited.start_with?(sha[0, 7])
+        return true if sha.start_with?(cited)
       end
       false
     end

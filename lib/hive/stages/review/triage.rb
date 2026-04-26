@@ -1,6 +1,8 @@
 require "digest"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/protected_files"
+require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 
 module Hive
@@ -32,7 +34,7 @@ module Hive
         # Files the triage agent must NOT modify. The reviewer files
         # are deliberately NOT in this list — triage's job is to edit
         # them in place. The escalations file is new and SHA-irrelevant.
-        PROTECTED_FILES = %w[plan.md worktree.yml task.md].freeze
+        PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
 
         BIAS_PRESETS = {
           "courageous" => "triage_courageous.md.erb",
@@ -68,7 +70,7 @@ module Hive
             escalations_path: escalations
           )
 
-          before = sha256_protected(ctx)
+          before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
           spawn_result = Hive::Stages::Base.spawn_agent(
             synthetic_task(ctx),
             prompt: prompt,
@@ -81,9 +83,9 @@ module Hive
             expected_output: escalations,
             status_mode: :output_file_exists
           )
-          after = sha256_protected(ctx)
+          after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
 
-          tampered = before.keys.reject { |f| before[f] == after[f] }
+          tampered = Hive::ProtectedFiles.diff(before, after)
           if tampered.any?
             return Result.new(
               status: :tampered,
@@ -132,7 +134,7 @@ module Hive
             "*-#{format('%02d', ctx.pass)}.md"
           )
           Dir[glob]
-            .reject { |f| File.basename(f).start_with?("escalations-") }
+            .select { |f| Hive::Stages::Review.reviewer_file?(File.basename(f)) }
             .sort
         end
 
@@ -150,38 +152,30 @@ module Hive
           template
         end
 
-        # Custom triage prompt path: resolved against <.hive-state>/templates/.
-        # File.realpath the result and confirm it stays under that root —
-        # path-escape attempts (../, absolute path, symlink to outside)
-        # raise ConfigError.
+        # Custom triage prompt path: resolved via the shared
+        # Hive::Stages::Base.resolve_template_path guard so every
+        # consumer of a user-supplied template name (review.fix,
+        # review.ci, review.browser_test, per-reviewer) shares one
+        # path-escape policy.
         def resolve_custom_template(custom, ctx)
           state_dir = ctx_state_dir(ctx)
-          templates_root = File.realpath(File.join(state_dir, "templates")) if File.directory?(File.join(state_dir, "templates"))
-          unless templates_root
-            raise Hive::ConfigError,
-                  "review.triage.custom_prompt #{custom.inspect} requires #{File.join(state_dir, 'templates')} to exist"
-          end
-
-          candidate = File.expand_path(custom, templates_root)
-          unless File.exist?(candidate)
-            raise Hive::ConfigError,
-                  "review.triage.custom_prompt #{custom.inspect} not found at #{candidate}"
-          end
-
-          resolved = File.realpath(candidate)
-          unless resolved.start_with?(templates_root + File::SEPARATOR) || resolved == templates_root
-            raise Hive::ConfigError,
-                  "review.triage.custom_prompt #{custom.inspect} resolves outside #{templates_root}"
-          end
-          resolved
+          # `custom` here is always a user-supplied path. Force the
+          # custom-template branch by joining a leading `./` so the
+          # resolver doesn't fall into the built-in branch when the
+          # user supplies a bare basename.
+          name = custom.include?("/") ? custom : "./#{custom}"
+          Hive::Stages::Base.resolve_template_path(name, hive_state_dir: state_dir)
+        rescue Hive::ConfigError => e
+          # Surface the original `review.triage.custom_prompt …` framing
+          # callers (and tests) match on.
+          raise Hive::ConfigError, e.message.sub("prompt_template", "review.triage.custom_prompt")
         end
 
-        # ctx.task_folder is .../<.hive-state>/stages/<N>-<name>/<slug>;
-        # walk up four levels to the project root, then append .hive-state.
-        # Two levels above task_folder is `.hive-state/stages/`; three is
-        # `.hive-state`; we want `.hive-state` so that's three up.
+        # Delegates to the shared helper so every review-stage consumer
+        # of resolve_template_path agrees on which directory counts as
+        # the templates root.
         def ctx_state_dir(ctx)
-          File.expand_path(File.join(ctx.task_folder, "..", "..", ".."))
+          Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
         end
 
         def render_prompt(template_name:, ctx:, cfg:, reviewer_files:, escalations_path:)
@@ -220,7 +214,18 @@ module Hive
         def build_reviewer_contents_block(reviewer_files, tag)
           out = +""
           reviewer_files.each do |path|
-            content = File.read(path)
+            content =
+              begin
+                File.read(path)
+              rescue Errno::ENOENT, IOError, SystemCallError => e
+                # A reviewer file disappearing mid-triage (TOCTOU race
+                # with the user, broken symlink, perms flipped) must not
+                # abort the whole triage — substitute an explanatory
+                # placeholder so the agent still sees the structure of
+                # the wrapper and can mark the file `[ ]` for human
+                # review.
+                "(reviewer file unreadable: #{e.message})"
+              end
             out << "\n## #{File.basename(path)}\n\n"
             out << "<#{tag} content_type=\"reviewer_md\" path=\"#{path}\">\n"
             out << content
@@ -237,27 +242,11 @@ module Hive
           MD
         end
 
-        def sha256_protected(ctx)
-          paths = protected_paths(ctx)
-          paths.each_with_object({}) do |path, h|
-            h[File.basename(path)] = File.exist?(path) ? Digest::SHA256.hexdigest(File.read(path)) : nil
-          end
-        end
-
-        # Triage shares the synthetic-task pattern with Reviewers::Agent —
-        # spawn_agent expects a task-shaped object but the 5-review
-        # runner has the real Task. Both layers receive a Context with
-        # paths only and build a minimal facade.
+        # Triage shares the synthetic-task pattern with every other
+        # 5-review sub-spawn; delegate to the shared helper (M-04).
         def synthetic_task(ctx)
-          SyntheticTask.new(
-            folder: ctx.task_folder,
-            state_file: File.join(ctx.task_folder, "task.md"),
-            log_dir: File.join(ctx.task_folder, "logs"),
-            stage_name: "5-review"
-          )
+          Hive::Reviewers.synthetic_task_for(ctx)
         end
-
-        SyntheticTask = Struct.new(:folder, :state_file, :log_dir, :stage_name, keyword_init: true)
       end
     end
   end

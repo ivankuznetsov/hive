@@ -7,13 +7,18 @@ module Hive
   # test/unit/secret_patterns_test.rb (or the consumer's tests).
   module SecretPatterns
     PATTERNS = {
-      # AWS access key id and secret access key.
-      aws_access_key:        /AKIA[0-9A-Z]{16}/,
+      # AWS access key id (AKIA = long-term, ASIA = temporary session token)
+      # and secret access key.
+      aws_access_key:        /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
       aws_secret_access_key: %r{aws[_\- ]secret[_\- ]access[_\- ]key.{0,5}['"]?[A-Za-z0-9/+=]{40}['"]?}i,
       # GitHub tokens: ghp (PAT), ghs (server-to-server), gho (OAuth), ghu (user).
       github_token:          /gh[psou]_[A-Za-z0-9]{36,}/,
-      # Generic api_key / api-key / apiKey followed by an assignment to a long string.
-      generic_api_key:       /\bapi[_\-]?key\b[\s:=]{0,3}['"][A-Za-z0-9_\-]{20,}['"]/i,
+      # Generic api_key / api-key / apiKey followed by an assignment to a
+      # long string. Quotes are optional so unquoted shell/YAML/env-style
+      # assignments (`API_KEY=abcdef...`) also trip; the trailing
+      # lookahead requires a token boundary so we don't run past the
+      # secret into adjacent text.
+      generic_api_key:       /\bapi[_\-]?key\b[\s:=]{0,3}['"]?[A-Za-z0-9_\-]{20,}['"]?(?=[\s,;]|$)/i,
       # PEM-encoded private keys.
       pem_private_key:       /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----/,
       # OpenAI / Anthropic / Stripe API keys (canonical prefixes).

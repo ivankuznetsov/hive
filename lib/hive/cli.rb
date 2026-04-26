@@ -75,7 +75,15 @@ module Hive
       run_stage_action("develop", target)
     end
 
-    desc "pr TARGET", "Move a completed execute task into PR, or run an existing PR task"
+    desc "review TARGET", "Move a completed execute task into review, or run an existing review task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def review(target)
+      run_stage_action("review", target)
+    end
+
+    desc "pr TARGET", "Move a completed review task into PR, or run an existing PR task"
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"

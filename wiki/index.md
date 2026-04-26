@@ -2,7 +2,7 @@
 title: Hive Wiki Index
 type: index
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [index]
 ---
 
@@ -10,7 +10,7 @@ tags: [index]
 
 *Auto-generated. Do not edit manually.*
 
-Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `6-pr` → `7-done`) where stage agents run via `claude -p` and `mv` between directories is the only approval gesture.
+Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
 
 **Pages**: 34 (excl. `index.md`/`log.md`) · **Date**: 2026-04-26
 
@@ -20,7 +20,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-
 - [[state-model]] — directory layout, marker grammar, state files, slug rules, configs, frontmatter, lock files, worktree pointer.
 - [[cli]] — top-level CLI surface (entry point, command table, error conventions).
 - [[dependencies]] — runtime gems, dev gems, external CLI deps, Ruby version, stdlib reliance.
-- [[decisions]] — 13 ADRs extracted from the planning docs.
+- [[decisions]] — 21 ADRs (013 + 014–021 added 2026-04-26 alongside 5-review).
 - [[active-areas]] — what's currently in flight and what's deferred.
 - [[gaps]] — coverage table, open questions, patterns not yet documented.
 - [[templates]] — ERB template catalogue and prompt-injection boundary policy.
@@ -35,14 +35,16 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a six-
 - [[commands/approve]] — agent-callable `mv <task> <next-stage>/` with marker validation, ambiguity resolution, and a hive/state commit per move.
 - [[commands/findings]] — `hive findings` / `accept-finding` / `reject-finding`: list and toggle GFM-checkbox findings in `reviews/ce-review-NN.md`.
 - [[commands/stage_action]] — `hive brainstorm` / `plan` / `develop` / `pr` / `archive` workflow verbs (promote-or-run).
+- `hive metrics rollback-rate [--days N] [--project NAME] [--json]` — fraction of fix-agent commits later reverted, broken down by triage bias / fix phase. See [[cli]] and [[stages/review]].
 
 ## Stages
 
-- [[stages/index]] — six-stage overview.
+- [[stages/index]] — seven-stage overview.
 - [[stages/inbox]] — inert capture zone.
 - [[stages/brainstorm]] — Q&A round-by-round.
 - [[stages/plan]] — `/compound-engineering:ce-plan` driven plan.
-- [[stages/execute]] — worktree + implementation + reviewer iteration.
+- [[stages/execute]] — worktree + implementation (impl-only since ADR-014).
+- [[stages/review]] — autonomous review loop: CI-fix → reviewers → triage → fix → guardrail → browser-test.
 - [[stages/pr]] — push branch + `gh pr create` (idempotent).
 - [[stages/done]] — print cleanup commands, stamp COMPLETE.
 

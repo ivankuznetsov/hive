@@ -7,7 +7,7 @@ updated: 2026-04-26
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, and findings commands remain the lower-level agent/script surface. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface.
+**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, and `metrics` are the lower-level agent/script surface. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, `approve`, `findings`, and `metrics` support `--json` for machine-readable output (with a structured error envelope on every failure path), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
@@ -30,6 +30,7 @@ tags: [cli, api]
 | `hive findings TARGET [--pass N] [--stage STAGE]` | List GFM-checkbox findings in `reviews/ce-review-NN.md` (latest by default) | `Hive::Commands::Findings` | [[commands/findings]] |
 | `hive accept-finding TARGET [ID...] [--severity S] [--all] [--stage STAGE]` | Tick `[x]` on review findings; selectors are unioned | `Hive::Commands::FindingToggle` (accept) | [[commands/findings]] |
 | `hive reject-finding TARGET [ID...] [--severity S] [--all] [--stage STAGE]` | Untick `[x]` on review findings | `Hive::Commands::FindingToggle` (reject) | [[commands/findings]] |
+| `hive metrics SUBCOMMAND [--days N] [--project NAME] [--json]` | Compute project-wide metrics. Currently one subcommand: `rollback-rate` walks `git log --all` and reports the fraction of fix-commits (those carrying `Hive-Fix-Pass` trailer) that were later reverted, broken down by `Hive-Triage-Bias` and `Hive-Fix-Phase`. | `Hive::Commands::Metrics` → `Hive::Metrics` | — |
 
 `Hive::CLI` (`lib/hive/cli.rb`) is the Thor class. Notable mappings:
 

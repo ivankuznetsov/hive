@@ -3,11 +3,11 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [roadmap, status]
 ---
 
-**TLDR**: Phase 1 MVP shipped across three commits (`c2098f0`, `873b1ae`, `1b05ccb`). CI wired, live-claude smoke wired, 94 unit/integration tests + 2 opt-in smoke cases all green. Phase 1 surface is settled; backlog below is Phase 2/3 plus the explicitly-deferred Phase 1 items.
+**TLDR**: Phase 1 MVP shipped Apr-25. The 5-review stage and its sub-pipeline (CI-fix, sequential reviewers, triage, fix, fix-guardrail, browser-test) shipped on `feat/5-review-stage` (branch in flight 2026-04-26). 295 unit/integration tests green; `hive metrics rollback-rate` operational.
 
 ## Status
 
@@ -32,7 +32,9 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 
 ## Phase 1 deferred work
 
-- Additional reviewers in `4-execute` (Codex local, pr-review-toolkit, rubocop-as-reviewer).
+- ~~Additional reviewers in `4-execute` (Codex local, pr-review-toolkit, rubocop-as-reviewer).~~ Shipped under [[stages/review]] (multi-reviewer set runs in 5-review, not 4-execute; rubocop-style linters belong in `review.ci.command` per ADR-014).
+- Parallel reviewers (Phase 2 of 5-review). Currently sequential (ADR-015); add behind a config flag if wall-clock cost becomes painful.
+- Trailer-validation log for fix commits that miss `Hive-Fix-*` trailers (planned in U14, dropped — agents that obey the prompt land trailers; the rollback-rate metric just gets noisier when one slips through).
 - Second pilot project and cross-project `hive status`.
 - Atomic rollback via snapshot tags on `hive/state` per stage transition (Phase 3).
 - `hive reinit <new-path>` for migrating registered project paths.

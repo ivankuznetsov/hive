@@ -7,8 +7,12 @@
     {
       "fingerprint": "9f73651d265a69db942fb10947510d982d4dbd1db3e69638332f147d32829e97",
       "note": "False positive. pid is integer-coerced via .to_i before interpolation, so the string can only contain digits. The 2>/dev/null suffix is the only shell-meaningful syntax and is a static literal."
+    },
+    {
+      "fingerprint": "c5383e38ce67101d42861fc17ef61be803b4270f300f47b186f531104b9bada6",
+      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! — internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
     }
   ],
-  "updated": "2026-04-25",
+  "updated": "2026-04-26",
   "brakeman_version": "8.0.4"
 }

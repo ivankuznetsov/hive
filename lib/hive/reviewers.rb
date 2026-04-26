@@ -25,11 +25,16 @@ module Hive
     # supported kind in v1). If a config explicitly sets `kind: linter`,
     # raise a helpful error pointing the user at `review.ci.command`
     # rather than silently ignoring the request.
-    def self.dispatch(spec, ctx)
+    #
+    # `cfg:` (optional, default nil) flows the merged project config to
+    # the adapter so `agents.<name>.<key>` overrides reach the
+    # AgentProfile lookup. Pre-cfg callers continue to work; the lookup
+    # falls back to the registry-stored profile when cfg is nil.
+    def self.dispatch(spec, ctx, cfg: nil)
       kind = (spec["kind"] || "agent").to_s
       case kind
       when "agent"
-        Agent.new(spec, ctx)
+        Agent.new(spec, ctx, cfg: cfg)
       when "linter"
         raise UnknownKindError, <<~MSG.strip
           reviewer kind "linter" is not supported in v1.

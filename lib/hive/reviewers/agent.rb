@@ -10,10 +10,15 @@ module Hive
     # success is detected via the profile's :output_file_exists mode (file
     # exists + non-empty + exit 0).
     class Agent < Base
+      def initialize(spec, ctx, cfg: nil)
+        super(spec, ctx)
+        @cfg = cfg
+      end
+
       def run!
         ensure_reviews_dir!
 
-        profile = Hive::AgentProfiles.lookup(spec.fetch("agent"))
+        profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
         skill = spec.fetch("skill")
         prompt = render_prompt(profile, skill)
 

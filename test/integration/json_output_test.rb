@@ -203,6 +203,89 @@ class JsonOutputTest < Minitest::Test
     end
   end
 
+  # ── REVIEW_* next_action coverage ────────────────────────────────────────
+
+  def test_run_json_on_review_waiting_marker_emits_edit_next_action
+    # Stub Hive::Stages::Review.run! to a no-op so the seeded
+    # REVIEW_WAITING marker survives unchanged into report_json. The
+    # contract under test is the next_action mapping, not the runner's
+    # ability to reach review_waiting from scratch.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "review-waiting-260426-aaaa"
+        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        FileUtils.mkdir_p(review_dir)
+        File.write(File.join(review_dir, "task.md"),
+                   "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
+
+        require "hive/stages/review"
+        Hive::Stages::Review.singleton_class.alias_method(:__orig_run!, :run!)
+        Hive::Stages::Review.define_singleton_method(:run!) { |_task, _cfg| { commit: nil, status: :review_waiting } }
+
+        begin
+          out, _err, status = with_captured_exit { Hive::Commands::Run.new(review_dir, json: true).call }
+          assert_equal Hive::ExitCodes::SUCCESS, status,
+                       "review_waiting is a soft pause, not an error — exit 0"
+
+          payload = JSON.parse(out)
+          assert_equal "review_waiting", payload["marker"]
+          next_action = payload["next_action"]
+          assert_equal Hive::Schemas::NextActionKind::EDIT, next_action["kind"]
+          assert_equal review_dir, next_action["target"],
+                       "edit-target is the task folder for review_waiting"
+          assert_match(/hive run/, next_action["rerun_with"],
+                       "rerun_with must surface a `hive run` command")
+        ensure
+          Hive::Stages::Review.singleton_class.alias_method(:run!, :__orig_run!)
+          Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_run!)
+        end
+      end
+    end
+  end
+
+  def test_run_json_on_review_stale_marker_emits_recover_stale_next_action
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "review-stale-260426-aaaa"
+        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        FileUtils.mkdir_p(review_dir)
+        File.write(File.join(review_dir, "task.md"),
+                   "<!-- REVIEW_STALE pass=4 -->\n")
+
+        out, _err, _status = with_captured_exit { Hive::Commands::Run.new(review_dir, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal "review_stale", payload["marker"]
+        next_action = payload["next_action"]
+        assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, next_action["kind"]
+        assert_equal [ "review_stale" ], next_action["markers_to_clear"]
+        refute_empty next_action["instructions"].to_s,
+                     "instructions must be non-empty so an agent / human knows how to recover"
+      end
+    end
+  end
+
+  def test_run_json_on_review_ci_stale_marker_emits_recover_stale_next_action
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "review-ci-stale-260426-aaaa"
+        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        FileUtils.mkdir_p(review_dir)
+        File.write(File.join(review_dir, "task.md"),
+                   "<!-- REVIEW_CI_STALE attempts=3 -->\n")
+
+        out, _err, _status = with_captured_exit { Hive::Commands::Run.new(review_dir, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal "review_ci_stale", payload["marker"]
+        next_action = payload["next_action"]
+        assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, next_action["kind"]
+        assert_equal [ "review_ci_stale" ], next_action["markers_to_clear"]
+      end
+    end
+  end
+
   # Defensive pin: every emitted next_action.kind must be in the closed
   # NextActionKind::ALL set. Drives THREE distinct producer arms (waiting,
   # complete, error) so a typo in any one of them is caught — the round-1

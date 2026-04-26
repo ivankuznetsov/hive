@@ -416,6 +416,67 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # --- agents.* config override plumbed end-to-end --------------------
+
+  def test_agents_config_override_flows_through_to_reviewer_spawn
+    # End-to-end proof that an `agents.<name>.bin` override in the
+    # project's merged config reaches the AgentProfile lookup at the
+    # reviewer spawn site. We point claude.bin at a definitely-missing
+    # path; the override took effect iff the spawn fails preflight
+    # (which happens because /tmp/intentionally-missing-binary doesn't
+    # exist), surfacing as :review_error phase=reviewers reason=all_failed.
+    # If the override didn't plumb through, the real claude bin under
+    # @driver_bin would have been used and the spawn would have
+    # produced a stub-empty review file (success path) instead.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        missing_bin = File.join(@driver_dir, "intentionally-missing-binary")
+        # Ensure the path truly doesn't exist (defensive: the dir is
+        # fresh from setup, but make the contract explicit).
+        FileUtils.rm_f(missing_bin)
+        refute File.exist?(missing_bin), "test precondition: bin must not exist"
+
+        folder = setup_review_task(dir, cfg_overrides: {
+          "agents" => {
+            "claude" => { "bin" => missing_bin }
+          },
+          "review" => {
+            "reviewers" => [
+              {
+                "name" => "override-probe",
+                "kind" => "agent",
+                "agent" => "claude",
+                "skill" => "ce-code-review",
+                "output_basename" => "override-probe",
+                "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+                "timeout_sec" => 5
+              }
+            ]
+          }
+        })
+        # Reset the version-check cache so the missing-bin check runs
+        # against the override, not a cached real-claude success.
+        Hive::AgentProfile.reset_version_cache!
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        # The override clearly took effect: with claude.bin pointing
+        # at a non-existent path, the reviewer's preflight returns
+        # :error from spawn_agent, the lone reviewer counts as
+        # all_failed, and the runner lands REVIEW_ERROR phase=reviewers.
+        assert_equal :review_error, marker.name,
+                     "override must flow through; marker=#{marker.name} attrs=#{marker.attrs.inspect}"
+        assert_equal "reviewers", marker.attrs["phase"],
+                     "the failure must land in the reviewers phase, proving the spawn site saw the override"
+        assert_equal "all_failed", marker.attrs["reason"]
+        # Run.report raises TaskInErrorState (3) on REVIEW_ERROR.
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+      ensure
+        Hive::AgentProfile.reset_version_cache!
+      end
+    end
+  end
+
   # --- top-level rescue: helper exception lands REVIEW_ERROR ----------
 
   def test_unexpected_helper_exception_lands_review_error_marker
@@ -448,6 +509,92 @@ class RunReviewTest < Minitest::Test
         ensure
           Hive::Stages::Review.singleton_class.alias_method(:mark_working, :__orig_mark_working)
           Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_mark_working)
+        end
+      end
+    end
+  end
+
+  # Parameterised coverage for the top-level rescue across every
+  # phase the runner tracks: :reviewers, :triage, :fix, :browser
+  # (the existing :ci case lives in the test above). Each phase trip
+  # must land REVIEW_ERROR with the matching `phase=` attribute so a
+  # polling agent / metric can branch on the structured payload.
+  def test_top_level_rescue_records_phase_across_each_runner_phase
+    phases = %i[reviewers triage fix browser]
+
+    phases.each do |target_phase|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir, cfg_overrides: {
+            "review" => {
+              "browser_test" => { "enabled" => true, "max_attempts" => 1 },
+              "reviewers" => [
+                {
+                  "name" => "stub-rev",
+                  "kind" => "agent",
+                  "agent" => "claude",
+                  "skill" => "ce-code-review",
+                  "output_basename" => "stub-rev",
+                  "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+                  "timeout_sec" => 5
+                }
+              ]
+            }
+          })
+
+          # For phases :fix and :triage we need pass-1 to produce
+          # findings so the runner reaches those branches. For :browser
+          # we need the loop to reach Phase 5; pass-1 finds findings,
+          # pass-2 finds zero so the all-clean break fires.
+          Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers_p, :run_reviewers)
+          Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task|
+            path = File.join(ctx.task_folder, "reviews", "stub-rev-#{format('%02d', ctx.pass)}.md")
+            FileUtils.mkdir_p(File.dirname(path))
+            content = ctx.pass == 1 ? "## High\n- [x] fix the thing\n" : ""
+            File.write(path, content)
+            :ok
+          end
+
+          # Stub Triage.run! to write empty escalations; with [x]
+          # findings present, the runner advances to the fix phase.
+          Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_p!, :run!)
+          Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
+            esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+            FileUtils.mkdir_p(File.dirname(esc))
+            File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n")
+            Hive::Stages::Review::Triage::Result.new(
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            )
+          end
+
+          # Stub mark_working to raise on the target phase. Each phase
+          # is set just before mark_working is called, so this is the
+          # narrowest possible trip-point that keeps the @current_phase
+          # tracker honest.
+          Hive::Stages::Review.singleton_class.alias_method(:__orig_mark_working_p, :mark_working)
+          Hive::Stages::Review.define_singleton_method(:mark_working) do |task, phase:, pass:|
+            raise "synthetic #{phase} failure" if phase == target_phase
+
+            __orig_mark_working_p(task, phase: phase, pass: pass)
+          end
+
+          begin
+            assert_raises(RuntimeError) { Hive::Commands::Run.new(folder).call }
+            marker = Hive::Markers.current(File.join(folder, "task.md"))
+            assert_equal :review_error, marker.name,
+                         "phase=#{target_phase}: rescue must land REVIEW_ERROR; got #{marker.name} attrs=#{marker.attrs.inspect}"
+            assert_equal target_phase.to_s, marker.attrs["phase"],
+                         "phase=#{target_phase}: rescue must record the active phase"
+            assert_equal "runner_exception", marker.attrs["reason"]
+            assert_equal "RuntimeError", marker.attrs["exception_class"]
+          ensure
+            Hive::Stages::Review.singleton_class.alias_method(:mark_working, :__orig_mark_working_p)
+            Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_mark_working_p)
+            Hive::Stages::Review.singleton_class.alias_method(:run_reviewers, :__orig_run_reviewers_p)
+            Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_run_reviewers_p)
+            Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_p!)
+            Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_p!)
+          end
         end
       end
     end

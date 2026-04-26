@@ -126,6 +126,76 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  # Per-rejection coverage for each terminal-success marker the
+  # allowlist refuses. Each test seeds the corresponding marker on the
+  # state file (so the marker-vs-state guard can't fire first) and
+  # asserts the allowlist message points the user at `hive approve`.
+
+  def test_clear_review_complete_is_rejected
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_complete)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_COMPLETE").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_match(/REVIEW_COMPLETE/, err)
+        assert_match(/hive approve/, err,
+                     "rejection error must redirect the user to `hive approve`")
+      end
+    end
+  end
+
+  def test_clear_execute_complete_is_rejected
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :execute_complete)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "EXECUTE_COMPLETE").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_match(/EXECUTE_COMPLETE/, err)
+        assert_match(/hive approve/, err)
+      end
+    end
+  end
+
+  def test_clear_complete_is_rejected
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :complete)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "COMPLETE").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_match(/COMPLETE/, err)
+        assert_match(/hive approve/, err)
+      end
+    end
+  end
+
+  def test_clear_unknown_marker_name_is_rejected
+    # An unknown name (`FROBNICATE`) must also be rejected; the user
+    # gets a helpful error listing the allowed names so they know what
+    # to do next.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "FROBNICATE").call
+        end
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_match(/FROBNICATE/, err)
+        assert_match(/allowlist|REVIEW_STALE/, err,
+                     "error must mention the allowed names so the user knows what to pass")
+      end
+    end
+  end
+
   # ── Marker-vs-state guard ──────────────────────────────────────────────
 
   def test_refuses_when_named_marker_does_not_match_actual

@@ -389,6 +389,112 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # --- Positive-integer review knobs --------------------------------------
+  # 0 / negative / non-integer values yield degenerate runner behavior:
+  #   review.ci.max_attempts: 0           → CiFix runs once and bails
+  #   review.browser_test.max_attempts: 0 → BrowserTest writes blocked.md without spawn
+  #   review.max_passes: 0                → pass loop exits before Phase 2
+  #   review.max_wall_clock_sec: 0        → wall_clock_exceeded? trips immediately
+  # Validation catches each at config-load time so misconfig fails at
+  # `hive run` startup, not silently mid-loop.
+
+  def test_load_raises_when_review_ci_max_attempts_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            max_attempts: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.ci\.max_attempts/, err.message)
+      assert_match(/positive integer/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_ci_max_attempts_is_negative
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            max_attempts: -1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.ci\.max_attempts/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_ci_max_attempts_is_non_integer
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            max_attempts: 1.5
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.ci\.max_attempts/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_browser_test_max_attempts_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          browser_test:
+            max_attempts: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.browser_test\.max_attempts/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_max_passes_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          max_passes: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.max_passes/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_max_wall_clock_sec_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          max_wall_clock_sec: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.max_wall_clock_sec/, err.message)
+    end
+  end
+
+  def test_load_accepts_review_knobs_at_default_positive_values
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            max_attempts: 5
+          browser_test:
+            max_attempts: 3
+          max_passes: 6
+          max_wall_clock_sec: 7200
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal 5, cfg.dig("review", "ci", "max_attempts")
+      assert_equal 3, cfg.dig("review", "browser_test", "max_attempts")
+      assert_equal 6, cfg.dig("review", "max_passes")
+      assert_equal 7200, cfg.dig("review", "max_wall_clock_sec")
+    end
+  end
+
   # --- New defaults present ----------------------------------------------
 
   def test_new_review_defaults_are_present

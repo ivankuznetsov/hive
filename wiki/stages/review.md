@@ -20,9 +20,9 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 | Marker / State | Action |
 |----------------|--------|
 | `:review_complete` | print "already complete; mv this folder to 6-pr/", return |
-| `:review_ci_stale` | warn; user fixes CI, removes marker, re-runs |
-| `:review_stale` | warn; user trims `reviews/` and removes marker |
-| `:review_error` | warn with attrs; user investigates, clears marker |
+| `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
+| `:review_stale` | warn; user trims `reviews/` then `hive markers clear FOLDER --name REVIEW_STALE` and re-runs |
+| `:review_error` | warn with attrs; user investigates then `hive markers clear FOLDER --name REVIEW_ERROR` and re-runs |
 | `:review_waiting` | resume — skip Phase 2/3, jump straight to Phase 4 with the user's manually-ticked `[x]` marks |
 | no `worktree.yml` | exit 1 (must come from 4-execute) |
 | `worktree.yml` points at deleted path | exit 1 with `git worktree prune` recovery hint |
@@ -112,8 +112,10 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 ## REVIEW_STALE recovery (max_passes / wall_clock)
 
 1. Inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count).
-2. Remove the `<!-- REVIEW_STALE … -->` marker from `task.md`.
+2. Run `hive markers clear FOLDER --name REVIEW_STALE` to remove the `<!-- REVIEW_STALE … -->` marker (atomic write + hive_commit). See [[commands/markers]].
 3. `hive run` again — the loop picks up at `max_review_pass(reviews/) + 1`.
+
+For `REVIEW_CI_STALE` (Phase 1 CI never went green) the equivalent flow is: edit `reviews/ci-blocked.md`, fix the CI failures locally, run `hive markers clear FOLDER --name REVIEW_CI_STALE`, then `hive run`. For `REVIEW_ERROR` (any phase failure recorded with `phase=…` and `reason=…`) the same pattern: investigate, run `hive markers clear FOLDER --name REVIEW_ERROR`, then `hive run`. The runner's pre-flight `warn` text emits the exact command per stuck-state.
 
 No frontmatter edits required: pass count is filename-derived, not stored.
 

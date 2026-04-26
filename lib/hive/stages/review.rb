@@ -8,6 +8,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/reviewers"
 require "hive/agent_profiles"
+require "hive/stages/review/context"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
@@ -76,13 +77,16 @@ module Hive
           warn "hive: already complete; mv this folder to 6-pr/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
-          warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, remove the marker, then re-run"
+          warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \
+               "`hive markers clear #{task.folder} --name REVIEW_CI_STALE` and re-run `hive run`"
           return { commit: nil, status: :review_ci_stale }
         when :review_stale
-          warn "hive: REVIEW_STALE — edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, remove the marker, then re-run"
+          warn "hive: REVIEW_STALE — edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, " \
+               "then run `hive markers clear #{task.folder} --name REVIEW_STALE` and re-run `hive run`"
           return { commit: nil, status: :review_stale }
         when :review_error
-          warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate, clear the marker, then re-run"
+          warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate, then run " \
+               "`hive markers clear #{task.folder} --name REVIEW_ERROR` and re-run `hive run`"
           return { commit: nil, status: :review_error }
         end
 
@@ -104,7 +108,7 @@ module Hive
         ops = Hive::GitOps.new(task.project_root)
         default_branch = ops.default_branch
 
-        ctx = Hive::Reviewers::Context.new(
+        ctx = Hive::Stages::Review::Context.new(
           worktree_path: worktree_path,
           task_folder: task.folder,
           default_branch: default_branch,

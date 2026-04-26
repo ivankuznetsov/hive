@@ -43,12 +43,37 @@ module Hive
 
     # Backward-compat class methods. Resolve to the claude profile so legacy
     # call sites (Hive::Agent.bin, Hive::Agent.check_version!) keep working.
+    #
+    # Caveat (correctness finding #11): these methods bypass per-spawn
+    # profile selection and ALWAYS resolve to the claude profile —
+    # misleading on a project running codex/pi. Pass an explicit
+    # profile: kwarg into Hive::Stages::Base.spawn_agent or call
+    # `Hive::AgentProfiles.lookup(:codex).bin` / `.check_version!`
+    # directly when the agent isn't claude. The methods are retained
+    # as smoke-test / fixture conveniences only.
     def self.bin
+      maybe_warn_legacy_class_method(:bin)
       Hive::AgentProfiles.lookup(:claude).bin
     end
 
     def self.check_version!
+      maybe_warn_legacy_class_method(:check_version!)
       Hive::AgentProfiles.lookup(:claude).check_version!
+    end
+
+    # Emit a one-shot deprecation warning the first time either legacy
+    # class method is called from outside the test suite. Suppress in
+    # tests so the existing assertion suite (which exercises the
+    # backward-compat shim by design) doesn't churn captured stderr.
+    @legacy_warned = {}
+    def self.maybe_warn_legacy_class_method(name)
+      return if ENV["HIVE_TEST"] == "1"
+      return if defined?(Minitest)
+      return if @legacy_warned[name]
+
+      @legacy_warned[name] = true
+      warn "Hive::Agent.#{name} is claude-specific and ignores AgentProfile " \
+           "selection; pass profile: explicitly or use AgentProfiles.lookup(:<name>).#{name}"
     end
 
     def run!

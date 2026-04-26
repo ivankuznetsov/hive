@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-approve.v1.json",
-  "title": "hive approve output (v1)",
-  "description": "Stable contract emitted by `hive approve --json`. Successful invocations and every failure path produce a single-line JSON document on stdout. v1 baseline.",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-approve.v2.json",
+  "title": "hive approve output (v2)",
+  "description": "Stable contract emitted by `hive approve --json`. v2 widens the stage-name enums to include the new 5-review stage and the renumbered 6-pr / 7-done. Successful invocations and every failure path produce a single-line JSON document on stdout.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -33,7 +33,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-approve" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": true },
         "noop": {
           "type": "boolean",
@@ -42,23 +42,23 @@
         "slug": { "type": "string" },
         "from_stage": {
           "type": "string",
-          "enum": ["inbox", "brainstorm", "plan", "execute", "pr", "done"],
+          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"],
           "description": "Bare stage name, mirrors hive-run.stage."
         },
-        "from_stage_index": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "from_stage_index": { "type": "integer", "minimum": 1, "maximum": 7 },
         "from_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"],
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"],
           "description": "Combined directory name (index + bare name) for path construction."
         },
         "to_stage": {
           "type": "string",
-          "enum": ["inbox", "brainstorm", "plan", "execute", "pr", "done"]
+          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"]
         },
-        "to_stage_index": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "to_stage_index": { "type": "integer", "minimum": 1, "maximum": 7 },
         "to_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"]
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"]
         },
         "direction": { "type": "string", "enum": ["forward", "backward", "same"] },
         "forced": {
@@ -69,7 +69,7 @@
         "to_folder": { "type": "string", "description": "Absolute path of the destination folder after the move (or noop target)." },
         "from_marker": {
           "type": ["string", "null"],
-          "description": "The marker that gated the move (e.g. \"complete\", \"execute_complete\"); null on noop."
+          "description": "The marker that gated the move (e.g. \"complete\", \"execute_complete\", \"review_complete\"); null on noop."
         },
         "commit_action": {
           "type": ["string", "null"],
@@ -84,7 +84,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-approve" },
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "ok": { "const": false },
         "error_class": {
           "type": "string",
@@ -97,7 +97,6 @@
             "destination_collision",
             "final_stage",
             "wrong_stage",
-            "rollback_failed",
             "invalid_task_path",
             "error"
           ]

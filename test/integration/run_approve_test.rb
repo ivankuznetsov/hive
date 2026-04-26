@@ -449,7 +449,7 @@ class RunApproveTest < Minitest::Test
         assert_equal expected_keys, payload.keys.sort
 
         assert_equal "hive-approve", payload["schema"]
-        assert_equal 1, payload["schema_version"]
+        assert_equal 2, payload["schema_version"]
         assert_equal true, payload["ok"]
         assert_equal false, payload["noop"]
         assert_equal slug, payload["slug"]

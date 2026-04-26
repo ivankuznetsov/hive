@@ -205,6 +205,40 @@ module Hive
     end
     map "reject-finding" => :reject_finding
 
+    desc "markers SUBCOMMAND FOLDER", "Manage state-file markers (clear)"
+    long_desc <<~DESC
+      Subcommands:
+        clear FOLDER --name <NAME>    Remove the named marker from the task's state file.
+
+      Allowed marker names (recovery markers only):
+        REVIEW_STALE  REVIEW_CI_STALE  REVIEW_ERROR  EXECUTE_STALE  ERROR
+
+      Terminal-success markers (REVIEW_COMPLETE / EXECUTE_COMPLETE / COMPLETE)
+      cannot be cleared this way — use `hive approve` to advance the task or
+      move the folder backward via `hive approve --to <stage>`.
+
+      Examples:
+        hive markers clear FOLDER --name REVIEW_STALE
+        hive markers clear my-task-slug --name REVIEW_CI_STALE --project myproj
+        hive markers clear FOLDER --name REVIEW_ERROR --json
+
+      Exit codes: 0 success; 4 marker mismatch / not in allowlist; 64 unknown
+      subcommand or unknown task; 70 internal error.
+    DESC
+    option :name, type: :string, required: true,
+                  desc: "marker name to remove (e.g. REVIEW_STALE)"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def markers(subcommand, target = nil)
+      require "hive/commands/markers"
+      Hive::Commands::Markers.new(
+        subcommand,
+        target,
+        name: options[:name],
+        project: options[:project],
+        json: options[:json]
+      ).call
+    end
+
     desc "metrics SUBCOMMAND", "Report metrics across registered projects (rollback-rate)"
     long_desc <<~DESC
       Subcommands:

@@ -1,8 +1,16 @@
+require "hive/stages/review/context"
+
 module Hive
   module Reviewers
-    # Per-spawn context passed by the 5-review runner to every reviewer
-    # adapter. Frozen so adapters can't mutate it.
-    Context = Data.define(:worktree_path, :task_folder, :default_branch, :pass)
+    # Historical name kept for backward compatibility with the
+    # `Hive::Reviewers::Agent` adapter (the one true reviewer consumer)
+    # and with any custom reviewer adapter built against the v1 API.
+    # The canonical home is `Hive::Stages::Review::Context` — the
+    # 5-review stage owns this Data type because triage / ci_fix /
+    # browser_test / fix_guardrail all consume it, none of which are
+    # reviewers. New code SHOULD reference `Hive::Stages::Review::Context`
+    # directly; this alias is preserved for backward compat.
+    Context = Hive::Stages::Review::Context
 
     # Reviewer outcome. Status is :ok | :error. error_message is set when
     # status == :error so the runner can surface it as a stub finding.

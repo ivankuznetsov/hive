@@ -103,6 +103,11 @@ module Hive
               tampered_files: []
             )
           else
+            # Clean up any partial escalations file the agent wrote
+            # before crashing. Without this, the next `hive run` reads
+            # escalations_count > 0 and branches into REVIEW_WAITING
+            # based on a corrupt artifact (correctness finding #15).
+            cleanup_partial_escalations!(escalations)
             Result.new(
               status: :error,
               escalations_path: escalations,
@@ -110,6 +115,17 @@ module Hive
               tampered_files: []
             )
           end
+        end
+
+        # Best-effort delete of a partial escalations file written by a
+        # crashed triage agent. Errno::ENOENT is the no-op case (file
+        # never existed); other I/O failures are intentionally swallowed
+        # — we're already on the error path and a stale file is the
+        # lesser evil compared to masking the original triage failure.
+        def cleanup_partial_escalations!(escalations_path)
+          File.unlink(escalations_path)
+        rescue Errno::ENOENT
+          nil
         end
 
         # Test helper: list of files the protected-SHA check covers, in

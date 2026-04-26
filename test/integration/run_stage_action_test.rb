@@ -138,7 +138,7 @@ class RunStageActionTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
-        done = File.join(dir, ".hive-state", "stages", "6-done", slug)
+        done = File.join(dir, ".hive-state", "stages", "7-done", slug)
         FileUtils.mkdir_p(File.dirname(done))
         FileUtils.mv(inbox, done)
         # task.md is the state file for done stage.
@@ -160,7 +160,7 @@ class RunStageActionTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
-        done = File.join(dir, ".hive-state", "stages", "6-done", slug)
+        done = File.join(dir, ".hive-state", "stages", "7-done", slug)
         FileUtils.mkdir_p(File.dirname(done))
         FileUtils.mv(inbox, done)
         File.write(File.join(done, "task.md"), "## archived\n<!-- COMPLETE -->\n")

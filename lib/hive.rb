@@ -88,11 +88,13 @@ module Hive
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze
       READY_TO_DEVELOP    = "ready_to_develop".freeze
+      READY_FOR_REVIEW    = "ready_for_review".freeze
       READY_FOR_PR        = "ready_for_pr".freeze
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       NEEDS_INPUT         = "needs_input".freeze
       REVIEW_FINDINGS     = "review_findings".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
+      RECOVER_REVIEW      = "recover_review".freeze
       AGENT_RUNNING       = "agent_running".freeze
       ARCHIVED            = "archived".freeze
       ERROR               = "error".freeze

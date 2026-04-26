@@ -83,10 +83,9 @@ class StatusTest < Minitest::Test
         end
 
         out, _err = capture_io { Hive::Commands::Status.new.call }
-        assert_includes out, "5-review/"
-        assert_includes out, "⏸ review-waiting"
-        assert_includes out, "⚠ review-ci-stale"
-        assert_includes out, "✓ review-complete"
+        assert_includes out, "review-waiting"
+        assert_includes out, "review-ci-stale"
+        assert_includes out, "review-complete"
       end
     end
   end

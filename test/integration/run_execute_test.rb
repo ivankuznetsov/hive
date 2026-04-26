@@ -100,7 +100,7 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
-  def test_re_run_after_complete_announces_to_mv_to_5_review
+  def test_re_run_after_complete_announces_next_step_review
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, _slug = setup_execute_task(dir)
@@ -109,7 +109,7 @@ class RunExecuteTest < Minitest::Test
         # Re-run; runner should detect EXECUTE_COMPLETE and short-circuit.
         out, err = capture_io { Hive::Commands::Run.new(folder).call }
         assert_match(/already complete/, err)
-        assert_match(/5-review/, out)
+        assert_match(/hive review/, out)
       ensure
         wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
         FileUtils.rm_rf(wt_path) if wt_path

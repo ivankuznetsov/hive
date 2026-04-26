@@ -49,9 +49,9 @@ module Hive
         command: "develop"
       },
       execute_complete: {
-        key: Hive::Schemas::TaskActionKind::READY_FOR_PR,
-        label: "Ready for PR",
-        command: "pr"
+        key: Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
+        label: "Ready for review",
+        command: "review"
       },
       execute_stale: {
         # Recovery path: the user must edit reviews/, lower task.md
@@ -62,6 +62,21 @@ module Hive
         key: Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
         label: "Needs recovery",
         command: "findings"
+      },
+      review_waiting: {
+        key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+        label: "Needs your input",
+        command: "review"
+      },
+      review_complete: {
+        key: Hive::Schemas::TaskActionKind::READY_FOR_PR,
+        label: "Ready for PR",
+        command: "pr"
+      },
+      review_stale: {
+        key: Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
+        label: "Needs recovery",
+        command: nil
       },
       pr_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
@@ -160,12 +175,25 @@ module Hive
         marker.name == :complete ? ACTIONS.fetch(:plan_complete) : ACTIONS.fetch(:plan_waiting)
       when "execute"
         execute_action
+      when "review"
+        review_action
       when "pr"
         marker.name == :complete ? ACTIONS.fetch(:pr_complete) : ACTIONS.fetch(:pr_waiting)
       when "done"
         ACTIONS.fetch(:done)
       else
         ACTIONS.fetch(:error)
+      end
+    end
+
+    def review_action
+      case marker.name
+      when :review_complete
+        ACTIONS.fetch(:review_complete)
+      when :review_stale, :review_ci_stale, :review_error
+        ACTIONS.fetch(:review_stale)
+      else
+        ACTIONS.fetch(:review_waiting)
       end
     end
 

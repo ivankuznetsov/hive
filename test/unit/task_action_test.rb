@@ -45,9 +45,14 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
-  def test_execute_complete_is_ready_for_pr
+  def test_execute_complete_is_ready_for_review
     task = fake_task(stage_name: "execute", stage_index: 4)
-    assert_equal "ready_for_pr", Hive::TaskAction.for(task, marker(:execute_complete)).key
+    assert_equal "ready_for_review", Hive::TaskAction.for(task, marker(:execute_complete)).key
+  end
+
+  def test_review_complete_is_ready_for_pr
+    task = fake_task(stage_name: "review", stage_index: 5)
+    assert_equal "ready_for_pr", Hive::TaskAction.for(task, marker(:review_complete)).key
   end
 
   def test_execute_waiting_with_findings_is_review_findings

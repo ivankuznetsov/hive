@@ -67,8 +67,8 @@ class ExitCodesTest < Minitest::Test
 
   def test_task_action_kind_closed_enum_membership
     expected = %w[
-      ready_to_brainstorm ready_to_plan ready_to_develop ready_for_pr ready_to_archive
-      needs_input review_findings recover_execute agent_running archived error
+      ready_to_brainstorm ready_to_plan ready_to_develop ready_for_review ready_for_pr ready_to_archive
+      needs_input review_findings recover_execute recover_review agent_running archived error
     ].sort
     assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort
   end

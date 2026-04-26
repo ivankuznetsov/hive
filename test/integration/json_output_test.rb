@@ -144,7 +144,7 @@ class JsonOutputTest < Minitest::Test
         assert_equal slug, next_action["slug"]
         assert_equal "5-review", next_action["from_stage"]
         assert_equal "6-pr", next_action["to_stage"]
-        assert_equal "hive approve #{slug} --from 5-review", next_action["command"]
+        assert_equal "hive pr #{slug} --from 5-review", next_action["command"]
       end
     end
   end
@@ -169,7 +169,7 @@ class JsonOutputTest < Minitest::Test
         assert_equal slug, next_action["slug"]
         assert_equal "4-execute", next_action["from_stage"]
         assert_equal "5-review", next_action["to_stage"]
-        assert_equal "hive approve #{slug} --from 4-execute", next_action["command"]
+        assert_equal "hive review #{slug} --from 4-execute", next_action["command"]
       end
     end
   end

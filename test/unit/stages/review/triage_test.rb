@@ -309,29 +309,22 @@ class TriageTest < Minitest::Test
 
   def test_unreadable_reviewer_file_substitutes_placeholder_in_block
     with_triage_dir do |_dir, task_folder|
-      ctx = make_ctx(nil, task_folder)
       reviews_dir = File.join(task_folder, "reviews")
       good = File.join(reviews_dir, "claude-ce-code-review-01.md")
       bad = File.join(reviews_dir, "codex-ce-code-review-01.md")
       File.write(good, "## High\n- [ ] real\n")
-      File.write(bad, "doesn't matter — read will be stubbed to raise\n")
+      File.write(bad, "should be unreadable\n")
 
-      Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_block, :build_reviewer_contents_block)
+      # Make `bad` unreadable to trigger the rescue path. chmod 0000
+      # produces Errno::EACCES on read; the rescue branch substitutes
+      # a placeholder rather than aborting triage.
+      File.chmod(0o000, bad)
       begin
-        File.stub(:read, ->(p, *args) {
-          raise Errno::ENOENT, p if p == bad
-
-          File.send(:__orig_read_for_test, p, *args) if File.respond_to?(:__orig_read_for_test)
-          # Fall through: re-read normally for any other path.
-          IO.read(p)
-        }) do
-          block = Hive::Stages::Review::Triage.build_reviewer_contents_block([ good, bad ], "tag1")
-          assert_includes block, "real", "good reviewer content must still be included"
-          assert_includes block, "reviewer file unreadable", "bad path must yield a placeholder"
-        end
+        block = Hive::Stages::Review::Triage.build_reviewer_contents_block([ good, bad ], "tag1")
+        assert_includes block, "real", "good reviewer content must still be included"
+        assert_includes block, "reviewer file unreadable", "unreadable path must yield a placeholder"
       ensure
-        Hive::Stages::Review::Triage.singleton_class.alias_method(:build_reviewer_contents_block, :__orig_block)
-        Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_block)
+        File.chmod(0o644, bad)
       end
     end
   end

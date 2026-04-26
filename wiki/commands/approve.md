@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [command, approval, json]
 ---
 
@@ -111,14 +111,22 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration
 
 ## Marker policy
 
+`Hive::Commands::Approve::VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete]` — the closed set that gates forward auto-advance. Each marker is written by exactly one stage and unblocks exactly one transition:
+
+| Marker | Written by | Unblocks `hive approve` |
+|--------|-----------|-------------------------|
+| `:complete`         | inert stages (1-inbox, 2-brainstorm, 3-plan, 6-pr, 7-done) | the next stage in the pipeline (e.g. `2-brainstorm` → `3-plan`) |
+| `:execute_complete` | `Stages::Execute` after the implementation phase finalizes | `4-execute` → `5-review` |
+| `:review_complete`  | `Stages::Review` after the autonomous loop finalizes | `5-review` → `6-pr` |
+
 | Direction | Marker required | Override |
 |-----------|-----------------|----------|
-| Forward auto (no `--to`) | `:complete`, `:execute_complete`, or `:review_complete` | `--force` |
-| Forward via `--to`       | `:complete`, `:execute_complete`, or `:review_complete` | `--force` |
-| Backward via `--to`      | none                                | n/a      |
-| Same stage (no-op)       | none                                | n/a      |
+| Forward auto (no `--to`) | one of `VALID_TERMINAL_MARKERS` | `--force` |
+| Forward via `--to`       | one of `VALID_TERMINAL_MARKERS` | `--force` |
+| Backward via `--to`      | none                            | n/a      |
+| Same stage (no-op)       | none                            | n/a      |
 
-`:error` is treated like any other non-terminal marker on forward auto — the message includes `marker is :error` so an agent can branch deterministically. Backward `--to` is the recovery lever (e.g. `hive approve <slug> --to 3-plan` after an execute crash).
+`:error`, `:waiting`, `:execute_waiting`, `:execute_stale`, `:review_waiting`, `:review_ci_stale`, `:review_stale`, `:review_error` are all non-terminal: they leave the task in place. The error message includes `marker is :<name>` so an agent can branch deterministically. Backward `--to` is the recovery lever (e.g. `hive approve <slug> --to 3-plan` after an execute crash). For the recovery markers (`:review_stale` / `:review_ci_stale` / `:review_error` / `:execute_stale` / `:error`) the agent-callable surface is `hive markers clear FOLDER --name <NAME>` — see [[commands/markers]].
 
 ## Idempotency: `--from`
 

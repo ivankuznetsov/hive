@@ -9,7 +9,7 @@ require "hive/commands/approve"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
-  def test_hive_approve_schema_file_exists_and_is_valid_json
+  def test_hive_approve_v2_schema_file_exists_and_is_valid_json
     path = Hive::Schemas.schema_path("hive-approve")
     assert File.exist?(path), "schema file missing: #{path}"
 
@@ -18,9 +18,37 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "hive-approve",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const"),
                  "SuccessPayload.schema.const must pin the schema name"
+    assert_equal 2,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
+                 "SuccessPayload.schema_version.const must pin v2 (current)"
+  end
+
+  # v1 (the original 6-stage schema) is preserved for external validators
+  # pinned to the pre-5-review release. Loading by explicit version: must
+  # still resolve.
+  def test_hive_approve_v1_schema_file_remains_for_back_compat
+    path = Hive::Schemas.schema_path("hive-approve", version: 1)
+    assert File.exist?(path), "v1 schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
     assert_equal 1,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
-                 "SuccessPayload.schema_version.const must pin v1"
+                 "v1 schema must still declare schema_version: 1"
+    # The original v1 enum had no `review` and ended at `6-done`.
+    v1_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
+    assert_includes v1_dirs, "5-pr",
+                    "v1 must keep its original enum (5-pr / 6-done) for pinned consumers"
+    refute_includes v1_dirs, "5-review",
+                    "v1 enum must NOT include the v2-introduced 5-review stage"
+  end
+
+  def test_hive_approve_v2_includes_review_stage
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
+    v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
+    assert_includes v2_dirs, "5-review", "v2 introduces the 5-review stage"
+    assert_includes v2_dirs, "6-pr"
+    assert_includes v2_dirs, "7-done"
+    refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
   end
 
   def test_hive_approve_success_required_keys_match_producer_emission
@@ -39,7 +67,7 @@ class SchemaFilesTest < Minitest::Test
     ].sort
 
     assert_equal producer_required, schema_required,
-                 "schema/producer required-key drift in hive-approve.v1.json"
+                 "schema/producer required-key drift in hive-approve.v2.json"
   end
 
   def test_hive_approve_error_kinds_match_producer_emission

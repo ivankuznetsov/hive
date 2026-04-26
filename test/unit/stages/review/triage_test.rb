@@ -272,6 +272,37 @@ class TriageTest < Minitest::Test
     end
   end
 
+  # --- partial-file cleanup on :error path (correctness #15) ---------
+  #
+  # If the triage spawn fails AFTER the agent wrote a partial
+  # reviews/escalations-NN.md, that file persists and the next
+  # `hive run` reads escalations_count > 0, branching into
+  # REVIEW_WAITING based on a corrupt artifact. The error path
+  # deletes the partial file before returning.
+  def test_error_path_cleans_partial_escalations_file
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+                 "## High\n- [ ] something: explain\n")
+
+      escalations = File.join(task_folder, "reviews", "escalations-01.md")
+      # The fake-claude writes a partial escalations file — but exits
+      # non-zero so the spawn returns :error. The cleanup step must
+      # then delete the partial file before Triage.run! returns.
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = escalations
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# partial — agent crashed mid-write\n- [ ] half-done\n"
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+      assert_equal :error, result.status,
+                   "spawn must surface as :error so the runner sets REVIEW_ERROR phase=triage"
+      refute File.exist?(escalations),
+             "partial escalations-01.md must be removed on the :error path so a subsequent " \
+             "`hive run` doesn't read escalations_count > 0 from a corrupt artifact"
+    end
+  end
+
   # --- discovery -------------------------------------------------------
 
   # --- R1: reviewer-file read failure is tolerated --------------------

@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-26
 tags: [cli, api]
 ---
 
@@ -20,11 +20,11 @@ tags: [cli, api]
 | `hive init [PROJECT_PATH]` | Bootstrap `.hive-state` orphan branch + worktree in a git project | `Hive::Commands::Init` | [[commands/init]] |
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project | `Hive::Commands::New` | [[commands/new]] |
 | `hive status` | Action-grouped task list across registered projects | `Hive::Commands::Status` | [[commands/status]] |
-| `hive brainstorm TARGET [--from STAGE]` | Start or re-run brainstorm by slug/path | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
-| `hive plan TARGET [--from STAGE]` | Promote completed brainstorm to plan, or re-run plan | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
-| `hive develop TARGET [--from STAGE]` | Promote completed plan to execute, or re-run execute | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
-| `hive pr TARGET [--from STAGE]` | Promote completed execute to PR, or re-run PR | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
-| `hive archive TARGET [--from STAGE]` | Promote completed PR to done, or re-run done | `Hive::Commands::StageAction` → approve/run | [[commands/run]] |
+| `hive brainstorm TARGET [--from STAGE]` | Start or re-run brainstorm by slug/path | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
+| `hive plan TARGET [--from STAGE]` | Promote completed brainstorm to plan, or re-run plan | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
+| `hive develop TARGET [--from STAGE]` | Promote completed plan to execute, or re-run execute | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
+| `hive pr TARGET [--from STAGE]` | Promote completed execute to PR, or re-run PR | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
+| `hive archive TARGET [--from STAGE]` | Promote completed PR to done, or re-run done | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive run TARGET` | Lower-level dispatcher for a slug or task folder | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
 | `hive findings TARGET [--pass N] [--stage STAGE]` | List GFM-checkbox findings in `reviews/ce-review-NN.md` (latest by default) | `Hive::Commands::Findings` | [[commands/findings]] |
@@ -37,7 +37,7 @@ tags: [cli, api]
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check).
-- `--json` is a `class_option` honoured by `status`, `run`, `approve`, `findings`, `accept-finding`, and `reject-finding`; other commands accept the flag silently so an automated caller can pass it uniformly. Each emits a typed JSON document on success AND a structured error envelope on every failure path.
+- `--json` is a `class_option` honoured by `status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, and the five workflow verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`). Each emits a typed JSON document on success AND a structured error envelope on every failure path. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission).
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works (without the rewrite, Thor would consume `--help` as the next positional argument).
 
 ## Exit-code contract (`Hive::ExitCodes`)
@@ -87,5 +87,5 @@ A few stage runners still call `warn`/`exit N` directly for non-bug user errors 
 ## Backlinks
 
 - [[architecture]]
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/approve]] · [[commands/findings]] · [[commands/stage_action]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]] · [[stages/done]]

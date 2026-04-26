@@ -341,5 +341,10 @@ Append-only log of all wiki operations.
 - `wiki/index.md` page count bumped 31 → 34.
 - `lib/hive/cli.rb` `class_option :json` comment refreshed to list all eight commands that honour the flag.
 
-**Tests:** 5 existing tests updated (intentional behavior changes around --from inclusion + final-stage no-op). RuboCop expected clean. New tests pending in next pass.
+**Tests:** 227 / 884 green (was 196 / 768 pre-remediation). RuboCop and Brakeman clean.
+
+- `test/unit/task_action_test.rb` (new) — pins the 13-action matrix, the `:agent_working` and `:execute_stale` carve-outs, and `--from <stage>` inclusion on every workflow-verb command.
+- `test/unit/schema_files_test.rb` — 4 new pins for `hive-stage-action`: file existence + draft, SuccessPayload required keys, ErrorPayload error_kind enum, NextAction.kind enum.
+- `test/integration/run_stage_action_test.rb` — coverage for the at-target branch, promote-and-run, archive idempotency no-op, `--from` retry-after-success rescue, and unified JSON envelope on each error path.
+- 5 existing tests updated for the intentional behaviour changes (--from now always emitted; final-stage emits NO_OP not RUN; archive no-op).
 

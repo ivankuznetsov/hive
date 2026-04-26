@@ -215,6 +215,17 @@ module Hive
       fix-prompt / ci-fix-prompt templates (Hive-Fix-Pass, Hive-Triage-Bias,
       Hive-Fix-Phase) are the source of truth for what counts as a fix-agent
       commit.
+
+      Examples:
+        hive metrics rollback-rate
+        hive metrics rollback-rate --days 30 --project writero --json
+
+      --project NAME matches the 'name' field of a registered project (see
+      hive status).
+      --days N is a positive integer count of calendar days; the command
+      walks 'git log --since="N days ago"'.
+
+      Exit codes: 0 success; 64 unknown subcommand or project; 70 git failure.
     DESC
     option :days, type: :numeric, desc: "limit window to commits within N days"
     option :project, type: :string, desc: "scope to one registered project"

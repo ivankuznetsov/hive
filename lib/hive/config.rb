@@ -243,6 +243,19 @@ module Hive
                 "review.reviewers[#{idx}] in #{describe_source(source_path)} must be a Hash; got #{entry.class}"
         end
 
+        # Required fields: presence + non-empty. Missing or blank values
+        # would otherwise NoMethodError or yield broken filenames mid-spawn
+        # (closes ce-code-review AC-6). Mirrors the framing used by the
+        # output_basename / agent checks below.
+        %w[name skill prompt_template].each do |field|
+          value = entry[field]
+          missing = value.nil? || (value.is_a?(String) && value.strip.empty?)
+          next unless missing
+
+          raise ConfigError,
+                "review.reviewers[#{idx}].#{field} in #{describe_source(source_path)} is missing"
+        end
+
         name = entry["name"]
         if name && (prev = seen_names[name])
           raise ConfigError,

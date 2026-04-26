@@ -138,4 +138,63 @@ class MetricsCommandTest < Minitest::Test
       assert_match(/no projects registered/, payload["message"])
     end
   end
+
+  # ── --days validation ──────────────────────────────────────────────────
+  # Thor coerces `--days 1.5` into a Float; the command class must
+  # reject anything that isn't a positive integer at construction time
+  # so the typed UsageError envelope (error_kind: "invalid_days") is
+  # produced before any git work runs.
+
+  def test_days_zero_exits_usage
+    with_registered_project do |_dir, _project|
+      _out, err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", days: 0).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/--days must be a positive integer/, err)
+    end
+  end
+
+  def test_days_negative_exits_usage
+    with_registered_project do |_dir, _project|
+      _out, err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", days: -3).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/--days must be a positive integer/, err)
+    end
+  end
+
+  def test_days_non_integer_exits_usage
+    with_registered_project do |_dir, _project|
+      _out, err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", days: 1.5).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/--days must be a positive integer/, err)
+    end
+  end
+
+  def test_days_valid_integer_succeeds
+    with_registered_project do |_dir, _project|
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", days: 30).call
+      end
+      assert_equal 0, status
+      assert_match(/total fix commits: 0/, out)
+    end
+  end
+
+  def test_days_invalid_json_emits_envelope
+    with_registered_project do |_dir, _project|
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Metrics.new("rollback-rate", days: 0, json: true).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+      payload = JSON.parse(out)
+      assert_equal "hive-metrics-rollback-rate", payload["schema"]
+      assert_equal "invalid_days", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+    end
+  end
 end

@@ -158,7 +158,7 @@ module Hive
         # review.ci, review.browser_test, per-reviewer) shares one
         # path-escape policy.
         def resolve_custom_template(custom, ctx)
-          state_dir = ctx_state_dir(ctx)
+          state_dir = hive_state_dir(ctx)
           # `custom` here is always a user-supplied path. Force the
           # custom-template branch by joining a leading `./` so the
           # resolver doesn't fall into the built-in branch when the
@@ -171,10 +171,12 @@ module Hive
           raise Hive::ConfigError, e.message.sub("prompt_template", "review.triage.custom_prompt")
         end
 
-        # Delegates to the shared helper so every review-stage consumer
-        # of resolve_template_path agrees on which directory counts as
-        # the templates root.
-        def ctx_state_dir(ctx)
+        # The project's .hive-state directory, derived from the context's
+        # task path (the context carries no direct project_root pointer).
+        # Delegates to the shared helper so every review-stage consumer of
+        # resolve_template_path agrees on which directory counts as the
+        # templates root.
+        def hive_state_dir(ctx)
           Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
         end
 

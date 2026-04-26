@@ -13,7 +13,7 @@ class StatusTest < Minitest::Test
     end
   end
 
-  def test_groups_tasks_by_stage_and_marks_markers
+  def test_groups_tasks_by_action_and_suggests_commands
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
@@ -33,8 +33,9 @@ class StatusTest < Minitest::Test
 
         out, _err = capture_io { Hive::Commands::Status.new.call }
         assert_includes out, project
-        assert_includes out, "1-inbox/"
-        assert_includes out, "2-brainstorm/"
+        assert_includes out, "Ready to brainstorm"
+        assert_includes out, "Needs your input"
+        assert_includes out, "hive brainstorm"
         assert_includes out, "⏸"
       end
     end

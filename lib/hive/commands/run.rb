@@ -6,17 +6,26 @@ require "hive/lock"
 require "hive/git_ops"
 require "hive/agent"
 require "hive/stages"
+require "hive/task_action"
+require "hive/task_resolver"
 
 module Hive
   module Commands
     class Run
-      def initialize(folder, json: false)
-        @folder = File.expand_path(folder)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false)
+        @target = target
+        @project_filter = project
+        @stage_filter = stage
         @json = json
+        @quiet = quiet
       end
 
       def call
-        task = Hive::Task.new(@folder)
+        task = Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
         cfg = Hive::Config.load(task.project_root)
 
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
@@ -65,7 +74,12 @@ module Hive
 
       def report(task, result)
         marker = Hive::Markers.current(task.state_file)
-        if @json
+        if @quiet
+          # Quiet mode: skip stdout/stderr but preserve the dual-signal
+          # raise on :error markers so composing callers (StageAction)
+          # can surface them in their own envelope.
+          raise Hive::TaskInErrorState, "stage recorded :error (#{marker.attrs.inspect})" if marker.name == :error
+        elsif @json
           report_json(task, result, marker)
         else
           report_text(task, result, marker)
@@ -102,7 +116,7 @@ module Hive
         kind = Hive::Schemas::NextActionKind
         case marker.name
         when :waiting, :execute_waiting
-          { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => "hive run #{task.folder}" }
+          { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => friendly_command(task, marker) }
         when :complete
           approve_action(task, next_stage_dir(task))
         when :execute_complete
@@ -132,7 +146,7 @@ module Hive
           "from_stage" => from_stage_dir,
           "to" => "#{dest_path}/",
           "to_stage" => File.basename(dest_path),
-          "command" => "hive approve #{task.slug} --from #{from_stage_dir}"
+          "command" => friendly_command(task, Hive::Markers.current(task.state_file))
         }
       end
 
@@ -141,12 +155,12 @@ module Hive
         puts "  state_file: #{task.state_file}"
         case marker.name
         when :waiting, :execute_waiting
-          puts "  next: edit the file, then `hive run #{task.folder}` again"
+          puts "  next: edit the file, then `#{friendly_command(task, marker)}` again"
         when :complete
-          next_stage = next_stage_dir(task)
-          puts "  next: mv #{task.folder} #{next_stage}/" if next_stage
+          command = friendly_command(task, marker)
+          puts "  next: #{command}" if command
         when :execute_complete
-          puts "  next: mv #{task.folder} #{File.join(task.hive_state_path, 'stages', '5-pr/')}"
+          puts "  next: #{friendly_command(task, marker)}"
         when :execute_stale
           puts "  next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run"
         when :error
@@ -160,6 +174,20 @@ module Hive
         return nil unless next_name
 
         File.join(task.hive_state_path, "stages", next_name)
+      end
+
+      def friendly_command(task, marker)
+        Hive::TaskAction.for(
+          task,
+          marker,
+          project_name: project_name_for(task),
+          project_count: Hive::Config.registered_projects.size
+        ).command
+      end
+
+      def project_name_for(task)
+        project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
+        project ? project["name"] : task.project_name
       end
     end
   end

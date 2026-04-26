@@ -10,10 +10,11 @@ module Hive
     # JSON document. Read-only; the agent-callable inspection step before
     # `hive accept-finding` / `hive reject-finding`.
     class Findings
-      def initialize(target, pass: nil, project: nil, json: false)
+      def initialize(target, pass: nil, project: nil, stage: nil, json: false)
         @target = target
         @pass = pass
         @project_filter = project
+        @stage_filter = stage
         @json = json
       end
 
@@ -31,7 +32,11 @@ module Hive
       private
 
       def do_call
-        task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+        task = Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
         review_path = Hive::Findings.review_path_for(task, pass: @pass)
         doc = Hive::Findings::Document.new(review_path)
         if @json

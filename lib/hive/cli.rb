@@ -7,8 +7,12 @@ module Hive
       true
     end
 
-    # `--json` is honoured by `status`, `run`, and `approve`; other commands
-    # accept the flag silently so an automated caller can pass it uniformly.
+    # `--json` is honoured by `status`, `run`, `approve`, `findings`,
+    # `accept-finding`, `reject-finding`, and the workflow verbs
+    # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `init` and `new`
+    # accept the flag silently so an automated caller can pass it
+    # uniformly. Each emitting command produces a typed JSON document on
+    # success and a structured error envelope on every failure path.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
@@ -32,12 +36,60 @@ module Hive
     end
     map "new" => :new_task
 
-    desc "run FOLDER", "Run the stage agent for the task at FOLDER"
-    def run_task(folder)
+    desc "run TARGET", "Run the stage agent for TARGET (slug or task folder)"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    def run_task(target)
       require "hive/commands/run"
-      Hive::Commands::Run.new(folder, json: options[:json]).call
+      Hive::Commands::Run.new(
+        target,
+        project: options[:project],
+        stage: options[:stage],
+        json: options[:json]
+      ).call
     end
     map "run" => :run_task
+
+    desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def brainstorm(target)
+      run_stage_action("brainstorm", target)
+    end
+
+    desc "plan TARGET", "Move a completed brainstorm task into plan, or run an existing plan task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def plan(target)
+      run_stage_action("plan", target)
+    end
+
+    desc "develop TARGET", "Move a completed plan task into execute, or run an existing execute task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def develop(target)
+      run_stage_action("develop", target)
+    end
+
+    desc "pr TARGET", "Move a completed execute task into PR, or run an existing PR task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def pr(target)
+      run_stage_action("pr", target)
+    end
+
+    desc "archive TARGET", "Move a completed PR task into done, or run an existing done task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def archive(target)
+      run_stage_action("archive", target)
+    end
 
     desc "status", "Show all active tasks across registered projects"
     def status
@@ -92,12 +144,15 @@ module Hive
     DESC
     option :pass, type: :numeric, desc: "review pass to inspect (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope slug lookup to one stage (default: any stage)"
     def findings(target)
       require "hive/commands/findings"
       Hive::Commands::Findings.new(
         target,
         pass: options[:pass],
         project: options[:project],
+        stage: options[:stage],
         json: options[:json]
       ).call
     end
@@ -115,12 +170,14 @@ module Hive
                       desc: "accept all findings of the given severity"
     option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope slug lookup to one stage (default: any stage)"
     def accept_finding(target, *ids)
       require "hive/commands/finding_toggle"
       Hive::Commands::FindingToggle.new(
         Hive::Commands::FindingToggle::ACCEPT,
         target, ids: ids, all: options[:all], severity: options[:severity],
-                pass: options[:pass], project: options[:project], json: options[:json]
+                pass: options[:pass], project: options[:project], stage: options[:stage], json: options[:json]
       ).call
     end
     map "accept-finding" => :accept_finding
@@ -136,14 +193,29 @@ module Hive
                       desc: "reject all findings of the given severity"
     option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope slug lookup to one stage (default: any stage)"
     def reject_finding(target, *ids)
       require "hive/commands/finding_toggle"
       Hive::Commands::FindingToggle.new(
         Hive::Commands::FindingToggle::REJECT,
         target, ids: ids, all: options[:all], severity: options[:severity],
-                pass: options[:pass], project: options[:project], json: options[:json]
+                pass: options[:pass], project: options[:project], stage: options[:stage], json: options[:json]
       ).call
     end
     map "reject-finding" => :reject_finding
+
+    no_commands do
+      def run_stage_action(verb, target)
+        require "hive/commands/stage_action"
+        Hive::Commands::StageAction.new(
+          verb,
+          target,
+          project: options[:project],
+          from: options[:from],
+          json: options[:json]
+        ).call
+      end
+    end
   end
 end

@@ -4,11 +4,23 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Ruby](https://img.shields.io/badge/ruby-3.4-red.svg)](.ruby-version)
 
-Folder-as-agent pipeline for software work. Each task lives in a directory; the directory's location *is* its stage (`1-inbox/` → `2-brainstorm/` → `3-plan/` → `4-execute/` → `5-pr/` → `6-done/`). `mv` between stage folders is the only approval gesture. Stage agents run as `claude -p` subprocesses, read from / write to the task folder, and exit.
+Hive is a local, folder-based pipeline for taking a software idea from rough note to pull request. Each task is a directory, and the directory's location is the task's stage:
 
-No daemon. No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and `mv` is the API.
+```text
+1-inbox -> 2-brainstorm -> 3-plan -> 4-execute -> 5-pr -> 6-done
+```
 
-**Status: Phase 1 MVP.** Single project pilot, single reviewer (`/compound-engineering:ce-review`), manual `hive run <folder>` per stage — multi-project daemon, observability probes, and Telegram bot are deferred.
+Stage agents run as `claude -p` subprocesses. They read the task folder, write their result back into that folder, and exit. You stay in control at each stage by approving the next move.
+
+No daemon. No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and the CLI is a small wrapper around ordinary folder moves and git commits.
+
+**Status:** local single-user pilot. The original `mv` workflow still works, but the current CLI also includes agent-callable commands for the common handoff points:
+
+- `hive status` shows current slugs grouped by the next useful action.
+- `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, and `hive archive` move-or-run tasks by slug.
+- `hive approve` remains the lower-level move command with marker checks, locking, retries, and JSON output.
+- `hive findings`, `hive accept-finding`, and `hive reject-finding` replace hand-editing review checkboxes.
+- `hive run`, `hive status`, `hive approve`, and findings commands have stable machine-readable contracts for agent callers.
 
 ## Install
 
@@ -35,47 +47,52 @@ Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep wor
 ```bash
 cd ~/Dev/your-project
 hive init .                                     # bootstrap orphan hive/state branch + .hive-state worktree
-hive new your-project 'add tag autocomplete'         # task lands in 1-inbox/<slug>/
+hive new your-project 'add tag autocomplete'    # task lands in 1-inbox/<slug>/
+hive status                                     # shows slugs grouped by next action
 
-# approve to start brainstorm
-mv .hive-state/stages/1-inbox/<slug> .hive-state/stages/2-brainstorm/
-hive run .hive-state/stages/2-brainstorm/<slug>
+# start brainstorm
+hive brainstorm <slug>
 
 # answer questions inline in brainstorm.md, save, re-run
-hive run .hive-state/stages/2-brainstorm/<slug>
+hive brainstorm <slug>
 
-# approve → plan
-mv .hive-state/stages/2-brainstorm/<slug> .hive-state/stages/3-plan/
-hive run .hive-state/stages/3-plan/<slug>
+# plan
+hive plan <slug>
 
-# approve → execute (feature worktree spawned at ~/Dev/your-project.worktrees/<slug>)
-mv .hive-state/stages/3-plan/<slug> .hive-state/stages/4-execute/
-hive run .hive-state/stages/4-execute/<slug>
+# develop
+hive develop <slug>
 
-# tick [x] on findings in reviews/ce-review-NN.md, re-run for next pass
-hive run .hive-state/stages/4-execute/<slug>
+# review findings, accept the ones to fix, then re-run execute
+hive findings <slug>
+hive accept-finding <slug> 1 3                  # or --severity high / --all
+hive develop <slug>
 
-# approve → PR
-mv .hive-state/stages/4-execute/<slug> .hive-state/stages/5-pr/
-hive run .hive-state/stages/5-pr/<slug>
+# open/update PR
+hive pr <slug>
 
 # after the PR merges: archive
-mv .hive-state/stages/5-pr/<slug> .hive-state/stages/6-done/
-hive run .hive-state/stages/6-done/<slug>       # prints worktree-cleanup commands
+hive archive <slug>                             # prints worktree-cleanup commands
 ```
+
+You can still move folders by hand when you want the lowest-level control. The CLI commands exist so agents and scripts can do the same work with predictable errors and JSON output.
 
 ## Daily usage
 
 | Command | What it does |
 |---------|--------------|
-| `hive new <project> '<text>'` | Capture an idea — writes `.hive-state/stages/1-inbox/<slug>/idea.md` and commits on `hive/state`. |
-| `mv` between stage folders | The original approval gesture. Still works; `hive approve` is the agent-callable equivalent. |
-| `hive approve <slug>` | Move a task to the next stage and record a hive/state commit. Use `--to <stage>` for explicit destinations (including backward recovery), `--from <stage>` to assert the current stage on retry, `--force` to bypass the terminal-marker check, `--json` for machine-readable output. Agent-callable equivalent of shell `mv`. |
-| `hive run <task-folder>` | Run the stage agent for the task at its current location. Idempotent; safe to re-run. |
-| `hive status` | Tabular view of every active task across all registered projects. Read-only. |
-| `hive findings <slug>` | List GFM-checkbox findings in the latest `reviews/ce-review-NN.md`. `--pass N` for a specific pass; `--json` for machine-readable. |
-| `hive accept-finding <slug> ID...` | Tick `[ ]` → `[x]` on review findings so they're re-injected into the next implementation pass. `--severity high` for all of one severity; `--all` for everything. |
-| `hive reject-finding <slug> ID...` | Inverse: tick `[x]` → `[ ]`. Same selectors. |
+| `hive new <project> '<text>'` | Capture an idea in `1-inbox/<slug>/idea.md` and commit it on `hive/state`. |
+| `hive status` | Show current slugs grouped by next action, with suggested commands. Read-only. |
+| `hive brainstorm <slug>` | Move an inbox task into brainstorm, or re-run an existing brainstorm task. |
+| `hive plan <slug>` | Move a completed brainstorm into plan, or re-run an existing plan task. |
+| `hive develop <slug>` | Move a completed plan into execute, or re-run an existing execute task. |
+| `hive pr <slug>` | Move a completed execute task into PR, or re-run an existing PR task. |
+| `hive archive <slug>` | Move a completed PR task into done, or re-run an existing done task. |
+| `hive run <target>` | Lower-level dispatcher for a slug or task folder. Safe to re-run. |
+| `hive approve <slug>` | Move a task to the next stage and commit the move on `hive/state`. Use `--from <stage>` for retry-safe automation, `--to <stage>` for explicit moves or recovery, `--force` when you intentionally bypass a marker check, and `--json` for agents. |
+| `hive findings <slug>` | List review findings from the latest `reviews/ce-review-NN.md`. Use `--pass N` for an older pass and `--json` for agents. |
+| `hive accept-finding <slug> ID...` | Mark selected findings as accepted (`[x]`) so the next execute pass fixes them. Select by IDs, `--severity high`, or `--all`. |
+| `hive reject-finding <slug> ID...` | Clear selected accepted findings back to unchecked (`[ ]`). Same selectors as `accept-finding`. |
+| `mv` between stage folders | The original low-level approval gesture. Still supported. |
 
 ## How it stays out of the way
 
@@ -145,6 +162,9 @@ Override individual keys; deep-merge keeps the rest at defaults. Budgets are san
 - **`plan.md missing`** in 4-execute — task didn't pass through `3-plan/`. Move it back, run plan, then forward again.
 - **`no worktree pointer`** in 5-pr — task didn't pass through `4-execute/`. Move it back through execute first.
 - **`worktree pointer present but worktree missing`** — `git -C <project> worktree prune`, delete `worktree.yml`, then re-run.
+- **`slug ... is ambiguous`** — the same slug exists in multiple projects or stages. Pass `--project <name>` for cross-project ambiguity, `--from <stage>` on workflow verbs, `--stage <stage>` on `run`/`findings`, or a full task folder path.
+- **`no finding with id=...`** — run `hive findings <slug>` again and use the IDs from the current review file. IDs are assigned by document order.
+- **`no findings selected`** — `accept-finding` / `reject-finding` need at least one selector: explicit IDs, `--severity <name>`, or `--all`.
 - **Stale `.lock`** — auto-cleared on next `hive run` when the recorded PID is dead. PID-reuse false positives are defended against by cross-checking `/proc/<pid>/stat` start time (Linux only).
 - **`EXECUTE_STALE`** in `task.md` — max review passes (default 4) hit. Edit `reviews/*.md` manually, decrement `pass:` in `task.md` frontmatter, remove the `<!-- EXECUTE_STALE … -->` marker, then `hive run` again.
 - **`reviewer_tampered`** in `task.md` — the reviewer agent edited `plan.md` or `worktree.yml` (it shouldn't). SHA-256 mismatch detected. Inspect the worktree, restore from git, re-run.

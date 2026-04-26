@@ -451,12 +451,19 @@ class RunApproveTest < Minitest::Test
         assert_equal Hive::Schemas::NextActionKind::RUN, next_action["kind"]
         assert_includes Hive::Schemas::NextActionKind::ALL, next_action["kind"]
         assert_match(%r{/3-plan/#{slug}\z}, next_action["folder"])
-        assert_match(%r{\Ahive run .*/3-plan/#{slug}\z}, next_action["command"])
+        # After advancing INTO 3-plan, "next" is "run the plan agent
+        # at 3-plan" — `hive plan <slug> --from 3-plan` hits StageAction's
+        # at-target branch. Emitting a verb that would advance OUT (e.g.
+        # `hive develop`) would refuse on the non-terminal marker.
+        assert_equal "hive plan #{slug} --from 3-plan", next_action["command"]
       end
     end
   end
 
-  def test_json_next_action_at_final_stage_is_no_op_with_reason
+  def test_json_next_action_at_final_stage_is_no_op
+    # An approve into 6-done has no next workflow step. Emitting `hive
+    # archive <slug>` here would send agent retry loops into a
+    # re-archive cycle (Done.run! always commits an "archived" entry).
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -821,9 +828,11 @@ class RunApproveTest < Minitest::Test
         assert_includes out, "hive: approved #{slug}"
         assert_includes out, "from:"
         assert_includes out, "to:"
-        # The "next: hive run" hint goes to stderr so a `... | jq`
+        # The "next:" hint goes to stderr so a `... | jq`
         # consumer who forgot --json doesn't get prose mixed with data.
-        assert_includes err, "next: hive run"
+        # Hint names the verb-to-run-at-the-new-stage so a copy-paste
+        # advances the pipeline rather than re-pointing at the old stage.
+        assert_includes err, "next: hive plan #{slug} --from 3-plan"
       end
     end
   end

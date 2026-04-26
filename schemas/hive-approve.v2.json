@@ -97,6 +97,7 @@
             "destination_collision",
             "final_stage",
             "wrong_stage",
+            "rollback_failed",
             "invalid_task_path",
             "error"
           ]

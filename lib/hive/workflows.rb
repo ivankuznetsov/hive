@@ -1,10 +1,11 @@
 module Hive
-  # Single source of truth for the five workflow verbs (brainstorm, plan,
-  # develop, pr, archive). Each verb advances a task from one stage to the
-  # next; `Hive::Commands::StageAction` consumes this map directly,
-  # `Hive::TaskAction` uses it to label the "ready to <verb>" status
-  # bucket per stage, and `Hive::Commands::Approve` / `FindingToggle`
-  # use it to derive the next-action command after a successful move.
+  # Single source of truth for the six workflow verbs (brainstorm, plan,
+  # develop, review, pr, archive). Each verb advances a task from one
+  # stage to the next; `Hive::Commands::StageAction` consumes this map
+  # directly, `Hive::TaskAction` uses it to label the "ready to <verb>"
+  # status bucket per stage, and `Hive::Commands::Approve` /
+  # `FindingToggle` use it to derive the next-action command after a
+  # successful move.
   #
   # Adding or removing a verb is a one-file change here.
   module Workflows
@@ -12,8 +13,9 @@ module Hive
       "brainstorm" => { source: "1-inbox", target: "2-brainstorm", force_source: true },
       "plan"       => { source: "2-brainstorm", target: "3-plan" },
       "develop"    => { source: "3-plan", target: "4-execute" },
-      "pr"         => { source: "4-execute", target: "5-pr" },
-      "archive"    => { source: "5-pr", target: "6-done" }
+      "review"     => { source: "4-execute", target: "5-review" },
+      "pr"         => { source: "5-review", target: "6-pr" },
+      "archive"    => { source: "6-pr", target: "7-done" }
     }.freeze
 
     # Reverse lookup by source: verb that advances OUT of stage_dir.

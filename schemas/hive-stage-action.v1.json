@@ -31,7 +31,7 @@
         "ok": { "const": true },
         "verb": {
           "type": "string",
-          "enum": ["brainstorm", "plan", "develop", "pr", "archive"]
+          "enum": ["brainstorm", "plan", "develop", "review", "pr", "archive"]
         },
         "phase": {
           "type": "string",
@@ -45,12 +45,12 @@
         "slug": { "type": "string" },
         "from_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr"],
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr"],
           "description": "The verb's documented source stage."
         },
         "to_stage_dir": {
           "type": "string",
-          "enum": ["2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"],
+          "enum": ["2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"],
           "description": "The verb's documented target stage."
         },
         "task_folder": {
@@ -78,7 +78,7 @@
         "ok": { "const": false },
         "verb": {
           "type": "string",
-          "enum": ["brainstorm", "plan", "develop", "pr", "archive"]
+          "enum": ["brainstorm", "plan", "develop", "review", "pr", "archive"]
         },
         "error_class": { "type": "string" },
         "error_kind": {
@@ -112,11 +112,13 @@
             "ready_to_brainstorm",
             "ready_to_plan",
             "ready_to_develop",
+            "ready_for_review",
             "ready_for_pr",
             "ready_to_archive",
             "needs_input",
             "review_findings",
             "recover_execute",
+            "recover_review",
             "agent_running",
             "archived",
             "error"

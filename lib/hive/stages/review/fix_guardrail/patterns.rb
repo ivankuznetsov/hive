@@ -46,13 +46,19 @@ module Hive
               description: "secret material added in a fix commit (AWS/GitHub/PEM/OpenAI/etc.). Auto-fix should never write a credential."
             },
             dotenv_edit: {
-              regex: /\A(?:\.env(?:\..+)?\z|secrets\.ya?ml\z|credentials\.ya?ml\z|\.npmrc\z|\.pypirc\z)/,
+              # `(?:\A|/)` so nested matches in monorepos / Rails apps
+              # also trip — apps/web/.env, config/credentials.yml.enc,
+              # packages/api/.npmrc — not just repo-root .env.
+              regex: %r{(?:\A|/)(?:\.env(?:\..+)?\z|secrets\.ya?ml\z|credentials\.ya?ml(?:\.enc)?\z|\.npmrc\z|\.pypirc\z)},
               severity: :high,
               targets: :file_path,
               description: ".env / secrets file edit: env/secret files often contain credentials and per-environment overrides; auto-fix shouldn't touch them."
             },
             dependency_lockfile_change: {
-              regex: /\A(?:Gemfile\.lock|package-lock\.json|pnpm-lock\.ya?ml|yarn\.lock|Cargo\.lock|go\.sum|poetry\.lock|Pipfile\.lock|composer\.lock|uv\.lock)\z/,
+              # `(?:\A|/)` so monorepo lockfiles match too —
+              # packages/y/package-lock.json, services/api/Gemfile.lock,
+              # apps/web/yarn.lock — not just repo-root.
+              regex: %r{(?:\A|/)(?:Gemfile\.lock|package-lock\.json|pnpm-lock\.ya?ml|yarn\.lock|Cargo\.lock|go\.sum|poetry\.lock|Pipfile\.lock|composer\.lock|uv\.lock)\z},
               severity: :medium,
               targets: :file_path,
               description: "lockfile churn during a fix pass: verify the change is an intended bump, not an accidental downgrade or arbitrary version drift."

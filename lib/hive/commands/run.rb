@@ -112,7 +112,9 @@ module Hive
         # caller receives the full JSON document AND a non-zero exit code
         # (3, TASK_IN_ERROR) as a dual signal.
         puts JSON.generate(payload)
-        raise Hive::TaskInErrorState, "stage recorded :error (#{marker.attrs.inspect})" if marker.name == :error
+        if [ :error, :review_error ].include?(marker.name)
+          raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
+        end
       end
 
       def json_next_action(task, marker)
@@ -120,13 +122,26 @@ module Hive
         case marker.name
         when :waiting, :execute_waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => friendly_command(task, marker) }
-        when :complete
+        when :complete, :execute_complete, :review_complete
           approve_action(task, next_stage_dir(task))
-        when :execute_complete
-          approve_action(task, File.join(task.hive_state_path, "stages", "6-pr"))
         when :execute_stale
           { "kind" => kind::RECOVER_STALE,
             "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }
+        when :review_waiting
+          { "kind" => kind::EDIT,
+            "target" => task.folder,
+            "instructions" => "toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, then re-run",
+            "rerun_with" => "hive run #{task.folder}" }
+        when :review_stale
+          { "kind" => kind::RECOVER_STALE,
+            "instructions" => "edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, " \
+                              "remove the REVIEW_STALE marker, then re-run",
+            "markers_to_clear" => [ "review_stale" ] }
+        when :review_ci_stale
+          { "kind" => kind::RECOVER_STALE,
+            "instructions" => "fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, " \
+                              "then re-run",
+            "markers_to_clear" => [ "review_ci_stale" ] }
         when :error
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
         else
@@ -159,16 +174,22 @@ module Hive
         case marker.name
         when :waiting, :execute_waiting
           puts "  next: edit the file, then `#{friendly_command(task, marker)}` again"
-        when :complete
+        when :complete, :execute_complete, :review_complete
           command = friendly_command(task, marker)
           puts "  next: #{command}" if command
-        when :execute_complete
-          puts "  next: #{friendly_command(task, marker)}"
         when :execute_stale
           puts "  next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run"
-        when :error
+        when :review_waiting
+          puts "  next: toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, " \
+               "then `hive run #{task.folder}`"
+        when :review_stale
+          puts "  next: edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, " \
+               "remove the REVIEW_STALE marker, then re-run"
+        when :review_ci_stale
+          puts "  next: fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, then re-run"
+        when :error, :review_error
           warn "  status: ERROR (#{marker.attrs.inspect})"
-          raise Hive::TaskInErrorState, "stage recorded :error (#{marker.attrs.inspect})"
+          raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
         end
       end
 

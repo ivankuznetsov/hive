@@ -231,6 +231,43 @@ class BrowserTestTest < Minitest::Test
     end
   end
 
+  def test_array_root_json_does_not_raise_and_yields_failed_with_descriptive_details
+    # Valid JSON whose root is an Array (or any non-Hash) used to crash
+    # parse_result_file with TypeError on `parsed["status"]`. Must now
+    # be handled as a malformed-result :failed attempt with a
+    # descriptive details string so the runner moves on.
+    with_browser_dir do |_dir, task_folder, ctx|
+      result_path = File.join(task_folder, "reviews", "browser-result-01-01.json")
+      FileUtils.mkdir_p(File.dirname(result_path))
+      File.write(result_path, '["passed"]')
+
+      parsed = Hive::Stages::Review::BrowserTest.parse_result_file(result_path)
+      assert_equal :failed, parsed[:status],
+                   "Array-root JSON must surface as :failed, not raise TypeError"
+      assert_includes parsed[:details], "non-hash JSON",
+                      "details must explain the root-type mismatch"
+      assert_includes parsed[:details], "Array",
+                      "details must name the actual root type"
+    end
+  end
+
+  def test_non_passed_status_preserves_raw_status_in_details
+    # When the agent emits a valid Hash with status="errored" / "skipped" /
+    # anything other than "passed", parse_result_file returns :failed but
+    # must surface the raw status_str so the user sees what the agent
+    # reported instead of a flat ":failed".
+    with_browser_dir do |_dir, task_folder, ctx|
+      result_path = File.join(task_folder, "reviews", "browser-result-01-01.json")
+      FileUtils.mkdir_p(File.dirname(result_path))
+      File.write(result_path, JSON.generate(status: "errored", summary: "x", details: "ctx"))
+
+      parsed = Hive::Stages::Review::BrowserTest.parse_result_file(result_path)
+      assert_equal :failed, parsed[:status]
+      assert_includes parsed[:details], "errored",
+                      "raw status_str must appear in details for non-passed outcomes"
+    end
+  end
+
   # --- prompt content --------------------------------------------------
 
   def test_prompt_invokes_ce_test_browser_skill_via_profile_syntax

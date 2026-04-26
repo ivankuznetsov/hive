@@ -12,7 +12,8 @@ module Hive
       "hive-run" => 1,
       "hive-approve" => 1,
       "hive-findings" => 1,
-      "hive-stage-action" => 1
+      "hive-stage-action" => 1,
+      "hive-metrics-rollback-rate" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use

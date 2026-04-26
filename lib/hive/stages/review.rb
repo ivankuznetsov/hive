@@ -421,7 +421,7 @@ module Hive
 
         statuses = []
         specs.each do |spec|
-          adapter = Hive::Reviewers.dispatch(spec, ctx)
+          adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
           # Wrap adapter.run! so a single reviewer raising (spawn-time
           # SystemCallError, network timeout in a custom adapter, …)
           # doesn't abort the whole reviewers phase. Treat as :error,
@@ -499,7 +499,7 @@ module Hive
 
       def spawn_fix_agent(task, cfg, ctx, accepted:)
         profile_name = cfg.dig("review", "fix", "agent") || "claude"
-        profile = Hive::AgentProfiles.lookup(profile_name)
+        profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
         template = cfg.dig("review", "fix", "prompt_template") || "fix_prompt.md.erb"
         template_path = Hive::Stages::Base.resolve_template_path(
           template,

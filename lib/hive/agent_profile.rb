@@ -118,6 +118,43 @@ module Hive
       override && !override.empty? ? override : @bin_default
     end
 
+    # Project-config override keys that may appear under
+    # `agents.<name>.<key>` in <hive-state>/config.yml. Each maps to an
+    # AgentProfile constructor kwarg. Unknown keys raise so a typo in
+    # config is surfaced loudly instead of silently ignored.
+    OVERRIDE_KEYS = {
+      "bin" => :bin_default,
+      "env_override" => :env_bin_override_key,
+      "min_version" => :min_version
+    }.freeze
+
+    # Return a new frozen profile with the given override keys applied.
+    # `overrides_hash` is a sub-hash of `agents.<name>` from the merged
+    # project config; nil/empty hashes return self unchanged.
+    #
+    # Validates every override key against OVERRIDE_KEYS; an unknown
+    # key raises Hive::ConfigError so a typo (`min_versn:`) fails the
+    # spawn at lookup time rather than silently keeping the old value.
+    def with_overrides(overrides_hash)
+      return self if overrides_hash.nil? || overrides_hash.empty?
+      unless overrides_hash.is_a?(Hash)
+        raise Hive::ConfigError,
+              "agents.#{@name} override must be a Hash; got #{overrides_hash.class}"
+      end
+
+      kwargs = construction_kwargs
+      overrides_hash.each do |key, value|
+        kwarg = OVERRIDE_KEYS[key.to_s]
+        unless kwarg
+          raise Hive::ConfigError,
+                "agents.#{@name}.#{key} is not a recognized override key " \
+                "(known: #{OVERRIDE_KEYS.keys.inspect})"
+        end
+        kwargs[kwarg] = value
+      end
+      self.class.new(**kwargs)
+    end
+
     # Verify the installed binary's version meets min_version.
     #
     # Cached per (bin, min_version) pair so repeated spawns in one process
@@ -178,6 +215,29 @@ module Hive
 
     def version_tuple(version_string)
       version_string.split(".").map(&:to_i)
+    end
+
+    # Snapshot of every kwarg the constructor takes, so with_overrides
+    # can build a sibling profile that differs only in the overridden
+    # fields. Mirrored 1:1 against `initialize`'s kwarg list — adding
+    # a new field requires updating both spots.
+    def construction_kwargs
+      {
+        name: @name,
+        bin_default: @bin_default,
+        env_bin_override_key: @env_bin_override_key,
+        headless_flag: @headless_flag,
+        permission_skip_flag: @permission_skip_flag,
+        add_dir_flag: @add_dir_flag,
+        budget_flag: @budget_flag,
+        output_format_flags: @output_format_flags.dup,
+        version_flag: @version_flag,
+        skill_syntax_format: @skill_syntax_format,
+        headless_supported: @headless_supported,
+        min_version: @min_version,
+        status_detection_mode: @status_detection_mode,
+        preflight: @preflight
+      }
     end
 
     class << self

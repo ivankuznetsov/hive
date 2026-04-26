@@ -144,6 +144,19 @@ module Hive
             "markers_to_clear" => [ "review_ci_stale" ] }
         when :error
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
+        when :review_error
+          # Surface phase + reason from the marker so polling agents can
+          # branch on the structured payload without parsing the marker
+          # themselves. Echoes every other attr (pass, files, …) under
+          # "error" so no signal is lost.
+          {
+            "kind" => Hive::Schemas::NextActionKind::NO_OP,
+            "phase" => marker.attrs["phase"],
+            "reason" => marker.attrs["reason"],
+            "error" => marker.attrs,
+            "instructions" => "investigate; clear the marker via " \
+                              "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+          }
         else
           { "kind" => Hive::Schemas::NextActionKind::NO_OP }
         end
@@ -189,6 +202,14 @@ module Hive
           puts "  next: fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, then re-run"
         when :error, :review_error
           warn "  status: ERROR (#{marker.attrs.inspect})"
+          if marker.name == :review_error
+            phase = marker.attrs["phase"]
+            reason = marker.attrs["reason"]
+            warn "  phase: #{phase}" if phase
+            warn "  reason: #{reason}" if reason
+            warn "  next: investigate; clear the marker via " \
+                 "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+          end
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
         end
       end

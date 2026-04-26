@@ -69,4 +69,49 @@ class AgentProfilesTest < Minitest::Test
     assert Hive::AgentProfiles.registered?(:claude)
     refute Hive::AgentProfiles.registered?(:nonexistent)
   end
+
+  # --- agents.* config overrides --------------------------------------
+
+  def test_lookup_with_cfg_applies_bin_override
+    cfg = { "agents" => { "claude" => { "bin" => "/opt/custom/claude" } } }
+    profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+    refute_same Hive::AgentProfiles.lookup(:claude), profile
+    assert_equal "/opt/custom/claude", profile.bin_default
+    # Registry-stored profile must NOT be mutated.
+    assert_equal "claude", Hive::AgentProfiles.lookup(:claude).bin_default
+  end
+
+  def test_lookup_with_cfg_applies_min_version_override
+    cfg = { "agents" => { "claude" => { "min_version" => "99.99.99" } } }
+    profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+    assert_equal "99.99.99", profile.min_version
+  end
+
+  def test_lookup_with_cfg_returns_registered_profile_when_no_override
+    cfg = { "agents" => { "codex" => { "bin" => "/opt/codex" } } }
+    profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+    assert_same Hive::AgentProfiles.lookup(:claude), profile
+  end
+
+  def test_lookup_with_cfg_returns_registered_profile_when_cfg_nil
+    profile = Hive::AgentProfiles.lookup(:claude, cfg: nil)
+    assert_same Hive::AgentProfiles.lookup(:claude), profile
+  end
+
+  def test_lookup_with_cfg_raises_config_error_on_unknown_override_key
+    cfg = { "agents" => { "claude" => { "min_versn" => "1.2.3" } } }
+    err = assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+    end
+    assert_match(/min_versn/, err.message)
+    assert_match(/agents\.claude/, err.message)
+  end
+
+  def test_lookup_with_cfg_accepts_string_or_symbol_name_for_overrides
+    cfg = { "agents" => { "codex" => { "bin" => "/opt/codex" } } }
+    by_sym = Hive::AgentProfiles.lookup(:codex, cfg: cfg)
+    by_str = Hive::AgentProfiles.lookup("codex", cfg: cfg)
+    assert_equal "/opt/codex", by_sym.bin_default
+    assert_equal "/opt/codex", by_str.bin_default
+  end
 end

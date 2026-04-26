@@ -57,6 +57,11 @@ module Hive
           max_attempts = cfg.dig("review", "ci", "max_attempts") || 3
           tail_lines = cfg.dig("review", "ci", "tail_lines") || DEFAULT_TAIL_LINES
           max_bytes = cfg.dig("review", "ci", "max_log_bytes") || DEFAULT_MAX_LOG_BYTES
+          # Per-attempt timeout for the CI subprocess itself. Reuses the
+          # same review_ci budget that gates fix-agent spawns; a single
+          # knob covers both halves of the loop. Default 600s matches
+          # Config::DEFAULTS.timeout_sec.review_ci.
+          timeout_sec = cfg.dig("timeout_sec", "review_ci") || 600
 
           attempts = 0
           last_output = nil
@@ -77,18 +82,23 @@ module Hive
             end
 
             attempts += 1
-            run_result = run_ci_once(command, ctx.worktree_path, max_bytes)
+            run_result = run_ci_once(command, ctx.worktree_path, max_bytes, timeout_sec)
             return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
 
             output = clean_output(run_result.combined, tail_lines)
             last_output = output
 
+            # exit_code can be nil when the subprocess was killed by a
+            # signal (e.g., SIGPIPE after the reader hit max_bytes and
+            # closed the pipe). Treat nil as non-zero so the loop falls
+            # through to the :stale / fix-agent path; only a clean
+            # exit-0 counts as :green.
             return Result.new(
               status: :green,
               attempts: attempts,
               last_output: output,
               error_message: nil
-            ) if run_result.exit_code.zero?
+            ) if run_result.exit_code && run_result.exit_code.zero?
 
             if attempts >= max_attempts
               return Result.new(
@@ -152,10 +162,13 @@ module Hive
           "[... #{truncated_count} earlier lines truncated; showing last #{tail_lines} ...]\n#{tail}"
         end
 
-        # Run the CI command once, capturing combined stdout+stderr up
-        # to max_bytes. Returns a struct so the caller can branch on
-        # error vs result before classifying as :green / :red.
-        def run_ci_once(command, cwd, max_bytes)
+        # Run the CI command once with a per-attempt timeout, streaming
+        # combined stdout+stderr through a pipe and capping at max_bytes
+        # *during* the read so a runaway CI command can't OOM the host.
+        # On timeout the subprocess group is TERM'd then KILL'd (same
+        # pattern as Hive::Agent#spawn_and_wait) and a CommandError is
+        # returned so the caller's :error path covers it.
+        def run_ci_once(command, cwd, max_bytes, timeout_sec)
           # Always exec directly — no `sh -c` indirection. A String
           # command is shellword-split (so `bin/ci --flag` works as
           # YAML); an Array is exec'd as-is (so paths with spaces or
@@ -164,24 +177,120 @@ module Hive
           # exit-127, letting the caller distinguish "binary doesn't
           # exist" from "CI ran but failed."
           cmd = command.is_a?(Array) ? command : Shellwords.split(command.to_s)
-          if cmd.empty?
-            return CommandError.new("CI command is empty after parsing")
-          end
+          return CommandError.new("CI command is empty after parsing") if cmd.empty?
 
           begin
-            stdout, stderr, status = Open3.capture3(*cmd, chdir: cwd, binmode: true)
+            pipe_r, pipe_w = IO.pipe
+            pid = Process.spawn(*cmd, chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w)
+            pipe_w.close
           rescue Errno::ENOENT, Errno::EACCES => e
-            return CommandError.new("CI command not runnable: #{cmd.first.inspect} (#{e.class.name.split('::').last}: #{e.message})")
+            pipe_r&.close unless pipe_r&.closed?
+            pipe_w&.close unless pipe_w&.closed?
+            return CommandError.new(
+              "CI command not runnable: #{cmd.first.inspect} " \
+              "(#{e.class.name.split('::').last}: #{e.message})"
+            )
           rescue StandardError => e
+            pipe_r&.close unless pipe_r&.closed?
+            pipe_w&.close unless pipe_w&.closed?
             return CommandError.new("CI command failed to launch: #{e.message}")
           end
 
-          combined = stdout.to_s + stderr.to_s
-          combined = combined.byteslice(-max_bytes, max_bytes) if combined.bytesize > max_bytes
+          combined = +""
+          # Reader keeps draining the pipe so the producer doesn't block
+          # or die with SIGPIPE, but appends only up to max_bytes into
+          # the captured buffer. Once the cap is hit we read-and-drop
+          # remaining bytes — bound memory, clean subprocess exit. The
+          # downstream consumer tail-truncates by line count in
+          # clean_output.
+          reader = Thread.new do
+            buf = +""
+            capped = false
+            loop do
+              chunk = pipe_r.read_nonblock(4096, exception: false)
+              if chunk == :wait_readable
+                IO.select([ pipe_r ], nil, nil, 0.1)
+                next
+              end
+              break if chunk.nil?
+
+              next if capped
+
+              remaining = max_bytes - buf.bytesize
+              if remaining <= 0
+                capped = true
+                next
+              end
+
+              buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
+            end
+            combined.replace(buf)
+          rescue EOFError, IOError
+            nil
+          ensure
+            pipe_r.close unless pipe_r.closed?
+          end
+
+          pgid = begin
+            Process.getpgid(pid)
+          rescue Errno::ESRCH
+            pid
+          end
+
+          deadline = Time.now + timeout_sec
+          status = nil
+          loop do
+            if Time.now > deadline
+              kill_process_group(pgid, pid)
+              reader.join(2)
+              reader.kill if reader.alive?
+              return CommandError.new("CI command timed out after #{timeout_sec}s")
+            end
+            _, status = Process.wait2(pid, Process::WNOHANG)
+            break if status
+
+            sleep 0.1
+          end
+          reader.join(2)
+          reader.kill if reader.alive?
+
           combined.force_encoding(Encoding::UTF_8)
           combined.scrub!("?") # replace invalid UTF-8 sequences
 
           Run.new(combined, status.exitstatus)
+        end
+
+        # TERM the process group, give it 3s to drain, then KILL.
+        # Mirrors Hive::Agent#sleep_grace_then_kill so a hung CI
+        # subprocess can't survive the timeout window.
+        def kill_process_group(pgid, pid)
+          begin
+            Process.kill("TERM", -pgid)
+          rescue Errno::ESRCH, Errno::EPERM
+            nil
+          end
+          grace_deadline = Time.now + 3
+          until Time.now >= grace_deadline
+            reaped =
+              begin
+                Process.wait(pid, Process::WNOHANG)
+              rescue Errno::ECHILD
+                pid
+              end
+            return if reaped
+
+            sleep 0.1
+          end
+          begin
+            Process.kill("KILL", -pgid)
+          rescue Errno::ESRCH, Errno::EPERM
+            nil
+          end
+          begin
+            Process.wait(pid)
+          rescue Errno::ECHILD
+            nil
+          end
         end
 
         Run = Struct.new(:combined, :exit_code)
@@ -212,7 +321,7 @@ module Hive
 
         def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:)
           profile_name = cfg.dig("review", "ci", "agent") || "claude"
-          profile = Hive::AgentProfiles.lookup(profile_name)
+          profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
 
           template = cfg.dig("review", "ci", "prompt_template") || "ci_fix_prompt.md.erb"
           template_path = Hive::Stages::Base.resolve_template_path(

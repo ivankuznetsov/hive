@@ -69,7 +69,7 @@ class RunReviewersTest < Minitest::Test
         RaisingReviewer.new(cfg["review"]["reviewers"][0], make_ctx(dir)),
         OkReviewer.new(cfg["review"]["reviewers"][1], make_ctx(dir))
       ]
-      Hive::Reviewers.define_singleton_method(:dispatch) do |_spec, _ctx|
+      Hive::Reviewers.define_singleton_method(:dispatch) do |_spec, _ctx, **_kwargs|
         a = adapters[idx]
         idx += 1
         a

@@ -113,4 +113,47 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile
     assert_nil profile.preflight!
   end
+
+  # --- with_overrides ---------------------------------------------------
+
+  def test_with_overrides_returns_self_for_nil_or_empty
+    profile = make_profile
+    assert_same profile, profile.with_overrides(nil)
+    assert_same profile, profile.with_overrides({})
+  end
+
+  def test_with_overrides_replaces_bin_default
+    profile = make_profile(bin_default: "claude")
+    overridden = profile.with_overrides("bin" => "/opt/custom/claude")
+    refute_same profile, overridden
+    assert_equal "/opt/custom/claude", overridden.bin_default
+    # Original profile is not mutated.
+    assert_equal "claude", profile.bin_default
+  end
+
+  def test_with_overrides_replaces_min_version
+    profile = make_profile(min_version: "1.0.0")
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+    assert_equal "9.9.9", overridden.min_version
+  end
+
+  def test_with_overrides_replaces_env_override_key
+    profile = make_profile(env_bin_override_key: "HIVE_CLAUDE_BIN")
+    overridden = profile.with_overrides("env_override" => "MY_CUSTOM_BIN")
+    assert_equal "MY_CUSTOM_BIN", overridden.env_bin_override_key
+  end
+
+  def test_with_overrides_raises_for_unknown_key
+    profile = make_profile
+    err = assert_raises(Hive::ConfigError) do
+      profile.with_overrides("not_a_real_key" => "x")
+    end
+    assert_match(/not_a_real_key/, err.message)
+  end
+
+  def test_with_overrides_returns_frozen_profile
+    profile = make_profile
+    overridden = profile.with_overrides("bin" => "/x")
+    assert overridden.frozen?
+  end
 end

@@ -92,7 +92,7 @@ module Hive
           File.delete(result_path) if File.exist?(result_path)
 
           profile_name = cfg.dig("review", "browser_test", "agent") || "claude"
-          profile = Hive::AgentProfiles.lookup(profile_name)
+          profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
           template = cfg.dig("review", "browser_test", "prompt_template") || "browser_test_prompt.md.erb"
           template_path = Hive::Stages::Base.resolve_template_path(
             template,

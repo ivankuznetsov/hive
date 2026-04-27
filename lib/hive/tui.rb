@@ -88,7 +88,7 @@ module Hive
       when :filter then handle_filter_prompt(grid_state, snapshot) if snapshot
       when :flash then grid_state.flash!(payload)
       when :dispatch_command then Hive::Tui::Subprocess.takeover!(payload)
-      when :help then grid_state.flash!("help overlay not yet wired (U8)")
+      when :help then show_help_overlay
       when :open_findings then run_triage(payload, grid_state)
       when :open_log_tail then run_log_tail(payload, grid_state)
       when :open_editor then grid_state.flash!("Enter on needs_input lands in a later unit")
@@ -187,6 +187,15 @@ module Hive
       new_doc = Hive::Findings::Document.new(review_path)
       indicator = triage_state.relocate_cursor(new_doc.findings)
       renderer.flash!("review file changed; cursor reset") if indicator == :reset
+    end
+
+    # `?` overlay — paint the keybinding modal and block on a single
+    # `getch` to dismiss. The render loop repaints the underlying grid
+    # on the next iteration so we don't have to remember the prior
+    # frame here.
+    def self.show_help_overlay
+      require "hive/tui/render/help_overlay"
+      Hive::Tui::Render::HelpOverlay.new.show
     end
 
     # Log-tail subloop — open the latest `<state>/logs/<slug>/*.log`

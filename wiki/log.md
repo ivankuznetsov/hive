@@ -2,6 +2,22 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-27T12:00:00Z] U2–U11 + polish — `hive tui` feature complete
+
+**Action:** Remaining `hive tui` units landed on top of U1: U2 `StateSource`/`Snapshot` (1Hz polling, 5s stalled banner), U3 `KeyMap` (single source-of-truth keystroke→action), U4 `Subprocess.takeover!` / `run_quiet!` + `SubprocessRegistry`, U5 status grid + `GridState`, U6 findings triage mode (`a`/`r` rebind to bulk accept/reject), U7 agent log tail, U8 help overlay + workflow-verb cross-check, U9 SIGHUP / `at_exit` / `KEY_RESIZE` handling, U11 PTY smoke test (`bin/hive tui` boots, paints first frame, `q` exits 0). Then `bcf66cd` applied 13 of 32 ce-code-review findings on top.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` already covers the full surface (modes table, keybindings, verb-refusal-on-`agent_running`, `claude_pid_alive` reaping, `Subprocess.takeover!` 5-step protocol, `run_quiet!` for findings toggles, terminal-hostility section incl. SIGWINCH / SIGTSTP / SIGHUP / `at_exit`, `--json` rejection, full test surface). No further edit needed — landed alongside U1 with the units in mind.
+
+**Code changes (referenced from wiki):**
+- `lib/hive/tui/state_source.rb`, `snapshot.rb`, `key_map.rb`, `subprocess.rb`, `subprocess_registry.rb`, `grid_state.rb`, `triage_state.rb`, `log_tail/file_resolver.rb`, `help.rb` — the per-unit modules referenced by the existing `wiki/commands/tui.md` "Test surface" section.
+- `test/integration/tui_subprocess_test.rb`, `test/smoke/tui_smoke_test.rb` — pin the curses tty round-trip and end-to-end PTY boot.
+- `CHANGELOG.md` — `[Unreleased]` records `hive tui` (commit `643ce67`).
+
+**Key decisions:**
+- **No render-layer snapshot tests.** Mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing; the data path is unit-tested per-module and the curses round-trip is pinned by the PTY smoke test. Documented in `wiki/commands/tui.md` "Test surface".
+- **Wiki refresh stays scoped to `commands/tui.md`.** No stage runner changed; the TUI dispatches the same Thor verbs a human would type. `wiki/stages/` is intentionally untouched.
+
 ## [2026-04-27T00:00:00Z] U1 — `hive tui` bootstrap
 
 **Action:** First implementation unit of the `hive tui` plan ([docs/plans/2026-04-27-001-feat-hive-tui-plan.md](../docs/plans/2026-04-27-001-feat-hive-tui-plan.md)). Adds the Thor command, the `Hive::Tui.run` skeleton, and the `curses` runtime gem. Subsequent units (U2–U11) replace the skeleton render loop with the real polling + render machinery. Wiki entries land alongside the command's first appearance per `CLAUDE.md` "wiki maintained alongside code".

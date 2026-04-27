@@ -112,9 +112,21 @@ module Hive
         case row.action_key
         when "review_findings" then [ :open_findings, row ]
         when "agent_running" then [ :open_log_tail, row ]
-        when "needs_input" then [ :open_editor, row ]
+        when "needs_input" then needs_input_action(row)
         else enter_fallback(row)
         end
+      end
+
+      # Enter on a `needs_input` row dispatches the row's suggested
+      # command — same effect as pressing the verb keystroke for that
+      # action. The earlier $EDITOR integration was removed because the
+      # spawn-an-editor-from-curses dance broke alt-screen handoff on
+      # several terminals; the TUI is for keystroke-driven dispatch,
+      # editing belongs in the user's own shell.
+      def needs_input_action(row)
+        return [ :flash, "no command available — task is #{row.action_label}" ] if row.suggested_command.nil?
+
+        [ :dispatch_command, Shellwords.split(row.suggested_command) ]
       end
 
       def enter_fallback(row)

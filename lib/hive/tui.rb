@@ -169,11 +169,10 @@ module Hive
       when :project_scope then grid_state.set_scope(payload, snapshot) if snapshot
       when :filter then handle_filter_prompt(grid_state, snapshot) if snapshot
       when :flash then grid_state.flash!(payload)
-      when :dispatch_command then Hive::Tui::Subprocess.takeover!(payload)
+      when :dispatch_command then dispatch_and_flash_on_error(payload, grid_state)
       when :help then show_help_overlay
       when :open_findings then run_triage(payload, grid_state)
       when :open_log_tail then run_log_tail(payload, grid_state)
-      when :open_editor then run_editor(payload, grid_state)
       end
       nil
     end
@@ -251,33 +250,14 @@ module Hive
       return unless finding
 
       argv = triage_state.toggle_command(finding)
-      announce_subprocess(renderer, argv)
       exit_status, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
       reload_or_flash(triage_state, renderer, review_path, exit_status: exit_status, err: err)
     end
 
     def self.run_bulk(triage_state, renderer, review_path, direction)
       argv = triage_state.bulk_command(direction)
-      announce_subprocess(renderer, argv)
       exit_status, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
       reload_or_flash(triage_state, renderer, review_path, exit_status: exit_status, err: err)
-    end
-
-    # Paint an inline "running…" status on the bottom row before
-    # run_quiet! blocks the render thread for ~150ms+ of subprocess
-    # startup. We bypass the renderer's flash buffer (which only
-    # repaints on the next draw call — too late) and write directly
-    # to Curses so the feedback appears synchronously, before the
-    # blocking spawn. KTD-4 accepted the per-keystroke spawn cost
-    # but didn't address the perceived-frozen gap; this closes it.
-    def self.announce_subprocess(_renderer, argv)
-      return unless defined?(Curses) && Curses.respond_to?(:refresh)
-
-      verb = argv[1].to_s
-      Curses.setpos(Curses.lines - 1, 0)
-      Curses.clrtoeol
-      Curses.addstr("running #{verb}…")
-      Curses.refresh
     end
 
     # On non-zero exit we surface stderr in the status line and keep the
@@ -310,24 +290,19 @@ module Hive
       Hive::Tui::Render::HelpOverlay.new.show
     end
 
-    # Spawn $EDITOR (with VISUAL fallback, then `vi`) on the row's
-    # state file via a full-screen takeover so vim/emacs/nano gets a
-    # cooked-mode tty. Shellsplit so a configured `EDITOR="vim -p"`
-    # works without re-introducing a shell layer.
-    def self.run_editor(row, grid_state)
-      require "shellwords"
-      editor = ENV["EDITOR"] || ENV["VISUAL"] || "vi"
-      Hive::Tui::Debug.log("editor", "row.state_file=#{row.state_file.inspect} EDITOR=#{editor.inspect}")
-      if editor.to_s.strip.empty?
-        grid_state.flash!("$EDITOR not set; cannot open #{File.basename(row.state_file.to_s)}")
-        return
-      end
+    # Wraps Subprocess.takeover! so the exit code lands as a flash on
+    # the next grid render — replaces the previous interactive
+    # "press Enter to acknowledge" prompt that broke the read in
+    # curses-mangled termios. The user sees the failure in the status
+    # line for the flash TTL (5s by default) without an extra
+    # keystroke; the actual subprocess output already scrolled past
+    # while curses was suspended.
+    def self.dispatch_and_flash_on_error(argv, grid_state)
+      verb = argv[1] || argv.first
+      exit_code = Hive::Tui::Subprocess.takeover!(argv)
+      return if exit_code.nil? || exit_code.zero?
 
-      argv = Shellwords.split(editor) + [ row.state_file ]
-      Hive::Tui::Debug.log("editor", "argv=#{argv.inspect} exists=#{File.exist?(row.state_file.to_s)}")
-      exit_status = Hive::Tui::Subprocess.takeover!(argv)
-      Hive::Tui::Debug.log("editor", "exited #{exit_status}")
-      grid_state.flash!("editor exited #{exit_status}") if exit_status != 0
+      grid_state.flash!("`#{verb}` exited #{exit_code}")
     end
 
     # Log-tail subloop — open the latest `<state>/logs/<slug>/*.log`
@@ -401,10 +376,11 @@ module Hive
     # explicit and refactor-safe.
     private_class_method :install_terminal_safety_hooks, :restore_terminal_safety_hooks,
                          :run_loop, :render_dispatch_loop,
-                         :handle_action, :run_triage, :resolve_review_path, :triage_loop,
+                         :handle_action, :dispatch_and_flash_on_error,
+                         :run_triage, :resolve_review_path, :triage_loop,
                          :handle_triage_action, :takeover_and_return, :run_toggle, :run_bulk,
-                         :reload_or_flash, :announce_subprocess,
-                         :show_help_overlay, :run_editor,
+                         :reload_or_flash,
+                         :show_help_overlay,
                          :run_log_tail, :resolve_log_path,
                          :log_tail_loop,
                          :handle_filter_prompt

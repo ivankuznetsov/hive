@@ -168,11 +168,26 @@ class TuiKeyMapTest < Minitest::Test
                  Hive::Tui::KeyMap.dispatch(mode: :grid, key: :key_enter, row: row)
   end
 
-  def test_grid_enter_on_needs_input_opens_editor
+  def test_grid_enter_on_needs_input_dispatches_suggested_command
+    # Enter on needs_input runs the row's suggested verb (same as
+    # pressing the verb keystroke for that row). The earlier
+    # $EDITOR-spawn integration was removed because the alt-screen
+    # handoff broke on several terminals; editing belongs in the
+    # user's own shell.
+    row = make_row(action_key: "needs_input",
+                   suggested_command: "hive plan some-slug --project demo --from 3-plan",
+                   action_label: "Needs your input")
+    action, payload = Hive::Tui::KeyMap.dispatch(mode: :grid, key: :key_enter, row: row)
+    assert_equal :dispatch_command, action
+    assert_equal [ "hive", "plan", "some-slug", "--project", "demo", "--from", "3-plan" ], payload
+  end
+
+  def test_grid_enter_on_needs_input_with_no_command_flashes
     row = make_row(action_key: "needs_input", suggested_command: nil,
-                   action_label: "Needs input")
-    assert_equal [ :open_editor, row ],
-                 Hive::Tui::KeyMap.dispatch(mode: :grid, key: :key_enter, row: row)
+                   action_label: "Needs your input")
+    action, message = Hive::Tui::KeyMap.dispatch(mode: :grid, key: :key_enter, row: row)
+    assert_equal :flash, action
+    assert_match(/Needs your input/, message)
   end
 
   def test_grid_enter_on_ready_with_command_dispatches

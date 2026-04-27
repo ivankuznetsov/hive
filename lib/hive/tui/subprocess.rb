@@ -59,18 +59,9 @@ module Hive
           rescue Errno::ENOENT, Errno::EACCES => e
             exit_code = COMMAND_NOT_FOUND_EXIT
             Hive::Tui::Debug.log("takeover", "errno=#{e.class.name}: #{e.message}")
-            warn_command_not_found(argv)
           ensure
             SubprocessRegistry.clear
             restore_traps(prev_int, prev_term)
-            # Pause BEFORE restore_termios — pre_termios was captured
-            # after curses init, so it's in curses-raw mode (cbreak +
-            # noecho). Calling $stdin.gets after a raw-mode restore
-            # produces no echo and never reaches a newline, so the
-            # prompt would freeze the TUI. The child exited via endwin
-            # which already left the tty in shell/cooked mode, so the
-            # pause sees a normal terminal here.
-            pause_for_acknowledgement(exit_code, argv) if exit_code && exit_code != 0
             restore_termios(pre_termios)
             Hive::Tui::Debug.log("takeover", "ensure done; about to restore_curses_state")
           end
@@ -232,52 +223,6 @@ module Hive
         return 128 + status.termsig if status.signaled?
 
         -1
-      end
-
-      # Curses is suspended at this point and termios is back in cooked
-      # mode, so a regular `gets` reads one line from the user's
-      # terminal. Without this pause the next `restore_curses_state`
-      # call clears the screen the moment takeover! returns, wiping
-      # any error message the child wrote (e.g. `hive pr` exit 4
-      # "cannot advance ..."). The user would then see nothing happen.
-      def pause_for_acknowledgement(exit_code, argv)
-        console = IO.console
-        unless console
-          Hive::Tui::Debug.log("pause", "skipped (no controlling terminal); exit=#{exit_code}")
-          return
-        end
-
-        verb = argv[1] || argv.first
-        Hive::Tui::Debug.log("pause", "prompting; exit=#{exit_code} verb=#{verb.inspect}")
-        $stderr.puts
-        $stderr.puts "[hive tui] `#{verb}` exited #{exit_code} — press Enter to return to grid..."
-        $stderr.flush
-        begin
-          # Force cooked + ICRNL + ICANON for the duration of the read.
-          # `endwin` only reverses the curses-set cbreak/noecho flags;
-          # other flags (ICRNL, ICANON in some libc states) can be left
-          # off, in which case `gets` blocks forever waiting for a
-          # newline that never arrives. `IO.console.cooked` saves the
-          # current termios, sets a known-good cooked state, runs the
-          # block, then restores. Use `console.gets` (= /dev/tty) so we
-          # bypass any redirection on $stdin.
-          console.cooked do
-            Hive::Tui::Debug.log("pause", "entered cooked block; calling gets")
-            console.gets
-            Hive::Tui::Debug.log("pause", "gets returned")
-          end
-        rescue StandardError => e
-          Hive::Tui::Debug.log("pause", "gets failed: #{e.class.name}: #{e.message}")
-          nil
-        end
-      end
-
-      # ENOENT means the binary at argv[0] could not be exec'd. The
-      # child never wrote anything, so without this surface line the
-      # user sees no output at all between curses-down and the
-      # acknowledgement prompt.
-      def warn_command_not_found(argv)
-        $stderr.puts "[hive tui] command not found: #{argv.first}" if $stderr.tty?
       end
     end
   end

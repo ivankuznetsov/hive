@@ -55,6 +55,16 @@ module Hive
       Tick = Class.new
       TICK = Tick.new.freeze
 
+      # Recurring no-op tick whose handler does nothing but yield the
+      # Ruby GVL. bubbletea-ruby's `tea_input_read_raw` C call holds
+      # the GVL without releasing it, which starves the StateSource
+      # polling thread. Scheduling this tick at ~10ms intervals keeps
+      # background threads alive — the main loop's `process_ticks`
+      # gives them a Ruby checkpoint between input polls.
+      # See `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+      YieldTick = Class.new
+      YIELD_TICK = YieldTick.new.freeze
+
       # ---- Filter-prompt messages (consumed in :filter mode) ----
       # Defined in U4 (not U9 where the FilterPrompt view lives) so the
       # message contract is centralized and Update can be unit-tested

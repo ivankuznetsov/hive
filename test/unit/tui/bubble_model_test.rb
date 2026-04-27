@@ -20,10 +20,21 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # ---- Construction / init ----
 
-  def test_init_returns_self_and_no_command
+  def test_init_returns_self_and_yield_tick
     new_model, cmd = @model.init
     assert_same @model, new_model
-    assert_nil cmd
+    # init seeds a recurring YieldTick so background threads (StateSource
+    # snapshot polling) get GVL time between bubbletea's input polls.
+    assert_kind_of Bubbletea::TickCommand, cmd,
+      "init must seed the yield tick so the GVL-yield cycle starts"
+  end
+
+  def test_yield_tick_message_reschedules_a_fresh_tick
+    # Once the yield-tick cycle is running, every YieldTick observation
+    # must produce a fresh TickCommand or the cycle stalls.
+    _, cmd = @model.update(Hive::Tui::Messages::YIELD_TICK)
+    assert_kind_of Bubbletea::TickCommand, cmd,
+      "update on YieldTick must return a fresh tick to keep the cycle going"
   end
 
   # ---- WindowSizeMessage translation ----

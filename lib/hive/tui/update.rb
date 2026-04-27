@@ -36,6 +36,12 @@ module Hive
           [ apply_subprocess_exited(model, message), nil ]
         when Messages::Tick
           [ apply_tick(model), nil ]
+        when Messages::YieldTick
+          # Pure no-op — the GVL yield happens in the tick callback
+          # itself (see BubbleModel#yield_tick_cmd). Update's job is
+          # to leave the model unchanged and let BubbleModel
+          # reschedule the recurring tick.
+          [ model, nil ]
         when Messages::FilterCharAppended
           [ apply_filter_char_appended(model, message), nil ]
         when Messages::FilterCharDeleted

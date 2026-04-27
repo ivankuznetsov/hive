@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-27T16:00:00Z] dependencies.md — `minitest` version row refreshed
+
+**Action:** Audit triggered by Gemfile/Gemfile.lock change hook. The U11 curses removal is already reflected in the prior log entry; the only remaining stale row was `minitest`, which still showed `~> 5.20` (locked 5.27.0) from before the dependabot bump in commit `429ff4c`. Updated to `~> 6.0` (locked 6.0.5) to match the current Gemfile + lockfile.
+
+**Refreshed pages:**
+- `wiki/dependencies.md` — minitest row corrected; bump source noted inline.
+
 ## [2026-04-27T15:30:00Z] `hive tui` curses backend removed (plan #003 U11)
 
 **Action:** U11 deletes the curses code path that lived alongside charm during U1–U10. `bundle install` no longer pulls in `curses` 1.6; `HIVE_TUI_BACKEND=curses` raises a typed error pointing at the removal; every `Curses.*` reference under `lib/` is gone. Bubble Tea + Lipgloss are now the only TUI runtime.

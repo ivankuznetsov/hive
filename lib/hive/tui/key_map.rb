@@ -60,6 +60,7 @@ module Hive
         when :triage then triage_message(key: key, row: row)
         when :log_tail then log_tail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
+        when :help then help_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
         end
       end
@@ -184,6 +185,14 @@ module Hive
         return Messages::BACK if ESCAPE_KEYS.include?(key)
 
         Messages::NOOP
+      end
+
+      # Help overlay dismisses on any key — matches the curses-era
+      # `Render::HelpOverlay#show` behaviour. Any printable char or
+      # special key returns BACK; the cursor singletons aren't special-
+      # cased here because they should also dismiss.
+      def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        Messages::BACK
       end
 
       # Shared DispatchCommand builder. `argv[1]` is the workflow verb

@@ -54,7 +54,14 @@ module Hive
 
         seed_model = Hive::Tui::Model.initial
         bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
-        runner = Bubbletea::Runner.new(bubble_model, alt_screen: true)
+        # `input_timeout: 1` (ms) is the GVL-friendly setting: bubbletea-ruby's
+        # `tea_input_read_raw` C call holds the Ruby GVL for the full timeout
+        # without releasing it, which starves the StateSource polling thread
+        # at the default 10ms. With 1ms, the main loop yields the GVL ~10x
+        # more often per second so background snapshot polling lands within
+        # ~1s instead of stalling for 10s+. Documented in
+        # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+        runner = Bubbletea::Runner.new(bubble_model, alt_screen: true, input_timeout: 1)
         bubble_model.dispatch = runner.method(:send)
 
         prev_hup = install_terminate_hook(runner)

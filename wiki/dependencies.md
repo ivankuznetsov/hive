@@ -27,7 +27,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
-| `minitest` | `~> 5.20` (locked 5.27.0) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. |
+| `minitest` | `~> 6.0` (locked 6.0.5) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `rubocop` | `~> 1.60` (locked 1.86.1) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 

@@ -56,12 +56,34 @@ module Hive
         @dispatch = callable
       end
 
+      # The init Cmd seeds a recurring `YieldTick` so the main loop
+      # yields to Ruby threads between input polls — see
+      # `Hive::Tui::Messages::YieldTick` for the underlying GVL-starvation
+      # rationale. Without this seed, `StateSource#refresh_once` (which
+      # runs on a background thread) takes 5-10s per poll under
+      # `runner.run`'s tight loop.
       def init
-        [ self, nil ]
+        [ self, yield_tick_cmd ]
+      end
+
+      # @api private
+      # Recurring 10ms tick. The callback yields the GVL via
+      # `Thread.pass` and returns YIELD_TICK; update sees it, returns
+      # the same tick again to keep the cycle going.
+      def yield_tick_cmd
+        Bubbletea.tick(0.01) do
+          Thread.pass
+          Hive::Tui::Messages::YIELD_TICK
+        end
       end
 
       def update(message)
         hive_message = translate(message)
+
+        # YieldTick is the only message that loops back into a tick
+        # — re-schedule on every observation so the GVL-yield cycle
+        # never stops.
+        return [ self, yield_tick_cmd ] if hive_message.is_a?(Hive::Tui::Messages::YieldTick)
 
         # Side-effect-bearing messages that need a runner reference or
         # perform synchronous I/O are handled here; everything else

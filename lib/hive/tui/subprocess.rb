@@ -115,11 +115,20 @@ module Hive
         end
       end
 
+      # After the child writes to the inherited terminal and exits,
+      # ncurses' internal screen buffer is now stale relative to the
+      # real terminal — `refresh` alone would only emit the diff
+      # against the old buffer (= nothing), leaving subprocess output
+      # painted in any rows the next render doesn't fully overwrite.
+      # `Curses.clear` sets the clearok flag AND erases the internal
+      # buffer so the next refresh emits a real clear-screen escape,
+      # giving the next `Render::Grid#draw` a blank canvas.
       def restore_curses_state
         return unless defined?(Curses) && Curses.respond_to?(:reset_prog_mode)
 
         begin
           Curses.reset_prog_mode
+          Curses.clear if Curses.respond_to?(:clear)
           Curses.refresh if Curses.respond_to?(:refresh)
         rescue StandardError
           nil

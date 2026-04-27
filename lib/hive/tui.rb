@@ -165,7 +165,7 @@ module Hive
       when :help then show_help_overlay
       when :open_findings then run_triage(payload, grid_state)
       when :open_log_tail then run_log_tail(payload, grid_state)
-      when :open_editor then grid_state.flash!("Enter on needs_input lands in a later unit")
+      when :open_editor then run_editor(payload, grid_state)
       end
       nil
     end
@@ -243,14 +243,33 @@ module Hive
       return unless finding
 
       argv = triage_state.toggle_command(finding)
+      announce_subprocess(renderer, argv)
       exit_status, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
       reload_or_flash(triage_state, renderer, review_path, exit_status: exit_status, err: err)
     end
 
     def self.run_bulk(triage_state, renderer, review_path, direction)
       argv = triage_state.bulk_command(direction)
+      announce_subprocess(renderer, argv)
       exit_status, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
       reload_or_flash(triage_state, renderer, review_path, exit_status: exit_status, err: err)
+    end
+
+    # Paint an inline "running…" status on the bottom row before
+    # run_quiet! blocks the render thread for ~150ms+ of subprocess
+    # startup. We bypass the renderer's flash buffer (which only
+    # repaints on the next draw call — too late) and write directly
+    # to Curses so the feedback appears synchronously, before the
+    # blocking spawn. KTD-4 accepted the per-keystroke spawn cost
+    # but didn't address the perceived-frozen gap; this closes it.
+    def self.announce_subprocess(_renderer, argv)
+      return unless defined?(Curses) && Curses.respond_to?(:refresh)
+
+      verb = argv[1].to_s
+      Curses.setpos(Curses.lines - 1, 0)
+      Curses.clrtoeol
+      Curses.addstr("running #{verb}…")
+      Curses.refresh
     end
 
     # On non-zero exit we surface stderr in the status line and keep the
@@ -281,6 +300,23 @@ module Hive
     def self.show_help_overlay
       require "hive/tui/render/help_overlay"
       Hive::Tui::Render::HelpOverlay.new.show
+    end
+
+    # Spawn $EDITOR (with VISUAL fallback, then `vi`) on the row's
+    # state file via a full-screen takeover so vim/emacs/nano gets a
+    # cooked-mode tty. Shellsplit so a configured `EDITOR="vim -p"`
+    # works without re-introducing a shell layer.
+    def self.run_editor(row, grid_state)
+      require "shellwords"
+      editor = ENV["EDITOR"] || ENV["VISUAL"] || "vi"
+      if editor.to_s.strip.empty?
+        grid_state.flash!("$EDITOR not set; cannot open #{File.basename(row.state_file.to_s)}")
+        return
+      end
+
+      argv = Shellwords.split(editor) + [ row.state_file ]
+      exit_status = Hive::Tui::Subprocess.takeover!(argv)
+      grid_state.flash!("editor exited #{exit_status}") if exit_status != 0
     end
 
     # Log-tail subloop — open the latest `<state>/logs/<slug>/*.log`
@@ -356,7 +392,9 @@ module Hive
                          :run_loop, :render_dispatch_loop,
                          :handle_action, :run_triage, :resolve_review_path, :triage_loop,
                          :handle_triage_action, :takeover_and_return, :run_toggle, :run_bulk,
-                         :reload_or_flash, :show_help_overlay, :run_log_tail, :resolve_log_path,
+                         :reload_or_flash, :announce_subprocess,
+                         :show_help_overlay, :run_editor,
+                         :run_log_tail, :resolve_log_path,
                          :log_tail_loop,
                          :handle_filter_prompt
   end

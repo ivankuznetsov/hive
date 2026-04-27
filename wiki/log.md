@@ -2,6 +2,27 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-27T15:30:00Z] `hive tui` curses backend removed (plan #003 U11)
+
+**Action:** U11 deletes the curses code path that lived alongside charm during U1–U10. `bundle install` no longer pulls in `curses` 1.6; `HIVE_TUI_BACKEND=curses` raises a typed error pointing at the removal; every `Curses.*` reference under `lib/` is gone. Bubble Tea + Lipgloss are now the only TUI runtime.
+
+**Refreshed pages:**
+- `wiki/dependencies.md` — `curses` row removed; TLDR drops the four-gem framing for three. Frontmatter `updated` bumped.
+- `wiki/commands/tui.md` — Backend section already framed charm as default in U10; no edit needed beyond verifying no curses references survived.
+
+**Code changes (referenced from wiki):**
+- Deleted: `lib/hive/tui/render/{grid,triage,log_tail,help_overlay,filter_prompt,palette}.rb` (curses renderers — replaced by `lib/hive/tui/views/*.rb` in U7–U9), `lib/hive/tui/key_map/curses_keys.rb` (curses int → KeyMap-symbol translator — replaced by `BubbleModel#bubble_key_to_keymap`), `lib/hive/tui/grid_state.rb` (mutating cursor/scope/filter state — replaced by frozen `Hive::Tui::Model` + `Update.apply`).
+- Slimmed: `lib/hive/tui.rb` from 399 to 36 lines — only `Hive::Tui.run` (with the MRI/tty boundary checks) survives. Curses run loop, triage subloop, log-tail subloop, filter-prompt subloop, help overlay, and `install_terminal_safety_hooks` all moved into `Hive::Tui::App.run_charm` + `BubbleModel` during U10 and are deleted here.
+- Slimmed: `lib/hive/tui/subprocess.rb` — `takeover!` (curses-suspended spawn-and-wait) and the curses-state save/restore helpers (`with_curses_suspended`, `save_curses_state`, `end_curses`, `restore_curses_state`) deleted; `save_termios`/`restore_termios` deleted (the framework owns termios now). `takeover_command` (charm builder) and `run_quiet!` (curses-free, used for triage toggles) remain.
+- Slimmed: `lib/hive/tui/app.rb` — `KNOWN_BACKENDS` is now `[CHARM]`, the `case backend` dispatch collapses to a single charm boot, and `REMOVED_BACKENDS` provides the migration-pointer error for `HIVE_TUI_BACKEND=curses`.
+- Slimmed: `lib/hive/tui/key_map.rb` — back-compat shim (`dispatch` + `message_to_tuple`) deleted; only `message_for` remains.
+- Updated tests: `test/integration/tui_subprocess_test.rb` drops `takeover!` cases (the `takeover_command` test class covers the same spawn/wait/trap path); `test/integration/tui_signals_test.rb` drops `install_terminal_safety_hooks` cases (the SIGHUP trap now lives in `App.run_charm`); `test/unit/tui/app_test.rb` exercises the curses-removal error; `test/unit/tui/key_map_test.rb` drops the legacy `dispatch`-based test class. Net delta: 597 unit tests, 200 integration tests, 0 failures.
+- Removed: `Gemfile` entry for `curses ~> 1.6`; `Gemfile.lock` regenerated.
+
+**Key decisions:**
+- **`HIVE_TUI_BACKEND=curses` raises a removal-pointer error rather than silently falling back to charm.** Users who type the value because they hit a charm regression deserve a typed signal, not a confusing "unknown backend" or — worse — a silent override. The pointer lives in `App::REMOVED_BACKENDS` and one release from now will be deleted alongside the env var itself.
+- **`Hive::Tui::GridState` deleted, not preserved.** The Charm Model (`Hive::Tui::Model`) plus `Update.apply` already cover the cursor/scope/filter semantics GridState owned. Keeping GridState as a "for testing" artifact would have invited drift the moment Model evolved.
+
 ## [2026-04-27T15:00:00Z] `hive tui` migrated to Charm bubbletea + lipgloss (plan #003 U1–U10)
 
 **Action:** Plan #003 ships across 10 commits (U1 scaffold → U10 default flip). The TUI's render layer is now Bubble Tea MVU with Lipgloss styling; the curses path is kept one release as `HIVE_TUI_BACKEND=curses` for terminal-specific regressions. U11 (the curses removal) follows.

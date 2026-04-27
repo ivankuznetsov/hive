@@ -4,13 +4,15 @@ module Hive
   module Tui
     # Pure command-builder + cursor state for the findings triage mode.
     # Holds a list of `Hive::Findings::Finding` records, the cursor index
-    # into that list, and produces the argv arrays the render loop hands
-    # to `Subprocess.run_quiet!` / `takeover!`. No curses, no I/O — every
-    # branch is unit-testable without a tty.
+    # into that list, and produces the argv arrays BubbleModel hands to
+    # `Subprocess.run_quiet!` (per-finding toggles) or
+    # `Subprocess.takeover_command` (`d` to dispatch develop). No I/O —
+    # every branch is unit-testable without a tty.
     #
     # The state is mutated in place across frames (cursor moves, findings
     # reload after a toggle) so the loop holds a single instance per
-    # triage session, mirroring `GridState`'s ownership model.
+    # triage session — the Charm Model carries it on `model.triage_state`
+    # and BubbleModel mutates it directly when reload-after-toggle fires.
     class TriageState
       # Title-prefix slice used by `relocate_cursor` to re-find the prior
       # cursor finding after a document reload. 32 chars is long enough
@@ -20,11 +22,10 @@ module Hive
 
       attr_reader :findings, :cursor, :slug, :review_path
 
-      # `review_path` is optional for the curses path (which threads it
-      # through `triage_loop` arguments) and required for the charm path
-      # (which carries the whole triage context on `Model#triage_state`,
-      # since views are pure functions of the model). Existing curses
-      # call sites stay green by omitting it.
+      # `review_path` is optional so legacy callers that built a
+      # TriageState without it still construct cleanly; in production
+      # `Hive::Tui::BubbleModel#open_findings` always supplies it
+      # because views read `state.review_path` for the header.
       def initialize(slug:, findings:, review_path: nil)
         @slug = slug
         @findings = findings

@@ -7,16 +7,17 @@ updated: 2026-04-27
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Four runtime gems (`thor`, `bubbletea`, `lipgloss`, plus `curses` as a deprecated escape hatch); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
+**TLDR**: Three runtime gems (`thor`, `bubbletea`, `lipgloss`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
 
 ## Runtime gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
-| `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui` (default backend after U10 of plan #003). FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
+| `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
-| `curses` | `~> 1.6` (locked 1.6.0) | **Legacy / deprecated.** Kept one release as a `HIVE_TUI_BACKEND=curses` escape hatch in case a charm-specific regression hits a user's terminal. U11 of plan #003 deletes this dependency and the entire curses code path. |
+
+The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.
 

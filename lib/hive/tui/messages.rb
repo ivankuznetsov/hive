@@ -79,10 +79,12 @@ module Hive
       FILTER_CANCELLED = FilterCancelled.new.freeze
 
       # ---- Keystroke-derived messages (returned by KeyMap.message_for) ----
-      # Added in U5 alongside the KeyMap reshape. Each maps 1:1 to a
-      # legacy `KeyMap.dispatch` `[verb, payload]` tuple shape so the
-      # back-compat shim can translate either direction during the
-      # migration window.
+      # `BubbleModel#update` translates a `Bubbletea::KeyMessage` into
+      # the `(mode, key, row)` triple `KeyMap.message_for` expects, then
+      # routes the resulting Message either through Update.apply (pure
+      # state transitions) or through BubbleModel's side-effect handlers
+      # (DispatchCommand → takeover_command, OpenFindings → file I/O,
+      # Bulk* / ToggleFinding → run_quiet!).
 
       # Dispatch a workflow verb subprocess. `argv` is the full command
       # array (`["hive", "plan", "slug", "--from", "2-brainstorm"]`),

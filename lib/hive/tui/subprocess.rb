@@ -1,5 +1,4 @@
 require "open3"
-require "io/console"
 require "bubbletea"
 require "hive/tui/debug"
 require "hive/tui/messages"
@@ -7,26 +6,28 @@ require "hive/tui/subprocess_registry"
 
 module Hive
   module Tui
-    # Two ways to run a child from inside the TUI without corrupting the
-    # parent's terminal:
+    # Two ways to run a child from inside the TUI:
     #
-    #   * `takeover!(argv)` — the child gets the real tty (interactive verbs
-    #     like `hive develop` need this). Curses is suspended, termios is
-    #     saved, the child runs in its own pgroup so SIGINT/SIGTERM can be
-    #     forwarded to the group rather than just the leader, and on return
-    #     curses + termios are restored.
-    #   * `run_quiet!(argv)` — the child is non-interactive; stdio is piped
-    #     and captured. No curses dance.
+    #   * `takeover_command(argv, dispatch:)` — interactive verbs (`hive
+    #     develop`, `hive plan`, etc.) need the real tty. Returns a
+    #     `Bubbletea::ExecCommand` the runner executes inside its own
+    #     suspend window (raw mode disabled, cursor shown, input reader
+    #     stopped). The callable spawns argv with `pgroup: true` so
+    #     INT/TERM forward cleanly, waits for the child, and dispatches
+    #     a `Messages::SubprocessExited(verb:, exit_code:)` back into
+    #     the loop via the supplied `dispatch` lambda.
+    #   * `run_quiet!(argv)` — non-interactive children (per-finding
+    #     `hive accept-finding` / `hive reject-finding` toggles in
+    #     triage mode). `Open3.capture3` runs the child without
+    #     touching the alt-screen, so the screen never flashes on
+    #     every keystroke.
     #
-    # Both manage SubprocessRegistry around the spawn so the SIGHUP cleanup
-    # hook in U9 can kill the in-flight child group on shutdown, and both
-    # restore the parent's INT/TERM trap handlers in `ensure` regardless of
-    # exit shape (clean, signal, exception). The pgid+trap idiom mirrors
-    # `Hive::Agent#spawn_and_wait` (lib/hive/agent.rb:99-117).
-    #
-    # `Curses` is NOT required at the top of this file: tests run without
-    # initialising curses, and U9 will require it lazily once the render
-    # loop boots. Every curses call is guarded by `defined?(Curses)`.
+    # Both manage SubprocessRegistry around the spawn so the SIGHUP
+    # cleanup hook (in `App.run_charm`) can kill the in-flight child
+    # group on shutdown, and both restore the parent's INT/TERM trap
+    # handlers in `ensure` regardless of exit shape (clean, signal,
+    # exception). The pgid+trap idiom mirrors `Hive::Agent#spawn_and_wait`
+    # (lib/hive/agent.rb:99-117).
     module Subprocess
       module_function
 
@@ -38,27 +39,23 @@ module Hive
       # missing binary and an explicit child exit code.
       COMMAND_NOT_FOUND_EXIT = 127
 
-      # Charm path: returns a `Bubbletea::ExecCommand` that, when run by the
-      # framework's runner, spawns argv with pgroup forwarding, waits, and
-      # dispatches a `Messages::SubprocessExited(verb:, exit_code:)` back into
-      # the loop via `dispatch.call(message)`.
+      # Charm path: returns a `Bubbletea::ExecCommand` that, when run by
+      # the framework's runner, spawns argv with pgroup forwarding,
+      # waits, and dispatches a `Messages::SubprocessExited(verb:, exit_code:)`
+      # back into the loop via `dispatch.call(message)`.
       #
       # The framework owns suspend/resume of raw mode, cursor, and input
-      # reader (see `Bubbletea::Runner#exec_process`) — that's why this path
-      # has no curses dance and no termios save/restore. The curses
-      # `takeover!` retains both because the curses backend manages its own
-      # alt-screen lifecycle.
+      # reader (see `Bubbletea::Runner#exec_process`).
       #
-      # The `dispatch:` parameter is the seam for runner injection. App's
-      # charm boot will wire `dispatch: runner.method(:send)` (Bubbletea's
-      # Runner overrides `Object#send` to enqueue messages onto the loop's
-      # input stream). Tests pass a plain capture lambda. We can't use the
-      # built-in `message:` argument of the takeover builder because the
-      # exit code isn't known at command-construction time — closure-capture
-      # is the only path that surfaces the actual exit code.
+      # The `dispatch:` parameter is the seam for runner injection.
+      # `App.run_charm` wires `dispatch: runner.method(:send)`. Tests
+      # pass a plain capture lambda. We can't use the framework
+      # builder's built-in `message:` argument because the exit code
+      # isn't known at command-construction time — closure-capture is
+      # the only path that surfaces the actual exit code.
       #
       # Verb is cached at argv[1] at construction time so SubprocessExited
-      # carries the verb name even if argv is mutated downstream — same
+      # carries the verb name even if argv mutates downstream — same
       # contract as `Messages::DispatchCommand.verb`.
       def takeover_command(argv, dispatch:)
         verb = argv[1]
@@ -69,10 +66,9 @@ module Hive
         Bubbletea.public_send(:exec, callable)
       end
 
-      # Extracted spawn-and-wait core shared between the curses `takeover!`
-      # path and the charm `takeover_command` callable. Returns the same
-      # Integer exit shape: 0..255 for clean exits, 128+signo for signal
-      # kills, COMMAND_NOT_FOUND_EXIT (127) for missing binary.
+      # Spawn-and-wait core. Returns the same Integer exit shape:
+      # 0..255 for clean exits, 128+signo for signal kills,
+      # COMMAND_NOT_FOUND_EXIT (127) for missing binary.
       def run_takeover_child(argv)
         Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
         prev_int, prev_term = install_pgid_forwarding_traps
@@ -88,39 +84,6 @@ module Hive
         ensure
           SubprocessRegistry.clear
           restore_traps(prev_int, prev_term)
-        end
-      end
-
-      def takeover!(argv)
-        Hive::Tui::Debug.log("takeover", "argv=#{argv.inspect}")
-        # Capture termios BEFORE curses' def_prog_mode runs (inside
-        # with_curses_suspended). The captured baseline must be the
-        # parent's pre-curses tty state so restore_termios can hand
-        # the child a clean slate; capturing AFTER def_prog_mode
-        # would freeze a curses-flavoured termios that ttys then
-        # restore on return — see KTD-3 in the plan.
-        pre_termios = save_termios
-        with_curses_suspended do
-          prev_int, prev_term = install_pgid_forwarding_traps
-          exit_code = nil
-          begin
-            Hive::Tui::Debug.log("takeover", "spawning")
-            pid = Process.spawn(*argv, pgroup: true)
-            register_real_pgid(pid)
-            Hive::Tui::Debug.log("takeover", "pid=#{pid} pgid=#{SubprocessRegistry.current.inspect}")
-            _, status = Process.wait2(pid)
-            exit_code = translate_status(status)
-            Hive::Tui::Debug.log("takeover", "exit=#{exit_code} status=#{status.inspect}")
-          rescue Errno::ENOENT, Errno::EACCES => e
-            exit_code = COMMAND_NOT_FOUND_EXIT
-            Hive::Tui::Debug.log("takeover", "errno=#{e.class.name}: #{e.message}")
-          ensure
-            SubprocessRegistry.clear
-            restore_traps(prev_int, prev_term)
-            restore_termios(pre_termios)
-            Hive::Tui::Debug.log("takeover", "ensure done; about to restore_curses_state")
-          end
-          exit_code
         end
       end
 
@@ -147,89 +110,6 @@ module Hive
       end
 
       # --- private helpers ---------------------------------------------------
-
-      # Curses may not be loaded in tests; def_prog_mode/endwin/reset_prog_mode
-      # are skipped entirely in that case. Curses::Error is rescued for the
-      # "loaded but not initialised" case (e.g. unit-test boot).
-      def with_curses_suspended
-        save_curses_state
-        end_curses
-        begin
-          yield
-        ensure
-          restore_curses_state
-        end
-      end
-
-      def save_curses_state
-        return unless defined?(Curses) && Curses.respond_to?(:def_prog_mode)
-
-        begin
-          Curses.def_prog_mode
-        rescue StandardError
-          # Curses::Error or any subclass — only meaningful when curses is
-          # initialised. Boot/test contexts where the screen isn't up are fine.
-          nil
-        end
-      end
-
-      def end_curses
-        return unless defined?(Curses) && Curses.respond_to?(:endwin)
-
-        begin
-          Curses.endwin
-        rescue StandardError
-          nil
-        end
-      end
-
-      # After the child writes to the inherited terminal and exits,
-      # ncurses' internal screen buffer is now stale relative to the
-      # real terminal — `refresh` alone would only emit the diff
-      # against the old buffer (= nothing), leaving subprocess output
-      # painted in any rows the next render doesn't fully overwrite.
-      # `Curses.clear` sets the clearok flag AND erases the internal
-      # buffer so the next refresh emits a real clear-screen escape,
-      # giving the next `Render::Grid#draw` a blank canvas.
-      def restore_curses_state
-        return unless defined?(Curses) && Curses.respond_to?(:reset_prog_mode)
-
-        Hive::Tui::Debug.log("curses", "restore: reset_prog_mode → clear → refresh")
-        begin
-          Curses.reset_prog_mode
-          Curses.clear if Curses.respond_to?(:clear)
-          Curses.refresh if Curses.respond_to?(:refresh)
-          Hive::Tui::Debug.log("curses", "restore: done")
-        rescue StandardError => e
-          Hive::Tui::Debug.log("curses", "restore: #{e.class.name}: #{e.message}")
-        end
-      end
-
-      # IO.console returns nil under nohup / no controlling tty. NoMethodError
-      # also covers the "method not exposed by this Ruby build" case.
-      def save_termios
-        console = IO.console
-        return nil unless console
-
-        begin
-          console.tcgetattr
-        rescue Errno::ENOTTY, NoMethodError
-          nil
-        end
-      end
-
-      def restore_termios(pre)
-        return unless pre
-
-        console = IO.console
-        return unless console
-
-        begin
-          console.tcsetattr(IO::TCSADRAIN, pre)
-        rescue Errno::ENOTTY, NoMethodError
-          nil
-        end
-      end
 
       # Trap blocks read the current pgid out of the registry so they
       # always forward to the live child even if the slot transitions

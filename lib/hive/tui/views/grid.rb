@@ -9,13 +9,10 @@ module Hive
       # returned String is the entire grid frame the runner will hand to
       # Bubble Tea for diffing against the previous frame.
       #
-      # Mirrors the curses `Render::Grid#draw` content layout 1:1 — same
-      # header, same project sections, same per-row format
-      # ("> slug.ljust(36) label.ljust(24) command age") so a side-by-
-      # side comparison of `hive status` and `hive tui` lines up.
-      # The only intentional difference: cursor highlight here is
-      # `Styles::CURSOR_HIGHLIGHT.render(line)` (Lipgloss reverse) instead
-      # of `Curses::A_REVERSE`.
+      # Per-row format ("> slug.ljust(36) label.ljust(24) command age")
+      # is identical to `hive status`'s text rendering so a side-by-side
+      # comparison of the two surfaces lines up. Cursor highlight uses
+      # `Styles::CURSOR_HIGHLIGHT.render(line)` (Lipgloss reverse).
       #
       # Lipgloss `Style#render` strips ANSI when stdout is not a tty (U2
       # finding). Tests can therefore pin layout/text but not styling.
@@ -50,9 +47,9 @@ module Hive
           Styles::HEADER.render(line)
         end
 
-        # The `last_error` banner is the model-side equivalent of the
-        # GridState `state_source.stalled?` check. Update writes
-        # `last_error` on PollFailed; SnapshotArrived clears it.
+        # `last_error` is set by Update.apply on PollFailed and cleared
+        # on SnapshotArrived; this banner gives the user a visual cue
+        # that the polling thread hit a transient error.
         def stalled?(model)
           !model.last_error.nil?
         end
@@ -99,8 +96,8 @@ module Hive
         end
 
         # Groups by action_label in `Status::ACTION_LABEL_ORDER`; unknown
-        # labels sort last so a future label addition still renders.
-        # Mirrors the curses path so visual ordering stays stable.
+        # labels sort last so a future label addition still renders even
+        # when the order list hasn't been updated yet.
         def grouped_rows(project, project_idx, model)
           ordered = order_labels(project.rows.map(&:action_label).uniq)
           row_idx_in_project = 0
@@ -162,12 +159,11 @@ module Hive
           end
         end
 
-        # ---- Visible-snapshot derivation (Model-side equivalent of
-        # GridState#visible_snapshot) ----
+        # ---- Visible-snapshot derivation ----
         #
-        # GridState applies scope first, then filter — same order here so
-        # the Charm and curses paths show identical content for the same
-        # (snapshot, scope, filter) tuple.
+        # Apply scope first (collapses to a single project) so the filter
+        # operates on the narrower set and the cursor's project_idx is
+        # stable against the visible projects list.
         def visible_snapshot(model)
           snap = model.snapshot
           return nil if snap.nil?

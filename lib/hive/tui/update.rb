@@ -163,8 +163,8 @@ module Hive
       # Cursor moves one row down within the same project; on overflow,
       # advances to the first row of the next project that has visible
       # rows. Stays clamped at the last row of the last non-empty project
-      # rather than wrapping. Mirrors `GridState#move_cursor_down` so the
-      # two backends agree on cursor semantics.
+      # rather than wrapping — wrap would mask the grid's scroll
+      # boundary.
       def apply_cursor_down(model)
         visible = visible_snapshot(model)
         return model if visible.nil? || model.cursor.nil?
@@ -236,7 +236,7 @@ module Hive
         new_model.with(cursor: cursor)
       end
 
-      # ---- Cursor / visibility helpers (mirror GridState's logic) ----
+      # ---- Cursor / visibility helpers ----
 
       def visible_snapshot(model)
         snap = model.snapshot

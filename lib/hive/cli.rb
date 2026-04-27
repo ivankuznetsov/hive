@@ -249,8 +249,8 @@ module Hive
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"
     long_desc <<~DESC
-      Opens a full-screen curses dashboard over `hive status`. Polls the
-      same data source at 1Hz, groups rows by action label, and
+      Opens a full-screen Charm bubbletea + lipgloss dashboard over `hive status`.
+      Polls the same data source at 1Hz, groups rows by action label, and
       dispatches every workflow verb (`brainstorm` / `plan` / `develop` /
       `review` / `pr` / `archive`) as a fresh subprocess on a single
       keystroke. `?` shows the keybinding cheatsheet; `q` quits.

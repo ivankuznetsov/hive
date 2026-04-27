@@ -13,9 +13,9 @@ module Hive
     #
     # Frozen value object built on `Data.define`. `#with(**)` returns a
     # new Model with overridden fields — never mutate.
-    # Default flash TTL — matches the curses GridState's TTL so the
-    # Charm backend feels the same to operators familiar with the v1
-    # behavior. Renderer + Tick handler both read this constant.
+    # Default flash TTL — long enough that the user reads a verb-exit
+    # flash without effort, short enough that it doesn't linger past
+    # the next keystroke. Renderer + Tick handler both read this constant.
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(

@@ -7,17 +7,17 @@ module Hive
     # log-viewer mode. Two collaborators:
     #
     #   - `FileResolver` picks the most recent `*.log` under a task's
-    #     log directory by mtime. Pure data; no curses; unit-tested.
+    #     log directory by mtime. Pure data; no I/O at construction;
+    #     unit-tested.
     #   - `Tail` keeps a non-blocking read cursor on one open log file
     #     plus a bounded ring buffer of the last N lines so the render
     #     layer can paint a frame without blocking on disk I/O.
     #
-    # Both pieces deliberately avoid threads — the render loop drives
-    # `poll!` between paints (Curses input timeout drains pending
-    # bytes between user keystrokes). The plan's "background thread"
-    # phrasing was simplified during implementation: a 100ms input
-    # timeout on the render loop is enough to keep the buffer fresh
-    # without the synchronisation footprint of a worker thread.
+    # Both pieces deliberately avoid threads — `BubbleModel#open_log_tail`
+    # calls `Tail#poll!` per render to ingest any new bytes since the
+    # last frame. The Bubble Tea runner's input poll handles user
+    # keystrokes on the same loop, so the buffer stays fresh without
+    # the synchronisation footprint of a worker thread.
     module LogTail
       module FileResolver
         module_function

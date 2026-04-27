@@ -8,8 +8,8 @@ module Hive
     # in the environment, every instrumented site appends one line per
     # event to a tmpdir log file. Disabled by default so no
     # observability tax in production. Writes are line-buffered (sync
-    # = true) so the log captures state immediately before any curses
-    # call that could hang or corrupt the screen.
+    # = true) so the log captures state immediately before any
+    # render-layer call that could hang or corrupt the screen.
     #
     # The constant `ENABLED` snapshots the env var at load time; this
     # is intentional — toggling it later doesn't reach the running

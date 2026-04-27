@@ -2,37 +2,37 @@ require "hive"
 
 module Hive
   module Tui
-    # Backend dispatcher. Reads `HIVE_TUI_BACKEND` env var:
-    #   unset / "charm" → bubbletea + lipgloss path (default after U10)
-    #   "curses"        → legacy curses run loop (kept until U11)
-    # Anything else raises `Hive::InvalidTaskPath` (exit 64) — same shape as
-    # the `--json` rejection at the command boundary.
-    #
-    # The dispatcher exists for the duration of the migration only. U11
-    # deletes the curses branch; the env var is then recognized one more
-    # release as a graceful-error pointer at the removal, then dropped.
+    # The Charm bubbletea + lipgloss backend's lifecycle owner. After
+    # U11 this is the only TUI backend; the curses path was removed in
+    # the same release. `HIVE_TUI_BACKEND=curses` now raises a typed
+    # error pointing at the removal instead of routing to the legacy
+    # code, and unsetting the env var (or setting it to "charm") boots
+    # the charm runtime directly.
     module App
-      CURSES = "curses".freeze
       CHARM = "charm".freeze
-      KNOWN_BACKENDS = [ CURSES, CHARM ].freeze
+      KNOWN_BACKENDS = [ CHARM ].freeze
+
+      # Recognized so a one-release-stale invocation gets a typed error
+      # explaining the removal rather than `unknown HIVE_TUI_BACKEND`.
+      REMOVED_BACKENDS = {
+        "curses" => "the curses backend was removed; charm is the only supported backend. " \
+                    "Unset HIVE_TUI_BACKEND or set it to 'charm'."
+      }.freeze
 
       module_function
 
       def run
-        case backend
-        when CURSES
-          Hive::Tui.run_curses
-        when CHARM
-          run_charm
-        end
+        backend
+        run_charm
       end
 
-      # Default flipped to charm in U10. Setting `HIVE_TUI_BACKEND=curses`
-      # remains supported for one release as an escape hatch in case a
-      # user hits a charm-specific regression on their terminal.
+      # Validates `HIVE_TUI_BACKEND`: returns the value when supported,
+      # raises with a removal pointer for retired backends, and raises
+      # `Hive::InvalidTaskPath` (exit 64) otherwise.
       def backend
         chosen = ENV.fetch("HIVE_TUI_BACKEND", CHARM).strip
         return chosen if KNOWN_BACKENDS.include?(chosen)
+        raise Hive::InvalidTaskPath, REMOVED_BACKENDS.fetch(chosen) if REMOVED_BACKENDS.key?(chosen)
 
         raise Hive::InvalidTaskPath,
               "unknown HIVE_TUI_BACKEND: #{chosen.inspect} (expected one of: #{KNOWN_BACKENDS.join(', ')})"
@@ -71,15 +71,15 @@ module Hive
       end
 
       # @api private
-      # Background thread that pulls snapshots from StateSource at ~1Hz
-      # and injects them into the runner as SnapshotArrived / PollFailed
-      # messages. StateSource is the source of truth for the polling
-      # cadence; this thread just drives the message-pump side.
+      # Background thread that pulls snapshots from StateSource at ~0.5s
+      # cadence and injects them into the runner as SnapshotArrived /
+      # PollFailed messages. StateSource is the source of truth for the
+      # actual polling cadence (1 Hz); this thread just drives the
+      # message-pump side and dedupes back-to-back identical snapshots.
       #
       # The thread's outer loop catches StandardError so a transient
       # exception in StateSource doesn't kill the messenger; the loop
-      # ends when StateSource#stop is called (its thread exits, leaving
-      # `current` frozen on the last successful snapshot).
+      # ends when the runner's `ensure` block calls `poller.kill`.
       def start_snapshot_poller(state_source, runner)
         Thread.new do
           last_snapshot = nil

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed — `hive tui` render layer migrated from curses to Charm bubbletea + lipgloss
+
+- The TUI now boots a [bubbletea-ruby](https://github.com/marcoroth/bubbletea-ruby) MVU runtime by default and renders frames with [lipgloss-ruby](https://github.com/marcoroth/lipgloss-ruby) styles. `KeyMap` is the single source of truth for keystroke→action mapping, returning typed `Hive::Tui::Messages::*` values that flow through `Hive::Tui::Update.apply(model, msg) → [model, cmd]`. Views are pure functions of the frozen Model — no curses, no I/O — which makes layout regressions reproducible in unit tests.
+- **Backend escape hatch:** `HIVE_TUI_BACKEND=curses hive tui` keeps the legacy curses runtime alive for one release as a safety net for terminal-specific regressions. The next release deletes it (per the migration plan).
+- **What didn't change:** every keystroke binding, every workflow-verb shell-out, every flash message, every JSON contract on adjacent CLI surfaces. The Thor surface (`hive tui`, `--json` rejection with EX_USAGE 64, non-tty USAGE-64 alignment) is identical. `Hive::Tui::Snapshot` / `Hive::Tui::StateSource` / `Hive::Tui::Help::BINDINGS` / `Hive::Tui::SubprocessRegistry` are untouched.
+- **Visual quality:** Lipgloss handles color/bold/reverse and adapts to the detected color profile. Grid action-key colors (cyan for `agent_running`, yellow for error/recover, green for `ready_*`) carry over verbatim. Help overlay renders inside a Lipgloss NORMAL border with rounded padding.
+- **Test ergonomics gap (documented):** lipgloss-ruby v0.2.2 strips ANSI when stdout is not a tty and exposes no force-color escape hatch. View tests therefore pin layout/text content; visual styling is validated by manual dogfood. Tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+
 ### Breaking changes
 
 - **Stage directories renumbered: `5-pr` → `6-pr` and `6-done` → `7-done`.** Position 5 is reserved for the upcoming `5-review` stage (CI-fix → multi-reviewer → auto-triage → fix → browser-test loop, per `docs/plans/2026-04-25-001-feat-5-review-stage-plan.md`). `5-review` is NOT yet present — `Hive::Stages::DIRS` currently has a numeric gap at position 5 that fills when U9 ships.

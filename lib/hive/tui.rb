@@ -18,10 +18,10 @@ module Hive
   # JRuby/TruffleRuby would need a synchronisation upgrade.
   module Tui
     # Entry point invoked by `Hive::CLI#tui`. Delegates to App.run, which
-    # routes to the curses or charm backend based on `HIVE_TUI_BACKEND`.
-    # Curses is the default through the migration sequence (U1-U9 of plan
-    # docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md);
-    # the default flips to charm in U10.
+    # routes to the charm or curses backend based on `HIVE_TUI_BACKEND`.
+    # Charm is the default after U10 of plan
+    # docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md;
+    # curses remains accessible as `HIVE_TUI_BACKEND=curses` until U11.
     def self.run
       raise Hive::Error, "hive tui requires MRI Ruby (got #{RUBY_ENGINE})" unless RUBY_ENGINE == "ruby"
       # Boundary parity with `hive tui --json`: both reject with USAGE (64) so a
@@ -32,9 +32,10 @@ module Hive
       Hive::Tui::App.run
     end
 
-    # Curses run loop kept here as the curses backend's entry point. App
-    # delegates here when HIVE_TUI_BACKEND is unset or "curses" (the default
-    # through U9). U11 deletes this method along with the rest of the
+    # Curses run loop kept here as the legacy backend entry point. App
+    # delegates here only when HIVE_TUI_BACKEND="curses" (the default is
+    # now charm; this remains as an escape hatch for terminal-specific
+    # regressions). U11 deletes this method along with the rest of the
     # curses code path.
     def self.run_curses
       require "curses"

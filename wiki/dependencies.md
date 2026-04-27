@@ -7,18 +7,20 @@ updated: 2026-04-27
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Two runtime gems (`thor`, `curses`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
+**TLDR**: Four runtime gems (`thor`, `bubbletea`, `lipgloss`, plus `curses` as a deprecated escape hatch); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
 
 ## Runtime gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
-| `curses` | `~> 1.6` (locked 1.6.0) | Terminal UI runtime — used in `Hive::Tui` (`lib/hive/tui.rb`) for the `hive tui` command. Stdlib-extracted, ruby-core maintained; ships `def_prog_mode` / `reset_prog_mode` / `endwin` / injected `KEY_RESIZE`. |
+| `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui` (default backend after U10 of plan #003). FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
+| `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
+| `curses` | `~> 1.6` (locked 1.6.0) | **Legacy / deprecated.** Kept one release as a `HIVE_TUI_BACKEND=curses` escape hatch in case a charm-specific regression hits a user's terminal. U11 of plan #003 deletes this dependency and the entire curses code path. |
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.
 
-Why Curses: the `hive tui` plan needs subprocess takeover (suspend the screen, exec `claude`, restore), resize handling, and zero-cost frame redraws. Curses 1.6 covers all three from stdlib lineage; alternatives (`tty-cursor` + ANSI, `ratatui`-style Rust deps) either lacked subprocess takeover or pulled in a 22 MB native dep (KTD-1 in the TUI plan).
+Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every state transition behind `Hive::Tui::Update.apply` so view regressions reproduce as unit tests; lipgloss styling renders consistently across modern terminals (Ghostty / Alacritty / kitty / iTerm2) where curses' subprocess-takeover dance had alt-screen handoff edge cases. Trade documented in plan #003 (`docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md`) and the U2 verification report.
 
 ## Development / test gems
 

@@ -23,9 +23,12 @@ class TuiAppTest < Minitest::Test
     end
   end
 
-  def test_backend_defaults_to_curses_when_env_unset
+  def test_backend_defaults_to_charm_when_env_unset
+    # U10 flipped the default from curses to charm. Curses remains
+    # accessible as `HIVE_TUI_BACKEND=curses` until U11 deletes the
+    # legacy code path entirely.
     ENV.delete("HIVE_TUI_BACKEND")
-    assert_equal Hive::Tui::App::CURSES, Hive::Tui::App.backend
+    assert_equal Hive::Tui::App::CHARM, Hive::Tui::App.backend
   end
 
   def test_backend_returns_curses_when_env_explicit
@@ -50,11 +53,13 @@ class TuiAppTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE, err.exit_code
   end
 
-  def test_run_charm_stub_prints_pointer_and_returns_cleanly
-    ENV["HIVE_TUI_BACKEND"] = "charm"
-    _out, err = capture_io { Hive::Tui::App.run_charm }
-    assert_match(/HIVE_TUI_BACKEND=charm/, err)
-    assert_match(/backend stub/, err)
-    assert_match(%r{docs/plans/.*charm.*\.md}, err)
+  # `run_charm` boots a real Bubble Tea runner that wants a tty;
+  # the actual lifecycle is exercised by the PTY-based smoke tests
+  # (`test/integration/tui_smoke_charm_test.rb`). Here we pin the
+  # symbol surface — that the method exists and the entry point
+  # contract (no args, public) hasn't drifted.
+  def test_run_charm_method_exists_on_app
+    assert_respond_to Hive::Tui::App, :run_charm,
+      "App.run_charm is the charm backend entry point — App.run delegates here"
   end
 end

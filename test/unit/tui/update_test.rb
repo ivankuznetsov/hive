@@ -213,4 +213,117 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 80, starting.cols, "Update must not mutate the input model"
     assert_equal 24, starting.rows
   end
+
+  # ---------- Keystroke-derived handlers (U10) ----------
+
+  require "hive/tui/snapshot"
+
+  def snap_with_two_projects_three_rows_each
+    rows_a = (1..3).map do |i|
+      Hive::Tui::Snapshot::Row.new(
+        project_name: "alpha", stage: "1-input", slug: "a#{i}", folder: nil,
+        state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}"
+      ).freeze
+    end
+    rows_b = (1..3).map do |i|
+      Hive::Tui::Snapshot::Row.new(
+        project_name: "beta", stage: "1-input", slug: "b#{i}", folder: nil,
+        state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}"
+      ).freeze
+    end
+    pa = Hive::Tui::Snapshot::ProjectView.new(name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: rows_a.freeze).freeze
+    pb = Hive::Tui::Snapshot::ProjectView.new(name: "beta",  path: "/b", hive_state_path: "/b/.h", error: nil, rows: rows_b.freeze).freeze
+    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ pa, pb ])
+  end
+
+  def test_flash_message_sets_flash_with_timestamp
+    new_model, _cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::Flash.new(text: "hello"))
+    assert_equal "hello", new_model.flash
+    refute_nil new_model.flash_set_at
+  end
+
+  def test_cursor_down_moves_within_project
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 0 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal [ 0, 1 ], new_model.cursor
+  end
+
+  def test_cursor_down_jumps_to_next_project_at_last_row
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 2 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal [ 1, 0 ], new_model.cursor
+  end
+
+  def test_cursor_down_clamps_at_end_of_last_project
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 1, 2 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal [ 1, 2 ], new_model.cursor, "must clamp rather than wrap"
+  end
+
+  def test_cursor_up_jumps_to_previous_project_at_first_row
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 1, 0 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal [ 0, 2 ], new_model.cursor
+  end
+
+  def test_cursor_up_clamps_at_top
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 0 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal [ 0, 0 ], new_model.cursor
+  end
+
+  def test_show_help_sets_mode_to_help
+    new_model, _cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::SHOW_HELP)
+    assert_equal :help, new_model.mode
+  end
+
+  def test_open_filter_prompt_pre_fills_buffer_with_active_filter
+    starting = model.with(filter: "auth")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_FILTER_PROMPT)
+    assert_equal :filter, new_model.mode
+    assert_equal "auth", new_model.filter_buffer
+  end
+
+  def test_back_from_triage_clears_triage_state
+    starting = model.with(mode: :triage, triage_state: Object.new)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.triage_state
+  end
+
+  def test_back_from_log_tail_clears_tail_state
+    starting = model.with(mode: :log_tail, tail_state: Object.new)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.tail_state
+  end
+
+  def test_back_from_help_returns_to_grid
+    starting = model.with(mode: :help)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+    assert_equal :grid, new_model.mode
+  end
+
+  def test_project_scope_sets_scope_and_resets_cursor
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 2 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::ProjectScope.new(n: 2))
+    assert_equal 2, new_model.scope
+    assert_equal [ 0, 0 ], new_model.cursor
+  end
+
+  def test_project_scope_zero_clears_scope
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 1)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::ProjectScope.new(n: 0))
+    assert_equal 0, new_model.scope
+  end
+
+  def test_noop_returns_model_unchanged
+    new_model, cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::NOOP)
+    assert_same model, new_model
+    assert_nil cmd
+  end
 end

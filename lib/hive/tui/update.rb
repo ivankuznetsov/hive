@@ -46,13 +46,36 @@ module Hive
           [ apply_filter_cancelled(model), nil ]
         when Messages::TerminateRequested
           [ model, terminate_command ]
+        when Messages::Flash
+          [ apply_flash(model, message), nil ]
+        when Messages::CursorDown
+          [ apply_cursor_down(model), nil ]
+        when Messages::CursorUp
+          [ apply_cursor_up(model), nil ]
+        when Messages::ShowHelp
+          [ apply_show_help(model), nil ]
+        when Messages::OpenFilterPrompt
+          [ apply_open_filter_prompt(model), nil ]
+        when Messages::Back
+          [ apply_back(model), nil ]
+        when Messages::ProjectScope
+          [ apply_project_scope(model, message), nil ]
+        when Messages::Noop
+          [ model, nil ]
         when Messages::KeyPressed
-          # Stub — wired in U5 once KeyMap returns Messages.
+          # Translation lives in `BubbleModel#update` (U10): KeyMap.message_for
+          # is called there before delegating to Update.apply. KeyPressed
+          # arriving here means the runner sent it raw without translation —
+          # treat as noop so a misconfigured wiring doesn't crash the loop.
           [ model, nil ]
         else
           # Unknown messages flow through unchanged. Future-compat with
           # framework messages we don't yet care about (FocusMessage,
           # BlurMessage, MouseMessage if mouse ever gets enabled).
+          # DispatchCommand / OpenFindings / OpenLogTail / Bulk* /
+          # ToggleFinding intentionally fall through here — they require
+          # I/O or a runner reference and are handled in BubbleModel
+          # before delegating to Update.
           [ model, nil ]
         end
       end
@@ -129,6 +152,122 @@ module Hive
       # in grid mode).
       def apply_filter_cancelled(model)
         model.with(mode: :grid, filter_buffer: "")
+      end
+
+      # ---- Keystroke-derived handlers (added in U10) ----
+
+      def apply_flash(model, msg)
+        model.with(flash: msg.text, flash_set_at: Time.now)
+      end
+
+      # Cursor moves one row down within the same project; on overflow,
+      # advances to the first row of the next project that has visible
+      # rows. Stays clamped at the last row of the last non-empty project
+      # rather than wrapping. Mirrors `GridState#move_cursor_down` so the
+      # two backends agree on cursor semantics.
+      def apply_cursor_down(model)
+        visible = visible_snapshot(model)
+        return model if visible.nil? || model.cursor.nil?
+
+        project_idx, row_idx = model.cursor
+        return model unless project_idx.between?(0, visible.projects.size - 1)
+
+        rows = visible.projects[project_idx].rows
+        if row_idx + 1 < rows.size
+          model.with(cursor: [ project_idx, row_idx + 1 ])
+        else
+          next_idx = next_non_empty_project_idx(visible, project_idx + 1)
+          next_idx ? model.with(cursor: [ next_idx, 0 ]) : model
+        end
+      end
+
+      def apply_cursor_up(model)
+        visible = visible_snapshot(model)
+        return model if visible.nil? || model.cursor.nil?
+
+        project_idx, row_idx = model.cursor
+        return model unless project_idx.between?(0, visible.projects.size - 1)
+
+        if row_idx > 0
+          model.with(cursor: [ project_idx, row_idx - 1 ])
+        else
+          prev_idx = prev_non_empty_project_idx(visible, project_idx - 1)
+          if prev_idx
+            last_row = visible.projects[prev_idx].rows.size - 1
+            model.with(cursor: [ prev_idx, last_row ])
+          else
+            model
+          end
+        end
+      end
+
+      def apply_show_help(model)
+        model.with(mode: :help)
+      end
+
+      # Pre-fill the filter buffer with the active filter so `/` followed
+      # by edits feels like in-place editing (curses parity).
+      def apply_open_filter_prompt(model)
+        model.with(mode: :filter, filter_buffer: model.filter.to_s)
+      end
+
+      # Esc / `q` from a sub-mode returns to grid. Clears triage_state
+      # and tail_state on exit so the next entry starts clean. Help
+      # overlay dismisses to grid; filter mode goes through
+      # FilterCancelled (still routes through Back symmetrically here
+      # for the keystroke that produced this Message).
+      def apply_back(model)
+        case model.mode
+        when :triage then model.with(mode: :grid, triage_state: nil)
+        when :log_tail then model.with(mode: :grid, tail_state: nil)
+        when :help, :filter then model.with(mode: :grid)
+        else model
+        end
+      end
+
+      # `n == 0` clears scope (all projects). Out-of-range still flips
+      # the scope (Snapshot returns an empty-projects view); cursor
+      # resets to the first non-empty project or nil if the scoped grid
+      # is empty.
+      def apply_project_scope(model, msg)
+        new_model = model.with(scope: msg.n)
+        visible = visible_snapshot(new_model)
+        cursor = visible.nil? ? [ 0, 0 ] : first_visible_cursor(visible)
+        new_model.with(cursor: cursor)
+      end
+
+      # ---- Cursor / visibility helpers (mirror GridState's logic) ----
+
+      def visible_snapshot(model)
+        snap = model.snapshot
+        return nil if snap.nil?
+
+        snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
+      end
+
+      def next_non_empty_project_idx(visible, start_idx)
+        idx = start_idx
+        while idx < visible.projects.size
+          return idx unless visible.projects[idx].rows.empty?
+
+          idx += 1
+        end
+        nil
+      end
+
+      def prev_non_empty_project_idx(visible, start_idx)
+        idx = start_idx
+        while idx >= 0
+          return idx unless visible.projects[idx].rows.empty?
+
+          idx -= 1
+        end
+        nil
+      end
+
+      def first_visible_cursor(visible)
+        first = next_non_empty_project_idx(visible, 0)
+        first.nil? ? nil : [ first, 0 ]
       end
     end
   end

@@ -3,11 +3,17 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-04-27T13:30:00Z
+updated: 2026-04-27T15:00:00Z
 tags: [command, tui, observability, interactive]
 ---
 
-**TLDR**: `hive tui` is the human-only, full-screen curses dashboard over `hive status`. It polls the same data source at 1 Hz, groups rows by action label, and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+**TLDR**: `hive tui` is the human-only, full-screen Charm bubbletea + lipgloss dashboard over `hive status`. It polls the same data source at 1 Hz, groups rows by action label, and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+
+## Backend
+
+The TUI's render layer is **bubbletea-ruby + lipgloss-ruby** (Charm Go libraries via FFI), wired through an MVU loop in `Hive::Tui::App.run_charm`. Frames are rendered by pure functions in `Hive::Tui::Views::*` over the frozen `Hive::Tui::Model`; state transitions flow through `Hive::Tui::Update.apply`; keystrokes are translated by `Hive::Tui::KeyMap.message_for` into typed `Hive::Tui::Messages::*` values.
+
+The legacy curses backend remains accessible for one release as `HIVE_TUI_BACKEND=curses hive tui` in case a charm-specific terminal regression hits a user. The next release (after U11 of plan #003) deletes the curses path entirely. Both backends consume the same `StateSource` snapshot and produce the same set of keystroke→action mappings — switching backends does not change behavior, only rendering.
 
 ## Modes
 
@@ -55,33 +61,35 @@ Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is
 
 ## Subprocess takeover
 
-Workflow verbs and `Enter`-on-`review_findings`'s `d` (develop) keystroke dispatch via `Hive::Tui::Subprocess.takeover!(argv)`:
+Workflow verbs and triage's `d` (develop) keystroke dispatch via `Hive::Tui::Subprocess.takeover_command(argv, dispatch:)` on the charm path. The returned `Bubbletea::ExecCommand` runs synchronously in the framework's suspend window (raw mode disabled, cursor shown, input reader stopped). Inside the callable:
 
-1. `Curses.def_prog_mode` saves the curses tty state.
-2. `Curses.endwin` restores cooked-mode shell tty so the child inherits a clean terminal.
-3. `Process.spawn(*argv, pgroup: true)` with stdin/stdout/stderr inherited.
-4. `Process.wait2` blocks; INT/TERM forward to the child's pgroup.
-5. `Curses.reset_prog_mode` + `Curses.refresh` restores the alternate screen.
+1. `Process.spawn(*argv, pgroup: true)` with stdin/stdout/stderr inherited.
+2. `Process.wait2` blocks; INT/TERM forward to the child's pgroup.
+3. The exit code is dispatched as `Messages::SubprocessExited(verb:, exit_code:)` via the closure-captured `dispatch` lambda (which `App.run_charm` wires to `runner.method(:send)`).
+4. The framework re-enters raw mode, hides the cursor, and resumes the input reader.
 
-Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — `Open3.capture3` runs `hive accept-finding` / `hive reject-finding` without tearing down curses, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line.
+The legacy curses path retains `Subprocess.takeover!(argv)` with the matching `def_prog_mode`/`endwin`/`reset_prog_mode` dance for as long as `HIVE_TUI_BACKEND=curses` is supported.
+
+Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — `Open3.capture3` runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line.
 
 ## Terminal hostility
 
-- **Resize:** ncurses' default SIGWINCH handler injects `Curses::KEY_RESIZE` into the next `getch`; the TUI redraws on receipt. No Ruby `Signal.trap("WINCH")` (per [ruby/curses#9](https://github.com/ruby/curses/issues/9)).
-- **Ctrl+Z / SIGTSTP:** ncurses' default handler suspends the curses runtime; resume restores the alternate screen.
-- **SIGHUP:** trapped at boot; flips a `terminate_requested` flag the render loop polls between frames. On the next iteration cleanup runs (kill any in-flight subprocess pgroup, `Curses.close_screen`, join the polling thread).
-- **`at_exit`:** `Curses.close_screen` + `SubprocessRegistry.kill_inflight!` registered BEFORE the first `Curses.init_screen` so a crash during init still restores the terminal.
+- **Resize:** Bubble Tea's runner installs its own SIGWINCH handler and synthesises a `WindowSizeMessage`; `BubbleModel#update` translates it into `Messages::WindowSized` so views can read `model.cols`/`model.rows` without poking the framework. The legacy curses path uses ncurses' injected `KEY_RESIZE`.
+- **Ctrl+Z / SIGTSTP:** Bubble Tea owns suspend/resume of the alt-screen and raw-mode toggling. The legacy curses path delegates to ncurses' default handler.
+- **SIGHUP:** trapped at boot in `App.run_charm`; the trap calls `runner.send(Messages::TERMINATE_REQUESTED)`, which the runner picks up at the top of the next loop tick. Update returns `Bubbletea.quit` so the runner exits cleanly. Cleanup runs in `App.run_charm`'s `ensure` (kill the polling thread, stop StateSource, restore the previous HUP handler, `SubprocessRegistry.kill_inflight!`).
+- **`at_exit`:** `SubprocessRegistry.kill_inflight!` is registered alongside the StateSource boot so a crash during init still kills any in-flight workflow-verb subprocess.
 - **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"unsupported_flag", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema).
 - **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.
 
 ## Test surface
 
 - `test/integration/tui_command_test.rb` — Thor help-text registration, `--json` rejection, non-tty boundary check.
-- `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `TriageState`, `LogTail::FileResolver`, `Help`).
-- `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover!` / `run_quiet!` against a fake child binary.
-- `test/smoke/tui_smoke_test.rb` — PTY-based boot smoke: `bin/hive tui` paints, the seeded project name appears, `q` exits 0.
+- `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `TriageState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
+- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`Grid`, `Triage`, `LogTail`, `HelpOverlay`, `FilterPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`).
+- `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover!` / `takeover_command` / `run_quiet!` against a fake child binary.
+- `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0. The latter pins `HIVE_TUI_BACKEND=charm` explicitly so the charm path stays covered after U11 deletes curses.
 
-No render-layer snapshot tests; mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing. The data path is unit-tested; the smoke test pins the curses round-trip end-to-end.
+No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing.
 
 ## Backlinks
 

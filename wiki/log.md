@@ -2,6 +2,29 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-27T15:00:00Z] `hive tui` migrated to Charm bubbletea + lipgloss (plan #003 U1–U10)
+
+**Action:** Plan #003 ships across 10 commits (U1 scaffold → U10 default flip). The TUI's render layer is now Bubble Tea MVU with Lipgloss styling; the curses path is kept one release as `HIVE_TUI_BACKEND=curses` for terminal-specific regressions. U11 (the curses removal) follows.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — TLDR mentions bubbletea + lipgloss; new "Backend" section explains the MVU loop and the env-var escape hatch; "Subprocess takeover" rewritten around `Subprocess.takeover_command` + `Bubbletea::ExecCommand`; "Terminal hostility" rewritten around the runner's SIGWINCH/Ctrl-Z handling and `runner.send(TERMINATE_REQUESTED)` for SIGHUP. Frontmatter `updated` bumped.
+- `wiki/dependencies.md` — `bubbletea` ~> 0.1.4 and `lipgloss` ~> 0.2.2 added as runtime gems; `curses` flagged as legacy/deprecated through U11. TLDR rewrite + "Why Bubble Tea + Lipgloss" rationale.
+- `CHANGELOG.md [Unreleased]` — new "Changed — `hive tui` render layer migrated…" section at the top of the section list, ahead of "Breaking changes" / "Added".
+
+**Code changes (referenced from wiki):**
+- `lib/hive/tui/app.rb` — full MVU lifecycle: builds `Hive::Tui::BubbleModel` over `Model.initial`, wires `dispatch: runner.method(:send)`, installs SIGHUP→`runner.send(TERMINATE_REQUESTED)`, runs a 0.5s background poller that injects `SnapshotArrived` / `PollFailed` based on `StateSource.current`, runs `Bubbletea::Runner`, cleans up on exit. Default backend flipped from `curses` to `charm`; `HIVE_TUI_BACKEND=curses` still routes to `Hive::Tui.run_curses` until U11.
+- `lib/hive/tui/bubble_model.rb` (new) — Bubbletea::Model adapter. Translates `KeyMessage` via `KeyMap.message_for(...)` and `WindowSizeMessage` to `Messages::WindowSized`; handles side-effect-bearing messages (`DispatchCommand` → `Subprocess.takeover_command`; `OpenFindings`/`OpenLogTail` synchronous I/O; `Bulk*`/`ToggleFinding` `run_quiet!` + reload); delegates everything else to `Update.apply`. Dispatches view by `model.mode` to one of `Views::Grid` / `Triage` / `LogTail` / `HelpOverlay` / composed `Grid + FilterPrompt`.
+- `lib/hive/tui/views/{grid,triage,log_tail,help_overlay,filter_prompt}.rb` (new) — pure functions over `Hive::Tui::Model`. Mirror the curses `Render::*` content layout 1:1; styling switched to Lipgloss. Test layer pins layout/text content; visual styling validated by manual dogfood (lipgloss-ruby v0.2.2 strips ANSI in non-tty test envs).
+- `lib/hive/tui/update.rb` — extended with keystroke-derived handlers: `Flash`, `CursorDown`/`CursorUp` (mirror `GridState#move_cursor_*` semantics), `ShowHelp`, `OpenFilterPrompt` (pre-fills buffer with active filter), `Back` (mode-aware revert clearing sub-mode state), `ProjectScope`, `Noop`. Pure-function transitions only — side effects live in BubbleModel.
+- `lib/hive/tui/subprocess.rb` — adds `Subprocess.takeover_command(argv, dispatch:) → Bubbletea::ExecCommand` and the shared `run_takeover_child` core; curses `takeover!` retains its termios+curses-suspended wrapper.
+- `lib/hive/tui/messages.rb` — extended with the keystroke-derived Message types (DispatchCommand, Flash, OpenFindings, OpenLogTail, ToggleFinding, BulkAccept, BulkReject, ProjectScope, plus singleton SHOW_HELP / OPEN_FILTER_PROMPT / BACK / CURSOR_DOWN / CURSOR_UP / NOOP).
+- `lib/hive/tui/key_map.rb` — `dispatch(mode:, key:, row:)` is now a thin shim over `message_for(...)` + `message_to_tuple(...)`. Single source of truth — curses (which still calls `dispatch` through U10) and charm (which calls `message_for` directly via BubbleModel) cannot drift.
+
+**Key decisions:**
+- **`HIVE_TUI_BACKEND=curses` kept one release.** Curses is the escape hatch if Bubble Tea misbehaves on a user's terminal in production. The next release deletes it (per plan #003 U11). Without this hatch the migration would be a hard cut, which the plan's risk register explicitly counsels against given bubbletea-ruby's alpha status.
+- **View tests pin layout, not styling.** lipgloss-ruby v0.2.2 strips ANSI in non-tty environments and exposes no force-color escape hatch. R19 (visual quality bar) is met by manual dogfood rather than golden-string color assertions; the gap is documented in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md` so a future renderer-profile API can close it.
+- **Side effects live in `BubbleModel`, not `Update`.** Update.apply stays pure (Model in, [Model, Cmd] out) so state transitions are unit-testable in isolation. DispatchCommand wraps with `Subprocess.takeover_command`; OpenFindings/OpenLogTail/Bulk*/ToggleFinding do synchronous I/O — same pattern the curses path used in `Hive::Tui.run_triage` / `run_quiet!`. Inline I/O is acceptable for v1 because the operations are quick (file reads) and the alternative (Bubble Tea Cmd-as-Fiber) isn't exposed by bubbletea-ruby v0.1.4.
+
 ## [2026-04-27T13:30:00Z] `hive tui` deferred ce-code-review issues #10/#11/#12
 
 **Action:** Commit `4ccad1a` closes the three deferred ce-code-review issues. Two CLI-surface changes worth wiki-recording: (1) `hive tui --json` reject path now emits a structured error envelope on stdout before raising (`{ok:false, error_class:"InvalidTaskPath", error_kind:"unsupported_flag", exit_code:64, ...}`) — no schema bump, because `tui` has no registered `hive-*` schema; (2) the non-tty boundary now raises `Hive::InvalidTaskPath` so it shares EX_USAGE (64) with the `--json` reject, instead of falling through to `Hive::Error` / generic exit 1. `tui` long_desc gained a one-line keystroke summary (`b/p/d/r/P/a`) so agents enumerating help see the human-only interaction shape.

@@ -1,6 +1,8 @@
 require "open3"
 require "io/console"
+require "bubbletea"
 require "hive/tui/debug"
+require "hive/tui/messages"
 require "hive/tui/subprocess_registry"
 
 module Hive
@@ -35,6 +37,59 @@ module Hive
       # caller can flash a stable status without ambiguating between a
       # missing binary and an explicit child exit code.
       COMMAND_NOT_FOUND_EXIT = 127
+
+      # Charm path: returns a `Bubbletea::ExecCommand` that, when run by the
+      # framework's runner, spawns argv with pgroup forwarding, waits, and
+      # dispatches a `Messages::SubprocessExited(verb:, exit_code:)` back into
+      # the loop via `dispatch.call(message)`.
+      #
+      # The framework owns suspend/resume of raw mode, cursor, and input
+      # reader (see `Bubbletea::Runner#exec_process`) — that's why this path
+      # has no curses dance and no termios save/restore. The curses
+      # `takeover!` retains both because the curses backend manages its own
+      # alt-screen lifecycle.
+      #
+      # The `dispatch:` parameter is the seam for runner injection. App's
+      # charm boot will wire `dispatch: runner.method(:send)` (Bubbletea's
+      # Runner overrides `Object#send` to enqueue messages onto the loop's
+      # input stream). Tests pass a plain capture lambda. We can't use the
+      # built-in `message:` argument of the takeover builder because the
+      # exit code isn't known at command-construction time — closure-capture
+      # is the only path that surfaces the actual exit code.
+      #
+      # Verb is cached at argv[1] at construction time so SubprocessExited
+      # carries the verb name even if argv is mutated downstream — same
+      # contract as `Messages::DispatchCommand.verb`.
+      def takeover_command(argv, dispatch:)
+        verb = argv[1]
+        callable = lambda do
+          exit_code = run_takeover_child(argv)
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
+        end
+        Bubbletea.public_send(:exec, callable)
+      end
+
+      # Extracted spawn-and-wait core shared between the curses `takeover!`
+      # path and the charm `takeover_command` callable. Returns the same
+      # Integer exit shape: 0..255 for clean exits, 128+signo for signal
+      # kills, COMMAND_NOT_FOUND_EXIT (127) for missing binary.
+      def run_takeover_child(argv)
+        Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
+        prev_int, prev_term = install_pgid_forwarding_traps
+        begin
+          pid = Process.spawn(*argv, pgroup: true)
+          register_real_pgid(pid)
+          Hive::Tui::Debug.log("takeover_command", "pid=#{pid} pgid=#{SubprocessRegistry.current.inspect}")
+          _, status = Process.wait2(pid)
+          translate_status(status)
+        rescue Errno::ENOENT, Errno::EACCES => e
+          Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
+          COMMAND_NOT_FOUND_EXIT
+        ensure
+          SubprocessRegistry.clear
+          restore_traps(prev_int, prev_term)
+        end
+      end
 
       def takeover!(argv)
         Hive::Tui::Debug.log("takeover", "argv=#{argv.inspect}")

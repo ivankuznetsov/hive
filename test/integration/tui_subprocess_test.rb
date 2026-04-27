@@ -208,3 +208,168 @@ class TuiSubprocessTest < Minitest::Test
     Hive::Tui::SubprocessRegistry.clear
   end
 end
+
+# U6 — `Subprocess.takeover_command(argv, dispatch:) → Bubbletea::ExecCommand`.
+# The framework owns suspend/resume of raw mode + cursor + input reader
+# (Bubbletea::Runner#exec_process), so this layer only needs to spawn the
+# child with pgroup forwarding, wait, and dispatch a SubprocessExited
+# message back into the loop. The `dispatch:` lambda is the seam — App.run_charm
+# wires `dispatch: runner.method(:send)` in U10; tests pass a capture lambda.
+#
+# We do NOT call `Bubbletea.exec`'s built-in `message:` arg because the exit
+# code isn't known at construction time. Closure-capture inside the callable
+# is the only path that lets us send the actual exit code back.
+class TuiSubprocessTakeoverCommandTest < Minitest::Test
+  include HiveTestHelper
+
+  FAKE_CHILD = TuiSubprocessTest::FAKE_CHILD
+
+  def setup
+    Hive::Tui::SubprocessRegistry.clear
+    %w[HIVE_TUI_FAKE_EXIT HIVE_TUI_FAKE_STDOUT HIVE_TUI_FAKE_STDERR
+       HIVE_TUI_FAKE_TRAP_INT HIVE_TUI_FAKE_BLOCK].each { |k| ENV.delete(k) }
+    @messages = []
+    @dispatch = ->(msg) { @messages << msg }
+  end
+
+  def teardown
+    %w[HIVE_TUI_FAKE_EXIT HIVE_TUI_FAKE_STDOUT HIVE_TUI_FAKE_STDERR
+       HIVE_TUI_FAKE_TRAP_INT HIVE_TUI_FAKE_BLOCK].each { |k| ENV.delete(k) }
+    Hive::Tui::SubprocessRegistry.clear
+  end
+
+  # ---- Builder shape ----
+
+  def test_takeover_command_returns_bubbletea_exec_command
+    cmd = Hive::Tui::Subprocess.takeover_command([ "hive", "develop", "slug" ], dispatch: @dispatch)
+    assert_kind_of Bubbletea::ExecCommand, cmd,
+      "takeover_command must return a Bubbletea::ExecCommand the runner knows how to execute"
+    assert_respond_to cmd.callable, :call,
+      "ExecCommand#callable must be invokable by the runner"
+  end
+
+  def test_takeover_command_does_not_spawn_at_construction_time
+    # Constructing the Cmd must not fork a child — the child only runs when
+    # the runner calls callable.call() inside its suspend window. A pre-spawn
+    # would race with the framework's raw-mode disable.
+    initial_messages = @messages.dup
+    Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD ], dispatch: @dispatch)
+    assert_equal initial_messages, @messages,
+      "takeover_command must defer spawn to callable invocation; no message before .call"
+  end
+
+  # ---- Callable execution ----
+
+  def test_callable_dispatches_subprocess_exited_with_zero_on_clean_exit
+    cmd = Hive::Tui::Subprocess.takeover_command([ "hive", "pr", "slug" ], dispatch: @dispatch)
+    # Patch argv[0] to the actual fake-child path while preserving the verb
+    # at argv[1] for caching. (Real call site already produces real `hive`
+    # argv; here we just want to drive the spawn against the fixture.)
+    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    cmd.callable.call
+
+    assert_equal 1, @messages.length, "exactly one SubprocessExited per execution"
+    msg = @messages.first
+    assert_kind_of Hive::Tui::Messages::SubprocessExited, msg
+    assert_equal "pr", msg.verb, "verb must be argv[1] cached at construction time"
+    assert_equal 0, msg.exit_code
+  end
+
+  def test_callable_dispatches_nonzero_exit_code
+    ENV["HIVE_TUI_FAKE_EXIT"] = "7"
+    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "develop" ], dispatch: @dispatch)
+    cmd.callable.call
+
+    msg = @messages.first
+    assert_equal 7, msg.exit_code
+    assert_equal "develop", msg.verb
+  end
+
+  def test_callable_dispatches_command_not_found_when_binary_missing
+    cmd = Hive::Tui::Subprocess.takeover_command(
+      [ "/path/that/does/not/exist/hive-fake", "develop" ],
+      dispatch: @dispatch
+    )
+    cmd.callable.call
+
+    msg = @messages.first
+    assert_equal 127, msg.exit_code,
+      "ENOENT must translate to 127 (POSIX command-not-found) so the existing flash path handles it"
+    assert_equal "develop", msg.verb
+  end
+
+  def test_callable_dispatches_signal_exit_on_pgroup_term
+    ENV["HIVE_TUI_FAKE_BLOCK"] = "1"
+    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "review" ], dispatch: @dispatch)
+
+    killer = Thread.new do
+      30.times do
+        pgid = Hive::Tui::SubprocessRegistry.current
+        if pgid.is_a?(Integer)
+          begin
+            Process.kill("TERM", -pgid)
+          rescue Errno::ESRCH
+            nil
+          end
+          break
+        end
+        sleep 0.02
+      end
+    end
+    cmd.callable.call
+    killer.join
+
+    msg = @messages.first
+    assert_equal 128 + Signal.list.fetch("TERM"), msg.exit_code,
+      "SIGTERM-killed child must report 128+SIGTERM (143) per POSIX shell convention"
+    assert_equal "review", msg.verb
+  end
+
+  # ---- Trap and registry hygiene ----
+
+  def test_callable_restores_int_and_term_traps
+    before_int = trap("INT", "DEFAULT")
+    before_term = trap("TERM", "DEFAULT")
+    begin
+      cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+      cmd.callable.call
+      after_int = trap("INT", "DEFAULT")
+      after_term = trap("TERM", "DEFAULT")
+      assert_equal "DEFAULT", after_int, "INT trap restored after callable returns"
+      assert_equal "DEFAULT", after_term, "TERM trap restored after callable returns"
+    ensure
+      trap("INT", before_int)
+      trap("TERM", before_term)
+    end
+  end
+
+  def test_callable_clears_registry_on_clean_exit
+    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    cmd.callable.call
+    assert_nil Hive::Tui::SubprocessRegistry.current,
+      "registry must be cleared after callable so SIGHUP doesn't kill nothing"
+  end
+
+  def test_callable_clears_registry_on_missing_binary
+    cmd = Hive::Tui::Subprocess.takeover_command(
+      [ "/no/such/binary", "develop" ],
+      dispatch: @dispatch
+    )
+    cmd.callable.call
+    assert_nil Hive::Tui::SubprocessRegistry.current,
+      "registry must be cleared even when spawn raises ENOENT"
+  end
+
+  # ---- Verb caching from argv[1] ----
+
+  def test_verb_cached_from_argv_index_one
+    # Synthetic: argv[0] is the binary, argv[1] is the verb. Cache at construction
+    # time so SubprocessExited carries the verb name even when argv leaks past us.
+    cmd = Hive::Tui::Subprocess.takeover_command(
+      [ FAKE_CHILD, "brainstorm", "some-slug", "--from", "1-input" ],
+      dispatch: @dispatch
+    )
+    cmd.callable.call
+    assert_equal "brainstorm", @messages.first.verb
+  end
+end

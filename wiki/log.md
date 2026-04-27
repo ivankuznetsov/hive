@@ -2,6 +2,23 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-27T13:30:00Z] `hive tui` deferred ce-code-review issues #10/#11/#12
+
+**Action:** Commit `4ccad1a` closes the three deferred ce-code-review issues. Two CLI-surface changes worth wiki-recording: (1) `hive tui --json` reject path now emits a structured error envelope on stdout before raising (`{ok:false, error_class:"InvalidTaskPath", error_kind:"unsupported_flag", exit_code:64, ...}`) — no schema bump, because `tui` has no registered `hive-*` schema; (2) the non-tty boundary now raises `Hive::InvalidTaskPath` so it shares EX_USAGE (64) with the `--json` reject, instead of falling through to `Hive::Error` / generic exit 1. `tui` long_desc gained a one-line keystroke summary (`b/p/d/r/P/a`) so agents enumerating help see the human-only interaction shape.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — terminal-hostility section now documents the JSON error envelope shape and the non-tty USAGE-64 alignment. Frontmatter `updated` bumped.
+- `wiki/cli.md` — already updated in `4ccad1a` to flag `tui` as the sole `--json`-rejecting command; no further edit needed.
+
+**Code changes (referenced from wiki):**
+- `lib/hive/cli.rb` — `tui` action now emits the JSON envelope before raising on `--json`; long_desc keystroke line.
+- `lib/hive/tui.rb` — non-tty raise upgraded to `Hive::InvalidTaskPath`; `restore_terminal_safety_hooks` (SIGHUP trap restore on clean exit); `terminate_requested?` checks added inside `triage_loop` and `log_tail_loop` so SIGHUP collapses subloops within a frame; `Errno::ENOENT/EACCES` rescue around `LogTail::Tail#open!` (race with rotation between `FileResolver.latest` and the open syscall); `Hive::NoReviewFile` rescue in `reload_or_flash` (concurrent archive/rerun) returns `:back` so triage drops to grid instead of crashing.
+- `lib/hive/tui/key_map/curses_keys.rb` (new) — extracted curses-int → KeyMap-symbol translation out of `Hive::Tui` so KeyMap owns its own symbol contract.
+
+**Key decisions:**
+- **No schema for `tui`'s JSON error envelope.** `hive tui` is human-only and has no registered `hive-*` schema, so the envelope deliberately omits `schema` rather than minting a one-off `hive-tui-error.v1.json` whose only payload is the rejection. JSON consumers still see typed error data; schema-validating wrappers continue to validate against the agent-callable surfaces unchanged.
+- **Non-tty + `--json` share EX_USAGE (64).** Both are misuse — the TUI cannot run without a terminal and cannot emit JSON — so wrappers can branch on a single "you used this wrong" exit code instead of distinguishing `1` (generic) from `64`. Documented in `wiki/commands/tui.md` "Terminal hostility".
+
 ## [2026-04-27T12:00:00Z] U2–U11 + polish — `hive tui` feature complete
 
 **Action:** Remaining `hive tui` units landed on top of U1: U2 `StateSource`/`Snapshot` (1Hz polling, 5s stalled banner), U3 `KeyMap` (single source-of-truth keystroke→action), U4 `Subprocess.takeover!` / `run_quiet!` + `SubprocessRegistry`, U5 status grid + `GridState`, U6 findings triage mode (`a`/`r` rebind to bulk accept/reject), U7 agent log tail, U8 help overlay + workflow-verb cross-check, U9 SIGHUP / `at_exit` / `KEY_RESIZE` handling, U11 PTY smoke test (`bin/hive tui` boots, paints first frame, `q` exits 0). Then `bcf66cd` applied 13 of 32 ce-code-review findings on top.

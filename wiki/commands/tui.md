@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-04-27
+updated: 2026-04-27T13:30:00Z
 tags: [command, tui, observability, interactive]
 ---
 
@@ -71,7 +71,8 @@ Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead
 - **Ctrl+Z / SIGTSTP:** ncurses' default handler suspends the curses runtime; resume restores the alternate screen.
 - **SIGHUP:** trapped at boot; flips a `terminate_requested` flag the render loop polls between frames. On the next iteration cleanup runs (kill any in-flight subprocess pgroup, `Curses.close_screen`, join the polling thread).
 - **`at_exit`:** `Curses.close_screen` + `SubprocessRegistry.kill_inflight!` registered BEFORE the first `Curses.init_screen` so a crash during init still restores the terminal.
-- **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design.
+- **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"unsupported_flag", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema).
+- **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.
 
 ## Test surface
 

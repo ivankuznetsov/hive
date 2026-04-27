@@ -79,4 +79,31 @@ class TuiHelpTest < Minitest::Test
     assert Hive::Tui::Help::BINDINGS.frozen?,
            "BINDINGS must be frozen so callers can't mutate the help text at runtime"
   end
+
+  def test_bindings_inner_hashes_are_frozen
+    Hive::Tui::Help::BINDINGS.each do |entry|
+      assert entry.frozen?, "BINDINGS entry must be frozen: #{entry.inspect}"
+    end
+  end
+
+  # Reverse direction of `test_every_workflow_verb_appears_in_grid_mode_bindings`:
+  # cross-check that no grid-mode binding references an action that
+  # neither resolves to a workflow verb nor matches the curated list of
+  # known TUI-internal actions. A typo in BINDINGS or a renamed verb
+  # would otherwise leave the cheatsheet pointing at vapor.
+  def test_no_grid_mode_binding_references_a_nonexistent_verb
+    known_non_verb_actions = %i[cursor_down cursor_up open_contextual filter project_scope help quit]
+    Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|
+      action = entry[:action]
+      next unless action.to_s.match?(/\A[a-z_]+\z/) # skip non-verb actions
+
+      if Hive::Workflows::VERBS.key?(action.to_s)
+        pass
+      elsif known_non_verb_actions.include?(action)
+        pass
+      else
+        flunk "BINDINGS references unknown action: #{action.inspect} (key=#{entry[:key]})"
+      end
+    end
+  end
 end

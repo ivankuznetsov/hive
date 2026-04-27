@@ -1,4 +1,5 @@
 require "hive"
+require "hive/commands/status"
 
 module Hive
   module Tui
@@ -54,16 +55,29 @@ module Hive
         new(generated_at: payload["generated_at"], projects: projects)
       end
 
+      # Rows are sorted by `Status::ACTION_LABEL_ORDER` at construction so
+      # `row_at(cursor)` and the renderer's grouped-row traversal walk the
+      # same list. Without this, a project whose tasks span multiple
+      # action_labels has the cursor highlight one row while keystrokes
+      # act on another (issue #10). Unknown labels sort last but preserve
+      # JSON order against their unknown peers; within a known group the
+      # original JSON order is preserved so Status's mtime-desc ranking
+      # within a stage is honoured.
       def self.build_project_view(payload)
         payload ||= {}
         name = payload["name"]
-        rows = Array(payload["tasks"]).map { |t| build_row(t, name) }
+        indexed = Array(payload["tasks"]).map.with_index { |t, i| [ build_row(t, name), i ] }
+        order = Hive::Commands::Status::ACTION_LABEL_ORDER
+        sorted = indexed.sort_by do |row, idx|
+          pos = order.index(row.action_label) || order.length
+          [ pos, idx ]
+        end.map(&:first)
         ProjectView.new(
           name: name,
           path: payload["path"],
           hive_state_path: payload["hive_state_path"],
           error: payload["error"],
-          rows: rows.freeze
+          rows: sorted.freeze
         ).freeze
       end
 

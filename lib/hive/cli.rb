@@ -255,6 +255,8 @@ module Hive
       `review` / `pr` / `archive`) as a fresh subprocess on a single
       keystroke. `?` shows the keybinding cheatsheet; `q` quits.
 
+      Keystrokes: b/p/d/r/P/a dispatch the corresponding workflow verb on the highlighted task.
+
       Human-only — `hive tui --json` is rejected with EX_USAGE (64).
       Agent-callable surfaces stay JSON via `hive status` and the
       typed verbs.

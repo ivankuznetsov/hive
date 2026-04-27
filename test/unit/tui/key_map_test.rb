@@ -359,4 +359,20 @@ class TuiKeyMapTest < Minitest::Test
     assert_includes err.message, "nonsense",
                     "error must name the offending mode"
   end
+
+  # Argv round-trip safety: a project name carrying shell metacharacters
+  # (here, a quoted "; rm -rf ~" payload) must surface as a single inert
+  # literal argv element after Shellwords.split — never an interpreted
+  # command. `Process.spawn(*argv)` doesn't go through a shell, so as long
+  # as the splitter respects the quoting, the metacharacter stays a
+  # data byte rather than control flow.
+  def test_grid_verb_preserves_shell_metacharacters_in_project_arg
+    suggested = "hive plan some-slug --project '; rm -rf ~' --from 2-brainstorm"
+    row = make_row(action_key: "ready_to_plan", suggested_command: suggested)
+    action, payload = Hive::Tui::KeyMap.dispatch(mode: :grid, key: "p", row: row)
+    assert_equal :dispatch_command, action
+    assert_equal [ "hive", "plan", "some-slug", "--project", "; rm -rf ~", "--from", "2-brainstorm" ],
+                 payload,
+                 "shell metacharacter must round-trip as an inert literal argv element"
+  end
 end

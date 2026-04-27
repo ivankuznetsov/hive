@@ -23,6 +23,12 @@ module Hive
         def read(initial: nil)
           buffer = String.new(initial || "")
           loop do
+            # Cooperative cancellation hatch: a SIGHUP while the user
+            # is mid-typing must collapse the prompt promptly so the
+            # render loop's terminate check fires. Treat it as Esc
+            # (clear + return to grid).
+            return { action: :clear, value: nil } if Hive::Tui.terminate_requested?
+
             draw(buffer)
             ch = Curses.getch
             next if ch.nil?

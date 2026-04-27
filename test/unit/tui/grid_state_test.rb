@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/tui/grid_state"
 require "hive/tui/snapshot"
+require "hive/commands/status"
 
 # GridState owns the per-frame view state (cursor, filter, scope,
 # flash). These tests pin the cursor wrap/clamp rules across project
@@ -290,5 +291,49 @@ class TuiGridStateTest < Minitest::Test
     state.flash!("x", now: t0)
     assert state.flash_active?(now: t0 + 9.0, ttl_seconds: 10.0)
     refute state.flash_active?(now: t0 + 11.0, ttl_seconds: 10.0)
+  end
+
+  # -------- Cursor / renderer alignment (issue #10) ----------------
+
+  # Builds a project whose rows span three action_labels in a JSON
+  # order that does NOT match `ACTION_LABEL_ORDER`. After the snapshot
+  # sort, `project.rows` is the visual order the renderer walks — so
+  # `at_cursor(snapshot)` at index N must return `project.rows[N]`.
+  # Without the sort fix in `Snapshot#build_project_view`, the renderer
+  # walks `ACTION_LABEL_ORDER`-grouped rows while `row_at` walks JSON
+  # order, and at indices >= the first cross-label boundary the two
+  # disagree.
+  def test_at_cursor_aligns_with_visual_row_order_across_multiple_action_labels
+    review = make_task(slug: "fix-stuff", action: "review_findings")
+    review["action_label"] = "Review findings"
+    brainstorm = make_task(slug: "brand-new", action: "ready_to_brainstorm")
+    needs_input = make_task(slug: "input-please", action: "needs_your_input")
+    needs_input["action_label"] = "Needs your input"
+
+    snapshot = make_snapshot([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 # Wrong order vs. ACTION_LABEL_ORDER:
+                                 "tasks" => [ review, brainstorm, needs_input ]
+                               }
+                             ])
+
+    state = Hive::Tui::GridState.new
+    project_rows = snapshot.projects.first.rows
+
+    # Sanity: post-sort visual order matches ACTION_LABEL_ORDER's ranking.
+    assert_equal %w[brand-new input-please fix-stuff], project_rows.map(&:slug),
+                 "snapshot must sort rows by ACTION_LABEL_ORDER"
+
+    # Walk the cursor down through every row and assert at_cursor matches
+    # the visual row at the same index — exactly what the renderer
+    # highlights at that screen position.
+    project_rows.each_with_index do |expected_row, idx|
+      assert_equal expected_row, state.at_cursor(snapshot),
+                   "cursor index #{idx} must point at the same row the renderer draws"
+      state.move_cursor_down(snapshot) unless idx == project_rows.size - 1
+    end
   end
 end

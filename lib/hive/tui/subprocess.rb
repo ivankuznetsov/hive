@@ -36,8 +36,14 @@ module Hive
       COMMAND_NOT_FOUND_EXIT = 127
 
       def takeover!(argv)
+        # Capture termios BEFORE curses' def_prog_mode runs (inside
+        # with_curses_suspended). The captured baseline must be the
+        # parent's pre-curses tty state so restore_termios can hand
+        # the child a clean slate; capturing AFTER def_prog_mode
+        # would freeze a curses-flavoured termios that ttys then
+        # restore on return — see KTD-3 in the plan.
+        pre_termios = save_termios
         with_curses_suspended do
-          pre_termios = save_termios
           prev_int, prev_term = install_pgid_forwarding_traps
           begin
             pid = Process.spawn(*argv, pgroup: true)
@@ -54,12 +60,12 @@ module Hive
         end
       end
 
-      # Returns [exit_status, stdout, stderr]. `Open3.capture3` waits
-      # internally so we never see the child's pgid; we still register a
-      # placeholder so a SIGHUP during the call observes a non-nil slot
-      # and the U9 hook treats it as "spawn in progress, no-op kill".
+      # Returns [exit_status, stdout, stderr]. `Open3.capture3` manages
+      # the child internally; we have no pgid to track. The placeholder
+      # registration that pairs with the SIGHUP cleanup hook happens
+      # inside `install_pgid_forwarding_traps` — registering again here
+      # would be a redundant double-write to the same slot.
       def run_quiet!(argv)
-        SubprocessRegistry.register_placeholder
         prev_int, prev_term = install_pgid_forwarding_traps
         begin
           out, err, status = Open3.capture3(*argv, pgroup: true)

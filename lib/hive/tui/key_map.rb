@@ -21,6 +21,7 @@ module Hive
     module KeyMap
       module_function
 
+      # @api private
       # Hand-written grid-mode key->verb map; static UI choice rather
       # than something derivable from `Hive::Workflows::VERBS`. Capital
       # `P` distinguishes `pr` from `plan` since both start with `p`.
@@ -33,11 +34,16 @@ module Hive
         "a" => "archive"
       }.freeze
 
+      # @api private
       ENTER_KEYS = [ :key_enter, "\r", "\n" ].freeze
+      # @api private
       ESCAPE_KEYS = [ :key_escape, "\e" ].freeze
+      # @api private
       DOWN_KEYS = [ :key_down, "j" ].freeze
+      # @api private
       UP_KEYS = [ :key_up, "k" ].freeze
 
+      # @api private
       # Row action_keys with no `suggested_command`, mapped to the
       # contextual flash message Enter (and verb keys) should surface.
       ENTER_FLASH_MESSAGES = {

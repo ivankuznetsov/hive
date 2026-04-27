@@ -34,6 +34,7 @@ module Hive
       require "hive/tui/render/palette"
       require "hive/tui/render/filter_prompt"
       require "hive/tui/key_map"
+      require "hive/tui/key_map/curses_keys"
       require "hive/tui/subprocess"
       require "hive/tui/subprocess_registry"
 
@@ -63,6 +64,20 @@ module Hive
 
       @prev_hup = trap("HUP") { @terminate_requested = true }
       @hooks_installed = true
+    end
+
+    # Inverse of `install_terminal_safety_hooks`: puts the SIGHUP trap
+    # back to whatever the parent process had before `Hive::Tui.run`
+    # entered. Called from `run_loop`'s `ensure` so a clean exit
+    # doesn't leak our trap into the parent shell. The at_exit
+    # callback can't be unregistered, but it short-circuits when the
+    # `@hooks_installed` guard is false on a subsequent run.
+    def self.restore_terminal_safety_hooks
+      return unless @hooks_installed
+
+      trap("HUP", @prev_hup || "DEFAULT")
+      @hooks_installed = false
+      @prev_hup = nil
     end
 
     # Test seam — exposes whether the boot guard already installed the
@@ -103,6 +118,7 @@ module Hive
       ensure
         state_source.stop
         Curses.close_screen
+        restore_terminal_safety_hooks
       end
     end
 
@@ -124,7 +140,7 @@ module Hive
           next
         end
 
-        key = translate_key(ch)
+        key = Hive::Tui::KeyMap::CursesKeys.translate(ch)
         action = Hive::Tui::KeyMap.dispatch(
           mode: :grid,
           key: key,
@@ -193,7 +209,7 @@ module Hive
         ch = Curses.getch
         next if ch.nil?
 
-        action = Hive::Tui::KeyMap.dispatch(mode: :triage, key: translate_key(ch), row: row)
+        action = Hive::Tui::KeyMap.dispatch(mode: :triage, key: Hive::Tui::KeyMap::CursesKeys.translate(ch), row: row)
         result = handle_triage_action(action, triage_state, renderer, review_path)
         return if result == :back
       end
@@ -319,34 +335,9 @@ module Hive
         ch = Curses.getch
         next if ch.nil?
 
-        action = Hive::Tui::KeyMap.dispatch(mode: :log_tail, key: translate_key(ch), row: row)
+        action = Hive::Tui::KeyMap.dispatch(mode: :log_tail, key: Hive::Tui::KeyMap::CursesKeys.translate(ch), row: row)
         return if action.first == :back
       end
-    end
-
-    # Curses returns Integer codes for special keys and a single-char
-    # String for printable input. Map to the surface KeyMap expects:
-    # `:key_*` Symbols for navigation, single-char Strings for the rest.
-    def self.translate_key(ch)
-      return ch if ch.is_a?(String)
-      return :unknown unless ch.is_a?(Integer)
-
-      case ch
-      when Curses::KEY_DOWN then :key_down
-      when Curses::KEY_UP then :key_up
-      when Curses::KEY_ENTER, 10, 13 then :key_enter
-      when 27 then :key_escape
-      else printable_or_unknown(ch)
-      end
-    end
-
-    # Restrict raw integer-to-chr conversion to the printable ASCII band
-    # so unmapped function keys / escape sequences don't surface as
-    # garbage bytes that KeyMap then routes as no-ops.
-    def self.printable_or_unknown(ch)
-      return ch.chr if ch.between?(32, 126)
-
-      :unknown
     end
 
     def self.handle_filter_prompt(grid_state, snapshot)
@@ -361,11 +352,12 @@ module Hive
     # `terminate_requested?`, `request_terminate!`. Everything else is
     # implementation-private so the API agents and tests can rely on stays
     # explicit and refactor-safe.
-    private_class_method :install_terminal_safety_hooks, :run_loop, :render_dispatch_loop,
+    private_class_method :install_terminal_safety_hooks, :restore_terminal_safety_hooks,
+                         :run_loop, :render_dispatch_loop,
                          :handle_action, :run_triage, :resolve_review_path, :triage_loop,
                          :handle_triage_action, :takeover_and_return, :run_toggle, :run_bulk,
                          :reload_or_flash, :show_help_overlay, :run_log_tail, :resolve_log_path,
-                         :log_tail_loop, :translate_key, :printable_or_unknown,
+                         :log_tail_loop,
                          :handle_filter_prompt
   end
 end

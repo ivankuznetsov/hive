@@ -41,13 +41,6 @@ class TuiTriageStateTest < Minitest::Test
     assert_raises(ArgumentError) { state.toggle_command(nil) }
   end
 
-  # -------- develop_command ----------------------------------------
-
-  def test_develop_command_returns_hive_develop_with_from_4_execute
-    state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [])
-    assert_equal [ "hive", "develop", "fix-auth", "--from", "4-execute" ], state.develop_command
-  end
-
   # -------- bulk_command -------------------------------------------
 
   def test_bulk_command_accept_returns_accept_finding_all_argv
@@ -150,5 +143,53 @@ class TuiTriageStateTest < Minitest::Test
     indicator = state.relocate_cursor([ f1 ])
     assert_equal :reset, indicator
     assert_equal 0, state.cursor
+  end
+
+  # When two findings share a (severity, title-prefix) key, the id
+  # match is the tiebreaker — landing on the prefix-collider would
+  # make the user's accept/reject keystroke act on the wrong finding.
+  def test_relocate_cursor_prefers_id_match_over_prefix_collider_at_different_index
+    f1 = make_finding(id: 1, severity: "low", title: "Other issue entirely")
+    f2 = make_finding(id: 2, severity: "high", title: "Auth bypass on login form")
+    state = Hive::Tui::TriageState.new(slug: "x", findings: [ f1, f2 ])
+    state.cursor_down # cursor on f2 (id=2 at prior index 1)
+
+    # Reload: a different high-severity finding with the same 32-char
+    # title prefix appears first (the "wrong" match by prefix). The
+    # original id=2 lands at index 0 — id match must win even though
+    # the prefix-collider sits at the prior cursor index.
+    f2_reloaded = make_finding(id: 2, severity: "high",
+                                title: "Auth bypass on login form")
+    prefix_collider = make_finding(id: 99, severity: "high",
+                                    title: "Auth bypass on login form (variant)")
+
+    indicator = state.relocate_cursor([ f2_reloaded, prefix_collider ])
+    assert_equal :relocated, indicator
+    assert_equal 0, state.cursor
+    assert_equal 2, state.current_finding.id,
+                 "id match must win over the prefix collider sitting at prior index"
+  end
+
+  # Prior id deleted, and two prefix-collision matches in the new list:
+  # the closest to the prior cursor index wins so the highlight tracks
+  # the user's spatial expectation.
+  def test_relocate_cursor_picks_closest_by_index_when_id_missing_and_multiple_prefix_matches
+    f1 = make_finding(id: 1, severity: "low", title: "Style nit on doc string")
+    f2 = make_finding(id: 2, severity: "low", title: "Style nit on doc string")
+    f3 = make_finding(id: 3, severity: "high", title: "Auth check missing")
+    f4 = make_finding(id: 4, severity: "low", title: "Style nit on doc string")
+    state = Hive::Tui::TriageState.new(slug: "x", findings: [ f1, f2, f3, f4 ])
+    3.times { state.cursor_down } # cursor on f4 (index 3)
+
+    # Reload: id=4 deleted; two new "Style nit on doc string" findings
+    # at indices 0 and 2. Index 2 is closer to prior cursor (3) than 0.
+    a = make_finding(id: 10, severity: "low", title: "Style nit on doc string")
+    b = make_finding(id: 11, severity: "high", title: "Auth check missing")
+    c = make_finding(id: 12, severity: "low", title: "Style nit on doc string")
+
+    indicator = state.relocate_cursor([ a, b, c ])
+    assert_equal :relocated, indicator
+    assert_equal 2, state.cursor,
+                 "closest-by-index prefix match (index 2 vs 0) wins when id is gone"
   end
 end

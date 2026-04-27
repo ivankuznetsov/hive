@@ -214,4 +214,88 @@ class TuiSnapshotTest < Minitest::Test
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([]))
     assert_nil snapshot.row_at(nil)
   end
+
+  # Rows must be sorted by `Status::ACTION_LABEL_ORDER` at construction
+  # time so the cursor `>` in the renderer always lines up with the row
+  # `at_cursor(snapshot)` returns. Without the sort, a project that
+  # spans multiple action_labels lets the cursor highlight one row while
+  # Enter / verb-keystrokes act on another (issue #10).
+  def test_build_project_view_sorts_rows_by_action_label_order
+    review = sample_task(slug: "fix-stuff")
+    review["action"] = "review_findings"
+    review["action_label"] = "Review findings"
+
+    brainstorm = sample_task(slug: "brand-new")
+    # Already labelled "Ready to brainstorm" by sample_task.
+
+    needs_input = sample_task(slug: "input-please")
+    needs_input["action"] = "needs_your_input"
+    needs_input["action_label"] = "Needs your input"
+
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 # Deliberately NOT in ACTION_LABEL_ORDER sequence:
+                                 "tasks" => [ review, brainstorm, needs_input ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    rows = snapshot.projects.first.rows
+
+    assert_equal "Ready to brainstorm", rows[0].action_label,
+                 "first row must be the highest-ranked label per ACTION_LABEL_ORDER"
+    assert_equal "Needs your input", rows[1].action_label
+    assert_equal "Review findings", rows[2].action_label
+  end
+
+  def test_build_project_view_preserves_json_order_within_action_label_group
+    # Two rows share the same label; their JSON order must survive the
+    # sort so `Status`'s upstream mtime-desc ranking is honoured.
+    first = sample_task(slug: "older-bug")
+    second = sample_task(slug: "newer-bug")
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ first, second ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    rows = snapshot.projects.first.rows
+    assert_equal [ "older-bug", "newer-bug" ], rows.map(&:slug),
+                 "JSON order is the stable secondary sort within a label group"
+  end
+
+  def test_build_project_view_unknown_action_labels_sort_last_and_preserve_json_order
+    known = sample_task(slug: "known-task")
+    unknown_one = sample_task(slug: "future-one")
+    unknown_one["action"] = "future_state_a"
+    unknown_one["action_label"] = "Some Future Label A"
+    unknown_two = sample_task(slug: "future-two")
+    unknown_two["action"] = "future_state_b"
+    unknown_two["action_label"] = "Some Future Label B"
+
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 # Unknown labels appear FIRST in JSON order; they must end up LAST.
+                                 "tasks" => [ unknown_one, unknown_two, known ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    rows = snapshot.projects.first.rows
+
+    assert_equal "known-task", rows[0].slug,
+                 "known label sorts ahead of any unknown labels"
+    assert_equal [ "future-one", "future-two" ], rows[1..2].map(&:slug),
+                 "unknown labels keep their JSON order against each other"
+  end
 end

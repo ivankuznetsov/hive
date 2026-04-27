@@ -77,12 +77,15 @@ module Hive
           size = @file.size
           start = [ size - @backbuffer_bytes, 0 ].max
           @file.seek(start)
+          # Drop bytes until the next newline so we never display a
+          # half-line. When the seek lands ON a newline boundary,
+          # `gets` consumes only the empty/whitespace remainder of
+          # that line (zero bytes if start was an exact boundary), so
+          # we don't lose a whole line the way an unconditional shift
+          # would.
+          @file.gets if start.positive?
           chunk = @file.read
           ingest(chunk) if chunk
-          # Discard any leading partial line — we sliced mid-line on the
-          # backbuffer cut and the user expects whole lines, not a
-          # truncated head.
-          @buffer.shift if start.positive? && !@buffer.empty?
           @inode = File.stat(@path).ino
           self
         end
@@ -116,11 +119,18 @@ module Hive
 
         # Last `count` lines from the buffer, oldest first. Renderer
         # asks for `terminal_height - 2` so the count maps to drawable
-        # rows rather than absolute buffer size.
+        # rows rather than absolute buffer size. When a final partial
+        # (no-newline) line is buffered, surface it as the last entry
+        # so live writes from a still-running agent surface in the
+        # tail before the line terminator arrives.
         def lines(count)
           return [] if count <= 0
 
-          @buffer.last(count)
+          if @partial.empty?
+            @buffer.last(count)
+          else
+            @buffer.last([ count - 1, 0 ].max) + [ @partial.dup ]
+          end
         end
 
         def close!

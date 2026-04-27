@@ -54,10 +54,6 @@ module Hive
         [ "hive", verb, @slug, finding.id.to_s ]
       end
 
-      def develop_command
-        [ "hive", "develop", @slug, "--from", "4-execute" ]
-      end
-
       # `direction` is `:accept` or `:reject`; anything else raises so the
       # caller (KeyMap dispatch) gets a loud signal rather than a silent
       # noop on a typo.
@@ -68,15 +64,23 @@ module Hive
       end
 
       # After a document reload, find the index of the previously-current
-      # finding by `(severity, title-prefix)`. Updates `@findings` and
-      # `@cursor` in place; returns one of:
+      # finding using a layered lookup:
+      #   1. If the prior finding's `id` exists in the new list, prefer
+      #      that exact identity match (fastest disambiguation when the
+      #      reviewer rewrote titles or shifted severities).
+      #   2. Otherwise, look up by `(severity, title-prefix)`. When
+      #      multiple new findings share that key, prefer the one
+      #      closest to the prior cursor index so the highlight tracks
+      #      the user's mental position rather than first-match.
+      #   3. If no match, reset cursor to 0 and return `:reset`.
+      #
+      # Updates `@findings` and `@cursor` in place; returns one of:
       #   :unchanged — same finding lives at the same index in new list
       #   :relocated — same finding found at a different index
       #   :reset     — no match; cursor reset to 0 (caller should flash)
-      # When two new findings share the same key, snaps to the first
-      # match (residual risk documented in the plan).
       def relocate_cursor(new_findings)
         prior = current_finding
+        prior_index = @cursor
         @findings = new_findings
 
         if prior.nil?
@@ -84,13 +88,13 @@ module Hive
           return :reset
         end
 
-        key = lookup_key_for(prior)
-        new_index = new_findings.index { |f| lookup_key_for(f) == key }
+        new_index = locate_by_id(prior, new_findings) ||
+                    locate_by_prefix(prior, prior_index, new_findings)
 
         if new_index.nil?
           @cursor = 0
           :reset
-        elsif new_index == @cursor && new_findings[new_index] == prior
+        elsif new_index == prior_index && new_findings[new_index] == prior
           :unchanged
         else
           @cursor = new_index
@@ -99,6 +103,24 @@ module Hive
       end
 
       private
+
+      def locate_by_id(prior, new_findings)
+        return nil if prior.id.nil?
+
+        new_findings.index { |f| f.id == prior.id }
+      end
+
+      # Closest-by-index match among new findings sharing the prior key.
+      # When two candidates are equidistant (e.g. prior_index=2, matches
+      # at 0 and 4), `min_by` keeps the first encountered, which is
+      # earliest-in-list — a stable, predictable tiebreak.
+      def locate_by_prefix(prior, prior_index, new_findings)
+        key = lookup_key_for(prior)
+        candidates = new_findings.each_index.select { |i| lookup_key_for(new_findings[i]) == key }
+        return nil if candidates.empty?
+
+        candidates.min_by { |i| (i - prior_index).abs }
+      end
 
       def lookup_key_for(finding)
         [ finding.severity, finding.title.to_s[0, TITLE_PREFIX_LEN] ]

@@ -44,6 +44,28 @@ class TuiSignalsTest < Minitest::Test
     assert Hive::Tui.atexit_registered?
   end
 
+  # Inverse of install: a normal `run_loop` exit must put SIGHUP back
+  # to the parent's prior handler so the trap doesn't leak into the
+  # shell. Capture the prior trap, install hooks, then restore and
+  # confirm the captured prior handler is reinstated.
+  def test_restore_terminal_safety_hooks_puts_trap_back_to_prior_value
+    sentinel_called = false
+    prior = Signal.trap("HUP") { sentinel_called = true }
+    begin
+      Hive::Tui.send(:install_terminal_safety_hooks)
+      assert Hive::Tui.atexit_registered?, "install must flag hooks installed"
+
+      Hive::Tui.send(:restore_terminal_safety_hooks)
+      refute Hive::Tui.atexit_registered?, "restore must clear the install flag"
+
+      Process.kill("HUP", Process.pid)
+      waited = wait_for_condition(deadline_seconds: 1.0) { sentinel_called }
+      assert waited, "prior SIGHUP handler must be reinstated by restore"
+    ensure
+      Signal.trap("HUP", prior || "DEFAULT")
+    end
+  end
+
   def test_sighup_trap_flips_terminate_requested_flag
     Hive::Tui.send(:install_terminal_safety_hooks)
     refute Hive::Tui.terminate_requested?, "fresh install starts un-terminated"

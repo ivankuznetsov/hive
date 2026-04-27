@@ -96,10 +96,15 @@ class TuiStateSourceTest < Minitest::Test
           source.stop
         end
       ensure
-        # Best-effort cleanup; the next test creates its own Status
-        # instances so the prepended raise is harmless if it remains,
-        # but undo our injection so the rest of the suite isn't affected.
-        patch.module_eval { remove_method(:json_payload) }
+        # Flip the toggle so any leftover call into the prepended patch
+        # falls through to `super(projects)` — equivalent to a no-op.
+        # MRI has no `unprepend`, so the prepended Module remains on
+        # `Hive::Commands::Status.ancestors`. That's an acceptable leak
+        # because the patch is now inert (raised==true short-circuits
+        # the raise branch on every subsequent call) and each test that
+        # injects a fresh Module gets its own ancestor entry rather
+        # than mutating ours.
+        raised = true
       end
     end
   end
@@ -129,10 +134,14 @@ class TuiStateSourceTest < Minitest::Test
   # surface (no instance-variable peeking) after a refresh fault.
   def test_stalled_and_last_error_are_both_reachable_when_poll_fails
     raised = false
+    keep_raising = true
     patch = Module.new do
-      define_method(:json_payload) do |_projects|
-        raised = true
-        raise StandardError, "synthetic refresh failure"
+      define_method(:json_payload) do |projects|
+        if keep_raising
+          raised = true
+          raise StandardError, "synthetic refresh failure"
+        end
+        super(projects)
       end
     end
     Hive::Commands::Status.prepend(patch)
@@ -152,7 +161,11 @@ class TuiStateSourceTest < Minitest::Test
         end
       end
     ensure
-      patch.module_eval { remove_method(:json_payload) }
+      # See sibling test — MRI has no `unprepend`. Flip `keep_raising`
+      # so any future call through the prepended Module falls through
+      # to `super(projects)` (a no-op). The empty/no-op Module remains
+      # on the ancestor chain; that's the documented acceptable leak.
+      keep_raising = false
     end
   end
 end

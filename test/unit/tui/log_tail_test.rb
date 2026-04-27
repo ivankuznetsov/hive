@@ -209,6 +209,22 @@ class TuiLogTailTest < Minitest::Test
     end
   end
 
+  # A still-running agent often flushes byte-by-byte and the final
+  # in-flight line lacks a trailing newline. Surfacing the partial
+  # makes live writes visible in the tail viewer before the writer
+  # commits the line terminator.
+  def test_tail_lines_surfaces_trailing_partial_line
+    with_log_dir do |dir|
+      path = File.join(dir, "x.log")
+      File.write(path, "first\nsecond\nno-newline-here")
+      tail = Hive::Tui::LogTail::Tail.new(path)
+      tail.open!
+      assert_equal %w[first second no-newline-here], tail.lines(10)
+    ensure
+      tail&.close!
+    end
+  end
+
   def test_tail_close_is_safe_to_call_twice
     with_log_dir do |dir|
       path = File.join(dir, "x.log")

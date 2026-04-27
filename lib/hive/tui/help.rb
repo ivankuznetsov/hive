@@ -45,7 +45,7 @@ module Hive
         # Filter prompt mode.
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
         { mode: :filter, key: "Esc",   action: :clear_filter,  description: "clear filter and return to grid" }
-      ].freeze
+      ].each(&:freeze).freeze
     end
   end
 end

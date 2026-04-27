@@ -33,8 +33,53 @@ module Hive
       require "hive/tui/render/filter_prompt"
       require "hive/tui/key_map"
       require "hive/tui/subprocess"
+      require "hive/tui/subprocess_registry"
 
+      install_terminal_safety_hooks
       run_loop
+    end
+
+    # Called BEFORE the first `Curses.init_screen` so a crash during
+    # init still restores the terminal. Idempotent — guarded by
+    # `@hooks_installed` so repeated `Hive::Tui.run` invocations from
+    # tests (or from daemons that respawn the loop) don't stack
+    # at_exit callbacks. The SIGHUP trap is also installed here; it
+    # flips a flag the render loop checks between frames so curses
+    # API calls are NEVER made from the trap context.
+    def self.install_terminal_safety_hooks
+      return if @hooks_installed
+
+      @terminate_requested = false
+      at_exit do
+        begin
+          Curses.close_screen
+        rescue StandardError
+          nil
+        end
+        Hive::Tui::SubprocessRegistry.kill_inflight!
+      end
+
+      @prev_hup = trap("HUP") { @terminate_requested = true }
+      @hooks_installed = true
+    end
+
+    # Test seam — exposes whether the boot guard already installed the
+    # at_exit + SIGHUP hooks. The U9 integration test asserts this is
+    # true after `Hive::Tui.run` boot, even before `Curses.init_screen`
+    # would have run.
+    def self.atexit_registered?
+      @hooks_installed == true
+    end
+
+    # Test/support helpers for the SIGHUP path. The render loop polls
+    # `terminate_requested?` between frames; tests use the setter to
+    # exercise the cleanup path without sending a real signal.
+    def self.terminate_requested?
+      @terminate_requested == true
+    end
+
+    def self.request_terminate!
+      @terminate_requested = true
     end
 
     def self.run_loop
@@ -61,10 +106,21 @@ module Hive
 
     def self.render_dispatch_loop(state_source, grid_state, grid)
       loop do
+        break if terminate_requested?
+
         snapshot = state_source.current
         grid.draw(snapshot, grid_state) if snapshot
         ch = Curses.getch
         next if ch.nil?
+
+        # Resize is handled at the loop level — clear and let the next
+        # iteration repaint against the new terminal dimensions. Per
+        # KTD-5 we DO NOT install a Ruby SIGWINCH trap; ncurses' default
+        # handler injects KEY_RESIZE into the next getch instead.
+        if ch.is_a?(Integer) && ch == Curses::KEY_RESIZE
+          Curses.clear
+          next
+        end
 
         key = translate_key(ch)
         action = Hive::Tui::KeyMap.dispatch(

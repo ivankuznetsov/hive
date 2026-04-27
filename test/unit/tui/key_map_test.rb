@@ -391,3 +391,252 @@ class TuiKeyMapTest < Minitest::Test
                  "shell metacharacter must round-trip as an inert literal argv element"
   end
 end
+
+# Tests for the new `KeyMap.message_for` API introduced by U5. The
+# existing 50 tuple-based tests above prove the shim round-trips
+# faithfully; these tests pin the Message shapes directly. The
+# discriminative-power audit (per ADV-2 in the doc review) focuses on
+# branches where the same key produces different shapes based on row
+# state: agent_running's three sub-paths, stale-lock escape hatch,
+# triage-d's verb caching, etc.
+class TuiKeyMapMessageForTest < Minitest::Test
+  include HiveTestHelper
+
+  def make_row(action_key:, suggested_command: "hive brainstorm some-slug --from 1-inbox",
+               claude_pid_alive: nil, action_label: "Ready to brainstorm",
+               slug: "some-slug", project_name: "alpha", stage: "1-inbox")
+    Hive::Tui::Snapshot::Row.new(
+      project_name: project_name, stage: stage, slug: slug,
+      folder: "/tmp/hive/#{slug}", state_file: "/tmp/hive/#{slug}/idea.md",
+      marker: "waiting", attrs: {}, mtime: "2026-04-27T12:00:00Z", age_seconds: 1,
+      claude_pid: claude_pid_alive ? 1234 : nil, claude_pid_alive: claude_pid_alive,
+      action_key: action_key, action_label: action_label,
+      suggested_command: suggested_command
+    ).freeze
+  end
+
+  # -------- DispatchCommand caches verb at construction --------
+
+  def test_dispatch_command_caches_verb_from_argv
+    # The plan calls out that DispatchCommand.verb is cached so
+    # SubprocessExited can flash by verb name without re-parsing.
+    row = make_row(action_key: "ready_to_plan",
+                   suggested_command: "hive plan some-slug --from 2-brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "p", row: row)
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+    assert_equal "plan", msg.verb, "verb must be argv[1] cached at construction"
+    assert_equal [ "hive", "plan", "some-slug", "--from", "2-brainstorm" ], msg.argv
+  end
+
+  def test_triage_d_caches_develop_verb
+    # Triage `d` synthesizes the argv directly (not from
+    # suggested_command); verb must still cache as "develop".
+    row = make_row(action_key: "review_findings", suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "d", row: row)
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+    assert_equal "develop", msg.verb
+    assert_equal [ "hive", "develop", "some-slug", "--from", "4-execute" ], msg.argv
+  end
+
+  # -------- Agent_running's three sub-paths (ADV-2 discriminative coverage) --------
+
+  def test_agent_running_with_alive_pid_returns_flash_refusal
+    row = make_row(action_key: "agent_running", claude_pid_alive: true,
+                   suggested_command: nil, action_label: "Agent running")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "p", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_match(/agent is running/, msg.text)
+  end
+
+  def test_agent_running_with_nil_pid_alive_returns_flash_refusal
+    # Indeterminate lock state — never dispatches, never crashes.
+    row = make_row(action_key: "agent_running", claude_pid_alive: nil,
+                   suggested_command: nil, action_label: "Agent running")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "p", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_match(/agent is running/, msg.text)
+  end
+
+  def test_agent_running_stale_lock_with_no_command_flashes_recovery_hint
+    # Stale-lock escape hatch but suggested_command is nil — must flash
+    # a recovery hint instead of crashing on Shellwords.split(nil).
+    row = make_row(action_key: "agent_running", claude_pid_alive: false,
+                   suggested_command: nil, action_label: "Agent running")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "p", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_match(/stale.*no recovery command/, msg.text)
+  end
+
+  def test_agent_running_stale_lock_with_command_dispatches
+    # Stale-lock escape hatch with a non-nil suggested_command —
+    # dispatches the verb so Hive::Lock can reap the stale lock.
+    row = make_row(action_key: "agent_running", claude_pid_alive: false,
+                   suggested_command: "hive plan some-slug --from 2-brainstorm",
+                   action_label: "Agent running")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "p", row: row)
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+    assert_equal "plan", msg.verb
+  end
+
+  # -------- Mode globals (work without a row) --------
+
+  def test_grid_q_returns_terminate_requested
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "q", row: nil)
+    assert_same Hive::Tui::Messages::TERMINATE_REQUESTED, msg
+  end
+
+  def test_grid_help_returns_show_help_singleton
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "?", row: nil)
+    assert_same Hive::Tui::Messages::SHOW_HELP, msg
+  end
+
+  def test_grid_slash_returns_open_filter_prompt_singleton
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "/", row: nil)
+    assert_same Hive::Tui::Messages::OPEN_FILTER_PROMPT, msg
+  end
+
+  def test_grid_digit_returns_project_scope_with_n
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "3", row: nil)
+    assert_kind_of Hive::Tui::Messages::ProjectScope, msg
+    assert_equal 3, msg.n
+  end
+
+  def test_grid_zero_returns_project_scope_clear
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "0", row: nil)
+    assert_kind_of Hive::Tui::Messages::ProjectScope, msg
+    assert_equal 0, msg.n
+  end
+
+  # -------- Cursor navigation --------
+
+  def test_grid_j_returns_cursor_down_singleton
+    row = make_row(action_key: "ready_to_brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "j", row: row)
+    assert_same Hive::Tui::Messages::CURSOR_DOWN, msg
+  end
+
+  def test_grid_key_up_returns_cursor_up_singleton
+    row = make_row(action_key: "ready_to_brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_up, row: row)
+    assert_same Hive::Tui::Messages::CURSOR_UP, msg
+  end
+
+  # -------- Enter sub-mode dispatch --------
+
+  def test_enter_on_review_findings_returns_open_findings_with_row
+    row = make_row(action_key: "review_findings", action_label: "Review findings",
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenFindings, msg
+    assert_same row, msg.row
+  end
+
+  def test_enter_on_agent_running_returns_open_log_tail_with_row
+    row = make_row(action_key: "agent_running", action_label: "Agent running",
+                   claude_pid_alive: true, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenLogTail, msg
+    assert_same row, msg.row
+  end
+
+  def test_enter_on_needs_input_dispatches_when_command_present
+    row = make_row(action_key: "needs_input", action_label: "Needs input",
+                   suggested_command: "hive plan some-slug --project alpha --from 3-plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+    assert_equal "plan", msg.verb
+  end
+
+  # -------- Triage rebindings --------
+
+  def test_triage_a_returns_bulk_accept_with_slug
+    row = make_row(action_key: "review_findings", slug: "auth-fix-260101-a1b2")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "a", row: row)
+    assert_kind_of Hive::Tui::Messages::BulkAccept, msg
+    assert_equal "auth-fix-260101-a1b2", msg.slug
+  end
+
+  def test_triage_r_returns_bulk_reject_with_slug
+    row = make_row(action_key: "review_findings", slug: "auth-fix-260101-a1b2")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "r", row: row)
+    assert_kind_of Hive::Tui::Messages::BulkReject, msg
+    assert_equal "auth-fix-260101-a1b2", msg.slug
+  end
+
+  def test_triage_space_returns_toggle_finding_with_row
+    row = make_row(action_key: "review_findings")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: " ", row: row)
+    assert_kind_of Hive::Tui::Messages::ToggleFinding, msg
+    assert_same row, msg.row
+  end
+
+  def test_triage_esc_returns_back_singleton
+    row = make_row(action_key: "review_findings")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: :key_escape, row: row)
+    assert_same Hive::Tui::Messages::BACK, msg
+  end
+
+  # -------- Sub-mode q/Esc → back --------
+
+  def test_log_tail_q_returns_back
+    row = make_row(action_key: "agent_running")
+    msg = Hive::Tui::KeyMap.message_for(mode: :log_tail, key: "q", row: row)
+    assert_same Hive::Tui::Messages::BACK, msg
+  end
+
+  def test_filter_esc_returns_back
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_escape, row: nil)
+    assert_same Hive::Tui::Messages::BACK, msg
+  end
+
+  # -------- Unknown key → NOOP --------
+
+  def test_unknown_key_in_grid_returns_noop_singleton
+    row = make_row(action_key: "ready_to_brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "Z", row: row)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_unknown_mode_raises
+    assert_raises(ArgumentError) do
+      Hive::Tui::KeyMap.message_for(mode: :nonexistent, key: "q", row: nil)
+    end
+  end
+
+  # -------- Round-trip: every Message must map back through the shim --------
+
+  def test_every_message_for_result_round_trips_through_shim
+    # ADV-2 finding: ensure no Message shape is missing from
+    # message_to_tuple. Probe a representative set of (mode, key, row)
+    # combinations and verify the shim doesn't raise.
+    fixtures = [
+      [ :grid, "q",            nil ],
+      [ :grid, "?",            nil ],
+      [ :grid, "/",            nil ],
+      [ :grid, "5",            nil ],
+      [ :grid, "j",            make_row(action_key: "ready_to_brainstorm") ],
+      [ :grid, "k",            make_row(action_key: "ready_to_brainstorm") ],
+      [ :grid, "b",            make_row(action_key: "ready_to_brainstorm") ],
+      [ :grid, :key_enter,     make_row(action_key: "review_findings", suggested_command: nil) ],
+      [ :grid, :key_enter,     make_row(action_key: "agent_running", claude_pid_alive: true, suggested_command: nil) ],
+      [ :grid, "p",            make_row(action_key: "agent_running", claude_pid_alive: true, suggested_command: nil) ],
+      [ :grid, "p",            make_row(action_key: "archived", suggested_command: nil, action_label: "Archived") ],
+      [ :grid, "Z",            make_row(action_key: "ready_to_brainstorm") ],
+      [ :triage, " ",          make_row(action_key: "review_findings") ],
+      [ :triage, "d",          make_row(action_key: "review_findings") ],
+      [ :triage, "a",          make_row(action_key: "review_findings") ],
+      [ :triage, "r",          make_row(action_key: "review_findings") ],
+      [ :triage, :key_escape,  make_row(action_key: "review_findings") ],
+      [ :triage, :key_down,    make_row(action_key: "review_findings") ],
+      [ :log_tail, "q",        make_row(action_key: "agent_running") ],
+      [ :log_tail, :key_escape, make_row(action_key: "agent_running") ],
+      [ :filter, :key_escape,  nil ]
+    ]
+
+    fixtures.each do |mode, key, row|
+      tuple = Hive::Tui::KeyMap.dispatch(mode: mode, key: key, row: row)
+      assert_kind_of Array, tuple, "(#{mode}, #{key.inspect}) must produce a tuple"
+      assert_equal 2, tuple.size, "(#{mode}, #{key.inspect}) tuple must be 2-element"
+    end
+  end
+end

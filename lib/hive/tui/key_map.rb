@@ -1,15 +1,21 @@
 require "shellwords"
 require "hive/tui/snapshot"
+require "hive/tui/messages"
 
 module Hive
   module Tui
     # Pure-data keystroke -> action mapper. The render layer translates
-    # `Curses.getch` output to either a single-character String or a
-    # `:key_*` Symbol before calling `dispatch(mode:, key:, row:)`; this
-    # keeps KeyMap free of curses so it stays unit-testable without a
-    # tty. Every code path returns a two-element [verb, payload] tuple
-    # and never invokes a subprocess on its own — TUI side effects live
-    # in U4 (Subprocess) and U5+ (render loop), not here.
+    # framework key events (curses or bubbletea) to either a single-
+    # character String or a `:key_*` Symbol before calling either
+    # `dispatch(mode:, key:, row:)` (curses path; returns
+    # `[verb, payload]` tuples) or `message_for(mode:, key:, row:)`
+    # (charm path; returns `Hive::Tui::Messages::*`). KeyMap stays
+    # backend-free so it's unit-testable without a tty.
+    #
+    # During the U1-U10 migration window both APIs coexist. Internally
+    # `dispatch` is a thin shim over `message_for` — single source of
+    # truth, no risk of the two surfaces drifting. U11 deletes the
+    # shim along with the curses code path.
     #
     # The same `key` may bind to different actions across modes:
     # `a` is `archive` verb dispatch in `:grid` mode and `bulk_accept`
@@ -53,42 +59,52 @@ module Hive
         "recover_review" => "task needs recovery — clear the stale review marker"
       }.freeze
 
-      def dispatch(mode:, key:, row:)
+      # ---- Primary API: returns Messages (used by the charm backend) ----
+      def message_for(mode:, key:, row:)
         case mode
-        when :grid then dispatch_grid(key: key, row: row)
-        when :triage then dispatch_triage(key: key, row: row)
-        when :log_tail then dispatch_log_tail(key: key, row: row)
-        when :filter then dispatch_filter(key: key, row: row)
+        when :grid then grid_message(key: key, row: row)
+        when :triage then triage_message(key: key, row: row)
+        when :log_tail then log_tail_message(key: key, row: row)
+        when :filter then filter_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
         end
       end
 
-      def dispatch_grid(key:, row:)
-        global = global_grid_action(key)
+      # ---- Back-compat shim: returns [verb, payload] tuples ----
+      # Used by the curses path through U10. Every Message produced by
+      # `message_for` has a 1:1 reverse mapping back to the legacy
+      # tuple shape — this is the only place that mapping lives, so
+      # the two surfaces can't drift.
+      def dispatch(mode:, key:, row:)
+        message_to_tuple(message_for(mode: mode, key: key, row: row))
+      end
+
+      def grid_message(key:, row:)
+        global = global_grid_message(key)
         return global if global
 
-        return [ :noop, nil ] if row.nil?
+        return Messages::NOOP if row.nil?
 
-        return verb_action(row) if VERB_KEYS.key?(key)
-        return enter_action(row) if ENTER_KEYS.include?(key)
-        return [ :cursor_down, nil ] if DOWN_KEYS.include?(key)
-        return [ :cursor_up, nil ] if UP_KEYS.include?(key)
+        return verb_message(row) if VERB_KEYS.key?(key)
+        return enter_message(row) if ENTER_KEYS.include?(key)
+        return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
+        return Messages::CURSOR_UP if UP_KEYS.include?(key)
 
-        [ :noop, nil ]
+        Messages::NOOP
       end
 
       # Keys that work even when the cursor sits on an empty grid; row
       # is irrelevant for these so we resolve them first.
-      def global_grid_action(key)
-        return [ :quit, nil ] if key == "q"
-        return [ :help, nil ] if key == "?"
-        return [ :filter, nil ] if key == "/"
-        return [ :project_scope, key.to_i ] if key.is_a?(String) && key.match?(/\A[0-9]\z/)
+      def global_grid_message(key)
+        return Messages::TERMINATE_REQUESTED if key == "q"
+        return Messages::SHOW_HELP if key == "?"
+        return Messages::OPEN_FILTER_PROMPT if key == "/"
+        return Messages::ProjectScope.new(n: key.to_i) if key.is_a?(String) && key.match?(/\A[0-9]\z/)
 
         nil
       end
 
-      def verb_action(row)
+      def verb_message(row)
         # Verb-on-agent-running refusal pre-empts ConcurrentRunError
         # from `Hive::Lock`; the stale-pid escape hatch only fires when
         # the lock is *provably* dead (claude_pid_alive == false). Nil
@@ -97,23 +113,29 @@ module Hive
         # escape hatch falls back to a flash so Shellwords.split(nil)
         # can never raise.
         if row.action_key == "agent_running"
-          return [ :flash, "agent is running on this task; press Enter to view its log" ] unless row.claude_pid_alive == false
-          return [ :flash, "agent lock is stale but no recovery command available" ] if row.suggested_command.nil?
+          unless row.claude_pid_alive == false
+            return Messages::Flash.new(text: "agent is running on this task; press Enter to view its log")
+          end
+          if row.suggested_command.nil?
+            return Messages::Flash.new(text: "agent lock is stale but no recovery command available")
+          end
 
-          return [ :dispatch_command, Shellwords.split(row.suggested_command) ]
+          return dispatch_command_for(row.suggested_command)
         end
 
-        return [ :flash, "no action available — task is #{row.action_label}" ] if row.suggested_command.nil?
+        if row.suggested_command.nil?
+          return Messages::Flash.new(text: "no action available — task is #{row.action_label}")
+        end
 
-        [ :dispatch_command, Shellwords.split(row.suggested_command) ]
+        dispatch_command_for(row.suggested_command)
       end
 
-      def enter_action(row)
+      def enter_message(row)
         case row.action_key
-        when "review_findings" then [ :open_findings, row ]
-        when "agent_running" then [ :open_log_tail, row ]
-        when "needs_input" then needs_input_action(row)
-        else enter_fallback(row)
+        when "review_findings" then Messages::OpenFindings.new(row: row)
+        when "agent_running" then Messages::OpenLogTail.new(row: row)
+        when "needs_input" then needs_input_message(row)
+        else enter_fallback_message(row)
         end
       end
 
@@ -123,54 +145,93 @@ module Hive
       # spawn-an-editor-from-curses dance broke alt-screen handoff on
       # several terminals; the TUI is for keystroke-driven dispatch,
       # editing belongs in the user's own shell.
-      def needs_input_action(row)
-        return [ :flash, "no command available — task is #{row.action_label}" ] if row.suggested_command.nil?
-
-        [ :dispatch_command, Shellwords.split(row.suggested_command) ]
-      end
-
-      def enter_fallback(row)
-        if row.action_key.to_s.start_with?("ready_") && row.suggested_command
-          return [ :dispatch_command, Shellwords.split(row.suggested_command) ]
+      def needs_input_message(row)
+        if row.suggested_command.nil?
+          return Messages::Flash.new(text: "no command available — task is #{row.action_label}")
         end
 
-        message = ENTER_FLASH_MESSAGES[row.action_key]
-        return [ :flash, message ] if message
-
-        [ :noop, nil ]
+        dispatch_command_for(row.suggested_command)
       end
 
-      def dispatch_triage(key:, row:)
-        return [ :back, nil ] if ESCAPE_KEYS.include?(key)
-        return [ :cursor_down, nil ] if DOWN_KEYS.include?(key)
-        return [ :cursor_up, nil ] if UP_KEYS.include?(key)
-        return triage_space_action(row) if key == " " || key == :space
-        return [ :noop, nil ] if row.nil?
+      def enter_fallback_message(row)
+        if row.action_key.to_s.start_with?("ready_") && row.suggested_command
+          return dispatch_command_for(row.suggested_command)
+        end
+
+        text = ENTER_FLASH_MESSAGES[row.action_key]
+        return Messages::Flash.new(text: text) if text
+
+        Messages::NOOP
+      end
+
+      def triage_message(key:, row:)
+        return Messages::BACK if ESCAPE_KEYS.include?(key)
+        return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
+        return Messages::CURSOR_UP if UP_KEYS.include?(key)
+        return triage_space_message(row) if key == " " || key == :space
+        return Messages::NOOP if row.nil?
 
         case key
-        when "d" then [ :dispatch_command, [ "hive", "develop", row.slug, "--from", "4-execute" ] ]
-        when "a" then [ :bulk_accept, row.slug ]
-        when "r" then [ :bulk_reject, row.slug ]
-        else [ :noop, nil ]
+        when "d"
+          Messages::DispatchCommand.new(
+            argv: [ "hive", "develop", row.slug, "--from", "4-execute" ],
+            verb: "develop"
+          )
+        when "a" then Messages::BulkAccept.new(slug: row.slug)
+        when "r" then Messages::BulkReject.new(slug: row.slug)
+        else Messages::NOOP
         end
       end
 
-      def triage_space_action(row)
-        return [ :noop, nil ] if row.nil?
+      def triage_space_message(row)
+        return Messages::NOOP if row.nil?
 
-        [ :toggle_finding, row ]
+        Messages::ToggleFinding.new(row: row)
       end
 
-      def dispatch_log_tail(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
-        return [ :back, nil ] if ESCAPE_KEYS.include?(key) || key == "q"
+      def log_tail_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
 
-        [ :noop, nil ]
+        Messages::NOOP
       end
 
-      def dispatch_filter(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
-        return [ :back, nil ] if ESCAPE_KEYS.include?(key)
+      def filter_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::BACK if ESCAPE_KEYS.include?(key)
 
-        [ :noop, nil ]
+        Messages::NOOP
+      end
+
+      # Shared DispatchCommand builder. `argv[1]` is the workflow verb
+      # (`brainstorm`/`plan`/`develop`/`review`/`pr`/`archive`); cached
+      # at construction time so SubprocessExited can flash by verb name.
+      def dispatch_command_for(suggested_command)
+        argv = Shellwords.split(suggested_command)
+        Messages::DispatchCommand.new(argv: argv, verb: argv[1])
+      end
+
+      # ---- Back-compat translation table ----
+      # Single source of truth for Message → legacy tuple. Every
+      # Message produced by `message_for` must round-trip through here.
+      def message_to_tuple(message)
+        case message
+        when Messages::DispatchCommand then [ :dispatch_command, message.argv ]
+        when Messages::Flash then [ :flash, message.text ]
+        when Messages::OpenFindings then [ :open_findings, message.row ]
+        when Messages::OpenLogTail then [ :open_log_tail, message.row ]
+        when Messages::ToggleFinding then [ :toggle_finding, message.row ]
+        when Messages::BulkAccept then [ :bulk_accept, message.slug ]
+        when Messages::BulkReject then [ :bulk_reject, message.slug ]
+        when Messages::ProjectScope then [ :project_scope, message.n ]
+        when Messages::ShowHelp then [ :help, nil ]
+        when Messages::OpenFilterPrompt then [ :filter, nil ]
+        when Messages::Back then [ :back, nil ]
+        when Messages::CursorDown then [ :cursor_down, nil ]
+        when Messages::CursorUp then [ :cursor_up, nil ]
+        when Messages::Noop then [ :noop, nil ]
+        when Messages::TerminateRequested then [ :quit, nil ]
+        else
+          raise ArgumentError, "no tuple mapping for #{message.class.name}"
+        end
       end
     end
   end

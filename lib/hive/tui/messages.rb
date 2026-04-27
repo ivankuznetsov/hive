@@ -77,6 +77,67 @@ module Hive
       # (and any previously-committed filter) and returns to grid mode.
       FilterCancelled = Class.new
       FILTER_CANCELLED = FilterCancelled.new.freeze
+
+      # ---- Keystroke-derived messages (returned by KeyMap.message_for) ----
+      # Added in U5 alongside the KeyMap reshape. Each maps 1:1 to a
+      # legacy `KeyMap.dispatch` `[verb, payload]` tuple shape so the
+      # back-compat shim can translate either direction during the
+      # migration window.
+
+      # Dispatch a workflow verb subprocess. `argv` is the full command
+      # array (`["hive", "plan", "slug", "--from", "2-brainstorm"]`),
+      # `verb` is `argv[1]` cached at construction time so the renderer
+      # can flash exit codes by verb name without re-deriving.
+      DispatchCommand = Data.define(:argv, :verb)
+
+      # Status-line flash. `text` is the literal message; renderer
+      # decides styling.
+      Flash = Data.define(:text)
+
+      # Enter on a `review_findings` row — push triage mode for `row`.
+      OpenFindings = Data.define(:row)
+
+      # Enter on an `agent_running` row — push log-tail mode for `row`.
+      OpenLogTail = Data.define(:row)
+
+      # Triage Space — toggle accept/reject on the current finding.
+      # `row` is the parent task row from grid mode, used by the
+      # triage subloop to derive slug + finding context.
+      ToggleFinding = Data.define(:row)
+
+      # Triage `a` — bulk-accept all findings on the row's task.
+      BulkAccept = Data.define(:slug)
+
+      # Triage `r` — bulk-reject all findings on the row's task.
+      BulkReject = Data.define(:slug)
+
+      # `1`–`9` scope to the Nth registered project; `0` clears scope.
+      ProjectScope = Data.define(:n)
+
+      # `?` — toggle help overlay.
+      ShowHelp = Class.new
+      SHOW_HELP = ShowHelp.new.freeze
+
+      # `/` — open filter prompt (mode → :filter).
+      OpenFilterPrompt = Class.new
+      OPEN_FILTER_PROMPT = OpenFilterPrompt.new.freeze
+
+      # Esc / `q` from a sub-mode — return to grid.
+      Back = Class.new
+      BACK = Back.new.freeze
+
+      # `j` / KEY_DOWN.
+      CursorDown = Class.new
+      CURSOR_DOWN = CursorDown.new.freeze
+
+      # `k` / KEY_UP.
+      CursorUp = Class.new
+      CURSOR_UP = CursorUp.new.freeze
+
+      # No-op — explicit "do nothing" so case statements can match
+      # without resorting to nil. Returned for unbound keystrokes.
+      Noop = Class.new
+      NOOP = Noop.new.freeze
     end
   end
 end

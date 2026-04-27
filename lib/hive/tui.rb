@@ -28,6 +28,7 @@ module Hive
       raise Hive::InvalidTaskPath, "hive tui requires a terminal" unless $stdout.tty?
 
       require "curses"
+      require "hive/tui/debug"
       require "hive/tui/state_source"
       require "hive/tui/grid_state"
       require "hive/tui/render/grid"
@@ -38,6 +39,7 @@ module Hive
       require "hive/tui/subprocess"
       require "hive/tui/subprocess_registry"
 
+      Hive::Tui::Debug.log("boot", "TERM=#{ENV.fetch('TERM', '?')} EDITOR=#{ENV.fetch('EDITOR', '?')} pwd=#{Dir.pwd}")
       install_terminal_safety_hooks
       run_loop
     end
@@ -136,16 +138,16 @@ module Hive
         # KTD-5 we DO NOT install a Ruby SIGWINCH trap; ncurses' default
         # handler injects KEY_RESIZE into the next getch instead.
         if ch.is_a?(Integer) && ch == Curses::KEY_RESIZE
+          Hive::Tui::Debug.log("grid", "KEY_RESIZE")
           Curses.clear
           next
         end
 
         key = Hive::Tui::KeyMap::CursesKeys.translate(ch)
-        action = Hive::Tui::KeyMap.dispatch(
-          mode: :grid,
-          key: key,
-          row: snapshot ? grid_state.at_cursor(snapshot) : nil
-        )
+        row_at_cursor = snapshot ? grid_state.at_cursor(snapshot) : nil
+        Hive::Tui::Debug.log("grid", "key=#{key.inspect} row_action=#{row_at_cursor&.action_key.inspect} row_slug=#{row_at_cursor&.slug.inspect}")
+        action = Hive::Tui::KeyMap.dispatch(mode: :grid, key: key, row: row_at_cursor)
+        Hive::Tui::Debug.log("grid", "action=#{action.first.inspect} payload_class=#{action.last.class.name}")
         break if handle_action(action, grid_state, snapshot) == :quit
       end
     end
@@ -309,13 +311,16 @@ module Hive
     def self.run_editor(row, grid_state)
       require "shellwords"
       editor = ENV["EDITOR"] || ENV["VISUAL"] || "vi"
+      Hive::Tui::Debug.log("editor", "row.state_file=#{row.state_file.inspect} EDITOR=#{editor.inspect}")
       if editor.to_s.strip.empty?
         grid_state.flash!("$EDITOR not set; cannot open #{File.basename(row.state_file.to_s)}")
         return
       end
 
       argv = Shellwords.split(editor) + [ row.state_file ]
+      Hive::Tui::Debug.log("editor", "argv=#{argv.inspect} exists=#{File.exist?(row.state_file.to_s)}")
       exit_status = Hive::Tui::Subprocess.takeover!(argv)
+      Hive::Tui::Debug.log("editor", "exited #{exit_status}")
       grid_state.flash!("editor exited #{exit_status}") if exit_status != 0
     end
 

@@ -1,5 +1,6 @@
 require "open3"
 require "io/console"
+require "hive/tui/debug"
 require "hive/tui/subprocess_registry"
 
 module Hive
@@ -36,6 +37,7 @@ module Hive
       COMMAND_NOT_FOUND_EXIT = 127
 
       def takeover!(argv)
+        Hive::Tui::Debug.log("takeover", "argv=#{argv.inspect}")
         # Capture termios BEFORE curses' def_prog_mode runs (inside
         # with_curses_suspended). The captured baseline must be the
         # parent's pre-curses tty state so restore_termios can hand
@@ -47,22 +49,30 @@ module Hive
           prev_int, prev_term = install_pgid_forwarding_traps
           exit_code = nil
           begin
+            Hive::Tui::Debug.log("takeover", "spawning")
             pid = Process.spawn(*argv, pgroup: true)
             register_real_pgid(pid)
+            Hive::Tui::Debug.log("takeover", "pid=#{pid} pgid=#{SubprocessRegistry.current.inspect}")
             _, status = Process.wait2(pid)
             exit_code = translate_status(status)
-          rescue Errno::ENOENT, Errno::EACCES
+            Hive::Tui::Debug.log("takeover", "exit=#{exit_code} status=#{status.inspect}")
+          rescue Errno::ENOENT, Errno::EACCES => e
             exit_code = COMMAND_NOT_FOUND_EXIT
+            Hive::Tui::Debug.log("takeover", "errno=#{e.class.name}: #{e.message}")
             warn_command_not_found(argv)
           ensure
             SubprocessRegistry.clear
             restore_traps(prev_int, prev_term)
-            restore_termios(pre_termios)
-            # Pause when the child failed so the user can actually read
-            # its error output before `restore_curses_state`'s clear
-            # wipes the screen. Successful exits return promptly; the
-            # render loop's clearing happens immediately after.
+            # Pause BEFORE restore_termios — pre_termios was captured
+            # after curses init, so it's in curses-raw mode (cbreak +
+            # noecho). Calling $stdin.gets after a raw-mode restore
+            # produces no echo and never reaches a newline, so the
+            # prompt would freeze the TUI. The child exited via endwin
+            # which already left the tty in shell/cooked mode, so the
+            # pause sees a normal terminal here.
             pause_for_acknowledgement(exit_code, argv) if exit_code && exit_code != 0
+            restore_termios(pre_termios)
+            Hive::Tui::Debug.log("takeover", "ensure done; about to restore_curses_state")
           end
           exit_code
         end
@@ -74,11 +84,15 @@ module Hive
       # inside `install_pgid_forwarding_traps` — registering again here
       # would be a redundant double-write to the same slot.
       def run_quiet!(argv)
+        Hive::Tui::Debug.log("run_quiet", "argv=#{argv.inspect}")
         prev_int, prev_term = install_pgid_forwarding_traps
         begin
           out, err, status = Open3.capture3(*argv, pgroup: true)
-          [ status.exitstatus || -1, out, err ]
-        rescue Errno::ENOENT, Errno::EACCES
+          exit_code = status.exitstatus || -1
+          Hive::Tui::Debug.log("run_quiet", "exit=#{exit_code} out_bytes=#{out.bytesize} err_bytes=#{err.bytesize}")
+          [ exit_code, out, err ]
+        rescue Errno::ENOENT, Errno::EACCES => e
+          Hive::Tui::Debug.log("run_quiet", "errno=#{e.class.name}: #{e.message}")
           [ COMMAND_NOT_FOUND_EXIT, "", "command not found: #{argv.first}" ]
         ensure
           SubprocessRegistry.clear
@@ -134,12 +148,14 @@ module Hive
       def restore_curses_state
         return unless defined?(Curses) && Curses.respond_to?(:reset_prog_mode)
 
+        Hive::Tui::Debug.log("curses", "restore: reset_prog_mode → clear → refresh")
         begin
           Curses.reset_prog_mode
           Curses.clear if Curses.respond_to?(:clear)
           Curses.refresh if Curses.respond_to?(:refresh)
-        rescue StandardError
-          nil
+          Hive::Tui::Debug.log("curses", "restore: done")
+        rescue StandardError => e
+          Hive::Tui::Debug.log("curses", "restore: #{e.class.name}: #{e.message}")
         end
       end
 
@@ -225,15 +241,21 @@ module Hive
       # any error message the child wrote (e.g. `hive pr` exit 4
       # "cannot advance ..."). The user would then see nothing happen.
       def pause_for_acknowledgement(exit_code, argv)
-        return unless $stdin.tty? && $stderr.tty?
+        unless $stdin.tty? && $stderr.tty?
+          Hive::Tui::Debug.log("pause", "skipped (no tty); exit=#{exit_code}")
+          return
+        end
 
         verb = argv[1] || argv.first
+        Hive::Tui::Debug.log("pause", "prompting; exit=#{exit_code} verb=#{verb.inspect}")
         $stderr.puts
         $stderr.puts "[hive tui] `#{verb}` exited #{exit_code} — press Enter to return to grid..."
         $stderr.flush
         begin
           $stdin.gets
-        rescue StandardError
+          Hive::Tui::Debug.log("pause", "got input; resuming")
+        rescue StandardError => e
+          Hive::Tui::Debug.log("pause", "gets failed: #{e.class.name}: #{e.message}")
           nil
         end
       end

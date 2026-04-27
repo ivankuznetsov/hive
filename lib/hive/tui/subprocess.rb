@@ -241,8 +241,9 @@ module Hive
       # any error message the child wrote (e.g. `hive pr` exit 4
       # "cannot advance ..."). The user would then see nothing happen.
       def pause_for_acknowledgement(exit_code, argv)
-        unless $stdin.tty? && $stderr.tty?
-          Hive::Tui::Debug.log("pause", "skipped (no tty); exit=#{exit_code}")
+        console = IO.console
+        unless console
+          Hive::Tui::Debug.log("pause", "skipped (no controlling terminal); exit=#{exit_code}")
           return
         end
 
@@ -252,8 +253,19 @@ module Hive
         $stderr.puts "[hive tui] `#{verb}` exited #{exit_code} — press Enter to return to grid..."
         $stderr.flush
         begin
-          $stdin.gets
-          Hive::Tui::Debug.log("pause", "got input; resuming")
+          # Force cooked + ICRNL + ICANON for the duration of the read.
+          # `endwin` only reverses the curses-set cbreak/noecho flags;
+          # other flags (ICRNL, ICANON in some libc states) can be left
+          # off, in which case `gets` blocks forever waiting for a
+          # newline that never arrives. `IO.console.cooked` saves the
+          # current termios, sets a known-good cooked state, runs the
+          # block, then restores. Use `console.gets` (= /dev/tty) so we
+          # bypass any redirection on $stdin.
+          console.cooked do
+            Hive::Tui::Debug.log("pause", "entered cooked block; calling gets")
+            console.gets
+            Hive::Tui::Debug.log("pause", "gets returned")
+          end
         rescue StandardError => e
           Hive::Tui::Debug.log("pause", "gets failed: #{e.class.name}: #{e.message}")
           nil

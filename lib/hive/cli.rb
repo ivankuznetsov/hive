@@ -247,6 +247,27 @@ module Hive
       ).call
     end
 
+    desc "tui", "Open the live, keystroke-driven dashboard for every active task"
+    long_desc <<~DESC
+      Opens a full-screen curses dashboard over `hive status`. Polls the
+      same data source at 1Hz, groups rows by action label, and
+      dispatches every workflow verb (`brainstorm` / `plan` / `develop` /
+      `review` / `pr` / `archive`) as a fresh subprocess on a single
+      keystroke. `?` shows the keybinding cheatsheet; `q` quits.
+
+      Human-only — `hive tui --json` is rejected with EX_USAGE (64).
+      Agent-callable surfaces stay JSON via `hive status` and the
+      typed verbs.
+
+      See `wiki/commands/tui.md` for modes, bindings, and limits.
+    DESC
+    def tui
+      raise Hive::InvalidTaskPath, "hive tui has no JSON output (it is human-only)" if options[:json]
+
+      require "hive/tui"
+      Hive::Tui.run
+    end
+
     desc "metrics SUBCOMMAND", "Report metrics across registered projects (rollback-rate)"
     long_desc <<~DESC
       Subcommands:

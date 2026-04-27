@@ -3,6 +3,7 @@ source "https://rubygems.org"
 ruby "~> 3.4"
 
 gem "thor", "~> 1.3"
+gem "curses", "~> 1.6"
 
 group :development, :test do
   gem "minitest", "~> 6.0"

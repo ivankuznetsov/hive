@@ -2,6 +2,27 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-27T00:00:00Z] U1 — `hive tui` bootstrap
+
+**Action:** First implementation unit of the `hive tui` plan ([docs/plans/2026-04-27-001-feat-hive-tui-plan.md](../docs/plans/2026-04-27-001-feat-hive-tui-plan.md)). Adds the Thor command, the `Hive::Tui.run` skeleton, and the `curses` runtime gem. Subsequent units (U2–U11) replace the skeleton render loop with the real polling + render machinery. Wiki entries land alongside the command's first appearance per `CLAUDE.md` "wiki maintained alongside code".
+
+**New pages:**
+- `wiki/commands/tui.md` — modes, keybindings, data source, subprocess takeover, terminal hostility notes, test surface; structure mirrors `wiki/commands/status.md`.
+
+**Refreshed pages:**
+- `wiki/cli.md` — TLDR mentions the new human-only command; command table adds the `tui` row.
+- `wiki/index.md` — Commands list links the new page; page count 35 → 36.
+
+**Code changes (referenced from wiki):**
+- `Gemfile` — adds `gem "curses", "~> 1.6"` to the production block (1.6.0 resolved).
+- `lib/hive/tui.rb` (new) — module skeleton with the `Hive::Tui.run` entry point and the `RUBY_ENGINE != "ruby"` boot guard.
+- `lib/hive/cli.rb` — registers `desc "tui"` + `def tui`; rejects `--json` with `Hive::InvalidTaskPath` (exit 64) per the plan's R13.
+- `test/integration/tui_command_test.rb` (new) — pins the help-text registration, the `--json` rejection, the `long_desc` text, and the non-tty boundary check.
+
+**Key decisions:**
+- **Wiki landed in U1, not a separate U10.** Per KTD-10, conflating a multi-command wiki refresh with the TUI feature inflates blast radius; the TUI's own page is co-shipped with the Thor command so the new surface and its documentation are atomic. Broader wiki refresh for unrelated drift remains deferred.
+- **Curses 1.6 production dep.** Stdlib-extracted, ruby-core maintained, ships with `def_prog_mode` / `reset_prog_mode` / `endwin` / injected `KEY_RESIZE` — every primitive the subsequent units need without picking up a 22 MB Rust dep (KTD-1).
+
 ## [2026-04-26T23:00:00Z] Round-4 — `hive markers clear`, schema v2, marker-policy refresh
 
 **Action:** Round-4 ce-code-review remediation. Added `hive markers clear FOLDER --name <NAME>` as the agent-callable surface for recovery markers (`REVIEW_STALE` / `REVIEW_CI_STALE` / `REVIEW_ERROR` / `EXECUTE_STALE` / `ERROR`); bumped the `hive-approve` JSON contract to v2 (the v1 → v2 transition added `5-review` and renumbered `5-pr → 6-pr` / `6-done → 7-done`); refreshed `wiki/commands/approve.md`'s marker-policy table to reflect the post-LFG-1 reality where `:review_complete` is in `VALID_TERMINAL_MARKERS`; and pointed `Stages::Review.run!`'s pre-flight `warn` lines at the new command.

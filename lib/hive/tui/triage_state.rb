@@ -18,11 +18,17 @@ module Hive
       # this out as a residual risk if two findings share the prefix).
       TITLE_PREFIX_LEN = 32
 
-      attr_reader :findings, :cursor, :slug
+      attr_reader :findings, :cursor, :slug, :review_path
 
-      def initialize(slug:, findings:)
+      # `review_path` is optional for the curses path (which threads it
+      # through `triage_loop` arguments) and required for the charm path
+      # (which carries the whole triage context on `Model#triage_state`,
+      # since views are pure functions of the model). Existing curses
+      # call sites stay green by omitting it.
+      def initialize(slug:, findings:, review_path: nil)
         @slug = slug
         @findings = findings
+        @review_path = review_path
         @cursor = 0
       end
 

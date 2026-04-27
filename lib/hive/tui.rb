@@ -90,8 +90,8 @@ module Hive
       when :dispatch_command then Hive::Tui::Subprocess.takeover!(payload)
       when :help then grid_state.flash!("help overlay not yet wired (U8)")
       when :open_findings then run_triage(payload, grid_state)
-      when :open_log_tail, :open_editor
-        grid_state.flash!("Enter actions land in U7")
+      when :open_log_tail then run_log_tail(payload, grid_state)
+      when :open_editor then grid_state.flash!("Enter on needs_input lands in a later unit")
       end
       nil
     end
@@ -187,6 +187,53 @@ module Hive
       new_doc = Hive::Findings::Document.new(review_path)
       indicator = triage_state.relocate_cursor(new_doc.findings)
       renderer.flash!("review file changed; cursor reset") if indicator == :reset
+    end
+
+    # Log-tail subloop — open the latest `<state>/logs/<slug>/*.log`
+    # for the highlighted `agent_running` row and tail it via
+    # non-blocking reads driven by the render loop's 100ms input
+    # timeout. q/Esc returns to the grid. If no log file exists yet
+    # (common race between the snapshot showing `agent_running` and
+    # the agent flushing its first byte), flash a friendly message
+    # and stay in the grid.
+    def self.run_log_tail(row, grid_state)
+      require "hive/task"
+      require "hive/tui/log_tail"
+      require "hive/tui/render/log_tail"
+
+      task = Hive::Task.new(row.folder)
+      log_path = resolve_log_path(task, grid_state)
+      return unless log_path
+
+      tail = Hive::Tui::LogTail::Tail.new(log_path)
+      tail.open!
+      renderer = Hive::Tui::Render::LogTail.new
+
+      begin
+        log_tail_loop(tail, renderer, row, log_path)
+      ensure
+        tail.close!
+      end
+    end
+
+    def self.resolve_log_path(task, grid_state)
+      Hive::Tui::LogTail::FileResolver.latest(task.log_dir)
+    rescue Hive::NoLogFiles
+      grid_state.flash!("(no log files yet — agent may not have written any output)")
+      nil
+    end
+
+    def self.log_tail_loop(tail, renderer, row, log_path)
+      loop do
+        tail.poll!
+        renderer.draw(tail, Curses.lines, log_path: log_path,
+                                          claude_pid_alive: row.claude_pid_alive)
+        ch = Curses.getch
+        next if ch.nil?
+
+        action = Hive::Tui::KeyMap.dispatch(mode: :log_tail, key: translate_key(ch), row: row)
+        return if action.first == :back
+      end
     end
 
     # Curses returns Integer codes for special keys and a single-char

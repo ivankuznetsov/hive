@@ -123,4 +123,36 @@ class TuiStateSourceTest < Minitest::Test
     # Should not raise.
     source.stop
   end
+
+  # Renderer reads `last_error` and `stalled?` together when poll
+  # failures persist; pin that both stay reachable via the public
+  # surface (no instance-variable peeking) after a refresh fault.
+  def test_stalled_and_last_error_are_both_reachable_when_poll_fails
+    raised = false
+    patch = Module.new do
+      define_method(:json_payload) do |_projects|
+        raised = true
+        raise StandardError, "synthetic refresh failure"
+      end
+    end
+    Hive::Commands::Status.prepend(patch)
+
+    begin
+      with_seeded_project do |_project, _dir|
+        source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+        source.start
+        begin
+          err = wait_for { source.last_error }
+          refute_nil err, "poll failure must populate last_error"
+          assert source.stalled?, "no successful poll yet — must report stalled"
+          assert_match(/synthetic refresh failure/, err.message)
+          assert raised
+        ensure
+          source.stop
+        end
+      end
+    ensure
+      patch.module_eval { remove_method(:json_payload) }
+    end
+  end
 end

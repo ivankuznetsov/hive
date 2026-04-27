@@ -262,7 +262,22 @@ module Hive
       See `wiki/commands/tui.md` for modes, bindings, and limits.
     DESC
     def tui
-      raise Hive::InvalidTaskPath, "hive tui has no JSON output (it is human-only)" if options[:json]
+      if options[:json]
+        require "json"
+        message = "hive tui has no JSON output (it is human-only). " \
+                  "Use 'hive status --json' for the same data."
+        # TUI does not have a registered hive-* schema; emit an envelope with the
+        # standard error fields except `schema` so JSON consumers see structured
+        # error data without a SCHEMA_VERSIONS bump.
+        puts JSON.generate(
+          "ok" => false,
+          "error_class" => "InvalidTaskPath",
+          "error_kind" => "unsupported_flag",
+          "exit_code" => Hive::ExitCodes::USAGE,
+          "message" => message
+        )
+        raise Hive::InvalidTaskPath, message
+      end
 
       require "hive/tui"
       Hive::Tui.run

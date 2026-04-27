@@ -31,7 +31,17 @@ module Hive
           candidates = Dir[File.join(log_dir, "*.log")]
           raise Hive::NoLogFiles, "no log files in #{log_dir}" if candidates.empty?
 
-          candidates.max_by { |path| File.mtime(path) }
+          # `File.mtime` can race with concurrent log rotation that removes a
+          # path between glob and stat; skip the vanished entries rather than
+          # let Errno::ENOENT crash the TUI.
+          with_mtimes = candidates.filter_map do |path|
+            [ path, File.mtime(path) ]
+          rescue Errno::ENOENT
+            nil
+          end
+          raise Hive::NoLogFiles, "no log files in #{log_dir}" if with_mtimes.empty?
+
+          with_mtimes.max_by(&:last).first
         end
       end
 

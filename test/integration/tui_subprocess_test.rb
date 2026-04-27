@@ -181,6 +181,24 @@ class TuiSubprocessTest < Minitest::Test
       "kill_inflight! should clear the slot even when placeholder"
   end
 
+  # `Process.spawn` with a missing binary used to propagate Errno::ENOENT
+  # straight into the TUI render loop and tear the screen down. The
+  # subprocess seam now translates ENOENT/EACCES into the POSIX-shell
+  # 127 ("command not found") sentinel so the caller's existing
+  # non-zero-status flash path handles it.
+  def test_takeover_returns_command_not_found_sentinel_when_binary_missing
+    status = Hive::Tui::Subprocess.takeover!([ "/path/that/does/not/exist/hive-fake" ])
+    assert_equal 127, status,
+                 "takeover! must translate Errno::ENOENT to 127 instead of raising"
+  end
+
+  def test_run_quiet_returns_command_not_found_sentinel_when_binary_missing
+    exit_status, out, err = Hive::Tui::Subprocess.run_quiet!([ "/path/that/does/not/exist/hive-fake" ])
+    assert_equal 127, exit_status
+    assert_equal "", out
+    assert_match(%r{command not found: /path/that/does/not/exist/hive-fake}, err)
+  end
+
   def test_registry_register_overwrites_placeholder
     Hive::Tui::SubprocessRegistry.register_placeholder
     assert_equal :placeholder, Hive::Tui::SubprocessRegistry.current

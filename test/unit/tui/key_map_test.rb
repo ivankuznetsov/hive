@@ -85,6 +85,30 @@ class TuiKeyMapTest < Minitest::Test
     assert_equal [ "hive", "plan", "some-slug", "--from", "3-plan" ], payload
   end
 
+  # Lock state is unknown (nil) — must NOT route to the stale-lock
+  # escape hatch. Treat unknown as "alive" so we never dispatch a verb
+  # under indeterminate lock state.
+  def test_grid_verb_on_unknown_pid_state_returns_flash
+    row = make_row(action_key: "agent_running", claude_pid_alive: nil,
+                   action_label: "Agent running",
+                   suggested_command: "hive plan some-slug --from 3-plan")
+    action, payload = Hive::Tui::KeyMap.dispatch(mode: :grid, key: "p", row: row)
+    assert_equal :flash, action
+    assert_equal "agent is running on this task; press Enter to view its log", payload
+  end
+
+  # Stale lock with no recovery command — earlier code passed nil
+  # straight to Shellwords.split and crashed; now flash a stable
+  # message so the TUI keeps painting.
+  def test_grid_verb_on_stale_agent_lock_without_command_returns_flash
+    row = make_row(action_key: "agent_running", claude_pid_alive: false,
+                   action_label: "Agent running (stale lock)",
+                   suggested_command: nil)
+    action, payload = Hive::Tui::KeyMap.dispatch(mode: :grid, key: "p", row: row)
+    assert_equal :flash, action
+    assert_equal "agent lock is stale but no recovery command available", payload
+  end
+
   def test_grid_verb_on_archived_row_returns_flash_with_label
     row = make_row(action_key: "archived", suggested_command: nil,
                    action_label: "Archived")

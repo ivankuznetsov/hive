@@ -84,10 +84,15 @@ module Hive
 
       def verb_action(row)
         # Verb-on-agent-running refusal pre-empts ConcurrentRunError
-        # from `Hive::Lock`; the stale-pid branch lets the lock be
-        # reaped by the verb subcommand itself.
+        # from `Hive::Lock`; the stale-pid escape hatch only fires when
+        # the lock is *provably* dead (claude_pid_alive == false). Nil
+        # (unknown) is treated as alive so we never dispatch a verb on
+        # an indeterminate lock state. A nil suggested_command on the
+        # escape hatch falls back to a flash so Shellwords.split(nil)
+        # can never raise.
         if row.action_key == "agent_running"
-          return [ :flash, "agent is running on this task; press Enter to view its log" ] if row.claude_pid_alive
+          return [ :flash, "agent is running on this task; press Enter to view its log" ] unless row.claude_pid_alive == false
+          return [ :flash, "agent lock is stale but no recovery command available" ] if row.suggested_command.nil?
 
           return [ :dispatch_command, Shellwords.split(row.suggested_command) ]
         end

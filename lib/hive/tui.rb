@@ -23,7 +23,9 @@ module Hive
     # repaints within ~one frame of arriving even when the user is idle.
     def self.run
       raise Hive::Error, "hive tui requires MRI Ruby (got #{RUBY_ENGINE})" unless RUBY_ENGINE == "ruby"
-      raise Hive::Error, "hive tui requires a terminal" unless $stdout.tty?
+      # Boundary parity with `hive tui --json`: both reject with USAGE (64) so a
+      # non-tty CI invocation and a misuse `--json` flag share the exit-code surface.
+      raise Hive::InvalidTaskPath, "hive tui requires a terminal" unless $stdout.tty?
 
       require "curses"
       require "hive/tui/state_source"
@@ -109,7 +111,7 @@ module Hive
         break if terminate_requested?
 
         snapshot = state_source.current
-        grid.draw(snapshot, grid_state) if snapshot
+        grid.draw(snapshot, grid_state, state_source: state_source) if snapshot
         ch = Curses.getch
         next if ch.nil?
 
@@ -183,6 +185,10 @@ module Hive
 
     def self.triage_loop(triage_state, renderer, row, review_path)
       loop do
+        # SIGHUP between frames must collapse subloops promptly so the
+        # render loop's terminate check exits cleanly.
+        return if terminate_requested?
+
         renderer.draw(triage_state, slug: row.slug, review_path: review_path)
         ch = Curses.getch
         next if ch.nil?
@@ -214,6 +220,8 @@ module Hive
       :back
     end
 
+    # Returns the result of `reload_or_flash` (nil or :back) so the
+    # vanished-review-file case can propagate upward to the triage loop.
     def self.run_toggle(triage_state, renderer, review_path)
       finding = triage_state.current_finding
       return unless finding
@@ -233,7 +241,9 @@ module Hive
     # cursor put. On success, reload the document so a concurrent
     # rewrite (review re-run) can't leave the state pointing at stale
     # IDs; relocate-cursor's `:reset` indicator triggers a flash so the
-    # user sees why the highlight jumped.
+    # user sees why the highlight jumped. If the review file vanished
+    # mid-session (concurrent archive / rerun) we return :back so the
+    # triage loop drops back to grid instead of crashing on the reload.
     def self.reload_or_flash(triage_state, renderer, review_path, exit_status:, err:)
       if exit_status != 0
         renderer.flash!(err.to_s.lines.first&.strip || "subprocess failed (exit #{exit_status})")
@@ -243,6 +253,9 @@ module Hive
       new_doc = Hive::Findings::Document.new(review_path)
       indicator = triage_state.relocate_cursor(new_doc.findings)
       renderer.flash!("review file changed; cursor reset") if indicator == :reset
+    rescue Hive::NoReviewFile
+      renderer.flash!("review file vanished; returning to grid")
+      :back
     end
 
     # `?` overlay — paint the keybinding modal and block on a single
@@ -271,7 +284,15 @@ module Hive
       return unless log_path
 
       tail = Hive::Tui::LogTail::Tail.new(log_path)
-      tail.open!
+      # Race with log rotation/permission flap between FileResolver.latest
+      # and the open syscall — flash + return rather than letting the
+      # raw Errno escape and crash the TUI loop.
+      begin
+        tail.open!
+      rescue Errno::ENOENT, Errno::EACCES => e
+        grid_state.flash!("log file unavailable: #{e.class.name.split('::').last}")
+        return
+      end
       renderer = Hive::Tui::Render::LogTail.new
 
       begin
@@ -290,6 +311,8 @@ module Hive
 
     def self.log_tail_loop(tail, renderer, row, log_path)
       loop do
+        return if terminate_requested?
+
         tail.poll!
         renderer.draw(tail, Curses.lines, log_path: log_path,
                                           claude_pid_alive: row.claude_pid_alive)
@@ -333,5 +356,16 @@ module Hive
       when :clear then grid_state.set_filter(nil, snapshot)
       end
     end
+
+    # Public surface stays narrow: `run` (entry point), `atexit_registered?`,
+    # `terminate_requested?`, `request_terminate!`. Everything else is
+    # implementation-private so the API agents and tests can rely on stays
+    # explicit and refactor-safe.
+    private_class_method :install_terminal_safety_hooks, :run_loop, :render_dispatch_loop,
+                         :handle_action, :run_triage, :resolve_review_path, :triage_loop,
+                         :handle_triage_action, :takeover_and_return, :run_toggle, :run_bulk,
+                         :reload_or_flash, :show_help_overlay, :run_log_tail, :resolve_log_path,
+                         :log_tail_loop, :translate_key, :printable_or_unknown,
+                         :handle_filter_prompt
   end
 end

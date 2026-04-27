@@ -49,6 +49,43 @@ class TuiLogTailTest < Minitest::Test
     end
   end
 
+  # The TOCTOU race between Dir[] glob and File.mtime on a rotating
+  # log directory used to surface as Errno::ENOENT crashing the TUI.
+  # Reproduce the race by overriding Dir.[] to return a path that no
+  # longer exists alongside a real one; `latest` must skip the missing
+  # entry rather than raise.
+  def with_dir_glob_returning(paths)
+    original = Dir.method(:[])
+    Dir.singleton_class.define_method(:[]) { |*_args| paths }
+    yield
+  ensure
+    Dir.singleton_class.define_method(:[], original)
+  end
+
+  def test_latest_skips_path_that_vanishes_between_glob_and_stat
+    with_log_dir do |dir|
+      survivor = File.join(dir, "execute-keep.log")
+      File.write(survivor, "still here\n")
+      doomed_path = File.join(dir, "execute-doomed.log")
+
+      with_dir_glob_returning([ doomed_path, survivor ]) do
+        assert_equal survivor, Hive::Tui::LogTail::FileResolver.latest(dir),
+                     "latest must skip vanished candidates rather than raise Errno::ENOENT"
+      end
+    end
+  end
+
+  # If every candidate has vanished, the helper falls back to the same
+  # NoLogFiles raise an empty glob produces — matching the existing
+  # render-mode boundary that flashes "no log files yet".
+  def test_latest_raises_no_log_files_when_every_candidate_vanished
+    with_log_dir do |dir|
+      with_dir_glob_returning([ File.join(dir, "ghost.log") ]) do
+        assert_raises(Hive::NoLogFiles) { Hive::Tui::LogTail::FileResolver.latest(dir) }
+      end
+    end
+  end
+
   def test_latest_handles_concurrent_log_rotation
     with_log_dir do |dir|
       original = File.join(dir, "execute.log")
@@ -113,6 +150,11 @@ class TuiLogTailTest < Minitest::Test
       tail.poll!
       lines = tail.lines(10)
       assert_includes lines, "after-truncate", "post-truncate appends must surface"
+      # Pre-truncate lines must still be in the buffer — we deliberately
+      # preserve the last good frame across truncation so the user
+      # doesn't see a blank screen flash.
+      assert_includes lines, "before", "pre-truncate buffer must be preserved"
+      assert_includes lines, "truncate", "pre-truncate buffer must be preserved"
     ensure
       tail&.close!
     end

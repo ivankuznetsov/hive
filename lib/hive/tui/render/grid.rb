@@ -19,12 +19,13 @@ module Hive
         SLUG_WIDTH = 36
         LABEL_WIDTH = 24
 
-        def draw(snapshot, grid_state)
+        def draw(snapshot, grid_state, state_source: nil)
           Curses.erase
           visible = grid_state.visible_snapshot(snapshot)
           row_cursor = 0
 
           row_cursor = draw_header(snapshot, grid_state, row_cursor)
+          row_cursor = draw_stalled_banner(state_source, row_cursor) if state_source&.stalled?
 
           if visible.projects.empty?
             draw_centered_message("(no projects registered; run `hive init <path>`)", row_cursor)
@@ -50,6 +51,29 @@ module Hive
 
           with_attr(Curses::A_BOLD) { put(row_cursor, 0, line) }
           row_cursor + 2
+        end
+
+        # Surfaces poll failures the user would otherwise have no way to
+        # see — without a banner the grid renders the previous frame
+        # forever while the background poller silently fails.
+        def draw_stalled_banner(state_source, row_cursor)
+          err_class = state_source.last_error&.class&.name&.split("::")&.last
+          age = stalled_age(state_source)
+          parts = [ "[stalled" ]
+          parts << "#{age}s ago" if age
+          parts << "— #{err_class}" if err_class
+          parts << "]"
+          line = parts.join(" ").gsub(" ]", "]")
+          attrs = Curses.color_pair(Palette::PAIR_FLASH) | Curses::A_BOLD
+          with_attr(attrs) { put(row_cursor, 0, line) }
+          row_cursor + 1
+        end
+
+        def stalled_age(state_source)
+          seen_at = state_source.current_seen_at
+          return nil unless seen_at
+
+          (Time.now - seen_at).to_i
         end
 
         def draw_projects(visible, grid_state, row_cursor)

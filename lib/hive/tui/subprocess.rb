@@ -30,6 +30,11 @@ module Hive
       # Returns Integer exit status. For signal-killed children, returns
       # `128 + signo` (POSIX shell convention) so callers see a non-zero,
       # non-overlapping value instead of nil.
+      # POSIX shells use 127 for "command not found"; reuse it so the TUI
+      # caller can flash a stable status without ambiguating between a
+      # missing binary and an explicit child exit code.
+      COMMAND_NOT_FOUND_EXIT = 127
+
       def takeover!(argv)
         with_curses_suspended do
           pre_termios = save_termios
@@ -39,6 +44,8 @@ module Hive
             register_real_pgid(pid)
             _, status = Process.wait2(pid)
             translate_status(status)
+          rescue Errno::ENOENT, Errno::EACCES
+            COMMAND_NOT_FOUND_EXIT
           ensure
             SubprocessRegistry.clear
             restore_traps(prev_int, prev_term)
@@ -57,6 +64,8 @@ module Hive
         begin
           out, err, status = Open3.capture3(*argv, pgroup: true)
           [ status.exitstatus || -1, out, err ]
+        rescue Errno::ENOENT, Errno::EACCES
+          [ COMMAND_NOT_FOUND_EXIT, "", "command not found: #{argv.first}" ]
         ensure
           SubprocessRegistry.clear
           restore_traps(prev_int, prev_term)

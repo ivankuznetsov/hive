@@ -21,19 +21,31 @@ module Hive
           filter: "Filter prompt"
         }.freeze
 
-        # Render the overlay then block on a single `getch` to dismiss.
-        # Returns nothing; caller redraws the underlying mode after.
+        # Render the overlay then loop on `getch` until any non-resize key
+        # arrives. The render loop set `Curses.timeout = 100` globally so a
+        # single `getch` would self-dismiss after 100ms; we ignore nil
+        # (timeout) and treat KEY_RESIZE as a redraw, not a dismissal.
         def show
-          Curses.clear
-          terminal_height = Curses.lines
-          terminal_width = Curses.cols
           rows = build_rows
-          paint(rows, terminal_height, terminal_width)
-          Curses.refresh
-          Curses.getch
+          repaint(rows)
+          loop do
+            ch = Curses.getch
+            next if ch.nil?
+            if ch == Curses::KEY_RESIZE
+              repaint(rows)
+              next
+            end
+            return
+          end
         end
 
         private
+
+        def repaint(rows)
+          Curses.clear
+          paint(rows, Curses.lines, Curses.cols)
+          Curses.refresh
+        end
 
         def build_rows
           rows = [ "hive tui — keybindings", "" ]

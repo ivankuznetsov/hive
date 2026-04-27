@@ -17,16 +17,26 @@ module Hive
   # cross-thread reads of `@current` snapshots without a Mutex.
   # JRuby/TruffleRuby would need a synchronisation upgrade.
   module Tui
-    # Entry point invoked by `Hive::CLI#tui`. Boots curses, spins up the
-    # background poller, and runs the render+dispatch loop until `q`.
-    # Curses input timeout is 100ms so a fresh snapshot from the poller
-    # repaints within ~one frame of arriving even when the user is idle.
+    # Entry point invoked by `Hive::CLI#tui`. Delegates to App.run, which
+    # routes to the curses or charm backend based on `HIVE_TUI_BACKEND`.
+    # Curses is the default through the migration sequence (U1-U9 of plan
+    # docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md);
+    # the default flips to charm in U10.
     def self.run
       raise Hive::Error, "hive tui requires MRI Ruby (got #{RUBY_ENGINE})" unless RUBY_ENGINE == "ruby"
       # Boundary parity with `hive tui --json`: both reject with USAGE (64) so a
       # non-tty CI invocation and a misuse `--json` flag share the exit-code surface.
       raise Hive::InvalidTaskPath, "hive tui requires a terminal" unless $stdout.tty?
 
+      require "hive/tui/app"
+      Hive::Tui::App.run
+    end
+
+    # Curses run loop kept here as the curses backend's entry point. App
+    # delegates here when HIVE_TUI_BACKEND is unset or "curses" (the default
+    # through U9). U11 deletes this method along with the rest of the
+    # curses code path.
+    def self.run_curses
       require "curses"
       require "hive/tui/debug"
       require "hive/tui/state_source"

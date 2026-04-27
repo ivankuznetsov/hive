@@ -89,10 +89,104 @@ module Hive
       when :flash then grid_state.flash!(payload)
       when :dispatch_command then Hive::Tui::Subprocess.takeover!(payload)
       when :help then grid_state.flash!("help overlay not yet wired (U8)")
-      when :open_findings, :open_log_tail, :open_editor
-        grid_state.flash!("Enter actions land in U6/U7")
+      when :open_findings then run_triage(payload, grid_state)
+      when :open_log_tail, :open_editor
+        grid_state.flash!("Enter actions land in U7")
       end
       nil
+    end
+
+    # Triage subloop — runs until Esc/back. Loads the latest review file,
+    # constructs a TriageState + Render::Triage, then dispatches Space /
+    # `d` / `a` / `r` per KeyMap's `:triage` mode. Space toggles use
+    # `Subprocess.run_quiet!` (no screen tear-down per KTD-4); `d` does a
+    # full takeover so the implementation pass streams to the user's tty.
+    def self.run_triage(row, grid_state)
+      require "hive/findings"
+      require "hive/task"
+      require "hive/tui/triage_state"
+      require "hive/tui/render/triage"
+
+      task = Hive::Task.new(row.folder)
+      review_path = resolve_review_path(task, grid_state)
+      return unless review_path
+
+      document = Hive::Findings::Document.new(review_path)
+      triage_state = Hive::Tui::TriageState.new(slug: row.slug, findings: document.findings)
+      renderer = Hive::Tui::Render::Triage.new
+
+      triage_loop(triage_state, renderer, row, review_path)
+    end
+
+    def self.resolve_review_path(task, grid_state)
+      Hive::Findings.review_path_for(task)
+    rescue Hive::NoReviewFile => e
+      grid_state.flash!(e.message)
+      nil
+    end
+
+    def self.triage_loop(triage_state, renderer, row, review_path)
+      loop do
+        renderer.draw(triage_state, slug: row.slug, review_path: review_path)
+        ch = Curses.getch
+        next if ch.nil?
+
+        action = Hive::Tui::KeyMap.dispatch(mode: :triage, key: translate_key(ch), row: row)
+        result = handle_triage_action(action, triage_state, renderer, review_path)
+        return if result == :back
+      end
+    end
+
+    def self.handle_triage_action(action, triage_state, renderer, review_path)
+      verb, _payload = action
+      case verb
+      when :back then :back
+      when :cursor_down then triage_state.cursor_down
+      when :cursor_up then triage_state.cursor_up
+      when :toggle_finding then run_toggle(triage_state, renderer, review_path)
+      when :dispatch_command then takeover_and_return(triage_state, action.last)
+      when :bulk_accept then run_bulk(triage_state, renderer, review_path, :accept)
+      when :bulk_reject then run_bulk(triage_state, renderer, review_path, :reject)
+      end
+    end
+
+    # `d` synthesises `hive develop --from 4-execute`; once the pass
+    # finishes, the action label moves off `review_findings` so we
+    # return to grid rather than re-rendering a stale triage view.
+    def self.takeover_and_return(_triage_state, argv)
+      Hive::Tui::Subprocess.takeover!(argv)
+      :back
+    end
+
+    def self.run_toggle(triage_state, renderer, review_path)
+      finding = triage_state.current_finding
+      return unless finding
+
+      argv = triage_state.toggle_command(finding)
+      exit_status, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
+      reload_or_flash(triage_state, renderer, review_path, exit_status: exit_status, err: err)
+    end
+
+    def self.run_bulk(triage_state, renderer, review_path, direction)
+      argv = triage_state.bulk_command(direction)
+      exit_status, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
+      reload_or_flash(triage_state, renderer, review_path, exit_status: exit_status, err: err)
+    end
+
+    # On non-zero exit we surface stderr in the status line and keep the
+    # cursor put. On success, reload the document so a concurrent
+    # rewrite (review re-run) can't leave the state pointing at stale
+    # IDs; relocate-cursor's `:reset` indicator triggers a flash so the
+    # user sees why the highlight jumped.
+    def self.reload_or_flash(triage_state, renderer, review_path, exit_status:, err:)
+      if exit_status != 0
+        renderer.flash!(err.to_s.lines.first&.strip || "subprocess failed (exit #{exit_status})")
+        return
+      end
+
+      new_doc = Hive::Findings::Document.new(review_path)
+      indicator = triage_state.relocate_cursor(new_doc.findings)
+      renderer.flash!("review file changed; cursor reset") if indicator == :reset
     end
 
     # Curses returns Integer codes for special keys and a single-char

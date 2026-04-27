@@ -39,6 +39,12 @@ module Hive
       require "hive/tui/subprocess"
       require "hive/tui/subprocess_registry"
 
+      if Hive::Tui::Debug::ENABLED
+        # Print log path BEFORE curses takes the screen so the user can
+        # `tail -f` it from a sibling shell.
+        warn "[hive tui] HIVE_TUI_DEBUG=1 — logging to #{Hive::Tui::Debug::LOG_PATH}"
+        sleep 0.3
+      end
       Hive::Tui::Debug.log("boot", "TERM=#{ENV.fetch('TERM', '?')} EDITOR=#{ENV.fetch('EDITOR', '?')} pwd=#{Dir.pwd}")
       install_terminal_safety_hooks
       run_loop

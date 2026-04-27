@@ -3,19 +3,22 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-27
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: One runtime gem (`thor`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
+**TLDR**: Two runtime gems (`thor`, `curses`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
 
 ## Runtime gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
+| `curses` | `~> 1.6` (locked 1.6.0) | Terminal UI runtime — used in `Hive::Tui` (`lib/hive/tui.rb`) for the `hive tui` command. Stdlib-extracted, ruby-core maintained; ships `def_prog_mode` / `reset_prog_mode` / `endwin` / injected `KEY_RESIZE`. |
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.
+
+Why Curses: the `hive tui` plan needs subprocess takeover (suspend the screen, exec `claude`, restore), resize handling, and zero-cost frame redraws. Curses 1.6 covers all three from stdlib lineage; alternatives (`tty-cursor` + ANSI, `ratatui`-style Rust deps) either lacked subprocess takeover or pulled in a 22 MB native dep (KTD-1 in the TUI plan).
 
 ## Development / test gems
 

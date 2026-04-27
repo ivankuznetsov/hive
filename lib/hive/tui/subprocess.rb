@@ -45,18 +45,26 @@ module Hive
         pre_termios = save_termios
         with_curses_suspended do
           prev_int, prev_term = install_pgid_forwarding_traps
+          exit_code = nil
           begin
             pid = Process.spawn(*argv, pgroup: true)
             register_real_pgid(pid)
             _, status = Process.wait2(pid)
-            translate_status(status)
+            exit_code = translate_status(status)
           rescue Errno::ENOENT, Errno::EACCES
-            COMMAND_NOT_FOUND_EXIT
+            exit_code = COMMAND_NOT_FOUND_EXIT
+            warn_command_not_found(argv)
           ensure
             SubprocessRegistry.clear
             restore_traps(prev_int, prev_term)
             restore_termios(pre_termios)
+            # Pause when the child failed so the user can actually read
+            # its error output before `restore_curses_state`'s clear
+            # wipes the screen. Successful exits return promptly; the
+            # render loop's clearing happens immediately after.
+            pause_for_acknowledgement(exit_code, argv) if exit_code && exit_code != 0
           end
+          exit_code
         end
       end
 
@@ -208,6 +216,34 @@ module Hive
         return 128 + status.termsig if status.signaled?
 
         -1
+      end
+
+      # Curses is suspended at this point and termios is back in cooked
+      # mode, so a regular `gets` reads one line from the user's
+      # terminal. Without this pause the next `restore_curses_state`
+      # call clears the screen the moment takeover! returns, wiping
+      # any error message the child wrote (e.g. `hive pr` exit 4
+      # "cannot advance ..."). The user would then see nothing happen.
+      def pause_for_acknowledgement(exit_code, argv)
+        return unless $stdin.tty? && $stderr.tty?
+
+        verb = argv[1] || argv.first
+        $stderr.puts
+        $stderr.puts "[hive tui] `#{verb}` exited #{exit_code} — press Enter to return to grid..."
+        $stderr.flush
+        begin
+          $stdin.gets
+        rescue StandardError
+          nil
+        end
+      end
+
+      # ENOENT means the binary at argv[0] could not be exec'd. The
+      # child never wrote anything, so without this surface line the
+      # user sees no output at all between curses-down and the
+      # acknowledgement prompt.
+      def warn_command_not_found(argv)
+        $stderr.puts "[hive tui] command not found: #{argv.first}" if $stderr.tty?
       end
     end
   end

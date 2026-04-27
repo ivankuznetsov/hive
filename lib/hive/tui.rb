@@ -17,15 +17,31 @@ module Hive
   # cross-thread reads of `@current` snapshots without a Mutex.
   # JRuby/TruffleRuby would need a synchronisation upgrade.
   module Tui
-    # Entry point invoked by `Hive::CLI#tui`. Boots curses, runs the
-    # render loop until the user presses `q` (or until the loop
-    # otherwise terminates), and tears down. Subsequent units replace
-    # the placeholder body with the real polling/render machinery.
+    # Entry point invoked by `Hive::CLI#tui`. Boots curses, spins up the
+    # background poller, and runs the render+dispatch loop until `q`.
+    # Curses input timeout is 100ms so a fresh snapshot from the poller
+    # repaints within ~one frame of arriving even when the user is idle.
     def self.run
       raise Hive::Error, "hive tui requires MRI Ruby (got #{RUBY_ENGINE})" unless RUBY_ENGINE == "ruby"
       raise Hive::Error, "hive tui requires a terminal" unless $stdout.tty?
 
       require "curses"
+      require "hive/tui/state_source"
+      require "hive/tui/grid_state"
+      require "hive/tui/render/grid"
+      require "hive/tui/render/palette"
+      require "hive/tui/render/filter_prompt"
+      require "hive/tui/key_map"
+      require "hive/tui/subprocess"
+
+      run_loop
+    end
+
+    def self.run_loop
+      state_source = Hive::Tui::StateSource.new
+      state_source.start
+      grid_state = Hive::Tui::GridState.new
+      grid = Hive::Tui::Render::Grid.new
 
       Curses.init_screen
       begin
@@ -33,18 +49,82 @@ module Hive
         Curses.noecho
         Curses.stdscr.keypad(true)
         Curses.curs_set(0)
+        Hive::Tui::Render::Palette.init!
+        Curses.timeout = 100
 
-        Curses.clear
-        Curses.setpos(0, 0)
-        Curses.addstr("hive tui — press q to quit")
-        Curses.refresh
-
-        loop do
-          ch = Curses.getch
-          break if ch == "q" || ch == "Q"
-        end
+        render_dispatch_loop(state_source, grid_state, grid)
       ensure
+        state_source.stop
         Curses.close_screen
+      end
+    end
+
+    def self.render_dispatch_loop(state_source, grid_state, grid)
+      loop do
+        snapshot = state_source.current
+        grid.draw(snapshot, grid_state) if snapshot
+        ch = Curses.getch
+        next if ch.nil?
+
+        key = translate_key(ch)
+        action = Hive::Tui::KeyMap.dispatch(
+          mode: :grid,
+          key: key,
+          row: snapshot ? grid_state.at_cursor(snapshot) : nil
+        )
+        break if handle_action(action, grid_state, snapshot) == :quit
+      end
+    end
+
+    # Returns :quit to break the loop; nil otherwise. Centralised so the
+    # main loop's body stays under Metrics/MethodLength.
+    def self.handle_action(action, grid_state, snapshot)
+      verb, payload = action
+      case verb
+      when :quit then return :quit
+      when :cursor_down then grid_state.move_cursor_down(snapshot) if snapshot
+      when :cursor_up then grid_state.move_cursor_up(snapshot) if snapshot
+      when :project_scope then grid_state.set_scope(payload, snapshot) if snapshot
+      when :filter then handle_filter_prompt(grid_state, snapshot) if snapshot
+      when :flash then grid_state.flash!(payload)
+      when :dispatch_command then Hive::Tui::Subprocess.takeover!(payload)
+      when :help then grid_state.flash!("help overlay not yet wired (U8)")
+      when :open_findings, :open_log_tail, :open_editor
+        grid_state.flash!("Enter actions land in U6/U7")
+      end
+      nil
+    end
+
+    # Curses returns Integer codes for special keys and a single-char
+    # String for printable input. Map to the surface KeyMap expects:
+    # `:key_*` Symbols for navigation, single-char Strings for the rest.
+    def self.translate_key(ch)
+      return ch if ch.is_a?(String)
+      return :unknown unless ch.is_a?(Integer)
+
+      case ch
+      when Curses::KEY_DOWN then :key_down
+      when Curses::KEY_UP then :key_up
+      when Curses::KEY_ENTER, 10, 13 then :key_enter
+      when 27 then :key_escape
+      else printable_or_unknown(ch)
+      end
+    end
+
+    # Restrict raw integer-to-chr conversion to the printable ASCII band
+    # so unmapped function keys / escape sequences don't surface as
+    # garbage bytes that KeyMap then routes as no-ops.
+    def self.printable_or_unknown(ch)
+      return ch.chr if ch.between?(32, 126)
+
+      :unknown
+    end
+
+    def self.handle_filter_prompt(grid_state, snapshot)
+      result = Hive::Tui::Render::FilterPrompt.new.read(initial: grid_state.filter)
+      case result[:action]
+      when :commit then grid_state.set_filter(result[:value], snapshot)
+      when :clear then grid_state.set_filter(nil, snapshot)
       end
     end
   end

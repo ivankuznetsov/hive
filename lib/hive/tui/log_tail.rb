@@ -56,6 +56,15 @@ module Hive
         DEFAULT_BACKBUFFER_BYTES = 64 * 1024
         READ_CHUNK = 8192
 
+        # Cap on the unterminated partial line. The completed-line
+        # buffer is bounded by `@ring_capacity`, but `@partial`
+        # accumulates everything between newlines — a child writing a
+        # huge no-newline blob would otherwise grow this without limit.
+        # 16KB is generous for any realistic log line; oversize prefixes
+        # are flushed as a synthetic line so the user still sees fresh
+        # bytes instead of a frozen view.
+        PARTIAL_BYTE_CAP = 16 * 1024
+
         attr_reader :path
 
         def initialize(path, ring_capacity: DEFAULT_RING_CAPACITY,
@@ -195,7 +204,22 @@ module Hive
             line = line.chomp("\r")
             @buffer << line
           end
+          flush_oversized_partial!
           trim_buffer
+        end
+
+        # Cap memory growth from a no-newline child. When @partial
+        # exceeds PARTIAL_BYTE_CAP, flush the prefix as a single
+        # synthetic line and keep the suffix; the next chunk continues
+        # filling. Drops nothing — the bytes are visible in the
+        # buffer, just split arbitrarily on byte boundary.
+        def flush_oversized_partial!
+          return if @partial.bytesize <= PARTIAL_BYTE_CAP
+
+          prefix = @partial.byteslice(0, PARTIAL_BYTE_CAP)
+          suffix = @partial.byteslice(PARTIAL_BYTE_CAP, @partial.bytesize - PARTIAL_BYTE_CAP)
+          @buffer << prefix
+          @partial = +(suffix.to_s)
         end
 
         def trim_buffer

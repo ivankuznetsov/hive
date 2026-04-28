@@ -235,4 +235,33 @@ class TuiLogTailTest < Minitest::Test
       tail.close! # must not raise
     end
   end
+
+  # A pathological child writing a huge no-newline blob would
+  # otherwise grow @partial unboundedly. The cap flushes the
+  # oversized prefix as a synthetic line so memory stays bounded.
+  def test_tail_caps_unterminated_partial_at_byte_threshold
+    with_log_dir do |dir|
+      path = File.join(dir, "x.log")
+      File.write(path, "") # start empty
+      tail = Hive::Tui::LogTail::Tail.new(path)
+      tail.open!
+      cap = Hive::Tui::LogTail::Tail::PARTIAL_BYTE_CAP
+
+      # Append 3x the cap with NO newlines — pre-fix this would land
+      # entirely in @partial and blow memory under a runaway child.
+      File.open(path, "a") { |f| f.write("X" * (cap * 3)) }
+      tail.poll!
+
+      partial = tail.instance_variable_get(:@partial)
+      assert partial.bytesize <= cap,
+        "partial line must not exceed PARTIAL_BYTE_CAP (got #{partial.bytesize} bytes; cap=#{cap})"
+      lines = tail.lines(10)
+      assert lines.length >= 2,
+        "oversized chunk must be split into at least 2 synthetic lines"
+      assert_equal cap, lines.first.bytesize,
+        "first synthetic line is exactly the cap size"
+    ensure
+      tail&.close!
+    end
+  end
 end

@@ -213,16 +213,23 @@ module Hive
       # Open the most recent log file under the row's `.hive/logs/`,
       # build a Tail, flip mode. Race-tolerant: if the file disappears
       # between resolve and open, flash instead of crashing.
+      #
+      # `FileResolver.latest` raises `Hive::NoLogFiles` (not nil) when
+      # the dir has no `*.log` entries — must be in the rescue list or
+      # the exception unwinds out of `Bubbletea::Runner` and tears the
+      # TUI down. Common on tasks that haven't run any agent yet (the
+      # `logs/` dir is created lazily by `Hive::Agent`).
       def open_log_tail(row)
         task = Hive::Task.new(row.folder)
         log_dir = File.join(task.folder, "logs")
         log_path = Hive::Tui::LogTail::FileResolver.latest(log_dir)
-        return [ flashed("no logs for #{row.slug}"), nil ] if log_path.nil?
 
         tail = Hive::Tui::LogTail::Tail.new(log_path)
         tail.open!
         wrapper = LogTailContext.new(tail: tail, claude_pid_alive: row.claude_pid_alive)
         [ @hive_model.with(mode: :log_tail, tail_state: wrapper), nil ]
+      rescue Hive::NoLogFiles
+        [ flashed("no logs yet for #{row.slug}"), nil ]
       rescue Hive::InvalidTaskPath, Errno::ENOENT, Errno::EACCES
         [ flashed("log file gone"), nil ]
       end

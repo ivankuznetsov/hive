@@ -131,4 +131,42 @@ class HiveTuiBubbleModelTest < Minitest::Test
     _, cmd = @model.update(msg)
     assert_kind_of Bubbletea::SequenceCommand, cmd
   end
+
+  # ---- Side-effect handlers must not propagate file-system exceptions ----
+  #
+  # The TUI runs inside `Bubbletea::Runner.run`; an unhandled exception
+  # from `BubbleModel#update` unwinds out of the runner and tears down
+  # the alt-screen mid-frame, leaving the user's terminal in a corrupt
+  # state. Every side-effect handler that does I/O must therefore rescue
+  # the predictable failure modes and surface them as a flash, never
+  # raise.
+  #
+  # The dogfood-found regression: pressing Enter on an `error`-state
+  # row whose task hadn't run any agent yet (logs/ dir empty) made
+  # `LogTail::FileResolver.latest` raise `Hive::NoLogFiles`, which
+  # wasn't in `open_log_tail`'s rescue list, killing the TUI.
+
+  def test_open_log_tail_flashes_when_no_log_files_exist
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "demo-260426-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
+      FileUtils.mkdir_p(File.join(task_folder, "logs")) # logs dir but NO *.log files
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "5-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: nil, attrs: nil,
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "error", action_label: "Error", suggested_command: nil
+      )
+
+      # Must not raise — must convert NoLogFiles into a flashed model
+      # change so the TUI keeps running.
+      _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))
+      assert_nil cmd, "no Cmd returned for the no-logs case"
+      assert_match(/no logs yet for #{slug}/, @model.hive_model.flash)
+      assert_equal :grid, @model.hive_model.mode,
+        "must stay in grid mode, not flip to :log_tail with a missing log"
+    end
+  end
 end

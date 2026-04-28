@@ -184,13 +184,29 @@ class TaskActionTest < Minitest::Test
     # and the next workflow verb should accept the task. Each pair
     # comes directly from a TaskAction ACTIONS row that maps a marker
     # name to a `command:`. Adding a new advance pair anywhere must
-    # come with a new entry here.
+    # come with a new entry here AND the marker must be in
+    # `Hive::Markers::TERMINAL_MARKER_NAMES`.
     "plan" => :complete,           # 2-brainstorm finishes with :complete
     "develop" => :complete,        # 3-plan finishes with :complete
     "review" => :execute_complete, # 4-execute finishes with :execute_complete
     "pr" => :review_complete,      # 5-review finishes with :review_complete
     "archive" => :complete         # 6-pr finishes with :complete
   }.freeze
+
+  # Pin the constant <-> map relationship: every marker that a
+  # workflow verb advances FROM must be in TERMINAL_MARKER_NAMES.
+  # If someone adds a new advance pair to the map without updating
+  # the constant, this test fails loudly.
+  def test_advance_verb_markers_are_in_terminal_marker_names_constant
+    require "hive/markers"
+    ADVANCE_VERBS_TO_TERMINAL_MARKERS.each_value do |marker_name|
+      assert_includes Hive::Markers::TERMINAL_MARKER_NAMES, marker_name,
+        "marker :#{marker_name} is referenced as an advance source but isn't " \
+        "in `Hive::Markers::TERMINAL_MARKER_NAMES`. Add it to the constant " \
+        "in lib/hive/markers.rb so every layer (StageAction#terminal_marker?, " \
+        "Run#json_next_action, the TUI) picks it up."
+    end
+  end
 
   # Pin: every workflow advance verb's `terminal_marker?` whitelist
   # accepts the corresponding stage-terminal marker. This is the test

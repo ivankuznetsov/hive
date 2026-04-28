@@ -64,12 +64,34 @@ class HiveTuiViewsGridTest < Minitest::Test
 
   # ---- Stalled banner (last_error) ----
 
-  def test_stalled_banner_renders_when_last_error_set
+  def test_stalled_banner_renders_class_name_and_first_message_line
     snap = snapshot_with([])
     err = StandardError.new("boom")
     model = base_model(snapshot: snap, last_error: err)
     out = Hive::Tui::Views::Grid.render(model)
-    assert_includes out, "[stalled — StandardError]"
+    # Banner now includes the message — without it, the user saw
+    # `[stalled — RuntimeError]` with no clue what failed.
+    assert_includes out, "[stalled — StandardError: boom]"
+  end
+
+  def test_stalled_banner_falls_back_to_class_name_when_message_empty
+    snap = snapshot_with([])
+    err = StandardError.new("")
+    model = base_model(snapshot: snap, last_error: err)
+    out = Hive::Tui::Views::Grid.render(model)
+    assert_includes out, "[stalled — StandardError]",
+      "empty message must not produce a trailing colon (`StandardError:`)"
+  end
+
+  def test_stalled_banner_truncates_long_messages
+    snap = snapshot_with([])
+    err = StandardError.new("a" * 200)
+    model = base_model(snapshot: snap, last_error: err)
+    out = Hive::Tui::Views::Grid.render(model)
+    # Cap at 60 chars so the banner doesn't wrap the line and corrupt
+    # the layout below.
+    refute out.include?("a" * 100), "long messages must be truncated"
+    assert out.include?("a" * 60), "first 60 chars must survive"
   end
 
   def test_no_stalled_banner_when_last_error_nil

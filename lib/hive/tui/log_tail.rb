@@ -1,5 +1,6 @@
 require "fileutils"
 require "hive"
+require "hive/tui/debug"
 
 module Hive
   module Tui
@@ -111,9 +112,13 @@ module Hive
           # scratch. Other Errno::* are swallowed so the renderer keeps
           # painting cached state instead of crashing.
           reopen
-        rescue Errno::ENOENT, Errno::EACCES, Errno::EBADF, Errno::EIO
+        rescue Errno::ENOENT, Errno::EACCES, Errno::EBADF, Errno::EIO => e
           # Transient filesystem trouble; leave buffer intact and try
-          # again on the next poll.
+          # again on the next poll. Logged so an EBADF (FD closed
+          # behind our back — view freezes until reopen) can be
+          # diagnosed via `HIVE_TUI_DEBUG=1` instead of looking like
+          # a hang.
+          Hive::Tui::Debug.log("log_tail", "poll! errno=#{e.class.name.split('::').last}")
           nil
         end
 
@@ -135,7 +140,8 @@ module Hive
 
         def close!
           @file&.close
-        rescue IOError
+        rescue IOError => e
+          Hive::Tui::Debug.log("log_tail", "close! IOError: #{e.message}")
           nil
         ensure
           @file = nil

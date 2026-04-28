@@ -160,7 +160,20 @@ module Hive
           stamp_subprocess_log("END exit=#{exit_code}", argv)
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         rescue StandardError => e
+          # If `wait2` raises (ECHILD because someone reaped, or a bug
+          # in pid tracking), the user's "running …" flash never
+          # gets a SubprocessExited follow-up — they can't tell whether
+          # the child is still working or wedged. Synthesize an exit
+          # so the existing flash machinery surfaces "exited -1".
           Hive::Tui::Debug.log("dispatch_background", "reaper: #{e.class.name}: #{e.message}")
+          begin
+            dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: -1))
+          rescue StandardError => inner
+            # Runner may have torn down between wait2 raising and our
+            # dispatch — log and exit silently. The reaper Thread is
+            # fire-and-forget; nothing else cares about this exit.
+            Hive::Tui::Debug.log("dispatch_background", "reaper-dispatch: #{inner.class.name}")
+          end
         end
       end
 
@@ -259,19 +272,26 @@ module Hive
           f.seek(offset)
           f.read
         end
-        begin_re = /^----- [^\n]* BEGIN: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
+        # The `(?:\([^)]+\))?` allows both "BEGIN:" (background-spawn)
+        # and "BEGIN(interactive):" (foreground takeover) — without it
+        # diagnostic lookup silently breaks for any future verb flagged
+        # `interactive: true` in `Hive::Workflows::VERBS`.
+        begin_re = /^----- [^\n]* BEGIN(?:\([^)]+\))?: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
         begin_match = text.enum_for(:scan, begin_re).map { Regexp.last_match }.last
         return nil if begin_match.nil?
 
         section_start = text.rindex(begin_match[0])
-        end_idx = text.index(/^----- [^\n]* END exit=[^\n]* -----$/, section_start) || text.length
+        end_idx = text.index(/^----- [^\n]* END(?:\([^)]+\))? exit=[^\n]* -----$/, section_start) || text.length
         text[section_start..end_idx]
       end
 
       # @api private
       def parse_argv_from_section(section)
         first = section.lines.first.to_s
-        m = first.match(/BEGIN: (.+) -----$/)
+        # Match both `BEGIN:` and `BEGIN(interactive):` (or any future
+        # parenthesized variant) so the project lookup works for
+        # interactive-takeover sections too.
+        m = first.match(/BEGIN(?:\([^)]+\))?: (.+) -----$/)
         m ? m[1].split(/\s+/) : nil
       end
 

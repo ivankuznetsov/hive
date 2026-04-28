@@ -115,18 +115,13 @@ module Hive
               "finish the current stage first, then run `#{next_command}`"
       end
 
-      # Markers whose presence means "this stage is done; the next verb
-      # may advance the task". 5-review writes `:review_complete` as
-      # its terminal marker (see `Hive::Stages::Review`'s phase
-      # progression: REVIEW_COMPLETE | REVIEW_WAITING | REVIEW_*_STALE)
-      # and `Hive::Commands::Run#json_next_action` already treats it as
-      # an advance-eligible state alongside `:complete` and
-      # `:execute_complete`. Without `:review_complete` here, `hive pr
-      # --from 5-review` raised WrongStage on every otherwise-valid
-      # post-review hand-off — the `hive tui`'s "Ready for PR" rows
-      # depend on this whitelist matching TaskAction's classification.
+      # See `Hive::Markers::TERMINAL_MARKER_NAMES` for the canonical
+      # list and the cross-layer drift history. Single source of
+      # truth — previously this list was hand-duplicated here,
+      # creating the `:review_complete` gap that `hive tui`'s
+      # "Ready for PR" rows tripped on every dispatch.
       def terminal_marker?(marker)
-        %i[complete execute_complete review_complete].include?(marker.name)
+        Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
       end
 
       # Inner Approve and Run are silent when the verb is in --json mode;

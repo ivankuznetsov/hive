@@ -20,6 +20,16 @@ module Hive
     ].freeze
     MARKER_RE = /<!--\s*(?<name>WAITING|COMPLETE|AGENT_WORKING|ERROR|EXECUTE_WAITING|EXECUTE_COMPLETE|EXECUTE_STALE|REVIEW_WORKING|REVIEW_WAITING|REVIEW_CI_STALE|REVIEW_STALE|REVIEW_COMPLETE|REVIEW_ERROR)(?<attrs>(?:\s+[^<>]*?)?)\s*-->/
 
+    # Markers whose presence means "this stage is done; the next verb
+    # may advance the task". Single source of truth — previously this
+    # list was duplicated across `Hive::Commands::StageAction#terminal_marker?`,
+    # `Hive::Commands::Run#json_next_action`, and the TUI's `TaskAction`
+    # classifier; the `:review_complete` whitelist gap that produced the
+    # U10/U11-era "Ready for PR row dispatches WrongStage" bug was a
+    # drift between two of these copies. Add a marker here and every
+    # consumer picks it up.
+    TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
+
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
         name == :none

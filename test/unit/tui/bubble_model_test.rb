@@ -37,6 +37,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "update on YieldTick must return a fresh tick to keep the cycle going"
   end
 
+  def test_yield_tick_callback_yields_gvl_and_returns_yield_tick_message
+    # The callback is the actual GVL-yield mechanism — without
+    # `Thread.pass` inside it, the StateSource polling thread starves
+    # under bubbletea's tight input-poll loop. This test invokes the
+    # callback directly so a regression removing `Thread.pass` (or
+    # changing the return value) trips a meaningful failure.
+    cmd = @model.send(:yield_tick_cmd)
+    callback = cmd.instance_variable_get(:@callback)
+    refute_nil callback, "TickCommand must carry an invokable callback"
+    result = callback.call
+    assert_equal Hive::Tui::Messages::YIELD_TICK, result,
+      "callback must return YIELD_TICK so update() reschedules the cycle"
+  end
+
   # ---- WindowSizeMessage translation ----
 
   def test_window_size_message_translates_to_window_sized
@@ -150,6 +164,38 @@ class HiveTuiBubbleModelTest < Minitest::Test
     ensure
       Hive::Workflows.singleton_class.alias_method(:interactive?, :_orig_interactive?)
       Hive::Workflows.singleton_class.send(:remove_method, :_orig_interactive?)
+    end
+  end
+
+  def test_interactive_takeover_callable_runs_child_and_dispatches_subprocess_exited
+    # Asserting the SequenceCommand shape is necessary but not
+    # sufficient — the inner ExecCommand callable is what actually
+    # spawns the child and dispatches SubprocessExited. Without
+    # this test, swapping the callable for a no-op (or breaking
+    # the dispatch invocation inside it) would silently pass.
+    Hive::Workflows.singleton_class.alias_method(:_orig_interactive2?, :interactive?)
+    Hive::Workflows.define_singleton_method(:interactive?) { |verb| verb.to_s == "develop" }
+    captured = []
+    @model.dispatch = ->(msg) { captured << msg }
+    begin
+      msg = Hive::Tui::Messages::DispatchCommand.new(
+        argv: [ "true", "develop", "slug" ],
+        verb: "develop"
+      )
+      _, cmd = @model.update(msg)
+      exec_cmd = cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
+      refute_nil exec_cmd, "sequence must contain an ExecCommand"
+
+      exec_cmd.callable.call
+
+      assert_equal 1, captured.length,
+        "callable must dispatch exactly one SubprocessExited (success path)"
+      assert_kind_of Hive::Tui::Messages::SubprocessExited, captured.first
+      assert_equal "develop", captured.first.verb
+      assert_equal 0, captured.first.exit_code
+    ensure
+      Hive::Workflows.singleton_class.alias_method(:interactive?, :_orig_interactive2?)
+      Hive::Workflows.singleton_class.send(:remove_method, :_orig_interactive2?)
     end
   end
 
@@ -305,6 +351,35 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_empty captured
   end
 
+  def test_snapshot_with_multiple_kill_class_rows_triggers_heal_for_each
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([
+      make_error_row(slug: "a", folder: "/x/.hive-state/stages/5-review/a", exit_code: 143),
+      make_error_row(slug: "b", folder: "/x/.hive-state/stages/4-execute/b", exit_code: 137),
+      make_error_row(slug: "c", folder: "/x/.hive-state/stages/3-plan/c", exit_code: 130)
+    ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal(
+      [ "/x/.hive-state/stages/3-plan/c",
+        "/x/.hive-state/stages/4-execute/b",
+        "/x/.hive-state/stages/5-review/a" ],
+      captured.sort,
+      "every kill-class row in the snapshot must trigger its own heal — not just the first"
+    )
+  end
+
+  def test_snapshot_mixing_kill_class_and_real_failures_only_heals_kill_class
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([
+      make_error_row(slug: "killed", folder: "/x/k", exit_code: 143),  # SIGTERM, heal
+      make_error_row(slug: "failed", folder: "/x/f", exit_code: 1),    # real failure, skip
+      make_error_row(slug: "timed",  folder: "/x/t", exit_code: nil, reason: "timeout") # skip
+    ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal [ "/x/k" ], captured,
+      "only kill-class signals heal; real failures and timeouts must reach the user untouched"
+  end
+
   def test_heal_dedup_only_fires_once_per_folder
     captured = stub_heal_capture(@model)
     row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/5-review/killed", exit_code: 143)
@@ -404,26 +479,28 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # `BubbleModel#update` would unwind out of Bubbletea's runner and
   # tear down the alt-screen mid-frame. Pin that ANY StandardError
   # is converted into a flash + the TUI keeps running.
-  def test_unhandled_exception_in_handler_becomes_flash_not_crash
-    # Force OpenLogTail to hit an unanticipated Errno by passing a
-    # row whose folder is a path that File operations will reject
-    # for a reason NOT in the explicit rescue list (Errno::ENAMETOOLONG
-    # via a folder name >255 bytes — neither ENOENT nor EACCES).
-    crash_row = Hive::Tui::Snapshot::Row.new(
-      project_name: "x", stage: "5-review", slug: "demo",
-      folder: "/" + ("a" * 4096), state_file: nil, marker: nil, attrs: nil,
-      mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error", suggested_command: nil
-    )
-
-    # Whatever exception rises (InvalidTaskPath from the bad folder
-    # is the actual one here, but the safety net should catch any
-    # StandardError) — must not propagate.
-    _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: crash_row))
-    assert_nil cmd, "unhandled exception path returns nil cmd, never propagates"
-    refute_nil @model.hive_model.flash, "exception must be surfaced as a flash"
-    assert_equal :grid, @model.hive_model.mode,
-      "exception in a sub-mode entry must NOT leave mode flipped"
+  def test_unhandled_exception_in_update_becomes_flash_not_crash
+    # The safety net at `BubbleModel#update`'s rescue catches
+    # exceptions NOT covered by per-handler rescues. Force a
+    # genuinely unanticipated exception by stubbing
+    # `Hive::Tui::Update.apply` to raise a `RuntimeError` (not in
+    # any per-handler rescue list). Without the safety net, this
+    # would unwind out of `Bubbletea::Runner.run` and tear down
+    # the alt-screen mid-frame.
+    Hive::Tui::Update.singleton_class.alias_method(:_orig_apply, :apply)
+    Hive::Tui::Update.define_singleton_method(:apply) do |_model, _msg|
+      raise "synthetic unanticipated failure for the safety-net test"
+    end
+    begin
+      _, cmd = @model.update(Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 24))
+      assert_nil cmd, "safety net returns nil cmd; never propagates exception"
+      refute_nil @model.hive_model.flash, "exception must surface as a flash"
+      assert_match(/internal error/i, @model.hive_model.flash,
+        "flash must label this as the safety-net catchall, not a per-handler diagnostic")
+    ensure
+      Hive::Tui::Update.singleton_class.alias_method(:apply, :_orig_apply)
+      Hive::Tui::Update.singleton_class.send(:remove_method, :_orig_apply)
+    end
   end
 
   def test_open_log_tail_flashes_when_no_log_files_exist

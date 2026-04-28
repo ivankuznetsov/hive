@@ -60,7 +60,14 @@ module Hive
       def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
         @hive_model = hive_model
         @dispatch = dispatch
-        @healed_folders = {} # folder path → Time.now (dedup; one heal attempt per session)
+        # `@healed_folders` is touched from the main runner thread
+        # (`auto_heal_kill_class_errors` registers folders before
+        # spawning heals) AND from heal Threads (which evict on
+        # failure so the next poll retries). The mutex serializes
+        # both — Hash#[]=/`#delete` are not GVL-atomic across multiple
+        # writers under MRI.
+        @healed_folders = {} # folder path → Time.now
+        @healed_folders_mutex = Mutex.new
       end
 
       # Late binding so App.run_charm can wire the runner reference
@@ -171,9 +178,16 @@ module Hive
         key = bubble_key_to_keymap(key_message)
         row = current_row
         Hive::Tui::KeyMap.message_for(mode: @hive_model.mode, key: key, row: row)
-      rescue ArgumentError
+      rescue ArgumentError => e
         # Unknown mode (defensive): treat as Noop. Should never fire
-        # since `mode` is constrained by Update transitions.
+        # since `mode` is constrained by Update transitions; logging
+        # here is the only way a regression in Update mode-handling
+        # would surface to an operator (otherwise: keystroke silently
+        # does nothing, no flash, no signal).
+        Hive::Tui::Debug.log(
+          "keymap",
+          "ArgumentError mode=#{@hive_model.mode.inspect} key=#{key.inspect}: #{e.message}"
+        )
         Hive::Tui::Messages::NOOP
       end
 
@@ -268,9 +282,8 @@ module Hive
 
         snapshot.rows.each do |row|
           next unless kill_class_error?(row)
-          next if @healed_folders.key?(row.folder)
+          next unless register_heal_attempt(row.folder)
 
-          @healed_folders[row.folder] = Time.now
           spawn_heal_thread(row)
         end
       end
@@ -285,17 +298,50 @@ module Hive
         KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
       end
 
+      # Atomic claim-or-skip on `@healed_folders`. Returns true when
+      # this caller wins the slot (must spawn the heal); false when
+      # some prior call already claimed it (skip).
+      def register_heal_attempt(folder)
+        @healed_folders_mutex.synchronize do
+          return false if @healed_folders.key?(folder)
+
+          @healed_folders[folder] = Time.now
+          true
+        end
+      end
+
+      # On heal failure, evict the folder so the next snapshot's
+      # `register_heal_attempt` succeeds and retries. Without this,
+      # a transient `hive markers clear` failure would strand the
+      # row in "Error" forever (the cache would block re-attempts).
+      def evict_heal_attempt(folder)
+        @healed_folders_mutex.synchronize { @healed_folders.delete(folder) }
+      end
+
       # Override-able for tests so they can capture the heal
       # invocation without forking a real `hive markers clear`.
       def spawn_heal_thread(row)
         Thread.new { heal_marker(row) }
       end
 
+      # Calls `hive markers clear` and converts any failure (non-zero
+      # exit, exception) into a debug-log entry + cache eviction so
+      # the next snapshot retries. Without the eviction, a single
+      # transient failure would leave the row stuck in Error
+      # indefinitely while `@healed_folders` blocked re-heals.
       def heal_marker(row)
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        Hive::Tui::Subprocess.run_quiet!(argv)
+        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
+        return if exit_code.zero?
+
+        Hive::Tui::Debug.log(
+          "auto_heal",
+          "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.lines.first&.chomp.to_s[0, 120]}"
+        )
+        evict_heal_attempt(row.folder)
       rescue StandardError => e
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
+        evict_heal_attempt(row.folder)
       end
 
       # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:

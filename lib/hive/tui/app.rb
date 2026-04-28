@@ -1,4 +1,5 @@
 require "hive"
+require "hive/tui/debug"
 
 module Hive
   module Tui
@@ -90,6 +91,7 @@ module Hive
       def start_snapshot_poller(state_source, runner)
         Thread.new do
           last_snapshot = nil
+          last_dispatched_error = nil
           loop do
             sleep 0.5
             current = state_source.current
@@ -97,13 +99,24 @@ module Hive
             if current && current != last_snapshot
               runner.send(Hive::Tui::Messages::SnapshotArrived.new(snapshot: current))
               last_snapshot = current
-            elsif error
+              # Reset the error-dedup so a future failure-after-success
+              # gets dispatched (otherwise an error from before the
+              # success would shadow a fresh one).
+              last_dispatched_error = nil
+            elsif error && !error.equal?(last_dispatched_error)
+              # Identity dedup so the same exception isn't re-dispatched
+              # every 0.5s tick while StateSource holds it. Two distinct
+              # exceptions (even with identical messages) dispatch
+              # separately.
               runner.send(Hive::Tui::Messages::PollFailed.new(error: error))
+              last_dispatched_error = error
             end
-          rescue StandardError
-            # Defensive: never let the poller thread die. The render loop
-            # will keep showing the last snapshot until something else
-            # kills the program.
+          rescue StandardError => e
+            # Defensive: never let the poller thread die. Log so a real
+            # bug here can be diagnosed via `HIVE_TUI_DEBUG=1` —
+            # without this, the loop livelocked invisibly: sleep, fail,
+            # next, repeat with no observability anywhere.
+            Hive::Tui::Debug.log("poller", "rescued #{e.class.name}: #{e.message}")
             next
           end
         end

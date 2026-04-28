@@ -56,7 +56,8 @@ module Hive
 
         def stalled_banner(model)
           err_class = model.last_error.class.name.split("::").last
-          line = "[stalled — #{err_class}]"
+          err_msg = model.last_error.message.to_s.lines.first&.chomp.to_s[0, 60]
+          line = err_msg.empty? ? "[stalled — #{err_class}]" : "[stalled — #{err_class}: #{err_msg}]"
           Styles::STALLED.render(line)
         end
 

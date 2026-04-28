@@ -26,15 +26,70 @@ class HiveTuiUpdateTest < Minitest::Test
   # ---------- SnapshotArrived ----------
 
   def test_snapshot_arrived_replaces_snapshot_and_clears_last_error
-    fake_snapshot = Object.new
+    snap = snap_with_two_projects_three_rows_each
     starting = model.with(last_error: StandardError.new("stale"))
     new_model, cmd = Hive::Tui::Update.apply(
       starting,
-      Hive::Tui::Messages::SnapshotArrived.new(snapshot: fake_snapshot)
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap)
     )
-    assert_same fake_snapshot, new_model.snapshot
+    assert_same snap, new_model.snapshot
     assert_nil new_model.last_error, "successful poll must clear last_error so the stalled banner stops showing"
     assert_nil cmd
+  end
+
+  # A poll that drops rows the cursor was sitting on must reclamp
+  # rather than leave model.cursor pointing at hidden rows; otherwise
+  # downstream cursor handlers refuse to move from invalid coords and
+  # the user is wedged with visible rows but no movable selection.
+  def test_snapshot_arrived_reclamps_cursor_when_prior_coords_now_invalid
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      cursor: [ 1, 2 ] # last row of beta
+    )
+    # New snapshot: only project alpha exists with 1 row. The prior
+    # cursor [1, 2] points at no-longer-existing project_idx 1.
+    pa = Hive::Tui::Snapshot::ProjectView.new(
+      name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil,
+      rows: [ Hive::Tui::Snapshot::Row.new(
+        project_name: "alpha", stage: "1-input", slug: "a1", folder: nil,
+        state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
+        action_label: "ready", suggested_command: "hive brainstorm a1"
+      ).freeze ].freeze
+    ).freeze
+    smaller_snap = Hive::Tui::Snapshot.new(generated_at: nil, projects: [ pa ])
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: smaller_snap)
+    )
+    assert_equal [ 0, 0 ], new_model.cursor,
+      "cursor must reclamp to first visible row when prior coords no longer exist"
+  end
+
+  def test_snapshot_arrived_preserves_cursor_when_still_valid
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      cursor: [ 1, 1 ]
+    )
+    # A "benign" poll that re-emits the same snapshot — cursor must
+    # not snap to the top, that would be UX-hostile.
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap_with_two_projects_three_rows_each)
+    )
+    assert_equal [ 1, 1 ], new_model.cursor,
+      "still-valid cursor must be preserved across snapshot polls"
+  end
+
+  def test_snapshot_arrived_assigns_cursor_when_starting_from_nil
+    starting = model.with(snapshot: nil, cursor: nil)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap_with_two_projects_three_rows_each)
+    )
+    assert_equal [ 0, 0 ], new_model.cursor,
+      "first snapshot must seed cursor at first visible row instead of leaving it nil"
   end
 
   # ---------- PollFailed ----------

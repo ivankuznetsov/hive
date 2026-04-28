@@ -109,9 +109,35 @@ module Hive
       end
 
       # Successful poll → store snapshot, clear last_error so the
-      # stalled banner stops showing.
+      # stalled banner stops showing. Re-clamps the cursor when the new
+      # snapshot's visible rows make the prior coords invalid: a poll
+      # that drops the last row of the cursor's project, or shrinks the
+      # project list past the cursor's project_idx, would otherwise
+      # leave model.cursor pointing at hidden rows. j/k subsequently
+      # noops because apply_cursor_* refuses to move from an invalid
+      # cursor. Preserve cursor when still valid (avoids snapping the
+      # user's selection on every benign poll).
       def apply_snapshot_arrived(model, msg)
-        model.with(snapshot: msg.snapshot, last_error: nil)
+        new_model = model.with(snapshot: msg.snapshot, last_error: nil)
+        visible = visible_snapshot(new_model)
+        return new_model if visible.nil?
+
+        new_model.with(cursor: reclamp_cursor(visible, new_model.cursor))
+      end
+
+      # Keep the cursor coords if they still point at an existing row
+      # in the visible snapshot; otherwise jump to the first visible
+      # row (or nil when the visible grid is empty).
+      def reclamp_cursor(visible, current)
+        return first_visible_cursor(visible) if current.nil?
+
+        project_idx, row_idx = current
+        if project_idx.between?(0, visible.projects.size - 1) &&
+           row_idx.between?(0, visible.projects[project_idx].rows.size - 1)
+          return current
+        end
+
+        first_visible_cursor(visible)
       end
 
       # Failed poll → keep prior snapshot, record error for renderer

@@ -291,9 +291,20 @@ module Hive
       # `task.log_dir/<label>-<ts>.log` via Hive::Agent's IO.pipe);
       # neither writes through the alt-screen, so the TUI never
       # corrupts visually during a verb dispatch.
+      #
+      # An immediate flash ("running …") fires synchronously so the
+      # user gets visual confirmation their keypress did something —
+      # without it, the dispatch is invisible until the next snapshot
+      # poll picks up the `:agent_working` marker (~1s later) or the
+      # reaper Thread sends SubprocessExited (seconds-to-minutes
+      # later, depending on the verb). The flash is overwritten by
+      # SubprocessExited's success/failure flash on completion.
       def dispatch_command(message)
         Hive::Tui::Subprocess.dispatch_background(message.argv, dispatch: @dispatch)
-        [ @hive_model, nil ]
+        verb = message.verb || message.argv[1] || "verb"
+        slug = message.argv[2] || ""
+        flash_text = slug.empty? ? "running `hive #{verb}`…" : "running `hive #{verb} #{slug}`…"
+        [ @hive_model.with(flash: flash_text, flash_set_at: Time.now), nil ]
       end
 
       # Synchronous I/O: open the review file, build a TriageState,

@@ -126,6 +126,23 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "update must NOT block on the spawn (got #{elapsed}s — should be < 0.5s)"
   end
 
+  def test_dispatch_command_flashes_running_message_for_immediate_feedback
+    # Without the flash, pressing Enter on a `needs_input` row would
+    # produce zero visual feedback because the spawn is asynchronous —
+    # the user couldn't tell their keypress did anything. The flash is
+    # overwritten by SubprocessExited's success/failure flash on
+    # completion.
+    msg = Hive::Tui::Messages::DispatchCommand.new(
+      argv: [ "hive", "develop", "hello-world-test", "--project", "demo", "--from", "3-plan" ],
+      verb: "develop"
+    )
+    @model.update(msg)
+    refute_nil @model.hive_model.flash, "dispatch must flash immediately so the user sees feedback"
+    assert_match(/running.*hive develop.*hello-world-test/, @model.hive_model.flash,
+      "flash must name the verb and slug the user dispatched on")
+    refute_nil @model.hive_model.flash_set_at, "flash_set_at must stamp for TTL aging"
+  end
+
   # ---- Late-binding dispatch (so App.run_charm can wire runner.method(:send)) ----
 
   def test_dispatch_setter_replaces_callable

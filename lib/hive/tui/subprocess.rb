@@ -9,26 +9,26 @@ module Hive
   module Tui
     # Two ways to run a child from inside the TUI:
     #
-    #   * `takeover_command(argv, dispatch:)` — interactive verbs (`hive
-    #     develop`, `hive plan`, etc.) need the real tty. Returns a
-    #     `Bubbletea::ExecCommand` the runner executes inside its own
-    #     suspend window (raw mode disabled, cursor shown, input reader
-    #     stopped). The callable spawns argv with `pgroup: true` so
-    #     INT/TERM forward cleanly, waits for the child, and dispatches
-    #     a `Messages::SubprocessExited(verb:, exit_code:)` back into
-    #     the loop via the supplied `dispatch` lambda.
-    #   * `run_quiet!(argv)` — non-interactive children (per-finding
-    #     `hive accept-finding` / `hive reject-finding` toggles in
-    #     triage mode). `Open3.capture3` runs the child without
-    #     touching the alt-screen, so the screen never flashes on
-    #     every keystroke.
+    #   * `dispatch_background(argv, dispatch:)` — workflow verbs (hive
+    #     brainstorm/plan/develop/review/pr/archive). Spawns the child
+    #     detached with stdio redirected to `SUBPROCESS_LOG_PATH`, returns
+    #     immediately. A reaper Thread waits for the child and dispatches
+    #     `Messages::SubprocessExited(verb:, exit_code:)`. Multiple
+    #     concurrent agents (across projects) work — the TUI keeps
+    #     polling and rendering while children run.
+    #   * `run_quiet!(argv)` — synchronous, captured-stdio children
+    #     for per-finding `hive accept-finding` / `hive reject-finding`
+    #     toggles in triage mode. `Open3.capture3` runs the child
+    #     without touching the alt-screen so the screen never flashes
+    #     on every keystroke.
     #
-    # Both manage SubprocessRegistry around the spawn so the SIGHUP
-    # cleanup hook (in `App.run_charm`) can kill the in-flight child
-    # group on shutdown, and both restore the parent's INT/TERM trap
-    # handlers in `ensure` regardless of exit shape (clean, signal,
-    # exception). The pgid+trap idiom mirrors `Hive::Agent#spawn_and_wait`
-    # (lib/hive/agent.rb:99-117).
+    # `run_quiet!` keeps the SubprocessRegistry single-slot pgid + the
+    # INT/TERM forwarding traps because the triage subprocess is short-
+    # lived and serial (one keystroke = one `run_quiet!` = one child).
+    # `dispatch_background` does NOT install signal forwarding — the
+    # child is detached into its own pgroup, and the TUI can quit
+    # without killing its agents (intentional: long-running agents
+    # outlive the dashboard).
     module Subprocess
       module_function
 
@@ -40,46 +40,75 @@ module Hive
       # missing binary and an explicit child exit code.
       COMMAND_NOT_FOUND_EXIT = 127
 
-      # Charm path: returns a `Bubbletea::SequenceCommand` that, when
-      # run by the framework's runner, exits alt-screen, spawns argv
-      # with pgroup forwarding, waits, re-enters alt-screen, and
-      # dispatches a `Messages::SubprocessExited(verb:, exit_code:)`
-      # back into the loop via `dispatch.call(message)`.
+      # Background spawn for workflow verbs (hive brainstorm/plan/
+      # develop/review/pr/archive). Returns nil (no Bubbletea Cmd) —
+      # the TUI keeps running its render loop while the child runs in
+      # parallel; multiple agents across multiple projects can run
+      # concurrently. A reaper Thread waits for the child and
+      # dispatches `Messages::SubprocessExited(verb:, exit_code:)` so
+      # the TUI flashes the result.
       #
-      # Why the alt-screen toggle is necessary: bubbletea-ruby's
-      # `Runner#exec_process` only toggles raw mode + cursor + input
-      # reader for the child — it does NOT exit alt-screen. With
-      # `alt_screen: true` (which the TUI uses), the child's stdout
-      # writes paint into the alt-screen buffer instead of the main
-      # terminal, and on return the renderer's diff state is corrupted
-      # (subsequent frames append below the buffered output instead of
-      # redrawing in place). Wrapping in a sequence with
-      # `exit_alt_screen` → exec → `enter_alt_screen` makes the child
-      # write to the main screen and forces a clean alt-screen
-      # re-render on return. Documented in U2 verification:
-      # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+      # Why no foreground takeover: the workflow verbs invoke
+      # `Hive::Agent` which spawns `claude` with captured stdio
+      # (`IO.pipe` to `task.log_dir/<label>-<ts>.log`). The child
+      # never needs the user's tty — taking over would only block the
+      # TUI for no benefit, and force serial agent runs.
       #
-      # The `dispatch:` parameter is the seam for runner injection.
-      # `App.run_charm` wires `dispatch: runner.method(:send)`. Tests
-      # pass a plain capture lambda. We can't use the framework
-      # builder's built-in `message:` argument because the exit code
-      # isn't known at command-construction time — closure-capture is
-      # the only path that surfaces the actual exit code.
+      # Stdout + stderr both redirect to `SUBPROCESS_LOG_PATH` (append)
+      # so a per-verb tail is available without corrupting the TUI's
+      # alt-screen. The agent's own structured log lands separately
+      # in `task.log_dir/*.log` (visible via Enter on agent_running rows).
       #
-      # Verb is cached at argv[1] at construction time so SubprocessExited
-      # carries the verb name even if argv mutates downstream — same
-      # contract as `Messages::DispatchCommand.verb`.
-      def takeover_command(argv, dispatch:)
+      # Pgroup leadership preserved: signal forwarding from the TUI
+      # parent isn't installed (the child detaches into its own
+      # group via `pgroup: true`); the SubprocessRegistry single-slot
+      # tracking is bypassed because background spawns can be
+      # concurrent and the registry doesn't model that. SIGHUP on the
+      # TUI lets background children continue independently — by
+      # design, since the user may want the agent to finish even if
+      # they exit the TUI.
+      def dispatch_background(argv, dispatch:)
         verb = argv[1]
-        callable = lambda do
-          exit_code = run_takeover_child(argv)
-          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
+        Hive::Tui::Debug.log("dispatch_background", "argv=#{argv.inspect}")
+        stamp_subprocess_log("BEGIN", argv)
+
+        pid = spawn_background_child(argv)
+        if pid.nil?
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: COMMAND_NOT_FOUND_EXIT))
+          return nil
         end
-        Bubbletea.sequence(
-          Bubbletea.exit_alt_screen,
-          Bubbletea.public_send(:exec, callable),
-          Bubbletea.enter_alt_screen
+
+        spawn_reaper_thread(pid, verb, argv, dispatch)
+        nil
+      end
+
+      # @api private
+      def spawn_background_child(argv)
+        Process.spawn(
+          *argv,
+          pgroup: true,
+          out: [ SUBPROCESS_LOG_PATH, "a" ],
+          err: [ SUBPROCESS_LOG_PATH, "a" ]
         )
+      rescue Errno::ENOENT, Errno::EACCES => e
+        Hive::Tui::Debug.log("dispatch_background", "errno=#{e.class.name}: #{e.message}")
+        stamp_subprocess_log("ERRNO #{e.class.name}: #{e.message}", argv)
+        nil
+      end
+
+      # @api private
+      # Wait for the child in a separate Ruby thread, dispatch
+      # SubprocessExited on completion. Each background spawn gets
+      # its own reaper — concurrent agents reap independently.
+      def spawn_reaper_thread(pid, verb, argv, dispatch)
+        Thread.new do
+          _, status = Process.wait2(pid)
+          exit_code = translate_status(status)
+          stamp_subprocess_log("END exit=#{exit_code}", argv)
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
+        rescue StandardError => e
+          Hive::Tui::Debug.log("dispatch_background", "reaper: #{e.class.name}: #{e.message}")
+        end
       end
 
       # Subprocess stderr log path. Workflow verbs spawned via
@@ -95,33 +124,6 @@ module Hive
       # 0..255 for clean exits, 128+signo for signal kills,
       # COMMAND_NOT_FOUND_EXIT (127) for missing binary.
       #
-      # Stderr is redirected (append) to `SUBPROCESS_LOG_PATH` so the
-      # user can `tail` it on a non-zero exit; alt-screen reasserts too
-      # fast for the operator to read errors otherwise. Stdout stays
-      # inherited so interactive prompts (gh pr create, claude tool
-      # permissions) round-trip cleanly.
-      def run_takeover_child(argv)
-        Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
-        prev_int, prev_term = install_pgid_forwarding_traps
-        begin
-          stamp_subprocess_log("BEGIN", argv)
-          pid = Process.spawn(*argv, pgroup: true, err: [ SUBPROCESS_LOG_PATH, "a" ])
-          register_real_pgid(pid)
-          Hive::Tui::Debug.log("takeover_command", "pid=#{pid} pgid=#{SubprocessRegistry.current.inspect}")
-          _, status = Process.wait2(pid)
-          exit_code = translate_status(status)
-          stamp_subprocess_log("END exit=#{exit_code}", argv)
-          exit_code
-        rescue Errno::ENOENT, Errno::EACCES => e
-          Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
-          stamp_subprocess_log("ERRNO #{e.class.name}: #{e.message}", argv)
-          COMMAND_NOT_FOUND_EXIT
-        ensure
-          SubprocessRegistry.clear
-          restore_traps(prev_int, prev_term)
-        end
-      end
-
       # @api private
       # Append a marker line so the log can be read as a stream of
       # per-verb sections. Failures with empty stderr (e.g., signal

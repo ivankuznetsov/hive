@@ -108,13 +108,14 @@ class TuiSubprocessTest < Minitest::Test
   end
 end
 
-# `Subprocess.takeover_command(argv, dispatch:) → Bubbletea::ExecCommand`.
-# The framework owns suspend/resume of raw mode + cursor + input reader
-# (`Bubbletea::Runner#exec_process`), so this layer only needs to spawn
-# the child with pgroup forwarding, wait, and dispatch a SubprocessExited
-# message back into the loop. The `dispatch:` lambda is the seam — App.run_charm
-# wires `dispatch: runner.method(:send)` in U10; tests pass a capture lambda.
-class TuiSubprocessTakeoverCommandTest < Minitest::Test
+# `Subprocess.dispatch_background(argv, dispatch:)` spawns workflow-verb
+# children in the background — TUI keeps rendering, multiple agents can
+# run concurrently. A reaper Thread waits for each child and dispatches
+# `Messages::SubprocessExited(verb:, exit_code:)` so the TUI flashes the
+# result. The `dispatch:` lambda is the seam — App.run_charm wires
+# `dispatch: runner.method(:send)`; tests pass a capture lambda + poll
+# the captured-messages array for the reaper to fire.
+class TuiSubprocessDispatchBackgroundTest < Minitest::Test
   include HiveTestHelper
 
   FAKE_CHILD = TuiSubprocessTest::FAKE_CHILD
@@ -124,7 +125,8 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
     %w[HIVE_TUI_FAKE_EXIT HIVE_TUI_FAKE_STDOUT HIVE_TUI_FAKE_STDERR
        HIVE_TUI_FAKE_TRAP_INT HIVE_TUI_FAKE_BLOCK].each { |k| ENV.delete(k) }
     @messages = []
-    @dispatch = ->(msg) { @messages << msg }
+    @messages_mutex = Mutex.new
+    @dispatch = ->(msg) { @messages_mutex.synchronize { @messages << msg } }
   end
 
   def teardown
@@ -133,148 +135,103 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
     Hive::Tui::SubprocessRegistry.clear
   end
 
+  # Wait for the reaper Thread to dispatch `count` messages, up to
+  # `timeout` seconds. Avoids fixed sleeps; matches the no-flake
+  # rule from CLAUDE.md.
+  def wait_for_messages(count, timeout: 3.0)
+    deadline = Time.now + timeout
+    while @messages_mutex.synchronize { @messages.length } < count
+      return false if Time.now > deadline
+
+      sleep 0.02
+    end
+    true
+  end
+
   # ---- Builder shape ----
-  #
-  # Helper: extract the inner ExecCommand from the sequence. The
-  # outer SequenceCommand wraps three commands: exit_alt_screen, the
-  # exec, and enter_alt_screen — see `Subprocess.takeover_command`'s
-  # rationale for the alt-screen toggle.
-  def exec_inside(sequence)
-    assert_kind_of Bubbletea::SequenceCommand, sequence,
-      "takeover_command returns a sequence wrapping exit_alt → exec → enter_alt"
-    inner = sequence.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
-    refute_nil inner, "sequence must contain an ExecCommand for the spawn"
-    inner
+
+  def test_dispatch_background_returns_nil_and_does_not_block
+    started = Time.now
+    result = Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    elapsed = Time.now - started
+    assert_nil result, "dispatch_background returns nil — no Bubbletea Cmd, the runner just keeps going"
+    assert elapsed < 0.5, "dispatch must NOT wait for the child (got #{elapsed}s — should be < 0.5s)"
+    wait_for_messages(1) # reap before teardown
   end
 
-  def test_takeover_command_returns_alt_screen_wrapped_exec
-    cmd = Hive::Tui::Subprocess.takeover_command([ "hive", "develop", "slug" ], dispatch: @dispatch)
-    assert_kind_of Bubbletea::SequenceCommand, cmd,
-      "takeover_command returns a sequence so alt-screen toggles around the exec"
-    classes = cmd.commands.map(&:class)
-    assert_equal(
-      [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
-      classes,
-      "sequence order must be exit_alt → exec → enter_alt so the child writes " \
-      "to the main screen and the alt-screen redraws cleanly on return"
-    )
-    inner = exec_inside(cmd)
-    assert_respond_to inner.callable, :call, "ExecCommand#callable must be invokable"
-  end
+  # ---- Reaper Thread dispatches SubprocessExited ----
 
-  def test_takeover_command_does_not_spawn_at_construction_time
-    initial_messages = @messages.dup
-    Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD ], dispatch: @dispatch)
-    assert_equal initial_messages, @messages,
-      "takeover_command must defer spawn to callable invocation; no message before .call"
-  end
-
-  # ---- Callable execution ----
-
-  def test_callable_dispatches_subprocess_exited_with_zero_on_clean_exit
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch))
-    cmd.callable.call
-
-    assert_equal 1, @messages.length, "exactly one SubprocessExited per execution"
+  def test_reaper_dispatches_subprocess_exited_with_zero_on_clean_exit
+    Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    assert wait_for_messages(1), "reaper must dispatch SubprocessExited within 3s"
     msg = @messages.first
     assert_kind_of Hive::Tui::Messages::SubprocessExited, msg
-    assert_equal "pr", msg.verb, "verb must be argv[1] cached at construction time"
+    assert_equal "pr", msg.verb, "verb cached at argv[1] for the SubprocessExited flash"
     assert_equal 0, msg.exit_code
   end
 
-  def test_callable_dispatches_nonzero_exit_code
+  def test_reaper_dispatches_nonzero_exit_code
     ENV["HIVE_TUI_FAKE_EXIT"] = "7"
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "develop" ], dispatch: @dispatch))
-    cmd.callable.call
-
+    Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "develop" ], dispatch: @dispatch)
+    assert wait_for_messages(1)
     msg = @messages.first
     assert_equal 7, msg.exit_code
     assert_equal "develop", msg.verb
   end
 
-  def test_callable_dispatches_command_not_found_when_binary_missing
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command(
+  def test_reaper_dispatches_command_not_found_synchronously_when_binary_missing
+    # ENOENT during spawn happens BEFORE we can hand off to the reaper —
+    # `dispatch_background` itself dispatches the SubprocessExited so
+    # the TUI gets immediate feedback rather than waiting on a phantom
+    # reaper that has no child to wait for.
+    Hive::Tui::Subprocess.dispatch_background(
       [ "/path/that/does/not/exist/hive-fake", "develop" ],
       dispatch: @dispatch
-    ))
-    cmd.callable.call
-
+    )
+    assert wait_for_messages(1, timeout: 0.5),
+      "spawn ENOENT must dispatch SubprocessExited synchronously; no thread to wait on"
     msg = @messages.first
-    assert_equal 127, msg.exit_code,
-      "ENOENT must translate to 127 (POSIX command-not-found) so the existing flash path handles it"
+    assert_equal 127, msg.exit_code, "ENOENT translates to 127 (POSIX command-not-found)"
     assert_equal "develop", msg.verb
   end
 
-  def test_callable_dispatches_signal_exit_on_pgroup_term
+  def test_concurrent_dispatches_run_in_parallel
+    # Two slow children, dispatched back-to-back. If `dispatch_background`
+    # is truly non-blocking, both finish in ~max(t1, t2), not t1 + t2.
     ENV["HIVE_TUI_FAKE_BLOCK"] = "1"
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "review" ], dispatch: @dispatch))
+    pids_killed = []
+    pids_mutex = Mutex.new
 
+    Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "develop" ], dispatch: @dispatch)
+    Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "review" ], dispatch: @dispatch)
+
+    # Kill any blocking child after a brief moment so the reapers can fire.
     killer = Thread.new do
-      30.times do
-        pgid = Hive::Tui::SubprocessRegistry.current
-        if pgid.is_a?(Integer)
-          begin
-            Process.kill("TERM", -pgid)
-          rescue Errno::ESRCH
-            nil
-          end
-          break
-        end
-        sleep 0.02
+      sleep 0.3
+      `pgrep -f tui-fake-child`.split.each do |pid|
+        Process.kill("TERM", pid.to_i)
+        pids_mutex.synchronize { pids_killed << pid.to_i }
+      rescue Errno::ESRCH
+        nil
       end
     end
-    cmd.callable.call
+
+    assert wait_for_messages(2, timeout: 5.0),
+      "both reapers must dispatch SubprocessExited; concurrent runs are the whole point"
     killer.join
-
-    msg = @messages.first
-    assert_equal 128 + Signal.list.fetch("TERM"), msg.exit_code,
-      "SIGTERM-killed child must report 128+SIGTERM (143) per POSIX shell convention"
-    assert_equal "review", msg.verb
-  end
-
-  # ---- Trap and registry hygiene ----
-
-  def test_callable_restores_int_and_term_traps
-    before_int = trap("INT", "DEFAULT")
-    before_term = trap("TERM", "DEFAULT")
-    begin
-      cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch))
-      cmd.callable.call
-      after_int = trap("INT", "DEFAULT")
-      after_term = trap("TERM", "DEFAULT")
-      assert_equal "DEFAULT", after_int, "INT trap restored after callable returns"
-      assert_equal "DEFAULT", after_term, "TERM trap restored after callable returns"
-    ensure
-      trap("INT", before_int)
-      trap("TERM", before_term)
-    end
-  end
-
-  def test_callable_clears_registry_on_clean_exit
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch))
-    cmd.callable.call
-    assert_nil Hive::Tui::SubprocessRegistry.current,
-      "registry must be cleared after callable so SIGHUP doesn't kill nothing"
-  end
-
-  def test_callable_clears_registry_on_missing_binary
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command(
-      [ "/no/such/binary", "develop" ],
-      dispatch: @dispatch
-    ))
-    cmd.callable.call
-    assert_nil Hive::Tui::SubprocessRegistry.current,
-      "registry must be cleared even when spawn raises ENOENT"
+    verbs = @messages.map(&:verb).sort
+    assert_equal %w[develop review], verbs,
+      "each dispatch must surface its own verb on completion (no cross-talk)"
   end
 
   # ---- Verb caching from argv[1] ----
 
   def test_verb_cached_from_argv_index_one
-    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command(
+    Hive::Tui::Subprocess.dispatch_background(
       [ FAKE_CHILD, "brainstorm", "some-slug", "--from", "1-input" ],
       dispatch: @dispatch
-    ))
-    cmd.callable.call
+    )
+    assert wait_for_messages(1)
     assert_equal "brainstorm", @messages.first.verb
   end
 end

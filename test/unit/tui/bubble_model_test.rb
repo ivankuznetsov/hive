@@ -111,13 +111,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "/auth"
   end
 
-  # ---- DispatchCommand → takeover_command wrapping ----
+  # ---- DispatchCommand → background spawn ----
 
-  def test_dispatch_command_message_returns_takeover_command
+  def test_dispatch_command_message_returns_nil_cmd_and_does_not_block
+    # Background dispatch returns nil — the TUI keeps its render loop
+    # going while the agent runs in parallel. The reaper Thread sends
+    # SubprocessExited later via the `dispatch` lambda.
+    started = Time.now
     msg = Hive::Tui::Messages::DispatchCommand.new(argv: [ "echo", "hi" ], verb: "hi")
     _, cmd = @model.update(msg)
-    assert_kind_of Bubbletea::SequenceCommand, cmd,
-      "DispatchCommand turns into a sequence (exit_alt → exec → enter_alt)"
+    elapsed = Time.now - started
+    assert_nil cmd, "DispatchCommand spawns in the background; no Bubbletea Cmd returned"
+    assert elapsed < 0.5,
+      "update must NOT block on the spawn (got #{elapsed}s — should be < 0.5s)"
   end
 
   # ---- Late-binding dispatch (so App.run_charm can wire runner.method(:send)) ----
@@ -125,11 +131,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_dispatch_setter_replaces_callable
     new_dispatch = ->(_m) { }
     @model.dispatch = new_dispatch
-    # Any subsequent takeover_command construction should now embed the
-    # new dispatch. Smoke check: the call doesn't raise.
+    # The replacement dispatch is now what the background reaper would
+    # dispatch SubprocessExited through. Smoke check: the call doesn't
+    # raise (returns nil cmd just like any DispatchCommand).
     msg = Hive::Tui::Messages::DispatchCommand.new(argv: [ "echo" ], verb: nil)
     _, cmd = @model.update(msg)
-    assert_kind_of Bubbletea::SequenceCommand, cmd
+    assert_nil cmd
   end
 
   # ---- Side-effect handlers must not propagate file-system exceptions ----
@@ -145,6 +152,100 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # row whose task hadn't run any agent yet (logs/ dir empty) made
   # `LogTail::FileResolver.latest` raise `Hive::NoLogFiles`, which
   # wasn't in `open_log_tail`'s rescue list, killing the TUI.
+
+  # ---- Auto-heal: kill-class error markers (SIGINT/SIGKILL/SIGTERM) ----
+  #
+  # When `hive pr` (or any takeover) gets killed mid-spawn — pgroup
+  # forwards SIGTERM, the agent writes `:error reason=exit_code
+  # exit_code=143`, and the task folder is left intact — the file
+  # state IS recoverable but the marker says "Error". Auto-heal
+  # clears those markers in the background so the TUI doesn't strand
+  # interrupted tasks in a stuck "Error" classification the user has
+  # to manually escape from.
+
+  def make_error_row(slug:, folder:, exit_code:, reason: "exit_code")
+    Hive::Tui::Snapshot::Row.new(
+      project_name: "demo", stage: "5-review", slug: slug, folder: folder,
+      state_file: nil, marker: "error", attrs: { "reason" => reason, "exit_code" => exit_code.to_s },
+      mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "error", action_label: "Error", suggested_command: nil
+    )
+  end
+
+  def stub_heal_capture(model)
+    captured = []
+    model.define_singleton_method(:spawn_heal_thread) { |row| captured << row.folder }
+    captured
+  end
+
+  def snapshot_with(rows)
+    project = Hive::Tui::Snapshot::ProjectView.new(
+      name: "demo", path: "/x", hive_state_path: "/x/.hive-state",
+      error: nil, rows: rows.freeze
+    ).freeze
+    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
+  end
+
+  def test_snapshot_with_sigterm_error_triggers_heal
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([ make_error_row(slug: "killed", folder: "/x/.hive-state/stages/5-review/killed", exit_code: 143) ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal [ "/x/.hive-state/stages/5-review/killed" ], captured,
+      "sigterm-killed task must trigger one heal"
+  end
+
+  def test_snapshot_with_sigint_error_triggers_heal
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([ make_error_row(slug: "ctrlc", folder: "/x/.hive-state/stages/4-execute/ctrlc", exit_code: 130) ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal [ "/x/.hive-state/stages/4-execute/ctrlc" ], captured
+  end
+
+  def test_snapshot_with_sigkill_error_triggers_heal
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([ make_error_row(slug: "killed9", folder: "/x/.hive-state/stages/4-execute/killed9", exit_code: 137) ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal [ "/x/.hive-state/stages/4-execute/killed9" ], captured
+  end
+
+  def test_snapshot_with_real_failure_does_not_heal
+    # exit_code=1 is a normal program exit, not a signal kill — the
+    # agent decided to fail. Auto-heal MUST NOT clear these; the
+    # error reflects a real condition the user needs to inspect.
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([ make_error_row(slug: "real-fail", folder: "/x/y", exit_code: 1) ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_empty captured, "exit_code=1 is a real failure, must not auto-heal"
+  end
+
+  def test_snapshot_with_non_exit_code_error_does_not_heal
+    # `:error reason=timeout` or `:error reason=secret_in_pr_body`
+    # are real, structured errors — clearing them silently would
+    # mask actual problems.
+    captured = stub_heal_capture(@model)
+    snap = snapshot_with([ make_error_row(slug: "timeout", folder: "/x/y", exit_code: nil, reason: "timeout") ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_empty captured
+  end
+
+  def test_heal_dedup_only_fires_once_per_folder
+    captured = stub_heal_capture(@model)
+    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/5-review/killed", exit_code: 143)
+    snap = snapshot_with([ row ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal 1, captured.length,
+      "repeated snapshots with the same kill-class error must trigger ONE heal, not N"
+  end
+
+  def test_snapshot_arrived_still_updates_the_model_after_auto_heal
+    stub_heal_capture(@model)
+    snap = snapshot_with([ make_error_row(slug: "k", folder: "/x/y", exit_code: 143) ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_same snap, @model.hive_model.snapshot,
+      "auto-heal must not block the regular Update.apply path — the model still updates"
+  end
 
   # Last-resort safety net: an unhandled exception escaping
   # `BubbleModel#update` would unwind out of Bubbletea's runner and

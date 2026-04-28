@@ -45,9 +45,22 @@ module Hive
 
       attr_reader :hive_model
 
+      # Exit codes that mean "the agent was killed by a signal", not
+      # "the agent ran and decided to fail". 130 = SIGINT (Ctrl-C);
+      # 137 = SIGKILL; 143 = SIGTERM (which fires when the user
+      # quits the TUI mid-takeover and the pgroup forwards the signal
+      # to in-flight children). Tasks left with `:error reason=exit_code
+      # exit_code=<one of these>` markers are interrupted, not broken —
+      # the file-system state is intact, just the marker says "stopped".
+      # The auto-healer in `auto_heal_kill_class_errors` clears these
+      # markers in the background so the TUI doesn't permanently
+      # display "Error" rows the user can resume by simply re-running.
+      KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
+
       def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
         @hive_model = hive_model
         @dispatch = dispatch
+        @healed_folders = {} # folder path → Time.now (dedup; one heal attempt per session)
       end
 
       # Late binding so App.run_charm can wire the runner reference
@@ -193,8 +206,18 @@ module Hive
 
       # Returns [new_hive_model, cmd] for the side-effect-bearing
       # messages, or nil to indicate "delegate to Update.apply".
+      #
+      # `SnapshotArrived` is special-cased here for the kill-class
+      # auto-healer (signal-killed tasks shouldn't display as "Error"
+      # forever — the file state IS intact, the marker is just stale).
+      # We return nil after kicking off the heal so `Update.apply`
+      # still applies the snapshot; the next poll picks up the cleared
+      # state.
       def handle_side_effect(message)
         case message
+        when Hive::Tui::Messages::SnapshotArrived
+          auto_heal_kill_class_errors(message.snapshot)
+          nil
         when Hive::Tui::Messages::DispatchCommand
           dispatch_command(message)
         when Hive::Tui::Messages::OpenFindings
@@ -210,9 +233,67 @@ module Hive
         end
       end
 
+      # Scan a fresh snapshot for tasks whose `:error` marker came from
+      # a signal kill (130 / 137 / 143) and clear the marker in the
+      # background. Each folder is healed at most once per session
+      # (`@healed_folders` dedup) so the loop never thrashes if the
+      # background heal is slow or the marker re-appears for an
+      # unrelated reason.
+      #
+      # The heal runs in a Ruby thread — `hive markers clear` is an
+      # in-process subprocess via `run_quiet!` which captures
+      # stdout/stderr cleanly without touching the alt-screen. The
+      # next snapshot poll picks up the cleared marker and the row
+      # re-classifies (typically back to "Ready for X" because the
+      # agent's pre-kill state is preserved in the task folder).
+      def auto_heal_kill_class_errors(snapshot)
+        return if snapshot.nil?
+
+        snapshot.rows.each do |row|
+          next unless kill_class_error?(row)
+          next if @healed_folders.key?(row.folder)
+
+          @healed_folders[row.folder] = Time.now
+          spawn_heal_thread(row)
+        end
+      end
+
+      def kill_class_error?(row)
+        return false unless row.action_key == "error"
+
+        attrs = row.attrs
+        return false if attrs.nil?
+        return false unless attrs["reason"] == "exit_code"
+
+        KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+      end
+
+      # Override-able for tests so they can capture the heal
+      # invocation without forking a real `hive markers clear`.
+      def spawn_heal_thread(row)
+        Thread.new { heal_marker(row) }
+      end
+
+      def heal_marker(row)
+        argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
+        Hive::Tui::Subprocess.run_quiet!(argv)
+      rescue StandardError => e
+        Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
+      end
+
+      # Workflow verbs run in the background — the TUI keeps its
+      # render loop responsive while the agent runs in parallel; the
+      # user can dispatch verbs on multiple rows / projects at once.
+      # The `Subprocess.dispatch_background` reaper Thread sends the
+      # eventual `Messages::SubprocessExited` when each child exits,
+      # which surfaces as a flash. Output goes to
+      # `Subprocess::SUBPROCESS_LOG_PATH` (and to the agent's own
+      # `task.log_dir/<label>-<ts>.log` via Hive::Agent's IO.pipe);
+      # neither writes through the alt-screen, so the TUI never
+      # corrupts visually during a verb dispatch.
       def dispatch_command(message)
-        cmd = Hive::Tui::Subprocess.takeover_command(message.argv, dispatch: @dispatch)
-        [ @hive_model, cmd ]
+        Hive::Tui::Subprocess.dispatch_background(message.argv, dispatch: @dispatch)
+        [ @hive_model, nil ]
       end
 
       # Synchronous I/O: open the review file, build a TriageState,

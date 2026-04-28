@@ -14,10 +14,12 @@ class TuiKeyMapMessageForTest < Minitest::Test
 
   def make_row(action_key:, suggested_command: "hive brainstorm some-slug --from 1-inbox",
                claude_pid_alive: nil, action_label: "Ready to brainstorm",
-               slug: "some-slug", project_name: "alpha", stage: "1-inbox")
+               slug: "some-slug", project_name: "alpha", stage: "1-inbox",
+               folder: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: project_name, stage: stage, slug: slug,
-      folder: "/tmp/hive/#{slug}", state_file: "/tmp/hive/#{slug}/idea.md",
+      folder: folder || "/tmp/hive/#{slug}",
+      state_file: "/tmp/hive/#{slug}/idea.md",
       marker: "waiting", attrs: {}, mtime: "2026-04-27T12:00:00Z", age_seconds: 1,
       claude_pid: claude_pid_alive ? 1234 : nil, claude_pid_alive: claude_pid_alive,
       action_key: action_key, action_label: action_label,
@@ -38,14 +40,26 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal [ "hive", "plan", "some-slug", "--from", "2-brainstorm" ], msg.argv
   end
 
-  def test_triage_d_caches_develop_verb
+  def test_triage_d_caches_develop_verb_and_targets_row_folder
     # Triage `d` synthesizes the argv directly (not from
-    # suggested_command); verb must still cache as "develop".
-    row = make_row(action_key: "review_findings", suggested_command: nil)
+    # suggested_command); verb must still cache as "develop". The
+    # TARGET is row.folder (absolute path), not row.slug, so
+    # `Hive::TaskResolver` short-circuits via path_target? rather than
+    # raising AmbiguousSlug under multi-project / multi-stage state.
+    row = make_row(
+      action_key: "review_findings",
+      suggested_command: nil,
+      folder: "/abs/.hive-state/stages/4-execute/some-slug"
+    )
     msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "d", row: row)
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
     assert_equal "develop", msg.verb
-    assert_equal [ "hive", "develop", "some-slug", "--from", "4-execute" ], msg.argv
+    assert_equal [
+      "hive", "develop",
+      "/abs/.hive-state/stages/4-execute/some-slug",
+      "--from", "4-execute"
+    ], msg.argv,
+      "triage d must use row.folder so TaskResolver bypasses slug ambiguity"
   end
 
   # -------- Agent_running's three sub-paths (ADV-2 discriminative coverage) --------
@@ -129,6 +143,36 @@ class TuiKeyMapMessageForTest < Minitest::Test
     row = make_row(action_key: "ready_to_brainstorm")
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_up, row: row)
     assert_same Hive::Tui::Messages::CURSOR_UP, msg
+  end
+
+  # Cursor navigation must work when the cursor sits on no visible row
+  # (post-filter-commit, post-snapshot-poll, or boot before any cursor
+  # has been derived). Without this, j/k after a filter that hid the
+  # selected row returned NOOP and wedged the user with visible matches
+  # they couldn't navigate to.
+  def test_grid_j_returns_cursor_down_even_when_row_is_nil
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "j", row: nil)
+    assert_same Hive::Tui::Messages::CURSOR_DOWN, msg
+  end
+
+  def test_grid_k_returns_cursor_up_even_when_row_is_nil
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "k", row: nil)
+    assert_same Hive::Tui::Messages::CURSOR_UP, msg
+  end
+
+  def test_grid_arrow_keys_returns_cursor_messages_when_row_is_nil
+    down = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_down, row: nil)
+    up = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_up, row: nil)
+    assert_same Hive::Tui::Messages::CURSOR_DOWN, down
+    assert_same Hive::Tui::Messages::CURSOR_UP, up
+  end
+
+  def test_grid_verb_keystroke_still_noops_when_row_is_nil
+    # The reverse-defense: verbs need a row to dispatch. row.nil must
+    # still NOOP for verb / Enter keystrokes; only cursor navigation
+    # bypasses the row guard.
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "b", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   # -------- Enter sub-mode dispatch --------

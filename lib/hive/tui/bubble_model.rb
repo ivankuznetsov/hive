@@ -495,7 +495,8 @@ module Hive
 
         document = Hive::Findings::Document.new(review_path)
         state = Hive::Tui::TriageState.new(
-          slug: row.slug, findings: document.findings, review_path: review_path
+          slug: row.slug, folder: row.folder,
+          findings: document.findings, review_path: review_path
         )
         [ @hive_model.with(mode: :triage, triage_state: state), nil ]
       rescue Hive::NoReviewFile, Hive::InvalidTaskPath, Errno::ENOENT

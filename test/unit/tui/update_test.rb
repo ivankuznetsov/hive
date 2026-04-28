@@ -165,6 +165,43 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal :grid, new_model.mode
   end
 
+  # Committing a filter that hides the cursor's row must re-clamp the
+  # cursor to the first visible match. Pre-fix, the prior cursor coords
+  # could point at a row the new filter hid; downstream cursor handlers
+  # treated that as "no current row" and refused to move, wedging the
+  # user.
+  def test_filter_committed_clamps_cursor_to_first_visible_match
+    # Snapshot: alpha [a1,a2,a3], beta [b1,b2,b3]. Filter "b1" hides
+    # all of alpha (empty rows after filter) and keeps only beta's b1.
+    # Pre-fix, the prior cursor [0, 2] (alpha's last row) survived the
+    # commit and pointed at a now-hidden row, wedging cursor handlers.
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      cursor: [ 0, 2 ],
+      mode: :filter,
+      filter_buffer: "b1"
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::FILTER_COMMITTED)
+    assert_equal :grid, new_model.mode
+    assert_equal "b1", new_model.filter
+    assert_equal [ 1, 0 ], new_model.cursor,
+      "cursor must clamp to first visible row of the filtered snapshot " \
+      "(beta's b1 at project_idx=1, row_idx=0); prior coords would point at hidden alpha"
+  end
+
+  def test_filter_committed_clears_cursor_when_filter_hides_everything
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      cursor: [ 0, 0 ],
+      mode: :filter,
+      filter_buffer: "no-such-row-anywhere"
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::FILTER_COMMITTED)
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.cursor,
+      "filter that hides every row must leave cursor nil so views render an empty-state hint"
+  end
+
   def test_filter_committed_with_empty_buffer_clears_active_filter
     starting = model.with(mode: :filter, filter: "old", filter_buffer: "")
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::FILTER_COMMITTED)

@@ -20,14 +20,26 @@ module Hive
       # this out as a residual risk if two findings share the prefix).
       TITLE_PREFIX_LEN = 32
 
-      attr_reader :findings, :cursor, :slug, :review_path
+      attr_reader :findings, :cursor, :slug, :folder, :review_path
 
+      # `folder` is the row's absolute task path. We use it as the
+      # `TARGET` argv positional for accept-finding / reject-finding /
+      # bulk commands so `Hive::TaskResolver` short-circuits via its
+      # `path_target?` branch. Slug-only TARGETs raise `AmbiguousSlug`
+      # under multi-project registries or same-slug multi-stage state,
+      # even though the TUI entered triage from a concrete row. See
+      # `lib/hive/task_resolver.rb` for the resolution rules.
+      #
       # `review_path` is optional so legacy callers that built a
       # TriageState without it still construct cleanly; in production
       # `Hive::Tui::BubbleModel#open_findings` always supplies it
-      # because views read `state.review_path` for the header.
-      def initialize(slug:, findings:, review_path: nil)
+      # because views read `state.review_path` for the header. `folder`
+      # also defaults to nil for the same reason — toggle_command falls
+      # back to `@slug` when folder is missing, which only matters in
+      # tests that don't exercise multi-project resolution.
+      def initialize(slug:, findings:, folder: nil, review_path: nil)
         @slug = slug
+        @folder = folder
         @findings = findings
         @review_path = review_path
         @cursor = 0
@@ -58,7 +70,7 @@ module Hive
         raise ArgumentError, "toggle_command requires a finding" if finding.nil?
 
         verb = finding.accepted ? "reject-finding" : "accept-finding"
-        [ "hive", verb, @slug, finding.id.to_s ]
+        [ "hive", verb, target, finding.id.to_s ]
       end
 
       # `direction` is `:accept` or `:reject`; anything else raises so the
@@ -67,7 +79,15 @@ module Hive
       def bulk_command(direction)
         raise ArgumentError, "bulk_command direction must be :accept or :reject" unless %i[accept reject].include?(direction)
 
-        [ "hive", "#{direction}-finding", @slug, "--all" ]
+        [ "hive", "#{direction}-finding", target, "--all" ]
+      end
+
+      # The argv TARGET for accept/reject calls. Prefer the absolute
+      # folder path (path_target? branch in TaskResolver — no slug
+      # ambiguity under multi-project / multi-stage state). Fall back
+      # to the slug when no folder was supplied (legacy test shape).
+      def target
+        @folder || @slug
       end
 
       # After a document reload, find the index of the previously-current

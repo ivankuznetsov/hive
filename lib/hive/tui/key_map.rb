@@ -71,12 +71,18 @@ module Hive
         global = global_grid_message(key)
         return global if global
 
+        # Cursor navigation must work even when the cursor sits on no
+        # visible row — without this branch j/k after a filter that
+        # hides the prior cursor returns NOOP, leaving the user wedged
+        # with visible matches and no way to navigate to them. The
+        # downstream apply_cursor_* handlers re-derive a usable cursor
+        # from the visible snapshot when the current cursor is invalid.
+        return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
+        return Messages::CURSOR_UP if UP_KEYS.include?(key)
         return Messages::NOOP if row.nil?
 
         return verb_message(row) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
-        return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
-        return Messages::CURSOR_UP if UP_KEYS.include?(key)
 
         Messages::NOOP
       end
@@ -160,8 +166,15 @@ module Hive
 
         case key
         when "d"
+          # Folder, not slug, so `Hive::TaskResolver` takes its
+          # `path_target?` branch instead of the slug-search that
+          # raises `AmbiguousSlug` under multi-project / multi-stage
+          # state. `--from 4-execute` is now belt-and-braces (the
+          # absolute folder already pins the stage), but kept as a
+          # defense-in-depth assertion if the row ever drifted
+          # between snapshot and dispatch.
           Messages::DispatchCommand.new(
-            argv: [ "hive", "develop", row.slug, "--from", "4-execute" ],
+            argv: [ "hive", "develop", row.folder, "--from", "4-execute" ],
             verb: "develop"
           )
         when "a" then Messages::BulkAccept.new(slug: row.slug)

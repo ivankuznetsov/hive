@@ -24,37 +24,57 @@ class TuiTriageStateTest < Minitest::Test
 
   # -------- toggle_command -----------------------------------------
 
+  # Accept/reject argv targets the absolute folder path so
+  # `Hive::TaskResolver` short-circuits via its `path_target?` branch.
+  # Slug-only targets raise `AmbiguousSlug` under multi-project /
+  # multi-stage state, which the TUI can hit from any concrete row.
+  FOLDER = "/abs/.hive-state/stages/4-execute/fix-auth".freeze
+
   def test_toggle_command_for_accepted_finding_returns_reject_argv
     f = make_finding(id: 3, accepted: true)
-    state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [ f ])
-    assert_equal [ "hive", "reject-finding", "fix-auth", "3" ], state.toggle_command(f)
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [ f ])
+    assert_equal [ "hive", "reject-finding", FOLDER, "3" ], state.toggle_command(f)
   end
 
   def test_toggle_command_for_unaccepted_finding_returns_accept_argv
     f = make_finding(id: 7, accepted: false)
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [ f ])
+    assert_equal [ "hive", "accept-finding", FOLDER, "7" ], state.toggle_command(f)
+  end
+
+  def test_toggle_command_falls_back_to_slug_when_folder_absent
+    # Legacy / test shape: callers that don't supply folder fall back to
+    # the slug. This preserves the prior contract for unit-test fixtures
+    # that don't exercise multi-project resolution.
+    f = make_finding(id: 3, accepted: false)
     state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [ f ])
-    assert_equal [ "hive", "accept-finding", "fix-auth", "7" ], state.toggle_command(f)
+    assert_equal [ "hive", "accept-finding", "fix-auth", "3" ], state.toggle_command(f)
   end
 
   def test_toggle_command_with_nil_finding_raises_argument_error
-    state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [])
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [])
     assert_raises(ArgumentError) { state.toggle_command(nil) }
   end
 
   # -------- bulk_command -------------------------------------------
 
   def test_bulk_command_accept_returns_accept_finding_all_argv
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [])
+    assert_equal [ "hive", "accept-finding", FOLDER, "--all" ], state.bulk_command(:accept)
+  end
+
+  def test_bulk_command_reject_returns_reject_finding_all_argv
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [])
+    assert_equal [ "hive", "reject-finding", FOLDER, "--all" ], state.bulk_command(:reject)
+  end
+
+  def test_bulk_command_falls_back_to_slug_when_folder_absent
     state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [])
     assert_equal [ "hive", "accept-finding", "fix-auth", "--all" ], state.bulk_command(:accept)
   end
 
-  def test_bulk_command_reject_returns_reject_finding_all_argv
-    state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [])
-    assert_equal [ "hive", "reject-finding", "fix-auth", "--all" ], state.bulk_command(:reject)
-  end
-
   def test_bulk_command_with_unknown_direction_raises_argument_error
-    state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [])
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [])
     assert_raises(ArgumentError) { state.bulk_command(:nope) }
   end
 

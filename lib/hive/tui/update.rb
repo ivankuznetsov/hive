@@ -152,9 +152,19 @@ module Hive
 
       # Commit the typed buffer as the active filter and return to grid.
       # Empty buffer commits as nil (clears any prior filter).
+      #
+      # Re-clamp the cursor to the first visible row of the new filter:
+      # without this the prior cursor coords could point at a row the
+      # filter just hid, which downstream cursor-navigation handlers
+      # treat as "no current row" and refuse to move (the user is then
+      # wedged with visible matches but no selectable row). Same shape
+      # `apply_project_scope` uses on scope changes.
       def apply_filter_committed(model)
         committed = model.filter_buffer.empty? ? nil : model.filter_buffer
-        model.with(mode: :grid, filter: committed, filter_buffer: "")
+        new_model = model.with(mode: :grid, filter: committed, filter_buffer: "")
+        visible = visible_snapshot(new_model)
+        cursor = visible.nil? ? new_model.cursor : first_visible_cursor(visible)
+        new_model.with(cursor: cursor)
       end
 
       # Cancel the filter prompt without committing. Preserves any

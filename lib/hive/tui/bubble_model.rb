@@ -332,12 +332,23 @@ module Hive
         KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
       end
 
+      # Time-bounded eviction window: a previous successful heal blocks
+      # re-heals of the same folder for `HEAL_REPEAT_INTERVAL_SECONDS`,
+      # then the slot becomes available again. Without the bound, a
+      # later kill-class error on the same folder (theoretically: the
+      # same folder/slug pair could be re-killed in the same session)
+      # would never re-heal because the cache permanently held the
+      # entry. F11 fix.
+      HEAL_REPEAT_INTERVAL_SECONDS = 60
+
       # Atomic claim-or-skip on `@healed_folders`. Returns true when
-      # this caller wins the slot (must spawn the heal); false when
-      # some prior call already claimed it (skip).
+      # this caller wins the slot (must spawn the heal); false when a
+      # prior call claimed it within the last
+      # HEAL_REPEAT_INTERVAL_SECONDS.
       def register_heal_attempt(folder)
         @healed_folders_mutex.synchronize do
-          return false if @healed_folders.key?(folder)
+          claimed_at = @healed_folders[folder]
+          return false if claimed_at && (Time.now - claimed_at) <= HEAL_REPEAT_INTERVAL_SECONDS
 
           @healed_folders[folder] = Time.now
           true

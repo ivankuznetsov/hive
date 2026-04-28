@@ -424,6 +424,48 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "repeated snapshots with the same kill-class error must trigger ONE heal, not N"
   end
 
+  # F11: the dedup cache used to be permanent; a folder that got
+  # re-killed later in the session would never re-heal. Bound the
+  # window so re-heals after HEAL_REPEAT_INTERVAL_SECONDS go through.
+  def test_heal_cache_re_permits_after_interval_elapses
+    captured = stub_heal_capture(@model)
+    folder = "/x/.hive-state/stages/4-execute/killed"
+    row = make_error_row(slug: "killed", folder: folder, exit_code: 143)
+    snap = snapshot_with([ row ])
+
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal 1, captured.length, "first kill-class error fires one heal"
+
+    # Re-permit by backdating the cache entry past the interval.
+    interval = Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS
+    cache = @model.instance_variable_get(:@healed_folders)
+    cache[folder] = Time.now - (interval + 1)
+
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal 2, captured.length,
+      "after HEAL_REPEAT_INTERVAL_SECONDS the slot must re-permit so a fresh kill on " \
+      "the same folder/slug pair gets re-healed instead of stranded"
+  end
+
+  def test_heal_cache_keeps_blocking_within_interval_window
+    captured = stub_heal_capture(@model)
+    folder = "/x/.hive-state/stages/4-execute/killed"
+    row = make_error_row(slug: "killed", folder: folder, exit_code: 143)
+    snap = snapshot_with([ row ])
+
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal 1, captured.length
+
+    # Backdate by half the interval — still within the dedup window.
+    interval = Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS
+    cache = @model.instance_variable_get(:@healed_folders)
+    cache[folder] = Time.now - (interval / 2.0)
+
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_equal 1, captured.length,
+      "within the interval window a repeated snapshot must NOT re-heal — that's the dedup contract"
+  end
+
   def test_snapshot_arrived_still_updates_the_model_after_auto_heal
     stub_heal_capture(@model)
     snap = snapshot_with([ make_error_row(slug: "k", folder: "/x/y", exit_code: 143) ])

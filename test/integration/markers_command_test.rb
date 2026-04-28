@@ -213,6 +213,108 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  # ── --match-attr cross-process race guard ─────────────────────────────
+
+  # Seeds an ERROR marker carrying explicit attrs (reason + exit_code).
+  # Mirrors the on-disk shape of a kill-class error the TUI auto-healer
+  # would observe (`<!-- ERROR reason=exit_code exit_code=143 -->`).
+  def seed_error_with_attrs(dir, marker_attrs:)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    project = File.basename(dir)
+    capture_io { Hive::Commands::New.new(project, "match-attr probe").call }
+    inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+    review = File.join(dir, ".hive-state", "stages", "5-review", File.basename(inbox))
+    FileUtils.mkdir_p(File.dirname(review))
+    FileUtils.mv(inbox, review)
+
+    state = File.join(review, "task.md")
+    File.write(state, "# my task\n\n## Implementation\n\nwip\n")
+    Hive::Markers.set(state, :error, marker_attrs)
+
+    [ project, review, File.basename(review) ]
+  end
+
+  def test_match_attr_clears_when_value_matches
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code", exit_code: 143 })
+        state = File.join(folder, "task.md")
+        assert_includes File.read(state), "exit_code=143"
+
+        capture_io do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "exit_code=143"
+          ).call
+        end
+
+        marker = Hive::Markers.current(state)
+        assert_equal :none, marker.name,
+                     "matching --match-attr value must allow the clear"
+      end
+    end
+  end
+
+  def test_match_attr_refuses_when_value_differs
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code", exit_code: 1 })
+        state = File.join(folder, "task.md")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "exit_code=143"
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status,
+                     "attr mismatch must surface as WrongStage so callers (auto-heal) " \
+                     "evict and retry without erasing a real-failure marker"
+        assert_match(/exit_code/, err)
+        marker = Hive::Markers.current(state)
+        assert_equal :error, marker.name,
+                     "marker must remain on disk when --match-attr refuses"
+      end
+    end
+  end
+
+  def test_match_attr_refuses_when_attr_key_absent
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code" })
+        state = File.join(folder, "task.md")
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "exit_code=143"
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status,
+                     "missing attr key must refuse with WrongStage"
+        marker = Hive::Markers.current(state)
+        assert_equal :error, marker.name
+      end
+    end
+  end
+
+  def test_match_attr_invalid_format_raises_invalid_task_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code", exit_code: 143 })
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "no-equals-sign"
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status,
+                     "malformed --match-attr must surface as USAGE; the auto-heal " \
+                     "doesn't generate this shape, but a hand-typed call should fail loudly"
+      end
+    end
+  end
+
   # ── JSON envelope ──────────────────────────────────────────────────────
 
   def test_json_success_envelope

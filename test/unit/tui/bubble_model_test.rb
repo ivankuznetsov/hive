@@ -432,6 +432,33 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "auto-heal must not block the regular Update.apply path — the model still updates"
   end
 
+  # F4: heal_marker passes --match-attr exit_code=<observed> so the
+  # cross-process race window (auto-heal observes 143, concurrent
+  # `hive run` writes 1, heal arrives) can't erase a real-failure
+  # marker. Captures the actual argv handed to run_quiet!.
+  def test_heal_marker_argv_includes_match_attr_for_observed_exit_code
+    captured_argv = nil
+    Hive::Tui::Subprocess.singleton_class.send(:alias_method, :__orig_run_quiet, :run_quiet!)
+    Hive::Tui::Subprocess.define_singleton_method(:run_quiet!) do |argv|
+      captured_argv = argv
+      [ 0, "", "" ]
+    end
+
+    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/4-execute/killed", exit_code: 143)
+    @model.send(:heal_marker, row)
+
+    assert_equal [
+      "hive", "markers", "clear",
+      "/x/.hive-state/stages/4-execute/killed",
+      "--name", "ERROR",
+      "--match-attr", "exit_code=143"
+    ], captured_argv,
+      "heal_marker must scope the clear to the kill-class exit_code we observed"
+  ensure
+    Hive::Tui::Subprocess.singleton_class.send(:alias_method, :run_quiet!, :__orig_run_quiet)
+    Hive::Tui::Subprocess.singleton_class.send(:remove_method, :__orig_run_quiet)
+  end
+
   # ---- SubprocessExited diagnostic interception ----
   #
   # Pattern-matches the captured stderr in SUBPROCESS_LOG_PATH for

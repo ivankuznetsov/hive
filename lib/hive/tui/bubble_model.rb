@@ -343,8 +343,17 @@ module Hive
       # the next snapshot retries. Without the eviction, a single
       # transient failure would leave the row stuck in Error
       # indefinitely while `@healed_folders` blocked re-heals.
+      #
+      # `--match-attr exit_code=<observed>` ties the clear to the
+      # specific kill-class marker we observed. If a concurrent
+      # `hive run` writes a NEW `:error exit_code=1` (real failure)
+      # between snapshot and heal, the match refuses, eviction fires,
+      # and the next snapshot's auto-heal pass sees the real failure
+      # instead of erasing it.
       def heal_marker(row)
+        observed_exit = row.attrs && row.attrs["exit_code"]
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
+        argv += [ "--match-attr", "exit_code=#{observed_exit}" ] if observed_exit
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
         return if exit_code.zero?
 

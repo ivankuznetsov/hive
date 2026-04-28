@@ -1,4 +1,5 @@
 require "open3"
+require "securerandom"
 require "tmpdir"
 require "bubbletea"
 require "hive/tui/debug"
@@ -76,7 +77,8 @@ module Hive
       def dispatch_background(argv, dispatch:)
         verb = argv[1]
         Hive::Tui::Debug.log("dispatch_background", "argv=#{argv.inspect}")
-        stamp_subprocess_log("BEGIN", argv)
+        spawn_id = generate_correlation_id
+        stamp_subprocess_log("BEGIN", argv, id: spawn_id)
 
         pid = spawn_background_child(argv)
         if pid.nil?
@@ -84,7 +86,7 @@ module Hive
           return nil
         end
 
-        spawn_reaper_thread(pid, verb, argv, dispatch)
+        spawn_reaper_thread(pid, verb, argv, dispatch, spawn_id)
         nil
       end
 
@@ -129,11 +131,12 @@ module Hive
       # the background path.
       def run_takeover_child_sync(argv)
         Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
-        stamp_subprocess_log("BEGIN(interactive)", argv)
+        spawn_id = generate_correlation_id
+        stamp_subprocess_log("BEGIN(interactive)", argv, id: spawn_id)
         pid = Process.spawn(*argv, pgroup: true)
         _, status = Process.wait2(pid)
         exit_code = translate_status(status)
-        stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv)
+        stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv, id: spawn_id)
         exit_code
       rescue Errno::ENOENT, Errno::EACCES => e
         Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
@@ -187,11 +190,11 @@ module Hive
       # cost is that we deliberately can't forward TERM through to
       # in-flight children at TUI shutdown — `q` quits the TUI but
       # the agents continue.
-      def spawn_reaper_thread(pid, verb, argv, dispatch)
+      def spawn_reaper_thread(pid, verb, argv, dispatch, spawn_id = nil)
         Thread.new do
           _, status = Process.wait2(pid)
           exit_code = translate_status(status)
-          stamp_subprocess_log("END exit=#{exit_code}", argv)
+          stamp_subprocess_log("END exit=#{exit_code}", argv, id: spawn_id)
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         rescue StandardError => e
           # `wait2` raised (ECHILD / pid tracking bug) — synthesize
@@ -226,12 +229,48 @@ module Hive
       # per-verb sections. Failures with empty stderr (e.g., signal
       # kill) still leave the BEGIN/END pair so the operator knows
       # which verb produced which exit code.
-      def stamp_subprocess_log(label, argv)
+      #
+      # `id:` is a per-spawn 8-char hex correlation ID (F7). Embedded
+      # in the BEGIN/END label as `BEGIN[ID]` / `END[ID] exit=N` so
+      # `recent_log_section_for` can pair the right BEGIN with the
+      # right END under concurrent verbs. Without it, two verbs
+      # interleaving BEGIN/END marker lines produced cross-talk
+      # diagnostics.
+      def stamp_subprocess_log(label, argv, id: nil)
+        annotated = id ? annotate_label_with_id(label, id) : label
         File.open(SUBPROCESS_LOG_PATH, "a") do |f|
-          f.puts "----- #{Time.now.utc.iso8601} #{label}: #{argv.join(' ')} -----"
+          f.puts "----- #{Time.now.utc.iso8601} #{annotated}: #{argv.join(' ')} -----"
         end
       rescue StandardError
         nil
+      end
+
+      # @api private
+      # Insert `[ID]` after the keyword (BEGIN, END, or BEGIN(...)/END(...))
+      # but before any trailing ` exit=N` suffix on END labels, so the
+      # parser regex can split on `END[ID] exit=` cleanly.
+      def annotate_label_with_id(label, id)
+        if label =~ /\AEND(\([^)]+\))?(\s+exit=.*)?\z/
+          paren = Regexp.last_match(1).to_s
+          tail = Regexp.last_match(2).to_s
+          "END#{paren}[#{id}]#{tail}"
+        elsif label =~ /\ABEGIN(\([^)]+\))?\z/
+          paren = Regexp.last_match(1).to_s
+          "BEGIN#{paren}[#{id}]"
+        else
+          # ERRNO and other label shapes don't get IDs — they're
+          # self-contained, no matching END to pair with.
+          label
+        end
+      end
+
+      # @api private
+      # 8 hex chars = 32 bits = ~4B distinct IDs; collision probability
+      # over the rolling 64KB log tail (~1000 BEGIN entries) is
+      # negligible. Smaller than UUID, large enough to disambiguate.
+      def generate_correlation_id
+        bytes = SecureRandom.random_bytes(4)
+        bytes.unpack1("H*")
       end
 
       # Map well-known stderr substrings emitted by the underlying CLI
@@ -293,8 +332,15 @@ module Hive
       # @api private
       # Read the file tail (cap at 64KB so a long-lived log doesn't
       # explode memory), find the most recent BEGIN line mentioning
-      # the verb, return the text from that BEGIN through the next
-      # END (or EOF). Returns nil if no BEGIN-for-verb is present.
+      # the verb, return the text from that BEGIN through its matching
+      # END (or EOF if no matching END yet). Returns nil if no BEGIN-
+      # for-verb is present.
+      #
+      # Concurrent verbs interleave BEGIN/END marker lines in the log;
+      # F7 added `[ID]` correlation tokens so the matcher pairs the
+      # right BEGIN with the right END instead of grabbing the next-END-
+      # of-any-verb. Falls back to first-END-after-BEGIN for legacy log
+      # entries that pre-date the ID format (no [ID] in the BEGIN line).
       def recent_log_section_for(verb)
         cap = 64 * 1024
         size = File.size(SUBPROCESS_LOG_PATH)
@@ -306,23 +352,38 @@ module Hive
         # The `(?:\([^)]+\))?` allows both "BEGIN:" (background-spawn)
         # and "BEGIN(interactive):" (foreground takeover) — without it
         # diagnostic lookup silently breaks for any future verb flagged
-        # `interactive: true` in `Hive::Workflows::VERBS`.
-        begin_re = /^----- [^\n]* BEGIN(?:\([^)]+\))?: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
+        # `interactive: true` in `Hive::Workflows::VERBS`. The
+        # `(?:\[(?<id>[0-9a-f]{8})\])?` captures F7's correlation token
+        # when present.
+        begin_re = /^----- [^\n]* BEGIN(?:\([^)]+\))?(?:\[(?<id>[0-9a-f]{8})\])?: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
         begin_match = text.enum_for(:scan, begin_re).map { Regexp.last_match }.last
         return nil if begin_match.nil?
 
         section_start = text.rindex(begin_match[0])
-        end_idx = text.index(/^----- [^\n]* END(?:\([^)]+\))? exit=[^\n]* -----$/, section_start) || text.length
+        end_idx = locate_matching_end(text, begin_match[:id], section_start) || text.length
         text[section_start..end_idx]
+      end
+
+      # @api private
+      # Find the offset of the matching END[id] for a BEGIN at
+      # `section_start`. When `id` is nil (legacy entry without
+      # correlation), falls back to the first END-of-any-verb after
+      # section_start (the pre-F7 best-effort).
+      def locate_matching_end(text, id, section_start)
+        if id
+          target = /^----- [^\n]* END(?:\([^)]+\))?\[#{Regexp.escape(id)}\] exit=[^\n]* -----$/
+        else
+          target = /^----- [^\n]* END(?:\([^)]+\))?(?:\[[0-9a-f]{8}\])? exit=[^\n]* -----$/
+        end
+        text.index(target, section_start)
       end
 
       # @api private
       def parse_argv_from_section(section)
         first = section.lines.first.to_s
-        # Match both `BEGIN:` and `BEGIN(interactive):` (or any future
-        # parenthesized variant) so the project lookup works for
-        # interactive-takeover sections too.
-        m = first.match(/BEGIN(?:\([^)]+\))?: (.+) -----$/)
+        # Match `BEGIN:`, `BEGIN(interactive):`, and the F7 variants
+        # carrying a correlation ID (`BEGIN[ID]:` / `BEGIN(interactive)[ID]:`).
+        m = first.match(/BEGIN(?:\([^)]+\))?(?:\[[0-9a-f]{8}\])?: (.+) -----$/)
         m ? m[1].split(/\s+/) : nil
       end
 

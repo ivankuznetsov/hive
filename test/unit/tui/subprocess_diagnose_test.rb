@@ -188,6 +188,94 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     end
   end
 
+  # ---- F7: per-spawn correlation IDs prevent verb section cross-talk ----
+
+  def test_interleaved_concurrent_verbs_use_correlation_ids_to_pair_begin_end
+    # Two verbs running concurrently interleave their BEGIN/END markers
+    # at line boundaries. Pre-F7 the parser walked "last BEGIN for verb"
+    # then "next END (any verb)" and would pick up the OTHER verb's END,
+    # capturing a stderr block that wasn't the right one. With F7, the
+    # `[ID]` correlation tokens on BEGIN[ID] / END[ID] let the parser
+    # pair them correctly even under interleave.
+    with_isolated_log do |path|
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-28T11:00:00Z BEGIN[aaaaaaaa]: hive pr slug --project demo-pr -----"
+        f.puts "----- 2026-04-28T11:00:00Z BEGIN[bbbbbbbb]: hive develop slug --project demo-dev -----"
+        # The DEVELOP child writes its stderr first
+        f.puts "totally novel develop output"
+        f.puts "----- 2026-04-28T11:00:01Z END[bbbbbbbb] exit=2: hive develop slug --project demo-dev -----"
+        # Then PR's stderr
+        f.puts "fatal: 'origin' does not appear to be a git repository"
+        f.puts "----- 2026-04-28T11:00:02Z END[aaaaaaaa] exit=1: hive pr slug --project demo-pr -----"
+      end
+
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+      assert_match(/demo-pr:.*project not set up/i, result,
+        "PR diagnostic must scope to the [aaaaaaaa] section's content; pre-F7 this " \
+        "would terminate at the END[bbbbbbbb] line and miss PR's actual stderr")
+    end
+  end
+
+  def test_correlation_id_section_does_not_leak_into_subsequent_verbs
+    # The opposite direction: PR's section ends BEFORE develop's stderr
+    # arrives. Diagnose for develop must not roll backward into PR's
+    # stderr.
+    with_isolated_log do |path|
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-28T11:00:00Z BEGIN[aaaaaaaa]: hive pr slug --project alpha -----"
+        f.puts "Permission denied (publickey)."
+        f.puts "----- 2026-04-28T11:00:01Z END[aaaaaaaa] exit=1: hive pr slug --project alpha -----"
+        f.puts "----- 2026-04-28T11:00:02Z BEGIN[cccccccc]: hive develop slug --project alpha -----"
+        f.puts "totally novel error"
+        f.puts "----- 2026-04-28T11:00:03Z END[cccccccc] exit=1: hive develop slug --project alpha -----"
+      end
+
+      assert_nil Hive::Tui::Subprocess.diagnose_recent_failure("develop"),
+        "develop section is the [cccccccc] block; its stderr is unmatched, must return nil " \
+        "rather than reach back into PR's [aaaaaaaa] block"
+    end
+  end
+
+  def test_legacy_id_less_entries_still_match_via_fallback
+    # Logs written before F7 have no [ID]. Mixed shape: the BEGIN line
+    # has no [ID] (legacy), and the END line has no [ID] either. Parser
+    # falls back to "first END after BEGIN".
+    with_isolated_log do |path|
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-28T11:00:00Z BEGIN: hive pr slug --project legacy -----"
+        f.puts "fatal: 'origin' does not appear to be a git repository"
+        f.puts "----- 2026-04-28T11:00:01Z END exit=1: hive pr slug --project legacy -----"
+      end
+
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+      assert_match(/legacy:.*project not set up/i, result,
+        "legacy log entries (no [ID]) must keep working — first-END-after-BEGIN fallback")
+    end
+  end
+
+  def test_real_stamp_subprocess_log_emits_correlation_ids_when_id_supplied
+    with_isolated_log do |path|
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", %w[hive pr slug], id: "deadbeef")
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "END exit=0", %w[hive pr slug], id: "deadbeef")
+      content = File.read(path)
+      assert_match(/BEGIN\[deadbeef\]:/, content,
+        "stamp_subprocess_log with id: must embed [ID] in the BEGIN label")
+      assert_match(/END\[deadbeef\] exit=0:/, content,
+        "stamp_subprocess_log with id: must embed [ID] BEFORE the exit= suffix on END labels")
+    end
+  end
+
+  def test_real_stamp_subprocess_log_keeps_legacy_shape_without_id
+    with_isolated_log do |path|
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", %w[hive pr slug])
+      content = File.read(path)
+      assert_match(/BEGIN: hive pr slug/, content,
+        "no id: → no [ID] section, legacy stamp shape preserved"
+      )
+      refute_match(/BEGIN\[/, content)
+    end
+  end
+
   # ---- extract_project edge cases ----
 
   def test_extract_project_pulls_value_after_project_flag

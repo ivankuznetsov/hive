@@ -82,6 +82,59 @@ module Hive
         nil
       end
 
+      # Foreground takeover for verbs that need the user's tty (stdin
+      # prompts, interactive `gh pr create`, claude tool-permission
+      # asks). Returns a `Bubbletea::SequenceCommand` that:
+      #
+      #   1. exit_alt_screen → terminal returns to normal so the child
+      #      writes to the main screen the user is looking at
+      #   2. exec(callable) → callable runs synchronously inside the
+      #      runner's suspend window (raw mode disabled, cursor shown,
+      #      input reader stopped). The callable spawns argv with
+      #      stdio inherited and waits for the exit code.
+      #   3. enter_alt_screen → re-enters alt-screen, triggers full
+      #      re-render via `renderer_set_alt_screen`.
+      #
+      # Used only for verbs flagged `interactive: true` in
+      # `Hive::Workflows::VERBS` — the default headless verbs go
+      # through `dispatch_background` which doesn't block the TUI.
+      #
+      # No `out:` / `err:` redirect: the child writes directly to the
+      # user's terminal (which is in main-screen mode during the
+      # callable, so the alt-screen buffer isn't corrupted). The
+      # subprocess log doesn't capture this output — that's the trade
+      # for actually showing the child to the user.
+      def takeover_command(argv, dispatch:)
+        verb = argv[1]
+        callable = lambda do
+          exit_code = run_takeover_child_sync(argv)
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
+        end
+        Bubbletea.sequence(
+          Bubbletea.exit_alt_screen,
+          Bubbletea.public_send(:exec, callable),
+          Bubbletea.enter_alt_screen
+        )
+      end
+
+      # @api private
+      # Foreground spawn-and-wait. Stdin/stdout/stderr inherited so the
+      # user can answer prompts. Same pgroup + ENOENT translation as
+      # the background path.
+      def run_takeover_child_sync(argv)
+        Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
+        stamp_subprocess_log("BEGIN(interactive)", argv)
+        pid = Process.spawn(*argv, pgroup: true)
+        _, status = Process.wait2(pid)
+        exit_code = translate_status(status)
+        stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv)
+        exit_code
+      rescue Errno::ENOENT, Errno::EACCES => e
+        Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
+        stamp_subprocess_log("ERRNO(interactive) #{e.class.name}: #{e.message}", argv)
+        COMMAND_NOT_FOUND_EXIT
+      end
+
       # @api private
       def spawn_background_child(argv)
         Process.spawn(

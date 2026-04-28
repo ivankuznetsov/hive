@@ -298,30 +298,40 @@ module Hive
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
       end
 
-      # Workflow verbs run in the background — the TUI keeps its
-      # render loop responsive while the agent runs in parallel; the
-      # user can dispatch verbs on multiple rows / projects at once.
-      # The `Subprocess.dispatch_background` reaper Thread sends the
-      # eventual `Messages::SubprocessExited` when each child exits,
-      # which surfaces as a flash. Output goes to
-      # `Subprocess::SUBPROCESS_LOG_PATH` (and to the agent's own
-      # `task.log_dir/<label>-<ts>.log` via Hive::Agent's IO.pipe);
-      # neither writes through the alt-screen, so the TUI never
-      # corrupts visually during a verb dispatch.
+      # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:
       #
-      # An immediate flash ("running …") fires synchronously so the
-      # user gets visual confirmation their keypress did something —
-      # without it, the dispatch is invisible until the next snapshot
-      # poll picks up the `:agent_working` marker (~1s later) or the
-      # reaper Thread sends SubprocessExited (seconds-to-minutes
-      # later, depending on the verb). The flash is overwritten by
-      # SubprocessExited's success/failure flash on completion.
+      #   * Non-interactive (default) → `Subprocess.dispatch_background`
+      #     spawns the child in a separate pgroup with stdio captured
+      #     to `SUBPROCESS_LOG_PATH`. The TUI render loop keeps going;
+      #     multiple agents across multiple projects run concurrently.
+      #     A reaper Thread sends `Messages::SubprocessExited` when
+      #     each child exits, which surfaces as a flash.
+      #
+      #   * Interactive → `Subprocess.takeover_command` returns a
+      #     `Bubbletea::SequenceCommand(exit_alt, exec, enter_alt)`.
+      #     The runner exits alt-screen, runs the child synchronously
+      #     with the user's tty (so stdin prompts work), and re-enters
+      #     alt-screen on return. Blocks the TUI for the duration —
+      #     same trade as the curses-era takeover, opt-in only when
+      #     the verb genuinely needs stdin.
+      #
+      # An immediate flash ("running …") fires synchronously in BOTH
+      # paths so the user gets visual confirmation their keypress did
+      # something. The flash is overwritten by SubprocessExited's
+      # success/failure flash on completion.
       def dispatch_command(message)
-        Hive::Tui::Subprocess.dispatch_background(message.argv, dispatch: @dispatch)
         verb = message.verb || message.argv[1] || "verb"
         slug = message.argv[2] || ""
+
+        cmd = if Hive::Workflows.interactive?(verb)
+                Hive::Tui::Subprocess.takeover_command(message.argv, dispatch: @dispatch)
+        else
+                Hive::Tui::Subprocess.dispatch_background(message.argv, dispatch: @dispatch)
+                nil
+        end
+
         flash_text = slug.empty? ? "running `hive #{verb}`…" : "running `hive #{verb} #{slug}`…"
-        [ @hive_model.with(flash: flash_text, flash_set_at: Time.now), nil ]
+        [ @hive_model.with(flash: flash_text, flash_set_at: Time.now), cmd ]
       end
 
       # Synchronous I/O: open the review file, build a TriageState,

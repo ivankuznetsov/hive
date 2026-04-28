@@ -126,14 +126,74 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "update must NOT block on the spawn (got #{elapsed}s — should be < 0.5s)"
   end
 
+  def test_dispatch_command_routes_interactive_verbs_to_foreground_takeover
+    # Stub `Hive::Workflows.interactive?` to return true for "develop"
+    # so the routing path is testable without hard-flagging a real
+    # verb. The default verb config has no interactive entries — this
+    # exercises the dispatch logic, not the policy.
+    Hive::Workflows.singleton_class.alias_method(:_orig_interactive?, :interactive?)
+    Hive::Workflows.define_singleton_method(:interactive?) { |verb| verb.to_s == "develop" }
+    begin
+      msg = Hive::Tui::Messages::DispatchCommand.new(
+        argv: [ "true", "develop", "slug", "--project", "demo", "--from", "3-plan" ],
+        verb: "develop"
+      )
+      _, cmd = @model.update(msg)
+      assert_kind_of Bubbletea::SequenceCommand, cmd,
+        "interactive verbs route to takeover_command which returns a SequenceCommand " \
+        "wrapping exit_alt → exec → enter_alt"
+      classes = cmd.commands.map(&:class)
+      assert_equal(
+        [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+        classes
+      )
+    ensure
+      Hive::Workflows.singleton_class.alias_method(:interactive?, :_orig_interactive?)
+      Hive::Workflows.singleton_class.send(:remove_method, :_orig_interactive?)
+    end
+  end
+
+  def test_dispatch_command_routes_non_interactive_verbs_to_background_spawn
+    # No verb is interactive by default, so the regular DispatchCommand
+    # for "develop" must produce nil cmd (background spawn).
+    msg = Hive::Tui::Messages::DispatchCommand.new(
+      argv: [ "true", "develop", "slug" ],
+      verb: "develop"
+    )
+    _, cmd = @model.update(msg)
+    assert_nil cmd, "headless verbs go to dispatch_background; no Bubbletea Cmd returned"
+  end
+
+  def test_workflows_interactive_predicate_defaults_to_false
+    require "hive/workflows"
+    Hive::Workflows::VERBS.each_key do |verb|
+      refute Hive::Workflows.interactive?(verb),
+        "verb '#{verb}' must NOT be interactive by default — opt-in only when stdin is genuinely required"
+    end
+  end
+
+  def test_workflows_interactive_predicate_returns_false_for_unknown_verb
+    require "hive/workflows"
+    refute Hive::Workflows.interactive?("nonexistent-verb")
+  end
+
   def test_dispatch_command_flashes_running_message_for_immediate_feedback
     # Without the flash, pressing Enter on a `needs_input` row would
     # produce zero visual feedback because the spawn is asynchronous —
     # the user couldn't tell their keypress did anything. The flash is
     # overwritten by SubprocessExited's success/failure flash on
     # completion.
+    #
+    # argv[0] is `true` (exits 0, ignores all args) instead of "hive"
+    # so the background spawn doesn't actually invoke the user's
+    # production `hive` against their real config registry. The flash
+    # text builder reads argv[1] / argv[2] (verb / slug) — those stay
+    # unchanged so the regex assertion still works. Without this
+    # guard, the test would leak `hive develop hello-world-test`
+    # invocations into the operator's task store every time the
+    # suite ran.
     msg = Hive::Tui::Messages::DispatchCommand.new(
-      argv: [ "hive", "develop", "hello-world-test", "--project", "demo", "--from", "3-plan" ],
+      argv: [ "true", "develop", "hello-world-test", "--project", "demo", "--from", "3-plan" ],
       verb: "develop"
     )
     @model.update(msg)

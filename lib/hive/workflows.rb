@@ -9,6 +9,21 @@ module Hive
   #
   # Adding or removing a verb is a one-file change here.
   module Workflows
+    # Optional `interactive: true` flag marks verbs that need the user's
+    # tty during execution (stdin prompts, interactive `gh pr create`,
+    # claude tool-permission asks). The TUI's `BubbleModel#dispatch_command`
+    # routes interactive verbs through `Subprocess.takeover_command`
+    # (foreground takeover with alt-screen toggle) instead of the
+    # default `Subprocess.dispatch_background` (no stdin, headless
+    # log capture).
+    #
+    # Default is non-interactive (omitting the key). No verb is flagged
+    # interactive in v1 because every workflow agent currently runs
+    # claude with captured stdio and `gh pr create` has been working
+    # non-interactively for `hive pr`. The flag is present so a future
+    # verb that DOES need stdin (e.g., a manual review prompt) can
+    # opt in with one line — without re-introducing foreground
+    # takeover for everything.
     VERBS = {
       "brainstorm" => { source: "1-inbox", target: "2-brainstorm", force_source: true },
       "plan"       => { source: "2-brainstorm", target: "3-plan" },
@@ -37,6 +52,17 @@ module Hive
 
     def verb_advancing_from(stage_dir)
       VERB_BY_SOURCE[stage_dir]
+    end
+
+    # Returns true when the verb is flagged `interactive: true` —
+    # used by the TUI to route the dispatch through foreground
+    # takeover instead of background spawn. `nil`/missing-verb
+    # returns false (safe default: assume headless).
+    def interactive?(verb)
+      cfg = VERBS[verb.to_s]
+      return false if cfg.nil?
+
+      cfg[:interactive] == true
     end
 
     # The verb whose target is stage_dir — used as the "what to do

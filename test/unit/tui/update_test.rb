@@ -62,12 +62,16 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil new_model.flash_set_at
   end
 
-  def test_subprocess_exited_nonzero_sets_flash_with_exit_code
+  def test_subprocess_exited_nonzero_sets_flash_with_exit_code_and_log_pointer
     new_model, _cmd = Hive::Tui::Update.apply(
       model,
       Hive::Tui::Messages::SubprocessExited.new(verb: "pr", exit_code: 4)
     )
-    assert_equal "`pr` exited 4", new_model.flash
+    # Flash starts with the verb + exit code so the user sees the
+    # core fact at a glance, then points at the stderr log file so
+    # they can `tail` it for the full subprocess error output.
+    assert_match(/\A`pr` exited 4 — tail /, new_model.flash)
+    assert_includes new_model.flash, Hive::Tui::Subprocess::SUBPROCESS_LOG_PATH
     refute_nil new_model.flash_set_at, "non-zero exit must stamp flash_set_at for TTL aging"
   end
 

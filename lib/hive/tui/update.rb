@@ -1,6 +1,7 @@
 require "hive"
 require "hive/tui/model"
 require "hive/tui/messages"
+require "hive/tui/subprocess"
 
 module Hive
   module Tui
@@ -121,7 +122,7 @@ module Hive
         return model if msg.exit_code.nil? || msg.exit_code.zero?
 
         model.with(
-          flash: "`#{msg.verb}` exited #{msg.exit_code}",
+          flash: "`#{msg.verb}` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess::SUBPROCESS_LOG_PATH}",
           flash_set_at: Time.now
         )
       end

@@ -1,4 +1,5 @@
 require "open3"
+require "tmpdir"
 require "bubbletea"
 require "hive/tui/debug"
 require "hive/tui/messages"
@@ -81,25 +82,57 @@ module Hive
         )
       end
 
+      # Subprocess stderr log path. Workflow verbs spawned via
+      # `takeover_command` redirect stderr to this file (append). The
+      # alt-screen reasserts immediately after the child exits, so any
+      # error output would otherwise scroll off-screen too fast to read;
+      # writing to a log lets the user `tail` it on a non-zero exit.
+      # Stdout stays inherited so interactive prompts (gh pr create,
+      # claude tool-permission asks) still work end-to-end.
+      SUBPROCESS_LOG_PATH = File.join(Dir.tmpdir, "hive-tui-subprocess.log").freeze
+
       # Spawn-and-wait core. Returns the same Integer exit shape:
       # 0..255 for clean exits, 128+signo for signal kills,
       # COMMAND_NOT_FOUND_EXIT (127) for missing binary.
+      #
+      # Stderr is redirected (append) to `SUBPROCESS_LOG_PATH` so the
+      # user can `tail` it on a non-zero exit; alt-screen reasserts too
+      # fast for the operator to read errors otherwise. Stdout stays
+      # inherited so interactive prompts (gh pr create, claude tool
+      # permissions) round-trip cleanly.
       def run_takeover_child(argv)
         Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
         prev_int, prev_term = install_pgid_forwarding_traps
         begin
-          pid = Process.spawn(*argv, pgroup: true)
+          stamp_subprocess_log("BEGIN", argv)
+          pid = Process.spawn(*argv, pgroup: true, err: [ SUBPROCESS_LOG_PATH, "a" ])
           register_real_pgid(pid)
           Hive::Tui::Debug.log("takeover_command", "pid=#{pid} pgid=#{SubprocessRegistry.current.inspect}")
           _, status = Process.wait2(pid)
-          translate_status(status)
+          exit_code = translate_status(status)
+          stamp_subprocess_log("END exit=#{exit_code}", argv)
+          exit_code
         rescue Errno::ENOENT, Errno::EACCES => e
           Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
+          stamp_subprocess_log("ERRNO #{e.class.name}: #{e.message}", argv)
           COMMAND_NOT_FOUND_EXIT
         ensure
           SubprocessRegistry.clear
           restore_traps(prev_int, prev_term)
         end
+      end
+
+      # @api private
+      # Append a marker line so the log can be read as a stream of
+      # per-verb sections. Failures with empty stderr (e.g., signal
+      # kill) still leave the BEGIN/END pair so the operator knows
+      # which verb produced which exit code.
+      def stamp_subprocess_log(label, argv)
+        File.open(SUBPROCESS_LOG_PATH, "a") do |f|
+          f.puts "----- #{Time.now.utc.iso8601} #{label}: #{argv.join(' ')} -----"
+        end
+      rescue StandardError
+        nil
       end
 
       # Returns [exit_status, stdout, stderr]. `Open3.capture3` manages

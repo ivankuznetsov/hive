@@ -78,12 +78,41 @@ class HiveTuiStylesTest < Minitest::Test
     assert_nil style.get_foreground
   end
 
-  def test_for_action_key_returns_independent_style_instances_for_chaining
-    # Callers may layer additional modifiers (e.g., add_modifier(REVERSED)
-    # for the cursor row) without mutating the shared palette.
+  # F23: for_action_key now returns a memoized Style instance per
+  # color key. The grid renderer calls it for every visible row on
+  # every frame; the per-call Style.new + foreground FFI crossing
+  # was ~6000 allocations/sec at 60fps × 50 rows. Style#render is
+  # read-only, so sharing is observably equivalent to the prior
+  # fresh-allocation contract.
+  def test_for_action_key_returns_memoized_style_per_key
     a = Hive::Tui::Styles.for_action_key("agent_running")
     b = Hive::Tui::Styles.for_action_key("agent_running")
-    refute_same a, b, "for_action_key must return a fresh Style each call"
+    assert_same a, b, "for_action_key must memoize per color key after F23"
+  end
+
+  def test_for_action_key_yellow_branches_share_one_yellow_instance_or_each_have_own
+    # Either all three "yellow" keys point at the SAME Style instance
+    # (one shared yellow), or each has its OWN frozen instance — both
+    # are acceptable memoizations. What's NOT acceptable is allocating
+    # a new instance per call. Pin the latter property explicitly.
+    e1 = Hive::Tui::Styles.for_action_key("error")
+    e2 = Hive::Tui::Styles.for_action_key("error")
+    assert_same e1, e2
+  end
+
+  def test_for_action_key_ready_branches_share_one_green_instance
+    a = Hive::Tui::Styles.for_action_key("ready_to_brainstorm")
+    b = Hive::Tui::Styles.for_action_key("ready_for_pr")
+    assert_same a, b,
+      "all ready_* keys hit the same READY_STYLE constant — one Style, one FFI cost"
+  end
+
+  def test_memoized_action_key_styles_are_frozen
+    Hive::Tui::Styles::ACTION_KEY_STYLES.each_value do |style|
+      assert style.frozen?, "memoized Style #{style.inspect} must be frozen"
+    end
+    assert Hive::Tui::Styles::READY_STYLE.frozen?
+    assert Hive::Tui::Styles::DEFAULT_STYLE.frozen?
   end
 
   # ---------- Module-level Style constants ----------

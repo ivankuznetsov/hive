@@ -36,15 +36,27 @@ module Hive
         Lipgloss::ANSIColor.resolve(value)
       end
 
-      # Per-row foreground style keyed by action_key. Returns a new Style
-      # each call so callers can chain additional modifiers (`bold(true)`,
-      # `reverse(true)`) without mutating the shared palette.
-      def for_action_key(action_key)
-        named = ACTION_KEY_COLORS[action_key]
-        return Lipgloss::Style.new.foreground(color(named)) if named
-        return Lipgloss::Style.new.foreground(color(:green)) if action_key.to_s.start_with?("ready_")
+      # Per-row foreground style keyed by action_key. Returns a memoized
+      # Style instance — render(line) is a pure read on the Style, so
+      # callers can't observe shared mutation. Pre-F23 every render row
+      # allocated a fresh Style + crossed the FFI boundary to set
+      # foreground; ~6000 allocations/sec at 60fps × 50 rows. The
+      # memoized table caches one Style per distinct color key.
+      ACTION_KEY_STYLES = {
+        "agent_running"   => Lipgloss::Style.new.foreground(color(:cyan)).freeze,
+        "error"           => Lipgloss::Style.new.foreground(color(:yellow)).freeze,
+        "recover_execute" => Lipgloss::Style.new.foreground(color(:yellow)).freeze,
+        "recover_review"  => Lipgloss::Style.new.foreground(color(:yellow)).freeze
+      }.freeze
 
-        Lipgloss::Style.new
+      READY_STYLE = Lipgloss::Style.new.foreground(color(:green)).freeze
+      DEFAULT_STYLE = Lipgloss::Style.new.freeze
+
+      def for_action_key(action_key)
+        return ACTION_KEY_STYLES.fetch(action_key) if ACTION_KEY_STYLES.key?(action_key)
+        return READY_STYLE if action_key.to_s.start_with?("ready_")
+
+        DEFAULT_STYLE
       end
 
       # Header line — bold default-fg. Works on monochrome terminals.

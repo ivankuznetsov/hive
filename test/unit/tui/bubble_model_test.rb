@@ -643,4 +643,46 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_nil cmd,
       "LOG_TAIL_POLL must not reschedule after the user has left :log_tail mode"
   end
+
+  # F6: every open_log_tail allocates a File handle inside Tail#open!.
+  # apply_back was clearing tail_state but never calling tail.close!,
+  # so each open/dismiss cycle leaked one FD until the process hit
+  # ENFILE/EMFILE.
+  def test_back_from_log_tail_closes_underlying_file_descriptor
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      log_path = File.join(dir, "agent.log")
+      File.write(log_path, "first line\n")
+      tail = Hive::Tui::LogTail::Tail.new(log_path)
+      tail.open!
+      file = tail.instance_variable_get(:@file)
+      refute file.closed?, "fixture sanity: Tail#open! must leave the underlying File open"
+
+      wrapper = Hive::Tui::BubbleModel::LogTailContext.new(tail: tail, claude_pid_alive: true)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :log_tail, tail_state: wrapper),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::BACK)
+      assert file.closed?,
+        "BACK in :log_tail mode must close the underlying File or every open/dismiss leaks one FD"
+      assert_equal :grid, @model.hive_model.mode
+      assert_nil @model.hive_model.tail_state,
+        "Update.apply_back still owns clearing tail_state — F6 only adds the close! side effect"
+    end
+  end
+
+  def test_back_from_other_modes_does_not_attempt_tail_close
+    # Defensive: the close hook must not fire when mode != :log_tail
+    # (no tail_state to close). Otherwise a stale wrapper from a
+    # different code path could be touched on every grid-mode Esc.
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid),
+      dispatch: @dispatch
+    )
+    # No exception means the guard works.
+    @model.update(Hive::Tui::Messages::BACK)
+    assert_equal :grid, @model.hive_model.mode
+  end
 end

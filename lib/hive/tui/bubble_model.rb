@@ -242,6 +242,13 @@ module Hive
           open_log_tail(message.row)
         when Hive::Tui::Messages::LogTailPoll
           poll_log_tail
+        when Hive::Tui::Messages::Back
+          # F6: log_tail dismissal must close the underlying File or
+          # every open/dismiss cycle leaks one FD. Side-effect-only —
+          # return nil so Update.apply still handles the mode flip
+          # and tail_state clearing.
+          close_tail_if_log_tail
+          nil
         when Hive::Tui::Messages::ToggleFinding
           toggle_finding(message.row)
         when Hive::Tui::Messages::BulkAccept
@@ -249,6 +256,13 @@ module Hive
         when Hive::Tui::Messages::BulkReject
           bulk_reject(message.slug)
         end
+      end
+
+      def close_tail_if_log_tail
+        return unless @hive_model.mode == :log_tail
+
+        wrapper = @hive_model.tail_state
+        wrapper&.tail&.close!
       end
 
       # Drain new bytes from the active Tail and reschedule the next

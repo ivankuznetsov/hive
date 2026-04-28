@@ -685,4 +685,49 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model.update(Hive::Tui::Messages::BACK)
     assert_equal :grid, @model.hive_model.mode
   end
+
+  # F8: heal Threads must be tracked so App.run_charm's ensure block
+  # can reap them at TUI exit. Pre-F8 the threads were unreferenced
+  # after spawn — quitting mid-flight left zombies whose dispatch
+  # eventually crashed against a dead runner.
+  def test_kill_inflight_heals_joins_or_kills_in_flight_threads
+    # Stub heal_marker with a slow stand-in so we can observe the
+    # join-then-kill behavior under a deterministic deadline.
+    @model.define_singleton_method(:heal_marker) do |_row|
+      sleep 5 # well past JOIN_TIMEOUT_SECONDS
+    end
+
+    rows = 3.times.map { |i| make_error_row(slug: "k#{i}", folder: "/x/k#{i}", exit_code: 143) }
+    threads = rows.map { |r| @model.send(:spawn_heal_thread, r) }
+    assert_equal 3, threads.size
+    threads.each { |t| assert t.alive?, "fixture sanity: stub thread should still be alive" }
+
+    started = Time.now
+    @model.kill_inflight_heals!
+    elapsed = Time.now - started
+
+    threads.each do |t|
+      refute t.alive?, "kill_inflight_heals! must reap every tracked Thread"
+    end
+    assert elapsed < Hive::Tui::BubbleModel::JOIN_TIMEOUT_SECONDS + 1.0,
+      "kill must respect the join timeout — got #{elapsed}s; deadline is " \
+      "JOIN_TIMEOUT_SECONDS (#{Hive::Tui::BubbleModel::JOIN_TIMEOUT_SECONDS}s) plus a small buffer"
+  end
+
+  def test_spawn_heal_thread_self_prunes_when_heal_completes
+    @model.define_singleton_method(:heal_marker) { |_row| nil }
+    row = make_error_row(slug: "fast", folder: "/x/fast", exit_code: 143)
+    t = @model.send(:spawn_heal_thread, row)
+    t.join(2)
+
+    tracked = @model.instance_variable_get(:@heal_threads)
+    refute_includes tracked, t,
+      "completed heal Thread must remove itself from @heal_threads to bound the list under long sessions"
+  end
+
+  def test_kill_inflight_heals_is_safe_when_no_threads_tracked
+    # Common shape: TUI quits before any kill-class error arrived.
+    @model.kill_inflight_heals!
+    # Must not raise; nothing to assert beyond the absence of exception.
+  end
 end

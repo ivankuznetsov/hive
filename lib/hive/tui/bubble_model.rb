@@ -68,6 +68,12 @@ module Hive
         # writers under MRI.
         @healed_folders = {} # folder path → Time.now
         @healed_folders_mutex = Mutex.new
+        # F8: track in-flight heal Threads so App.run_charm's ensure
+        # block can join-with-timeout-then-kill at TUI exit. Without
+        # this, heal threads quitting mid-flight became zombies after
+        # the runner tore down. Same mutex covers both fields — both
+        # are touched from the same paths.
+        @heal_threads = []
       end
 
       # Late binding so App.run_charm can wire the runner reference
@@ -348,8 +354,50 @@ module Hive
 
       # Override-able for tests so they can capture the heal
       # invocation without forking a real `hive markers clear`.
+      # F8: tracks the spawned Thread on `@heal_threads` so
+      # `kill_inflight_heals!` can reap stragglers at TUI exit; the
+      # Thread prunes itself once the heal returns to bound the
+      # tracking list under long sessions.
       def spawn_heal_thread(row)
-        Thread.new { heal_marker(row) }
+        thread = Thread.new do
+          heal_marker(row)
+        ensure
+          @healed_folders_mutex.synchronize { @heal_threads.delete(Thread.current) }
+        end
+        @healed_folders_mutex.synchronize { @heal_threads << thread }
+        thread
+      end
+
+      # Reaping protocol for the App.run_charm ensure block. Two
+      # phases share a single wall-clock deadline so a long-running
+      # heal can't bottleneck the whole batch: phase 1 joins every
+      # thread under one collective timeout (well-behaved heals
+      # finish here); phase 2 force-kills stragglers and joins each
+      # briefly to let their `ensure` block run. Snapshot/join is
+      # done outside the mutex (Thread#join releases the GVL so
+      # blocking under the lock would freeze the lifecycle); the
+      # mutator path (`spawn_heal_thread`'s `ensure`) is still safe
+      # to run against an already-empty list. Public because
+      # App.run_charm calls it from outside the class on TUI
+      # shutdown.
+      JOIN_TIMEOUT_SECONDS = 2.0
+      KILL_GRACE_SECONDS = 0.1
+
+      public def kill_inflight_heals!
+        threads = @healed_folders_mutex.synchronize { @heal_threads.dup }
+        deadline = Time.now + JOIN_TIMEOUT_SECONDS
+        threads.each do |t|
+          remaining = deadline - Time.now
+          break if remaining <= 0
+
+          t.join(remaining)
+        end
+        threads.each do |t|
+          next unless t.alive?
+
+          t.kill
+          t.join(KILL_GRACE_SECONDS)
+        end
       end
 
       # Calls `hive markers clear` and converts any failure (non-zero

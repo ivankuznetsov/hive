@@ -54,25 +54,39 @@ class TuiSubprocessTest < Minitest::Test
     assert_equal "boom", err
   end
 
-  def test_run_quiet_restores_int_and_term_traps
-    before_int = trap("INT", "DEFAULT")
-    before_term = trap("TERM", "DEFAULT")
+  # F9: run_quiet! no longer touches the global INT/TERM trap chain.
+  # The previous install/restore pair only ever registered a
+  # `:placeholder` pgid (register_real_pgid was never called from
+  # this path), so the trap block always short-circuited and INT
+  # forwarding silently no-op'd anyway. Removing the install/restore
+  # also closes the concurrent-run_quiet! trap-chain race the
+  # /ce-code-review walkthrough flagged.
+  def test_run_quiet_does_not_modify_int_and_term_traps
+    sentinel_int = proc { :sentinel_int }
+    sentinel_term = proc { :sentinel_term }
+    before_int = trap("INT", sentinel_int)
+    before_term = trap("TERM", sentinel_term)
     begin
       Hive::Tui::Subprocess.run_quiet!([ FAKE_CHILD ])
       after_int = trap("INT", "DEFAULT")
       after_term = trap("TERM", "DEFAULT")
-      assert_equal "DEFAULT", after_int, "INT trap should be restored after run_quiet!"
-      assert_equal "DEFAULT", after_term, "TERM trap should be restored after run_quiet!"
+      assert_same sentinel_int, after_int,
+                  "run_quiet! must not overwrite the parent's INT trap"
+      assert_same sentinel_term, after_term,
+                  "run_quiet! must not overwrite the parent's TERM trap"
     ensure
       trap("INT", before_int)
       trap("TERM", before_term)
     end
   end
 
-  def test_registry_cleared_after_run_quiet
+  def test_run_quiet_does_not_touch_subprocess_registry
+    Hive::Tui::SubprocessRegistry.register_placeholder
     Hive::Tui::Subprocess.run_quiet!([ FAKE_CHILD ])
-    assert_nil Hive::Tui::SubprocessRegistry.current,
-      "registry should be cleared after run_quiet! returns"
+    assert_equal :placeholder, Hive::Tui::SubprocessRegistry.current,
+      "run_quiet! must not write to or clear the registry — Open3 owns the child"
+  ensure
+    Hive::Tui::SubprocessRegistry.clear
   end
 
   def test_run_quiet_returns_command_not_found_sentinel_when_binary_missing

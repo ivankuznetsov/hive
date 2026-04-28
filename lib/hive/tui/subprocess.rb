@@ -22,13 +22,19 @@ module Hive
     #     without touching the alt-screen so the screen never flashes
     #     on every keystroke.
     #
-    # `run_quiet!` keeps the SubprocessRegistry single-slot pgid + the
-    # INT/TERM forwarding traps because the triage subprocess is short-
-    # lived and serial (one keystroke = one `run_quiet!` = one child).
-    # `dispatch_background` does NOT install signal forwarding — the
-    # child is detached into its own pgroup, and the TUI can quit
-    # without killing its agents (intentional: long-running agents
-    # outlive the dashboard).
+    # `run_quiet!` does NOT install INT/TERM forwarding traps or touch
+    # the SubprocessRegistry. `Open3.capture3` manages the child
+    # internally, and the per-keystroke triage subprocesses are short-
+    # lived enough that the user can simply press `r` again on Ctrl-C.
+    # The historical install/restore_traps pairing was dead code: it
+    # registered `:placeholder` and never called `register_real_pgid`,
+    # so the trap blocks always short-circuited and INT forwarding
+    # silently no-op'd anyway. Removing it also closes the concurrent-
+    # `run_quiet!` trap-chain race the audit flagged (F5/F9).
+    # `dispatch_background` likewise does NOT install signal
+    # forwarding — the child is detached into its own pgroup, and the
+    # TUI can quit without killing its agents (intentional: long-running
+    # agents outlive the dashboard).
     module Subprocess
       module_function
 
@@ -329,25 +335,20 @@ module Hive
       end
 
       # Returns [exit_status, stdout, stderr]. `Open3.capture3` manages
-      # the child internally; we have no pgid to track. The placeholder
-      # registration that pairs with the SIGHUP cleanup hook happens
-      # inside `install_pgid_forwarding_traps` — registering again here
-      # would be a redundant double-write to the same slot.
+      # the child internally; the parent's INT/TERM trap chain stays
+      # untouched, and the SubprocessRegistry is irrelevant for this
+      # short-lived path (no `register_real_pgid` was ever called from
+      # here, so the install/restore_traps pair was decorative — the
+      # trap blocks read `:placeholder` and short-circuited).
       def run_quiet!(argv)
         Hive::Tui::Debug.log("run_quiet", "argv=#{argv.inspect}")
-        prev_int, prev_term = install_pgid_forwarding_traps
-        begin
-          out, err, status = Open3.capture3(*argv, pgroup: true)
-          exit_code = status.exitstatus || -1
-          Hive::Tui::Debug.log("run_quiet", "exit=#{exit_code} out_bytes=#{out.bytesize} err_bytes=#{err.bytesize}")
-          [ exit_code, out, err ]
-        rescue Errno::ENOENT, Errno::EACCES => e
-          Hive::Tui::Debug.log("run_quiet", "errno=#{e.class.name}: #{e.message}")
-          [ COMMAND_NOT_FOUND_EXIT, "", "command not found: #{argv.first}" ]
-        ensure
-          SubprocessRegistry.clear
-          restore_traps(prev_int, prev_term)
-        end
+        out, err, status = Open3.capture3(*argv, pgroup: true)
+        exit_code = status.exitstatus || -1
+        Hive::Tui::Debug.log("run_quiet", "exit=#{exit_code} out_bytes=#{out.bytesize} err_bytes=#{err.bytesize}")
+        [ exit_code, out, err ]
+      rescue Errno::ENOENT, Errno::EACCES => e
+        Hive::Tui::Debug.log("run_quiet", "errno=#{e.class.name}: #{e.message}")
+        [ COMMAND_NOT_FOUND_EXIT, "", "command not found: #{argv.first}" ]
       end
 
       # --- private helpers ---------------------------------------------------

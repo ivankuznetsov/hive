@@ -449,44 +449,14 @@ module Hive
 
       # --- private helpers ---------------------------------------------------
 
-      # Trap blocks read the current pgid out of the registry so they
-      # always forward to the live child even if the slot transitions
-      # placeholder -> Integer mid-spawn. Trap returns the previous handler
-      # which we hand back so `ensure` can restore it.
-      def install_pgid_forwarding_traps
-        SubprocessRegistry.register_placeholder
-        prev_int = trap("INT") { forward_signal_to_inflight("INT") }
-        prev_term = trap("TERM") { forward_signal_to_inflight("TERM") }
-        [ prev_int, prev_term ]
-      end
-
-      def forward_signal_to_inflight(sig)
-        pgid = SubprocessRegistry.current
-        return unless pgid.is_a?(Integer)
-
-        begin
-          Process.kill(sig, -pgid)
-        rescue Errno::ESRCH, Errno::EPERM
-          nil
-        end
-      end
-
-      def restore_traps(prev_int, prev_term)
-        trap("INT", prev_int || "DEFAULT")
-        trap("TERM", prev_term || "DEFAULT")
-      end
-
-      # Mirrors Hive::Agent#spawn_and_wait: ESRCH means the child died
-      # before getpgid could observe it, in which case the pid is its own
-      # process-group leader by virtue of pgroup: true.
-      def register_real_pgid(pid)
-        pgid = begin
-          Process.getpgid(pid)
-        rescue Errno::ESRCH
-          pid
-        end
-        SubprocessRegistry.register(pgid)
-      end
+      # NOTE: install_pgid_forwarding_traps / restore_traps /
+      # forward_signal_to_inflight / register_real_pgid were deleted
+      # along with run_quiet!'s trap-install path (F9). The
+      # SubprocessRegistry module itself is still loadable for the
+      # signal cleanup hook in App.run_charm, but no production caller
+      # writes to its slot anymore: workflow verbs route through
+      # dispatch_background (detached pgroup, not registered) and
+      # run_quiet! uses Open3.capture3 (also not registered).
 
       # POSIX-shell convention for signal exits keeps the return type a
       # plain Integer the caller can compare against without unwrapping a

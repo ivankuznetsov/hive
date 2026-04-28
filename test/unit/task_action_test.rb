@@ -169,4 +169,84 @@ class TaskActionTest < Minitest::Test
                       "TaskAction emits key #{entry[:key].inspect} not in TaskActionKind::ALL"
     end
   end
+
+  # ── cross-layer contracts (the dogfood-found bug) ──────────────────────
+  #
+  # These tests pin contracts between TaskAction (what gets surfaced to
+  # the user as "Ready for X") and the CLI layer (what `hive X` actually
+  # accepts). A drift here is the bug pattern that surfaced when the
+  # `hive tui` "Ready for PR" rows kept dispatching `hive pr` and
+  # raising WrongStage on every press because the CLI's terminal-marker
+  # whitelist had a stale gap.
+
+  ADVANCE_VERBS_TO_TERMINAL_MARKERS = {
+    # verb → marker that 5-review/etc. writes when the stage is done
+    # and the next workflow verb should accept the task. Each pair
+    # comes directly from a TaskAction ACTIONS row that maps a marker
+    # name to a `command:`. Adding a new advance pair anywhere must
+    # come with a new entry here.
+    "plan" => :complete,           # 2-brainstorm finishes with :complete
+    "develop" => :complete,        # 3-plan finishes with :complete
+    "review" => :execute_complete, # 4-execute finishes with :execute_complete
+    "pr" => :review_complete,      # 5-review finishes with :review_complete
+    "archive" => :complete         # 6-pr finishes with :complete
+  }.freeze
+
+  # Pin: every workflow advance verb's `terminal_marker?` whitelist
+  # accepts the corresponding stage-terminal marker. This is the test
+  # that would have caught the U11 dogfood bug — `:review_complete`
+  # was missing from `terminal_marker?`, so `hive pr --from 5-review`
+  # rejected its only valid pre-advance marker.
+  def test_stage_action_terminal_marker_accepts_every_advance_marker
+    require "hive/commands/stage_action"
+
+    ADVANCE_VERBS_TO_TERMINAL_MARKERS.each do |verb, marker_name|
+      m = marker(marker_name)
+      probe = Hive::Commands::StageAction.allocate
+      assert probe.send(:terminal_marker?, m),
+             "TaskAction routes #{marker_name.inspect} → 'hive #{verb}' but " \
+             "StageAction#terminal_marker? rejects :#{marker_name}; the TUI's " \
+             "advance row for this state would WrongStage on every dispatch. " \
+             "Add :#{marker_name} to the whitelist in " \
+             "lib/hive/commands/stage_action.rb#terminal_marker?."
+    end
+  end
+
+  # Pin: every workflow advance row in TaskAction emits a verb that
+  # exists in `Hive::Workflows::VERBS`. Drift here would mean the
+  # TUI's "Ready to X" row dispatches `hive ship` (typo) and the
+  # CLI returns "command not found" via Thor.
+  def test_every_advance_action_command_is_a_workflow_verb
+    require "hive/workflows"
+
+    Hive::TaskAction::ACTIONS.each do |state, entry|
+      command = entry[:command]
+      next if command.nil?
+      # Skip non-workflow-verb commands ("findings" routes to the
+      # accept/reject toggler, not StageAction).
+      next unless Hive::Workflows.workflow_verb?(command)
+
+      assert_includes Hive::Workflows::VERBS.keys, command,
+                      "TaskAction state :#{state} advertises command 'hive #{command}' " \
+                      "but it isn't in Hive::Workflows::VERBS"
+    end
+  end
+
+  # Pin: TaskAction's stage names match `Hive::Stages::DIRS`. The
+  # classifier branches on `task.stage_name` ("inbox" / "brainstorm" /
+  # "execute" / etc.); if Stages renames a stage, every TaskAction
+  # branch for it silently falls into the `error` fallback.
+  def test_task_action_stage_names_match_stages_dirs
+    require "hive/stages"
+
+    expected_stage_names = Hive::Stages::DIRS.map { |d| d.split("-", 2).last }
+    classifier_stage_names = %w[inbox brainstorm plan execute review pr done]
+    missing = classifier_stage_names - expected_stage_names
+    extra = expected_stage_names - classifier_stage_names
+    assert_empty missing,
+                 "TaskAction branches on stage names #{missing.inspect} that aren't in Stages::DIRS"
+    assert_empty extra,
+                 "Stages::DIRS has stage names #{extra.inspect} that TaskAction doesn't classify; " \
+                 "tasks at those stages will fall through to ACTIONS[:error]"
+  end
 end

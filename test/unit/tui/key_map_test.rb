@@ -249,4 +249,20 @@ class TuiKeyMapMessageForTest < Minitest::Test
       assert_kind_of Object, message
     end
   end
+
+  # Contract: every value in VERB_KEYS is a real workflow verb that
+  # `Hive::Workflows::VERBS` defines. Drift would mean pressing the
+  # mapped key on a "Ready to X" row dispatches `hive <typo>` and
+  # crashes with command-not-found (the same bug class as the U11
+  # dogfood-found marker mismatch).
+  def test_verb_keys_values_are_workflow_verbs
+    require "hive/workflows"
+
+    Hive::Tui::KeyMap::VERB_KEYS.each do |key, verb|
+      assert_includes Hive::Workflows::VERBS.keys, verb,
+                      "KeyMap maps #{key.inspect} → 'hive #{verb}' but " \
+                      "Workflows::VERBS doesn't define '#{verb}'; pressing " \
+                      "#{key.inspect} would dispatch a phantom verb."
+    end
+  end
 end

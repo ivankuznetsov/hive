@@ -146,6 +146,16 @@ module Hive
       CursorUp = Class.new
       CURSOR_UP = CursorUp.new.freeze
 
+      # Triage-mode `j` / KEY_DOWN. Distinct from grid-mode `CursorDown`
+      # so Update can route to `TriageState#cursor_down` instead of
+      # mutating `model.cursor` (which is the grid coord).
+      TriageCursorDown = Class.new
+      TRIAGE_CURSOR_DOWN = TriageCursorDown.new.freeze
+
+      # Triage-mode `k` / KEY_UP.
+      TriageCursorUp = Class.new
+      TRIAGE_CURSOR_UP = TriageCursorUp.new.freeze
+
       # No-op — explicit "do nothing" so case statements can match
       # without resorting to nil. Returned for unbound keystrokes.
       Noop = Class.new

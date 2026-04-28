@@ -34,6 +34,8 @@ module Hive
         { mode: :grid, key: "?",     action: :help,           description: "this help overlay" },
         { mode: :grid, key: "q",     action: :quit,           description: "quit" },
         # Triage mode — Space and bulk rebindings.
+        { mode: :triage, key: "j",     action: :cursor_down,    description: "finding cursor down" },
+        { mode: :triage, key: "k",     action: :cursor_up,      description: "finding cursor up" },
         { mode: :triage, key: "Space", action: :toggle_finding, description: "toggle accept/reject on the highlighted finding" },
         { mode: :triage, key: "d",     action: :develop,        description: "dispatch hive develop to re-inject accepted findings" },
         { mode: :triage, key: "a",     action: :accept_all,     description: "bulk accept every finding (rebound from grid-mode archive)" },

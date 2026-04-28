@@ -200,6 +200,34 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::BACK, msg
   end
 
+  # Triage-mode cursor must NOT emit grid-mode CURSOR_DOWN/UP — those
+  # singletons drive `model.cursor` (grid coord) and would not move the
+  # finding cursor that lives on `triage_state`. F1 fix from
+  # /ce-code-review walk-through.
+  def test_triage_j_returns_triage_cursor_down_singleton
+    row = make_row(action_key: "review_findings")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "j", row: row)
+    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_DOWN, msg
+  end
+
+  def test_triage_key_down_returns_triage_cursor_down_singleton
+    row = make_row(action_key: "review_findings")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: :key_down, row: row)
+    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_DOWN, msg
+  end
+
+  def test_triage_k_returns_triage_cursor_up_singleton
+    row = make_row(action_key: "review_findings")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "k", row: row)
+    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_UP, msg
+  end
+
+  def test_triage_key_up_returns_triage_cursor_up_singleton
+    row = make_row(action_key: "review_findings")
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: :key_up, row: row)
+    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_UP, msg
+  end
+
   # -------- Sub-mode q/Esc → back --------
 
   def test_log_tail_q_returns_back

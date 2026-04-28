@@ -59,6 +59,10 @@ module Hive
           [ apply_cursor_down(model), nil ]
         when Messages::CursorUp
           [ apply_cursor_up(model), nil ]
+        when Messages::TriageCursorDown
+          [ apply_triage_cursor_down(model), nil ]
+        when Messages::TriageCursorUp
+          [ apply_triage_cursor_up(model), nil ]
         when Messages::ShowHelp
           [ apply_show_help(model), nil ]
         when Messages::OpenFilterPrompt
@@ -210,6 +214,20 @@ module Hive
 
       def apply_show_help(model)
         model.with(mode: :help)
+      end
+
+      # TriageState mutates in place (the loop holds a single instance
+      # per triage session), so the model itself is returned unchanged.
+      # No-op when triage_state is nil — defensive guard for keys that
+      # arrive before BubbleModel#open_findings has set the state.
+      def apply_triage_cursor_down(model)
+        model.triage_state&.cursor_down
+        model
+      end
+
+      def apply_triage_cursor_up(model)
+        model.triage_state&.cursor_up
+        model
       end
 
       # Pre-fill the filter buffer with the active filter so `/` followed

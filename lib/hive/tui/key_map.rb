@@ -153,8 +153,8 @@ module Hive
 
       def triage_message(key:, row:)
         return Messages::BACK if ESCAPE_KEYS.include?(key)
-        return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
-        return Messages::CURSOR_UP if UP_KEYS.include?(key)
+        return Messages::TRIAGE_CURSOR_DOWN if DOWN_KEYS.include?(key)
+        return Messages::TRIAGE_CURSOR_UP if UP_KEYS.include?(key)
         return triage_space_message(row) if key == " " || key == :space
         return Messages::NOOP if row.nil?
 

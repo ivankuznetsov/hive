@@ -37,7 +37,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 | `r` | run `hive review` |
 | `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
 | `a` | run `hive archive` |
-| `Enter` | open the row's contextual mode (triage / log tail / `$EDITOR`) or dispatch the suggested command |
+| `Enter` | open the row's contextual mode (triage on `review_findings`, log tail on `agent_running` / `error`) or dispatch the suggested command |
 | `/` | open filter prompt |
 | `1`–`9` | scope to the Nth registered project |
 | `0` | clear project scope |

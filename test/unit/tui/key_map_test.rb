@@ -149,6 +149,20 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  # Enter on an error-state row opens the agent log so the user can see
+  # WHY the agent failed without leaving the TUI. Replaces the earlier
+  # "inspect via $EDITOR" flash, which was stale after the `$EDITOR`
+  # integration was removed.
+  def test_enter_on_error_returns_open_log_tail_with_row
+    row = make_row(action_key: "error", action_label: "Error",
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenLogTail, msg,
+      "Enter on error rows must open log tail (the user wants to see why it failed), " \
+      "not flash a stale `$EDITOR` hint"
+    assert_same row, msg.row
+  end
+
   def test_enter_on_needs_input_dispatches_when_command_present
     row = make_row(action_key: "needs_input", action_label: "Needs input",
                    suggested_command: "hive plan some-slug --project alpha --from 3-plan")

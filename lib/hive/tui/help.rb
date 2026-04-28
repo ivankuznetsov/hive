@@ -27,7 +27,7 @@ module Hive
         # Grid mode — navigation + sub-modes.
         { mode: :grid, key: "j",     action: :cursor_down,    description: "cursor down" },
         { mode: :grid, key: "k",     action: :cursor_up,      description: "cursor up" },
-        { mode: :grid, key: "Enter", action: :open_contextual, description: "open contextual mode (triage / log tail / $EDITOR) or dispatch" },
+        { mode: :grid, key: "Enter", action: :open_contextual, description: "open contextual mode (triage / log tail) or dispatch the suggested command" },
         { mode: :grid, key: "/",     action: :filter,         description: "open filter prompt" },
         { mode: :grid, key: "1-9",   action: :project_scope,  description: "scope to the Nth registered project" },
         { mode: :grid, key: "0",     action: :project_scope,  description: "clear project scope" },

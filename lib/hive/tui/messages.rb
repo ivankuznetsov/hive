@@ -117,11 +117,28 @@ module Hive
       # triage subloop to derive slug + finding context.
       ToggleFinding = Data.define(:row)
 
-      # Triage `a` — bulk-accept all findings on the row's task.
-      BulkAccept = Data.define(:slug)
+      # Triage `a` — bulk-accept all findings on the task currently
+      # under triage. Payload-free singleton: `BubbleModel`'s handler
+      # reads `triage_state` (which captures the slug + folder at the
+      # moment triage was opened) instead of trusting the live grid
+      # row, which a 1Hz snapshot poll could have re-pointed at a
+      # different task before the keystroke landed.
+      BulkAccept = Class.new
+      BULK_ACCEPT = BulkAccept.new.freeze
 
-      # Triage `r` — bulk-reject all findings on the row's task.
-      BulkReject = Data.define(:slug)
+      # Triage `r` — bulk-reject all findings on the task currently
+      # under triage. Same shape as BulkAccept; see that comment for
+      # the no-payload rationale.
+      BulkReject = Class.new
+      BULK_REJECT = BulkReject.new.freeze
+
+      # Triage `d` — dispatch `hive develop` against the task currently
+      # under triage. Payload-free for the same race-tolerance reason:
+      # the handler resolves the develop argv from `triage_state`'s
+      # captured folder, never the live grid row that may have drifted
+      # under concurrent snapshot polls.
+      TriageDevelop = Class.new
+      TRIAGE_DEVELOP = TriageDevelop.new.freeze
 
       # `1`–`9` scope to the Nth registered project; `0` clears scope.
       ProjectScope = Data.define(:n)

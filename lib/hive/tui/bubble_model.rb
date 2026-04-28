@@ -258,9 +258,11 @@ module Hive
         when Hive::Tui::Messages::ToggleFinding
           toggle_finding(message.row)
         when Hive::Tui::Messages::BulkAccept
-          bulk_accept(message.slug)
+          bulk_accept
         when Hive::Tui::Messages::BulkReject
-          bulk_reject(message.slug)
+          bulk_reject
+        when Hive::Tui::Messages::TriageDevelop
+          triage_develop
         end
       end
 
@@ -577,17 +579,21 @@ module Hive
         reload_findings_into_state(state, row)
       end
 
-      def bulk_accept(slug)
-        bulk_run(direction: :accept, slug: slug)
+      # Bulk a/r/develop dispatch from triage mode. All three read the
+      # captured TriageState rather than the live grid row, so a 1Hz
+      # snapshot poll re-pointing the cursor at a different task can't
+      # misroute the dispatch.
+      def bulk_accept
+        bulk_run(direction: :accept)
       end
 
-      def bulk_reject(slug)
-        bulk_run(direction: :reject, slug: slug)
+      def bulk_reject
+        bulk_run(direction: :reject)
       end
 
-      def bulk_run(direction:, slug:)
+      def bulk_run(direction:)
         state = @hive_model.triage_state
-        return [ @hive_model, nil ] if state.nil? || state.slug != slug
+        return [ @hive_model, nil ] if state.nil?
 
         argv = state.bulk_command(direction)
         exit_code, _, err = Hive::Tui::Subprocess.run_quiet!(argv)
@@ -597,6 +603,20 @@ module Hive
         end
 
         reload_findings_into_state(state, nil)
+      end
+
+      # Triage `d` dispatches via the same takeover/background path as
+      # grid-mode workflow verbs, but builds the argv from triage_state
+      # so the dispatch never sees a stale-row mismatch.
+      def triage_develop
+        state = @hive_model.triage_state
+        return [ @hive_model, nil ] if state.nil?
+
+        message = Hive::Tui::Messages::DispatchCommand.new(
+          argv: state.develop_command,
+          verb: "develop"
+        )
+        dispatch_command(message)
       end
 
       def reload_findings_into_state(state, _row)

@@ -78,6 +78,20 @@ class TuiTriageStateTest < Minitest::Test
     assert_raises(ArgumentError) { state.bulk_command(:nope) }
   end
 
+  # -------- develop_command --------------------------------------
+
+  def test_develop_command_targets_folder_with_from_4_execute_assertion
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", folder: FOLDER, findings: [])
+    assert_equal [ "hive", "develop", FOLDER, "--from", "4-execute" ], state.develop_command,
+      "triage d targets the captured folder so a snapshot poll re-pointing the grid " \
+      "cursor mid-triage can't dispatch develop on a different task"
+  end
+
+  def test_develop_command_falls_back_to_slug_when_folder_absent
+    state = Hive::Tui::TriageState.new(slug: "fix-auth", findings: [])
+    assert_equal [ "hive", "develop", "fix-auth", "--from", "4-execute" ], state.develop_command
+  end
+
   # -------- cursor clamp -------------------------------------------
 
   def test_cursor_starts_at_zero

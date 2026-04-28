@@ -82,10 +82,20 @@ module Hive
         [ "hive", "#{direction}-finding", target, "--all" ]
       end
 
-      # The argv TARGET for accept/reject calls. Prefer the absolute
-      # folder path (path_target? branch in TaskResolver — no slug
-      # ambiguity under multi-project / multi-stage state). Fall back
-      # to the slug when no folder was supplied (legacy test shape).
+      # Triage `d` — re-dispatch develop on the task currently under
+      # triage so the agent re-reads accepted findings. TARGET is the
+      # captured folder, mirroring toggle/bulk commands; `--from
+      # 4-execute` is a defense-in-depth assertion (the folder already
+      # implies the stage).
+      def develop_command
+        [ "hive", "develop", target, "--from", "4-execute" ]
+      end
+
+      # The argv TARGET for accept/reject/develop calls. Prefer the
+      # absolute folder path (path_target? branch in TaskResolver — no
+      # slug ambiguity under multi-project / multi-stage state). Fall
+      # back to the slug when no folder was supplied (legacy test
+      # shape).
       def target
         @folder || @slug
       end

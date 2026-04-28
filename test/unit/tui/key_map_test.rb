@@ -40,26 +40,16 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal [ "hive", "plan", "some-slug", "--from", "2-brainstorm" ], msg.argv
   end
 
-  def test_triage_d_caches_develop_verb_and_targets_row_folder
-    # Triage `d` synthesizes the argv directly (not from
-    # suggested_command); verb must still cache as "develop". The
-    # TARGET is row.folder (absolute path), not row.slug, so
-    # `Hive::TaskResolver` short-circuits via path_target? rather than
-    # raising AmbiguousSlug under multi-project / multi-stage state.
-    row = make_row(
-      action_key: "review_findings",
-      suggested_command: nil,
-      folder: "/abs/.hive-state/stages/4-execute/some-slug"
-    )
+  def test_triage_d_returns_payload_free_singleton
+    # Triage `d` is a payload-free singleton; BubbleModel resolves the
+    # develop argv from triage_state so a snapshot poll re-pointing the
+    # cursor mid-triage can't dispatch develop on a different task.
+    # The argv-shape contract is pinned in TriageState's develop_command
+    # test, not here.
+    row = make_row(action_key: "review_findings", suggested_command: nil,
+                   folder: "/abs/.hive-state/stages/4-execute/some-slug")
     msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "d", row: row)
-    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
-    assert_equal "develop", msg.verb
-    assert_equal [
-      "hive", "develop",
-      "/abs/.hive-state/stages/4-execute/some-slug",
-      "--from", "4-execute"
-    ], msg.argv,
-      "triage d must use row.folder so TaskResolver bypasses slug ambiguity"
+    assert_same Hive::Tui::Messages::TRIAGE_DEVELOP, msg
   end
 
   # -------- Agent_running's three sub-paths (ADV-2 discriminative coverage) --------
@@ -217,18 +207,18 @@ class TuiKeyMapMessageForTest < Minitest::Test
 
   # -------- Triage rebindings --------
 
-  def test_triage_a_returns_bulk_accept_with_slug
+  def test_triage_a_returns_bulk_accept_singleton
+    # Bulk a/r are payload-free singletons; BubbleModel routes them
+    # against triage_state, not the live row's slug.
     row = make_row(action_key: "review_findings", slug: "auth-fix-260101-a1b2")
     msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "a", row: row)
-    assert_kind_of Hive::Tui::Messages::BulkAccept, msg
-    assert_equal "auth-fix-260101-a1b2", msg.slug
+    assert_same Hive::Tui::Messages::BULK_ACCEPT, msg
   end
 
-  def test_triage_r_returns_bulk_reject_with_slug
+  def test_triage_r_returns_bulk_reject_singleton
     row = make_row(action_key: "review_findings", slug: "auth-fix-260101-a1b2")
     msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "r", row: row)
-    assert_kind_of Hive::Tui::Messages::BulkReject, msg
-    assert_equal "auth-fix-260101-a1b2", msg.slug
+    assert_same Hive::Tui::Messages::BULK_REJECT, msg
   end
 
   def test_triage_space_returns_toggle_finding_with_row

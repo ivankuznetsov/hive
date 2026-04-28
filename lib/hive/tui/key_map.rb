@@ -162,23 +162,18 @@ module Hive
         return Messages::TRIAGE_CURSOR_DOWN if DOWN_KEYS.include?(key)
         return Messages::TRIAGE_CURSOR_UP if UP_KEYS.include?(key)
         return triage_space_message(row) if key == " " || key == :space
-        return Messages::NOOP if row.nil?
 
+        # Triage d/a/r are payload-free singletons. The handler in
+        # BubbleModel resolves the target argv from `triage_state`'s
+        # captured slug+folder rather than the live grid row, which a
+        # 1Hz snapshot poll could have re-pointed at a different task
+        # between triage open and the keystroke. row may be nil here
+        # (filter hid the parent row mid-triage); the handler still
+        # works because it ignores row entirely.
         case key
-        when "d"
-          # Folder, not slug, so `Hive::TaskResolver` takes its
-          # `path_target?` branch instead of the slug-search that
-          # raises `AmbiguousSlug` under multi-project / multi-stage
-          # state. `--from 4-execute` is now belt-and-braces (the
-          # absolute folder already pins the stage), but kept as a
-          # defense-in-depth assertion if the row ever drifted
-          # between snapshot and dispatch.
-          Messages::DispatchCommand.new(
-            argv: [ "hive", "develop", row.folder, "--from", "4-execute" ],
-            verb: "develop"
-          )
-        when "a" then Messages::BulkAccept.new(slug: row.slug)
-        when "r" then Messages::BulkReject.new(slug: row.slug)
+        when "d" then Messages::TRIAGE_DEVELOP
+        when "a" then Messages::BULK_ACCEPT
+        when "r" then Messages::BULK_REJECT
         else Messages::NOOP
         end
       end

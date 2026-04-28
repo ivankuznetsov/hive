@@ -55,6 +55,21 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_for_pr", Hive::TaskAction.for(task, marker(:review_complete)).key
   end
 
+  # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
+  # fell through to :review_waiting and emitted a runnable
+  # `hive review … --from 5-review` command while review was active —
+  # running it would acquire-then-fail the per-task lock with
+  # ConcurrentRunError. Treat as in-flight (agent_running) so the TUI's
+  # verb-refusal flash + log-tail-on-Enter path covers review-stage rows.
+  def test_review_working_is_agent_running_with_no_command
+    task = fake_task(stage_name: "review", stage_index: 5)
+    action = Hive::TaskAction.for(task, marker(:review_working, "phase" => "reviewers"))
+    assert_equal "agent_running", action.key,
+      "REVIEW_WORKING must surface as agent_running so dispatch refuses while review is active"
+    assert_nil action.command,
+      "no command for an in-flight stage — pressing the verb key flashes refusal"
+  end
+
   def test_execute_waiting_with_findings_is_review_findings
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 3))

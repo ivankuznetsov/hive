@@ -1,22 +1,23 @@
 ---
-title: Workflow verbs (brainstorm / plan / develop / pr / archive)
+title: Workflow verbs (brainstorm / plan / develop / review / pr / archive)
 type: command
 source: lib/hive/commands/stage_action.rb, lib/hive/workflows.rb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-04-28
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
-**TLDR**: Five Thor commands that wrap promote-or-run for the five stage transitions. `hive plan <slug> --from 2-brainstorm` either advances the task from 2-brainstorm to 3-plan and runs the plan agent, OR (if the task is already at 3-plan) just runs the plan agent. Same shape for `brainstorm`, `develop`, `pr`, `archive`. Backed by `Hive::Commands::StageAction` and `Hive::Workflows`.
+**TLDR**: Six Thor commands that wrap promote-or-run for the six stage transitions defined in `Hive::Workflows::VERBS`. `hive plan <slug> --from 2-brainstorm` either advances the task from 2-brainstorm to 3-plan and runs the plan agent, OR (if the task is already at 3-plan) just runs the plan agent. Same shape for `brainstorm`, `develop`, `review`, `pr`, `archive`. Backed by `Hive::Commands::StageAction` and `Hive::Workflows`.
 
 ## Usage
 
 ```
 hive brainstorm <slug>                    # promote 1-inbox → 2-brainstorm, run brainstorm
 hive plan <slug>                          # promote 2-brainstorm → 3-plan, run plan
-hive develop <slug>                       # promote 3-plan → 4-execute, run execute
-hive pr <slug>                            # promote 4-execute → 5-pr, run pr
-hive archive <slug>                       # promote 5-pr → 6-done, run done
+hive develop <slug>                       # promote 3-plan → 4-execute, run develop
+hive review <slug>                        # promote 4-execute → 5-review, run review
+hive pr <slug>                            # promote 5-review → 6-pr, run pr
+hive archive <slug>                       # promote 6-pr → 7-done, run archive
 
 hive plan <slug> --from 2-brainstorm      # idempotency assertion for retry
 hive plan <slug> --project NAME           # multi-project disambiguation

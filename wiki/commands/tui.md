@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-04-27T15:30:00Z
+updated: 2026-04-28T00:00:00Z
 tags: [command, tui, observability, interactive]
 ---
 
@@ -22,7 +22,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 | Status grid (default) | boot | `q` |
 | Findings triage | `Enter` on a `review_findings` row | `Esc` |
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
-| Filter prompt | `/` | `Esc` (clears) / `Enter` (commits) |
+| Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
 | Help overlay | `?` | any key |
 
 ## Keybindings (default mode)
@@ -59,6 +59,8 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 
+`Update.apply_snapshot_arrived` reclamps `model.cursor` against the new snapshot's visible rows: a poll that drops the cursor's row (e.g. the last task in a project finishes and disappears, or the project list shrinks past `project_idx`) jumps the cursor to the first visible row instead of leaving it pointing at a hidden one — without this, downstream `apply_cursor_*` handlers refuse to move from invalid coords and j/k silently noop. Still-valid cursors are preserved across benign polls so the user's selection does not snap to the top each second.
+
 ## Subprocess dispatch
 
 Workflow verbs default to background dispatch: `Hive::Tui::Subprocess.dispatch_background(argv, dispatch:)` `Process.spawn`s the child detached into its own pgroup with stdout/stderr captured to `SUBPROCESS_LOG_PATH`, returns immediately, and a reaper Thread waits for the child and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the TUI flashes the result. The renderer keeps painting and multiple agents across multiple projects run concurrently. `Hive::Workflows::VERBS` carries an optional `interactive: true` flag for verbs that need the user's tty (stdin prompts); none of the v1 verbs are flagged interactive, so every workflow keystroke takes the background path today.
@@ -67,11 +69,13 @@ Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_co
 
 Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — `Open3.capture3` runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line.
 
+`SUBPROCESS_LOG_PATH` (`$TMPDIR/hive-tui-subprocess.log`) collects BEGIN/END/ERRNO marker lines plus background-spawn child stdout/stderr. `SUBPROCESS_LOG_MAX_BYTES` (10 MiB) is checked at each stamp write — when exceeded the file is renamed to `…log.1` (single rotation tier) so normal-traffic disk usage caps near `2 × SUBPROCESS_LOG_MAX_BYTES`. The cap is approximate, not absolute: child stderr is `Process.spawn`-redirected straight into the file, so a noisy verb can grow it well past the cap between BEGIN and END before rotation fires synchronously with the next stamp.
+
 ## Terminal hostility
 
 - **Resize:** Bubble Tea's runner installs its own SIGWINCH handler and synthesises a `WindowSizeMessage`; `BubbleModel#update` translates it into `Messages::WindowSized` so views can read `model.cols`/`model.rows` without poking the framework.
 - **Ctrl+Z / SIGTSTP:** Bubble Tea owns suspend/resume of the alt-screen and raw-mode toggling.
-- **SIGHUP:** trapped at boot in `App.run_charm`; the trap calls `runner.send(Messages::TERMINATE_REQUESTED)`, which the runner picks up at the top of the next loop tick. Update returns `Bubbletea.quit` so the runner exits cleanly. Cleanup runs in `App.run_charm`'s `ensure` (kill the polling thread, stop StateSource, restore the previous HUP handler, `SubprocessRegistry.kill_inflight!`).
+- **SIGHUP:** trapped at boot in `App.run_charm`; the trap calls `runner.send(Messages::TERMINATE_REQUESTED)`, which the runner picks up at the top of the next loop tick. Update returns `Bubbletea.quit` so the runner exits cleanly. Cleanup runs in `App.run_charm`'s `ensure` (kill the polling thread, stop StateSource, restore the previous HUP handler, `SubprocessRegistry.kill_inflight!`, reap inflight auto-heal threads). All setup (StateSource boot, `Bubbletea::Runner` construction, HUP trap install, poller spawn) is performed *inside* the same `begin` so a constructor failure still hits the same nil-guarded cleanup path — the StateSource thread can no longer leak when `Bubbletea::Runner.new` raises.
 - **`at_exit`:** `SubprocessRegistry.kill_inflight!` is registered alongside the StateSource boot so a crash during init still kills any in-flight workflow-verb subprocess.
 - **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"invalid_task_path", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema, and `error_kind` matches the value other `InvalidTaskPath` emit sites already use).
 - **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.

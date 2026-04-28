@@ -792,3 +792,10 @@ Append-only log of all wiki operations.
 - `test/integration/run_stage_action_test.rb` — coverage for the at-target branch, promote-and-run, archive idempotency no-op, `--from` retry-after-success rescue, and unified JSON envelope on each error path.
 - 5 existing tests updated for the intentional behaviour changes (--from now always emitted; final-stage emits NO_OP not RUN; archive no-op).
 
+
+## 2026-04-28 — TUI robustness pass
+
+- **`Hive::Tui::Update.apply_snapshot_arrived`**: re-clamps `model.cursor` when a poll's new snapshot makes prior coords invalid (project_idx OOB or row_idx past the project's row count); preserves cursor when still valid so benign polls don't snap selection. New tests in `test/unit/tui/update_test.rb`.
+- **`Hive::Tui::App.run_charm`**: setup (`StateSource.new/start`, `BubbleModel.new`, `Bubbletea::Runner.new`, HUP hook, snapshot poller) moved INSIDE the `begin` so a constructor raise still triggers the same ensure cleanup; `ensure` block nil-guards each handle. Pre-fix, a Bubbletea::Runner failure leaked the StateSource thread.
+- **`Hive::Tui::Help::ENTRIES`**: filter-mode `Esc` action renamed `:clear_filter` → `:cancel_filter` with new semantics — discards the typed buffer but preserves any committed filter (was: nuked the committed filter too).
+- **`Hive::Tui::Subprocess::SUBPROCESS_LOG_MAX_BYTES`**: comment honesty pass — rotation only fires synchronously with stamp writes, so a noisy child writing tens of MB of stderr between BEGIN and END can blow past the cap; the eventual rotation moves the oversized blob to `.1`. Cap is approximate, not absolute.

@@ -156,6 +156,14 @@ module Hive
       TriageCursorUp = Class.new
       TRIAGE_CURSOR_UP = TriageCursorUp.new.freeze
 
+      # Recurring tick that drains new bytes from the active log_tail.
+      # `Tail#poll!` is only meaningful while the user is in :log_tail
+      # mode; the handler reschedules a fresh tick if mode is still
+      # :log_tail and stops the cycle otherwise. Without this, the view
+      # was frozen at the bytes read by `Tail#open!`.
+      LogTailPoll = Class.new
+      LOG_TAIL_POLL = LogTailPoll.new.freeze
+
       # No-op — explicit "do nothing" so case statements can match
       # without resorting to nil. Returned for unbound keystrokes.
       Noop = Class.new

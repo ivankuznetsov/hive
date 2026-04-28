@@ -240,6 +240,8 @@ module Hive
           open_findings(message.row)
         when Hive::Tui::Messages::OpenLogTail
           open_log_tail(message.row)
+        when Hive::Tui::Messages::LogTailPoll
+          poll_log_tail
         when Hive::Tui::Messages::ToggleFinding
           toggle_finding(message.row)
         when Hive::Tui::Messages::BulkAccept
@@ -247,6 +249,18 @@ module Hive
         when Hive::Tui::Messages::BulkReject
           bulk_reject(message.slug)
         end
+      end
+
+      # Drain new bytes from the active Tail and reschedule the next
+      # poll if the user is still viewing the log. Mode-change-out (Esc
+      # / `q` flips back to :grid and clears tail_state) stops the
+      # cycle so we don't keep waking the loop for a closed tail.
+      def poll_log_tail
+        wrapper = @hive_model.tail_state
+        return [ @hive_model, nil ] if wrapper.nil? || @hive_model.mode != :log_tail
+
+        wrapper.tail.poll!
+        [ @hive_model, log_tail_poll_cmd ]
       end
 
       # Intercept SubprocessExited to look for known setup errors in
@@ -423,11 +437,21 @@ module Hive
         tail = Hive::Tui::LogTail::Tail.new(log_path)
         tail.open!
         wrapper = LogTailContext.new(tail: tail, claude_pid_alive: row.claude_pid_alive)
-        [ @hive_model.with(mode: :log_tail, tail_state: wrapper), nil ]
+        [ @hive_model.with(mode: :log_tail, tail_state: wrapper), log_tail_poll_cmd ]
       rescue Hive::NoLogFiles
         [ flashed("no logs yet for #{row.slug}"), nil ]
       rescue Hive::InvalidTaskPath, Errno::ENOENT, Errno::EACCES
         [ flashed("log file gone"), nil ]
+      end
+
+      # 0.5s tick: long enough that a slow agent log doesn't cost a
+      # poll per frame, short enough that fresh bytes feel live.
+      # Symmetric with the curses path's per-frame poll cadence.
+      LOG_TAIL_POLL_INTERVAL = 0.5
+
+      # @api private
+      def log_tail_poll_cmd
+        Bubbletea.tick(LOG_TAIL_POLL_INTERVAL) { Hive::Tui::Messages::LOG_TAIL_POLL }
       end
 
       # Wrapper exposing `path`/`claude_pid_alive`/`lines(n)` to

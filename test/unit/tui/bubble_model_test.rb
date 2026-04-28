@@ -553,4 +553,67 @@ class HiveTuiBubbleModelTest < Minitest::Test
         "must stay in grid mode, not flip to :log_tail with a missing log"
     end
   end
+
+  # F3: Tail#poll! was never called — the view was frozen at the
+  # bytes read by Tail#open!. open_log_tail now schedules a recurring
+  # LOG_TAIL_POLL tick; the handler calls tail.poll! and reschedules
+  # while mode is still :log_tail.
+  def test_open_log_tail_returns_log_tail_poll_tick_cmd
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "tail-260428-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
+      logs = File.join(task_folder, "logs")
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "agent.log"), "first line\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "5-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: nil, attrs: nil,
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "agent_running", action_label: "Agent running", suggested_command: nil
+      )
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))
+      assert_kind_of Bubbletea::TickCommand, cmd,
+        "successful open_log_tail must seed the LOG_TAIL_POLL tick so new bytes drain"
+      assert_equal :log_tail, @model.hive_model.mode
+    end
+  end
+
+  def test_log_tail_poll_drains_new_bytes_and_reschedules
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      log_path = File.join(dir, "agent.log")
+      File.write(log_path, "first line\n")
+      tail = Hive::Tui::LogTail::Tail.new(log_path)
+      tail.open!
+      wrapper = Hive::Tui::BubbleModel::LogTailContext.new(tail: tail, claude_pid_alive: true)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :log_tail, tail_state: wrapper),
+        dispatch: @dispatch
+      )
+
+      # Append bytes after open!; tail's view is frozen until poll!
+      File.write(log_path, "second line\n", mode: "a")
+      assert_equal [ "first line" ], tail.lines(50),
+        "without poll! the new bytes must not yet be visible — proves the regression existed"
+
+      _, cmd = @model.update(Hive::Tui::Messages::LOG_TAIL_POLL)
+      assert_includes tail.lines(50), "second line",
+        "LOG_TAIL_POLL must drain new bytes via tail.poll!"
+      assert_kind_of Bubbletea::TickCommand, cmd,
+        "must reschedule a fresh tick while the user is still in :log_tail mode"
+    end
+  end
+
+  def test_log_tail_poll_stops_rescheduling_after_mode_change_out
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, tail_state: nil),
+      dispatch: @dispatch
+    )
+    _, cmd = @model.update(Hive::Tui::Messages::LOG_TAIL_POLL)
+    assert_nil cmd,
+      "LOG_TAIL_POLL must not reschedule after the user has left :log_tail mode"
+  end
 end

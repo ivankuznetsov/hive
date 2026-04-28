@@ -262,9 +262,37 @@ module Hive
       Polls the same data source at 1Hz, groups rows by action label, and
       dispatches every workflow verb (`brainstorm` / `plan` / `develop` /
       `review` / `pr` / `archive`) as a fresh subprocess on a single
-      keystroke. `?` shows the keybinding cheatsheet; `q` quits.
+      keystroke. `?` inside the TUI opens the full per-mode keybinding
+      cheatsheet; `q` quits.
 
-      Keystrokes: b/p/d/r/P/a dispatch the corresponding workflow verb on the highlighted task.
+      Modes (each with its own keymap):
+
+        grid (default)
+          b/p/d/r/P/a   dispatch hive brainstorm/plan/develop/review/pr/archive
+          j/k or Down/Up cursor up/down (jumps across projects at edges)
+          Enter         contextual: review_findings opens triage,
+                        agent_running/error opens log tail, ready_* dispatches
+          /             open the slug-filter prompt
+          1-9           scope to the Nth registered project; 0 clears scope
+          ?             open this help overlay
+          q             quit
+
+        triage (entered via Enter on a "Review findings" row)
+          j/k or Down/Up move the finding cursor
+          Space         toggle accept/reject on the highlighted finding
+          a             bulk-accept every finding on the task
+          r             bulk-reject every finding on the task
+          d             dispatch hive develop to re-inject accepted findings
+          Esc           back to grid
+
+        log_tail (entered via Enter on agent_running / error rows)
+          q / Esc       back to grid
+
+        filter (entered via /)
+          printable     append to the buffer
+          Backspace     delete one char
+          Enter         commit the typed buffer as the active filter
+          Esc           cancel and clear the buffer (preserves any prior filter)
 
       Human-only — `hive tui --json` is rejected with EX_USAGE (64).
       Agent-callable surfaces stay JSON via `hive status` and the
@@ -283,7 +311,11 @@ module Hive
         puts JSON.generate(
           "ok" => false,
           "error_class" => "InvalidTaskPath",
-          "error_kind" => "unsupported_flag",
+          # Match the error_kind value other InvalidTaskPath emit
+          # sites use across the CLI (markers/findings/run/etc.) so
+          # JSON consumers can switch on a single canonical value
+          # rather than special-casing TUI's previous "unsupported_flag".
+          "error_kind" => "invalid_task_path",
           "exit_code" => Hive::ExitCodes::USAGE,
           "message" => message
         )

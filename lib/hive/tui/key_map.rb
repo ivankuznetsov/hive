@@ -182,10 +182,27 @@ module Hive
         Messages::NOOP
       end
 
+      # Filter-prompt mode keystrokes. Update consumes the FilterChar*
+      # messages to extend/shrink/commit/cancel the buffer; KeyMap is
+      # the producer side. Esc routes to FILTER_CANCELLED (not BACK) so
+      # `apply_filter_cancelled` clears `filter_buffer` rather than
+      # leaking a half-typed query into the next `/` open.
       def filter_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
-        return Messages::BACK if ESCAPE_KEYS.include?(key)
+        return Messages::FILTER_CANCELLED if ESCAPE_KEYS.include?(key)
+        return Messages::FILTER_COMMITTED if ENTER_KEYS.include?(key)
+        return Messages::FILTER_CHAR_DELETED if key == :key_backspace
+        return Messages::FilterCharAppended.new(char: key) if printable_filter_char?(key)
 
         Messages::NOOP
+      end
+
+      # Single printable character (string of length 1). Excludes
+      # `:key_*` symbols and the `:space` symbol. Space-as-char (the
+      # literal " " string) is allowed so users can filter on slugs
+      # containing spaces, even though Hive slugs don't currently use
+      # them — keeps the surface forgiving.
+      def printable_filter_char?(key)
+        key.is_a?(String) && key.length == 1
       end
 
       # Help overlay dismisses on any key — matches the curses-era

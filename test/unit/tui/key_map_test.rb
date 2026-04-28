@@ -236,9 +236,35 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::BACK, msg
   end
 
-  def test_filter_esc_returns_back
+  # F2/F16: Esc in filter mode must route to FILTER_CANCELLED (not BACK)
+  # so apply_filter_cancelled clears filter_buffer. Routing through BACK
+  # left a half-typed query in the buffer for the next `/` open.
+  def test_filter_esc_returns_filter_cancelled
     msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_escape, row: nil)
-    assert_same Hive::Tui::Messages::BACK, msg
+    assert_same Hive::Tui::Messages::FILTER_CANCELLED, msg
+  end
+
+  def test_filter_enter_returns_filter_committed
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_enter, row: nil)
+    assert_same Hive::Tui::Messages::FILTER_COMMITTED, msg
+  end
+
+  def test_filter_backspace_returns_filter_char_deleted
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_backspace, row: nil)
+    assert_same Hive::Tui::Messages::FILTER_CHAR_DELETED, msg
+  end
+
+  def test_filter_printable_char_returns_filter_char_appended
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: "a", row: nil)
+    assert_kind_of Hive::Tui::Messages::FilterCharAppended, msg
+    assert_equal "a", msg.char
+  end
+
+  def test_filter_unknown_special_key_is_noop
+    # `:key_up` / `:key_down` etc. don't edit the buffer — silently noop
+    # so a stray cursor key doesn't move the grid cursor while typing.
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_up, row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   # -------- Unknown key → NOOP --------

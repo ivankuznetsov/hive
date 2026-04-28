@@ -81,6 +81,48 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :filter, @model.hive_model.mode
   end
 
+  # F2: full filter happy path through KeyMessage → KeyMap → Update.
+  # Open filter, type chars, commit; assert filter committed and mode
+  # back to :grid. Pins the regression we found in the /ce-code-review
+  # walk-through where every filter keystroke silently NOOPed.
+  def test_filter_mode_typing_and_enter_commits_filter
+    @model.update(Bubbletea::KeyMessage.new(key_type: 0, runes: [ "/".ord ]))
+    "auth".each_char do |c|
+      @model.update(Bubbletea::KeyMessage.new(key_type: 0, runes: [ c.ord ]))
+    end
+    assert_equal "auth", @model.hive_model.filter_buffer
+
+    @model.update(Bubbletea::KeyMessage.new(key_type: Bubbletea::KeyMessage::KEY_ENTER))
+    assert_equal "auth", @model.hive_model.filter
+    assert_equal :grid, @model.hive_model.mode
+    assert_equal "", @model.hive_model.filter_buffer
+  end
+
+  def test_filter_mode_backspace_shrinks_buffer
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :filter, filter_buffer: "auth"),
+      dispatch: @dispatch
+    )
+    @model.update(Bubbletea::KeyMessage.new(key_type: Bubbletea::KeyMessage::KEY_BACKSPACE))
+    assert_equal "aut", @model.hive_model.filter_buffer
+  end
+
+  # F16: Esc-in-filter must clear filter_buffer (was leaking the
+  # half-typed query into the next `/` open because the message
+  # routed through BACK instead of FILTER_CANCELLED).
+  def test_filter_mode_escape_clears_buffer_and_returns_to_grid
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :filter, filter_buffer: "wip", filter: "auth"),
+      dispatch: @dispatch
+    )
+    @model.update(Bubbletea::KeyMessage.new(key_type: Bubbletea::KeyMessage::KEY_ESC))
+    assert_equal :grid, @model.hive_model.mode
+    assert_equal "", @model.hive_model.filter_buffer
+    # Esc preserves any prior committed filter — only clears the
+    # in-progress buffer.
+    assert_equal "auth", @model.hive_model.filter
+  end
+
   def test_digit_keystroke_sets_project_scope
     km = Bubbletea::KeyMessage.new(key_type: 0, runes: [ "2".ord ])
     @model.update(km)

@@ -264,6 +264,82 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "auto-heal must not block the regular Update.apply path — the model still updates"
   end
 
+  # ---- SubprocessExited diagnostic interception ----
+  #
+  # Pattern-matches the captured stderr in SUBPROCESS_LOG_PATH for
+  # known setup-class errors and replaces the generic "exited N —
+  # tail …" flash with an actionable message. Dogfood-driven:
+  # `hive pr` exit 1 looped on a demo project that had no `origin`
+  # remote — the user wanted "project is not set up" surfaced
+  # directly so they could go fix the repo without `tail`-ing the log.
+
+  def with_isolated_subprocess_log
+    require "tmpdir"
+    Dir.mktmpdir do |dir|
+      log_path = File.join(dir, "hive-tui-subprocess.log")
+      original = Hive::Tui::Subprocess::SUBPROCESS_LOG_PATH
+      Hive::Tui::Subprocess.send(:remove_const, :SUBPROCESS_LOG_PATH)
+      Hive::Tui::Subprocess.const_set(:SUBPROCESS_LOG_PATH, log_path)
+      begin
+        yield log_path
+      ensure
+        Hive::Tui::Subprocess.send(:remove_const, :SUBPROCESS_LOG_PATH)
+        Hive::Tui::Subprocess.const_set(:SUBPROCESS_LOG_PATH, original)
+      end
+    end
+  end
+
+  def write_log_section(log_path, argv:, stderr:, exit_code:)
+    File.open(log_path, "a") do |f|
+      f.puts "----- 2026-04-28T11:05:47Z BEGIN: #{argv.join(' ')} -----"
+      f.puts stderr
+      f.puts "----- 2026-04-28T11:05:48Z END exit=#{exit_code}: #{argv.join(' ')} -----"
+    end
+  end
+
+  def test_missing_origin_remote_shows_project_not_set_up
+    with_isolated_subprocess_log do |log_path|
+      write_log_section(
+        log_path,
+        argv: %w[hive pr hello-world-test-260425-431f --project demo --from 6-pr],
+        stderr: "hive: git push failed: fatal: 'origin' does not appear to be a git repository",
+        exit_code: 1
+      )
+
+      @model.update(Hive::Tui::Messages::SubprocessExited.new(verb: "pr", exit_code: 1))
+
+      flash = @model.hive_model.flash
+      refute_nil flash
+      assert_match(/demo:/, flash, "diagnostic must name the project so the user knows which repo to fix")
+      assert_match(/project not set up/i, flash,
+        "user wanted 'project is not set up' surfaced directly so they can go create the repo manually")
+      refute_match(/tail/, flash, "diagnostic supersedes the generic 'tail the log' hint")
+    end
+  end
+
+  def test_unknown_failure_falls_back_to_default_flash
+    with_isolated_subprocess_log do |log_path|
+      write_log_section(
+        log_path,
+        argv: %w[hive develop slug --project p --from 3-plan],
+        stderr: "some unknown error nobody patterns against",
+        exit_code: 1
+      )
+
+      @model.update(Hive::Tui::Messages::SubprocessExited.new(verb: "develop", exit_code: 1))
+
+      # No specific diagnostic → Update.apply's default "exited N — tail …" flash applies.
+      flash = @model.hive_model.flash
+      assert_match(/exited 1/, flash, "unrecognized failures fall back to the generic exit-code flash")
+      assert_match(/tail/, flash, "fall-back flash includes the log-path hint")
+    end
+  end
+
+  def test_zero_exit_does_not_flash_diagnostic
+    @model.update(Hive::Tui::Messages::SubprocessExited.new(verb: "pr", exit_code: 0))
+    assert_nil @model.hive_model.flash, "zero exit must not flash anything (success path is silent)"
+  end
+
   # Last-resort safety net: an unhandled exception escaping
   # `BubbleModel#update` would unwind out of Bubbletea's runner and
   # tear down the alt-screen mid-frame. Pin that ANY StandardError

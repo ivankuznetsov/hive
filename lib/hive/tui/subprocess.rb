@@ -137,6 +137,99 @@ module Hive
         nil
       end
 
+      # Map well-known stderr substrings emitted by the underlying CLI
+      # (git, gh, ssh, etc.) to short, action-oriented flash text the
+      # TUI can show in place of "`<verb>` exited N — tail …". Helps
+      # the user immediately see *why* the verb failed for the common
+      # setup-class errors that are not a hive bug. Each entry is a
+      # [pattern, formatter] pair; formatter receives argv so it can
+      # name the project / slug.
+      DIAGNOSTIC_PATTERNS = [
+        [
+          /'origin' does not appear to be a git repository|Could not read from remote repository/,
+          ->(argv) {
+            project = extract_project(argv)
+            prefix = project ? "#{project}: " : ""
+            "#{prefix}project not set up — git remote 'origin' missing. Create the repo + add origin in a sibling shell, then retry."
+          }
+        ],
+        [
+          /gh: command not found/,
+          ->(_argv) { "`gh` CLI not installed — install it (e.g. `brew install gh`), then retry." }
+        ],
+        [
+          /Permission denied \(publickey\)/,
+          ->(_argv) { "git auth failed (no SSH key) — check `gh auth status` or your SSH agent, then retry." }
+        ]
+      ].freeze
+
+      # Returns a friendly diagnostic string for the most recent
+      # subprocess section in SUBPROCESS_LOG_PATH, or nil when nothing
+      # matches a known pattern. Called by `BubbleModel#handle_side_effect`
+      # on `Messages::SubprocessExited` with non-zero exit code; if a
+      # diagnostic is available, the TUI flashes that instead of the
+      # generic "exited N — tail …" hint.
+      #
+      # The lookup is best-effort: it reads the tail of the log,
+      # finds the most recent BEGIN that mentions the verb, and treats
+      # everything between that BEGIN and the next END as the verb's
+      # captured stderr. Concurrent verbs may interleave at line
+      # boundaries; if a pattern still matches we still show the
+      # diagnostic — false-positive risk is low because the patterns
+      # are specific.
+      def diagnose_recent_failure(verb)
+        return nil unless File.exist?(SUBPROCESS_LOG_PATH)
+
+        section = recent_log_section_for(verb)
+        return nil if section.nil? || section.strip.empty?
+
+        argv = parse_argv_from_section(section) || []
+        match = DIAGNOSTIC_PATTERNS.find { |pattern, _| section.match?(pattern) }
+        return nil unless match
+
+        match[1].call(argv)
+      rescue StandardError => e
+        Hive::Tui::Debug.log("diagnose", "failed: #{e.class.name}: #{e.message}")
+        nil
+      end
+
+      # @api private
+      # Read the file tail (cap at 64KB so a long-lived log doesn't
+      # explode memory), find the most recent BEGIN line mentioning
+      # the verb, return the text from that BEGIN through the next
+      # END (or EOF). Returns nil if no BEGIN-for-verb is present.
+      def recent_log_section_for(verb)
+        cap = 64 * 1024
+        size = File.size(SUBPROCESS_LOG_PATH)
+        offset = [ size - cap, 0 ].max
+        text = File.open(SUBPROCESS_LOG_PATH, "r") do |f|
+          f.seek(offset)
+          f.read
+        end
+        begin_re = /^----- [^\n]* BEGIN: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
+        begin_match = text.enum_for(:scan, begin_re).map { Regexp.last_match }.last
+        return nil if begin_match.nil?
+
+        section_start = text.rindex(begin_match[0])
+        end_idx = text.index(/^----- [^\n]* END exit=[^\n]* -----$/, section_start) || text.length
+        text[section_start..end_idx]
+      end
+
+      # @api private
+      def parse_argv_from_section(section)
+        first = section.lines.first.to_s
+        m = first.match(/BEGIN: (.+) -----$/)
+        m ? m[1].split(/\s+/) : nil
+      end
+
+      # @api private
+      def extract_project(argv)
+        idx = argv.index("--project")
+        return nil if idx.nil?
+
+        argv[idx + 1]
+      end
+
       # Returns [exit_status, stdout, stderr]. `Open3.capture3` manages
       # the child internally; we have no pgid to track. The placeholder
       # registration that pairs with the SIGHUP cleanup hook happens

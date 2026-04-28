@@ -218,6 +218,8 @@ module Hive
         when Hive::Tui::Messages::SnapshotArrived
           auto_heal_kill_class_errors(message.snapshot)
           nil
+        when Hive::Tui::Messages::SubprocessExited
+          diagnose_subprocess_exit(message)
         when Hive::Tui::Messages::DispatchCommand
           dispatch_command(message)
         when Hive::Tui::Messages::OpenFindings
@@ -231,6 +233,21 @@ module Hive
         when Hive::Tui::Messages::BulkReject
           bulk_reject(message.slug)
         end
+      end
+
+      # Intercept SubprocessExited to look for known setup errors in
+      # the captured stderr and override the generic "exited N — tail …"
+      # flash with an actionable diagnostic. Returns nil for the
+      # exit-zero (silent) case and for non-matching failures so
+      # `Update.apply_subprocess_exited` keeps its existing default
+      # flash behavior.
+      def diagnose_subprocess_exit(msg)
+        return nil if msg.exit_code.nil? || msg.exit_code.zero?
+
+        diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
+        return nil if diagnostic.nil?
+
+        [ @hive_model.with(flash: diagnostic, flash_set_at: Time.now), nil ]
       end
 
       # Scan a fresh snapshot for tasks whose `:error` marker came from

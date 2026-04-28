@@ -146,6 +146,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # `LogTail::FileResolver.latest` raise `Hive::NoLogFiles`, which
   # wasn't in `open_log_tail`'s rescue list, killing the TUI.
 
+  # Last-resort safety net: an unhandled exception escaping
+  # `BubbleModel#update` would unwind out of Bubbletea's runner and
+  # tear down the alt-screen mid-frame. Pin that ANY StandardError
+  # is converted into a flash + the TUI keeps running.
+  def test_unhandled_exception_in_handler_becomes_flash_not_crash
+    # Force OpenLogTail to hit an unanticipated Errno by passing a
+    # row whose folder is a path that File operations will reject
+    # for a reason NOT in the explicit rescue list (Errno::ENAMETOOLONG
+    # via a folder name >255 bytes — neither ENOENT nor EACCES).
+    crash_row = Hive::Tui::Snapshot::Row.new(
+      project_name: "x", stage: "5-review", slug: "demo",
+      folder: "/" + ("a" * 4096), state_file: nil, marker: nil, attrs: nil,
+      mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "error", action_label: "Error", suggested_command: nil
+    )
+
+    # Whatever exception rises (InvalidTaskPath from the bad folder
+    # is the actual one here, but the safety net should catch any
+    # StandardError) — must not propagate.
+    _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: crash_row))
+    assert_nil cmd, "unhandled exception path returns nil cmd, never propagates"
+    refute_nil @model.hive_model.flash, "exception must be surfaced as a flash"
+    assert_equal :grid, @model.hive_model.mode,
+      "exception in a sub-mode entry must NOT leave mode flipped"
+  end
+
   def test_open_log_tail_flashes_when_no_log_files_exist
     require "tmpdir"
     Dir.mktmpdir do |project_root|

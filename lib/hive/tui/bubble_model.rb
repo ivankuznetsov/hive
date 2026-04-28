@@ -2,6 +2,7 @@ require "bubbletea"
 require "hive"
 require "hive/task"
 require "hive/findings"
+require "hive/tui/debug"
 require "hive/tui/model"
 require "hive/tui/messages"
 require "hive/tui/key_map"
@@ -98,6 +99,26 @@ module Hive
         new_model, cmd = Hive::Tui::Update.apply(@hive_model, hive_message)
         @hive_model = new_model
         [ self, cmd ]
+      rescue StandardError => e
+        # Last-resort safety net. Every I/O-doing handler in
+        # `handle_side_effect` lists its plausible failure modes
+        # explicitly (see `open_findings`, `open_log_tail`, …) and
+        # converts them into a flash. This catches the
+        # *unanticipated* ones — a new Errno from a future fs feature,
+        # a YAML parse error from a malformed reviewer file, a
+        # Bubbletea framework message we don't yet handle. Without
+        # this rescue, the exception unwinds out of `Bubbletea::Runner.run`
+        # and tears down the alt-screen mid-frame, dumping the user back
+        # to the shell. With it: a flash + the TUI keeps going. The
+        # exception class + message are written to the debug log so
+        # operators with `HIVE_TUI_DEBUG=1` can diagnose without
+        # reproducing.
+        Hive::Tui::Debug.log("bubble_model", "rescued #{e.class.name}: #{e.message}")
+        @hive_model = @hive_model.with(
+          flash: "internal error: #{e.class.name.split('::').last}: #{e.message[0, 80]}",
+          flash_set_at: Time.now
+        )
+        [ self, nil ]
       end
 
       def view

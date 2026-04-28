@@ -50,35 +50,46 @@ module Hive
         require "hive/tui/state_source"
         require "hive/tui/subprocess_registry"
 
-        state_source = Hive::Tui::StateSource.new
-        state_source.start
-
-        seed_model = Hive::Tui::Model.initial
-        bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
-        # `input_timeout: 1` (ms) is the GVL-friendly setting: bubbletea-ruby's
-        # `tea_input_read_raw` C call holds the Ruby GVL for the full timeout
-        # without releasing it, which starves the StateSource polling thread
-        # at the default 10ms. With 1ms, the main loop yields the GVL ~10x
-        # more often per second so background snapshot polling lands within
-        # ~1s instead of stalling for 10s+. Documented in
-        # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
-        runner = Bubbletea::Runner.new(bubble_model, alt_screen: true, input_timeout: 1)
-        bubble_model.dispatch = runner.method(:send)
-
-        prev_hup = install_terminate_hook(runner)
-        poller = start_snapshot_poller(state_source, runner)
+        # Pre-declare the cleanup-relevant locals so the ensure block
+        # can nil-guard each one. Setup runs INSIDE begin so a raise
+        # before runner.run still triggers the same cleanup path
+        # (StateSource thread join, HUP hook restore, in-flight
+        # subprocess + heal thread reap). Pre-fix, a Bubbletea::Runner
+        # constructor failure would leak the StateSource thread.
+        state_source = nil
+        bubble_model = nil
+        prev_hup = nil
+        poller = nil
 
         begin
+          state_source = Hive::Tui::StateSource.new
+          state_source.start
+
+          seed_model = Hive::Tui::Model.initial
+          bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
+          # `input_timeout: 1` (ms) is the GVL-friendly setting: bubbletea-ruby's
+          # `tea_input_read_raw` C call holds the Ruby GVL for the full timeout
+          # without releasing it, which starves the StateSource polling thread
+          # at the default 10ms. With 1ms, the main loop yields the GVL ~10x
+          # more often per second so background snapshot polling lands within
+          # ~1s instead of stalling for 10s+. Documented in
+          # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+          runner = Bubbletea::Runner.new(bubble_model, alt_screen: true, input_timeout: 1)
+          bubble_model.dispatch = runner.method(:send)
+
+          prev_hup = install_terminate_hook(runner)
+          poller = start_snapshot_poller(state_source, runner)
+
           runner.run
         ensure
           poller&.kill
-          state_source.stop
-          restore_terminate_hook(prev_hup)
+          state_source&.stop
+          restore_terminate_hook(prev_hup) if prev_hup
           Hive::Tui::SubprocessRegistry.kill_inflight!
           # F8: heal Threads spawned by auto-heal can outlive the
           # runner; reap them with a 2s join-then-kill so the process
           # doesn't exit with zombies.
-          bubble_model.kill_inflight_heals!
+          bubble_model&.kill_inflight_heals!
         end
       end
 

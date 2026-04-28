@@ -59,14 +59,11 @@ If `claude_pid_alive == false` the marker is provably stale; the verb dispatches
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 
-## Subprocess takeover
+## Subprocess dispatch
 
-Workflow verbs and triage's `d` (develop) keystroke dispatch via `Hive::Tui::Subprocess.takeover_command(argv, dispatch:)` on the charm path. The returned `Bubbletea::ExecCommand` runs synchronously in the framework's suspend window (raw mode disabled, cursor shown, input reader stopped). Inside the callable:
+Workflow verbs default to background dispatch: `Hive::Tui::Subprocess.dispatch_background(argv, dispatch:)` `Process.spawn`s the child detached into its own pgroup with stdout/stderr captured to `SUBPROCESS_LOG_PATH`, returns immediately, and a reaper Thread waits for the child and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the TUI flashes the result. The renderer keeps painting and multiple agents across multiple projects run concurrently. `Hive::Workflows::VERBS` carries an optional `interactive: true` flag for verbs that need the user's tty (stdin prompts); none of the v1 verbs are flagged interactive, so every workflow keystroke takes the background path today.
 
-1. `Process.spawn(*argv, pgroup: true)` with stdin/stdout/stderr inherited.
-2. `Process.wait2` blocks; INT/TERM forward to the child's pgroup.
-3. The exit code is dispatched as `Messages::SubprocessExited(verb:, exit_code:)` via the closure-captured `dispatch` lambda (which `App.run_charm` wires to `runner.method(:send)`).
-4. The framework re-enters raw mode, hides the cursor, and resumes the input reader.
+Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_command(argv, dispatch:)`, which returns a `Bubbletea::SequenceCommand` of three steps: exit alt-screen, run a callable synchronously inside the framework's suspend window (raw mode disabled, cursor shown, input reader stopped), then re-enter alt-screen. The callable spawns the child with stdio inherited, blocks on `Process.wait2`, and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the user sees the same flash. Used only for verbs that genuinely need the tty.
 
 Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — `Open3.capture3` runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line.
 
@@ -76,7 +73,7 @@ Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead
 - **Ctrl+Z / SIGTSTP:** Bubble Tea owns suspend/resume of the alt-screen and raw-mode toggling.
 - **SIGHUP:** trapped at boot in `App.run_charm`; the trap calls `runner.send(Messages::TERMINATE_REQUESTED)`, which the runner picks up at the top of the next loop tick. Update returns `Bubbletea.quit` so the runner exits cleanly. Cleanup runs in `App.run_charm`'s `ensure` (kill the polling thread, stop StateSource, restore the previous HUP handler, `SubprocessRegistry.kill_inflight!`).
 - **`at_exit`:** `SubprocessRegistry.kill_inflight!` is registered alongside the StateSource boot so a crash during init still kills any in-flight workflow-verb subprocess.
-- **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"unsupported_flag", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema).
+- **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"invalid_task_path", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema, and `error_kind` matches the value other `InvalidTaskPath` emit sites already use).
 - **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.
 
 ## Test surface

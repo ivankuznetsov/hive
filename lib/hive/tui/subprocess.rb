@@ -220,13 +220,21 @@ module Hive
       # claude tool-permission asks) still work end-to-end.
       SUBPROCESS_LOG_PATH = File.join(Dir.tmpdir, "hive-tui-subprocess.log").freeze
 
-      # F25: pre-write rotation cap. Long-running TUI sessions append a
-      # marker line per BEGIN + END + ERRNO + child stderr (workflow
-      # verbs redirect stderr here), so the file grows unboundedly.
+      # F25: pre-write rotation cap, checked at every BEGIN/END stamp.
       # When `SUBPROCESS_LOG_PATH` exceeds SUBPROCESS_LOG_MAX_BYTES,
-      # rename it to `SUBPROCESS_LOG_PATH.1` (overwrite any existing
-      # rotated copy) and start fresh. Single rotation tier — disk
-      # usage caps at 2 × SUBPROCESS_LOG_MAX_BYTES.
+      # rename it to `SUBPROCESS_LOG_PATH.1` (overwriting any prior
+      # rotated copy) so the next stamp starts fresh.
+      #
+      # The cap is approximate, not absolute. Background-spawn children
+      # write stdout/stderr directly into the file via `Process.spawn`
+      # `out:` / `err:` redirects; rotation only fires synchronously
+      # with stamp writes. A noisy child producing tens of MB of stderr
+      # between BEGIN and END can grow the file well past the cap, and
+      # the eventual rotation moves that oversized blob to `.1`. The
+      # constant bounds normal-traffic disk usage at roughly twice
+      # SUBPROCESS_LOG_MAX_BYTES; pathological children may
+      # temporarily exceed that. Honest rotation would require
+      # per-spawn capture files (a bigger rework).
       SUBPROCESS_LOG_MAX_BYTES = 10 * 1024 * 1024
 
       # Spawn-and-wait core. Returns the same Integer exit shape:

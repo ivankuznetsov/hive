@@ -46,7 +46,7 @@ module Hive
         { mode: :log_tail, key: "Esc", action: :back, description: "back to grid" },
         # Filter prompt mode.
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
-        { mode: :filter, key: "Esc",   action: :clear_filter,  description: "clear filter and return to grid" }
+        { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" }
       ].each(&:freeze).freeze
     end
   end

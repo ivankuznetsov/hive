@@ -220,6 +220,15 @@ module Hive
       # claude tool-permission asks) still work end-to-end.
       SUBPROCESS_LOG_PATH = File.join(Dir.tmpdir, "hive-tui-subprocess.log").freeze
 
+      # F25: pre-write rotation cap. Long-running TUI sessions append a
+      # marker line per BEGIN + END + ERRNO + child stderr (workflow
+      # verbs redirect stderr here), so the file grows unboundedly.
+      # When `SUBPROCESS_LOG_PATH` exceeds SUBPROCESS_LOG_MAX_BYTES,
+      # rename it to `SUBPROCESS_LOG_PATH.1` (overwrite any existing
+      # rotated copy) and start fresh. Single rotation tier — disk
+      # usage caps at 2 × SUBPROCESS_LOG_MAX_BYTES.
+      SUBPROCESS_LOG_MAX_BYTES = 10 * 1024 * 1024
+
       # Spawn-and-wait core. Returns the same Integer exit shape:
       # 0..255 for clean exits, 128+signo for signal kills,
       # COMMAND_NOT_FOUND_EXIT (127) for missing binary.
@@ -237,11 +246,29 @@ module Hive
       # interleaving BEGIN/END marker lines produced cross-talk
       # diagnostics.
       def stamp_subprocess_log(label, argv, id: nil)
+        rotate_subprocess_log_if_needed
         annotated = id ? annotate_label_with_id(label, id) : label
         File.open(SUBPROCESS_LOG_PATH, "a") do |f|
           f.puts "----- #{Time.now.utc.iso8601} #{annotated}: #{argv.join(' ')} -----"
         end
       rescue StandardError
+        nil
+      end
+
+      # @api private
+      # Rotate when the log exceeds SUBPROCESS_LOG_MAX_BYTES. Renames
+      # the current file to `<path>.1` (overwriting any prior rotation),
+      # leaving the next stamp_subprocess_log to recreate the primary
+      # file via append-open. Best-effort: any errno here (Errno::*,
+      # bumped permissions, parallel rotator, etc.) is swallowed and
+      # the next caller will simply append to the existing oversized
+      # file; correctness still holds, just no rotation that round.
+      def rotate_subprocess_log_if_needed
+        size = File.size?(SUBPROCESS_LOG_PATH).to_i
+        return if size <= SUBPROCESS_LOG_MAX_BYTES
+
+        File.rename(SUBPROCESS_LOG_PATH, "#{SUBPROCESS_LOG_PATH}.1")
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EPERM
         nil
       end
 

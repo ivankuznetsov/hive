@@ -188,6 +188,55 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     end
   end
 
+  # ---- F25: pre-write rotation caps SUBPROCESS_LOG_PATH growth ----
+
+  def test_stamp_subprocess_log_rotates_when_size_exceeds_threshold
+    with_isolated_log do |path|
+      # Pre-fill the log past the threshold with arbitrary bytes — content
+      # doesn't matter, only File.size?.
+      threshold = Hive::Tui::Subprocess::SUBPROCESS_LOG_MAX_BYTES
+      File.write(path, "x" * (threshold + 1))
+      assert File.size(path) > threshold, "fixture sanity: log starts oversized"
+
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", %w[hive pr slug])
+
+      rotated = "#{path}.1"
+      assert File.exist?(rotated), "oversized log must be renamed to <path>.1"
+      assert File.exist?(path), "stamp_subprocess_log must recreate the primary log"
+      assert File.size(path) < threshold,
+        "primary log starts fresh after rotation (only the new BEGIN marker)"
+    end
+  end
+
+  def test_stamp_subprocess_log_does_not_rotate_within_threshold
+    with_isolated_log do |path|
+      File.write(path, "small payload\n")
+      original_size = File.size(path)
+
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", %w[hive pr slug])
+
+      rotated = "#{path}.1"
+      refute File.exist?(rotated), "below the threshold no rotation must occur"
+      assert File.size(path) > original_size, "stamp must still append to the primary log"
+    end
+  end
+
+  def test_stamp_subprocess_log_overwrites_existing_rotated_copy
+    with_isolated_log do |path|
+      threshold = Hive::Tui::Subprocess::SUBPROCESS_LOG_MAX_BYTES
+      File.write("#{path}.1", "OLDCONTENT")
+      File.write(path, "x" * (threshold + 1))
+
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", %w[hive pr slug])
+
+      rotated_content = File.read("#{path}.1")
+      refute_match(/OLDCONTENT/, rotated_content,
+        "single-tier rotation: rename overwrites the prior .1; total disk usage stays bounded")
+      assert rotated_content.start_with?("x"),
+        "rotated content must be the freshly oversized log, not the old .1"
+    end
+  end
+
   # ---- F7: per-spawn correlation IDs prevent verb section cross-talk ----
 
   def test_interleaved_concurrent_verbs_use_correlation_ids_to_pair_begin_end

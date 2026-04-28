@@ -1,4 +1,5 @@
 require "test_helper"
+require "securerandom"
 require "hive/tui/subprocess"
 require "hive/tui/subprocess_registry"
 
@@ -247,5 +248,90 @@ class TuiSubprocessDispatchBackgroundTest < Minitest::Test
     )
     assert wait_for_messages(1)
     assert_equal "brainstorm", @messages.first.verb
+  end
+
+  # ---- Per-spawn capture files (P2 #4) ----
+  #
+  # Pre-fix, child stdout/stderr was redirected to the shared
+  # SUBPROCESS_LOG_PATH; rotation only fired around BEGIN/END stamps,
+  # so a noisy child could grow the file past the cap before END
+  # arrived. Per-spawn capture files give each spawn its own log
+  # whose lifetime is bounded by the reaper (delete on success,
+  # keep on failure). The disk-usage cap on the shared log is now
+  # actually a real bound.
+
+  def existing_spawn_capture_paths
+    Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log"))
+  end
+
+  def test_dispatch_background_writes_child_stderr_to_per_spawn_capture
+    ENV["HIVE_TUI_FAKE_STDERR"] = "fatal: synthetic failure for capture test"
+    ENV["HIVE_TUI_FAKE_EXIT"] = "1"
+    before = existing_spawn_capture_paths
+    Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    assert wait_for_messages(1)
+
+    # Failure path keeps the capture; new file shows up vs. baseline.
+    after = existing_spawn_capture_paths
+    new_files = after - before
+    assert_equal 1, new_files.size,
+      "failed spawn must leave exactly one new per-spawn capture for diagnose to read"
+    captured = File.read(new_files.first)
+    assert_includes captured, "fatal: synthetic failure for capture test",
+      "child stderr must land in the per-spawn capture file, not the shared marker log"
+
+    File.delete(new_files.first) # test cleanup
+  end
+
+  def test_successful_spawn_deletes_its_capture_file
+    before = existing_spawn_capture_paths
+    Hive::Tui::Subprocess.dispatch_background([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    assert wait_for_messages(1)
+
+    after = existing_spawn_capture_paths
+    assert_equal before.size, after.size,
+      "exit 0 must delete the per-spawn capture so disk usage is bounded by failures, not spawn count"
+  end
+
+  def test_diagnose_recent_failure_reads_per_spawn_capture
+    ENV["HIVE_TUI_FAKE_STDERR"] = "fatal: 'origin' does not appear to be a git repository"
+    ENV["HIVE_TUI_FAKE_EXIT"] = "1"
+    Hive::Tui::Subprocess.dispatch_background(
+      [ FAKE_CHILD, "pr", "--project", "demo" ], dispatch: @dispatch
+    )
+    assert wait_for_messages(1)
+
+    diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+    refute_nil diagnostic,
+      "diagnose must locate the per-spawn capture by spawn_id and run pattern matching against it"
+    assert_match(/demo:.*project not set up/i, diagnostic)
+  ensure
+    Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log")).each { |p| File.delete(p) rescue nil }
+  end
+
+  def test_sweep_old_spawn_captures_deletes_orphans_past_cutoff
+    # Drop a synthetic orphan dated 25h ago — older than the 24h cutoff.
+    orphan = File.join(Dir.tmpdir, "hive-tui-spawn-#{SecureRandom.hex(4)}.log")
+    File.write(orphan, "stale capture from a crashed reaper")
+    File.utime(Time.now - (25 * 60 * 60), Time.now - (25 * 60 * 60), orphan)
+
+    Hive::Tui::Subprocess.send(:sweep_old_spawn_captures!)
+
+    refute File.exist?(orphan),
+      "sweep_old_spawn_captures! must delete files older than SPAWN_CAPTURE_MAX_AGE_SECONDS"
+  end
+
+  def test_sweep_old_spawn_captures_keeps_recent_files
+    # A file dated 1h ago is well within the 24h cutoff.
+    keeper = File.join(Dir.tmpdir, "hive-tui-spawn-#{SecureRandom.hex(4)}.log")
+    File.write(keeper, "recent capture from an in-flight reaper")
+    File.utime(Time.now - (60 * 60), Time.now - (60 * 60), keeper)
+
+    Hive::Tui::Subprocess.send(:sweep_old_spawn_captures!)
+
+    assert File.exist?(keeper),
+      "sweep must not touch captures within the cutoff window"
+  ensure
+    File.delete(keeper) if keeper && File.exist?(keeper)
   end
 end

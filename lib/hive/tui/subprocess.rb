@@ -12,11 +12,18 @@ module Hive
     #
     #   * `dispatch_background(argv, dispatch:)` — workflow verbs (hive
     #     brainstorm/plan/develop/review/pr/archive). Spawns the child
-    #     detached with stdio redirected to `SUBPROCESS_LOG_PATH`, returns
-    #     immediately. A reaper Thread waits for the child and dispatches
+    #     detached with stdout/stderr redirected to a per-spawn capture
+    #     file at `<tmpdir>/hive-tui-spawn-<id>.log` (named with the
+    #     same 8-char hex ID embedded in the BEGIN/END markers in
+    #     `SUBPROCESS_LOG_PATH`). Returns immediately. A reaper Thread
+    #     waits for the child, deletes the per-spawn capture on
+    #     exit_code == 0 (success has nothing to diagnose) and keeps
+    #     it on non-zero exits, then dispatches
     #     `Messages::SubprocessExited(verb:, exit_code:)`. Multiple
     #     concurrent agents (across projects) work — the TUI keeps
-    #     polling and rendering while children run.
+    #     polling and rendering while children run, and a noisy child
+    #     can no longer grow the shared log past its rotation cap
+    #     because child output never lands in the shared file.
     #   * `run_quiet!(argv)` — synchronous, captured-stdio children
     #     for per-finding `hive accept-finding` / `hive reject-finding`
     #     toggles in triage mode. `Open3.capture3` runs the child
@@ -79,8 +86,9 @@ module Hive
         Hive::Tui::Debug.log("dispatch_background", "argv=#{argv.inspect}")
         spawn_id = generate_correlation_id
         stamp_subprocess_log("BEGIN", argv, id: spawn_id)
+        sweep_old_spawn_captures!
 
-        pid = spawn_background_child(argv)
+        pid = spawn_background_child(argv, spawn_id)
         if pid.nil?
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: COMMAND_NOT_FOUND_EXIT))
           return nil
@@ -145,12 +153,13 @@ module Hive
       end
 
       # @api private
-      def spawn_background_child(argv)
+      def spawn_background_child(argv, spawn_id)
+        path = spawn_capture_path(spawn_id)
         Process.spawn(
           *argv,
           pgroup: true,
-          out: [ SUBPROCESS_LOG_PATH, "a" ],
-          err: [ SUBPROCESS_LOG_PATH, "a" ]
+          out: [ path, "a" ],
+          err: [ path, "a" ]
         )
       rescue Errno::ENOENT, Errno::EACCES => e
         Hive::Tui::Debug.log("dispatch_background", "errno=#{e.class.name}: #{e.message}")
@@ -195,6 +204,11 @@ module Hive
           _, status = Process.wait2(pid)
           exit_code = translate_status(status)
           stamp_subprocess_log("END exit=#{exit_code}", argv, id: spawn_id)
+          # Successful spawns have nothing to diagnose — drop the
+          # capture file so disk usage stays bounded by failures, not
+          # by overall spawn count. Failures keep their capture so
+          # diagnose_recent_failure can read it.
+          delete_spawn_capture(spawn_id) if spawn_id && exit_code.zero?
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         rescue StandardError => e
           # `wait2` raised (ECHILD / pid tracking bug) — synthesize
@@ -211,30 +225,60 @@ module Hive
         end
       end
 
-      # Subprocess stderr log path. Workflow verbs spawned via
-      # `takeover_command` redirect stderr to this file (append). The
-      # alt-screen reasserts immediately after the child exits, so any
-      # error output would otherwise scroll off-screen too fast to read;
-      # writing to a log lets the user `tail` it on a non-zero exit.
-      # Stdout stays inherited so interactive prompts (gh pr create,
-      # claude tool-permission asks) still work end-to-end.
+      # Per-spawn capture file path. `dispatch_background` redirects
+      # the child's stdout/stderr here (one file per spawn, named with
+      # the same 8-char hex ID embedded in the BEGIN/END markers in
+      # `SUBPROCESS_LOG_PATH`). Successful spawns delete their capture
+      # in the reaper; failed spawns keep theirs so
+      # `diagnose_recent_failure` can read the actual stderr.
+      def spawn_capture_path(spawn_id)
+        File.join(Dir.tmpdir, "hive-tui-spawn-#{spawn_id}.log")
+      end
+
+      # Best-effort delete; the reaper-or-sweep flow tolerates an
+      # already-gone file.
+      def delete_spawn_capture(spawn_id)
+        File.delete(spawn_capture_path(spawn_id))
+      rescue Errno::ENOENT
+        nil
+      rescue StandardError => e
+        Hive::Tui::Debug.log("dispatch_background", "delete_spawn_capture #{spawn_id}: #{e.class.name}")
+      end
+
+      # Belt-and-suspenders cleanup: remove orphaned capture files
+      # older than SPAWN_CAPTURE_MAX_AGE_SECONDS. Crashed reapers,
+      # killed-then-rebooted TUI sessions, and `kill -9 hive` all
+      # leave files behind that the success-path delete never runs
+      # against. Sweep at every BEGIN — hot enough to keep the dir
+      # bounded, cheap enough to not matter (one Dir.glob + N stat
+      # calls).
+      SPAWN_CAPTURE_MAX_AGE_SECONDS = 24 * 60 * 60 # 24h
+
+      def sweep_old_spawn_captures!
+        cutoff = Time.now - SPAWN_CAPTURE_MAX_AGE_SECONDS
+        Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log")).each do |path|
+          File.delete(path) if File.mtime(path) < cutoff
+        rescue Errno::ENOENT
+          nil
+        end
+      rescue StandardError => e
+        Hive::Tui::Debug.log("dispatch_background", "sweep_old_spawn_captures: #{e.class.name}")
+      end
+
+      # The shared marker log: BEGIN[id] / END[id] / ERRNO records
+      # only — child stdout/stderr lives in per-spawn capture files
+      # (see `spawn_capture_path`). Pre-spawn-capture, this file
+      # collected child stdio too and grew unboundedly between the
+      # rotation checkpoints; with per-spawn capture, it carries one
+      # short marker line per BEGIN/END pair, so the disk-usage cap
+      # below is now a real bound.
       SUBPROCESS_LOG_PATH = File.join(Dir.tmpdir, "hive-tui-subprocess.log").freeze
 
-      # F25: pre-write rotation cap, checked at every BEGIN/END stamp.
+      # Pre-write rotation cap, checked at every BEGIN/END stamp.
       # When `SUBPROCESS_LOG_PATH` exceeds SUBPROCESS_LOG_MAX_BYTES,
       # rename it to `SUBPROCESS_LOG_PATH.1` (overwriting any prior
-      # rotated copy) so the next stamp starts fresh.
-      #
-      # The cap is approximate, not absolute. Background-spawn children
-      # write stdout/stderr directly into the file via `Process.spawn`
-      # `out:` / `err:` redirects; rotation only fires synchronously
-      # with stamp writes. A noisy child producing tens of MB of stderr
-      # between BEGIN and END can grow the file well past the cap, and
-      # the eventual rotation moves that oversized blob to `.1`. The
-      # constant bounds normal-traffic disk usage at roughly twice
-      # SUBPROCESS_LOG_MAX_BYTES; pathological children may
-      # temporarily exceed that. Honest rotation would require
-      # per-spawn capture files (a bigger rework).
+      # rotated copy) so the next stamp starts fresh. Now actually
+      # bounded since child output no longer lands here.
       SUBPROCESS_LOG_MAX_BYTES = 10 * 1024 * 1024
 
       # Spawn-and-wait core. Returns the same Integer exit shape:
@@ -365,17 +409,16 @@ module Hive
       end
 
       # @api private
-      # Read the file tail (cap at 64KB so a long-lived log doesn't
-      # explode memory), find the most recent BEGIN line mentioning
-      # the verb, return the text from that BEGIN through its matching
-      # END (or EOF if no matching END yet). Returns nil if no BEGIN-
-      # for-verb is present.
+      # Find the most recent BEGIN[id] for `verb` in the marker log;
+      # return the matching per-spawn capture file's contents (the
+      # actual child stderr, capped at 64KB tail). Returns nil if no
+      # BEGIN-for-verb is present, or if its capture file is gone (the
+      # success-path delete fired, or the sweep reaped an orphan).
       #
-      # Concurrent verbs interleave BEGIN/END marker lines in the log;
-      # F7 added `[ID]` correlation tokens so the matcher pairs the
-      # right BEGIN with the right END instead of grabbing the next-END-
-      # of-any-verb. Falls back to first-END-after-BEGIN for legacy log
-      # entries that pre-date the ID format (no [ID] in the BEGIN line).
+      # Falls back to reading the section from the marker log itself
+      # for entries that lack a correlation ID (legacy logs from
+      # before per-spawn capture landed). The fallback returns the
+      # text BEGIN..matching-END just like the pre-rewrite behavior.
       def recent_log_section_for(verb)
         cap = 64 * 1024
         size = File.size(SUBPROCESS_LOG_PATH)
@@ -384,19 +427,34 @@ module Hive
           f.seek(offset)
           f.read
         end
-        # The `(?:\([^)]+\))?` allows both "BEGIN:" (background-spawn)
-        # and "BEGIN(interactive):" (foreground takeover) — without it
-        # diagnostic lookup silently breaks for any future verb flagged
-        # `interactive: true` in `Hive::Workflows::VERBS`. The
-        # `(?:\[(?<id>[0-9a-f]{8})\])?` captures F7's correlation token
-        # when present.
         begin_re = /^----- [^\n]* BEGIN(?:\([^)]+\))?(?:\[(?<id>[0-9a-f]{8})\])?: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
         begin_match = text.enum_for(:scan, begin_re).map { Regexp.last_match }.last
         return nil if begin_match.nil?
 
+        spawn_id = begin_match[:id]
+        return read_spawn_capture(spawn_id, cap) if spawn_id && File.exist?(spawn_capture_path(spawn_id))
+
+        # Legacy fallback: section text from the marker log itself.
+        # Hits when the entry pre-dates per-spawn capture, when the
+        # capture was deleted (successful spawn — but we wouldn't be
+        # diagnosing in that case anyway), or for the interactive
+        # takeover path which has no per-spawn file.
         section_start = text.rindex(begin_match[0])
-        end_idx = locate_matching_end(text, begin_match[:id], section_start) || text.length
+        end_idx = locate_matching_end(text, spawn_id, section_start) || text.length
         text[section_start..end_idx]
+      end
+
+      # @api private
+      def read_spawn_capture(spawn_id, cap)
+        path = spawn_capture_path(spawn_id)
+        size = File.size(path)
+        offset = [ size - cap, 0 ].max
+        File.open(path, "r") do |f|
+          f.seek(offset)
+          f.read
+        end
+      rescue Errno::ENOENT
+        nil
       end
 
       # @api private

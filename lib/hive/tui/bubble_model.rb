@@ -369,7 +369,7 @@ module Hive
         verb = message.verb || message.argv[1] || "verb"
         slug = message.argv[2] || ""
 
-        cmd = if Hive::Workflows.interactive?(verb)
+        cmd = if verb_interactive?(verb)
                 Hive::Tui::Subprocess.takeover_command(message.argv, dispatch: @dispatch)
         else
                 Hive::Tui::Subprocess.dispatch_background(message.argv, dispatch: @dispatch)
@@ -378,6 +378,16 @@ module Hive
 
         flash_text = slug.empty? ? "running `hive #{verb}`…" : "running `hive #{verb} #{slug}`…"
         [ @hive_model.with(flash: flash_text, flash_set_at: Time.now), cmd ]
+      end
+
+      # Indirection through an instance method (rather than calling
+      # `Hive::Workflows.interactive?` directly) so tests can override
+      # the predicate per-instance with `define_singleton_method`
+      # instead of mutating the module's singleton class. Keeps the
+      # test seam narrow and removes ordering/concurrency risk
+      # between tests that touch the same global.
+      def verb_interactive?(verb)
+        Hive::Workflows.interactive?(verb)
       end
 
       # Synchronous I/O: open the review file, build a TriageState,

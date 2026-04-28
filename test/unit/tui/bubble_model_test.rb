@@ -141,30 +141,26 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_dispatch_command_routes_interactive_verbs_to_foreground_takeover
-    # Stub `Hive::Workflows.interactive?` to return true for "develop"
-    # so the routing path is testable without hard-flagging a real
-    # verb. The default verb config has no interactive entries — this
-    # exercises the dispatch logic, not the policy.
-    Hive::Workflows.singleton_class.alias_method(:_orig_interactive?, :interactive?)
-    Hive::Workflows.define_singleton_method(:interactive?) { |verb| verb.to_s == "develop" }
-    begin
-      msg = Hive::Tui::Messages::DispatchCommand.new(
-        argv: [ "true", "develop", "slug", "--project", "demo", "--from", "3-plan" ],
-        verb: "develop"
-      )
-      _, cmd = @model.update(msg)
-      assert_kind_of Bubbletea::SequenceCommand, cmd,
-        "interactive verbs route to takeover_command which returns a SequenceCommand " \
-        "wrapping exit_alt → exec → enter_alt"
-      classes = cmd.commands.map(&:class)
-      assert_equal(
-        [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
-        classes
-      )
-    ensure
-      Hive::Workflows.singleton_class.alias_method(:interactive?, :_orig_interactive?)
-      Hive::Workflows.singleton_class.send(:remove_method, :_orig_interactive?)
-    end
+    # Override `verb_interactive?` on this BubbleModel INSTANCE so the
+    # routing path is testable without hard-flagging a real verb in
+    # `Hive::Workflows::VERBS` and without mutating module-level state
+    # that other tests may read. Per-instance singleton method lives
+    # only for the lifetime of @model.
+    @model.define_singleton_method(:verb_interactive?) { |verb| verb.to_s == "develop" }
+
+    msg = Hive::Tui::Messages::DispatchCommand.new(
+      argv: [ "true", "develop", "slug", "--project", "demo", "--from", "3-plan" ],
+      verb: "develop"
+    )
+    _, cmd = @model.update(msg)
+    assert_kind_of Bubbletea::SequenceCommand, cmd,
+      "interactive verbs route to takeover_command which returns a SequenceCommand " \
+      "wrapping exit_alt → exec → enter_alt"
+    classes = cmd.commands.map(&:class)
+    assert_equal(
+      [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+      classes
+    )
   end
 
   def test_interactive_takeover_callable_runs_child_and_dispatches_subprocess_exited
@@ -173,30 +169,25 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # spawns the child and dispatches SubprocessExited. Without
     # this test, swapping the callable for a no-op (or breaking
     # the dispatch invocation inside it) would silently pass.
-    Hive::Workflows.singleton_class.alias_method(:_orig_interactive2?, :interactive?)
-    Hive::Workflows.define_singleton_method(:interactive?) { |verb| verb.to_s == "develop" }
+    @model.define_singleton_method(:verb_interactive?) { |verb| verb.to_s == "develop" }
     captured = []
     @model.dispatch = ->(msg) { captured << msg }
-    begin
-      msg = Hive::Tui::Messages::DispatchCommand.new(
-        argv: [ "true", "develop", "slug" ],
-        verb: "develop"
-      )
-      _, cmd = @model.update(msg)
-      exec_cmd = cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
-      refute_nil exec_cmd, "sequence must contain an ExecCommand"
 
-      exec_cmd.callable.call
+    msg = Hive::Tui::Messages::DispatchCommand.new(
+      argv: [ "true", "develop", "slug" ],
+      verb: "develop"
+    )
+    _, cmd = @model.update(msg)
+    exec_cmd = cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
+    refute_nil exec_cmd, "sequence must contain an ExecCommand"
 
-      assert_equal 1, captured.length,
-        "callable must dispatch exactly one SubprocessExited (success path)"
-      assert_kind_of Hive::Tui::Messages::SubprocessExited, captured.first
-      assert_equal "develop", captured.first.verb
-      assert_equal 0, captured.first.exit_code
-    ensure
-      Hive::Workflows.singleton_class.alias_method(:interactive?, :_orig_interactive2?)
-      Hive::Workflows.singleton_class.send(:remove_method, :_orig_interactive2?)
-    end
+    exec_cmd.callable.call
+
+    assert_equal 1, captured.length,
+      "callable must dispatch exactly one SubprocessExited (success path)"
+    assert_kind_of Hive::Tui::Messages::SubprocessExited, captured.first
+    assert_equal "develop", captured.first.verb
+    assert_equal 0, captured.first.exit_code
   end
 
   def test_dispatch_command_routes_non_interactive_verbs_to_background_spawn
@@ -482,25 +473,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_unhandled_exception_in_update_becomes_flash_not_crash
     # The safety net at `BubbleModel#update`'s rescue catches
     # exceptions NOT covered by per-handler rescues. Force a
-    # genuinely unanticipated exception by stubbing
-    # `Hive::Tui::Update.apply` to raise a `RuntimeError` (not in
-    # any per-handler rescue list). Without the safety net, this
-    # would unwind out of `Bubbletea::Runner.run` and tear down
-    # the alt-screen mid-frame.
-    Hive::Tui::Update.singleton_class.alias_method(:_orig_apply, :apply)
-    Hive::Tui::Update.define_singleton_method(:apply) do |_model, _msg|
+    # genuinely unanticipated exception by overriding `translate`
+    # on this BubbleModel INSTANCE — `translate` is the first thing
+    # `update` calls before any per-handler rescue could catch, so
+    # raising here exercises the top-level safety net. Per-instance
+    # singleton method, no module-level mutation.
+    @model.define_singleton_method(:translate) do |_msg|
       raise "synthetic unanticipated failure for the safety-net test"
     end
-    begin
-      _, cmd = @model.update(Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 24))
-      assert_nil cmd, "safety net returns nil cmd; never propagates exception"
-      refute_nil @model.hive_model.flash, "exception must surface as a flash"
-      assert_match(/internal error/i, @model.hive_model.flash,
-        "flash must label this as the safety-net catchall, not a per-handler diagnostic")
-    ensure
-      Hive::Tui::Update.singleton_class.alias_method(:apply, :_orig_apply)
-      Hive::Tui::Update.singleton_class.send(:remove_method, :_orig_apply)
-    end
+    _, cmd = @model.update(Hive::Tui::Messages::WindowSized.new(cols: 80, rows: 24))
+    assert_nil cmd, "safety net returns nil cmd; never propagates exception"
+    refute_nil @model.hive_model.flash, "exception must surface as a flash"
+    assert_match(/internal error/i, @model.hive_model.flash,
+      "flash must label this as the safety-net catchall, not a per-handler diagnostic")
   end
 
   def test_open_log_tail_flashes_when_no_log_files_exist

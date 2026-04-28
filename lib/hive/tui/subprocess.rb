@@ -153,6 +153,34 @@ module Hive
       # Wait for the child in a separate Ruby thread, dispatch
       # SubprocessExited on completion. Each background spawn gets
       # its own reaper — concurrent agents reap independently.
+      #
+      # Lifecycle relative to `Bubbletea::Runner.run`:
+      #
+      # * **Normal case** — runner is alive when `wait2` returns;
+      #   dispatch fires; runner picks up the message at the top of
+      #   its next loop tick; flash surfaces.
+      # * **User quits the TUI while the agent is running** — the
+      #   `App.run_charm` `ensure` block tears the runner down. The
+      #   spawned child KEEPS RUNNING (no INT/TERM forwarding from
+      #   the parent in dispatch_background — children are detached
+      #   into their own pgroup so a long brainstorm finishes even
+      #   if the dashboard exits). When `wait2` eventually returns
+      #   in this Thread, `dispatch.call` lands on a dead runner;
+      #   the inner rescue catches the resulting error, logs it,
+      #   and exits silently. **The outer rescue's StandardError
+      #   does double duty**: it handles both `wait2` failures
+      #   (ECHILD / pid tracking bugs → synthesize `exit_code: -1`)
+      #   AND post-shutdown dispatch attempts. Both end up logged via
+      #   Debug; nothing else cares about the orphaned reaper.
+      # * **Reaper Thread error during normal-case dispatch** — same
+      #   path as the post-shutdown one, but `dispatch.call(-1)`
+      #   succeeds and the user sees "exited -1" on a live TUI.
+      #
+      # Trade: agents can outlive the dashboard (intentional, see
+      # `dispatch_background`'s docstring on detached pgroup). The
+      # cost is that we deliberately can't forward TERM through to
+      # in-flight children at TUI shutdown — `q` quits the TUI but
+      # the agents continue.
       def spawn_reaper_thread(pid, verb, argv, dispatch)
         Thread.new do
           _, status = Process.wait2(pid)
@@ -160,18 +188,15 @@ module Hive
           stamp_subprocess_log("END exit=#{exit_code}", argv)
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         rescue StandardError => e
-          # If `wait2` raises (ECHILD because someone reaped, or a bug
-          # in pid tracking), the user's "running …" flash never
-          # gets a SubprocessExited follow-up — they can't tell whether
-          # the child is still working or wedged. Synthesize an exit
-          # so the existing flash machinery surfaces "exited -1".
+          # `wait2` raised (ECHILD / pid tracking bug) — synthesize
+          # an exit so the user's "running …" flash resolves to
+          # "exited -1" rather than appearing wedged.
           Hive::Tui::Debug.log("dispatch_background", "reaper: #{e.class.name}: #{e.message}")
           begin
             dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: -1))
           rescue StandardError => inner
-            # Runner may have torn down between wait2 raising and our
-            # dispatch — log and exit silently. The reaper Thread is
-            # fire-and-forget; nothing else cares about this exit.
+            # Runner torn down before we got here (post-quit reaper)
+            # — logged and silenced. See lifecycle note above.
             Hive::Tui::Debug.log("dispatch_background", "reaper-dispatch: #{inner.class.name}")
           end
         end

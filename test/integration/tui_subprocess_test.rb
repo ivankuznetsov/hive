@@ -134,13 +134,32 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
   end
 
   # ---- Builder shape ----
+  #
+  # Helper: extract the inner ExecCommand from the sequence. The
+  # outer SequenceCommand wraps three commands: exit_alt_screen, the
+  # exec, and enter_alt_screen — see `Subprocess.takeover_command`'s
+  # rationale for the alt-screen toggle.
+  def exec_inside(sequence)
+    assert_kind_of Bubbletea::SequenceCommand, sequence,
+      "takeover_command returns a sequence wrapping exit_alt → exec → enter_alt"
+    inner = sequence.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
+    refute_nil inner, "sequence must contain an ExecCommand for the spawn"
+    inner
+  end
 
-  def test_takeover_command_returns_bubbletea_exec_command
+  def test_takeover_command_returns_alt_screen_wrapped_exec
     cmd = Hive::Tui::Subprocess.takeover_command([ "hive", "develop", "slug" ], dispatch: @dispatch)
-    assert_kind_of Bubbletea::ExecCommand, cmd,
-      "takeover_command must return a Bubbletea::ExecCommand the runner knows how to execute"
-    assert_respond_to cmd.callable, :call,
-      "ExecCommand#callable must be invokable by the runner"
+    assert_kind_of Bubbletea::SequenceCommand, cmd,
+      "takeover_command returns a sequence so alt-screen toggles around the exec"
+    classes = cmd.commands.map(&:class)
+    assert_equal(
+      [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+      classes,
+      "sequence order must be exit_alt → exec → enter_alt so the child writes " \
+      "to the main screen and the alt-screen redraws cleanly on return"
+    )
+    inner = exec_inside(cmd)
+    assert_respond_to inner.callable, :call, "ExecCommand#callable must be invokable"
   end
 
   def test_takeover_command_does_not_spawn_at_construction_time
@@ -153,7 +172,7 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
   # ---- Callable execution ----
 
   def test_callable_dispatches_subprocess_exited_with_zero_on_clean_exit
-    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch))
     cmd.callable.call
 
     assert_equal 1, @messages.length, "exactly one SubprocessExited per execution"
@@ -165,7 +184,7 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
 
   def test_callable_dispatches_nonzero_exit_code
     ENV["HIVE_TUI_FAKE_EXIT"] = "7"
-    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "develop" ], dispatch: @dispatch)
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "develop" ], dispatch: @dispatch))
     cmd.callable.call
 
     msg = @messages.first
@@ -174,10 +193,10 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
   end
 
   def test_callable_dispatches_command_not_found_when_binary_missing
-    cmd = Hive::Tui::Subprocess.takeover_command(
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command(
       [ "/path/that/does/not/exist/hive-fake", "develop" ],
       dispatch: @dispatch
-    )
+    ))
     cmd.callable.call
 
     msg = @messages.first
@@ -188,7 +207,7 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
 
   def test_callable_dispatches_signal_exit_on_pgroup_term
     ENV["HIVE_TUI_FAKE_BLOCK"] = "1"
-    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "review" ], dispatch: @dispatch)
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "review" ], dispatch: @dispatch))
 
     killer = Thread.new do
       30.times do
@@ -219,7 +238,7 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
     before_int = trap("INT", "DEFAULT")
     before_term = trap("TERM", "DEFAULT")
     begin
-      cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+      cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch))
       cmd.callable.call
       after_int = trap("INT", "DEFAULT")
       after_term = trap("TERM", "DEFAULT")
@@ -232,17 +251,17 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
   end
 
   def test_callable_clears_registry_on_clean_exit
-    cmd = Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch)
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command([ FAKE_CHILD, "pr" ], dispatch: @dispatch))
     cmd.callable.call
     assert_nil Hive::Tui::SubprocessRegistry.current,
       "registry must be cleared after callable so SIGHUP doesn't kill nothing"
   end
 
   def test_callable_clears_registry_on_missing_binary
-    cmd = Hive::Tui::Subprocess.takeover_command(
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command(
       [ "/no/such/binary", "develop" ],
       dispatch: @dispatch
-    )
+    ))
     cmd.callable.call
     assert_nil Hive::Tui::SubprocessRegistry.current,
       "registry must be cleared even when spawn raises ENOENT"
@@ -251,10 +270,10 @@ class TuiSubprocessTakeoverCommandTest < Minitest::Test
   # ---- Verb caching from argv[1] ----
 
   def test_verb_cached_from_argv_index_one
-    cmd = Hive::Tui::Subprocess.takeover_command(
+    cmd = exec_inside(Hive::Tui::Subprocess.takeover_command(
       [ FAKE_CHILD, "brainstorm", "some-slug", "--from", "1-input" ],
       dispatch: @dispatch
-    )
+    ))
     cmd.callable.call
     assert_equal "brainstorm", @messages.first.verb
   end

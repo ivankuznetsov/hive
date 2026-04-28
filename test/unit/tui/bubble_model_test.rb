@@ -116,8 +116,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_dispatch_command_message_returns_takeover_command
     msg = Hive::Tui::Messages::DispatchCommand.new(argv: [ "echo", "hi" ], verb: "hi")
     _, cmd = @model.update(msg)
-    assert_kind_of Bubbletea::ExecCommand, cmd,
-      "DispatchCommand must turn into an ExecCommand the runner can execute"
+    assert_kind_of Bubbletea::SequenceCommand, cmd,
+      "DispatchCommand turns into a sequence (exit_alt → exec → enter_alt)"
   end
 
   # ---- Late-binding dispatch (so App.run_charm can wire runner.method(:send)) ----
@@ -129,6 +129,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # new dispatch. Smoke check: the call doesn't raise.
     msg = Hive::Tui::Messages::DispatchCommand.new(argv: [ "echo" ], verb: nil)
     _, cmd = @model.update(msg)
-    assert_kind_of Bubbletea::ExecCommand, cmd
+    assert_kind_of Bubbletea::SequenceCommand, cmd
   end
 end

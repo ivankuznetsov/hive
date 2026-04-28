@@ -39,13 +39,24 @@ module Hive
       # missing binary and an explicit child exit code.
       COMMAND_NOT_FOUND_EXIT = 127
 
-      # Charm path: returns a `Bubbletea::ExecCommand` that, when run by
-      # the framework's runner, spawns argv with pgroup forwarding,
-      # waits, and dispatches a `Messages::SubprocessExited(verb:, exit_code:)`
+      # Charm path: returns a `Bubbletea::SequenceCommand` that, when
+      # run by the framework's runner, exits alt-screen, spawns argv
+      # with pgroup forwarding, waits, re-enters alt-screen, and
+      # dispatches a `Messages::SubprocessExited(verb:, exit_code:)`
       # back into the loop via `dispatch.call(message)`.
       #
-      # The framework owns suspend/resume of raw mode, cursor, and input
-      # reader (see `Bubbletea::Runner#exec_process`).
+      # Why the alt-screen toggle is necessary: bubbletea-ruby's
+      # `Runner#exec_process` only toggles raw mode + cursor + input
+      # reader for the child — it does NOT exit alt-screen. With
+      # `alt_screen: true` (which the TUI uses), the child's stdout
+      # writes paint into the alt-screen buffer instead of the main
+      # terminal, and on return the renderer's diff state is corrupted
+      # (subsequent frames append below the buffered output instead of
+      # redrawing in place). Wrapping in a sequence with
+      # `exit_alt_screen` → exec → `enter_alt_screen` makes the child
+      # write to the main screen and forces a clean alt-screen
+      # re-render on return. Documented in U2 verification:
+      # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
       #
       # The `dispatch:` parameter is the seam for runner injection.
       # `App.run_charm` wires `dispatch: runner.method(:send)`. Tests
@@ -63,7 +74,11 @@ module Hive
           exit_code = run_takeover_child(argv)
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         end
-        Bubbletea.public_send(:exec, callable)
+        Bubbletea.sequence(
+          Bubbletea.exit_alt_screen,
+          Bubbletea.public_send(:exec, callable),
+          Bubbletea.enter_alt_screen
+        )
       end
 
       # Spawn-and-wait core. Returns the same Integer exit shape:

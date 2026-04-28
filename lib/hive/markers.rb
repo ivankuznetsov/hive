@@ -66,9 +66,7 @@ module Hive
 
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
-      lock_path = "#{state_file_path}.markers-lock"
-      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
-        lock.flock(File::LOCK_EX)
+      with_markers_lock(state_file_path) do
         body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
         replaced, count = replace_last_marker(body, new_marker)
         body = if count.positive?
@@ -79,8 +77,24 @@ module Hive
         end
         write_atomic(state_file_path, body)
       end
-      File.delete(lock_path) if File.exist?(lock_path)
       new_marker
+    end
+
+    # Serialize concurrent state-file writers via a sidecar `.markers-lock`
+    # flock'd exclusively. Public so `hive markers clear` can wrap its own
+    # read+match+rewrite under the same lock that `set` uses — without
+    # this, `clear` reads the body, validates the marker, then rereads
+    # and rewrites in a separate window during which a concurrent
+    # `Markers.set` can land a fresh marker that the rewrite then erases.
+    def with_markers_lock(state_file_path)
+      ensure_dir(state_file_path)
+      lock_path = "#{state_file_path}.markers-lock"
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        lock.flock(File::LOCK_EX)
+        yield
+      end
+    ensure
+      File.delete(lock_path) if lock_path && File.exist?(lock_path)
     end
 
     def write_atomic(path, body)

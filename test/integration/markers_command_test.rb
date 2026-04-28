@@ -213,6 +213,73 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  # ── Read+match+rewrite atomicity ──────────────────────────────────────
+
+  # Even with --match-attr, the prior implementation read the marker,
+  # matched, then re-read and rewrote in remove_marker_line! as a
+  # separate operation. A concurrent Markers.set landing between the
+  # validation and the rewrite would have its marker erased by the
+  # stale-body rewrite. The fix wraps read+match+rewrite under the
+  # same `.markers-lock` Markers.set acquires; this test pins that
+  # the lock is held by checking that an exclusive flock on the lock
+  # path during clear_marker waits for clear to complete.
+  def test_markers_clear_holds_markers_lock_around_read_match_rewrite
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_review_task(dir, marker: :review_stale)
+        state = File.join(folder, "task.md")
+        lock_path = "#{state}.markers-lock"
+
+        # Hold the markers-lock from a sibling thread; the main
+        # thread's clear_marker must block on flock until the sibling
+        # releases. Queue-based signaling avoids the cross-thread
+        # mutex ownership problem (Mutex is owned by the locking
+        # thread; Queue#pop blocks across threads cleanly).
+        sibling_acquired = Queue.new
+        sibling_should_release = Queue.new
+        sibling_released_at = nil
+
+        sibling = Thread.new do
+          File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |f|
+            f.flock(File::LOCK_EX)
+            sibling_acquired << true
+            sibling_should_release.pop
+            sibling_released_at = Time.now
+          end
+        end
+
+        sibling_acquired.pop # wait for sibling to acquire the lock
+
+        clear_finished_at = nil
+        clear_thread = Thread.new do
+          capture_io do
+            Hive::Commands::Markers.new("clear", folder, name: "REVIEW_STALE").call
+          end
+          clear_finished_at = Time.now
+        end
+
+        # Give clear a chance to attempt the flock; it should still be
+        # blocked because the sibling holds the lock.
+        sleep 0.15
+        assert_nil clear_finished_at,
+          "clear_marker must block on `.markers-lock`; pre-fix it would complete here"
+
+        # Release sibling's hold; clear should now proceed.
+        sibling_should_release << true
+        sibling.join(2) || flunk("sibling thread didn't release lock")
+        clear_thread.join(2) || flunk("clear_marker didn't complete after lock release")
+
+        refute_nil clear_finished_at
+        assert clear_finished_at >= sibling_released_at,
+          "clear must observe the lock release before completing"
+
+        marker = Hive::Markers.current(state)
+        assert_equal :none, marker.name,
+          "after the lock contention resolves, the marker is cleared as usual"
+      end
+    end
+  end
+
   # ── --match-attr cross-process race guard ─────────────────────────────
 
   # Seeds an ERROR marker carrying explicit attrs (reason + exit_code).

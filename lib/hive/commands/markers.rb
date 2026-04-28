@@ -97,18 +97,30 @@ module Hive
         task = Hive::Task.new(folder)
         validate_project_path_match!(task)
 
-        marker = Hive::Markers.current(task.state_file)
-        actual = marker.name.to_s.upcase
-        unless actual == normalized
-          raise Hive::WrongStage,
-                "hive markers clear: task #{task.slug} has marker #{actual.inspect}, " \
-                "not #{normalized.inspect}; refusing to clear (the file may have been edited)."
+        # Read+validate+rewrite must run under the same `.markers-lock`
+        # that `Hive::Markers.set` uses. Otherwise a concurrent
+        # `hive run` writes a NEW marker between our validation and our
+        # rewrite, and the rewrite (using the body we read pre-write)
+        # erases that fresh marker. The hive_commit follows under
+        # `with_commit_lock` to serialise hive/state branch writes
+        # against any concurrent committer (auto-heal, run loop).
+        Hive::Markers.with_markers_lock(task.state_file) do
+          marker = Hive::Markers.current(task.state_file)
+          actual = marker.name.to_s.upcase
+          unless actual == normalized
+            raise Hive::WrongStage,
+                  "hive markers clear: task #{task.slug} has marker #{actual.inspect}, " \
+                  "not #{normalized.inspect}; refusing to clear (the file may have been edited)."
+          end
+
+          match_attr_or_raise!(task, marker)
+          remove_marker_line!(task.state_file, marker.raw)
         end
 
-        match_attr_or_raise!(task, marker)
+        Hive::Lock.with_commit_lock(task.hive_state_path) do
+          record_hive_commit(task, normalized)
+        end
 
-        remove_marker_line!(task.state_file, marker.raw)
-        record_hive_commit(task, normalized)
         emit_success(task, normalized)
       end
 

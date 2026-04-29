@@ -122,7 +122,7 @@ module Hive
         case marker.name
         when :waiting, :execute_waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => friendly_command(task, marker) }
-        when :complete, :execute_complete, :review_complete
+        when *Hive::Markers::TERMINAL_MARKER_NAMES
           approve_action(task, next_stage_dir(task))
         when :execute_stale
           { "kind" => kind::RECOVER_STALE,
@@ -187,7 +187,7 @@ module Hive
         case marker.name
         when :waiting, :execute_waiting
           puts "  next: edit the file, then `#{friendly_command(task, marker)}` again"
-        when :complete, :execute_complete, :review_complete
+        when *Hive::Markers::TERMINAL_MARKER_NAMES
           command = friendly_command(task, marker)
           puts "  next: #{command}" if command
         when :execute_stale

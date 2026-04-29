@@ -192,6 +192,16 @@ module Hive
         ACTIONS.fetch(:review_complete)
       when :review_stale, :review_ci_stale, :review_error
         ACTIONS.fetch(:review_stale)
+      when :review_working
+        # The review stage's own in-flight marker. Without this branch
+        # the row falls through to :review_waiting and emits a
+        # runnable `hive review … --from 5-review` command while review
+        # is already active — running it would acquire-then-fail the
+        # per-task lock with ConcurrentRunError. Treat it as in-flight
+        # via the same :agent_running surface other stages use for
+        # `:agent_working`. The TUI's verb-refusal flash + log-tail-on-
+        # Enter path then kicks in for review-stage rows too.
+        ACTIONS.fetch(:agent_running)
       else
         ACTIONS.fetch(:review_waiting)
       end

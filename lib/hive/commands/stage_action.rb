@@ -115,8 +115,13 @@ module Hive
               "finish the current stage first, then run `#{next_command}`"
       end
 
+      # See `Hive::Markers::TERMINAL_MARKER_NAMES` for the canonical
+      # list and the cross-layer drift history. Single source of
+      # truth — previously this list was hand-duplicated here,
+      # creating the `:review_complete` gap that `hive tui`'s
+      # "Ready for PR" rows tripped on every dispatch.
       def terminal_marker?(marker)
-        marker.name == :complete || marker.name == :execute_complete
+        Hive::Markers::TERMINAL_MARKER_NAMES.include?(marker.name)
       end
 
       # Inner Approve and Run are silent when the verb is in --json mode;

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Test fixture for U4 (Hive::Tui::Subprocess). Behaviour controlled by env vars
+# so a single binary covers the takeover!/run_quiet!/INT-trap scenarios.
+#
+#   HIVE_TUI_FAKE_EXIT=N         exit with N (default 0)
+#   HIVE_TUI_FAKE_STDOUT=text    print to stdout
+#   HIVE_TUI_FAKE_STDERR=text    print to stderr
+#   HIVE_TUI_FAKE_TRAP_INT=1     trap SIGINT, print marker, exit 130
+#   HIVE_TUI_FAKE_BLOCK=1        sleep until killed (used for SIGINT/SIGTERM tests)
+
+if [[ "$HIVE_TUI_FAKE_TRAP_INT" == "1" ]]; then
+  trap 'echo "fake-child:caught-SIGINT"; exit 130' INT
+fi
+if [[ -n "$HIVE_TUI_FAKE_STDOUT" ]]; then
+  printf '%s' "$HIVE_TUI_FAKE_STDOUT"
+fi
+if [[ -n "$HIVE_TUI_FAKE_STDERR" ]]; then
+  printf '%s' "$HIVE_TUI_FAKE_STDERR" 1>&2
+fi
+if [[ "$HIVE_TUI_FAKE_BLOCK" == "1" ]]; then
+  while true; do sleep 0.1; done
+fi
+exit "${HIVE_TUI_FAKE_EXIT:-0}"

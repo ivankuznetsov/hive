@@ -2,6 +2,117 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-29T00:00:00Z] state-model trigger fired on TUI log_tail change — no wiki edit
+
+**Action:** The state-model hook fired because `lib/hive/tui/log_tail.rb` was modified. Reviewed the diff: `flush_oversized_partial!` turned from single-pass into a `while` loop so `Tail#open!`'s 64KiB single-shot backbuffer read can't leave a multi-cap partial in memory after one flush. Added regression test `test_tail_open_with_no_newline_backbuffer_respects_partial_cap`. This is a TUI log-tailer memory-cap fix and does not touch the state-model surface (`task.rb`, `markers.rb`, `config.rb`, `lock.rb`, `worktree.rb`, `metrics.rb`). No edit to `wiki/state-model.md` or `wiki/modules/*.md`. The internal partial-cap loop is not currently a wiki-documented behavior and isn't worth surfacing on the user-facing `wiki/commands/tui.md` page.
+
+**Refreshed pages:** none (log entry only).
+
+## [2026-04-27T16:00:00Z] dependencies.md — `minitest` version row refreshed
+
+**Action:** Audit triggered by Gemfile/Gemfile.lock change hook. The U11 curses removal is already reflected in the prior log entry; the only remaining stale row was `minitest`, which still showed `~> 5.20` (locked 5.27.0) from before the dependabot bump in commit `429ff4c`. Updated to `~> 6.0` (locked 6.0.5) to match the current Gemfile + lockfile.
+
+**Refreshed pages:**
+- `wiki/dependencies.md` — minitest row corrected; bump source noted inline.
+
+## [2026-04-27T15:30:00Z] `hive tui` curses backend removed (plan #003 U11)
+
+**Action:** U11 deletes the curses code path that lived alongside charm during U1–U10. `bundle install` no longer pulls in `curses` 1.6; `HIVE_TUI_BACKEND=curses` raises a typed error pointing at the removal; every `Curses.*` reference under `lib/` is gone. Bubble Tea + Lipgloss are now the only TUI runtime.
+
+**Refreshed pages:**
+- `wiki/dependencies.md` — `curses` row removed; TLDR drops the four-gem framing for three. Frontmatter `updated` bumped.
+- `wiki/commands/tui.md` — Backend section already framed charm as default in U10; no edit needed beyond verifying no curses references survived.
+
+**Code changes (referenced from wiki):**
+- Deleted: `lib/hive/tui/render/{grid,triage,log_tail,help_overlay,filter_prompt,palette}.rb` (curses renderers — replaced by `lib/hive/tui/views/*.rb` in U7–U9), `lib/hive/tui/key_map/curses_keys.rb` (curses int → KeyMap-symbol translator — replaced by `BubbleModel#bubble_key_to_keymap`), `lib/hive/tui/grid_state.rb` (mutating cursor/scope/filter state — replaced by frozen `Hive::Tui::Model` + `Update.apply`).
+- Slimmed: `lib/hive/tui.rb` from 399 to 36 lines — only `Hive::Tui.run` (with the MRI/tty boundary checks) survives. Curses run loop, triage subloop, log-tail subloop, filter-prompt subloop, help overlay, and `install_terminal_safety_hooks` all moved into `Hive::Tui::App.run_charm` + `BubbleModel` during U10 and are deleted here.
+- Slimmed: `lib/hive/tui/subprocess.rb` — `takeover!` (curses-suspended spawn-and-wait) and the curses-state save/restore helpers (`with_curses_suspended`, `save_curses_state`, `end_curses`, `restore_curses_state`) deleted; `save_termios`/`restore_termios` deleted (the framework owns termios now). `takeover_command` (charm builder) and `run_quiet!` (curses-free, used for triage toggles) remain.
+- Slimmed: `lib/hive/tui/app.rb` — `KNOWN_BACKENDS` is now `[CHARM]`, the `case backend` dispatch collapses to a single charm boot, and `REMOVED_BACKENDS` provides the migration-pointer error for `HIVE_TUI_BACKEND=curses`.
+- Slimmed: `lib/hive/tui/key_map.rb` — back-compat shim (`dispatch` + `message_to_tuple`) deleted; only `message_for` remains.
+- Updated tests: `test/integration/tui_subprocess_test.rb` drops `takeover!` cases (the `takeover_command` test class covers the same spawn/wait/trap path); `test/integration/tui_signals_test.rb` drops `install_terminal_safety_hooks` cases (the SIGHUP trap now lives in `App.run_charm`); `test/unit/tui/app_test.rb` exercises the curses-removal error; `test/unit/tui/key_map_test.rb` drops the legacy `dispatch`-based test class. Net delta: 597 unit tests, 200 integration tests, 0 failures.
+- Removed: `Gemfile` entry for `curses ~> 1.6`; `Gemfile.lock` regenerated.
+
+**Key decisions:**
+- **`HIVE_TUI_BACKEND=curses` raises a removal-pointer error rather than silently falling back to charm.** Users who type the value because they hit a charm regression deserve a typed signal, not a confusing "unknown backend" or — worse — a silent override. The pointer lives in `App::REMOVED_BACKENDS` and one release from now will be deleted alongside the env var itself.
+- **`Hive::Tui::GridState` deleted, not preserved.** The Charm Model (`Hive::Tui::Model`) plus `Update.apply` already cover the cursor/scope/filter semantics GridState owned. Keeping GridState as a "for testing" artifact would have invited drift the moment Model evolved.
+
+## [2026-04-27T15:00:00Z] `hive tui` migrated to Charm bubbletea + lipgloss (plan #003 U1–U10)
+
+**Action:** Plan #003 ships across 10 commits (U1 scaffold → U10 default flip). The TUI's render layer is now Bubble Tea MVU with Lipgloss styling; the curses path is kept one release as `HIVE_TUI_BACKEND=curses` for terminal-specific regressions. U11 (the curses removal) follows.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — TLDR mentions bubbletea + lipgloss; new "Backend" section explains the MVU loop and the env-var escape hatch; "Subprocess takeover" rewritten around `Subprocess.takeover_command` + `Bubbletea::ExecCommand`; "Terminal hostility" rewritten around the runner's SIGWINCH/Ctrl-Z handling and `runner.send(TERMINATE_REQUESTED)` for SIGHUP. Frontmatter `updated` bumped.
+- `wiki/dependencies.md` — `bubbletea` ~> 0.1.4 and `lipgloss` ~> 0.2.2 added as runtime gems; `curses` flagged as legacy/deprecated through U11. TLDR rewrite + "Why Bubble Tea + Lipgloss" rationale.
+- `CHANGELOG.md [Unreleased]` — new "Changed — `hive tui` render layer migrated…" section at the top of the section list, ahead of "Breaking changes" / "Added".
+
+**Code changes (referenced from wiki):**
+- `lib/hive/tui/app.rb` — full MVU lifecycle: builds `Hive::Tui::BubbleModel` over `Model.initial`, wires `dispatch: runner.method(:send)`, installs SIGHUP→`runner.send(TERMINATE_REQUESTED)`, runs a 0.5s background poller that injects `SnapshotArrived` / `PollFailed` based on `StateSource.current`, runs `Bubbletea::Runner`, cleans up on exit. Default backend flipped from `curses` to `charm`; `HIVE_TUI_BACKEND=curses` still routes to `Hive::Tui.run_curses` until U11.
+- `lib/hive/tui/bubble_model.rb` (new) — Bubbletea::Model adapter. Translates `KeyMessage` via `KeyMap.message_for(...)` and `WindowSizeMessage` to `Messages::WindowSized`; handles side-effect-bearing messages (`DispatchCommand` → `Subprocess.takeover_command`; `OpenFindings`/`OpenLogTail` synchronous I/O; `Bulk*`/`ToggleFinding` `run_quiet!` + reload); delegates everything else to `Update.apply`. Dispatches view by `model.mode` to one of `Views::Grid` / `Triage` / `LogTail` / `HelpOverlay` / composed `Grid + FilterPrompt`.
+- `lib/hive/tui/views/{grid,triage,log_tail,help_overlay,filter_prompt}.rb` (new) — pure functions over `Hive::Tui::Model`. Mirror the curses `Render::*` content layout 1:1; styling switched to Lipgloss. Test layer pins layout/text content; visual styling validated by manual dogfood (lipgloss-ruby v0.2.2 strips ANSI in non-tty test envs).
+- `lib/hive/tui/update.rb` — extended with keystroke-derived handlers: `Flash`, `CursorDown`/`CursorUp` (mirror `GridState#move_cursor_*` semantics), `ShowHelp`, `OpenFilterPrompt` (pre-fills buffer with active filter), `Back` (mode-aware revert clearing sub-mode state), `ProjectScope`, `Noop`. Pure-function transitions only — side effects live in BubbleModel.
+- `lib/hive/tui/subprocess.rb` — adds `Subprocess.takeover_command(argv, dispatch:) → Bubbletea::ExecCommand` and the shared `run_takeover_child` core; curses `takeover!` retains its termios+curses-suspended wrapper.
+- `lib/hive/tui/messages.rb` — extended with the keystroke-derived Message types (DispatchCommand, Flash, OpenFindings, OpenLogTail, ToggleFinding, BulkAccept, BulkReject, ProjectScope, plus singleton SHOW_HELP / OPEN_FILTER_PROMPT / BACK / CURSOR_DOWN / CURSOR_UP / NOOP).
+- `lib/hive/tui/key_map.rb` — `dispatch(mode:, key:, row:)` is now a thin shim over `message_for(...)` + `message_to_tuple(...)`. Single source of truth — curses (which still calls `dispatch` through U10) and charm (which calls `message_for` directly via BubbleModel) cannot drift.
+
+**Key decisions:**
+- **`HIVE_TUI_BACKEND=curses` kept one release.** Curses is the escape hatch if Bubble Tea misbehaves on a user's terminal in production. The next release deletes it (per plan #003 U11). Without this hatch the migration would be a hard cut, which the plan's risk register explicitly counsels against given bubbletea-ruby's alpha status.
+- **View tests pin layout, not styling.** lipgloss-ruby v0.2.2 strips ANSI in non-tty environments and exposes no force-color escape hatch. R19 (visual quality bar) is met by manual dogfood rather than golden-string color assertions; the gap is documented in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md` so a future renderer-profile API can close it.
+- **Side effects live in `BubbleModel`, not `Update`.** Update.apply stays pure (Model in, [Model, Cmd] out) so state transitions are unit-testable in isolation. DispatchCommand wraps with `Subprocess.takeover_command`; OpenFindings/OpenLogTail/Bulk*/ToggleFinding do synchronous I/O — same pattern the curses path used in `Hive::Tui.run_triage` / `run_quiet!`. Inline I/O is acceptable for v1 because the operations are quick (file reads) and the alternative (Bubble Tea Cmd-as-Fiber) isn't exposed by bubbletea-ruby v0.1.4.
+
+## [2026-04-27T13:30:00Z] `hive tui` deferred ce-code-review issues #10/#11/#12
+
+**Action:** Commit `4ccad1a` closes the three deferred ce-code-review issues. Two CLI-surface changes worth wiki-recording: (1) `hive tui --json` reject path now emits a structured error envelope on stdout before raising (`{ok:false, error_class:"InvalidTaskPath", error_kind:"unsupported_flag", exit_code:64, ...}`) — no schema bump, because `tui` has no registered `hive-*` schema; (2) the non-tty boundary now raises `Hive::InvalidTaskPath` so it shares EX_USAGE (64) with the `--json` reject, instead of falling through to `Hive::Error` / generic exit 1. `tui` long_desc gained a one-line keystroke summary (`b/p/d/r/P/a`) so agents enumerating help see the human-only interaction shape.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — terminal-hostility section now documents the JSON error envelope shape and the non-tty USAGE-64 alignment. Frontmatter `updated` bumped.
+- `wiki/cli.md` — already updated in `4ccad1a` to flag `tui` as the sole `--json`-rejecting command; no further edit needed.
+
+**Code changes (referenced from wiki):**
+- `lib/hive/cli.rb` — `tui` action now emits the JSON envelope before raising on `--json`; long_desc keystroke line.
+- `lib/hive/tui.rb` — non-tty raise upgraded to `Hive::InvalidTaskPath`; `restore_terminal_safety_hooks` (SIGHUP trap restore on clean exit); `terminate_requested?` checks added inside `triage_loop` and `log_tail_loop` so SIGHUP collapses subloops within a frame; `Errno::ENOENT/EACCES` rescue around `LogTail::Tail#open!` (race with rotation between `FileResolver.latest` and the open syscall); `Hive::NoReviewFile` rescue in `reload_or_flash` (concurrent archive/rerun) returns `:back` so triage drops to grid instead of crashing.
+- `lib/hive/tui/key_map/curses_keys.rb` (new) — extracted curses-int → KeyMap-symbol translation out of `Hive::Tui` so KeyMap owns its own symbol contract.
+
+**Key decisions:**
+- **No schema for `tui`'s JSON error envelope.** `hive tui` is human-only and has no registered `hive-*` schema, so the envelope deliberately omits `schema` rather than minting a one-off `hive-tui-error.v1.json` whose only payload is the rejection. JSON consumers still see typed error data; schema-validating wrappers continue to validate against the agent-callable surfaces unchanged.
+- **Non-tty + `--json` share EX_USAGE (64).** Both are misuse — the TUI cannot run without a terminal and cannot emit JSON — so wrappers can branch on a single "you used this wrong" exit code instead of distinguishing `1` (generic) from `64`. Documented in `wiki/commands/tui.md` "Terminal hostility".
+
+## [2026-04-27T12:00:00Z] U2–U11 + polish — `hive tui` feature complete
+
+**Action:** Remaining `hive tui` units landed on top of U1: U2 `StateSource`/`Snapshot` (1Hz polling, 5s stalled banner), U3 `KeyMap` (single source-of-truth keystroke→action), U4 `Subprocess.takeover!` / `run_quiet!` + `SubprocessRegistry`, U5 status grid + `GridState`, U6 findings triage mode (`a`/`r` rebind to bulk accept/reject), U7 agent log tail, U8 help overlay + workflow-verb cross-check, U9 SIGHUP / `at_exit` / `KEY_RESIZE` handling, U11 PTY smoke test (`bin/hive tui` boots, paints first frame, `q` exits 0). Then `bcf66cd` applied 13 of 32 ce-code-review findings on top.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` already covers the full surface (modes table, keybindings, verb-refusal-on-`agent_running`, `claude_pid_alive` reaping, `Subprocess.takeover!` 5-step protocol, `run_quiet!` for findings toggles, terminal-hostility section incl. SIGWINCH / SIGTSTP / SIGHUP / `at_exit`, `--json` rejection, full test surface). No further edit needed — landed alongside U1 with the units in mind.
+
+**Code changes (referenced from wiki):**
+- `lib/hive/tui/state_source.rb`, `snapshot.rb`, `key_map.rb`, `subprocess.rb`, `subprocess_registry.rb`, `grid_state.rb`, `triage_state.rb`, `log_tail/file_resolver.rb`, `help.rb` — the per-unit modules referenced by the existing `wiki/commands/tui.md` "Test surface" section.
+- `test/integration/tui_subprocess_test.rb`, `test/smoke/tui_smoke_test.rb` — pin the curses tty round-trip and end-to-end PTY boot.
+- `CHANGELOG.md` — `[Unreleased]` records `hive tui` (commit `643ce67`).
+
+**Key decisions:**
+- **No render-layer snapshot tests.** Mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing; the data path is unit-tested per-module and the curses round-trip is pinned by the PTY smoke test. Documented in `wiki/commands/tui.md` "Test surface".
+- **Wiki refresh stays scoped to `commands/tui.md`.** No stage runner changed; the TUI dispatches the same Thor verbs a human would type. `wiki/stages/` is intentionally untouched.
+
+## [2026-04-27T00:00:00Z] U1 — `hive tui` bootstrap
+
+**Action:** First implementation unit of the `hive tui` plan ([docs/plans/2026-04-27-001-feat-hive-tui-plan.md](../docs/plans/2026-04-27-001-feat-hive-tui-plan.md)). Adds the Thor command, the `Hive::Tui.run` skeleton, and the `curses` runtime gem. Subsequent units (U2–U11) replace the skeleton render loop with the real polling + render machinery. Wiki entries land alongside the command's first appearance per `CLAUDE.md` "wiki maintained alongside code".
+
+**New pages:**
+- `wiki/commands/tui.md` — modes, keybindings, data source, subprocess takeover, terminal hostility notes, test surface; structure mirrors `wiki/commands/status.md`.
+
+**Refreshed pages:**
+- `wiki/cli.md` — TLDR mentions the new human-only command; command table adds the `tui` row.
+- `wiki/index.md` — Commands list links the new page; page count 35 → 36.
+
+**Code changes (referenced from wiki):**
+- `Gemfile` — adds `gem "curses", "~> 1.6"` to the production block (1.6.0 resolved).
+- `lib/hive/tui.rb` (new) — module skeleton with the `Hive::Tui.run` entry point and the `RUBY_ENGINE != "ruby"` boot guard.
+- `lib/hive/cli.rb` — registers `desc "tui"` + `def tui`; rejects `--json` with `Hive::InvalidTaskPath` (exit 64) per the plan's R13.
+- `test/integration/tui_command_test.rb` (new) — pins the help-text registration, the `--json` rejection, the `long_desc` text, and the non-tty boundary check.
+
+**Key decisions:**
+- **Wiki landed in U1, not a separate U10.** Per KTD-10, conflating a multi-command wiki refresh with the TUI feature inflates blast radius; the TUI's own page is co-shipped with the Thor command so the new surface and its documentation are atomic. Broader wiki refresh for unrelated drift remains deferred.
+- **Curses 1.6 production dep.** Stdlib-extracted, ruby-core maintained, ships with `def_prog_mode` / `reset_prog_mode` / `endwin` / injected `KEY_RESIZE` — every primitive the subsequent units need without picking up a 22 MB Rust dep (KTD-1).
+
 ## [2026-04-26T23:00:00Z] Round-4 — `hive markers clear`, schema v2, marker-policy refresh
 
 **Action:** Round-4 ce-code-review remediation. Added `hive markers clear FOLDER --name <NAME>` as the agent-callable surface for recovery markers (`REVIEW_STALE` / `REVIEW_CI_STALE` / `REVIEW_ERROR` / `EXECUTE_STALE` / `ERROR`); bumped the `hive-approve` JSON contract to v2 (the v1 → v2 transition added `5-review` and renumbered `5-pr → 6-pr` / `6-done → 7-done`); refreshed `wiki/commands/approve.md`'s marker-policy table to reflect the post-LFG-1 reality where `:review_complete` is in `VALID_TERMINAL_MARKERS`; and pointed `Stages::Review.run!`'s pre-flight `warn` lines at the new command.
@@ -687,3 +798,10 @@ Append-only log of all wiki operations.
 - `test/integration/run_stage_action_test.rb` — coverage for the at-target branch, promote-and-run, archive idempotency no-op, `--from` retry-after-success rescue, and unified JSON envelope on each error path.
 - 5 existing tests updated for the intentional behaviour changes (--from now always emitted; final-stage emits NO_OP not RUN; archive no-op).
 
+
+## 2026-04-28 — TUI robustness pass
+
+- **`Hive::Tui::Update.apply_snapshot_arrived`**: re-clamps `model.cursor` when a poll's new snapshot makes prior coords invalid (project_idx OOB or row_idx past the project's row count); preserves cursor when still valid so benign polls don't snap selection. New tests in `test/unit/tui/update_test.rb`.
+- **`Hive::Tui::App.run_charm`**: setup (`StateSource.new/start`, `BubbleModel.new`, `Bubbletea::Runner.new`, HUP hook, snapshot poller) moved INSIDE the `begin` so a constructor raise still triggers the same ensure cleanup; `ensure` block nil-guards each handle. Pre-fix, a Bubbletea::Runner failure leaked the StateSource thread.
+- **`Hive::Tui::Help::ENTRIES`**: filter-mode `Esc` action renamed `:clear_filter` → `:cancel_filter` with new semantics — discards the typed buffer but preserves any committed filter (was: nuked the committed filter too).
+- **`Hive::Tui::Subprocess::SUBPROCESS_LOG_MAX_BYTES`**: comment honesty pass — rotation only fires synchronously with stamp writes, so a noisy child writing tens of MB of stderr between BEGIN and END can blow past the cap; the eventual rotation moves the oversized blob to `.1`. Cap is approximate, not absolute.

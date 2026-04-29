@@ -20,6 +20,16 @@ module Hive
     ].freeze
     MARKER_RE = /<!--\s*(?<name>WAITING|COMPLETE|AGENT_WORKING|ERROR|EXECUTE_WAITING|EXECUTE_COMPLETE|EXECUTE_STALE|REVIEW_WORKING|REVIEW_WAITING|REVIEW_CI_STALE|REVIEW_STALE|REVIEW_COMPLETE|REVIEW_ERROR)(?<attrs>(?:\s+[^<>]*?)?)\s*-->/
 
+    # Markers whose presence means "this stage is done; the next verb
+    # may advance the task". Single source of truth — previously this
+    # list was duplicated across `Hive::Commands::StageAction#terminal_marker?`,
+    # `Hive::Commands::Run#json_next_action`, and the TUI's `TaskAction`
+    # classifier; the `:review_complete` whitelist gap that produced the
+    # U10/U11-era "Ready for PR row dispatches WrongStage" bug was a
+    # drift between two of these copies. Add a marker here and every
+    # consumer picks it up.
+    TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
+
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
         name == :none
@@ -56,9 +66,7 @@ module Hive
 
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
-      lock_path = "#{state_file_path}.markers-lock"
-      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
-        lock.flock(File::LOCK_EX)
+      with_markers_lock(state_file_path) do
         body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
         replaced, count = replace_last_marker(body, new_marker)
         body = if count.positive?
@@ -69,8 +77,30 @@ module Hive
         end
         write_atomic(state_file_path, body)
       end
-      File.delete(lock_path) if File.exist?(lock_path)
       new_marker
+    end
+
+    # Serialize concurrent state-file writers via a sidecar `.markers-lock`
+    # flock'd exclusively. Public so `hive markers clear` can wrap its own
+    # read+match+rewrite under the same lock that `set` uses — without
+    # this, `clear` reads the body, validates the marker, then rereads
+    # and rewrites in a separate window during which a concurrent
+    # `Markers.set` can land a fresh marker that the rewrite then erases.
+    #
+    # The lockfile is left on disk after the flock releases. flock
+    # semantics are tied to the inode, not the path; deleting the file
+    # lets a racing contender create a NEW inode and `flock` it
+    # independently while another process is still serializing on the
+    # old one — both could enter the critical section. Sticky lockfiles
+    # are fine here because they're already gitignored
+    # (`.hive-state/stages/*/*/*.markers-lock` in `Hive::GitOps`).
+    def with_markers_lock(state_file_path)
+      ensure_dir(state_file_path)
+      lock_path = "#{state_file_path}.markers-lock"
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        lock.flock(File::LOCK_EX)
+        yield
+      end
     end
 
     def write_atomic(path, body)

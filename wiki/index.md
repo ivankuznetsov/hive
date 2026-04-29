@@ -12,7 +12,7 @@ tags: [index]
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
 
-**Pages**: 35 (excl. `index.md`/`log.md`) · **Date**: 2026-04-26
+**Pages**: 36 (excl. `index.md`/`log.md`) · **Date**: 2026-04-27
 
 ## Top level
 
@@ -32,6 +32,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[commands/new]] — capture an idea, derive a slug, scaffold `idea.md`.
 - [[commands/run]] — dispatcher: lock → stage runner → commit → report (`--json` supported).
 - [[commands/status]] — read-only table of every active task across registered projects (`--json` supported).
+- [[commands/tui]] — live, keystroke-driven curses dashboard over `hive status` (human-only; no JSON).
 - [[commands/approve]] — agent-callable `mv <task> <next-stage>/` with marker validation, ambiguity resolution, and a hive/state commit per move.
 - [[commands/findings]] — `hive findings` / `accept-finding` / `reject-finding`: list and toggle GFM-checkbox findings in `reviews/ce-review-NN.md`.
 - [[commands/stage_action]] — `hive brainstorm` / `plan` / `develop` / `pr` / `archive` workflow verbs (promote-or-run).

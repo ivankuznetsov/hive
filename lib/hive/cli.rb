@@ -229,13 +229,21 @@ module Hive
         hive markers clear FOLDER --name REVIEW_STALE
         hive markers clear my-task-slug --name REVIEW_CI_STALE --project myproj
         hive markers clear FOLDER --name REVIEW_ERROR --json
+        hive markers clear FOLDER --name ERROR --match-attr exit_code=143
 
-      Exit codes: 0 success; 4 marker mismatch / not in allowlist; 64 unknown
-      subcommand or unknown task; 70 internal error.
+      Use --match-attr KEY=VALUE to refuse the clear unless the current marker
+      carries the named attribute. The auto-healer in `hive tui` uses this to
+      avoid erasing a real-failure marker that landed between observation and
+      heal under cross-process concurrency.
+
+      Exit codes: 0 success; 4 marker mismatch / attr mismatch / not in
+      allowlist; 64 unknown subcommand or unknown task; 70 internal error.
     DESC
     option :name, type: :string, required: true,
                   desc: "marker name to remove (e.g. REVIEW_STALE)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :match_attr, type: :string,
+                        desc: "refuse clear unless marker has the named attr (KEY=VALUE)"
     def markers(subcommand, target = nil)
       require "hive/commands/markers"
       Hive::Commands::Markers.new(
@@ -243,8 +251,79 @@ module Hive
         target,
         name: options[:name],
         project: options[:project],
+        match_attr: options[:match_attr],
         json: options[:json]
       ).call
+    end
+
+    desc "tui", "Open the live, keystroke-driven dashboard for every active task"
+    long_desc <<~DESC
+      Opens a full-screen Charm bubbletea + lipgloss dashboard over `hive status`.
+      Polls the same data source at 1Hz, groups rows by action label, and
+      dispatches every workflow verb (`brainstorm` / `plan` / `develop` /
+      `review` / `pr` / `archive`) as a fresh subprocess on a single
+      keystroke. `?` inside the TUI opens the full per-mode keybinding
+      cheatsheet; `q` quits.
+
+      Modes (each with its own keymap):
+
+        grid (default)
+          b/p/d/r/P/a   dispatch hive brainstorm/plan/develop/review/pr/archive
+          j/k or Down/Up cursor up/down (jumps across projects at edges)
+          Enter         contextual: review_findings opens triage,
+                        agent_running/error opens log tail, ready_* dispatches
+          /             open the slug-filter prompt
+          1-9           scope to the Nth registered project; 0 clears scope
+          ?             open this help overlay
+          q             quit
+
+        triage (entered via Enter on a "Review findings" row)
+          j/k or Down/Up move the finding cursor
+          Space         toggle accept/reject on the highlighted finding
+          a             bulk-accept every finding on the task
+          r             bulk-reject every finding on the task
+          d             dispatch hive develop to re-inject accepted findings
+          Esc           back to grid
+
+        log_tail (entered via Enter on agent_running / error rows)
+          q / Esc       back to grid
+
+        filter (entered via /)
+          printable     append to the buffer
+          Backspace     delete one char
+          Enter         commit the typed buffer as the active filter
+          Esc           cancel and clear the buffer (preserves any prior filter)
+
+      Human-only — `hive tui --json` is rejected with EX_USAGE (64).
+      Agent-callable surfaces stay JSON via `hive status` and the
+      typed verbs.
+
+      See `wiki/commands/tui.md` for modes, bindings, and limits.
+    DESC
+    def tui
+      if options[:json]
+        require "json"
+        message = "hive tui has no JSON output (it is human-only). " \
+                  "Use 'hive status --json' for the same data."
+        # TUI does not have a registered hive-* schema; emit an envelope with the
+        # standard error fields except `schema` so JSON consumers see structured
+        # error data without a SCHEMA_VERSIONS bump.
+        puts JSON.generate(
+          "ok" => false,
+          "error_class" => "InvalidTaskPath",
+          # Match the error_kind value other InvalidTaskPath emit
+          # sites use across the CLI (markers/findings/run/etc.) so
+          # JSON consumers can switch on a single canonical value
+          # rather than special-casing TUI's previous "unsupported_flag".
+          "error_kind" => "invalid_task_path",
+          "exit_code" => Hive::ExitCodes::USAGE,
+          "message" => message
+        )
+        raise Hive::InvalidTaskPath, message
+      end
+
+      require "hive/tui"
+      Hive::Tui.run
     end
 
     desc "metrics SUBCOMMAND", "Report metrics across registered projects (rollback-rate)"

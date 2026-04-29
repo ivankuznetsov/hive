@@ -293,21 +293,15 @@ class TuiSubprocessDispatchBackgroundTest < Minitest::Test
       "exit 0 must delete the per-spawn capture so disk usage is bounded by failures, not spawn count"
   end
 
-  def test_diagnose_recent_failure_reads_per_spawn_capture
-    ENV["HIVE_TUI_FAKE_STDERR"] = "fatal: 'origin' does not appear to be a git repository"
-    ENV["HIVE_TUI_FAKE_EXIT"] = "1"
-    Hive::Tui::Subprocess.dispatch_background(
-      [ FAKE_CHILD, "pr", "--project", "demo" ], dispatch: @dispatch
-    )
-    assert wait_for_messages(1)
-
-    diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
-    refute_nil diagnostic,
-      "diagnose must locate the per-spawn capture by spawn_id and run pattern matching against it"
-    assert_match(/demo:.*project not set up/i, diagnostic)
-  ensure
-    Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log")).each { |p| File.delete(p) rescue nil }
-  end
+  # NOTE: the diagnose-by-per-spawn-capture flow is pinned by
+  # `test_per_spawn_diagnose_keeps_project_in_flash` in
+  # test/unit/tui/subprocess_diagnose_test.rb, which uses synthetic
+  # BEGIN lines + synthetic capture files via with_isolated_log.
+  # An equivalent integration test using FAKE_CHILD wouldn't work:
+  # the BEGIN argv would be the fake-child path, not "hive <verb>",
+  # so recent_log_section_for's regex would never match. It would
+  # only appear to pass when SUBPROCESS_LOG_PATH happened to contain
+  # stale entries from real `hive pr` invocations in the dev env.
 
   def test_sweep_old_spawn_captures_deletes_orphans_past_cutoff
     # Drop a synthetic orphan dated 25h ago — older than the 24h cutoff.

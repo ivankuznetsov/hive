@@ -86,6 +86,14 @@ module Hive
     # this, `clear` reads the body, validates the marker, then rereads
     # and rewrites in a separate window during which a concurrent
     # `Markers.set` can land a fresh marker that the rewrite then erases.
+    #
+    # The lockfile is left on disk after the flock releases. flock
+    # semantics are tied to the inode, not the path; deleting the file
+    # lets a racing contender create a NEW inode and `flock` it
+    # independently while another process is still serializing on the
+    # old one — both could enter the critical section. Sticky lockfiles
+    # are fine here because they're already gitignored
+    # (`.hive-state/stages/*/*/*.markers-lock` in `Hive::GitOps`).
     def with_markers_lock(state_file_path)
       ensure_dir(state_file_path)
       lock_path = "#{state_file_path}.markers-lock"
@@ -93,8 +101,6 @@ module Hive
         lock.flock(File::LOCK_EX)
         yield
       end
-    ensure
-      File.delete(lock_path) if lock_path && File.exist?(lock_path)
     end
 
     def write_atomic(path, body)

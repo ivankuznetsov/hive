@@ -7,7 +7,7 @@ updated: 2026-04-26
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, `approve`, `findings`, `markers`, and `metrics` support `--json` for machine-readable output (with a structured error envelope on every failure path), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `review`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, `approve`, `findings`, `markers`, and `metrics` support `--json` for machine-readable output (with a structured error envelope on every failure path), and process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
@@ -23,7 +23,8 @@ tags: [cli, api]
 | `hive brainstorm TARGET [--from STAGE]` | Start or re-run brainstorm by slug/path | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive plan TARGET [--from STAGE]` | Promote completed brainstorm to plan, or re-run plan | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive develop TARGET [--from STAGE]` | Promote completed plan to execute, or re-run execute | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
-| `hive pr TARGET [--from STAGE]` | Promote completed execute to PR, or re-run PR | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
+| `hive review TARGET [--from STAGE]` | Promote completed execute to review, or re-run review | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
+| `hive pr TARGET [--from STAGE]` | Promote completed review to PR, or re-run PR | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive archive TARGET [--from STAGE]` | Promote completed PR to done, or re-run done | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive run TARGET` | Lower-level dispatcher for a slug or task folder | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |

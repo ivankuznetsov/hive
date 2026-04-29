@@ -3,6 +3,13 @@ source "https://rubygems.org"
 ruby "~> 3.4"
 
 gem "thor", "~> 1.3"
+# Charm Ruby bindings — the only TUI backend after U11 of plan #003
+# (`docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md`).
+# Bubble Tea drives the MVU loop in `Hive::Tui::App.run_charm`; lipgloss
+# styles every rendered frame. U2 verification:
+# `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+gem "bubbletea", "~> 0.1.4"
+gem "lipgloss", "~> 0.2.2"
 
 group :development, :test do
   gem "minitest", "~> 6.0"

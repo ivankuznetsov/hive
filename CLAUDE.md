@@ -30,3 +30,7 @@ When you need project context:
 
 ### Cross-Project Context
 Before making architectural decisions, check ~/wikis/master/wiki/ for existing patterns and known gotchas.
+
+## Documented Solutions
+
+`docs/solutions/` — documented solutions to past problems (bugs, architecture patterns, conventions, workflow learnings), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas.

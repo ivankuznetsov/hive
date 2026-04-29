@@ -263,6 +263,18 @@ module Hive
     end
   end
 
+  # The TUI's log-tail mode opened on a slug whose `<state>/logs/<slug>/`
+  # directory contains no `*.log` files yet. Common race between an
+  # `agent_running` row appearing in the status snapshot and the agent
+  # actually flushing its first byte to disk; the render-mode boundary
+  # catches this and flashes a friendly message instead of entering an
+  # empty viewer.
+  class NoLogFiles < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
   # An ID was passed to accept-finding / reject-finding that doesn't
   # match any finding in the targeted review file.
   class UnknownFinding < Error

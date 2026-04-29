@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed — `hive tui` render layer migrated from curses to Charm bubbletea + lipgloss
+
+- The TUI now boots a [bubbletea-ruby](https://github.com/marcoroth/bubbletea-ruby) MVU runtime and renders frames with [lipgloss-ruby](https://github.com/marcoroth/lipgloss-ruby) styles. `KeyMap` is the single source of truth for keystroke→action mapping, returning typed `Hive::Tui::Messages::*` values that flow through `Hive::Tui::Update.apply(model, msg) → [model, cmd]`. Views are pure functions of the frozen Model — no I/O — which makes layout regressions reproducible in unit tests.
+- **Curses backend removed.** The `curses` gem is no longer a runtime dependency; the legacy `Hive::Tui::Render::*` modules and the `Hive::Tui.run_curses` entry point are deleted. `HIVE_TUI_BACKEND=curses` raises `Hive::InvalidTaskPath` (exit 64) with a removal-pointer message rather than silently falling back to charm.
+- **What didn't change:** every keystroke binding, every workflow-verb shell-out, every flash message, every JSON contract on adjacent CLI surfaces. The Thor surface (`hive tui`, `--json` rejection with EX_USAGE 64, non-tty USAGE-64 alignment) is identical. `Hive::Tui::Snapshot` / `Hive::Tui::StateSource` / `Hive::Tui::Help::BINDINGS` / `Hive::Tui::SubprocessRegistry` are untouched.
+- **Visual quality:** Lipgloss handles color/bold/reverse and adapts to the detected color profile. Grid action-key colors (cyan for `agent_running`, yellow for error/recover, green for `ready_*`) carry over verbatim. Help overlay renders inside a Lipgloss NORMAL border with rounded padding.
+- **Test ergonomics gap (documented):** lipgloss-ruby v0.2.2 strips ANSI when stdout is not a tty and exposes no force-color escape hatch. View tests therefore pin layout/text content; visual styling is validated by manual dogfood. Tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+
 ### Breaking changes
 
 - **Stage directories renumbered: `5-pr` → `6-pr` and `6-done` → `7-done`.** Position 5 is reserved for the upcoming `5-review` stage (CI-fix → multi-reviewer → auto-triage → fix → browser-test loop, per `docs/plans/2026-04-25-001-feat-5-review-stage-plan.md`). `5-review` is NOT yet present — `Hive::Stages::DIRS` currently has a numeric gap at position 5 that fills when U9 ships.
@@ -30,7 +38,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   `hive init` on fresh projects creates the new directory layout automatically. The migration is one-shot per project; no auto-migration helper ships in v1.
 
-### Added
+### Added — `hive tui` (live dashboard + keystroke-driven workflow)
+
+- `hive tui` — full-screen, modal, curses-based dashboard over `hive status`. Polls `Hive::Commands::Status#json_payload` in-process at 1 Hz from a non-daemon background thread; renders rows grouped by `TaskAction` action label across registered projects; dispatches workflow verbs as fresh subprocesses on single-key keystrokes. Human-only — `hive tui --json` is rejected with EX_USAGE (64); agent-callable surfaces stay on `hive status` and the typed verbs.
+- Four modes — status grid (default), findings triage (Enter on `review_findings`), agent log tail (Enter on `agent_running`), help overlay (`?`); plus a filter prompt (`/`, Esc clears, Enter commits) and per-project scope (`1`–`9`, `0` clears).
+- Verb keystrokes: `b` brainstorm, `p` plan, `d` develop, `r` review, `P` (capital) pr, `a` archive. Pressing a verb on an `agent_running` row whose `claude_pid_alive` is true flashes a hint instead of dispatching, pre-empting `ConcurrentRunError` (exit 75); when the PID is provably dead the verb dispatches normally so `Hive::Lock` can reap the stale lock.
+- Findings triage: per-`Space` toggles via `hive accept-finding` / `hive reject-finding` use a quiet subprocess flavor (no screen tear-down) so the screen never flashes; `d` dispatches `hive develop --from 4-execute` via full-screen takeover. Bulk `a` / `r` (rebound from grid-mode archive/review) accept/reject every finding at once. After every toggle the document reloads and the cursor relocates by `(severity, title-prefix)` to handle concurrent rewrites.
+- Agent log tail: tails the latest `<state>/logs/<slug>/*.log` file via non-blocking reads driven by the render loop's 100 ms input timeout. Handles inode rotation (re-open new inode), truncation (rewind cleanly), and transient `Errno::*` (swallow + retry). Footer shows `[stale: claude_pid no longer alive]` when the producing agent's PID is dead.
+- Terminal hostility: `at_exit` cleanup + SIGHUP cooperative cancellation are installed BEFORE the first `Curses.init_screen` so a crash during init still restores the terminal. Resize handled via injected `KEY_RESIZE` (no Ruby `Signal.trap("WINCH")` per ruby/curses#9). Ctrl+Z suspend / SIGCONT resume rely on ncurses' default handlers. SubprocessRegistry holds the in-flight pgid (or `:placeholder` sentinel) under a `Monitor` so the trap path can reap subprocesses without racing the spawn.
+- New runtime gem: `curses ~> 1.6` (production block of `Gemfile`). Stdlib-extracted, ruby-core maintained; ships every primitive needed (`def_prog_mode`/`reset_prog_mode`/`endwin` for subprocess takeover, `KEY_RESIZE` injection, automatic SIGTSTP/SIGCONT). Containerised consumers need `apk add ncurses-dev` / `apt install libncurses-dev`.
+- New typed exception: `Hive::NoLogFiles < Hive::Error` (exit code 64 USAGE) — raised by `LogTail::FileResolver.latest` when a slug's log directory contains no `*.log` files yet.
 
 - Five workflow verbs `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, `hive archive` — each is a single Thor command that resolves a slug or folder, then either runs the target stage's agent (already at target) or promotes from source-stage and runs the target's agent. `--from STAGE` is the idempotency assertion: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice. `--json` emits a single `hive-stage-action` v1 envelope (success and error). `archive` is idempotent at 6-done.
 - `Hive::Workflows` module — single source of truth for the verb→source/target stage map. `VERBS` hash plus `verb_advancing_from(stage_dir)` and `verb_arriving_at(stage_dir)` reverse lookups. `Hive::Commands::StageAction`, `Hive::TaskAction`, `Hive::Commands::Approve`, and `FindingToggle` all delegate so renaming or adding a verb is a one-file change.

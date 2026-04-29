@@ -3,25 +3,31 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-27
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: One runtime gem (`thor`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
+**TLDR**: Three runtime gems (`thor`, `bubbletea`, `lipgloss`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
 
 ## Runtime gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
+| `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
+| `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
+
+The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.
+
+Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every state transition behind `Hive::Tui::Update.apply` so view regressions reproduce as unit tests; lipgloss styling renders consistently across modern terminals (Ghostty / Alacritty / kitty / iTerm2) where curses' subprocess-takeover dance had alt-screen handoff edge cases. Trade documented in plan #003 (`docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md`) and the U2 verification report.
 
 ## Development / test gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
-| `minitest` | `~> 5.20` (locked 5.27.0) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. |
+| `minitest` | `~> 6.0` (locked 6.0.5) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `rubocop` | `~> 1.60` (locked 1.86.1) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 

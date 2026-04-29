@@ -325,6 +325,32 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     end
   end
 
+  # Diagnose flow over per-spawn capture: pre-fix, recent_log_section_for
+  # returned only the capture body so parse_argv_from_section ran against
+  # stderr and lost `--project`. The diagnostic flash dropped the project
+  # name. The fix prepends the BEGIN line so argv is recoverable.
+  def test_per_spawn_diagnose_keeps_project_in_flash
+    with_isolated_log do |path|
+      # Marker entry with a per-spawn ID (no embedded stderr — that lives
+      # in the per-spawn capture file).
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-29T10:00:00Z BEGIN[deadbeef]: hive pr slug --project demo-pr -----"
+        f.puts "----- 2026-04-29T10:00:01Z END[deadbeef] exit=1: hive pr slug --project demo-pr -----"
+      end
+
+      # Per-spawn capture file holds the actual stderr.
+      capture_path = File.join(Dir.tmpdir, "hive-tui-spawn-deadbeef.log")
+      File.write(capture_path, "fatal: 'origin' does not appear to be a git repository\n")
+
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+      assert_match(/demo-pr:.*project not set up/i, result,
+        "diagnose must extract --project from the BEGIN line even when stderr lives in a per-spawn file"
+      )
+    ensure
+      File.delete(capture_path) if capture_path && File.exist?(capture_path)
+    end
+  end
+
   # ---- extract_project edge cases ----
 
   def test_extract_project_pulls_value_after_project_flag

@@ -432,7 +432,15 @@ module Hive
         return nil if begin_match.nil?
 
         spawn_id = begin_match[:id]
-        return read_spawn_capture(spawn_id, cap) if spawn_id && File.exist?(spawn_capture_path(spawn_id))
+        if spawn_id && File.exist?(spawn_capture_path(spawn_id))
+          # Prepend the BEGIN line so `parse_argv_from_section` can
+          # still read it as the section's first line. Without this,
+          # `extract_project` runs against stderr and loses the
+          # `--project` flag — multi-project users would see an
+          # unscoped diagnostic flash.
+          capture = read_spawn_capture(spawn_id, cap)
+          return capture.nil? ? nil : "#{begin_match[0]}\n#{capture}"
+        end
 
         # Legacy fallback: section text from the marker log itself.
         # Hits when the entry pre-dates per-spawn capture, when the

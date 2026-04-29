@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-29T00:00:00Z] state-model trigger fired on TUI log_tail change — no wiki edit
+
+**Action:** The state-model hook fired because `lib/hive/tui/log_tail.rb` was modified. Reviewed the diff: `flush_oversized_partial!` turned from single-pass into a `while` loop so `Tail#open!`'s 64KiB single-shot backbuffer read can't leave a multi-cap partial in memory after one flush. Added regression test `test_tail_open_with_no_newline_backbuffer_respects_partial_cap`. This is a TUI log-tailer memory-cap fix and does not touch the state-model surface (`task.rb`, `markers.rb`, `config.rb`, `lock.rb`, `worktree.rb`, `metrics.rb`). No edit to `wiki/state-model.md` or `wiki/modules/*.md`. The internal partial-cap loop is not currently a wiki-documented behavior and isn't worth surfacing on the user-facing `wiki/commands/tui.md` page.
+
+**Refreshed pages:** none (log entry only).
+
 ## [2026-04-27T16:00:00Z] dependencies.md — `minitest` version row refreshed
 
 **Action:** Audit triggered by Gemfile/Gemfile.lock change hook. The U11 curses removal is already reflected in the prior log entry; the only remaining stale row was `minitest`, which still showed `~> 5.20` (locked 5.27.0) from before the dependabot bump in commit `429ff4c`. Updated to `~> 6.0` (locked 6.0.5) to match the current Gemfile + lockfile.

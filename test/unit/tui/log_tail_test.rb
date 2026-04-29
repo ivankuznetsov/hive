@@ -264,4 +264,32 @@ class TuiLogTailTest < Minitest::Test
       tail&.close!
     end
   end
+
+  # Tail#open! reads up to DEFAULT_BACKBUFFER_BYTES (64KiB) in a
+  # single `@file.read` call and ingests the result in one shot. A
+  # single-pass flush_oversized_partial! would split that 64KiB into
+  # one 16KiB prefix and leave 48KiB in @partial — cap violated. The
+  # while-loop version keeps the cap honored for both open! and
+  # chunked poll!.
+  def test_tail_open_with_no_newline_backbuffer_respects_partial_cap
+    with_log_dir do |dir|
+      path = File.join(dir, "x.log")
+      cap = Hive::Tui::LogTail::Tail::PARTIAL_BYTE_CAP
+      backbuffer = Hive::Tui::LogTail::Tail::DEFAULT_BACKBUFFER_BYTES
+
+      # Pre-seed the file with a 64KiB no-newline blob so open! sees
+      # the entire backbuffer in one read.
+      File.write(path, "Y" * backbuffer)
+
+      tail = Hive::Tui::LogTail::Tail.new(path)
+      tail.open!
+
+      partial = tail.instance_variable_get(:@partial)
+      assert partial.bytesize <= cap,
+        "open!'s single-shot backbuffer ingest must not leave @partial above the cap " \
+        "(got #{partial.bytesize} bytes; cap=#{cap})"
+    ensure
+      tail&.close!
+    end
+  end
 end

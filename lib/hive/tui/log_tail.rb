@@ -208,18 +208,20 @@ module Hive
           trim_buffer
         end
 
-        # Cap memory growth from a no-newline child. When @partial
+        # Cap memory growth from a no-newline child. While @partial
         # exceeds PARTIAL_BYTE_CAP, flush the prefix as a single
-        # synthetic line and keep the suffix; the next chunk continues
-        # filling. Drops nothing — the bytes are visible in the
-        # buffer, just split arbitrarily on byte boundary.
+        # synthetic line and keep the suffix; loop until the cap holds
+        # so a single oversized ingest (e.g., Tail#open!'s 64KiB
+        # backbuffer read in one call) can't park a multi-cap partial
+        # in memory after one flush. Drops nothing — bytes are split
+        # arbitrarily on byte boundary across multiple synthetic lines.
         def flush_oversized_partial!
-          return if @partial.bytesize <= PARTIAL_BYTE_CAP
-
-          prefix = @partial.byteslice(0, PARTIAL_BYTE_CAP)
-          suffix = @partial.byteslice(PARTIAL_BYTE_CAP, @partial.bytesize - PARTIAL_BYTE_CAP)
-          @buffer << prefix
-          @partial = +(suffix.to_s)
+          while @partial.bytesize > PARTIAL_BYTE_CAP
+            prefix = @partial.byteslice(0, PARTIAL_BYTE_CAP)
+            suffix = @partial.byteslice(PARTIAL_BYTE_CAP, @partial.bytesize - PARTIAL_BYTE_CAP)
+            @buffer << prefix
+            @partial = +(suffix.to_s)
+          end
         end
 
         def trim_buffer

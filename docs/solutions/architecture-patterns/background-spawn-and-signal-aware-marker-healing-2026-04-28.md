@@ -1,6 +1,7 @@
 ---
 title: Background-spawn dispatch and signal-aware marker healing for headless TUI agents
 date: 2026-04-28
+last_refreshed: 2026-04-29
 category: architecture-patterns
 module: Hive::Tui
 problem_type: architecture_pattern
@@ -63,6 +64,8 @@ end
 ```
 
 A synchronous "running …" flash fires from the supervisor side at dispatch time (`BubbleModel#dispatch_command`) so the user gets immediate keypress feedback — the spawn is async but the visual confirmation is not.
+
+> **Refinement (2026-04-29):** the snippet above redirects every child to a single shared `SUBPROCESS_LOG_PATH`. That shape couldn't bound disk usage under noisy children and lost diagnostics when rotation fired during an in-flight spawn. The current implementation redirects each child to a per-spawn capture file keyed by an 8-char correlation ID; the marker log only carries BEGIN/END/ERRNO records. See [[architecture-patterns/per-spawn-stdio-capture-correlation-id-2026-04-29]] for the pattern, the failure modes that motivated it, and the lifecycle-cleanup rules.
 
 ### Pattern 2 — Auto-heal kill-class markers
 
@@ -154,18 +157,16 @@ The `add-ruby-version-requirement-to-260425-ff9b` task in writero was previously
 **Subprocess log per-section structure** (enables verb-aware diagnostics later):
 
 ```
------ 2026-04-28T10:55:21Z BEGIN: hive pr add-ruby-version-requirement-to-260425-ff9b --project writero --from 5-review -----
-hive: marker=complete
-  state_file: …/pr.md
-  next: hive archive add-ruby-version-…
------ 2026-04-28T10:56:03Z END exit=0: hive pr add-ruby-version-requirement-to-260425-ff9b --project writero --from 5-review -----
+----- 2026-04-28T10:55:21Z BEGIN[a3f7e21b]: hive pr add-ruby-version-requirement-to-260425-ff9b --project writero --from 5-review -----
+----- 2026-04-28T10:56:03Z END[a3f7e21b] exit=0: hive pr add-ruby-version-requirement-to-260425-ff9b --project writero --from 5-review -----
 ```
 
-Each spawn produces one BEGIN / END pair around its captured stderr, allowing later passes (e.g., `Subprocess.diagnose_recent_failure`) to extract per-verb sections for targeted error messages without reading the full log.
+Each spawn produces one BEGIN / END pair carrying a shared 8-char correlation ID. The pair is **just markers** — child stdout/stderr lives in a separate per-spawn capture file keyed by the same ID (`<tmpdir>/hive-tui-spawn-<id>.log`). `Subprocess.diagnose_recent_failure(verb)` walks the marker log to find the most recent BEGIN[id] for a verb, then reads the matching capture file directly instead of scanning the shared log. See [[architecture-patterns/per-spawn-stdio-capture-correlation-id-2026-04-29]] for the full lifecycle (delete-on-success / keep-on-failure / opportunistic 24h sweep) and the failure modes the shared-appender shape used to allow.
 
 ## Related
 
+- [[architecture-patterns/per-spawn-stdio-capture-correlation-id-2026-04-29]] — the next layer down. Where this doc covers *dispatch shape* (background spawn + reaper + dispatch lambda), the per-spawn-capture doc covers *output capture lifecycle* (per-spawn files keyed by correlation ID, delete-on-success, opportunistic sweep). Read together: this pattern says "spawn detached and reap async"; the per-spawn-capture pattern says "where the child's stdio actually lands and how to clean it up."
 - `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md` — verifies the bubbletea-ruby v0.1.4 API surface; documents that the takeover callable doesn't propagate exit codes (the original reason for the closure-capture pattern these fixes evolved out of). Shares one referenced file (`lib/hive/tui/subprocess.rb`) but covers a distinct gap (lipgloss color-rendering on non-tty stdout).
 - Plan `docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md` — the migration plan whose R3 / KTD-4 / U6 specified the now-superseded foreground takeover model. The background-spawn pattern documented here replaces the takeover sections of that plan; refresh of the plan doc is out of scope for this learning but flagged for a future `/ce-compound-refresh` pass.
-- `Hive::Commands::Markers` — the agent-callable healer the auto-heal dispatches against (`hive markers clear FOLDER --name ERROR`).
-- Commits on `feat/hive-tui`: `6eae7e5` (auto-heal + background-spawn), `bd2013f` (running-flash for immediate feedback), `88012bc` (per-pattern diagnostic flashes that build on the per-section log structure).
+- `Hive::Commands::Markers` — the agent-callable healer the auto-heal dispatches against (`hive markers clear FOLDER --name ERROR --match-attr exit_code=N` after the cross-process race fix).
+- Commits on `feat/hive-tui`: `6eae7e5` (auto-heal + background-spawn), `bd2013f` (running-flash for immediate feedback), `88012bc` (per-pattern diagnostic flashes that build on the per-section log structure), `11db9dd` (auto-heal `--match-attr` cross-process race guard), `e030b24` (per-spawn capture files).

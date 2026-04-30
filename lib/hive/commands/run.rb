@@ -30,6 +30,18 @@ module Hive
       end
 
       def call
+        @stdout_written = false
+        do_call
+      rescue Hive::Error => e
+        emit_error_envelope(e) if @json && !@stdout_written
+        raise
+      rescue StandardError => e
+        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        emit_error_envelope(wrapped) if @json && !@stdout_written
+        raise wrapped
+      end
+
+      def do_call
         task = Hive::TaskResolver.new(
           @target,
           project_filter: @project_filter,
@@ -125,6 +137,7 @@ module Hive
         # caller receives the full JSON document AND a non-zero exit code
         # (3, TASK_IN_ERROR) as a dual signal.
         puts JSON.generate(payload)
+        @stdout_written = true
         if [ :error, :review_error ].include?(marker.name)
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
         end
@@ -246,6 +259,47 @@ module Hive
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
         project ? project["name"] : task.project_name
+      end
+
+      # Emit a hive-run ErrorPayload to stdout. Gated on @json + the
+      # @stdout_written flag in #call so we don't double-emit when
+      # report_json already wrote the dual-signal SuccessPayload before
+      # raising TaskInErrorState (see lib/hive/commands/run.rb#report_json
+      # and the contract documented at the top of report_json).
+      def emit_error_envelope(error)
+        extras = { "slug" => @target, "stage" => @stage_filter }.compact
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-run",
+          error: error,
+          error_kind: error_kind_for(error),
+          extras: extras
+        )
+        puts JSON.generate(payload)
+        @stdout_written = true
+      end
+
+      # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:
+      # `case/when` uses `===` (is_a?), so subclasses MUST precede their
+      # ancestors. Notably:
+      #   - WrongStage precedes nothing here, but FinalStageReached < WrongStage
+      #     so it correctly matches "wrong_stage" via this clause.
+      #   - AmbiguousSlug precedes the implicit InvalidTaskPath fallthrough
+      #     (AmbiguousSlug < InvalidTaskPath); without this ordering the
+      #     more general InvalidTaskPath case (when added) would shadow it.
+      def error_kind_for(error)
+        case error
+        when Hive::WrongStage         then Hive::Schemas::RunErrorKind::WRONG_STAGE
+        when Hive::ConcurrentRunError then Hive::Schemas::RunErrorKind::CONCURRENT_RUN
+        when Hive::TaskInErrorState   then Hive::Schemas::RunErrorKind::TASK_IN_ERROR
+        when Hive::StageError         then Hive::Schemas::RunErrorKind::STAGE
+        when Hive::ConfigError        then Hive::Schemas::RunErrorKind::CONFIG
+        when Hive::AgentError         then Hive::Schemas::RunErrorKind::AGENT
+        when Hive::GitError           then Hive::Schemas::RunErrorKind::GIT
+        when Hive::WorktreeError      then Hive::Schemas::RunErrorKind::WORKTREE
+        when Hive::AmbiguousSlug      then Hive::Schemas::RunErrorKind::AMBIGUOUS_SLUG
+        when Hive::InternalError      then Hive::Schemas::RunErrorKind::INTERNAL
+        else                               Hive::Schemas::RunErrorKind::GENERIC
+        end
       end
     end
   end

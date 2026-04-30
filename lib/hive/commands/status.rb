@@ -32,9 +32,22 @@ module Hive
       end
 
       def call
+        @stdout_written = false
+        do_call
+      rescue Hive::Error => e
+        emit_error_envelope(e) if @json && !@stdout_written
+        raise
+      rescue StandardError => e
+        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        emit_error_envelope(wrapped) if @json && !@stdout_written
+        raise wrapped
+      end
+
+      def do_call
         projects = Hive::Config.registered_projects
         if @json
           puts JSON.generate(json_payload(projects))
+          @stdout_written = true
           return
         end
 
@@ -256,6 +269,32 @@ module Hive
           "#{seconds / 3600}h ago"
         else
           "#{seconds / 86_400}d ago"
+        end
+      end
+
+      # Emit a hive-status ErrorPayload to stdout. Gated on @json +
+      # @stdout_written so a successful json_payload write doesn't get
+      # double-emitted by the rescue. `hive status` carries no slug/stage
+      # context, so extras stays empty.
+      def emit_error_envelope(error)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-status",
+          error: error,
+          error_kind: error_kind_for(error)
+        )
+        puts JSON.generate(payload)
+        @stdout_written = true
+      end
+
+      # Map a Hive::Error subclass to a StatusErrorKind value. Status's
+      # producer surface is much narrower than Run's — only ConfigError /
+      # InternalError surface deliberately; everything else is the generic
+      # fallback.
+      def error_kind_for(error)
+        case error
+        when Hive::ConfigError   then Hive::Schemas::StatusErrorKind::CONFIG
+        when Hive::InternalError then Hive::Schemas::StatusErrorKind::INTERNAL
+        else                          Hive::Schemas::StatusErrorKind::GENERIC
         end
       end
     end

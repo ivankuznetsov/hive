@@ -2,20 +2,58 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hive:schema:status:v1",
   "title": "hive status output (v1)",
-  "description": "Stable contract emitted by `hive status --json`.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schema", "schema_version", "generated_at", "projects"],
-  "properties": {
-    "schema": { "const": "hive-status" },
-    "schema_version": { "const": 1 },
-    "generated_at": { "type": "string", "format": "date-time" },
-    "projects": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/Project" }
-    }
-  },
+  "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
   "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "generated_at", "projects"],
+      "properties": {
+        "schema": { "const": "hive-status" },
+        "schema_version": { "const": 1 },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "projects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Project" }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "description": "Emitted by the top-level rescue in Hive::Commands::Status when an error is raised before json_payload wrote a SuccessPayload. `hive status` doesn't carry slug/stage context — those fields are absent here.",
+      "properties": {
+        "schema": { "const": "hive-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": ["config", "internal", "generic"]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "candidates": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "id": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
     "Project": {
       "type": "object",
       "additionalProperties": false,

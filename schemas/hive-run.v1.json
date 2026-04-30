@@ -2,70 +2,124 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hive:schema:run:v1",
   "title": "hive run output (v1)",
-  "description": "Stable success contract emitted by `hive run --json`.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema",
-    "schema_version",
-    "slug",
-    "stage",
-    "stage_index",
-    "folder",
-    "state_file",
-    "marker",
-    "attrs",
-    "commit_action",
-    "next_action"
+  "description": "Stable contract emitted by `hive run --json`. Either a SuccessPayload (the run's marker + next_action) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
   ],
-  "properties": {
-    "schema": { "const": "hive-run" },
-    "schema_version": { "const": 1 },
-    "slug": { "type": "string" },
-    "stage": {
-      "type": "string",
-      "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"]
-    },
-    "stage_index": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 7
-    },
-    "folder": { "type": "string" },
-    "state_file": { "type": "string" },
-    "marker": {
-      "type": "string",
-      "enum": [
-        "none",
-        "waiting",
-        "complete",
-        "agent_working",
-        "execute_waiting",
-        "execute_complete",
-        "execute_stale",
-        "review_working",
-        "review_waiting",
-        "review_ci_stale",
-        "review_stale",
-        "review_complete",
-        "review_error",
-        "error"
-      ]
-    },
-    "attrs": {
+  "$defs": {
+    "SuccessPayload": {
       "type": "object",
-      "additionalProperties": true
-    },
-    "commit_action": { "type": ["string", "null"] },
-    "next_action": {
-      "type": "object",
-      "required": ["kind"],
-      "additionalProperties": true,
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "slug",
+        "stage",
+        "stage_index",
+        "folder",
+        "state_file",
+        "marker",
+        "attrs",
+        "commit_action",
+        "next_action"
+      ],
       "properties": {
-        "kind": {
+        "schema": { "const": "hive-run" },
+        "schema_version": { "const": 1 },
+        "slug": { "type": "string" },
+        "stage": {
           "type": "string",
-          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"]
+        },
+        "stage_index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        },
+        "folder": { "type": "string" },
+        "state_file": { "type": "string" },
+        "marker": {
+          "type": "string",
+          "enum": [
+            "none",
+            "waiting",
+            "complete",
+            "agent_working",
+            "execute_waiting",
+            "execute_complete",
+            "execute_stale",
+            "review_working",
+            "review_waiting",
+            "review_ci_stale",
+            "review_stale",
+            "review_complete",
+            "review_error",
+            "error"
+          ]
+        },
+        "attrs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "commit_action": { "type": ["string", "null"] },
+        "next_action": {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+            }
+          }
         }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "description": "Emitted by the top-level rescue in Hive::Commands::Run when an error is raised before report_json wrote a SuccessPayload. Per-error structured fields (`candidates`, `id`, `path`) appear only on the matching error_kind.",
+      "properties": {
+        "schema": { "const": "hive-run" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "concurrent_run",
+            "task_in_error",
+            "wrong_stage",
+            "stage",
+            "config",
+            "agent",
+            "git",
+            "worktree",
+            "ambiguous_slug",
+            "internal",
+            "generic"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "slug": { "type": ["string", "null"] },
+        "stage": { "type": ["string", "null"] },
+        "candidates": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "id": { "type": "string" },
+        "path": { "type": "string" }
       }
     }
   }

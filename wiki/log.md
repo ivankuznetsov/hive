@@ -813,3 +813,8 @@ Append-only log of all wiki operations.
 - Added published `schemas/hive-status.v1.json` and `schemas/hive-run.v1.json`, plus drift tests in `test/unit/schema_files_test.rb`.
 - Added `hive version` / `hive --version` for binary smoke tests and e2e environment snapshots.
 - Documented the layer in [[e2e]], updated [[testing]], [[dependencies]], [[cli]], and added ADR-022.
+
+## 2026-04-30 — Asciinema e2e verification
+
+- Verified `/usr/bin/asciinema` 3.2.0 is now visible on PATH and can create an asciicast v2 smoke file.
+- Closed the local asciinema verification gap; `HIVE_ASCIINEMA_BIN` remains documented for non-PATH installs.

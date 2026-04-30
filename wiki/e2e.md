@@ -42,7 +42,23 @@ Supported step kinds:
 - `tui_expect`, `tui_keys`, `wait_subprocess`: tmux-backed TUI interaction.
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
 
-Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, and `{task_dir:<stage>}`.
+Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
+
+### Trust boundary
+
+`ruby_block` runs the literal `block:` string through Kernel-level code evaluation against the executor's binding with full process privileges. That string can mutate the outer hive checkout, exec arbitrary commands, and read or rewrite any private state of `StepExecutor`. The trust contract is: anyone who can commit to `test/e2e/scenarios/` can execute arbitrary code at test-runtime. **`ruby_block` changes warrant extra reviewer attention.** Prefer a purpose-built step kind for any pattern used more than once.
+
+### Multi-stage fake-claude dispatch
+
+V1 dispatches per-step via `env:` overrides (`HIVE_FAKE_CLAUDE_WRITE_FILE`, `HIVE_FAKE_CLAUDE_WRITE_CONTENT`). Multi-reviewer-per-invocation queueing is post-v1; see [[gaps]].
+
+### Scenario statuses
+
+Each entry in `report.json#scenarios[]` carries a `status`:
+
+- `passed` — every step ran and asserted cleanly.
+- `failed` — at least one step raised; failure artifacts are written under `scenarios/<name>/`.
+- `setup_failed` — `Sandbox.bootstrap` raised before any step ran. `failed_step_index` is `null`, `artifacts_dir` is `null`. The aggregate run-level status (`complete` / `partial` / `crashed`) is unaffected.
 
 ## Artifacts
 
@@ -56,13 +72,13 @@ Every run writes `report.json`:
 On failure, the harness writes a scenario bundle containing:
 
 - `exception.txt`
-- `env-snapshot.txt`
+- `env-snapshot.json` (schema `hive-e2e-env-snapshot`, schema_version 1)
 - `sandbox-git-status.txt`
 - `sandbox-tree.txt`
-- copied `.hive-state/stages/` and `.hive-state/logs/`
+- copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
 - `repro.sh`
 - `manifest.json` with size and SHA-256 per artifact
-- TUI failures also include pane and keystroke captures. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
+- TUI failures also include keystroke captures plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
 ## Current Scenarios
 

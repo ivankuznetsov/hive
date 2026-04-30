@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-29T00:00:00Z] e2e — second-pass fixer landed 12 deferred follow-ups
+
+**Action:** Applied F#7/F#8/F#9/F#10/F#12/F#13/F#15/F#16/F#17/F#18/F#27/F#33 from PR #18's deferred queue. The user-visible surface changes: `bin/hive-e2e` learned `--json` for `list`, `run`, and `clean`; preflight failures now exit 78; `setup_failed` joins `passed`/`failed` as a third per-scenario status; failure artifacts now write `env-snapshot.json`, `<basename>.tail`, and `pane-before.txt`. `StepExecutor` was split across `string_expander.rb`, `scenario_context.rb`, `tmux_session_lifecycle.rb`. The dead `anchors.yml` and the unused `fake-claude-scripts/full-pipeline.sh` + `review-with-findings.sh` were removed. `repro.sh`'s `cd` traversal depth was corrected (six `..` to reach the repo root) and wrapped in `realpath` so a wrong depth surfaces visibly.
+
+**Refreshed pages:**
+- `wiki/e2e.md` — added Trust boundary subsection, Multi-stage fake-claude dispatch note, Scenario statuses (passed / failed / setup_failed), and updated the artifacts list (`env-snapshot.json`, `.tail` files, `pane-before.txt`).
+
 ## [2026-04-29T00:00:00Z] state-model trigger fired on TUI log_tail change — no wiki edit
 
 **Action:** The state-model hook fired because `lib/hive/tui/log_tail.rb` was modified. Reviewed the diff: `flush_oversized_partial!` turned from single-pass into a `while` loop so `Tail#open!`'s 64KiB single-shot backbuffer read can't leave a multi-cap partial in memory after one flush. Added regression test `test_tail_open_with_no_newline_backbuffer_respects_partial_cap`. This is a TUI log-tailer memory-cap fix and does not touch the state-model surface (`task.rb`, `markers.rb`, `config.rb`, `lock.rb`, `worktree.rb`, `metrics.rb`). No edit to `wiki/state-model.md` or `wiki/modules/*.md`. The internal partial-cap loop is not currently a wiki-documented behavior and isn't worth surfacing on the user-facing `wiki/commands/tui.md` page.

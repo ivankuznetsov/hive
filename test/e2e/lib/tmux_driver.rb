@@ -18,6 +18,12 @@ module Hive
       end
 
       class DeadSession < StandardError; end
+      class PaneCollapsedError < StandardError; end
+
+      # Common bash/zsh prompt sentinels we treat as "the TUI just exited and a
+      # shell is staring back at us". Detected at end-of-pane to avoid false
+      # positives on prompt-shaped strings inside the TUI itself.
+      SHELL_PROMPT_RE = /[$#] \z/
 
       attr_reader :socket_name, :session_name, :keystrokes
 
@@ -84,6 +90,19 @@ module Hive
       # text appears mid-render (e.g. between scroll lines while the TUI is still
       # writing) — without it we can hand back control to the next step before
       # the screen has actually settled.
+      #
+      # Predicate ordering (race avoidance):
+      #   1. capture-pane FIRST — get a deterministic snapshot to reason over.
+      #   2. Detect a shell-prompt sentinel at the tail of the snapshot. If the
+      #      TUI has already exited, the surrounding shell prompt is what we
+      #      see, and continuing to wait is pointless: fail fast with
+      #      PaneCollapsedError so the scenario surfaces a clear cause.
+      #   3. Match the anchor against the snapshot.
+      #   4. Run has-session as a final verification before declaring :ok, in
+      #      case the session died DURING capture-pane (capture races process
+      #      teardown otherwise).
+      # The settled-state stabilization branch applies the same order on both
+      # polls of the two-poll-stable confirmation.
       def wait_for(anchor: nil, timeout: 3.0, interval: 0.1, allow_stable: true, require_stable: true)
         start
         started_at = monotonic_time
@@ -92,14 +111,21 @@ module Hive
         last = +""
 
         loop do
-          ensure_live!
-          last = capture_pane
+          last = capture_pane_raw
+          guard_pane_collapsed!(last)
           if anchor && last.include?(anchor)
-            return :ok unless require_stable
+            unless require_stable
+              ensure_live!
+              return :ok
+            end
 
             sleep interval
-            confirm = capture_pane
-            return :ok if confirm.include?(anchor) && confirm == last
+            confirm = capture_pane_raw
+            guard_pane_collapsed!(confirm)
+            if confirm.include?(anchor) && confirm == last
+              ensure_live!
+              return :ok
+            end
 
             previous = confirm
             last = confirm
@@ -107,7 +133,10 @@ module Hive
 
           if allow_stable && !anchor.nil? && last == previous
             stable_count += 1
-            return :ok if stable_count >= 2
+            if stable_count >= 2
+              ensure_live!
+              return :ok
+            end
           else
             stable_count = 0
           end
@@ -118,6 +147,20 @@ module Hive
 
           sleep interval
         end
+      end
+
+      private def guard_pane_collapsed!(pane)
+        return unless pane.is_a?(String) && !pane.empty?
+
+        tail = pane.lines.last(3).join
+        raise PaneCollapsedError, "tmux pane collapsed to a shell prompt; subprocess exited" if SHELL_PROMPT_RE.match?(tail)
+      end
+
+      private def capture_pane_raw
+        out, err, status = Open3.capture3(*(base_args + [ "capture-pane", "-p", "-t", @session_name ]))
+        raise "tmux capture-pane failed: #{err.empty? ? out : err}" unless status.success?
+
+        out
       end
 
       # Waits for the subprocess running inside the tmux pane to exit. The previous

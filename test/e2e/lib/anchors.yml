@@ -1,5 +1,0 @@
-grid:
-  header: "hive tui"
-  hint: "[?] help"
-filter:
-  prompt: "filter="

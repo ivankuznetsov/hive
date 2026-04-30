@@ -1,13 +1,10 @@
 require "fileutils"
 require "json"
-require "rbconfig"
-require "shellwords"
 require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
 require_relative "artifact_capture"
-require_relative "asciinema_driver"
 require_relative "cli_driver"
 require_relative "diff_walker"
 require_relative "json_validator"
@@ -15,10 +12,18 @@ require_relative "paths"
 require_relative "repro_script_writer"
 require_relative "sandbox"
 require_relative "sandbox_env"
-require_relative "tmux_driver"
+require_relative "scenario_context"
+require_relative "string_expander"
+require_relative "tmux_session_lifecycle"
 
 module Hive
   module E2E
+    # Dispatch hub: walks a parsed scenario, sends each step to a `step_<kind>`
+    # handler, accumulates per-step status, and on failure produces a repro.sh
+    # plus a forensic artifact bundle. State that needs to outlive a single
+    # step (slug, registered projects, pre-keystroke pane snapshot) lives on
+    # the ScenarioContext; string expansion is delegated to StringExpander;
+    # tmux + asciinema lifecycle is owned by TmuxSessionLifecycle.
     class StepExecutor
       ScenarioResult = Data.define(:name, :status, :duration_seconds, :failed_step_index, :failed_step_kind, :error_summary, :artifacts_dir, :repro)
 
@@ -35,59 +40,42 @@ module Hive
       def initialize(scenario:, sandbox:, scenario_dir:, run_id:)
         @scenario = scenario
         @sandbox = sandbox
-        @sandbox_dir = sandbox.sandbox_dir
-        @run_home = sandbox.run_home
         @scenario_dir = scenario_dir
         @run_id = run_id
-        @cli = CliDriver.new(@sandbox_dir, @run_home)
+        @ctx = ScenarioContext.new(sandbox: sandbox, run_home: sandbox.run_home, run_id: run_id)
+        @cli = CliDriver.new(@ctx.sandbox_dir, @ctx.run_home)
         @validator = JsonValidator.new
         @diff_walker = DiffWalker.new
+        @tmux_lifecycle = TmuxSessionLifecycle.new(scenario: scenario, sandbox_dir: @ctx.sandbox_dir,
+                                                   run_home: @ctx.run_home, run_id: run_id,
+                                                   scenario_dir: scenario_dir)
         @step_results = []
-        @slug = nil
-        @projects = { File.basename(@sandbox_dir) => @sandbox_dir }
-        @last_json = nil
-        @tmux = nil
-        @asciinema = nil
         @preserve_cast = false
       end
 
+      # Scenario `setup:` is intentionally minimal in v1. Multi-stage dispatch
+      # for fake-claude responses is driven by per-step `env:` overrides
+      # (HIVE_FAKE_CLAUDE_WRITE_FILE / HIVE_FAKE_CLAUDE_WRITE_CONTENT, see
+      # full_pipeline_happy_path.yml). Multi-reviewer-per-invocation queueing
+      # is post-v1; see wiki/gaps.md for the open question.
       def execute
         started = monotonic_time
-        @scenario.steps.each do |step|
-          execute_step(step)
-        end
-        stop_asciinema(delete: true)
-        duration = monotonic_time - started
-        ScenarioResult.new(name: @scenario.name, status: "passed", duration_seconds: duration.round(3),
+        @scenario.steps.each { |step| dispatch(step) }
+        @tmux_lifecycle.stop_asciinema(delete: true)
+        ScenarioResult.new(name: @scenario.name, status: "passed",
+                           duration_seconds: (monotonic_time - started).round(3),
                            failed_step_index: nil, failed_step_kind: nil, error_summary: nil,
                            artifacts_dir: relative_scenario_dir, repro: nil)
       rescue StandardError => e
-        @preserve_cast = true
-        stop_asciinema(delete: false)
-        failed_step = e.respond_to?(:step) ? e.step : nil
-        repro = ReproScriptWriter.new(
-          scenario_dir: @scenario_dir,
-          sandbox_dir: @sandbox_dir,
-          run_home: @run_home,
-          steps: @scenario.steps,
-          failed_index: failed_step&.position || @step_results.size + 1
-        ).write
-        ArtifactCapture.new(scenario_dir: @scenario_dir, sandbox_dir: @sandbox_dir, run_home: @run_home)
-          .collect(error: e, failed_step: failed_step, step_results: @step_results, tmux_driver: @tmux,
-                   schema_diff: e.respond_to?(:schema_diff) ? e.schema_diff : nil)
-        duration = monotonic_time - started
-        ScenarioResult.new(name: @scenario.name, status: "failed", duration_seconds: duration.round(3),
-                           failed_step_index: failed_step&.position, failed_step_kind: failed_step&.kind,
-                           error_summary: "#{e.class}: #{e.message}",
-                           artifacts_dir: relative_scenario_dir, repro: repro.sub("#{File.dirname(@scenario_dir)}/", ""))
+        on_failure(e, started)
       ensure
-        stop_asciinema(delete: !@preserve_cast)
-        @tmux&.cleanup
+        @tmux_lifecycle.stop_asciinema(delete: !@preserve_cast)
+        @tmux_lifecycle.cleanup
       end
 
       private
 
-      def execute_step(step)
+      def dispatch(step)
         send("step_#{step.kind}", step)
         @step_results << { "index" => step.position, "kind" => step.kind, "status" => "passed" }
       rescue StepFailure
@@ -98,30 +86,51 @@ module Hive
         raise StepFailure.new(step, e.message)
       end
 
+      def on_failure(error, started)
+        @preserve_cast = true
+        @tmux_lifecycle.stop_asciinema(delete: false)
+        failed_step = error.respond_to?(:step) ? error.step : nil
+        repro = ReproScriptWriter.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir,
+                                      run_home: @ctx.run_home, steps: @scenario.steps,
+                                      failed_index: failed_step&.position || @step_results.size + 1).write
+        ArtifactCapture.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir, run_home: @ctx.run_home)
+          .collect(error: error, failed_step: failed_step, step_results: @step_results,
+                   tmux_driver: @tmux_lifecycle.tmux,
+                   schema_diff: error.respond_to?(:schema_diff) ? error.schema_diff : nil,
+                   pane_before: @ctx.pre_keystroke_pane)
+        ScenarioResult.new(name: @scenario.name, status: "failed",
+                           duration_seconds: (monotonic_time - started).round(3),
+                           failed_step_index: failed_step&.position, failed_step_kind: failed_step&.kind,
+                           error_summary: "#{error.class}: #{error.message}",
+                           artifacts_dir: relative_scenario_dir,
+                           repro: repro.sub("#{File.dirname(@scenario_dir)}/", ""))
+      end
+
+      # ---- step kinds ----------------------------------------------------
+
       def step_cli(step)
-        result = run_cli_step(step)
+        run_cli_step(step)
         discover_slug!
-        result
       end
 
       def step_json_assert(step)
         result = run_cli_step(step)
         validation = @validator.validate(step.args.fetch("schema"), result.stdout)
-        if validation.status == :no_schema
-          raise StepFailure.new(step, "no schema for #{step.args.fetch('schema')}")
-        end
+        raise StepFailure.new(step, "no schema for #{step.args.fetch('schema')}") if validation.status == :no_schema
         unless validation.ok?
           diff = @diff_walker.render(validation.errors, parse_error: validation.parse_error)
           raise StepFailure.new(step, "schema validation failed for #{step.args.fetch('schema')}", schema_diff: diff)
         end
 
         doc = JSON.parse(result.stdout)
-        @last_json = doc
-        if step.args.key?("pick")
-          actual = pick(doc, Array(step.args["pick"]))
-          expected = expand_value(step.args["equals"])
-          raise StepFailure.new(step, "expected #{step.args['pick'].inspect} to equal #{expected.inspect}, got #{actual.inspect}") unless actual == expected
-        end
+        @ctx.last_json = doc
+        return unless step.args.key?("pick")
+
+        actual = pick(doc, Array(step.args["pick"]))
+        expected = expand(step.args["equals"])
+        return if actual == expected
+
+        raise StepFailure.new(step, "expected #{step.args['pick'].inspect} to equal #{expected.inspect}, got #{actual.inspect}")
       end
 
       def step_state_assert(step)
@@ -135,6 +144,103 @@ module Hive
         end
 
         run_state_assertion!(step, path)
+      end
+
+      def step_seed_state(step)
+        project_dir = project_dir_for(step.args["project"])
+        stage = expand_string(step.args.fetch("stage"))
+        slug = expand_string(step.args["slug"] || "#{@scenario.name.tr('_', '-')}-task")
+        @ctx.slug_default!(slug)
+        folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, step.args["state_file"] || default_state_file(stage))
+        File.write(state_file, expand_string(step.args["content"] || default_state_content(slug, stage)))
+        Array(step.args["files"]).each do |file_spec|
+          path = File.join(folder, expand_string(file_spec.fetch("path")))
+          FileUtils.mkdir_p(File.dirname(path))
+          File.write(path, expand_string(file_spec.fetch("content", "")))
+        end
+      end
+
+      def step_write_file(step)
+        path = expand_path(step.args.fetch("path"))
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, expand_string(step.args.fetch("content")))
+      end
+
+      def step_register_project(step)
+        name = expand_string(step.args.fetch("name"))
+        @ctx.register_project(name, @sandbox.register_secondary(name))
+      end
+
+      # DANGER: ruby_block runs eval(...) with full process privileges. The
+      # binding exposes self (StepExecutor) plus sandbox/slug/run_home locals.
+      # Scenarios authored here can mutate the outer hive checkout, exec
+      # arbitrary system commands, and access any private method or ivar of
+      # this class. The trust boundary is "anyone who can commit to
+      # test/e2e/scenarios/ can execute arbitrary code at test-runtime."
+      # Use sparingly; prefer a purpose-built step kind for repeating patterns.
+      def step_ruby_block(step)
+        sandbox = @ctx.sandbox_dir
+        slug = current_slug
+        run_home = @ctx.run_home
+        eval(step.args.fetch("block"), binding, @scenario.path, step.position)
+        @ctx.slug_default!(slug)
+      end
+
+      def step_tui_expect(step)
+        tmux = @tmux_lifecycle.start_session
+        # require_stable forces tmux_driver to take a second confirming capture
+        # before returning so we don't race a still-rendering TUI frame.
+        tmux.wait_for(anchor: expand_string(step.args.fetch("anchor")),
+                      timeout: (step.args["timeout"] || 3.0).to_f,
+                      allow_stable: false,
+                      require_stable: true)
+      end
+
+      def step_tui_keys(step)
+        tmux = @tmux_lifecycle.start_session
+        # Snapshot the pane BEFORE the keystroke so a step failure has a
+        # before/after pair for forensics. Best-effort.
+        @ctx.pre_keystroke_pane = @tmux_lifecycle.snapshot_pane
+        if step.args.key?("text")
+          tmux.send_text(expand_string(step.args["text"]))
+        else
+          # `keys:` always carries a tmux named-key token (e.g. "Enter", "Up",
+          # "C-c"); send it verbatim. Literal text uses the `text:` branch above.
+          tmux.send_keys(expand_string(step.args["keys"].to_s))
+        end
+      end
+
+      def step_wait_subprocess(step)
+        tmux = @tmux_lifecycle.start_session
+        tmux.wait_for_subprocess_exit(timeout: (step.args["timeout"] || 30.0).to_f)
+      end
+
+      def step_editor_action(step)
+        run_cli_step(step, env_overrides: { "EDITOR" => Paths.editor_shim })
+      end
+
+      def step_log_assert(step)
+        path = expand_path(step.args.fetch("path"))
+        raise StepFailure.new(step, "log file not found: #{path}") unless File.exist?(path)
+
+        regex = Regexp.new(expand_string(step.args.fetch("match")))
+        raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}") unless File.read(path).match?(regex)
+      end
+
+      # ---- helpers -------------------------------------------------------
+
+      def run_cli_step(step, env_overrides: {})
+        args = expand(step.args.fetch("args"))
+        env = expand(step.args["env"] || {}).merge(env_overrides)
+        cwd = expand_path(step.args["cwd"] || "{sandbox}")
+        @cli.call(args,
+                  expect_exit: step.args.fetch("expect_exit", 0),
+                  expect_stderr_match: step.args["expect_stderr_match"],
+                  cwd: cwd,
+                  timeout: (step.args["timeout"] || 30.0).to_f,
+                  env_overrides: env)
       end
 
       def state_assertion_passes?(step, path)
@@ -162,159 +268,33 @@ module Hive
           expected = expand_string(step.args["contains"].to_s)
           raise StepFailure.new(step, "expected #{path} to contain #{expected.inspect}") unless body.include?(expected)
         end
-        if step.args["match"]
-          body = File.read(path)
-          regex = Regexp.new(expand_string(step.args["match"].to_s))
-          raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}") unless body.match?(regex)
-        end
-      end
+        return unless step.args["match"]
 
-      def step_seed_state(step)
-        project_dir = project_dir_for(step.args["project"])
-        stage = expand_string(step.args.fetch("stage"))
-        slug = expand_string(step.args["slug"] || "#{@scenario.name.tr('_', '-')}-task")
-        @slug ||= slug
-        folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
-        FileUtils.mkdir_p(folder)
-        state_file = File.join(folder, step.args["state_file"] || default_state_file(stage))
-        File.write(state_file, expand_string(step.args["content"] || default_state_content(slug, stage)))
-        Array(step.args["files"]).each do |file_spec|
-          path = File.join(folder, expand_string(file_spec.fetch("path")))
-          FileUtils.mkdir_p(File.dirname(path))
-          File.write(path, expand_string(file_spec.fetch("content", "")))
-        end
-      end
-
-      def step_write_file(step)
-        path = expand_path(step.args.fetch("path"))
-        FileUtils.mkdir_p(File.dirname(path))
-        File.write(path, expand_string(step.args.fetch("content")))
-      end
-
-      def step_register_project(step)
-        name = expand_string(step.args.fetch("name"))
-        @projects[name] = @sandbox.register_secondary(name)
-      end
-
-      def step_ruby_block(step)
-        sandbox = @sandbox_dir
-        slug = current_slug
-        run_home = @run_home
-        eval(step.args.fetch("block"), binding, @scenario.path, step.position)
-        @slug ||= slug
-      end
-
-      def step_tui_expect(step)
-        ensure_tmux!
-        # require_stable forces tmux_driver to take a second confirming capture
-        # before returning so we don't race a still-rendering TUI frame.
-        @tmux.wait_for(anchor: expand_string(step.args.fetch("anchor")),
-                       timeout: (step.args["timeout"] || 3.0).to_f,
-                       allow_stable: false,
-                       require_stable: true)
-      end
-
-      def step_tui_keys(step)
-        ensure_tmux!
-        if step.args.key?("text")
-          @tmux.send_text(expand_string(step.args["text"]))
-        else
-          # `keys:` always carries a tmux named-key token (e.g. "Enter", "Up",
-          # "C-c"); send it verbatim. Literal text uses the `text:` branch above.
-          @tmux.send_keys(expand_string(step.args["keys"].to_s))
-        end
-      end
-
-      def step_wait_subprocess(step)
-        ensure_tmux!
-        @tmux.wait_for_subprocess_exit(timeout: (step.args["timeout"] || 30.0).to_f)
-      end
-
-      def step_editor_action(step)
-        env = { "EDITOR" => Paths.editor_shim }
-        run_cli_step(step, env_overrides: env)
-      end
-
-      def step_log_assert(step)
-        path = expand_path(step.args.fetch("path"))
-        raise StepFailure.new(step, "log file not found: #{path}") unless File.exist?(path)
-
-        regex = Regexp.new(expand_string(step.args.fetch("match")))
-        raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}") unless File.read(path).match?(regex)
-      end
-
-      def run_cli_step(step, env_overrides: {})
-        args = expand_value(step.args.fetch("args"))
-        env = expand_value(step.args["env"] || {}).merge(env_overrides)
-        cwd = expand_path(step.args["cwd"] || "{sandbox}")
-        @cli.call(args,
-                  expect_exit: step.args.fetch("expect_exit", 0),
-                  expect_stderr_match: step.args["expect_stderr_match"],
-                  cwd: cwd,
-                  timeout: (step.args["timeout"] || 30.0).to_f,
-                  env_overrides: env)
-      end
-
-      def ensure_tmux!
-        return @tmux if @tmux
-        raise "tmux is required for TUI e2e scenarios" unless TmuxDriver.available?
-
-        env = SandboxEnv.repro_env(@sandbox_dir, @run_home)
-        env.merge!(expand_value(@scenario.setup["tui_env"] || {}))
-        command = Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", Paths.hive_bin, "tui" ])
-        @tmux = TmuxDriver.new(run_id: @run_id, session_name: "scenario-#{@scenario.name}",
-                               command: command, env: env)
-        @tmux.start
-        start_asciinema_if_available
-      end
-
-      def start_asciinema_if_available
-        return if @asciinema
-        return unless AsciinemaDriver.available?
-
-        @asciinema = AsciinemaDriver.new(
-          socket_name: @tmux.socket_name,
-          session_name: @tmux.session_name,
-          cast_path: File.join(@scenario_dir, "cast.json")
-        )
-        @asciinema.start
-      rescue AsciinemaDriver::Unavailable
-        @asciinema = nil
-      end
-
-      def stop_asciinema(delete:)
-        return unless @asciinema
-
-        @asciinema.stop
-        if delete
-          FileUtils.rm_f(@asciinema.cast_path)
-        else
-          FileUtils.mkdir_p(@scenario_dir)
-          File.write(File.join(@scenario_dir, "cast-status.txt"), "#{@asciinema.integrity_status}\n")
-        end
-      ensure
-        @asciinema = nil
+        body = File.read(path)
+        regex = Regexp.new(expand_string(step.args["match"].to_s))
+        raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}") unless body.match?(regex)
       end
 
       def discover_slug!
-        @slug ||= current_slug
+        @ctx.slug_default!(current_slug)
       rescue StepFailure
         nil
       end
 
       def current_slug
-        return @slug if @slug
+        return @ctx.slug if @ctx.slug
 
-        stages = Dir[File.join(@sandbox_dir, ".hive-state", "stages", "*", "*")].select { |path| File.directory?(path) }
+        stages = Dir[File.join(@ctx.sandbox_dir, ".hive-state", "stages", "*", "*")].select { |path| File.directory?(path) }
         raise StepFailure.new(nil, "no task slug found in sandbox") if stages.empty?
 
-        @slug = File.basename(stages.sort.first)
+        @ctx.slug_default!(File.basename(stages.sort.first))
+        @ctx.slug
       end
 
       def project_dir_for(name)
-        return @sandbox_dir if name.nil?
+        return @ctx.sandbox_dir if name.nil?
 
-        @projects.fetch(expand_string(name.to_s))
+        @ctx.project_dir(expand_string(name.to_s))
       end
 
       def default_state_file(stage)
@@ -339,25 +319,19 @@ module Hive
 
       def expand_path(value)
         expanded = expand_string(value.to_s)
-        expanded.start_with?("/") ? expanded : File.join(@sandbox_dir, expanded)
+        expanded.start_with?("/") ? expanded : File.join(@ctx.sandbox_dir, expanded)
       end
 
-      def expand_value(value)
-        case value
-        when Hash then value.transform_values { |v| expand_value(v) }
-        when Array then value.map { |v| expand_value(v) }
-        when String then expand_string(value)
-        else value
-        end
+      def expand(value)
+        StringExpander.expand(value, expander_context)
       end
 
       def expand_string(value)
-        value
-          .gsub("{sandbox}", @sandbox_dir)
-          .gsub("{run_home}", @run_home)
-          .gsub("{project}", File.basename(@sandbox_dir))
-          .gsub("{slug}", @slug || current_slug_safe.to_s)
-          .gsub(/\{task_dir:([^}]+)\}/) { File.join(@sandbox_dir, ".hive-state", "stages", Regexp.last_match(1), @slug || current_slug_safe.to_s) }
+        StringExpander.expand_string(value.to_s, expander_context)
+      end
+
+      def expander_context
+        @ctx.expander_context(slug_resolver: -> { current_slug_safe })
       end
 
       def current_slug_safe

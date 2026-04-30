@@ -73,16 +73,23 @@ module Hive
 
       def self.cleanup_runs(runs_dir: Paths.runs_dir, retain_days: 7, retain_failed_days: 14)
         now = Time.now
+        deleted = 0
+        kept = 0
         Dir[File.join(runs_dir, "*")].each do |dir|
           next unless File.directory?(dir)
 
           report_path = File.join(dir, "report.json")
           status = File.exist?(report_path) ? JSON.parse(File.read(report_path))["status"] : "crashed"
           retain = status == "complete" ? retain_days : retain_failed_days
-          next if now - File.mtime(dir) < retain.to_i * 86_400
+          if now - File.mtime(dir) < retain.to_i * 86_400
+            kept += 1
+            next
+          end
 
           FileUtils.rm_rf(dir)
+          deleted += 1
         end
+        { "deleted" => deleted, "kept" => kept }
       end
 
       private

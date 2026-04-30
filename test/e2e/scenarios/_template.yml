@@ -1,40 +1,124 @@
 name: template
 description: Reference scenario showing every v1 step kind.
 tags: [template]
-setup:
-  fake_claude_script: full-pipeline
+
+# `setup:` is intentionally minimal in v1.
+#
+# Optional keys:
+#   tui_env: hash merged into the env passed to `tmux new-session` for any
+#            tui_* step. Useful for stage-specific HIVE_FAKE_CLAUDE_* vars.
+# Multi-stage fake-claude dispatch is driven by per-step `env:` overrides
+# (HIVE_FAKE_CLAUDE_WRITE_FILE / HIVE_FAKE_CLAUDE_WRITE_CONTENT) — see
+# full_pipeline_happy_path.yml. Multi-reviewer-per-invocation queueing is
+# post-v1; see wiki/gaps.md.
+
+# Expansion variables available in every string-valued arg below:
+#   {sandbox}            — absolute path to the per-scenario sandbox
+#   {run_home}           — absolute path to the per-scenario hive-home
+#   {project}            — basename of the sandbox (registered project name)
+#   {slug}               — the task slug discovered or seeded so far
+#   {task_dir:<stage>}   — `{sandbox}/.hive-state/stages/<stage>/{slug}`
+#   {run_id}             — current run id (only meaningful in tmux env etc.)
+
 steps:
+  # cli — run a `bin/hive` subprocess against the sandbox.
+  # Required: args (array of strings)
+  # Optional: expect_exit (default 0), expect_stderr_match (regex string),
+  #           cwd (default {sandbox}), env (hash), timeout (seconds, default 30)
   - kind: cli
     args: [version]
     expect_exit: 0
+
+  # seed_state — plant a task folder in `{sandbox}/.hive-state/stages/<stage>/<slug>/`
+  # so later steps have a deterministic starting state without running the prior CLI.
+  # Required: stage
+  # Optional: slug (defaults to "<scenario-name>-task"), project (defaults to
+  #           the primary sandbox; use a name registered via register_project),
+  #           state_file (default depends on stage: idea.md / brainstorm.md /
+  #           plan.md / task.md), content (full file body), files (array of
+  #           {path, content} entries to write under the slug folder).
   - kind: seed_state
     stage: 2-brainstorm
     slug: template-task
     state_file: brainstorm.md
     content: "# Template\n\n<!-- COMPLETE -->\n"
+
+  # state_assert — assert a sandbox file's existence, absence, marker, or
+  # content. Polls until `timeout` (in seconds) before failing.
+  # Required: path
+  # Optional: absent (true to assert non-existence),
+  #           marker: { current: <NAME> } to assert the marker enum,
+  #           contains: <substring>, match: <regex string>,
+  #           timeout (seconds, default 0 — single-shot)
   - kind: state_assert
     path: "{task_dir:2-brainstorm}/brainstorm.md"
     marker: { current: COMPLETE }
+
+  # json_assert — run a `bin/hive` subprocess, parse stdout as JSON, validate
+  # against a published schema, and optionally assert a JSONPath-ish value.
+  # Required: args (array), schema (e.g. "hive-status")
+  # Optional: pick (array of keys / integer indices), equals (expected value),
+  #           plus all keys from `cli` (expect_exit, env, cwd, timeout)
   - kind: json_assert
     args: [status, --json]
     schema: hive-status
     pick: [projects, 0, tasks, 0, slug]
     equals: template-task
+
+  # write_file — write a literal file inside the sandbox (absolute paths
+  # forbidden — interpreted relative to {sandbox} when not starting with /).
+  # Required: path, content
   - kind: write_file
     path: "{sandbox}/tmp.txt"
     content: "hello\n"
+
+  # register_project — copy the sample project into a second registered project
+  # under the run dir and `hive init` it. Subsequent steps can reference this
+  # project by `project: <name>` (e.g. on seed_state).
+  # Required: name
   - kind: register_project
     name: project-b
+
+  # ruby_block — DANGER: eval-based escape hatch. Runs the `block` string with
+  # `self == StepExecutor` and locals `sandbox`, `slug`, `run_home`. Anyone
+  # who can commit a scenario can execute arbitrary code at test-runtime;
+  # use sparingly and prefer a purpose-built step kind.
+  # Required: block (Ruby source string)
   - kind: ruby_block
     block: "File.write(File.join(sandbox, 'ruby-block.txt'), slug)"
+
+  # tui_expect — wait for a string anchor to appear (and stay stable) in the
+  # tmux pane running `bin/hive tui`. Starts a tmux session lazily on first
+  # use of any tui_* step.
+  # Required: anchor
+  # Optional: timeout (seconds, default 3.0)
   - kind: tui_expect
     anchor: "hive tui"
+
+  # tui_keys — deliver keystrokes to the live tmux pane. Use `keys` for named
+  # tmux keys ("Enter", "Up", "C-c"); use `text` for literal characters
+  # (sent one at a time to avoid Bubble Tea input quirks).
+  # Required: exactly one of `keys` (named tmux key) or `text` (literal string)
   - kind: tui_keys
     keys: "q"
+
+  # wait_subprocess — wait for the foreground process inside the tmux pane to
+  # exit. Used after `tui_keys: "q"` to confirm the TUI process has fully
+  # torn down before asserting downstream state.
+  # Optional: timeout (seconds, default 30.0)
   - kind: wait_subprocess
     timeout: 1
+
+  # editor_action — like `cli`, but with EDITOR set to the test editor shim
+  # so commands that shell out to $EDITOR (`hive edit`, etc.) are deterministic.
+  # Required: args (array)
+  # Optional: same as `cli`
   - kind: editor_action
     args: [version]
+
+  # log_assert — assert a regex match against a sandbox file's full contents.
+  # Use for matching against `.hive-state/logs/<slug>/<stage>-NN.log` etc.
+  # Required: path, match (regex string)
   - kind: log_assert
     path: "{sandbox}/tmp.txt"
     match: "hello"

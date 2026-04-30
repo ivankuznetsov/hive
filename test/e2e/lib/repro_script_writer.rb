@@ -27,15 +27,22 @@ module Hive
 
       def script
         env = SandboxEnv.repro_env(@sandbox_dir, @run_home)
+        # repro.sh lives at <repo>/test/e2e/runs/<id>/scenarios/<name>/repro.sh
+        # — six parent dirs up reaches the repo root. realpath gives a clean
+        # absolute path so a wrong depth surfaces visibly instead of silently
+        # cd'ing into a stale parent.
         lines = [
           "#!/usr/bin/env bash",
           "set -euo pipefail",
-          "cd \"$(dirname \"$0\")/../../..\""
+          "cd \"$(realpath \"$(dirname \"$0\")/../../../../../..\")\""
         ]
         env.each { |key, value| lines << "export #{key}=#{Shellwords.escape(value.to_s)}" }
         lines << "echo 'Replaying setup and failed CLI-visible steps for #{@failed_index}'"
         @steps.first(@failed_index.to_i).each do |step|
-          next unless step.kind == "cli" || step.kind == "json_assert"
+          unless step.kind == "cli" || step.kind == "json_assert"
+            lines << "# step skipped: kind=#{step.kind} (stateful)"
+            next
+          end
 
           args = Array(step.args["args"]).map(&:to_s)
           lines << Shellwords.join([ RbConfig.ruby, "-Ilib", "bin/hive", *args ])

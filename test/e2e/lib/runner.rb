@@ -35,12 +35,7 @@ module Hive
         begin
           write_report(status: "partial", total: @total)
           scenarios.each do |scenario|
-            sandbox = Sandbox.bootstrap(File.join(@run_dir, scenario.name))
-            scenario_dir = File.join(@run_dir, "scenarios", scenario.name)
-            result = StepExecutor.new(scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: @run_id).execute
-            @results << result
-            assert_sample_project_unmutated!
-            sandbox.cleanup unless keep_artifacts || result.status == "failed"
+            run_one(scenario, keep_artifacts: keep_artifacts)
             write_report(status: "partial", total: @total)
           end
           write_report(status: "complete", total: @total)
@@ -63,6 +58,27 @@ module Hive
       end
 
       private
+
+      # Runs a single scenario including bootstrap. Bootstrap failures yield a
+      # `setup_failed` per-scenario status so aggregate run status (complete /
+      # partial / crashed) is unaffected — agents still see one row per
+      # scenario, just with no artifacts_dir / failed_step_index.
+      def run_one(scenario, keep_artifacts:)
+        sandbox = Sandbox.bootstrap(File.join(@run_dir, scenario.name))
+      rescue StandardError => e
+        @results << StepExecutor::ScenarioResult.new(
+          name: scenario.name, status: "setup_failed", duration_seconds: 0.0,
+          failed_step_index: nil, failed_step_kind: nil,
+          error_summary: "#{e.class}: #{e.message}",
+          artifacts_dir: nil, repro: nil
+        )
+      else
+        scenario_dir = File.join(@run_dir, "scenarios", scenario.name)
+        result = StepExecutor.new(scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: @run_id).execute
+        @results << result
+        assert_sample_project_unmutated!
+        sandbox.cleanup unless keep_artifacts || result.status == "failed"
+      end
 
       def generate_run_id
         "#{Time.now.utc.strftime('%Y-%m-%dT%H-%M-%SZ')}-#{Process.pid}-#{SecureRandom.hex(2)}"
@@ -98,6 +114,7 @@ module Hive
       def report_hash(status:, total:)
         passed = @results.count { |result| result.status == "passed" }
         failed = @results.count { |result| result.status == "failed" }
+        setup_failed = @results.count { |result| result.status == "setup_failed" }
         {
           "schema" => "hive-e2e-report",
           "schema_version" => 1,
@@ -108,7 +125,8 @@ module Hive
           "summary" => {
             "total" => total,
             "passed" => passed,
-            "failed" => failed
+            "failed" => failed,
+            "setup_failed" => setup_failed
           },
           "scenarios" => @results.map(&:to_h),
           "harness_errors" => @harness_errors || []

@@ -23,22 +23,34 @@ module Hive
         @run_dir = File.join(@runs_dir, @run_id)
         FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))
         @started_at = Time.now.utc
+        @harness_errors = []
         scenarios = select_scenarios(pattern: pattern, tag: tag)
         raise "no scenarios match #{pattern || tag || 'all'}" if scenarios.empty?
 
-        write_report(status: "partial", total: scenarios.size)
-        scenarios.each do |scenario|
-          sandbox = Sandbox.bootstrap(File.join(@run_dir, scenario.name))
-          scenario_dir = File.join(@run_dir, "scenarios", scenario.name)
-          result = StepExecutor.new(scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: @run_id).execute
-          @results << result
-          sandbox.cleanup unless keep_artifacts || result.status == "failed"
-          write_report(status: "partial", total: scenarios.size)
+        # Capture total once so signal handlers and the rescue branch can write
+        # a coherent report regardless of how many scenarios actually ran.
+        @total = scenarios.size
+        prev_int = Signal.trap("INT") { handle_signal!("INT") }
+        prev_term = Signal.trap("TERM") { handle_signal!("TERM") }
+        begin
+          write_report(status: "partial", total: @total)
+          scenarios.each do |scenario|
+            sandbox = Sandbox.bootstrap(File.join(@run_dir, scenario.name))
+            scenario_dir = File.join(@run_dir, "scenarios", scenario.name)
+            result = StepExecutor.new(scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: @run_id).execute
+            @results << result
+            assert_sample_project_unmutated!
+            sandbox.cleanup unless keep_artifacts || result.status == "failed"
+            write_report(status: "partial", total: @total)
+          end
+          write_report(status: "complete", total: @total)
+          report_hash(status: "complete", total: @total)
+        ensure
+          Signal.trap("INT", prev_int) if prev_int
+          Signal.trap("TERM", prev_term) if prev_term
         end
-        write_report(status: "complete", total: scenarios.size)
-        report_hash(status: "complete", total: scenarios.size)
       rescue StandardError
-        write_report(status: "crashed", total: @results.size)
+        write_report(status: "crashed", total: @total || @results.size)
         raise
       end
 
@@ -54,6 +66,24 @@ module Hive
 
       def generate_run_id
         "#{Time.now.utc.strftime('%Y-%m-%dT%H-%M-%SZ')}-#{Process.pid}-#{SecureRandom.hex(2)}"
+      end
+
+      # Flush a "crashed" report and exit with the conventional 128+signum code so
+      # CI surfaces interrupted runs distinctly from clean failures.
+      def handle_signal!(sig)
+        write_report(status: "crashed", total: @total || @results.size)
+        begin
+          Sandbox.cleanup_runs
+        rescue StandardError
+          nil
+        end
+        exit(sig == "INT" ? 130 : 143)
+      end
+
+      def assert_sample_project_unmutated!
+        Sandbox.new(@run_dir).assert_sample_project_unmutated!
+      rescue StandardError => e
+        @harness_errors << { "kind" => "sample_project_mutated", "message" => e.message }
       end
 
       def write_report(status:, total:)
@@ -80,7 +110,8 @@ module Hive
             "passed" => passed,
             "failed" => failed
           },
-          "scenarios" => @results.map(&:to_h)
+          "scenarios" => @results.map(&:to_h),
+          "harness_errors" => @harness_errors || []
         }
       end
     end

@@ -4,7 +4,15 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 $LOAD_PATH.unshift(File.expand_path("../test/e2e/lib", __dir__))
 
 require "thor"
+require "hive"
 require "runner"
+
+# Mirror bin/hive: intercept `--version`/`-v` BEFORE Thor dispatch so the
+# default_task `:run_scenarios` doesn't swallow it as a positional pattern.
+if ARGV == [ "--version" ] || ARGV == [ "-v" ]
+  puts Hive::VERSION
+  exit 0
+end
 
 module Hive
   module E2E
@@ -20,6 +28,11 @@ module Hive
         exit(failed.zero? ? 0 : 1)
       end
       map "run" => :run_scenarios
+
+      desc "version", "Print hive gem version"
+      def version
+        puts Hive::VERSION
+      end
 
       desc "list", "List available e2e scenarios"
       def list

@@ -56,28 +56,55 @@ module Hive
           "--command", command,
           @cast_path,
           out: File::NULL,
-          err: File::NULL
+          err: File::NULL,
+          pgroup: true
         )
       end
 
       def stop
         return unless @pid
 
-        Process.kill("TERM", @pid)
+        # Signal the entire process group so the tmux attach child started by
+        # asciinema dies with the recorder. Without -pgid the attach lingers and
+        # holds the cast file open, racing the manifest pass.
+        pgid = begin
+          Process.getpgid(@pid)
+        rescue Errno::ESRCH
+          @pid
+        end
+        begin
+          Process.kill("TERM", -pgid)
+        rescue Errno::ESRCH
+          nil
+        end
+
         deadline = Time.now + 2
+        reaped = false
         loop do
           _, status = Process.wait2(@pid, Process::WNOHANG)
-          break if status
+          if status
+            reaped = true
+            break
+          end
           break if Time.now >= deadline
 
           sleep 0.05
         end
-        Process.kill("KILL", @pid)
-        Process.wait(@pid)
-      rescue Errno::ESRCH
-        nil
-      rescue Errno::ECHILD
-        nil
+
+        # Only escalate to KILL if the WNOHANG poll never saw the process exit.
+        # Otherwise the unconditional KILL/wait races and raises ESRCH/ECHILD.
+        unless reaped
+          begin
+            Process.kill("KILL", -pgid)
+          rescue Errno::ESRCH
+            nil
+          end
+          begin
+            Process.wait(@pid)
+          rescue Errno::ECHILD
+            nil
+          end
+        end
       ensure
         @pid = nil
       end

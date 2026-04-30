@@ -206,9 +206,12 @@ module Hive
 
       def step_tui_expect(step)
         ensure_tmux!
+        # require_stable forces tmux_driver to take a second confirming capture
+        # before returning so we don't race a still-rendering TUI frame.
         @tmux.wait_for(anchor: expand_string(step.args.fetch("anchor")),
                        timeout: (step.args["timeout"] || 3.0).to_f,
-                       allow_stable: false)
+                       allow_stable: false,
+                       require_stable: true)
       end
 
       def step_tui_keys(step)
@@ -216,8 +219,9 @@ module Hive
         if step.args.key?("text")
           @tmux.send_text(expand_string(step.args["text"]))
         else
-          keys = expand_string(step.args["keys"].to_s)
-          @tmux.send_keys(keys == "Enter" ? "Enter" : keys)
+          # `keys:` always carries a tmux named-key token (e.g. "Enter", "Up",
+          # "C-c"); send it verbatim. Literal text uses the `text:` branch above.
+          @tmux.send_keys(expand_string(step.args["keys"].to_s))
         end
       end
 

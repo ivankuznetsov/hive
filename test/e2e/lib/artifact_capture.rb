@@ -12,20 +12,27 @@ module Hive
         @scenario_dir = scenario_dir
         @sandbox_dir = sandbox_dir
         @run_home = run_home
+        @capture_errors = []
       end
 
+      # Each individual capture call is isolated: a failure in any single artifact
+      # writer is recorded in @capture_errors and surfaced through manifest.json
+      # but does NOT propagate, so the original step failure remains the
+      # canonical scenario error.
       def collect(error:, failed_step:, step_results:, tmux_driver: nil, schema_diff: nil)
         FileUtils.mkdir_p(@scenario_dir)
-        write("exception.txt", exception_text(error, failed_step))
-        write("env-snapshot.txt", env_snapshot)
-        write("sandbox-git-status.txt", capture("git", "-C", @sandbox_dir, "status", "--short", "--branch"))
-        write("sandbox-tree.txt", sandbox_tree)
-        write("schema-diff.txt", schema_diff) if schema_diff && !schema_diff.empty?
-        write("keystrokes.log", JSON.pretty_generate(tmux_driver.keystrokes)) if tmux_driver
-        write("pane-after.txt", tmux_driver.capture_pane) if tmux_driver
-        copy_tree(File.join(@sandbox_dir, ".hive-state", "stages"), File.join(@scenario_dir, "state"))
-        copy_tree(File.join(@sandbox_dir, ".hive-state", "logs"), File.join(@scenario_dir, "logs"))
-        write("step-results.json", JSON.pretty_generate(step_results))
+        guard("exception.txt") { write("exception.txt", exception_text(error, failed_step)) }
+        guard("env-snapshot.txt") { write("env-snapshot.txt", env_snapshot) }
+        guard("sandbox-git-status.txt") { write("sandbox-git-status.txt", capture("git", "-C", @sandbox_dir, "status", "--short", "--branch")) }
+        guard("sandbox-tree.txt") { write("sandbox-tree.txt", sandbox_tree) }
+        guard("schema-diff.txt") { write("schema-diff.txt", schema_diff) } if schema_diff && !schema_diff.empty?
+        if tmux_driver
+          guard("keystrokes.log") { write("keystrokes.log", JSON.pretty_generate(tmux_driver.keystrokes)) }
+          guard("pane-after.txt") { write("pane-after.txt", tmux_driver.capture_pane) }
+        end
+        guard("state") { copy_tree(File.join(@sandbox_dir, ".hive-state", "stages"), File.join(@scenario_dir, "state")) }
+        guard("logs") { copy_tree(File.join(@sandbox_dir, ".hive-state", "logs"), File.join(@scenario_dir, "logs")) }
+        guard("step-results.json") { write("step-results.json", JSON.pretty_generate(step_results)) }
         write_manifest
       end
 
@@ -93,9 +100,17 @@ module Hive
         File.write(path, content.to_s)
       end
 
+      def guard(label)
+        yield
+      rescue StandardError => e
+        @capture_errors << { "label" => label, "error" => "#{e.class}: #{e.message}" }
+      end
+
       def write_manifest
         files = Dir[File.join(@scenario_dir, "**", "*")].select { |path| File.file?(path) }.sort
         manifest = {
+          "schema" => "hive-e2e-manifest",
+          "schema_version" => 1,
           "generated_at" => Time.now.utc.iso8601,
           "files" => files.map do |path|
             {
@@ -103,9 +118,13 @@ module Hive
               "size" => File.size(path),
               "sha256" => Digest::SHA256.file(path).hexdigest
             }
-          end
+          end,
+          "capture_errors" => @capture_errors
         }
-        File.write(File.join(@scenario_dir, "manifest.json"), JSON.pretty_generate(manifest))
+        path = File.join(@scenario_dir, "manifest.json")
+        tmp = "#{path}.tmp.#{Process.pid}"
+        File.write(tmp, JSON.pretty_generate(manifest))
+        File.rename(tmp, path)
       end
     end
   end

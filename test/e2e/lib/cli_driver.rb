@@ -73,7 +73,7 @@ module Hive
         timed_out = false
         status = nil
 
-        Open3.popen3(env, *command(args), chdir: cwd) do |stdin, out, err, wait_thr|
+        Open3.popen3(env, *command(args), chdir: cwd, pgroup: true) do |stdin, out, err, wait_thr|
           stdin.close
           out_reader = Thread.new { out.read }
           err_reader = Thread.new { err.read }
@@ -89,10 +89,14 @@ module Hive
         ProcessResult.new(stdout: stdout, stderr: stderr, exit_code: status&.exitstatus, timed_out: timed_out)
       end
 
+      # Signal the entire process group (negative pid) so any children spawned by the
+      # CLI under test (editor shims, sub-shells, etc.) are torn down too. Without
+      # pgroup-targeted kills, descendants outlive the timeout and leak.
       def terminate(pid)
-        Process.kill("TERM", pid)
+        pgid = Process.getpgid(pid)
+        Process.kill("TERM", -pgid)
         sleep 0.5
-        Process.kill("KILL", pid)
+        Process.kill("KILL", -pgid)
       rescue Errno::ESRCH
         nil
       end

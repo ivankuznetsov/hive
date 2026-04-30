@@ -57,8 +57,18 @@ module Hive
         raise "sample project mutated during e2e run: #{err.empty? ? out : err}"
       end
 
+      # Removes all per-scenario state when called: sandbox dir, hive-home, and
+      # the worktrees tree. Caller decides when to invoke it; on
+      # `keep_artifacts || failed` Runner skips this so everything under
+      # run_dir/scenarios/<name>, plus the per-scenario sandbox/hive_home, is
+      # preserved for forensic inspection.
       def cleanup
-        FileUtils.rm_rf(@run_home)
+        worktrees_dir = File.join(@run_dir, "worktrees")
+        [ @sandbox_dir, @run_home, worktrees_dir ].each do |path|
+          FileUtils.rm_rf(path)
+        rescue Errno::ENOENT
+          nil
+        end
       end
 
       def self.cleanup_runs(runs_dir: Paths.runs_dir, retain_days: 7, retain_failed_days: 14)

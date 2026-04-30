@@ -79,7 +79,12 @@ module Hive
         out
       end
 
-      def wait_for(anchor: nil, timeout: 3.0, interval: 0.1, allow_stable: true)
+      # `require_stable: true` forces a second capture after a positive anchor
+      # match before returning :ok. This avoids false positives where the anchor
+      # text appears mid-render (e.g. between scroll lines while the TUI is still
+      # writing) — without it we can hand back control to the next step before
+      # the screen has actually settled.
+      def wait_for(anchor: nil, timeout: 3.0, interval: 0.1, allow_stable: true, require_stable: true)
         start
         started_at = monotonic_time
         previous = nil
@@ -89,7 +94,16 @@ module Hive
         loop do
           ensure_live!
           last = capture_pane
-          return :ok if anchor && last.include?(anchor)
+          if anchor && last.include?(anchor)
+            return :ok unless require_stable
+
+            sleep interval
+            confirm = capture_pane
+            return :ok if confirm.include?(anchor) && confirm == last
+
+            previous = confirm
+            last = confirm
+          end
 
           if allow_stable && !anchor.nil? && last == previous
             stable_count += 1
@@ -106,8 +120,26 @@ module Hive
         end
       end
 
-      def wait_for_subprocess_exit(timeout: 30.0)
-        wait_for(anchor: "hive tui", timeout: timeout, interval: 0.2)
+      # Waits for the subprocess running inside the tmux pane to exit. The previous
+      # implementation polled for the running anchor "hive tui" which is present
+      # *while* the TUI is alive — so it returned immediately. We now poll
+      # `#{pane_dead}` (1 once the foreground process exits) which is the
+      # authoritative tmux signal that the subprocess has completed.
+      def wait_for_subprocess_exit(timeout: 30.0, interval: 0.1)
+        start
+        started_at = monotonic_time
+        loop do
+          out, err, status = Open3.capture3(*(base_args + [
+            "list-panes", "-t", @session_name, "-F", "\#{pane_dead}"
+          ]))
+          raise "tmux list-panes failed: #{err.empty? ? out : err}" unless status.success?
+          return :ok if out.lines.first.to_s.strip == "1"
+
+          elapsed = monotonic_time - started_at
+          raise AnchorTimeout.new(anchor: "pane_dead", captured: out, elapsed: elapsed) if elapsed >= timeout
+
+          sleep interval
+        end
       end
 
       def cleanup

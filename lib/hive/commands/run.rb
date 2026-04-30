@@ -21,6 +21,12 @@ module Hive
         marker attrs commit_action next_action
       ].freeze
 
+      # Optional top-level keys allowed in the SuccessPayload. They're emitted
+      # only when the runner result carries the corresponding data — currently
+      # `cleanup_instructions:` from the 7-done stage. See
+      # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
+      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
+
       def initialize(target, project: nil, stage: nil, json: false, quiet: false)
         @target = target
         @project_filter = project
@@ -131,6 +137,9 @@ module Hive
         # adding a key to one without the other is a load-time error rather
         # than silent schema drift.
         payload = REQUIRED_PAYLOAD_KEYS.to_h { |key| [ key, values.fetch(key) ] }
+        if result.is_a?(Hash) && result[:cleanup_instructions]
+          payload["cleanup_instructions"] = result[:cleanup_instructions]
+        end
         # The JSON payload is written to stdout *before* the raise. bin/hive
         # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
         # interpreter shutdown flushes stdout via IO finalizers, so the
@@ -207,7 +216,13 @@ module Hive
         }
       end
 
-      def report_text(task, _result, marker)
+      def report_text(task, result, marker)
+        if result.is_a?(Hash) && result[:cleanup_instructions]
+          # 7-done stage returns the cleanup lines as data; the human path
+          # renders them on stdout while --json embeds them in the envelope.
+          # See lib/hive/stages/done.rb.
+          puts result[:cleanup_instructions]
+        end
         puts "hive: marker=#{marker.name}"
         puts "  state_file: #{task.state_file}"
         case marker.name

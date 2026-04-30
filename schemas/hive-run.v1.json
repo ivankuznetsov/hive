@@ -73,6 +73,11 @@
               "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
             }
           }
+        },
+        "cleanup_instructions": {
+          "description": "Human-readable cleanup guidance returned by the 7-done stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
+          "type": "array",
+          "items": { "type": "string" }
         }
       }
     },

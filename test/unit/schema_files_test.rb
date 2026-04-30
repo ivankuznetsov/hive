@@ -167,10 +167,11 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_run_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
     schema_required = doc.fetch("required").sort
-    producer_required = %w[
-      schema schema_version slug stage stage_index folder state_file
-      marker attrs commit_action next_action
-    ].sort
+    # Derive directly from the producer constant so a drift between the
+    # emitted hash and the schema can only happen in one place. The
+    # constant is the same list `Hive::Commands::Run#report_json` consults
+    # to build the JSON envelope (see lib/hive/commands/run.rb).
+    producer_required = Hive::Commands::Run::REQUIRED_PAYLOAD_KEYS.sort
 
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-run.v1.json"

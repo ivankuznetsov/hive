@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-30T00:00:00Z] e2e — third-wave fixer landed 7 surviving follow-ups
+
+**Action:** Applied seven survivor findings from the previous two waves on PR #18: (A) `bin/hive-e2e` `exit_on_failure?` regression test was already in place — verified; (B) `repro.sh` now replays setup-step kinds inline (`seed_state`, `write_file`, `register_project`, `ruby_block`, `state_assert`, `log_assert`) and explicitly skips live-tmux kinds (`tui_keys`, `tui_expect`, `wait_subprocess`, `editor_action`); (C) `Sandbox.cleanup_runs` now treats `status: complete` with `summary.failed > 0` as failed-retention (extracted to `retention_days_for`, with malformed report.json defaulting to `retain_failed_days`); (D) `Hive::Commands::Run` exposes `REQUIRED_PAYLOAD_KEYS` constant — the producer's `report_json` and the schema-drift test now both consume it (single source of truth); (E) `bundle lock --add-platform ruby` extended `Gemfile.lock` PLATFORMS; (F) `ArtifactCapture` now copies `<tmpdir>/hive-tui-spawn-*.log` plus the shared `hive-tui-subprocess.log` into `<scenario_dir>/tui-subprocess/` with `.tail` companions; (G) `tui_status_navigate_dispatch_plan` rebuilt around the TUI's verb-key dispatch path — `p` keystroke spawns `bin/hive plan`, `wait_subprocess` waits for the dispatched child, `state_assert` proves plan.md/COMPLETE landed.
+
+**Refreshed pages:**
+- `wiki/e2e.md` — `tui_status_navigate_dispatch_plan` description now reflects verb-key dispatch end-to-end coverage rather than the old "tmux-rendered grid" framing.
+
 ## [2026-04-29T00:00:00Z] e2e — second-pass fixer landed 12 deferred follow-ups
 
 **Action:** Applied F#7/F#8/F#9/F#10/F#12/F#13/F#15/F#16/F#17/F#18/F#27/F#33 from PR #18's deferred queue. The user-visible surface changes: `bin/hive-e2e` learned `--json` for `list`, `run`, and `clean`; preflight failures now exit 78; `setup_failed` joins `passed`/`failed` as a third per-scenario status; failure artifacts now write `env-snapshot.json`, `<basename>.tail`, and `pane-before.txt`. `StepExecutor` was split across `string_expander.rb`, `scenario_context.rb`, `tmux_session_lifecycle.rb`. The dead `anchors.yml` and the unused `fake-claude-scripts/full-pipeline.sh` + `review-with-findings.sh` were removed. `repro.sh`'s `cd` traversal depth was corrected (six `..` to reach the repo root) and wrapped in `realpath` so a wrong depth surfaces visibly.

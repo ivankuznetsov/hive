@@ -39,4 +39,13 @@ class E2EBinaryTest < Minitest::Test
     assert status.success?
     assert_equal "#{Hive::VERSION}\n", out
   end
+
+  # Thor's default for unknown commands is to print a deprecation warning
+  # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
+  # see a non-zero status instead. Pin the contract here.
+  def test_unknown_command_exits_non_zero
+    _out, _err, status = Open3.capture3(hive_e2e, "no-such-command")
+    refute_equal 0, status.exitstatus,
+                 "bin/hive-e2e should exit non-zero on unknown commands (got #{status.exitstatus.inspect})"
+  end
 end

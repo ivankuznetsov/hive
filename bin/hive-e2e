@@ -63,6 +63,13 @@ module Hive
       class_option :json, type: :boolean, default: false,
                           desc: "Emit structured JSON output where applicable"
 
+      # Thor 1.3+ default is to print a deprecation warning and exit 0 on
+      # unknown commands; opting in to non-zero exit lets CI / wrapper
+      # scripts branch precisely on bad invocations.
+      def self.exit_on_failure?
+        true
+      end
+
       default_task :run_scenarios
 
       desc "run [PATTERN]", "Run e2e scenarios"

@@ -4,6 +4,7 @@ require "json"
 require "open3"
 require "rbconfig"
 require "time"
+require "tmpdir"
 require_relative "paths"
 
 module Hive
@@ -36,6 +37,7 @@ module Hive
         end
         guard("state") { copy_tree(File.join(@sandbox_dir, ".hive-state", "stages"), File.join(@scenario_dir, "state")) }
         guard("logs") { copy_logs_with_tails }
+        guard("tui-subprocess") { copy_tui_subprocess_diagnostics }
         guard("step-results.json") { write("step-results.json", JSON.pretty_generate(step_results)) }
         write_manifest
       end
@@ -91,6 +93,28 @@ module Hive
           FileUtils.cp(full_path, dest)
           tail_path = "#{dest}.tail"
           File.write(tail_path, tail_lines(full_path, LOG_TAIL_LINES))
+        end
+      end
+
+      # Mirror lib/hive/tui/subprocess.rb: per-spawn capture files at
+      # `<tmpdir>/hive-tui-spawn-<id>.log` plus the shared marker log
+      # `<tmpdir>/hive-tui-subprocess.log`. Copying both into the scenario
+      # bundle gives forensic visibility into what the TUI's own
+      # dispatch-background subprocesses produced when a TUI scenario
+      # fails mid-dispatch. Absence of the files is normal (no TUI
+      # invoked, or a non-TUI scenario) — silently skipped.
+      def copy_tui_subprocess_diagnostics
+        sources = Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log"))
+        marker_log = File.join(Dir.tmpdir, "hive-tui-subprocess.log")
+        sources << marker_log if File.exist?(marker_log)
+        return if sources.empty?
+
+        dest_root = File.join(@scenario_dir, "tui-subprocess")
+        FileUtils.mkdir_p(dest_root)
+        sources.each do |source|
+          dest = File.join(dest_root, File.basename(source))
+          FileUtils.cp(source, dest)
+          File.write("#{dest}.tail", tail_lines(source, LOG_TAIL_LINES))
         end
       end
 

@@ -12,6 +12,15 @@ require "hive/task_resolver"
 module Hive
   module Commands
     class Run
+      # Single source of truth for the hive-run JSON envelope's required keys.
+      # `report_json` builds the payload from this list so the schema-drift
+      # test (test/unit/schema_files_test.rb) and the producer share one
+      # definition: adding/removing a key here is the only place to do it.
+      REQUIRED_PAYLOAD_KEYS = %w[
+        schema schema_version slug stage stage_index folder state_file
+        marker attrs commit_action next_action
+      ].freeze
+
       def initialize(target, project: nil, stage: nil, json: false, quiet: false)
         @target = target
         @project_filter = project
@@ -93,7 +102,7 @@ module Hive
       # `next_action.kind` values is exported as Hive::Schemas::NextActionKind
       # so producer and tests share a single source of truth.
       def report_json(task, result, marker)
-        payload = {
+        values = {
           "schema" => "hive-run",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"),
           "slug" => task.slug,
@@ -106,6 +115,10 @@ module Hive
           "commit_action" => result.is_a?(Hash) ? result[:commit] : nil,
           "next_action" => json_next_action(task, marker)
         }
+        # Build the emitted hash strictly in REQUIRED_PAYLOAD_KEYS order so
+        # adding a key to one without the other is a load-time error rather
+        # than silent schema drift.
+        payload = REQUIRED_PAYLOAD_KEYS.to_h { |key| [ key, values.fetch(key) ] }
         # The JSON payload is written to stdout *before* the raise. bin/hive
         # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
         # interpreter shutdown flushes stdout via IO finalizers, so the

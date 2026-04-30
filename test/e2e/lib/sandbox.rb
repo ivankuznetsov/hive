@@ -78,9 +78,7 @@ module Hive
         Dir[File.join(runs_dir, "*")].each do |dir|
           next unless File.directory?(dir)
 
-          report_path = File.join(dir, "report.json")
-          status = File.exist?(report_path) ? JSON.parse(File.read(report_path))["status"] : "crashed"
-          retain = status == "complete" ? retain_days : retain_failed_days
+          retain = retention_days_for(dir, retain_days: retain_days, retain_failed_days: retain_failed_days)
           if now - File.mtime(dir) < retain.to_i * 86_400
             kept += 1
             next
@@ -90,6 +88,23 @@ module Hive
           deleted += 1
         end
         { "deleted" => deleted, "kept" => kept }
+      end
+
+      # A run that finished cleanly with summary.failed > 0 (some scenarios
+      # passed, some failed) earns the longer retention window: forensics
+      # for partial failures are just as valuable as for outright crashes.
+      # Malformed report.json is treated as failed so we don't lose the
+      # evidence to a broken serializer.
+      def self.retention_days_for(run_dir, retain_days:, retain_failed_days:)
+        report_path = File.join(run_dir, "report.json")
+        return retain_failed_days unless File.exist?(report_path)
+
+        report = JSON.parse(File.read(report_path))
+        status = report["status"]
+        failed = report.dig("summary", "failed").to_i
+        status == "complete" && failed.zero? ? retain_days : retain_failed_days
+      rescue JSON::ParserError
+        retain_failed_days
       end
 
       private

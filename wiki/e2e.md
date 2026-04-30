@@ -87,7 +87,7 @@ On failure, the harness writes a scenario bundle containing:
 | `full_pipeline_happy_path` | Real subprocess choreography from new task to done, avoiding network PR creation. |
 | `review_with_findings_then_develop` | `findings --json`, `accept-finding`, schema validation, review file toggles. |
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
-| `tui_status_navigate_dispatch_plan` | tmux-rendered TUI grid plus deterministic plan transition. |
+| `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |
 
 ## Operational Notes

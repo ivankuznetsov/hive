@@ -101,6 +101,34 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
+  def test_tui_subprocess_diagnostics_copied_into_bundle_when_present
+    with_dirs do |scenario_dir, sandbox, run_home|
+      # Seed fake TUI per-spawn capture + marker log files in /tmp so the
+      # capture pass picks them up. Clean both up afterwards regardless of
+      # outcome so the next test in this suite isn't polluted.
+      spawn_log = File.join(Dir.tmpdir, "hive-tui-spawn-FAKE.log")
+      marker_log = File.join(Dir.tmpdir, "hive-tui-subprocess.log")
+      File.write(spawn_log, "FAKE-SPAWN-OUTPUT\n")
+      File.write(marker_log, "----- BEGIN[FAKE]: hive plan -----\n")
+
+      begin
+        collect(scenario_dir, sandbox, run_home)
+
+        copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-FAKE.log")
+        copied_marker = File.join(scenario_dir, "tui-subprocess", "hive-tui-subprocess.log")
+        assert File.exist?(copied_spawn), "per-spawn capture file should be copied into the bundle"
+        assert File.exist?(copied_marker), "shared TUI marker log should be copied into the bundle"
+        assert_includes File.read(copied_spawn), "FAKE-SPAWN-OUTPUT",
+                        "per-spawn capture body should round-trip into the bundle"
+        assert File.exist?("#{copied_spawn}.tail"),
+               "per-spawn capture should also get a .tail companion (matching log-tails pattern)"
+      ensure
+        File.delete(spawn_log) if File.exist?(spawn_log)
+        File.delete(marker_log) if File.exist?(marker_log)
+      end
+    end
+  end
+
   def test_env_snapshot_is_json_with_schema_version
     with_dirs do |scenario_dir, sandbox, run_home|
       collect(scenario_dir, sandbox, run_home)

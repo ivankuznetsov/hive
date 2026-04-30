@@ -1,0 +1,55 @@
+#!/usr/bin/env ruby
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+$LOAD_PATH.unshift(File.expand_path("../test/e2e/lib", __dir__))
+
+require "thor"
+require "runner"
+
+module Hive
+  module E2E
+    class Binary < Thor
+      default_task :run_scenarios
+
+      desc "run [PATTERN]", "Run e2e scenarios"
+      option :filter, type: :string, desc: "run scenarios with the given tag"
+      option :keep_artifacts, type: :boolean, default: false, desc: "keep run-home directories after passing scenarios"
+      def run_scenarios(pattern = nil)
+        report = Runner.new.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
+        failed = report.fetch("summary").fetch("failed")
+        exit(failed.zero? ? 0 : 1)
+      end
+      map "run" => :run_scenarios
+
+      desc "list", "List available e2e scenarios"
+      def list
+        Runner.new.select_scenarios.each do |scenario|
+          tags = scenario.tags.empty? ? "" : " [#{scenario.tags.join(', ')}]"
+          puts "#{scenario.name}#{tags}"
+        end
+      end
+
+      desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"
+      def replay(run_id, scenario)
+        script = File.join(Paths.runs_dir, run_id, "scenarios", scenario, "repro.sh")
+        raise "missing repro script: #{script}" unless File.exist?(script)
+
+        exec script
+      end
+
+      desc "clean", "Remove old e2e run artifacts"
+      option :retain_days, type: :numeric, default: ENV.fetch("RUNS_RETAIN_DAYS", 7).to_i
+      option :retain_failed_days, type: :numeric, default: ENV.fetch("RUNS_RETAIN_FAILED_DAYS", 14).to_i
+      def clean
+        Sandbox.cleanup_runs(retain_days: options[:retain_days], retain_failed_days: options[:retain_failed_days])
+      end
+    end
+  end
+end
+
+begin
+  Hive::E2E::Binary.start(ARGV)
+rescue StandardError => e
+  warn "hive-e2e: #{e.message}"
+  exit 1
+end

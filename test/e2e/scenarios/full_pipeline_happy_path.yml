@@ -1,0 +1,44 @@
+name: full_pipeline_happy_path
+description: Real bin/hive subprocess flow from inbox to done without network PR creation.
+tags: [happy-path, cli-only]
+steps:
+  - kind: cli
+    args: [new, "{project}", "demo idea"]
+  - kind: cli
+    args: [brainstorm, "{slug}", --from, 1-inbox]
+    env:
+      HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:2-brainstorm}/brainstorm.md"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+  - kind: state_assert
+    path: "{task_dir:2-brainstorm}/brainstorm.md"
+    marker: { current: COMPLETE }
+  - kind: cli
+    args: [plan, "{slug}", --from, 2-brainstorm]
+    env:
+      HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:3-plan}/plan.md"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Plan\n\n<!-- COMPLETE -->\n"
+  - kind: state_assert
+    path: "{task_dir:3-plan}/plan.md"
+    marker: { current: COMPLETE }
+  - kind: cli
+    args: [develop, "{slug}", --from, 3-plan]
+  - kind: state_assert
+    path: "{task_dir:4-execute}/task.md"
+    marker: { current: EXECUTE_COMPLETE }
+  - kind: cli
+    args: [review, "{slug}", --from, 4-execute]
+  - kind: state_assert
+    path: "{task_dir:5-review}/task.md"
+    marker: { current: REVIEW_COMPLETE }
+  - kind: cli
+    args: [approve, "{slug}", --from, 5-review, --to, 6-pr]
+  - kind: write_file
+    path: "{task_dir:6-pr}/pr.md"
+    content: "# PR\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 -->\n"
+  - kind: cli
+    args: [archive, "{slug}", --from, 6-pr]
+  - kind: json_assert
+    args: [status, --json]
+    schema: hive-status
+    pick: [projects, 0, tasks, 0, stage]
+    equals: 7-done

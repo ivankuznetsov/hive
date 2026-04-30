@@ -9,6 +9,7 @@ AllCops:
     - "vendor/**/*"
     - "tmp/**/*"
     - "test/fixtures/**/*"
+    - "test/e2e/runs/**/*"
 
 # Project-specific overrides on top of the 37signals omakase base.
 Style/Documentation:

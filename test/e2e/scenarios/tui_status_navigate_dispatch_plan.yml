@@ -1,0 +1,30 @@
+name: tui_status_navigate_dispatch_plan
+description: TUI renders a ready-to-plan row while a real CLI plan run updates the grid state.
+tags: [tui]
+setup:
+  tui_env:
+    HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:3-plan}/plan.md"
+    HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Plan\n\n<!-- COMPLETE -->\n"
+steps:
+  - kind: seed_state
+    stage: 2-brainstorm
+    slug: tui-plan-task
+    state_file: brainstorm.md
+    content: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 5
+  - kind: tui_expect
+    anchor: "tui-plan-task"
+    timeout: 5
+  - kind: cli
+    args: [plan, "{slug}", --from, 2-brainstorm]
+    env:
+      HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:3-plan}/plan.md"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Plan\n\n<!-- COMPLETE -->\n"
+  - kind: state_assert
+    path: "{task_dir:3-plan}/plan.md"
+    marker: { current: COMPLETE }
+    timeout: 10
+  - kind: tui_keys
+    keys: "q"

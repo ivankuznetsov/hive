@@ -1,0 +1,39 @@
+name: two_projects_fuzzy_filter
+description: TUI fuzzy filter and numeric project scope across two registered projects.
+tags: [tui]
+steps:
+  - kind: seed_state
+    stage: 2-brainstorm
+    slug: auth-primary-task
+    state_file: brainstorm.md
+    content: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+  - kind: register_project
+    name: project-b
+  - kind: seed_state
+    project: project-b
+    stage: 2-brainstorm
+    slug: auth-project-b-task
+    state_file: brainstorm.md
+    content: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 5
+  - kind: tui_keys
+    keys: "/"
+  - kind: tui_keys
+    text: "auth"
+  - kind: tui_expect
+    anchor: "/auth"
+    timeout: 5
+  - kind: tui_keys
+    keys: "Enter"
+  - kind: tui_expect
+    anchor: "auth-primary-task"
+    timeout: 5
+  - kind: tui_keys
+    keys: "2"
+  - kind: tui_expect
+    anchor: "scope=2"
+    timeout: 5
+  - kind: tui_keys
+    keys: "q"

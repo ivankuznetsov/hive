@@ -1,0 +1,40 @@
+name: template
+description: Reference scenario showing every v1 step kind.
+tags: [template]
+setup:
+  fake_claude_script: full-pipeline
+steps:
+  - kind: cli
+    args: [version]
+    expect_exit: 0
+  - kind: seed_state
+    stage: 2-brainstorm
+    slug: template-task
+    state_file: brainstorm.md
+    content: "# Template\n\n<!-- COMPLETE -->\n"
+  - kind: state_assert
+    path: "{task_dir:2-brainstorm}/brainstorm.md"
+    marker: { current: COMPLETE }
+  - kind: json_assert
+    args: [status, --json]
+    schema: hive-status
+    pick: [projects, 0, tasks, 0, slug]
+    equals: template-task
+  - kind: write_file
+    path: "{sandbox}/tmp.txt"
+    content: "hello\n"
+  - kind: register_project
+    name: project-b
+  - kind: ruby_block
+    block: "File.write(File.join(sandbox, 'ruby-block.txt'), slug)"
+  - kind: tui_expect
+    anchor: "hive tui"
+  - kind: tui_keys
+    keys: "q"
+  - kind: wait_subprocess
+    timeout: 1
+  - kind: editor_action
+    args: [version]
+  - kind: log_assert
+    path: "{sandbox}/tmp.txt"
+    match: "hello"

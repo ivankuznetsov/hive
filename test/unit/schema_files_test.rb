@@ -1,6 +1,9 @@
 require "test_helper"
 require "json"
 require "hive/commands/approve"
+require "hive/commands/run"
+require "hive/commands/status"
+require "hive/tui/snapshot"
 
 # Schema files under schemas/ are the published artefact for external
 # consumers (non-Ruby SDKs, CI validators, etc.). They must:
@@ -89,6 +92,94 @@ class SchemaFilesTest < Minitest::Test
     enum_kinds = Hive::Schemas::NextActionKind::ALL.sort
     assert_equal enum_kinds, schema_kinds,
                  "schema NextAction.kind enum must mirror Hive::Schemas::NextActionKind::ALL"
+  end
+
+  # ── hive-status ────────────────────────────────────────────────────────
+
+  def test_hive_status_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-status")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-status", doc.dig("properties", "schema", "const")
+    assert_equal 1, doc.dig("properties", "schema_version", "const")
+  end
+
+  def test_hive_status_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    schema_required = doc.fetch("required").sort
+    assert_equal %w[generated_at projects schema schema_version].sort, schema_required
+
+    row = {
+      stage: "1-inbox",
+      slug: "probe",
+      folder: "/tmp/probe",
+      state_file: "/tmp/probe/idea.md",
+      marker_name: :waiting,
+      marker_attrs: {},
+      mtime: Time.now,
+      claude_pid: nil,
+      claude_pid_alive: nil,
+      action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
+      action_label: "Ready to brainstorm",
+      suggested_command: "hive brainstorm probe --from 1-inbox"
+    }
+    producer_keys = Hive::Commands::Status.new.task_payload(row).keys.sort
+    schema_task_required = doc.dig("$defs", "Task", "required").sort
+    assert_equal producer_keys, schema_task_required,
+                 "schema/producer required-key drift in hive-status Task"
+  end
+
+  def test_hive_status_task_enums_match_closed_sets
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+
+    assert_equal Hive::Stages::DIRS.sort,
+                 doc.dig("$defs", "Task", "properties", "stage", "enum").sort
+    assert_equal Hive::Commands::Status::ICON.keys.map(&:to_s).sort,
+                 doc.dig("$defs", "Task", "properties", "marker", "enum").sort
+    assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
+                 doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_hive_status_schema_matches_tui_snapshot_row_keys
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    schema_properties = doc.dig("$defs", "Task", "properties").keys
+    snapshot_row_keys = Hive::Tui::Snapshot::Row.members.map(&:to_s) - [ "project_name" ]
+    snapshot_row_keys = snapshot_row_keys.map { |key| key == "action_key" ? "action" : key }
+
+    assert_empty snapshot_row_keys - schema_properties,
+                 "Snapshot::Row must not consume fields absent from hive-status schema"
+  end
+
+  # ── hive-run ───────────────────────────────────────────────────────────
+
+  def test_hive_run_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-run")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-run", doc.dig("properties", "schema", "const")
+    assert_equal 1, doc.dig("properties", "schema_version", "const")
+  end
+
+  def test_hive_run_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
+    schema_required = doc.fetch("required").sort
+    producer_required = %w[
+      schema schema_version slug stage stage_index folder state_file
+      marker attrs commit_action next_action
+    ].sort
+
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-run.v1.json"
+  end
+
+  def test_hive_run_next_action_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
+    schema_kinds = doc.dig("properties", "next_action", "properties", "kind", "enum").sort
+    assert_equal Hive::Schemas::NextActionKind::ALL.sort, schema_kinds
   end
 
   # ── hive-findings ───────────────────────────────────────────────────────

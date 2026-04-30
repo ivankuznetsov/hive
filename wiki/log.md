@@ -805,3 +805,11 @@ Append-only log of all wiki operations.
 - **`Hive::Tui::App.run_charm`**: setup (`StateSource.new/start`, `BubbleModel.new`, `Bubbletea::Runner.new`, HUP hook, snapshot poller) moved INSIDE the `begin` so a constructor raise still triggers the same ensure cleanup; `ensure` block nil-guards each handle. Pre-fix, a Bubbletea::Runner failure leaked the StateSource thread.
 - **`Hive::Tui::Help::ENTRIES`**: filter-mode `Esc` action renamed `:clear_filter` → `:cancel_filter` with new semantics — discards the typed buffer but preserves any committed filter (was: nuked the committed filter too).
 - **`Hive::Tui::Subprocess::SUBPROCESS_LOG_MAX_BYTES`**: comment honesty pass — rotation only fires synchronously with stamp writes, so a noisy child writing tens of MB of stderr between BEGIN and END can blow past the cap; the eventual rotation moves the oversized blob to `.1`. Cap is approximate, not absolute.
+
+## 2026-04-29 — Agentic E2E suite
+
+- Added `test/e2e/` with a real-subprocess harness, YAML scenarios, sample Ruby fixture, tmux TUI driver, JSON schema validator, artifact capture, repro script writer, and versioned `report.json`.
+- Added `bin/hive-e2e` (`run`, `list`, `replay`, `clean`) and `rake e2e` / `rake e2e:lib_test`.
+- Added published `schemas/hive-status.v1.json` and `schemas/hive-run.v1.json`, plus drift tests in `test/unit/schema_files_test.rb`.
+- Added `hive version` / `hive --version` for binary smoke tests and e2e environment snapshots.
+- Documented the layer in [[e2e]], updated [[testing]], [[dependencies]], [[cli]], and added ADR-022.

@@ -3,11 +3,11 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-04-27
+updated: 2026-04-29
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Three runtime gems (`thor`, `bubbletea`, `lipgloss`); six development gems (`minitest`, `rake`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Three external CLI dependencies (`claude`, `gh`, `git`).
+**TLDR**: Three runtime gems (`thor`, `bubbletea`, `lipgloss`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `gh`, and `git`; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
 
 ## Runtime gems
 
@@ -29,6 +29,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 |-----|---------|---------|
 | `minitest` | `~> 6.0` (locked 6.0.5) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
+| `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
 | `rubocop` | `~> 1.60` (locked 1.86.1) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 
 ## Standard library reliance
@@ -60,6 +61,8 @@ These are not gems but the CLI tools the runtime invokes:
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
 | `gh` | (any auth-supporting recent) | `Stages::Pr` only — `gh auth status`, `gh pr list`, `gh pr create` |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
+| `tmux` | 3.0+ (3.6a verified locally) | test-time only; `test/e2e/lib/tmux_driver.rb` drives `hive tui` scenarios on a private socket |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | test-time optional; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
@@ -71,3 +74,4 @@ These are not gems but the CLI tools the runtime invokes:
 
 - [[architecture]]
 - [[modules/agent]]
+- [[e2e]]

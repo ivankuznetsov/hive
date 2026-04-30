@@ -3,11 +3,11 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-04-29
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest. Two suites — `test/unit/` (one per `lib/hive/` module) and `test/integration/` (one per CLI command + per stage runner + a full-flow scenario). Tests use real subprocesses with `test/fixtures/fake-claude` and `fake-gh` shell scripts standing in for the external binaries.
+**TLDR**: Minitest for unit/integration coverage, plus an opt-in outer e2e layer. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, and `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios.
 
 ## Run all
 
@@ -67,6 +67,18 @@ task default: :test
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → pr → done. |
 | `skip_worktree_test.rb` | Verifies hive-state commits on master don't leak into feature worktrees. |
 
+## E2E suite (`test/e2e/`)
+
+The e2e layer is documented in [[e2e]]. It is opt-in:
+
+```bash
+bundle exec rake e2e:lib_test
+bin/hive-e2e list
+bin/hive-e2e run
+```
+
+The five starter scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+
 ## Lint
 
 `bundle exec rubocop` is the lint command. Config in `.rubocop.yml`:
@@ -85,4 +97,5 @@ Per the user's CLAUDE.md rule: never pass non-Ruby files to rubocop.
 
 - [[architecture]]
 - [[modules/agent]]
+- [[e2e]]
 - [[gaps]]

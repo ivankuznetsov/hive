@@ -25,4 +25,24 @@ Rake::TestTask.new(:smoke) do |t|
   t.description = "Run live-claude smoke tests (real subprocess; ~$0.25/run)"
 end
 
+namespace :e2e do
+  Rake::TestTask.new(:lib_test) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = FileList["test/e2e/lib/**/*_test.rb"]
+    t.warning = false
+    t.description = "Run e2e harness library tests"
+  end
+
+  desc "Remove old e2e run artifacts"
+  task :clean do
+    ruby "bin/hive-e2e", "clean"
+  end
+end
+
+desc "Run real-subprocess CLI/TUI e2e scenarios"
+task :e2e do
+  ruby "bin/hive-e2e", "run"
+end
+
 task default: :test

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:status:v1",
+  "title": "hive status output (v1)",
+  "description": "Stable contract emitted by `hive status --json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "generated_at", "projects"],
+  "properties": {
+    "schema": { "const": "hive-status" },
+    "schema_version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "projects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Project" }
+    }
+  },
+  "$defs": {
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "hive_state_path", "tasks"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "hive_state_path": { "type": "string" },
+        "error": {
+          "type": "string",
+          "enum": ["missing_project_path", "not_initialised"]
+        },
+        "tasks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Task" }
+        }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "slug",
+        "folder",
+        "state_file",
+        "marker",
+        "attrs",
+        "mtime",
+        "age_seconds",
+        "claude_pid",
+        "claude_pid_alive",
+        "action",
+        "action_label",
+        "suggested_command"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"]
+        },
+        "slug": { "type": "string" },
+        "folder": { "type": "string" },
+        "state_file": { "type": "string" },
+        "marker": {
+          "type": "string",
+          "enum": [
+            "none",
+            "waiting",
+            "complete",
+            "agent_working",
+            "execute_waiting",
+            "execute_complete",
+            "execute_stale",
+            "review_working",
+            "review_waiting",
+            "review_ci_stale",
+            "review_stale",
+            "review_complete",
+            "review_error",
+            "error"
+          ]
+        },
+        "attrs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "mtime": { "type": "string", "format": "date-time" },
+        "age_seconds": { "type": "integer", "minimum": 0 },
+        "claude_pid": { "type": ["integer", "null"], "minimum": 1 },
+        "claude_pid_alive": { "type": ["boolean", "null"] },
+        "action": {
+          "type": "string",
+          "enum": [
+            "ready_to_brainstorm",
+            "ready_to_plan",
+            "ready_to_develop",
+            "ready_for_review",
+            "ready_for_pr",
+            "ready_to_archive",
+            "needs_input",
+            "review_findings",
+            "recover_execute",
+            "recover_review",
+            "agent_running",
+            "archived",
+            "error"
+          ]
+        },
+        "action_label": { "type": "string" },
+        "suggested_command": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

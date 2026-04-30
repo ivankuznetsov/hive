@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-04-30T17:00:00Z] cli — error envelopes on stdout for `hive run --json` and `hive status --json`
+
+**Action:** Added `Hive::Schemas::RunErrorKind` (11 kinds) and `Hive::Schemas::StatusErrorKind` (3 kinds) closed enums under `Hive::Schemas`, mirroring the self-derived `ALL` pattern from `NextActionKind`/`TaskActionKind`. Amended `schemas/hive-run.v1.json` and `schemas/hive-status.v1.json` in place at v1: each schema now uses `oneOf: [SuccessPayload, ErrorPayload]` with the existing root content moved into `$defs.SuccessPayload`. Wired `Hive::Commands::Run` and `Hive::Commands::Status` `#call` with the canonical Pattern B rescue (`rescue Hive::Error => e; emit_error_envelope(e) if @json && !@stdout_written; raise`), with one departure from Pattern B — the `@stdout_written` guard, load-bearing for `hive run`'s existing dual-signal `:error`-marker contract. `bin/hive` rescue still produces the same exit codes; the only addition is a stdout JSON write on the error path when `--json` is set. Without `--json`, behavior is byte-identical to before.
+
+**Refreshed pages:**
+- `wiki/cli.md` — added an "Error envelopes" paragraph documenting the universal contract (every `--json`-supporting command emits an envelope on stdout when an error is raised; consumers detect failure by `payload.ok == false`).
+
 ## [2026-04-30T00:00:00Z] e2e — third-wave fixer landed 7 surviving follow-ups
 
 **Action:** Applied seven survivor findings from the previous two waves on PR #18: (A) `bin/hive-e2e` `exit_on_failure?` regression test was already in place — verified; (B) `repro.sh` now replays setup-step kinds inline (`seed_state`, `write_file`, `register_project`, `ruby_block`, `state_assert`, `log_assert`) and explicitly skips live-tmux kinds (`tui_keys`, `tui_expect`, `wait_subprocess`, `editor_action`); (C) `Sandbox.cleanup_runs` now treats `status: complete` with `summary.failed > 0` as failed-retention (extracted to `retention_days_for`, with malformed report.json defaulting to `retain_failed_days`); (D) `Hive::Commands::Run` exposes `REQUIRED_PAYLOAD_KEYS` constant — the producer's `report_json` and the schema-drift test now both consume it (single source of truth); (E) `bundle lock --add-platform ruby` extended `Gemfile.lock` PLATFORMS; (F) `ArtifactCapture` now copies `<tmpdir>/hive-tui-spawn-*.log` plus the shared `hive-tui-subprocess.log` into `<scenario_dir>/tui-subprocess/` with `.tail` companions; (G) `tui_status_navigate_dispatch_plan` rebuilt around the TUI's verb-key dispatch path — `p` keystroke spawns `bin/hive plan`, `wait_subprocess` waits for the dispatched child, `state_assert` proves plan.md/COMPLETE landed.

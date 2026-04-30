@@ -85,6 +85,34 @@ class StatusErrorEnvelopeTest < Minitest::Test
     end
   end
 
+  # End-to-end coverage for the plan's smoke command:
+  # `HIVE_HOME=/nonexistent bin/hive status --json | jq .ok` must report
+  # `false` (config error envelope), not `true` (empty projects). Before
+  # Fix 2, registered_projects returned [] silently on a missing HIVE_HOME,
+  # which made `ok` look true. The validate_hive_home! check raises
+  # Hive::ConfigError, which propagates through Status#call's rescue into
+  # the envelope.
+  def test_explicitly_nonexistent_hive_home_emits_config_envelope
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = "/tmp/hive-test-status-nonexistent-#{rand(1_000_000)}"
+    begin
+      cmd = Hive::Commands::Status.new(json: true)
+      out, _err, status = with_captured_exit { cmd.call }
+      assert_equal Hive::ExitCodes::CONFIG, status,
+                   "explicitly nonexistent HIVE_HOME must exit 78 (CONFIG), not 0"
+      payload = JSON.parse(out)
+      assert_equal false, payload["ok"],
+                   "smoke command `HIVE_HOME=/nonexistent hive status --json | jq .ok` must report false"
+      assert_equal "config", payload["error_kind"]
+      assert_equal "ConfigError", payload["error_class"]
+      assert_includes payload["message"], "HIVE_HOME is set to a path that does not exist"
+      assert @schemer.valid?(payload),
+             "explicit-nonexistent envelope must validate (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    ensure
+      ENV["HIVE_HOME"] = prev
+    end
+  end
+
   # R3 regression: without --json, error path is stderr-text + exit code,
   # no JSON on stdout.
   def test_human_path_no_json_unchanged_on_error

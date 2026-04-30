@@ -511,4 +511,78 @@ class ConfigTest < Minitest::Test
       assert_equal "pi",      cfg.dig("agents", "pi", "bin")
     end
   end
+
+  # --- HIVE_HOME explicit-but-nonexistent validation --------------------
+  # Silent `[]` on a typo'd HIVE_HOME hid the misconfiguration and made
+  # `hive status --json | jq .ok` falsely report `true`. The validation
+  # fires only when ENV["HIVE_HOME"] is explicitly set AND the directory
+  # doesn't exist — the default path (env unset) and the legitimate
+  # first-install state (dir exists, no config.yml yet) must continue to
+  # work without raising.
+
+  def test_registered_projects_raises_when_hive_home_explicitly_nonexistent
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = "/tmp/hive-test-definitely-does-not-exist-#{rand(1_000_000)}"
+    err = assert_raises(Hive::ConfigError) { Hive::Config.registered_projects }
+    assert_match(/HIVE_HOME is set to a path that does not exist/, err.message)
+    assert_includes err.message, ENV["HIVE_HOME"]
+  ensure
+    ENV["HIVE_HOME"] = prev
+  end
+
+  def test_registered_projects_returns_empty_when_hive_home_unset
+    prev = ENV["HIVE_HOME"]
+    ENV.delete("HIVE_HOME")
+    # Default ~/Dev/hive may or may not have a config.yml; what matters is
+    # that the validation doesn't fire and the call returns an Array. Stub
+    # global_config_path to a guaranteed-missing file so we exercise the
+    # "no config.yml" branch deterministically.
+    Hive::Config.singleton_class.alias_method(:__orig_global_config_path, :global_config_path)
+    Hive::Config.define_singleton_method(:global_config_path) { "/nonexistent-#{rand(1_000_000)}/config.yml" }
+    begin
+      assert_equal [], Hive::Config.registered_projects
+    ensure
+      Hive::Config.singleton_class.alias_method(:global_config_path, :__orig_global_config_path)
+      Hive::Config.singleton_class.send(:remove_method, :__orig_global_config_path)
+      ENV["HIVE_HOME"] = prev
+    end
+  end
+
+  def test_registered_projects_returns_empty_when_hive_home_dir_exists_but_no_config
+    Dir.mktmpdir("hive-empty-home") do |dir|
+      prev = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+      begin
+        assert_equal [], Hive::Config.registered_projects,
+                     "directory exists but no config.yml is the legitimate fresh-install state"
+      ensure
+        ENV["HIVE_HOME"] = prev
+      end
+    end
+  end
+
+  def test_register_project_still_works_on_first_call_with_fresh_hive_home
+    # `register_project` must continue to lazy-create config.yml on first
+    # use even though `registered_projects` now validates HIVE_HOME. The
+    # validation guards READ paths only; register_project does its own
+    # mkdir_p and reads the YAML file directly without going through
+    # registered_projects.
+    Dir.mktmpdir("hive-fresh-home") do |dir|
+      prev = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+      begin
+        entry = Hive::Config.register_project(name: "first", path: "/tmp/first")
+        assert_equal "first", entry["name"]
+        assert File.exist?(File.join(dir, "config.yml")),
+               "register_project must lazy-create config.yml on first use"
+        # registered_projects after registration still works (directory now
+        # exists AND config.yml is now there).
+        projects = Hive::Config.registered_projects
+        assert_equal 1, projects.size
+        assert_equal "first", projects.first["name"]
+      ensure
+        ENV["HIVE_HOME"] = prev
+      end
+    end
+  end
 end

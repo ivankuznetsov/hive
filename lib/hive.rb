@@ -100,6 +100,39 @@ module Hive
       ERROR               = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
+
+    # Closed enum of `error_kind` values emitted by `hive run --json` when
+    # an error envelope is produced. Each value maps 1:1 to a Hive::Error
+    # subclass via Hive::Commands::Run#error_kind_for. `ALL` is self-derived
+    # so adding a new constant without updating ALL is impossible.
+    #
+    # Adding a new kind is non-breaking by contract; renaming or removing a
+    # value bumps SCHEMA_VERSIONS["hive-run"].
+    module RunErrorKind
+      CONCURRENT_RUN = "concurrent_run".freeze
+      TASK_IN_ERROR  = "task_in_error".freeze
+      WRONG_STAGE    = "wrong_stage".freeze
+      STAGE          = "stage".freeze
+      CONFIG         = "config".freeze
+      AGENT          = "agent".freeze
+      GIT            = "git".freeze
+      WORKTREE       = "worktree".freeze
+      AMBIGUOUS_SLUG = "ambiguous_slug".freeze
+      INTERNAL       = "internal".freeze
+      GENERIC        = "generic".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive status --json`
+    # when an error envelope is produced. `hive status`'s producer surface
+    # is much narrower than `hive run`'s — only ConfigError / InternalError
+    # and the generic fallback. Same self-derived ALL pattern.
+    module StatusErrorKind
+      CONFIG   = "config".freeze
+      INTERNAL = "internal".freeze
+      GENERIC  = "generic".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
   end
 
   # Process exit-code contract for the `hive` CLI.

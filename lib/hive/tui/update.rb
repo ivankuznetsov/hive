@@ -71,6 +71,10 @@ module Hive
           [ apply_back(model), nil ]
         when Messages::ProjectScope
           [ apply_project_scope(model, message), nil ]
+        when Messages::PaneFocusToggled
+          [ apply_pane_focus_toggled(model), nil ]
+        when Messages::PaneFocusChanged
+          [ apply_pane_focus_changed(model, message), nil ]
         when Messages::Noop
           [ model, nil ]
         when Messages::KeyPressed
@@ -207,12 +211,44 @@ module Hive
         model.with(flash: msg.text, flash_set_at: Time.now)
       end
 
-      # Cursor moves one row down within the same project; on overflow,
-      # advances to the first row of the next project that has visible
-      # rows. Stays clamped at the last row of the last non-empty project
-      # rather than wrapping — wrap would mask the grid's scroll
-      # boundary.
+      # j / KEY_DOWN. Routes by `pane_focus`:
+      #   :left  → advance the projects-pane selection (model.scope).
+      #   :right → advance the task cursor (existing v1 behaviour: row,
+      #            then next project's first row, clamped at the last
+      #            row of the last non-empty project).
       def apply_cursor_down(model)
+        return apply_left_pane_cursor_down(model) if model.pane_focus == :left
+
+        apply_right_pane_cursor_down(model)
+      end
+
+      def apply_cursor_up(model)
+        return apply_left_pane_cursor_up(model) if model.pane_focus == :left
+
+        apply_right_pane_cursor_up(model)
+      end
+
+      # Left-pane navigation drives `model.scope`. Scope 0 = ★ All projects;
+      # 1..projects.size = the Nth registered project. Clamped at both
+      # ends (no wrap — same boundary contract as the right pane).
+      # ProjectScope's snapshot/cursor recompute is reused via
+      # `apply_project_scope` so the right pane stays coherent with
+      # the new scope.
+      def apply_left_pane_cursor_down(model)
+        snap = model.snapshot
+        max_scope = snap ? snap.projects.size : 0
+        return model if model.scope >= max_scope
+
+        apply_project_scope(model, Messages::ProjectScope.new(n: model.scope + 1))
+      end
+
+      def apply_left_pane_cursor_up(model)
+        return model if model.scope <= 0
+
+        apply_project_scope(model, Messages::ProjectScope.new(n: model.scope - 1))
+      end
+
+      def apply_right_pane_cursor_down(model)
         visible = visible_snapshot(model)
         return model if visible.nil? || model.cursor.nil?
 
@@ -228,7 +264,7 @@ module Hive
         end
       end
 
-      def apply_cursor_up(model)
+      def apply_right_pane_cursor_up(model)
         visible = visible_snapshot(model)
         return model if visible.nil? || model.cursor.nil?
 
@@ -246,6 +282,17 @@ module Hive
             model
           end
         end
+      end
+
+      def apply_pane_focus_toggled(model)
+        target = model.pane_focus == :left ? :right : :left
+        model.with(pane_focus: target)
+      end
+
+      def apply_pane_focus_changed(model, msg)
+        return model unless %i[left right].include?(msg.target)
+
+        model.with(pane_focus: msg.target)
       end
 
       def apply_show_help(model)

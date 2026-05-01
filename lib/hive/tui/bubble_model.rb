@@ -185,7 +185,12 @@ module Hive
       def translate_key(key_message)
         key = bubble_key_to_keymap(key_message)
         row = current_row
-        Hive::Tui::KeyMap.message_for(mode: @hive_model.mode, key: key, row: row)
+        Hive::Tui::KeyMap.message_for(
+          mode: @hive_model.mode,
+          key: key,
+          row: row,
+          pane_focus: @hive_model.pane_focus
+        )
       rescue ArgumentError => e
         # Unknown mode (defensive): treat as Noop. Should never fire
         # since `mode` is constrained by Update transitions; logging

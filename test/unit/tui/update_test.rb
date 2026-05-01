@@ -367,6 +367,93 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal [ 0, 2 ], new_model.cursor
   end
 
+  # ---- v2 pane focus + left-pane cursor routing ----
+
+  def test_pane_focus_toggled_flips_right_to_left
+    starting = model.with(pane_focus: :right)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::PANE_FOCUS_TOGGLED)
+    assert_equal :left, new_model.pane_focus
+  end
+
+  def test_pane_focus_toggled_flips_left_to_right
+    starting = model.with(pane_focus: :left)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::PANE_FOCUS_TOGGLED)
+    assert_equal :right, new_model.pane_focus
+  end
+
+  def test_pane_focus_changed_sets_explicit_target_left
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model.with(pane_focus: :right),
+      Hive::Tui::Messages::PaneFocusChanged.new(target: :left)
+    )
+    assert_equal :left, new_model.pane_focus
+  end
+
+  def test_pane_focus_changed_sets_explicit_target_right
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model.with(pane_focus: :left),
+      Hive::Tui::Messages::PaneFocusChanged.new(target: :right)
+    )
+    assert_equal :right, new_model.pane_focus
+  end
+
+  def test_pane_focus_changed_with_invalid_target_is_no_op
+    # Defensive guard so a future bug in the keystroke pipeline can't
+    # leave pane_focus in an unrecognised state.
+    starting = model.with(pane_focus: :left)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::PaneFocusChanged.new(target: :sideways)
+    )
+    assert_equal :left, new_model.pane_focus
+  end
+
+  def test_cursor_down_under_left_focus_increments_scope
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 0
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal 1, new_model.scope, "j on left pane should advance scope from 0 → 1"
+  end
+
+  def test_cursor_down_under_left_focus_clamps_at_max_scope
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 2 # already at the last project
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal 2, new_model.scope, "must not advance past projects.size"
+  end
+
+  def test_cursor_up_under_left_focus_decrements_scope
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 2
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal 1, new_model.scope
+  end
+
+  def test_cursor_up_under_left_focus_clamps_at_zero
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 0
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal 0, new_model.scope, "must not decrement below 0 (★ All projects)"
+  end
+
+  def test_cursor_down_under_right_focus_preserves_v1_behaviour
+    # Regression guard: v1 cursor row navigation must still work when
+    # pane_focus is :right (the default and v1 implicit behaviour).
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right, cursor: [ 0, 0 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal [ 0, 1 ], new_model.cursor
+  end
+
   def test_cursor_up_clamps_at_top
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 0 ])
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)

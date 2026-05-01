@@ -92,6 +92,76 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal "plan", msg.verb
   end
 
+  # -------- v2 pane focus + new-idea bindings --------
+
+  def test_grid_tab_returns_pane_focus_toggled
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_tab, row: nil)
+    assert_same Hive::Tui::Messages::PANE_FOCUS_TOGGLED, msg
+  end
+
+  def test_grid_backtab_also_toggles_pane_focus
+    # `Shift+Tab` on most terminals surfaces as `:key_backtab` in
+    # Bubble Tea. Both keys should drive the same toggle.
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_backtab, row: nil)
+    assert_same Hive::Tui::Messages::PANE_FOCUS_TOGGLED, msg
+  end
+
+  def test_grid_h_jumps_pane_focus_to_left
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "h", row: nil)
+    assert_kind_of Hive::Tui::Messages::PaneFocusChanged, msg
+    assert_equal :left, msg.target
+  end
+
+  def test_grid_l_jumps_pane_focus_to_right
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "l", row: nil)
+    assert_kind_of Hive::Tui::Messages::PaneFocusChanged, msg
+    assert_equal :right, msg.target
+  end
+
+  def test_grid_n_opens_new_idea_prompt
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "n", row: nil)
+    assert_same Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT, msg
+  end
+
+  def test_grid_enter_from_left_pane_jumps_focus_to_right
+    # On the left pane Enter is "select project, focus tasks" — never
+    # a verb dispatch. KeyMap routes this without consulting `row`.
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: nil, pane_focus: :left)
+    assert_kind_of Hive::Tui::Messages::PaneFocusChanged, msg
+    assert_equal :right, msg.target
+  end
+
+  def test_grid_enter_from_right_pane_falls_through_to_existing_dispatch
+    # On the right pane Enter still routes via enter_message(row) →
+    # DispatchCommand for ready_* rows (existing v1 behaviour). Pin it
+    # so a future refactor doesn't accidentally route Enter through
+    # the pane-focus branch on the right.
+    row = Hive::Tui::Snapshot::Row.new(
+      project_name: "p", stage: "2-brainstorm", slug: "s", folder: "/f",
+      state_file: "/s.md", marker: "complete", attrs: {}, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "ready_to_plan", action_label: "Ready to plan",
+      suggested_command: "hive plan s --from 2-brainstorm"
+    )
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row, pane_focus: :right)
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+  end
+
+  def test_message_for_pane_focus_defaults_to_right_for_back_compat
+    # Existing callers that don't pass `pane_focus:` (any v1 unit test
+    # in the suite) must continue to work — default :right preserves
+    # v1 KeyMap behaviour.
+    row = Hive::Tui::Snapshot::Row.new(
+      project_name: "p", stage: "2-brainstorm", slug: "s", folder: "/f",
+      state_file: "/s.md", marker: "complete", attrs: {}, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "ready_to_plan", action_label: "Ready to plan",
+      suggested_command: "hive plan s --from 2-brainstorm"
+    )
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+  end
+
   # -------- Mode globals (work without a row) --------
 
   def test_grid_q_returns_terminate_requested

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-clean.v1.json",
+  "title": "hive-e2e clean output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "deleted", "kept"],
+  "properties": {
+    "schema": { "const": "hive-e2e-clean" },
+    "schema_version": { "const": 1 },
+    "deleted": { "type": "integer", "minimum": 0 },
+    "kept": { "type": "integer", "minimum": 0 },
+    "dry_run": { "type": "boolean" },
+    "deleted_runs": { "type": "array", "items": { "$ref": "#/$defs/RunRecord" } },
+    "kept_runs": { "type": "array", "items": { "$ref": "#/$defs/RunRecord" } }
+  },
+  "$defs": {
+    "RunRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "path", "reason"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "path": { "type": "string" },
+        "reason": { "type": "string" },
+        "retain_days": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

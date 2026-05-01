@@ -9,6 +9,7 @@ require "thor"
 require "hive"
 require "runner"
 require "schemas"
+require "path_safety"
 
 # Mirror bin/hive: intercept `--version`/`-v` BEFORE Thor dispatch so the
 # default_task `:run_scenarios` doesn't swallow it as a positional pattern.
@@ -23,14 +24,16 @@ module Hive
     # bin/hive routing: success / failure / config so wrapper scripts and
     # CI matrices can branch precisely.
     #
-    #   0   = all scenarios passed
-    #   1   = one or more scenarios failed
-    #   78  = preflight failure (missing tooling, bad config, missing repro)
-    module BinaryExit
-      SUCCESS = 0
-      FAILURE = 1
-      CONFIG  = Hive::ExitCodes::CONFIG # 78
-    end
+      #   0   = all scenarios passed
+      #   1   = one or more scenarios failed
+      #   64  = usage error (bad args, no matching scenarios)
+      #   78  = preflight failure (missing tooling, bad config, missing repro)
+      module BinaryExit
+        SUCCESS = 0
+        FAILURE = 1
+        USAGE  = Hive::ExitCodes::USAGE # 64
+        CONFIG  = Hive::ExitCodes::CONFIG # 78
+      end
 
     class PreflightError < StandardError; end
 
@@ -98,7 +101,10 @@ module Hive
       def run_scenarios(pattern = nil)
         runner = Runner.new
         scenarios = runner.select_scenarios(pattern: pattern, tag: options[:filter])
-        raise "no scenarios match #{pattern || options[:filter] || 'all'}" if scenarios.empty?
+        if scenarios.empty?
+          exit_with_error("no scenarios match #{pattern || options[:filter] || 'all'}",
+                          error_kind: "no_scenarios", exit_code: BinaryExit::USAGE)
+        end
 
         Preflight.require_tmux! if scenarios.any? { |scenario| tui_scenario?(scenario) }
         report = runner.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
@@ -140,7 +146,12 @@ module Hive
 
       desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"
       def replay(run_id, scenario)
-        script = File.join(Paths.runs_dir, run_id, "scenarios", scenario, "repro.sh")
+        run_id = PathSafety.safe_basename!(run_id, "run_id")
+        scenario = PathSafety.safe_basename!(scenario, "scenario")
+        run_dir = PathSafety.contained_path!(Paths.runs_dir, run_id, "run dir")
+        scenario_root = PathSafety.contained_path!(run_dir, "scenarios", "scenario root")
+        scenario_dir = PathSafety.contained_path!(scenario_root, scenario, "scenario dir")
+        script = PathSafety.contained_path!(scenario_dir, "repro.sh", "repro script")
         unless File.exist?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} has no repro.sh; the run may have completed successfully (#{script})",
@@ -149,14 +160,20 @@ module Hive
           )
         end
 
-        exec script
+        exec([ script, File.basename(script) ])
+      rescue ArgumentError => e
+        exit_with_error(e, error_kind: "usage", exit_code: BinaryExit::USAGE)
       end
 
       desc "clean", "Remove old e2e run artifacts"
-      option :retain_days, type: :numeric, default: ENV.fetch("RUNS_RETAIN_DAYS", 7).to_i
-      option :retain_failed_days, type: :numeric, default: ENV.fetch("RUNS_RETAIN_FAILED_DAYS", 14).to_i
+      option :retain_days, type: :string, default: ENV.fetch("RUNS_RETAIN_DAYS", "7")
+      option :retain_failed_days, type: :string, default: ENV.fetch("RUNS_RETAIN_FAILED_DAYS", "14")
+      option :dry_run, type: :boolean, default: false, desc: "show which runs would be deleted without deleting them"
       def clean
-        result = Sandbox.cleanup_runs(retain_days: options[:retain_days], retain_failed_days: options[:retain_failed_days])
+        retain_days = parse_retention_window(options[:retain_days], "retain_days")
+        retain_failed_days = parse_retention_window(options[:retain_failed_days], "retain_failed_days")
+        result = Sandbox.cleanup_runs(retain_days: retain_days, retain_failed_days: retain_failed_days,
+                                      dry_run: options[:dry_run])
         deleted = result.fetch("deleted")
         kept = result.fetch("kept")
         if options[:json]
@@ -164,11 +181,16 @@ module Hive
             "schema" => "hive-e2e-clean",
             "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-clean"),
             "deleted" => deleted,
-            "kept" => kept
+            "kept" => kept,
+            "dry_run" => options[:dry_run],
+            "deleted_runs" => result.fetch("deleted_runs"),
+            "kept_runs" => result.fetch("kept_runs")
           )
         else
           puts "deleted: #{deleted}, kept: #{kept}"
         end
+      rescue ArgumentError => e
+        exit_with_error(e, error_kind: "usage", exit_code: BinaryExit::USAGE)
       end
 
       private
@@ -202,6 +224,15 @@ module Hive
         self.class.invocation_command
       rescue StandardError
         nil
+      end
+
+      def parse_retention_window(value, label)
+        days = Integer(value.to_s, 10)
+        raise ArgumentError, "#{label} must be >= 0" if days.negative?
+
+        days
+      rescue ArgumentError
+        raise ArgumentError, "#{label} must be a non-negative integer (got #{value.inspect})"
       end
     end
   end
@@ -242,11 +273,11 @@ rescue Hive::E2E::PreflightError => e
 rescue Thor::Error => e
   if ARGV.include?("--json")
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
-                                                          exit_code: Hive::E2E::BinaryExit::FAILURE))
+                                                          exit_code: Hive::E2E::BinaryExit::USAGE))
   else
     warn e.message
   end
-  exit Hive::E2E::BinaryExit::FAILURE
+  exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e
   if ARGV.include?("--json")
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,

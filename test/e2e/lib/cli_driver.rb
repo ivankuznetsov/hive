@@ -75,8 +75,8 @@ module Hive
 
         Open3.popen3(env, *command(args), chdir: cwd, pgroup: true) do |stdin, out, err, wait_thr|
           stdin.close
-          out_reader = Thread.new { out.read }
-          err_reader = Thread.new { err.read }
+          out_reader = Thread.new { read_stream(out) }
+          err_reader = Thread.new { read_stream(err) }
           unless wait_thr.join(timeout)
             timed_out = true
             terminate(wait_thr.pid)
@@ -87,6 +87,12 @@ module Hive
         end
 
         ProcessResult.new(stdout: stdout, stderr: stderr, exit_code: status&.exitstatus, timed_out: timed_out)
+      end
+
+      def read_stream(stream)
+        stream.read
+      rescue IOError
+        ""
       end
 
       # Signal the entire process group (negative pid) so any children spawned by the

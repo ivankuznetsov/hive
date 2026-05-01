@@ -142,8 +142,14 @@ class E2ERunnerTest < Minitest::Test
         write_scenario(scenarios_dir, "slow_scenario", <<~YAML)
           name: slow_scenario
           steps:
+            - kind: seed_state
+              stage: 1-inbox
+              slug: slow-task
+            - kind: write_file
+              path: "{sandbox}/slow-step-started"
+              content: ready
             - kind: ruby_block
-              block: "sleep 10"
+              block: "sleep 60"
         YAML
 
         script = <<~RUBY
@@ -157,10 +163,13 @@ class E2ERunnerTest < Minitest::Test
         File.write(script_file, script)
 
         pid = Process.spawn(RbConfig.ruby, script_file, chdir: File.expand_path("..", __dir__))
-        # Wait for the report.json to be created (partial), then SIGINT.
-        deadline = Time.now + 10
+        # Wait until bootstrap has completed and the intended slow step is
+        # active, then SIGINT. Interrupting earlier can catch Open3 reader
+        # threads inside bootstrap and produce noisy report_on_exception output.
+        deadline = Time.now + 20
         run_dir = nil
-        until run_dir && File.exist?(File.join(run_dir, "report.json"))
+        until run_dir && File.exist?(File.join(run_dir, "report.json")) &&
+              File.exist?(File.join(run_dir, "slow_scenario", "sandbox", "slow-step-started"))
           run_dir = Dir[File.join(runs_dir, "*")].first
           break if Time.now >= deadline
 
@@ -173,6 +182,45 @@ class E2ERunnerTest < Minitest::Test
         report = JSON.parse(File.read(File.join(run_dir, "report.json")))
         assert_equal "crashed", report["status"]
       end
+    end
+  end
+
+  def test_sample_project_mutation_marks_run_failed
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "mutation_guard", <<~YAML)
+        name: mutation_guard
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      original = Hive::E2E::Sandbox.instance_method(:assert_sample_project_unmutated!)
+      Hive::E2E::Sandbox.define_method(:assert_sample_project_unmutated!) do
+        raise "sample project changed"
+      end
+      begin
+        Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+      ensure
+        Hive::E2E::Sandbox.define_method(:assert_sample_project_unmutated!, original)
+      end
+
+      report = report_for(runs_dir)
+      assert_equal 1, report["summary"]["failed"]
+      assert_equal "failed", report["scenarios"].first["status"]
+      assert_equal "sample_project_mutated", report["harness_errors"].first["kind"]
+    end
+  end
+
+  def test_setup_failed_runs_use_failed_retention_window
+    Dir.mktmpdir("runs") do |runs_dir|
+      run_dir = File.join(runs_dir, "setup-failed")
+      FileUtils.mkdir_p(run_dir)
+      File.write(File.join(run_dir, "report.json"), JSON.pretty_generate(
+        "status" => "complete",
+        "summary" => { "failed" => 0, "setup_failed" => 1 }
+      ))
+
+      assert_equal 14, Hive::E2E::Sandbox.retention_days_for(run_dir, retain_days: 7, retain_failed_days: 14)
     end
   end
 end

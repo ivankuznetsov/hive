@@ -25,4 +25,23 @@ class E2EScenarioParserTest < Minitest::Test
       assert_operator error.line, :>, 0
     end
   end
+
+  def test_rejects_unsafe_scenario_names_before_runner_uses_paths
+    [ "../bad", "/tmp/bad", "nested/name", ".", "bad name" ].each do |name|
+      Dir.mktmpdir("scenario") do |dir|
+        path = File.join(dir, "bad.yml")
+        File.write(path, <<~YAML)
+          name: #{name.inspect}
+          steps:
+            - kind: cli
+              args: [version]
+        YAML
+
+        error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+          Hive::E2E::ScenarioParser.parse(path)
+        end
+        assert_includes error.message, "scenario name must be a safe basename"
+      end
+    end
+  end
 end

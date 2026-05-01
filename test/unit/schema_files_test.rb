@@ -3,6 +3,7 @@ require "json"
 require "json_schemer"
 require "hive/commands/approve"
 require "hive/commands/run"
+require "hive/commands/stage_action"
 require "hive/commands/status"
 require "hive/tui/snapshot"
 
@@ -475,6 +476,42 @@ class SchemaFilesTest < Minitest::Test
     enum_keys = Hive::Schemas::TaskActionKind::ALL.sort
     assert_equal enum_keys, schema_keys,
                  "schema NextAction.key enum must mirror Hive::Schemas::TaskActionKind::ALL"
+  end
+
+  def test_hive_stage_action_wrong_stage_error_payload_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action"))))
+    error = Hive::WrongStage.new("wrong stage", current_stage: "1-inbox", target_stage: "2-brainstorm")
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-stage-action",
+      error: error,
+      error_kind: "wrong_stage",
+      extras: { "verb" => "brainstorm" }
+    )
+
+    assert schemer.valid?(payload),
+           "hive-stage-action ErrorPayload must accept WrongStage extras (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+  end
+
+  def test_shared_lock_error_extras_validate_for_stage_action_and_findings
+    error = Hive::ConcurrentRunError.new(
+      "lock held",
+      holder: { "pid" => 123, "slug" => "task", "stage" => "4-execute" },
+      lock_path: "/tmp/task.lock"
+    )
+    {
+      "hive-stage-action" => { "verb" => "develop" },
+      "hive-findings" => { "operation" => "accept" }
+    }.each do |schema, extras|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema))))
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: schema,
+        error: error,
+        error_kind: "error",
+        extras: extras
+      )
+      assert schemer.valid?(payload),
+             "#{schema} ErrorPayload must accept shared lock extras (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
   end
 
   # ── hive-metrics-rollback-rate ─────────────────────────────────────────

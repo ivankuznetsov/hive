@@ -152,7 +152,7 @@ module Hive
         return model if msg.exit_code.nil? || msg.exit_code.zero?
 
         model.with(
-          flash: "`#{msg.verb}` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess::SUBPROCESS_LOG_PATH}",
+          flash: "`#{msg.verb}` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess.log_path}",
           flash_set_at: Time.now
         )
       end

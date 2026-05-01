@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require "shellwords"
 require "tmpdir"
 require_relative "repro_script_writer"
 require_relative "scenario"
@@ -57,10 +58,7 @@ class E2EReproScriptWriterTest < Minitest::Test
     end
   end
 
-  def test_cd_uses_realpath_six_ups_to_repo_root
-    # repro.sh lives at <repo>/test/e2e/runs/<id>/scenarios/<name>/repro.sh.
-    # Six `..` reaches the repo root; we wrap in realpath so a wrong depth
-    # surfaces visibly (rather than silently cd'ing into a stale parent).
+  def test_cd_uses_absolute_repo_root
     Dir.mktmpdir("scenario") do |scenario_dir|
       Dir.mktmpdir("sandbox") do |sandbox|
         Dir.mktmpdir("home") do |run_home|
@@ -70,8 +68,8 @@ class E2EReproScriptWriterTest < Minitest::Test
           ).write
 
           body = File.read(path)
-          assert_includes body, 'cd "$(realpath "$(dirname "$0")/../../../../../..")"',
-            "repro.sh should cd via 6-ups + realpath, body was:\n#{body}"
+          assert_includes body, "cd #{Shellwords.escape(Hive::E2E::Paths.repo_root)}",
+            "repro.sh should not derive repo root from the run artifact location, body was:\n#{body}"
         end
       end
     end
@@ -113,6 +111,10 @@ class E2EReproScriptWriterTest < Minitest::Test
                           "write_file should emit a heredoc-write block"
           assert_includes body, "register_project: project-b",
                           "register_project should emit a cp -a + bin/hive init block"
+          refute_match(%r{cd .* -Ilib bin/hive init}, body,
+                       "register_project replay must not use relative -Ilib bin/hive from the copied project")
+          assert_includes body, Hive::E2E::Paths.hive_bin,
+                          "register_project replay must use the absolute hive binary"
           assert_includes body, "ruby_block runs with sandbox, run_home, and slug locals restored",
                           "ruby_block must include the restored binding-context note"
           # Live-tmux steps are explicitly skipped with the new comment.
@@ -127,7 +129,7 @@ class E2EReproScriptWriterTest < Minitest::Test
     end
   end
 
-  def test_state_assert_and_log_assert_get_implicit_replay_comment
+  def test_state_assert_and_log_assert_emit_real_checks
     Dir.mktmpdir("scenario") do |scenario_dir|
       Dir.mktmpdir("sandbox") do |sandbox|
         Dir.mktmpdir("home") do |run_home|
@@ -143,8 +145,34 @@ class E2EReproScriptWriterTest < Minitest::Test
           ).write
 
           body = File.read(path)
-          assert_includes body, "# step 1 state_assert: read-only assertion replayed implicitly"
-          assert_includes body, "# step 2 log_assert: read-only assertion replayed implicitly"
+          assert_includes body, "# step 1 state_assert:"
+          assert_match(/state_assert.*failed/m, body)
+          assert_includes body, "# step 2 log_assert:"
+          assert_match(/log.*not.*found/m, body)
+        end
+      end
+    end
+  end
+
+  def test_rejects_shell_metacharacters_in_seed_state_paths
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [
+            make_step("seed_state",
+                      args: { "stage" => "2-brainstorm", "slug" => "auth-task",
+                              "state_file" => "../$(touch hacked)" },
+                      position: 1)
+          ]
+
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: steps, failed_index: 1
+          ).write
+
+          body = File.read(path)
+          assert_includes body, "not replayable: unsafe seed_state input"
+          assert_includes body, "exit 1"
         end
       end
     end

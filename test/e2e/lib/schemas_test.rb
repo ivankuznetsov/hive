@@ -54,4 +54,11 @@ class E2ESchemasTest < Minitest::Test
       assert_operator version, :>=, 1, "#{name.inspect} version must be >= 1"
     end
   end
+
+  def test_every_registered_schema_has_a_published_file
+    Hive::E2E::Schemas::VERSIONS.each_key do |name|
+      path = Hive::E2E::Schemas.schema_path(name)
+      assert File.exist?(path), "published schema file missing: #{path}"
+    end
+  end
 end

@@ -49,13 +49,14 @@ class E2EBinaryTest < Minitest::Test
   # "Could not find command \"no-such\"." to stderr with exit 1.
   def test_unknown_command_with_json_emits_envelope_on_stdout
     out, err, status = Open3.capture3(hive_e2e, "no-such", "--json")
-    refute_equal 0, status.exitstatus, "exit must be non-zero"
+    assert_equal 64, status.exitstatus
     assert_empty err, "human prose must not leak to stderr when --json is set"
 
     payload = JSON.parse(out)
     assert_equal "hive-e2e-error", payload["schema"]
     assert_equal false, payload["ok"]
     assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
     assert_match(/no-such/, payload["message"])
   end
 
@@ -70,6 +71,7 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "hive-e2e-error", payload["schema"]
     assert_equal false, payload["ok"]
     assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
   end
 
   def test_version_short_flag_prints_hive_version
@@ -108,12 +110,53 @@ class E2EBinaryTest < Minitest::Test
 
   def test_run_no_match_emits_json_error_when_requested
     out, err, status = Open3.capture3(hive_e2e, "run", "definitely-no-scenario", "--json")
-    assert_equal 1, status.exitstatus
+    assert_equal 64, status.exitstatus
     assert_empty err
 
     payload = JSON.parse(out)
     assert_equal "hive-e2e-error", payload["schema"]
-    assert_equal "run_failed", payload["error_kind"]
+    assert_equal "no_scenarios", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
     assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  end
+
+  def test_replay_rejects_traversal_components
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "../escape", "scenario")
+    assert_equal 64, status.exitstatus
+    assert_empty err
+
+    payload = JSON.parse(out)
+    assert_equal "usage", payload["error_kind"]
+    assert_match(/run_id must be a safe basename/, payload["message"])
+  end
+
+  def test_clean_rejects_invalid_retention_values
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+        hive_e2e, "clean", "--json", "--retain-days", "-1"
+      )
+      assert_equal 64, status.exitstatus
+      assert_empty err
+
+      payload = JSON.parse(out)
+      assert_equal "usage", payload["error_kind"]
+      assert_match(/retain_days must be a non-negative integer/, payload["message"])
+    end
+  end
+
+  def test_clean_json_includes_dry_run_and_audit_arrays
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+      assert status.success?, "bin/hive-e2e clean --json --dry-run should exit 0, stderr was: #{err}"
+
+      payload = JSON.parse(out)
+      assert_equal true, payload["dry_run"]
+      assert_kind_of Array, payload["deleted_runs"]
+      assert_kind_of Array, payload["kept_runs"]
+    end
   end
 end

@@ -1,5 +1,4 @@
 require "test_helper"
-require "ostruct"
 require "hive/task_action"
 require "hive/markers"
 
@@ -9,10 +8,11 @@ require "hive/markers"
 # command, so a typo in ACTIONS would silently misroute agents.
 class TaskActionTest < Minitest::Test
   Marker = Hive::Markers::State
+  FakeTask = Struct.new(:stage_name, :stage_index, :slug, :project_root, :project_name, keyword_init: true)
 
   def fake_task(stage_name:, stage_index:, slug: "demo-260426-aaaa", project_root: "/x")
-    OpenStruct.new(stage_name: stage_name, stage_index: stage_index, slug: slug,
-                   project_root: project_root, project_name: File.basename(project_root))
+    FakeTask.new(stage_name: stage_name, stage_index: stage_index, slug: slug,
+                 project_root: project_root, project_name: File.basename(project_root))
   end
 
   def marker(name, attrs = {})

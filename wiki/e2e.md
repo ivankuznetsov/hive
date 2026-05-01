@@ -67,7 +67,7 @@ Every run writes `report.json`:
 - `schema: hive-e2e-report`
 - `schema_version: 1`
 - run timestamps and summary counts
-- one entry per scenario with status, duration, failure step, artifacts path, and repro path
+- one entry per scenario with status, duration, failure step, artifacts path, and repro path. Paths are relative to the run directory (`scenarios/<name>/...`) so agents can resolve them from `report.json` without guessing a second base.
 
 On failure, the harness writes a scenario bundle containing:
 
@@ -78,7 +78,7 @@ On failure, the harness writes a scenario bundle containing:
 - copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
 - `repro.sh`
 - `manifest.json` with size and SHA-256 per artifact
-- TUI failures also include keystroke captures plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
+- TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/`, plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
 ## Current Scenarios
 
@@ -86,6 +86,7 @@ On failure, the harness writes a scenario bundle containing:
 |----------|----------|
 | `full_pipeline_happy_path` | Real subprocess choreography from new task to done, avoiding network PR creation. |
 | `review_with_findings_then_develop` | `findings --json`, `accept-finding`, schema validation, review file toggles. |
+| `run_error_envelope` | `hive run --json` against a stale-locked task emits a parseable `hive-run` error payload. |
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |

@@ -139,7 +139,23 @@
             }
           }
         },
-        "id": { "type": "integer", "minimum": 1 }
+        "id": { "type": "integer", "minimum": 1 },
+        "holder": {
+          "type": "object",
+          "description": "Present on ConcurrentRunError when raised over a live task lock. Properties are best-effort and additionalProperties is open to allow forward-compatible additions.",
+          "additionalProperties": true,
+          "properties": {
+            "pid": { "type": "integer" },
+            "slug": { "type": "string" },
+            "stage": { "type": "string" },
+            "started_at": { "type": "string" },
+            "process_start_time": { "type": "string" }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Filesystem path of the lock file that triggered ConcurrentRunError."
+        }
       }
     },
     "Finding": {

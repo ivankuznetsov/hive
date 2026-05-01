@@ -152,6 +152,47 @@ class E2ETmuxDriverTest < Minitest::Test
     end
   end
 
+  def test_wait_for_subprocess_exit_ignores_mismatched_end_marker
+    Dir.mktmpdir("tmux-subprocess") do |dir|
+      log_path = File.join(dir, "hive-tui-subprocess.log")
+      driver = make_driver(session_name: "subprocess-log-mismatch", command: "sleep 30")
+      driver.instance_variable_set(:@subprocess_log_path, log_path)
+      driver.mark_subprocess_log!
+      writer = Thread.new do
+        sleep 0.1
+        File.write(
+          log_path,
+          "----- 2026-04-30T00:00:00Z BEGIN[deadbeef]: hive plan slug -----\n" \
+          "----- 2026-04-30T00:00:00Z END[cafef00d] exit=0: hive plan slug -----\n"
+        )
+        sleep 0.2
+        File.open(log_path, "a") do |file|
+          file.write("----- 2026-04-30T00:00:01Z END[deadbeef] exit=0: hive plan slug -----\n")
+        end
+      end
+
+      assert_equal :ok, driver.wait_for_subprocess_exit(timeout: 2.0, interval: 0.05)
+      writer.join
+    end
+  end
+
+  def test_wait_for_subprocess_exit_resets_offset_after_log_rotation
+    Dir.mktmpdir("tmux-subprocess") do |dir|
+      log_path = File.join(dir, "hive-tui-subprocess.log")
+      driver = make_driver(session_name: "subprocess-log-rotated", command: "sleep 30")
+      driver.instance_variable_set(:@subprocess_log_path, log_path)
+      File.write(log_path, "x" * 10_000)
+      driver.mark_subprocess_log!
+      File.write(
+        log_path,
+        "----- 2026-04-30T00:00:00Z BEGIN[deadbeef]: hive plan slug -----\n" \
+        "----- 2026-04-30T00:00:01Z END[deadbeef] exit=0: hive plan slug -----\n"
+      )
+
+      assert_equal :ok, driver.wait_for_subprocess_exit(timeout: 2.0, interval: 0.05)
+    end
+  end
+
   # Non-zero END exit must surface as SubprocessFailed, not :ok. Without
   # the bind-to-BEGIN-id check the previous code treated any END regex
   # match as success regardless of exit_code, silently masking failures.

@@ -40,12 +40,12 @@ module Hive
         @cast_path = cast_path
         @rows = rows
         @cols = cols
-        @wait_thr = nil
+        @pid = nil
         preflight!
       end
 
       def start
-        return if @wait_thr
+        return if @pid
 
         FileUtils.mkdir_p(File.dirname(@cast_path))
         command = "tmux -L #{@socket_name.shellescape} attach -t #{@session_name.shellescape}"

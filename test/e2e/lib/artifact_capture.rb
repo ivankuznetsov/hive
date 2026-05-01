@@ -12,6 +12,7 @@ module Hive
   module E2E
     class ArtifactCapture
       LOG_TAIL_LINES = 200
+      TUI_SPAWN_CAPTURE_MAX_BYTES = 1024 * 1024
 
       def initialize(scenario_dir:, sandbox_dir:, run_home:, tui_log_dir: nil)
         @scenario_dir = scenario_dir
@@ -131,8 +132,19 @@ module Hive
         FileUtils.mkdir_p(dest_root)
         sources.each do |source|
           dest = File.join(dest_root, File.basename(source))
-          FileUtils.cp(source, dest)
+          copy_tui_diagnostic(source, dest)
           File.write("#{dest}.tail", tail_lines(source, LOG_TAIL_LINES))
+        end
+      end
+
+      def copy_tui_diagnostic(source, dest)
+        if File.basename(source).start_with?("hive-tui-spawn-") &&
+           File.size(source) > TUI_SPAWN_CAPTURE_MAX_BYTES
+          notice = "[truncated to last #{TUI_SPAWN_CAPTURE_MAX_BYTES} bytes]\n"
+          retained_bytes = [ TUI_SPAWN_CAPTURE_MAX_BYTES - notice.bytesize, 0 ].max
+          File.write(dest, "#{notice}#{tail_bytes(source, retained_bytes)}")
+        else
+          FileUtils.cp(source, dest)
         end
       end
 
@@ -142,6 +154,14 @@ module Hive
           acc.shift if acc.size > count
         end
         lines.join
+      end
+
+      def tail_bytes(path, bytes)
+        File.open(path, "rb") do |file|
+          size = file.size
+          file.seek([ size - bytes, 0 ].max)
+          file.read
+        end
       end
 
       def first_line(*cmd)

@@ -1,4 +1,5 @@
 require "psych"
+require_relative "path_safety"
 require_relative "scenario"
 
 module Hive
@@ -28,6 +29,7 @@ module Hive
         "seed_state" => %w[stage],
         "write_file" => %w[path content],
         "register_project" => %w[name],
+        "editor_action" => %w[args],
         "log_assert" => %w[path match],
         "ruby_block" => %w[block]
       }.freeze
@@ -44,7 +46,7 @@ module Hive
         data = Psych.safe_load(File.read(@path), aliases: true, permitted_classes: [ Symbol ]) || {}
         invalid!("scenario root must be a map", 1) unless data.is_a?(Hash)
 
-        name = required_string(data, "name")
+        name = safe_scenario_name(required_string(data, "name"))
         steps = parse_steps(data["steps"])
         Scenario.new(
           name: name,
@@ -79,7 +81,7 @@ module Hive
 
       def validate_step_types(kind, step)
         case kind
-        when "cli", "json_assert"
+        when "cli", "json_assert", "editor_action"
           invalid!("#{kind}.args must be an array", line_for(kind)) unless step["args"].is_a?(Array)
         when "tui_keys"
           unless step.key?("keys") || step.key?("text")
@@ -97,6 +99,12 @@ module Hive
         invalid!("missing #{key.inspect}", line_for(key)) if value.nil? || value.to_s.empty?
 
         value.to_s
+      end
+
+      def safe_scenario_name(value)
+        PathSafety.safe_basename!(value, "scenario name")
+      rescue ArgumentError => e
+        invalid!(e.message, line_for("name"))
       end
 
       def invalid!(reason, line)

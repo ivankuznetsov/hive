@@ -23,7 +23,8 @@ class E2EArtifactCaptureTest < Minitest::Test
   def collect(scenario_dir, sandbox, run_home, **overrides)
     error = overrides[:error] || RuntimeError.new("boom")
     failed_step = overrides[:failed_step] || make_step("cli")
-    Hive::E2E::ArtifactCapture.new(scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home)
+    Hive::E2E::ArtifactCapture.new(scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+                                   tui_log_dir: overrides[:tui_log_dir])
       .collect(error: error, failed_step: failed_step,
                step_results: overrides[:step_results] || [],
                tmux_driver: overrides[:tmux_driver],
@@ -101,31 +102,69 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
+  def test_dead_tmux_pane_capture_records_placeholder
+    with_dirs do |scenario_dir, sandbox, run_home|
+      fake_tmux = Object.new
+      fake_tmux.define_singleton_method(:keystrokes) { [] }
+      fake_tmux.define_singleton_method(:capture_pane) { raise "pane is gone" }
+
+      collect(scenario_dir, sandbox, run_home, tmux_driver: fake_tmux)
+
+      pane_after = File.read(File.join(scenario_dir, "pane-after.txt"))
+      assert_includes pane_after, "capture-pane failed",
+        "artifact capture should preserve the original scenario failure when pane capture is already dead"
+    end
+  end
+
   def test_tui_subprocess_diagnostics_copied_into_bundle_when_present
     with_dirs do |scenario_dir, sandbox, run_home|
-      # Seed fake TUI per-spawn capture + marker log files in /tmp so the
-      # capture pass picks them up. Clean both up afterwards regardless of
-      # outcome so the next test in this suite isn't polluted.
-      spawn_log = File.join(Dir.tmpdir, "hive-tui-spawn-FAKE.log")
-      marker_log = File.join(Dir.tmpdir, "hive-tui-subprocess.log")
+      log_dir = File.join(scenario_dir, "tui-live")
+      FileUtils.mkdir_p(log_dir)
+      spawn_log = File.join(log_dir, "hive-tui-spawn-FAKE.log")
+      marker_log = File.join(log_dir, "hive-tui-subprocess.log")
       File.write(spawn_log, "FAKE-SPAWN-OUTPUT\n")
       File.write(marker_log, "----- BEGIN[FAKE]: hive plan -----\n")
 
+      collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
+
+      copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-FAKE.log")
+      copied_marker = File.join(scenario_dir, "tui-subprocess", "hive-tui-subprocess.log")
+      assert File.exist?(copied_spawn), "per-spawn capture file should be copied into the bundle"
+      assert File.exist?(copied_marker), "shared TUI marker log should be copied into the bundle"
+      assert_includes File.read(copied_spawn), "FAKE-SPAWN-OUTPUT",
+                      "per-spawn capture body should round-trip into the bundle"
+      assert File.exist?("#{copied_spawn}.tail"),
+             "per-spawn capture should also get a .tail companion (matching log-tails pattern)"
+    end
+  end
+
+  def test_tui_subprocess_diagnostics_ignore_global_tmp_logs
+    with_dirs do |scenario_dir, sandbox, run_home|
+      spawn_log = File.join(Dir.tmpdir, "hive-tui-spawn-GLOBAL.log")
+      File.write(spawn_log, "GLOBAL\n")
       begin
         collect(scenario_dir, sandbox, run_home)
-
-        copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-FAKE.log")
-        copied_marker = File.join(scenario_dir, "tui-subprocess", "hive-tui-subprocess.log")
-        assert File.exist?(copied_spawn), "per-spawn capture file should be copied into the bundle"
-        assert File.exist?(copied_marker), "shared TUI marker log should be copied into the bundle"
-        assert_includes File.read(copied_spawn), "FAKE-SPAWN-OUTPUT",
-                        "per-spawn capture body should round-trip into the bundle"
-        assert File.exist?("#{copied_spawn}.tail"),
-               "per-spawn capture should also get a .tail companion (matching log-tails pattern)"
+        refute File.exist?(File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-GLOBAL.log")),
+          "artifact capture must not copy stale global /tmp TUI logs into this scenario"
       ensure
         File.delete(spawn_log) if File.exist?(spawn_log)
-        File.delete(marker_log) if File.exist?(marker_log)
       end
+    end
+  end
+
+  def test_tui_subprocess_spawn_capture_is_truncated_when_copied
+    with_dirs do |scenario_dir, sandbox, run_home|
+      log_dir = File.join(scenario_dir, "tui-live")
+      FileUtils.mkdir_p(log_dir)
+      spawn_log = File.join(log_dir, "hive-tui-spawn-BIG.log")
+      File.write(spawn_log, "x" * (Hive::E2E::ArtifactCapture::TUI_SPAWN_CAPTURE_MAX_BYTES + 10))
+
+      collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
+
+      copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-BIG.log")
+      assert File.size(copied_spawn) < File.size(spawn_log),
+             "artifact bundle should not copy oversized per-spawn captures wholesale"
+      assert_includes File.read(copied_spawn, 128), "truncated to last"
     end
   end
 

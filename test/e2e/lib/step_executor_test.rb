@@ -80,6 +80,44 @@ class E2EStepExecutorTest < Minitest::Test
     end
   end
 
+  def test_path_only_state_assert_requires_file_to_exist
+    with_runner do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "missing_path_assert", <<~YAML)
+        name: missing_path_assert
+        steps:
+          - kind: state_assert
+            path: "{sandbox}/missing.txt"
+      YAML
+
+      Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+
+      report = report_for(runs_dir)
+      assert_equal 1, report["summary"]["failed"]
+      assert_match(/expected .*missing\.txt to exist/, report["scenarios"].first["error_summary"])
+    end
+  end
+
+  def test_write_file_rejects_paths_outside_sandbox
+    Dir.mktmpdir("outside") do |outside|
+      target = File.join(outside, "escaped.txt")
+      with_runner do |scenarios_dir, runs_dir|
+        write_scenario(scenarios_dir, "escape_write", <<~YAML)
+          name: escape_write
+          steps:
+            - kind: write_file
+              path: #{target.inspect}
+              content: "bad"
+        YAML
+
+        Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+
+        report = report_for(runs_dir)
+        assert_equal 1, report["summary"]["failed"]
+        refute File.exist?(target), "write_file must not create files outside the sandbox"
+      end
+    end
+  end
+
   def test_state_assert_marker_semantics
     with_runner do |scenarios_dir, runs_dir|
       write_scenario(scenarios_dir, "state_marker", <<~YAML)

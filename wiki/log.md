@@ -9,20 +9,6 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - `wiki/cli.md` — added an "Error envelopes" paragraph documenting the universal contract (every `--json`-supporting command emits an envelope on stdout when an error is raised; consumers detect failure by `payload.ok == false`).
 
-## [2026-04-30T00:00:00Z] e2e — third-wave fixer landed 7 surviving follow-ups
-
-**Action:** Applied seven survivor findings from the previous two waves on PR #18: (A) `bin/hive-e2e` `exit_on_failure?` regression test was already in place — verified; (B) `repro.sh` now replays setup-step kinds inline (`seed_state`, `write_file`, `register_project`, `ruby_block`, `state_assert`, `log_assert`) and explicitly skips live-tmux kinds (`tui_keys`, `tui_expect`, `wait_subprocess`, `editor_action`); (C) `Sandbox.cleanup_runs` now treats `status: complete` with `summary.failed > 0` as failed-retention (extracted to `retention_days_for`, with malformed report.json defaulting to `retain_failed_days`); (D) `Hive::Commands::Run` exposes `REQUIRED_PAYLOAD_KEYS` constant — the producer's `report_json` and the schema-drift test now both consume it (single source of truth); (E) `bundle lock --add-platform ruby` extended `Gemfile.lock` PLATFORMS; (F) `ArtifactCapture` now copies `<tmpdir>/hive-tui-spawn-*.log` plus the shared `hive-tui-subprocess.log` into `<scenario_dir>/tui-subprocess/` with `.tail` companions; (G) `tui_status_navigate_dispatch_plan` rebuilt around the TUI's verb-key dispatch path — `p` keystroke spawns `bin/hive plan`, `wait_subprocess` waits for the dispatched child, `state_assert` proves plan.md/COMPLETE landed.
-
-**Refreshed pages:**
-- `wiki/e2e.md` — `tui_status_navigate_dispatch_plan` description now reflects verb-key dispatch end-to-end coverage rather than the old "tmux-rendered grid" framing.
-
-## [2026-04-29T00:00:00Z] e2e — second-pass fixer landed 12 deferred follow-ups
-
-**Action:** Applied F#7/F#8/F#9/F#10/F#12/F#13/F#15/F#16/F#17/F#18/F#27/F#33 from PR #18's deferred queue. The user-visible surface changes: `bin/hive-e2e` learned `--json` for `list`, `run`, and `clean`; preflight failures now exit 78; `setup_failed` joins `passed`/`failed` as a third per-scenario status; failure artifacts now write `env-snapshot.json`, `<basename>.tail`, and `pane-before.txt`. `StepExecutor` was split across `string_expander.rb`, `scenario_context.rb`, `tmux_session_lifecycle.rb`. The dead `anchors.yml` and the unused `fake-claude-scripts/full-pipeline.sh` + `review-with-findings.sh` were removed. `repro.sh`'s `cd` traversal depth was corrected (six `..` to reach the repo root) and wrapped in `realpath` so a wrong depth surfaces visibly.
-
-**Refreshed pages:**
-- `wiki/e2e.md` — added Trust boundary subsection, Multi-stage fake-claude dispatch note, Scenario statuses (passed / failed / setup_failed), and updated the artifacts list (`env-snapshot.json`, `.tail` files, `pane-before.txt`).
-
 ## [2026-04-29T00:00:00Z] state-model trigger fired on TUI log_tail change — no wiki edit
 
 **Action:** The state-model hook fired because `lib/hive/tui/log_tail.rb` was modified. Reviewed the diff: `flush_oversized_partial!` turned from single-pass into a `while` loop so `Tail#open!`'s 64KiB single-shot backbuffer read can't leave a multi-cap partial in memory after one flush. Added regression test `test_tail_open_with_no_newline_backbuffer_respects_partial_cap`. This is a TUI log-tailer memory-cap fix and does not touch the state-model surface (`task.rb`, `markers.rb`, `config.rb`, `lock.rb`, `worktree.rb`, `metrics.rb`). No edit to `wiki/state-model.md` or `wiki/modules/*.md`. The internal partial-cap loop is not currently a wiki-documented behavior and isn't worth surfacing on the user-facing `wiki/commands/tui.md` page.
@@ -839,3 +825,34 @@ Append-only log of all wiki operations.
 
 - Verified `/usr/bin/asciinema` 3.2.0 is now visible on PATH and can create an asciicast v2 smoke file.
 - Closed the local asciinema verification gap; `HIVE_ASCIINEMA_BIN` remains documented for non-PATH installs.
+
+## [2026-04-29T00:00:00Z] e2e — second-pass fixer landed 12 deferred follow-ups
+
+**Action:** Applied F#7/F#8/F#9/F#10/F#12/F#13/F#15/F#16/F#17/F#18/F#27/F#33 from PR #18's deferred queue. The user-visible surface changes: `bin/hive-e2e` learned `--json` for `list`, `run`, and `clean`; preflight failures now exit 78; `setup_failed` joins `passed`/`failed` as a third per-scenario status; failure artifacts now write `env-snapshot.json`, `<basename>.tail`, and `pane-before.txt`. `StepExecutor` was split across `string_expander.rb`, `scenario_context.rb`, `tmux_session_lifecycle.rb`. The dead `anchors.yml` and the unused `fake-claude-scripts/full-pipeline.sh` + `review-with-findings.sh` were removed. `repro.sh`'s `cd` traversal depth was corrected (six `..` to reach the repo root) and wrapped in `realpath` so a wrong depth surfaces visibly.
+
+**Refreshed pages:**
+- `wiki/e2e.md` — added Trust boundary subsection, Multi-stage fake-claude dispatch note, Scenario statuses (passed / failed / setup_failed), and updated the artifacts list (`env-snapshot.json`, `.tail` files, `pane-before.txt`).
+
+## [2026-04-30T00:00:00Z] e2e — third-wave fixer landed 7 surviving follow-ups
+
+**Action:** Applied seven survivor findings from the previous two waves on PR #18: (A) `bin/hive-e2e` `exit_on_failure?` regression test was already in place — verified; (B) `repro.sh` now replays setup-step kinds inline (`seed_state`, `write_file`, `register_project`, `ruby_block`, `state_assert`, `log_assert`) and explicitly skips live-tmux kinds (`tui_keys`, `tui_expect`, `wait_subprocess`, `editor_action`); (C) `Sandbox.cleanup_runs` now treats `status: complete` with `summary.failed > 0` as failed-retention (extracted to `retention_days_for`, with malformed report.json defaulting to `retain_failed_days`); (D) `Hive::Commands::Run` exposes `REQUIRED_PAYLOAD_KEYS` constant — the producer's `report_json` and the schema-drift test now both consume it (single source of truth); (E) `bundle lock --add-platform ruby` extended `Gemfile.lock` PLATFORMS; (F) `ArtifactCapture` now copies `<tmpdir>/hive-tui-spawn-*.log` plus the shared `hive-tui-subprocess.log` into `<scenario_dir>/tui-subprocess/` with `.tail` companions; (G) `tui_status_navigate_dispatch_plan` rebuilt around the TUI's verb-key dispatch path — `p` keystroke spawns `bin/hive plan`, `wait_subprocess` waits for the dispatched child, `state_assert` proves plan.md/COMPLETE landed.
+
+**Refreshed pages:**
+- `wiki/e2e.md` — `tui_status_navigate_dispatch_plan` description now reflects verb-key dispatch end-to-end coverage rather than the old "tmux-rendered grid" framing.
+
+## [2026-04-30T17:30:00Z] e2e — PR #18 review fixes
+
+**Action:** Fixed the follow-up ce-code-review findings on PR #18: `wait_subprocess` now observes run-scoped TUI subprocess END/ERRNO markers instead of tmux pane death; tmux sessions run commands through an env wrapper so PATH and `setup.tui_env` expansions reach `hive tui`; TUI subprocess logs are scoped per scenario; `repro.sh` expands args/env/cwd and preserves expected non-zero exits; report paths are run-relative; sample-project mutation now fails the scenario; `bin/hive-e2e` emits JSON error envelopes, handles `run --help`, and only preflights tmux for selected TUI scenarios; cleanup retention treats `setup_failed` as failed; the asciinema start guard is idempotent.
+
+**Refreshed pages:**
+- `wiki/e2e.md` — clarified run-relative report paths and run-scoped TUI subprocess artifacts.
+- `wiki/commands/tui.md` — documented `HIVE_TUI_LOG_DIR` as the e2e-scoped subprocess log root.
+
+## [2026-05-01T00:00:00Z] e2e — PR #18 review hardening
+
+**Action:** Fixed the latest PR #18 review findings: scenario names and scenario-authored paths now validate/contain before filesystem writes; `hive-e2e replay` validates run/scenario components and uses no-shell exec; `hive-e2e clean` validates retention inputs, refuses unsafe roots, only deletes generated run directories, and can dry-run with per-run audit output; `repro.sh` uses the absolute repo root, validates setup paths, replays state/log/json assertions, and uses absolute `bin/hive` for `register_project`; e2e JSON contracts now have published schema files; stage-action/findings error schemas accept the shared structured lock and stage extras; TUI quiet subprocesses/timeouts and retained per-spawn captures are bounded.
+
+**Refreshed pages:**
+- `wiki/e2e.md` — added the `run_error_envelope` scenario to Current Scenarios.
+- `wiki/testing.md` — updated the e2e starter scenario count to six.
+- `wiki/commands/tui.md` — documented bounded quiet subprocesses and truncated retained spawn captures.

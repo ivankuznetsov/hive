@@ -4,11 +4,13 @@ require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
+require "hive/stages"
 require_relative "artifact_capture"
 require_relative "cli_driver"
 require_relative "diff_walker"
 require_relative "json_validator"
 require_relative "paths"
+require_relative "path_safety"
 require_relative "repro_script_writer"
 require_relative "sandbox"
 require_relative "sandbox_env"
@@ -172,15 +174,15 @@ module Hive
 
       def step_seed_state(step)
         project_dir = project_dir_for(step.args["project"])
-        stage = expand_string(step.args.fetch("stage"))
-        slug = expand_string(step.args["slug"] || "#{@scenario.name.tr('_', '-')}-task")
+        stage = safe_stage!(expand_string(step.args.fetch("stage")), step)
+        slug = PathSafety.safe_basename!(expand_string(step.args["slug"] || "#{@scenario.name.tr('_', '-')}-task"), "seed_state slug")
         @ctx.slug_default!(slug)
         folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
         FileUtils.mkdir_p(folder)
-        state_file = File.join(folder, step.args["state_file"] || default_state_file(stage))
+        state_file = contained_relative_path(folder, step.args["state_file"] || default_state_file(stage), "seed_state state_file")
         File.write(state_file, expand_string(step.args["content"] || default_state_content(slug, stage)))
         Array(step.args["files"]).each do |file_spec|
-          path = File.join(folder, expand_string(file_spec.fetch("path")))
+          path = contained_relative_path(folder, file_spec.fetch("path"), "seed_state file path")
           FileUtils.mkdir_p(File.dirname(path))
           File.write(path, expand_string(file_spec.fetch("content", "")))
         end
@@ -280,7 +282,7 @@ module Hive
           raise StepFailure.new(step, "expected #{path} to be absent") if File.exist?(path)
           return
         end
-        if step.args.key?("exists") || step.args.key?("marker") || step.args.key?("contains") || step.args.key?("match")
+        if !truthy?(step.args["absent"]) || step.args.key?("exists") || step.args.key?("marker") || step.args.key?("contains") || step.args.key?("match")
           raise StepFailure.new(step, "expected #{path} to exist") unless File.exist?(path)
         end
         if (marker = step.args["marker"])
@@ -344,7 +346,18 @@ module Hive
 
       def expand_path(value)
         expanded = expand_string(value.to_s)
-        expanded.start_with?("/") ? expanded : File.join(@ctx.sandbox_dir, expanded)
+        PathSafety.contained_path!(@ctx.sandbox_dir, expanded, "scenario path")
+      end
+
+      def contained_relative_path(root, value, label)
+        relative = PathSafety.relative_path!(expand_string(value.to_s), label)
+        PathSafety.contained_path!(root, relative, label)
+      end
+
+      def safe_stage!(stage, step)
+        return stage if Hive::Stages::DIRS.include?(stage)
+
+        raise StepFailure.new(step, "unknown stage #{stage.inspect}")
       end
 
       def expand(value)

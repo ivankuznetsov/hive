@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "yaml"
 require_relative "cli_driver"
+require_relative "path_safety"
 require_relative "paths"
 
 module Hive
@@ -45,21 +46,12 @@ module Hive
       # @run_dir and rm_rf an unrelated tree. Constrain to a single
       # filesystem-safe basename and verify the resolved path is contained
       # within @run_dir before any destructive operation.
-      VALID_PROJECT_NAME = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/
-
       def register_secondary(name)
-        unless name.is_a?(String) && VALID_PROJECT_NAME.match?(name)
-          raise ArgumentError,
-                "register_secondary name must match #{VALID_PROJECT_NAME.source} (got #{name.inspect})"
-        end
+        name = PathSafety.safe_basename!(name, "register_secondary name")
 
         path = File.join(@run_dir, name)
-        resolved = File.expand_path(path)
-        run_dir_resolved = File.expand_path(@run_dir)
-        unless resolved.start_with?("#{run_dir_resolved}/") && File.dirname(resolved) == run_dir_resolved
-          raise ArgumentError,
-                "register_secondary path #{resolved.inspect} escapes run_dir #{run_dir_resolved.inspect}"
-        end
+        resolved = PathSafety.contained_path!(@run_dir, path, "register_secondary path")
+        raise ArgumentError, "register_secondary path #{resolved.inspect} must be directly under #{@run_dir.inspect}" unless File.dirname(resolved) == File.expand_path(@run_dir)
 
         reject_git_dir!(@sample_project_path)
         FileUtils.rm_rf(path)
@@ -111,23 +103,35 @@ module Hive
         end
       end
 
-      def self.cleanup_runs(runs_dir: Paths.runs_dir, retain_days: 7, retain_failed_days: 14)
+      def self.cleanup_runs(runs_dir: Paths.runs_dir, retain_days: 7, retain_failed_days: 14, dry_run: false)
+        runs_dir = PathSafety.cleanup_root!(runs_dir, default_runs_dir: Paths.default_runs_dir)
         now = Time.now
         deleted = 0
         kept = 0
+        deleted_runs = []
+        kept_runs = []
         Dir[File.join(runs_dir, "*")].each do |dir|
           next unless File.directory?(dir)
+
+          run_id = File.basename(dir)
+          unless PathSafety.generated_run_dir?(run_id)
+            kept += 1
+            kept_runs << run_record(dir, reason: "name_not_generated_run_id")
+            next
+          end
 
           retain = retention_days_for(dir, retain_days: retain_days, retain_failed_days: retain_failed_days)
           if now - File.mtime(dir) < retain.to_i * 86_400
             kept += 1
+            kept_runs << run_record(dir, reason: "retained", retain_days: retain)
             next
           end
 
-          FileUtils.rm_rf(dir)
+          FileUtils.rm_rf(dir) unless dry_run
           deleted += 1
+          deleted_runs << run_record(dir, reason: dry_run ? "would_delete" : "expired", retain_days: retain)
         end
-        { "deleted" => deleted, "kept" => kept }
+        { "deleted" => deleted, "kept" => kept, "deleted_runs" => deleted_runs, "kept_runs" => kept_runs }
       end
 
       # A run that finished cleanly with summary.failed > 0 (some scenarios
@@ -145,6 +149,15 @@ module Hive
         status == "complete" && failed.zero? ? retain_days : retain_failed_days
       rescue JSON::ParserError
         retain_failed_days
+      end
+
+      def self.run_record(dir, reason:, retain_days: nil)
+        {
+          "run_id" => File.basename(dir),
+          "path" => dir,
+          "reason" => reason,
+          "retain_days" => retain_days
+        }.compact
       end
 
       private

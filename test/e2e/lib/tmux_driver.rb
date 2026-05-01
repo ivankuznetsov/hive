@@ -19,6 +19,16 @@ module Hive
 
       class DeadSession < StandardError; end
       class PaneCollapsedError < StandardError; end
+      class TmuxCommandTimeout < StandardError
+        attr_reader :stdout, :stderr, :elapsed
+
+        def initialize(stdout:, stderr:, elapsed:)
+          @stdout = stdout
+          @stderr = stderr
+          @elapsed = elapsed
+          super("tmux command timed out after #{format('%.2f', elapsed)}s")
+        end
+      end
 
       # Raised when a TUI-dispatched subprocess emits END[<id>] with a
       # non-zero exit. Carries the BEGIN/END id for cross-referencing with
@@ -52,6 +62,7 @@ module Hive
       SHELL_PROMPT_RE = /[$#] \z/
 
       attr_reader :socket_name, :session_name, :keystrokes
+      TMUX_COMMAND_TIMEOUT = 5.0
 
       def self.available?
         _out, _err, status = Open3.capture3("tmux", "-V")
@@ -81,7 +92,7 @@ module Hive
           "-s", @session_name, "-x", @cols.to_s, "-y", @rows.to_s
         ]
         args << command_with_env
-        out, err, status = Open3.capture3(*args)
+        out, err, status = capture_command(*args)
         raise "tmux new-session failed: #{err.empty? ? out : err}" unless status.success?
 
         @tmux_session_id = out.strip
@@ -93,7 +104,7 @@ module Hive
         args = base_args + [ "send-keys", "-t", @session_name ]
         args << "-l" if literal
         Array(keys).each { |key| args << key.to_s }
-        out, err, status = Open3.capture3(*args)
+        out, err, status = capture_command(*args)
         raise "tmux send-keys failed: #{err.empty? ? out : err}" unless status.success?
 
         @keystrokes << { "at" => Time.now.utc.iso8601, "keys" => Array(keys).map(&:to_s), "literal" => literal }
@@ -110,7 +121,7 @@ module Hive
       def capture_pane
         start
         ensure_live!
-        out, err, status = Open3.capture3(*(base_args + [ "capture-pane", "-p", "-t", @session_name ]))
+        out, err, status = capture_command(*(base_args + [ "capture-pane", "-p", "-t", @session_name ]))
         raise "tmux capture-pane failed: #{err.empty? ? out : err}" unless status.success?
 
         out
@@ -188,7 +199,7 @@ module Hive
       end
 
       private def capture_pane_raw
-        out, err, status = Open3.capture3(*(base_args + [ "capture-pane", "-p", "-t", @session_name ]))
+        out, err, status = capture_command(*(base_args + [ "capture-pane", "-p", "-t", @session_name ]))
         raise "tmux capture-pane failed: #{err.empty? ? out : err}" unless status.success?
 
         out
@@ -249,7 +260,7 @@ module Hive
       def wait_for_pane_dead(timeout:, interval:)
         started_at = monotonic_time
         loop do
-          out, err, status = Open3.capture3(*(base_args + [
+          out, err, status = capture_command(*(base_args + [
             "list-panes", "-t", @session_name, "-F", "\#{pane_dead}"
           ]))
           raise "tmux list-panes failed: #{err.empty? ? out : err}" unless status.success?
@@ -263,7 +274,7 @@ module Hive
       end
 
       def cleanup
-        Open3.capture3(*(base_args + [ "kill-server" ]))
+        capture_command(*(base_args + [ "kill-server" ]))
         @started = false
       rescue Errno::ENOENT
         nil
@@ -286,6 +297,7 @@ module Hive
       def subprocess_log_since_marker
         return "" unless @subprocess_log_path && File.exist?(@subprocess_log_path)
 
+        @subprocess_log_offset = 0 if File.size(@subprocess_log_path) < @subprocess_log_offset.to_i
         File.open(@subprocess_log_path, "r") do |file|
           file.seek([ @subprocess_log_offset.to_i, 0 ].max)
           file.read
@@ -300,10 +312,57 @@ module Hive
       end
 
       def ensure_live!
-        _out, _err, status = Open3.capture3(*(base_args + [ "has-session", "-t", @session_name ]))
+        _out, _err, status = capture_command(*(base_args + [ "has-session", "-t", @session_name ]))
         return if status.success?
 
         raise DeadSession, "tmux session #{@session_name} is not running on #{@socket_name}"
+      end
+
+      def capture_command(*cmd, timeout: TMUX_COMMAND_TIMEOUT)
+        started = monotonic_time
+        Open3.popen3(*cmd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
+          stdin.close
+          out_reader = Thread.new { read_stream(stdout) }
+          err_reader = Thread.new { read_stream(stderr) }
+          loop do
+            if wait_thr.join(0.05)
+              return [ out_reader.value, err_reader.value, wait_thr.value ]
+            end
+
+            elapsed = monotonic_time - started
+            next if elapsed < timeout
+
+            terminate_process_group(wait_thr.pid)
+            raise TmuxCommandTimeout.new(stdout: safe_thread_value(out_reader), stderr: safe_thread_value(err_reader),
+                                         elapsed: elapsed)
+          end
+        end
+      end
+
+      def read_stream(stream)
+        stream.read
+      rescue IOError
+        ""
+      end
+
+      def terminate_process_group(pid)
+        Process.kill("TERM", -pid)
+      rescue Errno::ESRCH
+        nil
+      ensure
+        sleep 0.1
+        begin
+          Process.kill("KILL", -pid)
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+
+      def safe_thread_value(thread)
+        thread.kill if thread.alive?
+        thread.value.to_s
+      rescue StandardError
+        ""
       end
 
       def monotonic_time

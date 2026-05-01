@@ -30,6 +30,15 @@ module Hive
           raise KeyError, "unknown e2e schema #{name.inspect} — register it in test/e2e/lib/schemas.rb"
         end
       end
+
+      def self.schema_dir
+        File.expand_path("../../../schemas", __dir__)
+      end
+
+      def self.schema_path(name, version: nil)
+        version ||= version_for(name)
+        File.join(schema_dir, "#{name}.v#{version}.json")
+      end
     end
   end
 end

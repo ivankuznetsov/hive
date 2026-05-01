@@ -3,6 +3,7 @@ require "json"
 require "securerandom"
 require "time"
 require_relative "paths"
+require_relative "path_safety"
 require_relative "sandbox"
 require_relative "scenario_parser"
 require_relative "schemas"
@@ -65,7 +66,9 @@ module Hive
       # partial / crashed) is unaffected — agents still see one row per
       # scenario, just with no artifacts_dir / failed_step_index.
       def run_one(scenario, keep_artifacts:)
-        sandbox = Sandbox.bootstrap(File.join(@run_dir, scenario.name))
+        name = PathSafety.safe_basename!(scenario.name, "scenario name")
+        scenario_run_dir = direct_child_path(@run_dir, name, "scenario run dir")
+        sandbox = Sandbox.bootstrap(scenario_run_dir)
       rescue StandardError => e
         @results << StepExecutor::ScenarioResult.new(
           name: scenario.name, status: "setup_failed", duration_seconds: 0.0,
@@ -74,7 +77,8 @@ module Hive
           artifacts_dir: nil, repro: nil
         )
       else
-        scenario_dir = File.join(@run_dir, "scenarios", scenario.name)
+        scenario_root = direct_child_path(@run_dir, "scenarios", "scenario artifact root")
+        scenario_dir = direct_child_path(scenario_root, name, "scenario artifact dir")
         result = StepExecutor.new(scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: @run_id).execute
         if (mutation_error = sample_project_mutation_error)
           @harness_errors << { "kind" => "sample_project_mutated", "message" => mutation_error.message }
@@ -86,6 +90,14 @@ module Hive
 
       def generate_run_id
         "#{Time.now.utc.strftime('%Y-%m-%dT%H-%M-%SZ')}-#{Process.pid}-#{SecureRandom.hex(2)}"
+      end
+
+      def direct_child_path(root, child, label)
+        child = PathSafety.safe_basename!(child, label)
+        path = PathSafety.contained_path!(root, child, label)
+        raise ArgumentError, "#{label} #{path.inspect} must be directly under #{File.expand_path(root).inspect}" unless File.dirname(path) == File.expand_path(root)
+
+        path
       end
 
       # Flush a "crashed" report and exit with the conventional 128+signum code so

@@ -1,6 +1,7 @@
 require "json"
 require "hive"
 require_relative "diff_walker"
+require_relative "schemas"
 
 module Hive
   module E2E
@@ -42,9 +43,10 @@ module Hive
       end
 
       def schema_path(schema_name)
-        return nil unless Hive::Schemas::SCHEMA_VERSIONS.key?(schema_name)
+        return Hive::Schemas.schema_path(schema_name) if Hive::Schemas::SCHEMA_VERSIONS.key?(schema_name)
+        return Hive::E2E::Schemas.schema_path(schema_name) if Hive::E2E::Schemas::VERSIONS.key?(schema_name)
 
-        Hive::Schemas.schema_path(schema_name)
+        nil
       end
 
       def schemer(schema_name, path)

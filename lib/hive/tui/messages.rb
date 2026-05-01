@@ -173,6 +173,40 @@ module Hive
       TriageCursorUp = Class.new
       TRIAGE_CURSOR_UP = TriageCursorUp.new.freeze
 
+      # ---- Pane focus messages (v2 two-pane layout) ----
+
+      # Tab / Shift+Tab — toggle pane focus between :left and :right.
+      PaneFocusToggled = Class.new
+      PANE_FOCUS_TOGGLED = PaneFocusToggled.new.freeze
+
+      # `h` / `l` — explicit pane focus shift. `target` is :left | :right.
+      PaneFocusChanged = Data.define(:target)
+
+      # ---- New-idea prompt messages (consumed in :new_idea mode) ----
+      # Mirror the FilterChar* shape so Update can be unit-tested against
+      # the full message set without dependency on view code.
+
+      # `n` from :grid — open the inline new-idea prompt (mode → :new_idea).
+      OpenNewIdeaPrompt = Class.new
+      OPEN_NEW_IDEA_PROMPT = OpenNewIdeaPrompt.new.freeze
+
+      # User typed a printable character into the new-idea buffer.
+      NewIdeaCharAppended = Data.define(:char)
+
+      # User pressed Backspace in the new-idea prompt.
+      NewIdeaCharDeleted = Class.new
+      NEW_IDEA_CHAR_DELETED = NewIdeaCharDeleted.new.freeze
+
+      # User pressed Enter in the new-idea prompt — submit the buffer
+      # as a new `hive new <project> "<title>"` invocation. The project
+      # is resolved by the handler from `model.scope`.
+      NewIdeaSubmitted = Class.new
+      NEW_IDEA_SUBMITTED = NewIdeaSubmitted.new.freeze
+
+      # User pressed Esc — clear the buffer and return to :grid mode.
+      NewIdeaCancelled = Class.new
+      NEW_IDEA_CANCELLED = NewIdeaCancelled.new.freeze
+
       # Recurring tick that drains new bytes from the active log_tail.
       # `Tail#poll!` is only meaningful while the user is in :log_tail
       # mode; the handler reschedules a fresh tick if mode is still

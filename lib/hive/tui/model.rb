@@ -19,25 +19,31 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,           # Symbol: :grid / :triage / :log_tail / :filter / :help
-      :snapshot,       # Hive::Tui::Snapshot (or nil before first poll)
-      :cursor,         # [project_idx, row_idx] (or nil for empty grid)
-      :filter,         # String or nil — committed substring filter
-      :filter_buffer,  # String — typed text in :filter mode
-      :scope,          # Integer — 0 means all projects; 1..N selects Nth
-      :flash,          # String or nil — current status-line message
-      :flash_set_at,   # Time or nil — flash decay timestamp
-      :triage_state,   # Hive::Tui::TriageState or nil — :triage mode only
-      :tail_state,     # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
-      :cols,           # Integer — terminal width (set on WindowSized)
-      :rows,           # Integer — terminal height
-      :last_error      # Exception or nil — last poll failure
+      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea
+      :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
+      :cursor,           # [project_idx, row_idx] (or nil for empty grid)
+      :filter,           # String or nil — committed substring filter
+      :filter_buffer,    # String — typed text in :filter mode
+      :scope,            # Integer — 0 means all projects; 1..N selects Nth
+      :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
+      :new_idea_buffer,  # String — typed text in :new_idea mode
+      :flash,            # String or nil — current status-line message
+      :flash_set_at,     # Time or nil — flash decay timestamp
+      :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
+      :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
+      :cols,             # Integer — terminal width (set on WindowSized)
+      :rows,             # Integer — terminal height
+      :last_error        # Exception or nil — last poll failure
     )
 
     Model::DEFAULT_FLASH_TTL_SECONDS = 5.0
 
     class Model
       # Boot state. App.run constructs the runner with this Model.
+      # `pane_focus` defaults to `:right` so the table is the first
+      # interaction surface — preserves v1 muscle memory where verb keys
+      # (b/p/d/r/P/a) and Enter operate on the highlighted task without
+      # the user first having to Tab into the task pane.
       def self.initial(cols: 80, rows: 24)
         new(
           mode: :grid,
@@ -46,6 +52,8 @@ module Hive
           filter: nil,
           filter_buffer: "",
           scope: 0,
+          pane_focus: :right,
+          new_idea_buffer: "",
           flash: nil,
           flash_set_at: nil,
           triage_state: nil,

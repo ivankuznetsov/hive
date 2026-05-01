@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-01T15:00:00Z] tui — v2 two-pane redesign
+
+**Action:** Replaced v1's single-column action-grouped `Views::Grid` with a two-pane composition: `Views::ProjectsPane` (left, project list with `★ All projects` virtual entry) and `Views::TasksPane` (right, 5-column compact table — icon · slug · stage · status · age). `Views::Grid` and its tests were deleted in the same PR — no `HIVE_TUI_LAYOUT=v1` escape hatch. Pane focus is keyboard-only via `Tab` / `Shift+Tab` / `h` / `l`. `j` / `k` route by `model.pane_focus`: left-pane navigation drives `model.scope`; right-pane navigation drives the row cursor. New `n` keystroke opens an inline new-idea prompt that dispatches `hive new <project> "<title>"` via `Subprocess.run_quiet!` (project resolved from left-pane selection; `★ All` falls back to the first registered project, label shows `★→<name>` so the resolved target is visible). Below 70 cols the project pane is suppressed and the tasks pane occupies the full width. Visual style refresh: rounded borders, focused/dim border distinction (cyan/faint), refined action-key palette (magenta=agent_running, red=error, blue=ready_*, green=archived, yellow=needs_input/review_findings).
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — TLDR rewritten for the two-pane layout; added Layout section with ASCII mockup; expanded Modes table to include `:new_idea`; expanded Keybindings table (`Tab`/`Shift+Tab`/`h`/`l`/`n`); added Visual style section with the semantic color/icon mapping.
+
 ## [2026-04-30T17:00:00Z] cli — error envelopes on stdout for `hive run --json` and `hive status --json`
 
 **Action:** Added `Hive::Schemas::RunErrorKind` (11 kinds) and `Hive::Schemas::StatusErrorKind` (3 kinds) closed enums under `Hive::Schemas`, mirroring the self-derived `ALL` pattern from `NextActionKind`/`TaskActionKind`. Amended `schemas/hive-run.v1.json` and `schemas/hive-status.v1.json` in place at v1: each schema now uses `oneOf: [SuccessPayload, ErrorPayload]` with the existing root content moved into `$defs.SuccessPayload`. Wired `Hive::Commands::Run` and `Hive::Commands::Status` `#call` with the canonical Pattern B rescue (`rescue Hive::Error => e; emit_error_envelope(e) if @json && !@stdout_written; raise`), with one departure from Pattern B — the `@stdout_written` guard, load-bearing for `hive run`'s existing dual-signal `:error`-marker contract. `bin/hive` rescue still produces the same exit codes; the only addition is a stdout JSON write on the error path when `--json` is set. Without `--json`, behavior is byte-identical to before.

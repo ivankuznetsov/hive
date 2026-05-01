@@ -28,11 +28,16 @@ module Hive
       ScenarioResult = Data.define(:name, :status, :duration_seconds, :failed_step_index, :failed_step_kind, :error_summary, :artifacts_dir, :repro)
 
       class StepFailure < StandardError
-        attr_reader :step, :schema_diff
+        attr_reader :step, :schema_diff, :stdout, :stderr, :exit_actual, :exit_expected
 
-        def initialize(step, message, schema_diff: nil)
+        def initialize(step, message, schema_diff: nil, stdout: nil, stderr: nil,
+                       exit_actual: nil, exit_expected: nil)
           @step = step
           @schema_diff = schema_diff
+          @stdout = stdout
+          @stderr = stderr
+          @exit_actual = exit_actual
+          @exit_expected = exit_expected
           super(message)
         end
       end
@@ -41,6 +46,7 @@ module Hive
         @scenario = scenario
         @sandbox = sandbox
         @scenario_dir = scenario_dir
+        @run_dir = File.dirname(File.dirname(scenario_dir))
         @run_id = run_id
         @ctx = ScenarioContext.new(sandbox: sandbox, run_home: sandbox.run_home, run_id: run_id)
         @cli = CliDriver.new(@ctx.sandbox_dir, @ctx.run_home)
@@ -48,7 +54,7 @@ module Hive
         @diff_walker = DiffWalker.new
         @tmux_lifecycle = TmuxSessionLifecycle.new(scenario: scenario, sandbox_dir: @ctx.sandbox_dir,
                                                    run_home: @ctx.run_home, run_id: run_id,
-                                                   scenario_dir: scenario_dir)
+                                                   scenario_dir: scenario_dir, context: @ctx)
         @step_results = []
         @preserve_cast = false
       end
@@ -65,7 +71,8 @@ module Hive
         ScenarioResult.new(name: @scenario.name, status: "passed",
                            duration_seconds: (monotonic_time - started).round(3),
                            failed_step_index: nil, failed_step_kind: nil, error_summary: nil,
-                           artifacts_dir: relative_scenario_dir, repro: nil)
+                           artifacts_dir: File.directory?(@scenario_dir) ? relative_scenario_dir : nil,
+                           repro: nil)
       rescue StandardError => e
         on_failure(e, started)
       ensure
@@ -83,7 +90,21 @@ module Hive
         raise
       rescue StandardError => e
         @step_results << { "index" => step.position, "kind" => step.kind, "status" => "failed" }
-        raise StepFailure.new(step, e.message)
+        # Preserve subprocess output from CliDriver errors so the artifact
+        # bundle and any agent reading exception.txt sees the actual command
+        # stdout/stderr that triggered the failure. Without this, the wrap
+        # at step level reduces a "hive run exit 75 with stderr 'lock held'"
+        # to a bare exception message — agents lose the diagnostic surface.
+        case e
+        when CliDriver::ExitMismatchError
+          raise StepFailure.new(step, e.message,
+                                stdout: e.stdout, stderr: e.stderr,
+                                exit_actual: e.actual, exit_expected: e.expected)
+        when CliDriver::StderrMismatchError
+          raise StepFailure.new(step, e.message, stdout: e.stdout, stderr: e.stderr)
+        else
+          raise StepFailure.new(step, e.message)
+        end
       end
 
       def on_failure(error, started)
@@ -92,8 +113,11 @@ module Hive
         failed_step = error.respond_to?(:step) ? error.step : nil
         repro = ReproScriptWriter.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir,
                                       run_home: @ctx.run_home, steps: @scenario.steps,
-                                      failed_index: failed_step&.position || @step_results.size + 1).write
-        ArtifactCapture.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir, run_home: @ctx.run_home)
+                                      failed_index: failed_step&.position || @step_results.size + 1,
+                                      scenario_name: @scenario.name,
+                                      expander_context: repro_expander_context).write
+        ArtifactCapture.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir, run_home: @ctx.run_home,
+                            tui_log_dir: @tmux_lifecycle.tui_log_dir)
           .collect(error: error, failed_step: failed_step, step_results: @step_results,
                    tmux_driver: @tmux_lifecycle.tmux,
                    schema_diff: error.respond_to?(:schema_diff) ? error.schema_diff : nil,
@@ -103,7 +127,7 @@ module Hive
                            failed_step_index: failed_step&.position, failed_step_kind: failed_step&.kind,
                            error_summary: "#{error.class}: #{error.message}",
                            artifacts_dir: relative_scenario_dir,
-                           repro: repro.sub("#{File.dirname(@scenario_dir)}/", ""))
+                           repro: repro.sub("#{@run_dir}/", ""))
       end
 
       # ---- step kinds ----------------------------------------------------
@@ -203,6 +227,7 @@ module Hive
         # Snapshot the pane BEFORE the keystroke so a step failure has a
         # before/after pair for forensics. Best-effort.
         @ctx.pre_keystroke_pane = @tmux_lifecycle.snapshot_pane
+        tmux.mark_subprocess_log!
         if step.args.key?("text")
           tmux.send_text(expand_string(step.args["text"]))
         else
@@ -345,7 +370,11 @@ module Hive
       end
 
       def relative_scenario_dir
-        @scenario_dir.sub("#{Paths.runs_dir}/", "")
+        @scenario_dir.sub("#{@run_dir}/", "")
+      end
+
+      def repro_expander_context
+        @ctx.expander_context(slug_resolver: -> { @ctx.slug.to_s })
       end
 
       def monotonic_time

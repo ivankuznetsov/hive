@@ -6,16 +6,18 @@ require "rbconfig"
 require "time"
 require "tmpdir"
 require_relative "paths"
+require_relative "schemas"
 
 module Hive
   module E2E
     class ArtifactCapture
       LOG_TAIL_LINES = 200
 
-      def initialize(scenario_dir:, sandbox_dir:, run_home:)
+      def initialize(scenario_dir:, sandbox_dir:, run_home:, tui_log_dir: nil)
         @scenario_dir = scenario_dir
         @sandbox_dir = sandbox_dir
         @run_home = run_home
+        @tui_log_dir = tui_log_dir
         @capture_errors = []
       end
 
@@ -30,6 +32,16 @@ module Hive
         guard("sandbox-git-status.txt") { write("sandbox-git-status.txt", capture("git", "-C", @sandbox_dir, "status", "--short", "--branch")) }
         guard("sandbox-tree.txt") { write("sandbox-tree.txt", sandbox_tree) }
         guard("schema-diff.txt") { write("schema-diff.txt", schema_diff) } if schema_diff && !schema_diff.empty?
+        # When the failing step was a CLI invocation, preserve its captured
+        # stdout/stderr alongside the exception text so agents can diagnose
+        # without re-running. Skipped when the underlying error wasn't a
+        # subprocess invocation (the StepFailure carries nil for these).
+        if error.respond_to?(:stdout) && !error.stdout.to_s.empty?
+          guard("cmd-stdout.txt") { write("cmd-stdout.txt", error.stdout) }
+        end
+        if error.respond_to?(:stderr) && !error.stderr.to_s.empty?
+          guard("cmd-stderr.txt") { write("cmd-stderr.txt", error.stderr) }
+        end
         if tmux_driver
           guard("keystrokes.log") { write("keystrokes.log", JSON.pretty_generate(tmux_driver.keystrokes)) }
           guard("pane-after.txt") { write("pane-after.txt", safe_pane_capture(tmux_driver)) }
@@ -49,6 +61,11 @@ module Hive
         lines << "step_index: #{failed_step&.position}"
         lines << "step_kind: #{failed_step&.kind}"
         lines << "#{error.class}: #{error.message}"
+        if error.respond_to?(:exit_actual) && !error.exit_actual.nil?
+          lines << "exit_actual: #{error.exit_actual}"
+          lines << "exit_expected: #{error.exit_expected}" unless error.exit_expected.nil?
+          lines << "(see cmd-stdout.txt / cmd-stderr.txt for captured output)"
+        end
         lines.concat(Array(error.backtrace).first(30))
         "#{lines.join("\n")}\n"
       end
@@ -56,7 +73,7 @@ module Hive
       def env_snapshot
         {
           "schema" => "hive-e2e-env-snapshot",
-          "schema_version" => 1,
+          "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-env-snapshot"),
           "hive_version" => first_line(RbConfig.ruby, "-I#{Paths.lib_dir}", Paths.hive_bin, "version"),
           "ruby" => RUBY_DESCRIPTION,
           "platform" => RUBY_PLATFORM,
@@ -96,16 +113,17 @@ module Hive
         end
       end
 
-      # Mirror lib/hive/tui/subprocess.rb: per-spawn capture files at
-      # `<tmpdir>/hive-tui-spawn-<id>.log` plus the shared marker log
-      # `<tmpdir>/hive-tui-subprocess.log`. Copying both into the scenario
-      # bundle gives forensic visibility into what the TUI's own
-      # dispatch-background subprocesses produced when a TUI scenario
-      # fails mid-dispatch. Absence of the files is normal (no TUI
-      # invoked, or a non-TUI scenario) — silently skipped.
+      # Mirror lib/hive/tui/subprocess.rb under the run-scoped HIVE_TUI_LOG_DIR:
+      # per-spawn capture files plus the shared marker log. Copying both into the
+      # scenario bundle gives forensic visibility into what the TUI's own
+      # dispatch-background subprocesses produced when a TUI scenario fails
+      # mid-dispatch. Absence of the directory is normal (no TUI invoked, or a
+      # non-TUI scenario) — silently skipped.
       def copy_tui_subprocess_diagnostics
-        sources = Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log"))
-        marker_log = File.join(Dir.tmpdir, "hive-tui-subprocess.log")
+        return unless @tui_log_dir && File.directory?(@tui_log_dir)
+
+        sources = Dir.glob(File.join(@tui_log_dir, "hive-tui-spawn-*.log"))
+        marker_log = File.join(@tui_log_dir, "hive-tui-subprocess.log")
         sources << marker_log if File.exist?(marker_log)
         return if sources.empty?
 
@@ -177,7 +195,7 @@ module Hive
         files = Dir[File.join(@scenario_dir, "**", "*")].select { |path| File.file?(path) }.sort
         manifest = {
           "schema" => "hive-e2e-manifest",
-          "schema_version" => 1,
+          "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-manifest"),
           "generated_at" => Time.now.utc.iso8601,
           "files" => files.map do |path|
             {

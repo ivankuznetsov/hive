@@ -6,6 +6,7 @@ class E2EJsonValidatorTest < Minitest::Test
     payload = {
       "schema" => "hive-status",
       "schema_version" => 1,
+      "ok" => true,
       "generated_at" => Time.now.utc.iso8601,
       "projects" => []
     }

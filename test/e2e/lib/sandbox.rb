@@ -19,6 +19,7 @@ module Hive
         @sample_project_path = sample_project_path
         @sandbox_dir = File.join(run_dir, "sandbox")
         @run_home = File.join(run_dir, "hive-home")
+        @secondary_projects = []
       end
 
       def bootstrap
@@ -39,32 +40,71 @@ module Hive
         raise
       end
 
+      # Scenario YAMLs control `name`; we File.join + rm_rf with it, so a
+      # value containing `/`, `..`, or absolute components could escape
+      # @run_dir and rm_rf an unrelated tree. Constrain to a single
+      # filesystem-safe basename and verify the resolved path is contained
+      # within @run_dir before any destructive operation.
+      VALID_PROJECT_NAME = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/
+
       def register_secondary(name)
+        unless name.is_a?(String) && VALID_PROJECT_NAME.match?(name)
+          raise ArgumentError,
+                "register_secondary name must match #{VALID_PROJECT_NAME.source} (got #{name.inspect})"
+        end
+
         path = File.join(@run_dir, name)
+        resolved = File.expand_path(path)
+        run_dir_resolved = File.expand_path(@run_dir)
+        unless resolved.start_with?("#{run_dir_resolved}/") && File.dirname(resolved) == run_dir_resolved
+          raise ArgumentError,
+                "register_secondary path #{resolved.inspect} escapes run_dir #{run_dir_resolved.inspect}"
+        end
+
         reject_git_dir!(@sample_project_path)
         FileUtils.rm_rf(path)
         FileUtils.cp_r(@sample_project_path, path)
         initialise_git_repo(path)
         CliDriver.new(path, @run_home).call([ "init" ], cwd: path)
         tune_project_config(path)
+        @secondary_projects << path
         path
       end
 
       def assert_sample_project_unmutated!
-        out, err, status = Open3.capture3("git", "-C", Paths.repo_root, "diff", "--quiet", "--", "test/e2e/sample-project")
-        return if status.success?
+        diff_out, diff_err, diff_status = Open3.capture3(
+          "git", "-C", Paths.repo_root, "diff", "--quiet", "--", "test/e2e/sample-project"
+        )
+        unless diff_status.success?
+          raise "sample project mutated during e2e run (tracked diff): " \
+                "#{diff_err.empty? ? diff_out : diff_err}"
+        end
 
-        raise "sample project mutated during e2e run: #{err.empty? ? out : err}"
+        # `git diff --quiet` ignores untracked files. A scenario that writes
+        # a new file under test/e2e/sample-project/ would not be caught by
+        # the diff above. Catch those too via porcelain status — any output
+        # under that prefix is a mutation.
+        status_out, status_err, status_status = Open3.capture3(
+          "git", "-C", Paths.repo_root, "status", "--porcelain", "--", "test/e2e/sample-project"
+        )
+        unless status_status.success?
+          raise "sample project mutation guard could not run git status: " \
+                "#{status_err.empty? ? status_out : status_err}"
+        end
+        return if status_out.strip.empty?
+
+        raise "sample project mutated during e2e run (untracked or staged): #{status_out}"
       end
 
-      # Removes all per-scenario state when called: sandbox dir, hive-home, and
-      # the worktrees tree. Caller decides when to invoke it; on
-      # `keep_artifacts || failed` Runner skips this so everything under
-      # run_dir/scenarios/<name>, plus the per-scenario sandbox/hive_home, is
-      # preserved for forensic inspection.
+      # Removes all per-scenario state when called: sandbox dir, hive-home,
+      # the worktrees tree, and any registered secondary project trees.
+      # Caller decides when to invoke it; on `keep_artifacts || failed`
+      # Runner skips this so everything under run_dir/scenarios/<name>, plus
+      # the per-scenario sandbox/hive_home and any secondary project dirs,
+      # is preserved for forensic inspection.
       def cleanup
         worktrees_dir = File.join(@run_dir, "worktrees")
-        [ @sandbox_dir, @run_home, worktrees_dir ].each do |path|
+        ([ @sandbox_dir, @run_home, worktrees_dir ] + @secondary_projects).each do |path|
           FileUtils.rm_rf(path)
         rescue Errno::ENOENT
           nil
@@ -101,7 +141,7 @@ module Hive
 
         report = JSON.parse(File.read(report_path))
         status = report["status"]
-        failed = report.dig("summary", "failed").to_i
+        failed = report.dig("summary", "failed").to_i + report.dig("summary", "setup_failed").to_i
         status == "complete" && failed.zero? ? retain_days : retain_failed_days
       rescue JSON::ParserError
         retain_failed_days

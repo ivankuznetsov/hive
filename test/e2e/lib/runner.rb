@@ -5,6 +5,7 @@ require "time"
 require_relative "paths"
 require_relative "sandbox"
 require_relative "scenario_parser"
+require_relative "schemas"
 require_relative "step_executor"
 
 module Hive
@@ -75,8 +76,11 @@ module Hive
       else
         scenario_dir = File.join(@run_dir, "scenarios", scenario.name)
         result = StepExecutor.new(scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: @run_id).execute
+        if (mutation_error = sample_project_mutation_error)
+          @harness_errors << { "kind" => "sample_project_mutated", "message" => mutation_error.message }
+          result = failed_harness_result(result, mutation_error)
+        end
         @results << result
-        assert_sample_project_unmutated!
         sandbox.cleanup unless keep_artifacts || result.status == "failed"
       end
 
@@ -96,10 +100,24 @@ module Hive
         exit(sig == "INT" ? 130 : 143)
       end
 
-      def assert_sample_project_unmutated!
+      def sample_project_mutation_error
         Sandbox.new(@run_dir).assert_sample_project_unmutated!
+        nil
       rescue StandardError => e
-        @harness_errors << { "kind" => "sample_project_mutated", "message" => e.message }
+        e
+      end
+
+      def failed_harness_result(result, error)
+        StepExecutor::ScenarioResult.new(
+          name: result.name,
+          status: "failed",
+          duration_seconds: result.duration_seconds,
+          failed_step_index: result.failed_step_index,
+          failed_step_kind: result.failed_step_kind || "harness",
+          error_summary: "#{error.class}: #{error.message}",
+          artifacts_dir: result.artifacts_dir,
+          repro: result.repro
+        )
       end
 
       def write_report(status:, total:)
@@ -117,7 +135,7 @@ module Hive
         setup_failed = @results.count { |result| result.status == "setup_failed" }
         {
           "schema" => "hive-e2e-report",
-          "schema_version" => 1,
+          "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-report"),
           "run_id" => @run_id,
           "started_at" => @started_at&.iso8601,
           "ended_at" => Time.now.utc.iso8601,

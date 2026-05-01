@@ -20,6 +20,32 @@ module Hive
       class DeadSession < StandardError; end
       class PaneCollapsedError < StandardError; end
 
+      # Raised when a TUI-dispatched subprocess emits END[<id>] with a
+      # non-zero exit. Carries the BEGIN/END id for cross-referencing with
+      # the marker log + the captured log window for forensic display.
+      class SubprocessFailed < StandardError
+        attr_reader :begin_id, :exit_code, :log
+
+        def initialize(begin_id:, exit_code:, log:)
+          @begin_id = begin_id
+          @exit_code = exit_code
+          @log = log
+          super("tui subprocess END[#{begin_id}] exit=#{exit_code}")
+        end
+      end
+
+      # Raised when an ERRNO line appears in the watched marker window —
+      # the subprocess crashed before reaching END, so no exit_code exists.
+      class SubprocessAbnormal < StandardError
+        attr_reader :begin_id, :log
+
+        def initialize(begin_id:, log:)
+          @begin_id = begin_id
+          @log = log
+          super("tui subprocess crashed before END (ERRNO observed for BEGIN[#{begin_id || '?'}])")
+        end
+      end
+
       # Common bash/zsh prompt sentinels we treat as "the TUI just exited and a
       # shell is staring back at us". Detected at end-of-pane to avoid false
       # positives on prompt-shaped strings inside the TUI itself.
@@ -34,7 +60,7 @@ module Hive
         false
       end
 
-      def initialize(run_id:, session_name:, command:, env: {}, rows: 50, cols: 200)
+      def initialize(run_id:, session_name:, command:, env: {}, rows: 50, cols: 200, subprocess_log_path: nil)
         @socket_name = "hive-e2e-#{run_id}"
         @session_name = session_name
         @command = command
@@ -43,6 +69,8 @@ module Hive
         @cols = cols
         @keystrokes = []
         @started = false
+        @subprocess_log_path = subprocess_log_path
+        @subprocess_log_offset = subprocess_log_size
       end
 
       def start
@@ -52,8 +80,7 @@ module Hive
           "new-session", "-d", "-P", "-F", "\#{session_id}",
           "-s", @session_name, "-x", @cols.to_s, "-y", @rows.to_s
         ]
-        @env.each { |key, value| args.concat([ "-e", "#{key}=#{value}" ]) }
-        args << @command
+        args << command_with_env
         out, err, status = Open3.capture3(*args)
         raise "tmux new-session failed: #{err.empty? ? out : err}" unless status.success?
 
@@ -70,6 +97,10 @@ module Hive
         raise "tmux send-keys failed: #{err.empty? ? out : err}" unless status.success?
 
         @keystrokes << { "at" => Time.now.utc.iso8601, "keys" => Array(keys).map(&:to_s), "literal" => literal }
+      end
+
+      def mark_subprocess_log!
+        @subprocess_log_offset = subprocess_log_size
       end
 
       def send_text(text)
@@ -163,13 +194,59 @@ module Hive
         out
       end
 
-      # Waits for the subprocess running inside the tmux pane to exit. The previous
-      # implementation polled for the running anchor "hive tui" which is present
-      # *while* the TUI is alive — so it returned immediately. We now poll
-      # `#{pane_dead}` (1 once the foreground process exits) which is the
-      # authoritative tmux signal that the subprocess has completed.
+      # Waits for a TUI-dispatched workflow child to complete. Headless verbs run
+      # through Subprocess.dispatch_background, so the foreground tmux pane remains
+      # the long-lived `hive tui` process; tmux's pane_dead would wait for the
+      # wrong lifecycle. The TUI writes BEGIN/END/ERRNO markers to a run-scoped
+      # log, and step_tui_keys records the file offset immediately before sending
+      # the dispatch key.
       def wait_for_subprocess_exit(timeout: 30.0, interval: 0.1)
         start
+        return wait_for_subprocess_log(timeout: timeout, interval: interval) if @subprocess_log_path
+
+        wait_for_pane_dead(timeout: timeout, interval: interval)
+      end
+
+      def wait_for_subprocess_log(timeout:, interval:)
+        started_at = monotonic_time
+        begin_id = nil
+        loop do
+          marker = subprocess_log_since_marker
+          # Bind to the FIRST BEGIN that appears after the offset captured
+          # by mark_subprocess_log!. The dispatched subprocess always emits
+          # BEGIN[<id>] before any END or ERRNO, so a missing id means the
+          # subprocess hasn't started yet — keep polling.
+          begin_id ||= marker.match(/BEGIN(?:\([^)]+\))?\[([0-9a-f]{8})\]/)&.captures&.first
+          if begin_id
+            end_match = marker.match(/END(?:\([^)]+\))?\[#{begin_id}\] exit=(-?\d+)/)
+            if end_match
+              exit_code = end_match[1].to_i
+              return :ok if exit_code.zero?
+
+              raise SubprocessFailed.new(begin_id: begin_id, exit_code: exit_code, log: marker)
+            end
+          end
+          # ERRNO entries don't carry an id (see lib/hive/tui/subprocess.rb)
+          # — they signal an abnormal failure that never reaches END. Treat
+          # any ERRNO appearing in the watched window as a subprocess crash.
+          if marker.match?(/^----- [^\n]* ERRNO\b/)
+            raise SubprocessAbnormal.new(begin_id: begin_id, log: marker)
+          end
+
+          elapsed = monotonic_time - started_at
+          if elapsed >= timeout
+            raise AnchorTimeout.new(
+              anchor: "tui subprocess END[#{begin_id || '?'}]",
+              captured: marker,
+              elapsed: elapsed
+            )
+          end
+
+          sleep interval
+        end
+      end
+
+      def wait_for_pane_dead(timeout:, interval:)
         started_at = monotonic_time
         loop do
           out, err, status = Open3.capture3(*(base_args + [
@@ -193,6 +270,30 @@ module Hive
       end
 
       private
+
+      def command_with_env
+        return @command if @env.empty?
+
+        Shellwords.join([ "env", *@env.map { |key, value| "#{key}=#{value}" } ]) + " #{@command}"
+      end
+
+      def subprocess_log_size
+        return 0 unless @subprocess_log_path && File.exist?(@subprocess_log_path)
+
+        File.size(@subprocess_log_path)
+      end
+
+      def subprocess_log_since_marker
+        return "" unless @subprocess_log_path && File.exist?(@subprocess_log_path)
+
+        File.open(@subprocess_log_path, "r") do |file|
+          file.seek([ @subprocess_log_offset.to_i, 0 ].max)
+          file.read
+        end
+      rescue Errno::EINVAL
+        @subprocess_log_offset = 0
+        File.read(@subprocess_log_path)
+      end
 
       def base_args
         [ "tmux", "-L", @socket_name ]

@@ -1,4 +1,6 @@
 require_relative "../../test_helper"
+require "rbconfig"
+require "tmpdir"
 require_relative "tmux_driver"
 
 class E2ETmuxDriverTest < Minitest::Test
@@ -100,5 +102,103 @@ class E2ETmuxDriverTest < Minitest::Test
 
     assert_operator longest_line_width, :<=, COLS,
       "pane lines should not exceed configured cols (#{COLS}); longest was #{longest_line_width}"
+  end
+
+  def test_start_injects_path_env_into_command
+    Dir.mktmpdir("tmux-env") do |dir|
+      output = File.join(dir, "path.txt")
+      command = Shellwords.join([
+        RbConfig.ruby,
+        "-e",
+        "File.write(ARGV.fetch(0), ENV.fetch('PATH'))",
+        output
+      ])
+      driver = make_driver(session_name: "envpath", command: command)
+      driver.instance_variable_set(:@env, { "PATH" => "/tmp/hive-env-sentinel" })
+      driver.start
+
+      deadline = Time.now + 2
+      sleep 0.05 until File.exist?(output) || Time.now >= deadline
+
+      assert_includes File.read(output).split(":"), "/tmp/hive-env-sentinel"
+    end
+  end
+
+  def test_wait_for_subprocess_exit_observes_log_marker_without_pane_death
+    Dir.mktmpdir("tmux-subprocess") do |dir|
+      log_path = File.join(dir, "hive-tui-subprocess.log")
+      driver = make_driver(session_name: "subprocess-log", command: "sleep 30")
+      driver.instance_variable_set(:@subprocess_log_path, log_path)
+      driver.mark_subprocess_log!
+      writer = Thread.new do
+        sleep 0.2
+        # Production TUI always emits BEGIN before END; the driver binds the
+        # observed END to the BEGIN id so a stray END from a prior subprocess
+        # cannot be mistaken for completion of the current dispatch.
+        File.write(
+          log_path,
+          "----- 2026-04-30T00:00:00Z BEGIN[deadbeef]: hive plan slug -----\n" \
+          "----- 2026-04-30T00:00:00Z END[deadbeef] exit=0: hive plan slug -----\n"
+        )
+      end
+
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      assert_equal :ok, driver.wait_for_subprocess_exit(timeout: 2.0, interval: 0.05)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+      assert_operator elapsed, :<, 1.5, "log marker should resolve before the sleeping TUI pane exits"
+      assert driver.capture_pane, "pane should still be alive after background subprocess completion"
+      writer.join
+    end
+  end
+
+  # Non-zero END exit must surface as SubprocessFailed, not :ok. Without
+  # the bind-to-BEGIN-id check the previous code treated any END regex
+  # match as success regardless of exit_code, silently masking failures.
+  def test_wait_for_subprocess_exit_raises_on_nonzero_end_exit
+    Dir.mktmpdir("tmux-subprocess") do |dir|
+      log_path = File.join(dir, "hive-tui-subprocess.log")
+      driver = make_driver(session_name: "subprocess-log-fail", command: "sleep 30")
+      driver.instance_variable_set(:@subprocess_log_path, log_path)
+      driver.mark_subprocess_log!
+      Thread.new do
+        sleep 0.1
+        File.write(
+          log_path,
+          "----- 2026-04-30T00:00:00Z BEGIN[cafef00d]: hive plan slug -----\n" \
+          "----- 2026-04-30T00:00:00Z END[cafef00d] exit=1: hive plan slug -----\n"
+        )
+      end.tap { |t| t.join }
+
+      err = assert_raises(Hive::E2E::TmuxDriver::SubprocessFailed) do
+        driver.wait_for_subprocess_exit(timeout: 2.0, interval: 0.05)
+      end
+      assert_equal "cafef00d", err.begin_id
+      assert_equal 1, err.exit_code
+    end
+  end
+
+  # ERRNO appearing in the watched window means the subprocess crashed
+  # before reaching END. Treat it as an abnormal-exit failure, not silent
+  # success.
+  def test_wait_for_subprocess_exit_raises_on_errno_marker
+    Dir.mktmpdir("tmux-subprocess") do |dir|
+      log_path = File.join(dir, "hive-tui-subprocess.log")
+      driver = make_driver(session_name: "subprocess-log-errno", command: "sleep 30")
+      driver.instance_variable_set(:@subprocess_log_path, log_path)
+      driver.mark_subprocess_log!
+      Thread.new do
+        sleep 0.1
+        File.write(
+          log_path,
+          "----- 2026-04-30T00:00:00Z BEGIN[abadbabe]: hive plan slug -----\n" \
+          "----- 2026-04-30T00:00:00Z ERRNO Errno::ENOENT: no such file -----\n"
+        )
+      end.tap { |t| t.join }
+
+      assert_raises(Hive::E2E::TmuxDriver::SubprocessAbnormal) do
+        driver.wait_for_subprocess_exit(timeout: 2.0, interval: 0.05)
+      end
+    end
   end
 end

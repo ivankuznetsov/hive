@@ -28,7 +28,10 @@ module Hive
       end
 
       def runs_dir
-        File.join(e2e_root, "runs")
+        # `HIVE_E2E_RUNS_DIR` lets tests redirect the runs directory to a
+        # temp dir so they cannot accidentally delete real forensic
+        # artifacts via `hive-e2e clean`. Production runs ignore the env.
+        ENV["HIVE_E2E_RUNS_DIR"] || File.join(e2e_root, "runs")
       end
 
       def fake_claude

@@ -31,6 +31,32 @@ class E2EReproScriptWriterTest < Minitest::Test
     end
   end
 
+  # The CLI step runs inside a `( cd <sandbox> && ... )` subshell, so the
+  # outer `cd <repo>` at the top of repro.sh does not apply. `-Ilib` and
+  # `bin/hive` must resolve as ABSOLUTE paths, otherwise replay looks them
+  # up under the sandbox dir and fails to find the gem code / binary.
+  def test_cli_step_uses_absolute_paths_for_lib_and_bin_hive
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [ make_step("cli", args: { "args" => [ "version" ] }) ]
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: steps, failed_index: 1
+          ).write
+
+          body = File.read(path)
+          refute_match(%r{ -Ilib bin/hive\b}, body,
+                       "repro.sh must NOT emit relative -Ilib bin/hive — those resolve under <sandbox> in the subshell")
+          assert_match(%r{-I#{Regexp.escape(Hive::E2E::Paths.lib_dir)}}, body,
+                       "repro.sh must emit -I<absolute-repo>/lib so it resolves from inside the cd <sandbox> subshell")
+          assert_includes body, Hive::E2E::Paths.hive_bin,
+                          "repro.sh must reference the absolute path to bin/hive"
+        end
+      end
+    end
+  end
+
   def test_cd_uses_realpath_six_ups_to_repo_root
     # repro.sh lives at <repo>/test/e2e/runs/<id>/scenarios/<name>/repro.sh.
     # Six `..` reaches the repo root; we wrap in realpath so a wrong depth
@@ -87,8 +113,8 @@ class E2EReproScriptWriterTest < Minitest::Test
                           "write_file should emit a heredoc-write block"
           assert_includes body, "register_project: project-b",
                           "register_project should emit a cp -a + bin/hive init block"
-          assert_includes body, "ruby_block runs in a stripped binding",
-                          "ruby_block must include the binding-context caveat"
+          assert_includes body, "ruby_block runs with sandbox, run_home, and slug locals restored",
+                          "ruby_block must include the restored binding-context note"
           # Live-tmux steps are explicitly skipped with the new comment.
           assert_includes body, "step 5 skipped: requires live tmux (kind=tui_keys)",
                           "tui_keys cannot replay offline"
@@ -144,6 +170,66 @@ class E2EReproScriptWriterTest < Minitest::Test
           # quote (`'a b'`) or backslash-escape (`a\ b`).
           assert export_line.include?("\\ ") || export_line.include?("'"),
             "BUNDLE_GEMFILE value with spaces must be shell-escaped, was: #{export_line.inspect}"
+        end
+      end
+    end
+  end
+
+  def test_cli_steps_expand_placeholders_env_cwd_and_expected_exit
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [
+            make_step("cli",
+                      args: {
+                        "args" => [ "run", "{slug}", "--stage", "4-execute" ],
+                        "env" => { "HIVE_FAKE_CLAUDE_WRITE_FILE" => "{task_dir:4-execute}/task.md" },
+                        "cwd" => "{sandbox}",
+                        "expect_exit" => 75
+                      },
+                      position: 1)
+          ]
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir,
+            sandbox_dir: sandbox,
+            run_home: run_home,
+            steps: steps,
+            failed_index: 1,
+            expander_context: {
+              sandbox_dir: sandbox,
+              run_home: run_home,
+              run_id: "run-1",
+              slug: "expanded-slug"
+            }
+          ).write
+
+          body = File.read(path)
+          assert_includes body, "expanded-slug", "CLI args should be expanded before replay"
+          assert_includes body, File.join(sandbox, ".hive-state", "stages", "4-execute", "expanded-slug", "task.md"),
+                          "per-step env should be expanded before replay"
+          assert_includes body, "if [ \"$status\" -ne 75 ]",
+                          "expected non-zero exits should not abort under set -e before validation"
+        end
+      end
+    end
+  end
+
+  def test_seed_state_without_slug_uses_executor_default_slug
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [ make_step("seed_state", args: { "stage" => "2-brainstorm" }, position: 1) ]
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir,
+            sandbox_dir: sandbox,
+            run_home: run_home,
+            steps: steps,
+            failed_index: 1,
+            scenario_name: "my_scenario"
+          ).write
+
+          assert_includes File.read(path), "my-scenario-task",
+            "seed_state default slug should match StepExecutor's scenario-name default"
         end
       end
     end

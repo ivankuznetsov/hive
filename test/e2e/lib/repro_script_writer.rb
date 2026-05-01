@@ -3,27 +3,35 @@ require "rbconfig"
 require "shellwords"
 require_relative "paths"
 require_relative "sandbox_env"
+require_relative "string_expander"
 
 module Hive
   module E2E
     class ReproScriptWriter
-      # Step kinds whose effect is pure file/state I/O — safe to replay
-      # offline. tui_keys / tui_expect / wait_subprocess / editor_action
-      # all need a live tmux pane the bare bash repro can't bootstrap, so
-      # they're skipped with a comment instead of executed.
+      # Step kinds whose effect is pure CLI/file/state I/O — safe to replay
+      # offline. tui_keys / tui_expect / wait_subprocess need a live tmux pane
+      # the bare bash repro can't bootstrap, so they're skipped with a comment.
       REPLAYABLE_KINDS = %w[
         cli json_assert seed_state write_file register_project
-        ruby_block state_assert log_assert
+        ruby_block state_assert log_assert editor_action
       ].freeze
 
-      LIVE_TMUX_KINDS = %w[tui_keys tui_expect wait_subprocess editor_action].freeze
+      LIVE_TMUX_KINDS = %w[tui_keys tui_expect wait_subprocess].freeze
 
-      def initialize(scenario_dir:, sandbox_dir:, run_home:, steps:, failed_index:)
+      def initialize(scenario_dir:, sandbox_dir:, run_home:, steps:, failed_index:, scenario_name: nil, expander_context: nil)
         @scenario_dir = scenario_dir
         @sandbox_dir = sandbox_dir
         @run_home = run_home
         @steps = steps
         @failed_index = failed_index
+        @scenario_name = scenario_name
+        @expander_context = expander_context || {
+          sandbox_dir: sandbox_dir,
+          run_home: run_home,
+          run_id: "",
+          slug: nil,
+          slug_resolver: nil
+        }
       end
 
       def write
@@ -64,6 +72,8 @@ module Hive
         case step.kind
         when "cli", "json_assert"
           emit_cli(step)
+        when "editor_action"
+          emit_cli(step, env_overrides: { "EDITOR" => Paths.editor_shim })
         when "seed_state"
           emit_seed_state(step)
         when "write_file"
@@ -81,9 +91,31 @@ module Hive
         end
       end
 
-      def emit_cli(step)
-        args = Array(step.args["args"]).map(&:to_s)
-        [ Shellwords.join([ RbConfig.ruby, "-Ilib", "bin/hive", *args ]) ]
+      def emit_cli(step, env_overrides: {})
+        args = expand(step.args.fetch("args")).map(&:to_s)
+        env = expand(step.args["env"] || {}).merge(env_overrides)
+        cwd = expand_path(step.args["cwd"] || "{sandbox}")
+        expected = step.args.key?("expect_exit") ? step.args["expect_exit"] : 0
+        # Use absolute paths for ruby's -I and bin/hive so they resolve from
+        # inside the `( cd <sandbox> && ... )` subshell. The outer `cd <repo>`
+        # at the script top doesn't apply within the subshell, so a relative
+        # `-Ilib bin/hive` would look up paths under the sandbox and fail.
+        command = Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", Paths.hive_bin, *args ])
+        command = Shellwords.join([ "env", *env.map { |key, value| "#{key}=#{value}" } ]) + " #{command}" unless env.empty?
+
+        lines = [
+          "# step #{step.position} #{step.kind}: #{args.join(' ')}",
+          "set +e",
+          "( cd #{Shellwords.escape(cwd)} && #{command} )",
+          "status=$?",
+          "set -e"
+        ]
+        if expected.nil?
+          lines << "true # exit status intentionally unchecked"
+        else
+          lines << "if [ \"$status\" -ne #{expected.to_i} ]; then echo \"expected exit #{expected.to_i}, got $status\" >&2; exit 1; fi"
+        end
+        lines
       end
 
       def emit_seed_state(step)
@@ -91,34 +123,35 @@ module Hive
         # sandbox's stages directory. Caller-supplied `content` is replayed
         # verbatim; unset values fall back to the StepExecutor defaults so the
         # marker the live run wrote is preserved.
-        stage = step.args.fetch("stage").to_s
-        slug = (step.args["slug"] || "scenario-task").to_s
-        state_file = step.args["state_file"] || default_state_file(stage)
+        stage = expand_string(step.args.fetch("stage").to_s)
+        slug = expand_string(step.args["slug"] || default_slug)
+        state_file = expand_string(step.args["state_file"] || default_state_file(stage))
         marker = stage == "1-inbox" ? "WAITING" : "COMPLETE"
-        content = step.args["content"] || "# #{slug}\n\n<!-- #{marker} -->\n"
+        content = expand_string(step.args["content"] || "# #{slug}\n\n<!-- #{marker} -->\n")
         # Sub-paths beneath $HIVE_SANDBOX_DIR are emitted as double-quoted
         # strings so the shell expands the env var without us needing to
         # backslash-escape every $ — Shellwords.escape would mangle that.
         # The stage/slug components are scenario-author-controlled and YAML-
         # validated, so they're safe to interpolate directly.
-        folder = "\"$HIVE_SANDBOX_DIR/.hive-state/stages/#{stage}/#{slug}\""
+        project_root = project_root_for(step.args["project"])
+        folder = "\"#{project_root}/.hive-state/stages/#{stage}/#{slug}\""
         lines = [
           "# step #{step.position} seed_state: #{stage}/#{slug}",
           "mkdir -p #{folder}",
-          heredoc_write_unquoted("$HIVE_SANDBOX_DIR/.hive-state/stages/#{stage}/#{slug}/#{state_file}", content)
+          heredoc_write_unquoted("#{project_root}/.hive-state/stages/#{stage}/#{slug}/#{state_file}", content)
         ]
         Array(step.args["files"]).each do |spec|
-          rel = spec.fetch("path")
-          full = "$HIVE_SANDBOX_DIR/.hive-state/stages/#{stage}/#{slug}/#{rel}"
+          rel = expand_string(spec.fetch("path"))
+          full = "#{project_root}/.hive-state/stages/#{stage}/#{slug}/#{rel}"
           lines << "mkdir -p \"#{File.dirname(full)}\""
-          lines << heredoc_write_unquoted(full, spec.fetch("content", ""))
+          lines << heredoc_write_unquoted(full, expand_string(spec.fetch("content", "")))
         end
         lines
       end
 
       def emit_write_file(step)
-        path = step.args.fetch("path").to_s
-        content = step.args.fetch("content").to_s
+        path = expand_string(step.args.fetch("path").to_s)
+        content = expand_string(step.args.fetch("content").to_s)
         full = path.start_with?("/") ? path : "$HIVE_SANDBOX_DIR/#{path}"
         [
           "# step #{step.position} write_file: #{path}",
@@ -149,10 +182,20 @@ module Hive
 
       def emit_ruby_block(step)
         block = step.args.fetch("block").to_s
+        ruby = [
+          "require 'fileutils'",
+          "require 'time'",
+          "require 'yaml'",
+          "require 'hive/lock'",
+          "sandbox = ENV.fetch('HIVE_SANDBOX_DIR')",
+          "run_home = ENV.fetch('HIVE_HOME')",
+          "slug = #{expand_string("{slug}").inspect}",
+          block
+        ].join("\n")
         [
           "# step #{step.position} ruby_block:",
-          "# ruby_block runs in a stripped binding (no StepExecutor self); blocks referencing private methods won't replay.",
-          "#{Shellwords.escape(RbConfig.ruby)} -e #{Shellwords.escape(block)}"
+          "# ruby_block runs with sandbox, run_home, and slug locals restored for replay.",
+          "#{Shellwords.escape(RbConfig.ruby)} -Ilib -e #{Shellwords.escape(ruby)}"
         ]
       end
 
@@ -173,6 +216,32 @@ module Hive
         when "3-plan" then "plan.md"
         else "task.md"
         end
+      end
+
+      def default_slug
+        return "scenario-task" unless @scenario_name
+
+        "#{@scenario_name.tr('_', '-')}-task"
+      end
+
+      def project_root_for(project)
+        name = expand_string(project.to_s)
+        return "$HIVE_SANDBOX_DIR" if name.empty?
+
+        "$(dirname \"$HIVE_SANDBOX_DIR\")/#{name}"
+      end
+
+      def expand(value)
+        StringExpander.expand(value, @expander_context)
+      end
+
+      def expand_string(value)
+        StringExpander.expand_string(value.to_s, @expander_context)
+      end
+
+      def expand_path(value)
+        expanded = expand_string(value.to_s)
+        expanded.start_with?("/") ? expanded : File.join(@sandbox_dir, expanded)
       end
     end
   end

@@ -1,0 +1,95 @@
+require "lipgloss"
+require "hive/tui/styles"
+
+module Hive
+  module Tui
+    module Views
+      # Pure view function: `Views::ProjectsPane.render(model, width:) →
+      # String`. Renders the left pane of the v2 two-pane layout — a
+      # vertical list of registered projects with `★ All projects` pinned
+      # to the top as a virtual entry. The selected entry (driven by
+      # `model.scope`: 0 = ★, N = nth project) is reverse-video highlighted.
+      #
+      # Border style is decided by `model.pane_focus`: focused panes use
+      # the cyan accent border; the inactive pane uses the dim grey one.
+      # Lipgloss's rounded border falls back to ASCII corners on terminals
+      # without Unicode box-drawing — no boot guard needed.
+      #
+      # The width: kwarg is the *outer* pane width (border included). Inner
+      # content width = width - 2 (one cell of border on each side). Names
+      # longer than the inner width are truncated with an ellipsis so the
+      # box never overflows.
+      #
+      # Empty-snapshot path renders the ★ entry plus a placeholder line so
+      # the pane still draws at boot before the first poll completes.
+      module ProjectsPane
+        ALL_PROJECTS_LABEL = "★ All projects".freeze
+        TITLE = "Projects".freeze
+        EMPTY_PLACEHOLDER = "(no projects;".freeze
+        EMPTY_PLACEHOLDER_HINT = " run hive init)".freeze
+
+        module_function
+
+        def render(model, width:)
+          inner_width = [ width - 2, 1 ].max
+          rows = build_rows(model, inner_width)
+          body = rows.join("\n")
+          # Lipgloss chain methods return new Style instances; the frozen
+          # base constants stay shared while each render gets its own
+          # sized variant. No mutation, no FFI cost beyond the chain itself.
+          border_for(model).width(inner_width).render(body)
+        end
+
+        # Exposed for test-time assertion — rendered border foreground
+        # color isn't readable through lipgloss-ruby getters when stdout
+        # is not a tty, so tests verify the chosen Style by identity here.
+        def border_for(model)
+          model.pane_focus == :left ? Styles::PANE_FOCUSED_BORDER : Styles::PANE_DIM_BORDER
+        end
+
+        # Visible row list: ★ All projects then each registered project,
+        # in registry order. Empty snapshot still shows ★ plus a hint.
+        def build_rows(model, inner_width)
+          all_row = render_row(ALL_PROJECTS_LABEL, model.scope.zero?, inner_width)
+          projects = (model.snapshot && model.snapshot.projects) || []
+          if projects.empty?
+            return [
+              Styles::HEADER.render(truncate(TITLE, inner_width)),
+              "",
+              all_row,
+              Styles::HINT.render(truncate(EMPTY_PLACEHOLDER, inner_width)),
+              Styles::HINT.render(truncate(EMPTY_PLACEHOLDER_HINT, inner_width))
+            ]
+          end
+
+          project_rows = projects.each_with_index.map do |project, idx|
+            scope_index = idx + 1
+            render_row(project.name.to_s, model.scope == scope_index, inner_width)
+          end
+          [
+            Styles::HEADER.render(truncate(TITLE, inner_width)),
+            "",
+            all_row,
+            *project_rows
+          ]
+        end
+
+        def render_row(label, selected, inner_width)
+          truncated = truncate(label, inner_width)
+          padded = truncated.ljust(inner_width)
+          selected ? Styles::CURSOR_HIGHLIGHT.render(padded) : padded
+        end
+
+        # Truncate with a trailing ellipsis when the label exceeds the
+        # available width. Names of length 1..2 fall back to a hard cut.
+        def truncate(label, max_width)
+          return "" if max_width <= 0
+          return label if label.length <= max_width
+          return label[0, max_width] if max_width < 2
+
+          "#{label[0, max_width - 1]}…"
+        end
+      end
+    end
+  end
+end

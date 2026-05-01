@@ -443,6 +443,43 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, new_model.scope, "must not decrement below 0 (★ All projects)"
   end
 
+  # ---- v2 new-idea mode lifecycle ----
+
+  def test_open_new_idea_prompt_sets_mode_and_clears_buffer
+    starting = model.with(mode: :grid, new_idea_buffer: "leftover-text")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea, new_model.mode
+    assert_equal "", new_model.new_idea_buffer
+  end
+
+  def test_new_idea_char_appended_grows_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss")
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaCharAppended.new(char: " ")
+    )
+    assert_equal "rss ", new_model.new_idea_buffer
+  end
+
+  def test_new_idea_char_deleted_shrinks_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+    assert_equal "rss feed", new_model.new_idea_buffer
+  end
+
+  def test_new_idea_char_deleted_on_empty_buffer_stays_empty
+    starting = model.with(mode: :new_idea, new_idea_buffer: "")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+    assert_equal "", new_model.new_idea_buffer
+    assert_equal :new_idea, new_model.mode, "delete-on-empty must not change mode"
+  end
+
+  def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
+    assert_equal :grid, new_model.mode
+    assert_equal "", new_model.new_idea_buffer
+  end
+
   def test_cursor_down_under_right_focus_preserves_v1_behaviour
     # Regression guard: v1 cursor row navigation must still work when
     # pane_focus is :right (the default and v1 implicit behaviour).

@@ -70,6 +70,7 @@ module Hive
         when :log_tail then log_tail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
+        when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
         end
       end
@@ -237,6 +238,20 @@ module Hive
       # cased here because they should also dismiss.
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         Messages::BACK
+      end
+
+      # New-idea prompt mode — same key shape as `:filter` mode but
+      # produces NewIdea* messages. Esc cancels (clears the buffer +
+      # returns to :grid); Enter submits (BubbleModel handles the
+      # subprocess dispatch); Backspace deletes the trailing character;
+      # any printable char appends.
+      def new_idea_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key)
+        return Messages::NEW_IDEA_SUBMITTED if ENTER_KEYS.include?(key)
+        return Messages::NEW_IDEA_CHAR_DELETED if key == :key_backspace
+        return Messages::NewIdeaCharAppended.new(char: key) if printable_filter_char?(key)
+
+        Messages::NOOP
       end
 
       # Shared DispatchCommand builder. `argv[1]` is the workflow verb

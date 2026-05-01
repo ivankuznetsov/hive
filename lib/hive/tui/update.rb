@@ -75,6 +75,14 @@ module Hive
           [ apply_pane_focus_toggled(model), nil ]
         when Messages::PaneFocusChanged
           [ apply_pane_focus_changed(model, message), nil ]
+        when Messages::OpenNewIdeaPrompt
+          [ apply_open_new_idea_prompt(model), nil ]
+        when Messages::NewIdeaCharAppended
+          [ apply_new_idea_char_appended(model, message), nil ]
+        when Messages::NewIdeaCharDeleted
+          [ apply_new_idea_char_deleted(model), nil ]
+        when Messages::NewIdeaCancelled
+          [ apply_new_idea_cancelled(model), nil ]
         when Messages::Noop
           [ model, nil ]
         when Messages::KeyPressed
@@ -293,6 +301,33 @@ module Hive
         return model unless %i[left right].include?(msg.target)
 
         model.with(pane_focus: msg.target)
+      end
+
+      # ---- New-idea prompt handlers (U6) ----
+      #
+      # Submit (`Messages::NewIdeaSubmitted`) is intentionally NOT
+      # handled here — it requires a subprocess call (`hive new …`)
+      # which lives in BubbleModel#handle_side_effect. That preserves
+      # Update's purity (no I/O, no Bubbletea coupling). On submit the
+      # BubbleModel reads `model.new_idea_buffer`, dispatches the child,
+      # and resets the model via `apply_new_idea_cancelled`-equivalent
+      # transition (mode → :grid, buffer cleared) on either success or
+      # validation failure.
+
+      def apply_open_new_idea_prompt(model)
+        model.with(mode: :new_idea, new_idea_buffer: "")
+      end
+
+      def apply_new_idea_char_appended(model, msg)
+        model.with(new_idea_buffer: model.new_idea_buffer.to_s + msg.char)
+      end
+
+      def apply_new_idea_char_deleted(model)
+        model.with(new_idea_buffer: model.new_idea_buffer.to_s[0..-2].to_s)
+      end
+
+      def apply_new_idea_cancelled(model)
+        model.with(mode: :grid, new_idea_buffer: "")
       end
 
       def apply_show_help(model)

@@ -18,6 +18,7 @@ require "hive/tui/views/triage"
 require "hive/tui/views/log_tail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
+require "hive/tui/views/new_idea_prompt"
 
 module Hive
   module Tui
@@ -156,6 +157,7 @@ module Hive
         when :log_tail then Views::LogTail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
+        when :new_idea then compose_new_idea_view
         else compose_two_pane_view
         end
       end
@@ -270,6 +272,8 @@ module Hive
           bulk_reject
         when Hive::Tui::Messages::TriageDevelop
           triage_develop
+        when Hive::Tui::Messages::NewIdeaSubmitted
+          submit_new_idea
         end
       end
 
@@ -626,6 +630,36 @@ module Hive
         dispatch_command(message)
       end
 
+      # `n` submission: dispatch `bin/hive new <project> <title>` via the
+      # same `run_quiet!` helper that backs accept-finding / reject-
+      # finding so the screen doesn't flash on every idea entry. Project
+      # is resolved from `model.scope` (0 = first registered project per
+      # the v2 brainstorm decision; N = nth registered project). Empty
+      # title or no-projects-registered states flash an error and return
+      # to :grid without spawning a child.
+      def submit_new_idea
+        title = @hive_model.new_idea_buffer.to_s.strip
+        return [ flashed("title required").with(mode: :grid, new_idea_buffer: ""), nil ] if title.empty?
+
+        project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
+        if project.nil?
+          return [
+            flashed("no projects — run `hive init <path>` first").with(mode: :grid, new_idea_buffer: ""),
+            nil
+          ]
+        end
+
+        argv = [ "new", project, title ]
+        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
+        new_model = @hive_model.with(mode: :grid, new_idea_buffer: "")
+        if exit_code.zero?
+          [ new_model.with(flash: "+ #{title.inspect} → #{project}", flash_set_at: Time.now), nil ]
+        else
+          msg = err.to_s.lines.first&.chomp || "hive new exit #{exit_code}"
+          [ new_model.with(flash: "new failed: #{msg}", flash_set_at: Time.now), nil ]
+        end
+      end
+
       def reload_findings_into_state(state, _row)
         document = Hive::Findings::Document.new(state.review_path)
         state.relocate_cursor(document.findings)
@@ -643,6 +677,12 @@ module Hive
       # against the previous frame so a one-line change paints cheaply.
       def compose_filter_view
         compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model))
+      end
+
+      # New-idea mode: same composition; footer = the inline prompt with
+      # the project label so the operator sees the resolved target.
+      def compose_new_idea_view
+        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model))
       end
 
       # ---- v2 two-pane composition ----

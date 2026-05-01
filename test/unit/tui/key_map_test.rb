@@ -123,6 +123,34 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT, msg
   end
 
+  # ---- :new_idea mode keystroke routing ----
+
+  def test_new_idea_esc_cancels
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_escape, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CANCELLED, msg
+  end
+
+  def test_new_idea_enter_submits
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_enter, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_SUBMITTED, msg
+  end
+
+  def test_new_idea_backspace_deletes
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_backspace, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED, msg
+  end
+
+  def test_new_idea_printable_char_appends
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: "r", row: nil)
+    assert_kind_of Hive::Tui::Messages::NewIdeaCharAppended, msg
+    assert_equal "r", msg.char
+  end
+
+  def test_new_idea_unknown_key_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_up, row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_grid_enter_from_left_pane_jumps_focus_to_right
     # On the left pane Enter is "select project, focus tasks" — never
     # a verb dispatch. KeyMap routes this without consulting `row`.

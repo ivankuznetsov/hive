@@ -261,6 +261,97 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert out.is_a?(String)
   end
 
+  # ---- v2 new-idea submission ----
+
+  # Stub Hive::Tui::Subprocess.run_quiet! for the duration of a block.
+  # Saves/restores the original via singleton-method swap so multiple
+  # tests don't leak across each other when run in random order.
+  def with_run_quiet_stub(stub_proc)
+    sentinel = Hive::Tui::Subprocess.method(:run_quiet!)
+    Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, sentinel) if sentinel
+  end
+
+  def test_new_idea_submission_dispatches_hive_new_with_resolved_project
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "rss feeds"
+      ),
+      dispatch: @dispatch
+    )
+    captured_argv = nil
+    with_run_quiet_stub(->(argv) { captured_argv = argv; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal [ "new", "hive", "rss feeds" ], captured_argv,
+                 "submission must shell out to `hive new <project> <title>`"
+    assert_equal :grid, @model.hive_model.mode, "successful submit must return to :grid"
+    assert_equal "", @model.hive_model.new_idea_buffer
+  end
+
+  def test_new_idea_submission_with_empty_buffer_flashes_and_does_not_dispatch
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "   "
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "empty/whitespace buffer must NOT spawn a subprocess"
+    assert_equal :grid, @model.hive_model.mode
+    assert_match(/title required/, @model.hive_model.flash.to_s)
+  end
+
+  def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01", "projects" => []
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count
+    assert_match(/no projects/, @model.hive_model.flash.to_s)
+  end
+
+  def test_new_idea_submission_subprocess_failure_surfaces_in_flash
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    with_run_quiet_stub(->(_argv) { [ 1, "", "boom: bad name\n" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_match(/new failed/, @model.hive_model.flash.to_s)
+    assert_match(/boom: bad name/, @model.hive_model.flash.to_s)
+    assert_equal :grid, @model.hive_model.mode, "failure still returns to :grid"
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block

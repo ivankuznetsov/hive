@@ -11,10 +11,11 @@
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "generated_at", "projects"],
+      "required": ["schema", "schema_version", "ok", "generated_at", "projects"],
       "properties": {
         "schema": { "const": "hive-status" },
         "schema_version": { "const": 1 },
+        "ok": { "const": true },
         "generated_at": { "type": "string", "format": "date-time" },
         "projects": {
           "type": "array",
@@ -42,13 +43,22 @@
         "error_class": { "type": "string" },
         "error_kind": {
           "type": "string",
-          "enum": ["config", "internal", "generic"]
+          "enum": ["config", "internal", "error"]
         },
         "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
         "message": { "type": "string" },
         "candidates": {
           "type": "array",
-          "items": { "type": "string" }
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
         },
         "id": { "type": "string" },
         "path": { "type": "string" }

@@ -14,6 +14,7 @@
       "required": [
         "schema",
         "schema_version",
+        "ok",
         "slug",
         "stage",
         "stage_index",
@@ -27,6 +28,7 @@
       "properties": {
         "schema": { "const": "hive-run" },
         "schema_version": { "const": 1 },
+        "ok": { "const": true },
         "slug": { "type": "string" },
         "stage": {
           "type": "string",
@@ -93,7 +95,7 @@
         "exit_code",
         "message"
       ],
-      "description": "Emitted by the top-level rescue in Hive::Commands::Run when an error is raised before report_json wrote a SuccessPayload. Per-error structured fields (`candidates`, `id`, `path`) appear only on the matching error_kind.",
+      "description": "Emitted by the top-level rescue in Hive::Commands::Run when an error is raised before report_json wrote a SuccessPayload. Per-error structured fields (`candidates`, `id`, `path`, `holder`, `lock_path`) appear only on the matching error_kind.",
       "properties": {
         "schema": { "const": "hive-run" },
         "schema_version": { "const": 1 },
@@ -111,20 +113,57 @@
             "git",
             "worktree",
             "ambiguous_slug",
+            "invalid_task_path",
             "internal",
-            "generic"
+            "error"
           ]
         },
         "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
         "message": { "type": "string" },
         "slug": { "type": ["string", "null"] },
-        "stage": { "type": ["string", "null"] },
+        "stage_filter": {
+          "type": ["string", "null"],
+          "description": "User-supplied `--stage` filter value when present, else null. Distinct from the resolved `current_stage`/`target_stage`."
+        },
+        "current_stage": {
+          "type": "string",
+          "description": "Present on WrongStage and FinalStageReached: the stage the task is actually at."
+        },
+        "target_stage": {
+          "type": "string",
+          "description": "Present on WrongStage when raised by a verb that knows its target stage (approve/develop/review/etc.): the stage the verb expected."
+        },
         "candidates": {
           "type": "array",
-          "items": { "type": "string" }
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
         },
         "id": { "type": "string" },
-        "path": { "type": "string" }
+        "path": { "type": "string" },
+        "holder": {
+          "type": "object",
+          "description": "Present on ConcurrentRunError when raised over a live task lock. Carries the existing lock holder's metadata so agents can decide whether to wait, kill, or escalate. Properties are best-effort and additionalProperties is open to allow forward-compatible additions.",
+          "additionalProperties": true,
+          "properties": {
+            "pid": { "type": "integer" },
+            "slug": { "type": "string" },
+            "stage": { "type": "string" },
+            "started_at": { "type": "string" },
+            "process_start_time": { "type": "string" }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Filesystem path of the lock file that triggered ConcurrentRunError."
+        }
       }
     }
   }

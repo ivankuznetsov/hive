@@ -22,7 +22,7 @@ class StatusErrorEnvelopeTest < Minitest::Test
       out, _err = capture_io { Hive::Commands::Status.new(json: true).call }
       payload = JSON.parse(out)
       assert_equal "hive-status", payload["schema"]
-      refute payload.key?("ok"), "SuccessPayload arm carries no `ok` key"
+      assert_equal true, payload["ok"], "SuccessPayload carries `ok: true` so the discriminator is symmetric with ErrorPayload's `ok: false`"
       assert @schemer.valid?(payload),
              "SuccessPayload must validate (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
     end

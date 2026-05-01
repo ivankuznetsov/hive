@@ -43,12 +43,17 @@
           "enum": [
             "unknown_subcommand",
             "unknown_project",
-            "no_projects_registered"
+            "no_projects_registered",
+            "invalid_days",
+            "config",
+            "internal",
+            "error"
           ]
         },
         "exit_code": {
           "type": "integer",
-          "enum": [64]
+          "minimum": 0,
+          "maximum": 255
         },
         "message": { "type": "string" }
       }

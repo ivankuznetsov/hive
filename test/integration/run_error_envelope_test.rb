@@ -49,7 +49,7 @@ class RunErrorEnvelopeTest < Minitest::Test
                      "dual-signal must emit exactly one JSON document on stdout (the SuccessPayload), not two"
         payload = JSON.parse(nonblank.first)
         assert_equal "error", payload["marker"], "the SuccessPayload must be the one emitted, not an ErrorPayload"
-        refute payload.key?("ok"), "SuccessPayload arm doesn't carry an ok key (only ErrorPayload does)"
+        assert_equal true, payload["ok"], "SuccessPayload carries `ok: true` so the discriminator is symmetric with ErrorPayload's `ok: false`"
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
                      "exit code 3 (TASK_IN_ERROR) must still fire after the SuccessPayload write"
       end
@@ -84,6 +84,11 @@ class RunErrorEnvelopeTest < Minitest::Test
         assert_equal Hive::ExitCodes::TEMPFAIL, payload["exit_code"]
         refute_empty payload["message"], "envelope must surface a non-empty message"
         assert_includes err, "hive:", "human-path stderr message must still fire (raise was preserved)"
+        assert_kind_of Hash, payload["holder"],
+                       "ConcurrentRunError envelope must surface the lock holder's metadata so agents can recover"
+        assert_equal Process.pid, payload["holder"]["pid"], "holder.pid must mirror the live lock's pid"
+        assert_equal slug, payload["holder"]["slug"]
+        assert_match %r{\.lock\z}, payload["lock_path"], "lock_path must point at the colliding .lock file"
         assert @schemer.valid?(payload),
                "ErrorPayload must validate against schemas/hive-run.v1.json (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
       end
@@ -119,6 +124,31 @@ class RunErrorEnvelopeTest < Minitest::Test
     end
   end
 
+  # InvalidTaskPath: an unknown slug raises InvalidTaskPath via TaskResolver.
+  # The dispatch clause sits AFTER AmbiguousSlug (AmbiguousSlug < InvalidTaskPath)
+  # so the more general parent does not shadow the AmbiguousSlug surface. Without
+  # the clause this would fall through to "generic" — agents must see
+  # "invalid_task_path" the same way approve/findings/markers expose it.
+  def test_invalid_task_path_emits_envelope
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::Run.new("does-not-exist-slug-xyz", json: true).call
+        end
+        assert_equal Hive::ExitCodes::USAGE, status, "InvalidTaskPath exits 64 (USAGE)"
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "invalid_task_path", payload["error_kind"],
+                     "InvalidTaskPath must surface as invalid_task_path, not generic"
+        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert @schemer.valid?(payload),
+               "InvalidTaskPath envelope must validate (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
+      end
+    end
+  end
+
   # WrongStage: running on 1-inbox raises WrongStage (Stages::Inbox.run! is
   # an inert capture zone). The case-statement must surface "wrong_stage",
   # not the generic fallthrough. Since FinalStageReached < WrongStage, both
@@ -140,6 +170,10 @@ class RunErrorEnvelopeTest < Minitest::Test
         assert_equal "wrong_stage", payload["error_kind"],
                      "WrongStage (and its subclass FinalStageReached) must surface as wrong_stage, not generic"
         assert_equal "WrongStage", payload["error_class"]
+        assert_equal "1-inbox", payload["current_stage"],
+                     "WrongStage envelope must surface the resolved current_stage (1-inbox here)"
+        assert_equal "2-brainstorm", payload["target_stage"],
+                     "WrongStage from inbox.run! carries target_stage=2-brainstorm so agents know where to mv"
         assert @schemer.valid?(payload),
                "WrongStage envelope must validate (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
       end

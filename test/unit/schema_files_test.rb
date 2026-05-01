@@ -112,7 +112,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_status_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
-    assert_equal %w[generated_at projects schema schema_version].sort, schema_required
+    assert_equal %w[generated_at ok projects schema schema_version].sort, schema_required
 
     row = {
       stage: "1-inbox",
@@ -221,6 +221,31 @@ class SchemaFilesTest < Minitest::Test
                  "schema/producer required-key drift in hive-run.v1.json"
   end
 
+  # OPTIONAL_PAYLOAD_KEYS documents fields that are valid in SuccessPayload
+  # but only emitted conditionally (currently `cleanup_instructions`).
+  # Without this disjointness check, a contributor could move a key from
+  # required to optional without removing it from the required list, or
+  # vice versa, and silently break the schema contract.
+  def test_hive_run_optional_payload_keys_are_disjoint_from_required
+    overlap = Hive::Commands::Run::OPTIONAL_PAYLOAD_KEYS &
+              Hive::Commands::Run::REQUIRED_PAYLOAD_KEYS
+    assert_empty overlap,
+                 "OPTIONAL_PAYLOAD_KEYS and REQUIRED_PAYLOAD_KEYS must be disjoint " \
+                 "(overlap: #{overlap.inspect})"
+  end
+
+  # The schema must declare every OPTIONAL_PAYLOAD_KEYS field as a property
+  # on SuccessPayload (so additionalProperties: false doesn't reject it).
+  def test_hive_run_optional_payload_keys_appear_in_schema_properties
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
+    schema_properties = doc.dig("$defs", "SuccessPayload", "properties").keys
+    Hive::Commands::Run::OPTIONAL_PAYLOAD_KEYS.each do |key|
+      assert_includes schema_properties, key,
+                      "OPTIONAL_PAYLOAD_KEYS includes #{key.inspect} but the schema does not " \
+                      "declare it as a SuccessPayload property — additionalProperties: false would reject it"
+    end
+  end
+
   def test_hive_run_next_action_kinds_match_closed_enum
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
     schema_kinds = doc.dig("$defs", "SuccessPayload", "properties", "next_action", "properties", "kind", "enum").sort
@@ -247,10 +272,56 @@ class SchemaFilesTest < Minitest::Test
         schema: "hive-run",
         error: error,
         error_kind: kind,
-        extras: { "slug" => "probe", "stage" => "execute" }
+        extras: { "slug" => "probe", "stage_filter" => "execute" }
       )
       assert schemer.valid?(payload),
              "hive-run ErrorPayload arm must accept error_kind=#{kind.inspect} (validation errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  # Producer-routed drift check: every RunErrorKind value MUST be reachable
+  # via `Hive::Commands::Run#error_kind_for(<representative-exception>)` AND
+  # round-trip through the schema. Without this, a contributor could add a
+  # constant to RunErrorKind + schema enum, never wire it into the dispatch,
+  # and the round-trip test above would still pass — silent dispatch drift.
+  def test_run_error_kind_for_routes_every_kind_through_dispatch
+    require "hive/commands/run"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-run"))))
+    representatives = {
+      Hive::Schemas::RunErrorKind::CONCURRENT_RUN    => Hive::ConcurrentRunError.new("lock contention"),
+      Hive::Schemas::RunErrorKind::TASK_IN_ERROR     => Hive::TaskInErrorState.new("error marker"),
+      Hive::Schemas::RunErrorKind::WRONG_STAGE       => Hive::WrongStage.new("wrong stage"),
+      Hive::Schemas::RunErrorKind::STAGE             => Hive::StageError.new("stage failed"),
+      Hive::Schemas::RunErrorKind::CONFIG            => Hive::ConfigError.new("config bad"),
+      Hive::Schemas::RunErrorKind::AGENT             => Hive::AgentError.new("agent died"),
+      Hive::Schemas::RunErrorKind::GIT               => Hive::GitError.new("git push failed"),
+      Hive::Schemas::RunErrorKind::WORKTREE          => Hive::WorktreeError.new("worktree busy"),
+      Hive::Schemas::RunErrorKind::AMBIGUOUS_SLUG    => Hive::AmbiguousSlug.new(
+        "ambig", slug: "probe",
+        candidates: [ { project: "alpha", stage: "2-brainstorm", folder: "/tmp/probe" } ]
+      ),
+      Hive::Schemas::RunErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
+      Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
+    }
+    missing = Hive::Schemas::RunErrorKind::ALL - representatives.keys
+    assert_empty missing,
+                 "every RunErrorKind value must have a representative exception in this test " \
+                 "(missing: #{missing.inspect}); without one a future kind can be added without dispatch wiring"
+    run = Hive::Commands::Run.new("/tmp/dummy")
+    representatives.each do |expected_kind, exception|
+      actual_kind = run.send(:error_kind_for, exception)
+      assert_equal expected_kind, actual_kind,
+                   "Run#error_kind_for(#{exception.class}) must return #{expected_kind.inspect}, got #{actual_kind.inspect}"
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-run",
+        error: exception,
+        error_kind: actual_kind,
+        extras: { "slug" => "probe", "stage_filter" => nil }.compact
+      )
+      assert schemer.valid?(payload),
+             "round-trip envelope for #{exception.class} (kind=#{actual_kind}) must validate " \
+             "(errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
     end
   end
 
@@ -273,9 +344,15 @@ class SchemaFilesTest < Minitest::Test
   end
 
   # AmbiguousSlug auto-extras `candidates` — the round-trip must still pass.
+  # Candidates use the production shape: Array<{project:, stage:, folder:}> per
+  # Hive::TaskResolver#find_slug_across_projects, not String array.
   def test_hive_run_error_payload_with_ambiguous_slug_candidates_validates
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-run"))))
-    error = Hive::AmbiguousSlug.new("ambiguous", slug: "probe", candidates: %w[a b c])
+    candidates = [
+      { project: "alpha", stage: "2-brainstorm", folder: "/tmp/alpha/stages/2-brainstorm/probe" },
+      { project: "beta",  stage: "3-plan",       folder: "/tmp/beta/stages/3-plan/probe" }
+    ]
+    error = Hive::AmbiguousSlug.new("ambiguous", slug: "probe", candidates: candidates)
     payload = Hive::Schemas::ErrorEnvelope.build(
       schema: "hive-run",
       error: error,

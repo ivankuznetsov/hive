@@ -69,6 +69,7 @@ module Hive
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+          "ok" => true,
           "generated_at" => Time.now.utc.iso8601,
           "projects" => projects.map { |p| project_payload(p, project_count: projects.size) }
         }
@@ -284,17 +285,24 @@ module Hive
         )
         puts JSON.generate(payload)
         @stdout_written = true
+      rescue Errno::EPIPE, JSON::GeneratorError
+        # See lib/hive/commands/run.rb#emit_error_envelope for the rationale:
+        # swallow emit-time failures so the original Hive::Error still
+        # propagates with its documented exit_code instead of becoming
+        # exit 1 via bin/hive's outermost rescue.
+        @stdout_written = true
       end
 
       # Map a Hive::Error subclass to a StatusErrorKind value. Status's
       # producer surface is much narrower than Run's — only ConfigError /
       # InternalError surface deliberately; everything else is the generic
-      # fallback.
+      # `error` fallback (matching the convention used by approve/findings/
+      # markers/stage_action/finding_toggle).
       def error_kind_for(error)
         case error
         when Hive::ConfigError   then Hive::Schemas::StatusErrorKind::CONFIG
         when Hive::InternalError then Hive::Schemas::StatusErrorKind::INTERNAL
-        else                          Hive::Schemas::StatusErrorKind::GENERIC
+        else                          Hive::Schemas::StatusErrorKind::ERROR
         end
       end
     end

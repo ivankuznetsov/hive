@@ -32,7 +32,15 @@ module Hive
           File.delete(lock_path)
           retry if attempts < 3
         end
-        raise ConcurrentRunError, "another hive run is active for #{task_folder} (lock at #{lock_path})"
+        # Best-effort holder snapshot: a torn read from a concurrent writer is
+        # acceptable here since the envelope's holder block is advisory. The
+        # raise still goes through with `holder: nil` if YAML parsing fails.
+        holder = (YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) rescue nil)
+        raise ConcurrentRunError.new(
+          "another hive run is active for #{task_folder} (lock at #{lock_path})",
+          holder: holder,
+          lock_path: lock_path
+        )
       end
       data
     end
@@ -68,8 +76,10 @@ module Hive
         deadline = Time.now + COMMIT_LOCK_TIMEOUT_SEC
         until f.flock(File::LOCK_EX | File::LOCK_NB)
           if Time.now >= deadline
-            raise ConcurrentRunError,
-                  "commit lock at #{lock_path} held longer than #{COMMIT_LOCK_TIMEOUT_SEC}s"
+            raise ConcurrentRunError.new(
+              "commit lock at #{lock_path} held longer than #{COMMIT_LOCK_TIMEOUT_SEC}s",
+              lock_path: lock_path
+            )
           end
 
           sleep 0.2

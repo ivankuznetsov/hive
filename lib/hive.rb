@@ -54,7 +54,14 @@ module Hive
         payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
         payload["id"] = error.id if error.is_a?(Hive::UnknownFinding)
         payload["path"] = error.path if error.is_a?(Hive::DestinationCollision)
-        payload["stage"] = error.stage if error.is_a?(Hive::FinalStageReached)
+        if error.is_a?(Hive::WrongStage)
+          payload["current_stage"] = error.current_stage if error.current_stage
+          payload["target_stage"] = error.target_stage if error.target_stage
+        end
+        if error.is_a?(Hive::ConcurrentRunError)
+          payload["holder"] = error.holder if error.holder
+          payload["lock_path"] = error.lock_path if error.lock_path
+        end
         payload
       end
     end
@@ -98,6 +105,40 @@ module Hive
       AGENT_RUNNING       = "agent_running".freeze
       ARCHIVED            = "archived".freeze
       ERROR               = "error".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive run --json` when
+    # an error envelope is produced. Each value maps 1:1 to a Hive::Error
+    # subclass via Hive::Commands::Run#error_kind_for. `ALL` is self-derived
+    # so adding a new constant without updating ALL is impossible.
+    #
+    # Adding a new kind is non-breaking by contract; renaming or removing a
+    # value bumps SCHEMA_VERSIONS["hive-run"].
+    module RunErrorKind
+      CONCURRENT_RUN    = "concurrent_run".freeze
+      TASK_IN_ERROR     = "task_in_error".freeze
+      WRONG_STAGE       = "wrong_stage".freeze
+      STAGE             = "stage".freeze
+      CONFIG            = "config".freeze
+      AGENT             = "agent".freeze
+      GIT               = "git".freeze
+      WORKTREE          = "worktree".freeze
+      AMBIGUOUS_SLUG    = "ambiguous_slug".freeze
+      INVALID_TASK_PATH = "invalid_task_path".freeze
+      INTERNAL          = "internal".freeze
+      ERROR             = "error".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive status --json`
+    # when an error envelope is produced. `hive status`'s producer surface
+    # is much narrower than `hive run`'s — only ConfigError / InternalError
+    # and the generic fallback. Same self-derived ALL pattern.
+    module StatusErrorKind
+      CONFIG   = "config".freeze
+      INTERNAL = "internal".freeze
+      ERROR    = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
   end
@@ -145,6 +186,20 @@ module Hive
   end
 
   class ConcurrentRunError < Error
+    attr_reader :holder, :lock_path
+
+    # `holder` carries the existing lock's metadata (pid, slug, stage,
+    # started_at, process_start_time) when the collision was raised over a
+    # live lock. May be nil when no holder context is available (e.g.,
+    # commit-lock flock timeout, where flock doesn't expose the holder).
+    # Surfaces in `hive run --json` ErrorPayload via Hive::Schemas::ErrorEnvelope
+    # so agents can decide whether to wait, kill the holder, or escalate.
+    def initialize(message, holder: nil, lock_path: nil)
+      super(message)
+      @holder = holder
+      @lock_path = lock_path
+    end
+
     def exit_code
       ExitCodes::TEMPFAIL
     end
@@ -198,9 +253,20 @@ module Hive
     end
   end
 
-  # Raised when the user invokes `hive run` on an inert stage (1-inbox).
-  # The folder is in the wrong location for the requested operation.
+  # Raised when the user invokes `hive run` on an inert stage (1-inbox)
+  # or invokes a verb (approve/develop/review/...) at the wrong stage.
+  # Optional `current_stage:` / `target_stage:` carry the resolved stage
+  # context so the JSON error envelope can surface them as structured
+  # fields, distinct from the user-supplied `--stage` filter.
   class WrongStage < Error
+    attr_reader :current_stage, :target_stage
+
+    def initialize(message, current_stage: nil, target_stage: nil)
+      super(message)
+      @current_stage = current_stage
+      @target_stage = target_stage
+    end
+
     def exit_code
       ExitCodes::WRONG_STAGE
     end
@@ -246,11 +312,15 @@ module Hive
   # Maps to WRONG_STAGE (4) so wrappers can branch cleanly between
   # "real collision (1)" and "no further stage (4)".
   class FinalStageReached < WrongStage
-    attr_reader :stage
-
     def initialize(message, stage:)
-      super(message)
-      @stage = stage
+      super(message, current_stage: stage)
+    end
+
+    # Back-compat: callers (and the JSON error envelope) used `error.stage`.
+    # current_stage is the canonical name on the parent; this preserves the
+    # older read-side surface without forcing a wider rename.
+    def stage
+      current_stage
     end
   end
 

@@ -1,6 +1,7 @@
 require "open3"
 require "securerandom"
 require "tmpdir"
+require "fileutils"
 require "bubbletea"
 require "hive/tui/debug"
 require "hive/tui/messages"
@@ -8,43 +9,43 @@ require "hive/tui/subprocess_registry"
 
 module Hive
   module Tui
-    # Two ways to run a child from inside the TUI:
-    #
-    #   * `dispatch_background(argv, dispatch:)` — workflow verbs (hive
-    #     brainstorm/plan/develop/review/pr/archive). Spawns the child
-    #     detached with stdout/stderr redirected to a per-spawn capture
-    #     file at `<tmpdir>/hive-tui-spawn-<id>.log` (named with the
-    #     same 8-char hex ID embedded in the BEGIN/END markers in
-    #     `SUBPROCESS_LOG_PATH`). Returns immediately. A reaper Thread
-    #     waits for the child, deletes the per-spawn capture on
-    #     exit_code == 0 (success has nothing to diagnose) and keeps
-    #     it on non-zero exits, then dispatches
-    #     `Messages::SubprocessExited(verb:, exit_code:)`. Multiple
-    #     concurrent agents (across projects) work — the TUI keeps
-    #     polling and rendering while children run, and a noisy child
-    #     can no longer grow the shared log past its rotation cap
-    #     because child output never lands in the shared file.
-    #   * `run_quiet!(argv)` — synchronous, captured-stdio children
-    #     for per-finding `hive accept-finding` / `hive reject-finding`
-    #     toggles in triage mode. `Open3.capture3` runs the child
-    #     without touching the alt-screen so the screen never flashes
-    #     on every keystroke.
-    #
-    # `run_quiet!` does NOT install INT/TERM forwarding traps or touch
-    # the SubprocessRegistry. `Open3.capture3` manages the child
-    # internally, and the per-keystroke triage subprocesses are short-
-    # lived enough that the user can simply press `r` again on Ctrl-C.
-    # The historical install/restore_traps pairing was dead code: it
-    # registered `:placeholder` and never called `register_real_pgid`,
-    # so the trap blocks always short-circuited and INT forwarding
-    # silently no-op'd anyway. Removing it also closes the concurrent-
-    # `run_quiet!` trap-chain race the audit flagged (F5/F9).
-    # `dispatch_background` likewise does NOT install signal
-    # forwarding — the child is detached into its own pgroup, and the
-    # TUI can quit without killing its agents (intentional: long-running
-    # agents outlive the dashboard).
-    module Subprocess
-      module_function
+      # Two ways to run a child from inside the TUI:
+      #
+      #   * `dispatch_background(argv, dispatch:)` — workflow verbs (hive
+      #     brainstorm/plan/develop/review/pr/archive). Spawns the child
+      #     detached with stdout/stderr redirected to a per-spawn capture
+      #     file at `<tmpdir>/hive-tui-spawn-<id>.log` (named with the
+      #     same 8-char hex ID embedded in the BEGIN/END markers in
+      #     `SUBPROCESS_LOG_PATH`). Returns immediately. A reaper Thread
+      #     waits for the child, deletes the per-spawn capture on
+      #     exit_code == 0 (success has nothing to diagnose) and keeps
+      #     it on non-zero exits, then dispatches
+      #     `Messages::SubprocessExited(verb:, exit_code:)`. Multiple
+      #     concurrent agents (across projects) work — the TUI keeps
+      #     polling and rendering while children run, and a noisy child
+      #     can no longer grow the shared log past its rotation cap
+      #     because child output never lands in the shared file.
+      #   * `run_quiet!(argv)` — synchronous, captured-stdio children
+      #     for per-finding `hive accept-finding` / `hive reject-finding`
+      #     toggles in triage mode. `Open3.capture3` runs the child
+      #     without touching the alt-screen so the screen never flashes
+      #     on every keystroke.
+      #
+      # `run_quiet!` does NOT install INT/TERM forwarding traps or touch
+      # the SubprocessRegistry. `Open3.capture3` manages the child
+      # internally, and the per-keystroke triage subprocesses are short-
+      # lived enough that the user can simply press `r` again on Ctrl-C.
+      # The historical install/restore_traps pairing was dead code: it
+      # registered `:placeholder` and never called `register_real_pgid`,
+      # so the trap blocks always short-circuited and INT forwarding
+      # silently no-op'd anyway. Removing it also closes the concurrent-
+      # `run_quiet!` trap-chain race the audit flagged (F5/F9).
+      # `dispatch_background` likewise does NOT install signal
+      # forwarding — the child is detached into its own pgroup, and the
+      # TUI can quit without killing its agents (intentional: long-running
+      # agents outlive the dashboard).
+      module Subprocess
+        module_function
 
       # Returns Integer exit status. For signal-killed children, returns
       # `128 + signo` (POSIX shell convention) so callers see a non-zero,
@@ -53,6 +54,8 @@ module Hive
       # caller can flash a stable status without ambiguating between a
       # missing binary and an explicit child exit code.
       COMMAND_NOT_FOUND_EXIT = 127
+      COMMAND_TIMEOUT_EXIT = 124
+      RUN_QUIET_TIMEOUT_SECONDS = 30
 
       # Background spawn for workflow verbs (hive brainstorm/plan/
       # develop/review/pr/archive). Returns nil (no Bubbletea Cmd) —
@@ -155,6 +158,7 @@ module Hive
       # @api private
       def spawn_background_child(argv, spawn_id)
         path = spawn_capture_path(spawn_id)
+        FileUtils.mkdir_p(File.dirname(path))
         Process.spawn(
           *argv,
           pgroup: true,
@@ -208,7 +212,11 @@ module Hive
           # capture file so disk usage stays bounded by failures, not
           # by overall spawn count. Failures keep their capture so
           # diagnose_recent_failure can read it.
-          delete_spawn_capture(spawn_id) if spawn_id && exit_code.zero?
+          if spawn_id && exit_code.zero?
+            delete_spawn_capture(spawn_id)
+          elsif spawn_id
+            bound_spawn_capture(spawn_id)
+          end
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         rescue StandardError => e
           # `wait2` raised (ECHILD / pid tracking bug) — synthesize
@@ -232,7 +240,7 @@ module Hive
       # in the reaper; failed spawns keep theirs so
       # `diagnose_recent_failure` can read the actual stderr.
       def spawn_capture_path(spawn_id)
-        File.join(Dir.tmpdir, "hive-tui-spawn-#{spawn_id}.log")
+        File.join(log_dir, "hive-tui-spawn-#{spawn_id}.log")
       end
 
       # Best-effort delete; the reaper-or-sweep flow tolerates an
@@ -253,16 +261,29 @@ module Hive
       # bounded, cheap enough to not matter (one Dir.glob + N stat
       # calls).
       SPAWN_CAPTURE_MAX_AGE_SECONDS = 24 * 60 * 60 # 24h
+      SPAWN_CAPTURE_MAX_BYTES = 1024 * 1024
 
       def sweep_old_spawn_captures!
         cutoff = Time.now - SPAWN_CAPTURE_MAX_AGE_SECONDS
-        Dir.glob(File.join(Dir.tmpdir, "hive-tui-spawn-*.log")).each do |path|
+        Dir.glob(File.join(log_dir, "hive-tui-spawn-*.log")).each do |path|
           File.delete(path) if File.mtime(path) < cutoff
         rescue Errno::ENOENT
           nil
         end
       rescue StandardError => e
         Hive::Tui::Debug.log("dispatch_background", "sweep_old_spawn_captures: #{e.class.name}")
+      end
+
+      def bound_spawn_capture(spawn_id)
+        path = spawn_capture_path(spawn_id)
+        return unless File.exist?(path)
+        return if File.size(path) <= SPAWN_CAPTURE_MAX_BYTES
+
+        notice = "[truncated to last #{SPAWN_CAPTURE_MAX_BYTES} bytes]\n"
+        retained_bytes = [ SPAWN_CAPTURE_MAX_BYTES - notice.bytesize, 0 ].max
+        File.write(path, "#{notice}#{tail_bytes(path, retained_bytes)}")
+      rescue StandardError => e
+        Hive::Tui::Debug.log("dispatch_background", "bound_spawn_capture #{spawn_id}: #{e.class.name}")
       end
 
       # The shared marker log: BEGIN[id] / END[id] / ERRNO records
@@ -280,6 +301,14 @@ module Hive
       # rotated copy) so the next stamp starts fresh. Now actually
       # bounded since child output no longer lands here.
       SUBPROCESS_LOG_MAX_BYTES = 10 * 1024 * 1024
+
+      def log_dir
+        ENV["HIVE_TUI_LOG_DIR"].to_s.empty? ? Dir.tmpdir : ENV["HIVE_TUI_LOG_DIR"]
+      end
+
+      def log_path
+        ENV["HIVE_TUI_LOG_DIR"].to_s.empty? ? SUBPROCESS_LOG_PATH : File.join(log_dir, "hive-tui-subprocess.log")
+      end
 
       # Spawn-and-wait core. Returns the same Integer exit shape:
       # 0..255 for clean exits, 128+signo for signal kills,
@@ -300,7 +329,9 @@ module Hive
       def stamp_subprocess_log(label, argv, id: nil)
         rotate_subprocess_log_if_needed
         annotated = id ? annotate_label_with_id(label, id) : label
-        File.open(SUBPROCESS_LOG_PATH, "a") do |f|
+        path = log_path
+        FileUtils.mkdir_p(File.dirname(path))
+        File.open(path, "a") do |f|
           f.puts "----- #{Time.now.utc.iso8601} #{annotated}: #{argv.join(' ')} -----"
         end
       rescue StandardError
@@ -316,10 +347,11 @@ module Hive
       # the next caller will simply append to the existing oversized
       # file; correctness still holds, just no rotation that round.
       def rotate_subprocess_log_if_needed
-        size = File.size?(SUBPROCESS_LOG_PATH).to_i
+        path = log_path
+        size = File.size?(path).to_i
         return if size <= SUBPROCESS_LOG_MAX_BYTES
 
-        File.rename(SUBPROCESS_LOG_PATH, "#{SUBPROCESS_LOG_PATH}.1")
+        File.rename(path, "#{path}.1")
       rescue Errno::ENOENT, Errno::EACCES, Errno::EPERM
         nil
       end
@@ -393,7 +425,7 @@ module Hive
       # diagnostic — false-positive risk is low because the patterns
       # are specific.
       def diagnose_recent_failure(verb)
-        return nil unless File.exist?(SUBPROCESS_LOG_PATH)
+        return nil unless File.exist?(log_path)
 
         section = recent_log_section_for(verb)
         return nil if section.nil? || section.strip.empty?
@@ -421,9 +453,10 @@ module Hive
       # text BEGIN..matching-END just like the pre-rewrite behavior.
       def recent_log_section_for(verb)
         cap = 64 * 1024
-        size = File.size(SUBPROCESS_LOG_PATH)
+        path = log_path
+        size = File.size(path)
         offset = [ size - cap, 0 ].max
-        text = File.open(SUBPROCESS_LOG_PATH, "r") do |f|
+        text = File.open(path, "r") do |f|
           f.seek(offset)
           f.read
         end
@@ -465,6 +498,14 @@ module Hive
         nil
       end
 
+      def tail_bytes(path, bytes)
+        File.open(path, "rb") do |file|
+          size = file.size
+          file.seek([ size - bytes, 0 ].max)
+          file.read
+        end
+      end
+
       # @api private
       # Find the offset of the matching END[id] for a BEGIN at
       # `section_start`. When `id` is nil (legacy entry without
@@ -496,24 +537,81 @@ module Hive
         argv[idx + 1]
       end
 
-      # Returns [exit_status, stdout, stderr]. `Open3.capture3` manages
-      # the child internally; the parent's INT/TERM trap chain stays
-      # untouched, and the SubprocessRegistry is irrelevant for this
-      # short-lived path (no `register_real_pgid` was ever called from
-      # here, so the install/restore_traps pair was decorative — the
-      # trap blocks read `:placeholder` and short-circuited).
+      # Returns [exit_status, stdout, stderr]. The child is timeout-bounded
+      # and runs in its own process group so quitting or interrupting the TUI
+      # cannot leave a captured-stdio helper behind.
       def run_quiet!(argv)
         Hive::Tui::Debug.log("run_quiet", "argv=#{argv.inspect}")
-        out, err, status = Open3.capture3(*argv, pgroup: true)
-        exit_code = status.exitstatus || -1
+        out, err, status = bounded_capture3(*argv, timeout: RUN_QUIET_TIMEOUT_SECONDS)
+        exit_code = translate_status(status)
         Hive::Tui::Debug.log("run_quiet", "exit=#{exit_code} out_bytes=#{out.bytesize} err_bytes=#{err.bytesize}")
         [ exit_code, out, err ]
       rescue Errno::ENOENT, Errno::EACCES => e
         Hive::Tui::Debug.log("run_quiet", "errno=#{e.class.name}: #{e.message}")
         [ COMMAND_NOT_FOUND_EXIT, "", "command not found: #{argv.first}" ]
+      rescue TimeoutError => e
+        Hive::Tui::Debug.log("run_quiet", "timeout=#{e.elapsed.round(2)}s argv=#{argv.inspect}")
+        [ COMMAND_TIMEOUT_EXIT, e.stdout, "command timed out after #{e.elapsed.round(2)}s: #{argv.join(' ')}\n#{e.stderr}" ]
       end
 
       # --- private helpers ---------------------------------------------------
+
+      TimeoutError = Class.new(StandardError) do
+        attr_reader :stdout, :stderr, :elapsed
+
+        def initialize(stdout:, stderr:, elapsed:)
+          @stdout = stdout
+          @stderr = stderr
+          @elapsed = elapsed
+          super("subprocess timed out after #{format('%.2f', elapsed)}s")
+        end
+      end
+
+      def bounded_capture3(*cmd, timeout:)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        Open3.popen3(*cmd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
+          stdin.close
+          out_reader = Thread.new { read_stream(stdout) }
+          err_reader = Thread.new { read_stream(stderr) }
+          loop do
+            if wait_thr.join(0.05)
+              return [ out_reader.value, err_reader.value, wait_thr.value ]
+            end
+
+            elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+            next if elapsed < timeout
+
+            terminate_process_group(wait_thr.pid)
+            raise TimeoutError.new(stdout: safe_thread_value(out_reader), stderr: safe_thread_value(err_reader), elapsed: elapsed)
+          end
+        end
+      end
+
+      def read_stream(stream)
+        stream.read
+      rescue IOError
+        ""
+      end
+
+      def terminate_process_group(pid)
+        Process.kill("TERM", -pid)
+      rescue Errno::ESRCH
+        nil
+      ensure
+        sleep 0.1
+        begin
+          Process.kill("KILL", -pid)
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+
+      def safe_thread_value(thread)
+        thread.kill if thread.alive?
+        thread.value.to_s
+      rescue StandardError
+        ""
+      end
 
       # NOTE: install_pgid_forwarding_traps / restore_traps /
       # forward_signal_to_inflight / register_real_pgid were deleted
@@ -533,6 +631,6 @@ module Hive
 
         -1
       end
-    end
+      end
   end
 end

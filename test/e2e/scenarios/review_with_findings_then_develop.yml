@@ -1,0 +1,32 @@
+name: review_with_findings_then_develop
+description: Findings JSON plus accept-finding toggles on a seeded execute review file.
+tags: [cli-only, findings]
+steps:
+  - kind: seed_state
+    stage: 4-execute
+    slug: review-findings-task
+    state_file: task.md
+    content: "# Task\n\n<!-- EXECUTE_WAITING findings_count=3 -->\n"
+    files:
+      - path: plan.md
+        content: "# Plan\n\n<!-- COMPLETE -->\n"
+      - path: reviews/ce-review-01.md
+        content: "## High\n- [ ] First issue: fix it\n- [ ] Second issue: fix it too\n## Low\n- [ ] Third issue: later\n"
+  - kind: json_assert
+    args: [findings, "{slug}", --stage, 4-execute, --json]
+    schema: hive-findings
+    pick: [summary, total]
+    equals: 3
+  - kind: cli
+    args: [accept-finding, "{slug}", "1", "2", --stage, 4-execute]
+  - kind: state_assert
+    path: "{task_dir:4-execute}/reviews/ce-review-01.md"
+    contains: "- [x] First issue"
+  - kind: state_assert
+    path: "{task_dir:4-execute}/reviews/ce-review-01.md"
+    contains: "- [ ] Third issue"
+  - kind: json_assert
+    args: [status, --json]
+    schema: hive-status
+    pick: [projects, 0, tasks, 0, action]
+    equals: review_findings

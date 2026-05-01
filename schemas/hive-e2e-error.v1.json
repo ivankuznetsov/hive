@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-error.v1.json",
+  "title": "hive-e2e error output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok", "error_kind", "message", "exit_code"],
+  "properties": {
+    "schema": { "const": "hive-e2e-error" },
+    "schema_version": { "const": 1 },
+    "ok": { "const": false },
+    "error_kind": {
+      "type": "string",
+      "enum": ["usage", "no_scenarios", "preflight", "run_failed", "missing_repro", "error"]
+    },
+    "message": { "type": "string" },
+    "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "command": { "type": ["string", "null"] }
+  }
+}

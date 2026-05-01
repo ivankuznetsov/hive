@@ -132,7 +132,25 @@ module Hive
       merged
     end
 
+    # Surface a misconfigured HIVE_HOME loudly on READ paths only.
+    # When ENV["HIVE_HOME"] is explicitly set to a path that doesn't exist
+    # (e.g., a user typo), `registered_projects` returning [] silently hid
+    # the typo and made `hive status --json | jq .ok` falsely report `true`
+    # under nonexistent-HIVE_HOME smoke runs. Fire only when explicitly set
+    # AND missing — leave the default unset path lazy-creatable by
+    # `register_project` (which does its own mkdir_p), and accept the
+    # legitimate "directory exists but config.yml not yet written" first-run
+    # state.
+    def validate_hive_home!
+      env = ENV["HIVE_HOME"]
+      return if env.nil? || env.empty?
+      return if File.directory?(env)
+
+      raise ConfigError, "HIVE_HOME is set to a path that does not exist: #{env}"
+    end
+
     def registered_projects
+      validate_hive_home!
       path = global_config_path
       return [] unless File.exist?(path)
 

@@ -95,10 +95,34 @@
         },
         "exit_code": { "type": "integer", "enum": [1, 4, 64, 70, 75, 78] },
         "message": { "type": "string" },
+        "current_stage": {
+          "type": "string",
+          "description": "Present on WrongStage and FinalStageReached: the stage the task is actually at."
+        },
+        "target_stage": {
+          "type": "string",
+          "description": "Present on WrongStage when the workflow verb knows the expected stage."
+        },
         "candidates": { "type": "array" },
         "id": { "type": "integer", "minimum": 1 },
         "path": { "type": "string" },
-        "stage": { "type": "string" }
+        "stage": { "type": "string" },
+        "holder": {
+          "type": "object",
+          "description": "Present on ConcurrentRunError when raised over a live task lock. Properties are best-effort and additionalProperties is open to allow forward-compatible additions.",
+          "additionalProperties": true,
+          "properties": {
+            "pid": { "type": "integer" },
+            "slug": { "type": "string" },
+            "stage": { "type": "string" },
+            "started_at": { "type": "string" },
+            "process_start_time": { "type": "string" }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Filesystem path of the lock file that triggered ConcurrentRunError."
+        }
       }
     },
     "NextAction": {

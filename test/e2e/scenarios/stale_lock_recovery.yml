@@ -1,0 +1,33 @@
+name: stale_lock_recovery
+description: Concurrent lock failure produces TEMPFAIL, then marker clear and rerun recover.
+tags: [cli-only, recovery]
+steps:
+  - kind: seed_state
+    stage: 4-execute
+    slug: stale-lock-task
+    state_file: task.md
+    content: "# Task\n\n<!-- EXECUTE_STALE pass=2 -->\n"
+    files:
+      - path: plan.md
+        content: "# Plan\n\n<!-- COMPLETE -->\n"
+  - kind: ruby_block
+    block: |
+      lock_path = File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "started_at" => Time.now.utc.iso8601,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
+      }.to_yaml)
+  - kind: cli
+    args: [run, "{slug}", --stage, 4-execute]
+    expect_exit: 75
+  - kind: ruby_block
+    block: |
+      FileUtils.rm_f(File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock"))
+  - kind: cli
+    args: [markers, clear, "{task_dir:4-execute}", --name, EXECUTE_STALE]
+  - kind: cli
+    args: [run, "{slug}", --stage, 4-execute]
+  - kind: state_assert
+    path: "{task_dir:4-execute}/.lock"
+    absent: true

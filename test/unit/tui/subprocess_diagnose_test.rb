@@ -1,4 +1,5 @@
 require "test_helper"
+require "rbconfig"
 require "tmpdir"
 require "hive/tui/subprocess"
 
@@ -349,6 +350,27 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     ensure
       File.delete(capture_path) if capture_path && File.exist?(capture_path)
     end
+  end
+
+  def test_bound_spawn_capture_truncates_retained_failure_file
+    spawn_id = "feedbeef"
+    capture_path = File.join(Dir.tmpdir, "hive-tui-spawn-#{spawn_id}.log")
+    File.write(capture_path, "x" * (Hive::Tui::Subprocess::SPAWN_CAPTURE_MAX_BYTES + 10))
+
+    Hive::Tui::Subprocess.send(:bound_spawn_capture, spawn_id)
+
+    assert File.size(capture_path) < Hive::Tui::Subprocess::SPAWN_CAPTURE_MAX_BYTES + 10
+    assert_includes File.read(capture_path, 128), "truncated to last"
+  ensure
+    File.delete(capture_path) if capture_path && File.exist?(capture_path)
+  end
+
+  def test_bounded_capture3_times_out_and_reaps_process_group
+    error = assert_raises(Hive::Tui::Subprocess::TimeoutError) do
+      Hive::Tui::Subprocess.send(:bounded_capture3, RbConfig.ruby, "-e", "sleep 5", timeout: 0.1)
+    end
+
+    assert_operator error.elapsed, :>=, 0.1
   end
 
   # ---- extract_project edge cases ----

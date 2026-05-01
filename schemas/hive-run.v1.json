@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:run:v1",
+  "title": "hive run output (v1)",
+  "description": "Stable contract emitted by `hive run --json`. Either a SuccessPayload (the run's marker + next_action) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "slug",
+        "stage",
+        "stage_index",
+        "folder",
+        "state_file",
+        "marker",
+        "attrs",
+        "commit_action",
+        "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-run" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "slug": { "type": "string" },
+        "stage": {
+          "type": "string",
+          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"]
+        },
+        "stage_index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        },
+        "folder": { "type": "string" },
+        "state_file": { "type": "string" },
+        "marker": {
+          "type": "string",
+          "enum": [
+            "none",
+            "waiting",
+            "complete",
+            "agent_working",
+            "execute_waiting",
+            "execute_complete",
+            "execute_stale",
+            "review_working",
+            "review_waiting",
+            "review_ci_stale",
+            "review_stale",
+            "review_complete",
+            "review_error",
+            "error"
+          ]
+        },
+        "attrs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "commit_action": { "type": ["string", "null"] },
+        "next_action": {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+            }
+          }
+        },
+        "cleanup_instructions": {
+          "description": "Human-readable cleanup guidance returned by the 7-done stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "description": "Emitted by the top-level rescue in Hive::Commands::Run when an error is raised before report_json wrote a SuccessPayload. Per-error structured fields (`candidates`, `id`, `path`, `holder`, `lock_path`) appear only on the matching error_kind.",
+      "properties": {
+        "schema": { "const": "hive-run" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "concurrent_run",
+            "task_in_error",
+            "wrong_stage",
+            "stage",
+            "config",
+            "agent",
+            "git",
+            "worktree",
+            "ambiguous_slug",
+            "invalid_task_path",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "slug": { "type": ["string", "null"] },
+        "stage_filter": {
+          "type": ["string", "null"],
+          "description": "User-supplied `--stage` filter value when present, else null. Distinct from the resolved `current_stage`/`target_stage`."
+        },
+        "current_stage": {
+          "type": "string",
+          "description": "Present on WrongStage and FinalStageReached: the stage the task is actually at."
+        },
+        "target_stage": {
+          "type": "string",
+          "description": "Present on WrongStage when raised by a verb that knows its target stage (approve/develop/review/etc.): the stage the verb expected."
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
+        "id": { "type": "string" },
+        "path": { "type": "string" },
+        "holder": {
+          "type": "object",
+          "description": "Present on ConcurrentRunError when raised over a live task lock. Carries the existing lock holder's metadata so agents can decide whether to wait, kill, or escalate. Properties are best-effort and additionalProperties is open to allow forward-compatible additions.",
+          "additionalProperties": true,
+          "properties": {
+            "pid": { "type": "integer" },
+            "slug": { "type": "string" },
+            "stage": { "type": "string" },
+            "started_at": { "type": "string" },
+            "process_start_time": { "type": "string" }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Filesystem path of the lock file that triggered ConcurrentRunError."
+        }
+      }
+    }
+  }
+}

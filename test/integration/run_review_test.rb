@@ -498,7 +498,14 @@ class RunReviewTest < Minitest::Test
         end
 
         begin
-          assert_raises(RuntimeError) { Hive::Commands::Run.new(folder).call }
+          # Run#call's outer rescue (added with the error-envelope contract)
+          # wraps any StandardError into Hive::InternalError before propagating;
+          # the wrapped message still carries the original class+message for
+          # debugging. The runner's own rescue lands the REVIEW_ERROR marker
+          # before re-raising, so the marker contract is unaffected.
+          err = assert_raises(Hive::InternalError) { Hive::Commands::Run.new(folder).call }
+          assert_includes err.message, "RuntimeError",
+                          "wrapped message must preserve the original class for debugging"
           marker = Hive::Markers.current(File.join(folder, "task.md"))
           assert_equal :review_error, marker.name,
                        "helper exception must land REVIEW_ERROR, not leave REVIEW_WORKING"
@@ -579,7 +586,12 @@ class RunReviewTest < Minitest::Test
           end
 
           begin
-            assert_raises(RuntimeError) { Hive::Commands::Run.new(folder).call }
+            # See companion test note: Run#call wraps StandardError into
+            # Hive::InternalError; the original class+message is preserved
+            # in the wrapped message for debugging.
+            err = assert_raises(Hive::InternalError) { Hive::Commands::Run.new(folder).call }
+            assert_includes err.message, "RuntimeError",
+                            "phase=#{target_phase}: wrapped message must preserve the original class"
             marker = Hive::Markers.current(File.join(folder, "task.md"))
             assert_equal :review_error, marker.name,
                          "phase=#{target_phase}: rescue must land REVIEW_ERROR; got #{marker.name} attrs=#{marker.attrs.inspect}"

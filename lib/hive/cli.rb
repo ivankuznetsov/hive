@@ -19,6 +19,12 @@ module Hive
     APPROVE_TO_ENUM = (Hive::Stages::DIRS + Hive::Stages::NAMES).freeze
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 
+    desc "version", "Print hive version"
+    def version
+      puts Hive::VERSION
+    end
+    map "--version" => :version
+
     desc "init [PROJECT_PATH]", "Bootstrap .hive-state in a project (orphan hive/state branch)"
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     def init(project_path = Dir.pwd)

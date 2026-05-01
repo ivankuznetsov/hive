@@ -1,0 +1,289 @@
+#!/usr/bin/env ruby
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+$LOAD_PATH.unshift(File.expand_path("../test/e2e/lib", __dir__))
+
+require "json"
+require "open3"
+require "thor"
+require "hive"
+require "runner"
+require "schemas"
+require "path_safety"
+
+# Mirror bin/hive: intercept `--version`/`-v` BEFORE Thor dispatch so the
+# default_task `:run_scenarios` doesn't swallow it as a positional pattern.
+if ARGV == [ "--version" ] || ARGV == [ "-v" ]
+  puts Hive::VERSION
+  exit 0
+end
+
+module Hive
+  module E2E
+    # Process exit-code contract for the e2e binary. Mirrors the inner
+    # bin/hive routing: success / failure / config so wrapper scripts and
+    # CI matrices can branch precisely.
+    #
+      #   0   = all scenarios passed
+      #   1   = one or more scenarios failed
+      #   64  = usage error (bad args, no matching scenarios)
+      #   78  = preflight failure (missing tooling, bad config, missing repro)
+      module BinaryExit
+        SUCCESS = 0
+        FAILURE = 1
+        USAGE  = Hive::ExitCodes::USAGE # 64
+        CONFIG  = Hive::ExitCodes::CONFIG # 78
+      end
+
+    class PreflightError < StandardError; end
+
+    module Preflight
+      module_function
+
+      TMUX_INSTALL_HINT = "tmux not found. Install with: `brew install tmux` (macOS), " \
+                          "`apt install tmux` (Debian/Ubuntu), or `pacman -S tmux` (Arch).".freeze
+
+      ASCIINEMA_INSTALL_HINT = "asciinema 2.4+ not found. Install with: `pipx install asciinema` " \
+                               "(cross-platform), `brew install asciinema` (macOS), or " \
+                               "`pacman -S asciinema` (Arch).".freeze
+
+      def require_tmux!
+        _out, _err, status = Open3.capture3("tmux", "-V")
+        raise PreflightError, TMUX_INSTALL_HINT unless status.success?
+      rescue Errno::ENOENT
+        raise PreflightError, TMUX_INSTALL_HINT
+      end
+
+      def require_asciinema!
+        require "asciinema_driver"
+        return if AsciinemaDriver.available? && AsciinemaDriver.version &&
+                  AsciinemaDriver.version >= AsciinemaDriver::MIN_VERSION
+
+        raise PreflightError, ASCIINEMA_INSTALL_HINT
+      end
+    end
+
+    module JsonError
+      module_function
+
+      def payload(error_kind:, message:, exit_code:, command: nil)
+        {
+          "schema" => "hive-e2e-error",
+          "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-error"),
+          "ok" => false,
+          "error_kind" => error_kind,
+          "message" => message,
+          "exit_code" => exit_code,
+          "command" => command
+        }.compact
+      end
+    end
+
+    class Binary < Thor
+      class_option :json, type: :boolean, default: false,
+                          desc: "Emit structured JSON output where applicable"
+
+      # Thor 1.3+ default is to print a deprecation warning and exit 0 on
+      # unknown commands; opting in to non-zero exit lets CI / wrapper
+      # scripts branch precisely on bad invocations. The `--json` path
+      # passes `debug: true` to Thor::Base.start (see bottom of this file),
+      # which makes Thor re-raise Thor::Error so the outer rescue can emit
+      # a structured envelope.
+      def self.exit_on_failure?
+        true
+      end
+
+      default_task :run_scenarios
+
+      desc "run [PATTERN]", "Run e2e scenarios"
+      option :filter, type: :string, desc: "run scenarios with the given tag"
+      option :keep_artifacts, type: :boolean, default: false, desc: "keep run-home directories after passing scenarios"
+      def run_scenarios(pattern = nil)
+        runner = Runner.new
+        scenarios = runner.select_scenarios(pattern: pattern, tag: options[:filter])
+        if scenarios.empty?
+          exit_with_error("no scenarios match #{pattern || options[:filter] || 'all'}",
+                          error_kind: "no_scenarios", exit_code: BinaryExit::USAGE)
+        end
+
+        Preflight.require_tmux! if scenarios.any? { |scenario| tui_scenario?(scenario) }
+        report = runner.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
+        if options[:json]
+          puts JSON.pretty_generate(report)
+        end
+        summary = report.fetch("summary")
+        failed = summary.fetch("failed") + summary.fetch("setup_failed", 0)
+        exit(failed.zero? ? BinaryExit::SUCCESS : BinaryExit::FAILURE)
+      rescue PreflightError => e
+        exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
+      rescue StandardError => e
+        exit_with_error(e, error_kind: "run_failed", exit_code: BinaryExit::FAILURE)
+      end
+      map "run" => :run_scenarios
+
+      desc "version", "Print hive gem version"
+      def version
+        puts Hive::VERSION
+      end
+
+      desc "list", "List available e2e scenarios"
+      def list
+        scenarios = Runner.new.select_scenarios
+        if options[:json]
+          payload = {
+            "schema" => "hive-e2e-scenarios",
+            "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-scenarios"),
+            "scenarios" => scenarios.map { |scenario| scenario_summary(scenario) }
+          }
+          puts JSON.pretty_generate(payload)
+        else
+          scenarios.each do |scenario|
+            tags = scenario.tags.empty? ? "" : " [#{scenario.tags.join(', ')}]"
+            puts "#{scenario.name}#{tags}"
+          end
+        end
+      end
+
+      desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"
+      def replay(run_id, scenario)
+        run_id = PathSafety.safe_basename!(run_id, "run_id")
+        scenario = PathSafety.safe_basename!(scenario, "scenario")
+        run_dir = PathSafety.contained_path!(Paths.runs_dir, run_id, "run dir")
+        scenario_root = PathSafety.contained_path!(run_dir, "scenarios", "scenario root")
+        scenario_dir = PathSafety.contained_path!(scenario_root, scenario, "scenario dir")
+        script = PathSafety.contained_path!(scenario_dir, "repro.sh", "repro script")
+        unless File.exist?(script)
+          exit_with_error(
+            "Run ##{run_id} scenario #{scenario} has no repro.sh; the run may have completed successfully (#{script})",
+            error_kind: "missing_repro",
+            exit_code: BinaryExit::CONFIG
+          )
+        end
+
+        exec([ script, File.basename(script) ])
+      rescue ArgumentError => e
+        exit_with_error(e, error_kind: "usage", exit_code: BinaryExit::USAGE)
+      end
+
+      desc "clean", "Remove old e2e run artifacts"
+      option :retain_days, type: :string, default: ENV.fetch("RUNS_RETAIN_DAYS", "7")
+      option :retain_failed_days, type: :string, default: ENV.fetch("RUNS_RETAIN_FAILED_DAYS", "14")
+      option :dry_run, type: :boolean, default: false, desc: "show which runs would be deleted without deleting them"
+      def clean
+        retain_days = parse_retention_window(options[:retain_days], "retain_days")
+        retain_failed_days = parse_retention_window(options[:retain_failed_days], "retain_failed_days")
+        result = Sandbox.cleanup_runs(retain_days: retain_days, retain_failed_days: retain_failed_days,
+                                      dry_run: options[:dry_run])
+        deleted = result.fetch("deleted")
+        kept = result.fetch("kept")
+        if options[:json]
+          puts JSON.pretty_generate(
+            "schema" => "hive-e2e-clean",
+            "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-clean"),
+            "deleted" => deleted,
+            "kept" => kept,
+            "dry_run" => options[:dry_run],
+            "deleted_runs" => result.fetch("deleted_runs"),
+            "kept_runs" => result.fetch("kept_runs")
+          )
+        else
+          puts "deleted: #{deleted}, kept: #{kept}"
+        end
+      rescue ArgumentError => e
+        exit_with_error(e, error_kind: "usage", exit_code: BinaryExit::USAGE)
+      end
+
+      private
+
+      def scenario_summary(scenario)
+        {
+          "name" => scenario.name,
+          "tags" => scenario.tags,
+          "description" => scenario.description,
+          "path" => scenario.path,
+          "steps_count" => scenario.steps.size
+        }
+      end
+
+      def tui_scenario?(scenario)
+        scenario.steps.any? { |step| %w[tui_keys tui_expect wait_subprocess].include?(step.kind) }
+      end
+
+      def exit_with_error(error, error_kind:, exit_code:)
+        message = error.respond_to?(:message) ? error.message : error.to_s
+        if options[:json]
+          puts JSON.pretty_generate(JsonError.payload(error_kind: error_kind, message: message,
+                                                     exit_code: exit_code, command: invoked_command))
+        else
+          warn "hive-e2e: #{message}"
+        end
+        exit exit_code
+      end
+
+      def invoked_command
+        self.class.invocation_command
+      rescue StandardError
+        nil
+      end
+
+      def parse_retention_window(value, label)
+        days = Integer(value.to_s, 10)
+        raise ArgumentError, "#{label} must be >= 0" if days.negative?
+
+        days
+      rescue ArgumentError
+        raise ArgumentError, "#{label} must be a non-negative integer (got #{value.inspect})"
+      end
+    end
+  end
+end
+
+def rewrite_help_flag!(argv)
+  return if argv.empty?
+
+  cmd_idx = argv.index { |arg| !arg.start_with?("-") }
+  return unless cmd_idx
+
+  help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
+  return unless help_idx
+
+  cmd = argv.delete_at(cmd_idx)
+  argv.delete_at(cmd_idx + help_idx)
+  argv.unshift("help", cmd)
+end
+
+begin
+  rewrite_help_flag!(ARGV)
+  # Thor::Base#start rescues Thor::Error internally and either prints to
+  # stderr + exit 1 (when exit_on_failure? is true) or warns + exit 0
+  # (when false) — neither path lets bin/hive-e2e's outer rescue emit a
+  # JSON error envelope. Passing `debug: true` makes Thor re-raise instead,
+  # so when --json is set the rescue below can format the structured
+  # hive-e2e-error output. Without --json, preserve Thor's existing
+  # human-readable behavior.
+  Hive::E2E::Binary.start(ARGV, debug: ARGV.include?("--json"))
+rescue Hive::E2E::PreflightError => e
+  if ARGV.include?("--json")
+    puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
+                                                          exit_code: Hive::E2E::BinaryExit::CONFIG))
+  else
+    warn "hive-e2e: #{e.message}"
+  end
+  exit Hive::E2E::BinaryExit::CONFIG
+rescue Thor::Error => e
+  if ARGV.include?("--json")
+    puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
+                                                          exit_code: Hive::E2E::BinaryExit::USAGE))
+  else
+    warn e.message
+  end
+  exit Hive::E2E::BinaryExit::USAGE
+rescue StandardError => e
+  if ARGV.include?("--json")
+    puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
+                                                          exit_code: Hive::E2E::BinaryExit::FAILURE))
+  else
+    warn "hive-e2e: #{e.message}"
+  end
+  exit Hive::E2E::BinaryExit::FAILURE
+end

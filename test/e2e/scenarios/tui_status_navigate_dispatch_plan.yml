@@ -1,0 +1,42 @@
+name: tui_status_navigate_dispatch_plan
+description: TUI verb-key dispatch — `p` on a ready-to-plan row spawns `bin/hive plan`, the TUI re-renders with the new state.
+tags: [tui]
+setup:
+  tui_env:
+    HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:3-plan}/plan.md"
+    HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Plan\n\n<!-- COMPLETE -->\n"
+steps:
+  # Seed a ready-to-plan task so the TUI's status grid offers `p` (plan).
+  - kind: seed_state
+    stage: 2-brainstorm
+    slug: tui-plan-task
+    state_file: brainstorm.md
+    content: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+  # TUI is started lazily by the first tui_* step. Wait for the dashboard
+  # chrome and the seeded row.
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 5
+  - kind: tui_expect
+    anchor: "tui-plan-task"
+    timeout: 5
+  # Press `p` — TUI's verb-key dispatch (Subprocess.dispatch_background)
+  # spawns `bin/hive plan` against the highlighted row.
+  - kind: tui_keys
+    keys: "p"
+  # The dispatched child runs in its own pgroup; wait for the foreground
+  # subprocess inside the pane to die before asserting its side-effects.
+  - kind: wait_subprocess
+    timeout: 30
+  # TUI re-renders after dispatch — the dashboard chrome is back.
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 5
+  # Proves the dispatched `bin/hive plan` actually ran end-to-end:
+  # plan.md exists with COMPLETE marker.
+  - kind: state_assert
+    path: "{task_dir:3-plan}/plan.md"
+    marker: { current: COMPLETE }
+    timeout: 10
+  - kind: tui_keys
+    keys: "q"

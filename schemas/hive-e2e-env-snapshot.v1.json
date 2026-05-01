@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-env-snapshot.v1.json",
+  "title": "hive-e2e environment snapshot (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "hive_version", "ruby", "platform", "tmux_version", "asciinema_version", "term", "hive_home", "bundle_gemfile", "path", "sandbox"],
+  "properties": {
+    "schema": { "const": "hive-e2e-env-snapshot" },
+    "schema_version": { "const": 1 },
+    "hive_version": { "type": "string" },
+    "ruby": { "type": "string" },
+    "platform": { "type": "string" },
+    "tmux_version": { "type": "string" },
+    "asciinema_version": { "type": "string" },
+    "term": { "type": "string" },
+    "hive_home": { "type": "string" },
+    "bundle_gemfile": { "type": "string" },
+    "path": { "type": "string" },
+    "sandbox": { "type": "string" }
+  }
+}

@@ -12,6 +12,8 @@ require "hive/tui/triage_state"
 require "hive/tui/log_tail"
 require "hive/tui/subprocess"
 require "hive/tui/views/grid"
+require "hive/tui/views/projects_pane"
+require "hive/tui/views/tasks_pane"
 require "hive/tui/views/triage"
 require "hive/tui/views/log_tail"
 require "hive/tui/views/help_overlay"
@@ -149,12 +151,12 @@ module Hive
 
       def view
         case @hive_model.mode
-        when :grid then Views::Grid.render(@hive_model)
+        when :grid then compose_two_pane_view
         when :triage then Views::Triage.render(@hive_model)
         when :log_tail then Views::LogTail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
-        else Views::Grid.render(@hive_model)
+        else compose_two_pane_view
         end
       end
 
@@ -631,22 +633,84 @@ module Hive
         @hive_model.with(flash: text, flash_set_at: Time.now)
       end
 
-      # Filter mode: Views::Grid for the underlying frame; replace the
-      # bottom hint line with the filter prompt. Bubble Tea diffs
-      # against the previous frame so a one-line change paints
-      # cheaply.
+      # Filter mode: same two-pane composition as :grid mode, but the
+      # footer line is replaced by the filter prompt. Bubble Tea diffs
+      # against the previous frame so a one-line change paints cheaply.
       def compose_filter_view
-        grid_lines = Views::Grid.render(@hive_model).lines
-        prompt = Views::FilterPrompt.render(@hive_model)
-        if grid_lines.empty?
-          prompt
+        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model))
+      end
+
+      # ---- v2 two-pane composition ----
+
+      # Width below which the project pane is suppressed and the tasks
+      # pane occupies the full screen. Below 70, the cyan-bordered box
+      # plus 5-column table simply has no room to breathe.
+      TWO_PANE_MIN_COLS = 70
+
+      # Compose the v2 two-pane layout: header strip + ProjectsPane |
+      # TasksPane | footer strip. Below TWO_PANE_MIN_COLS the project
+      # pane is suppressed and only the tasks pane renders, with the
+      # scope label prefixed onto the header so cross-project context
+      # isn't lost.
+      def compose_two_pane_view(footer: default_footer)
+        cols = @hive_model.cols.to_i
+        sections = [ header_strip ]
+        if cols < TWO_PANE_MIN_COLS
+          sections << Views::TasksPane.render(@hive_model, width: [ cols, 40 ].max)
         else
-          # The status line is always the trailing line — replace it
-          # in place so layout doesn't shift when the user toggles
-          # filter mode.
-          grid_lines[-1] = prompt
-          grid_lines.join
+          sections << join_panes(cols)
         end
+        sections << footer
+        sections.join("\n")
+      end
+
+      # Top strip — `hive tui · scope=… · filter=… · generated_at=…`.
+      # Same content v1's Views::Grid#header_line carried, lifted to a
+      # composer concern so the panes stay focused on their own boxes.
+      def header_strip
+        scope_label = @hive_model.scope.zero? ? "★ All projects" : @hive_model.scope.to_s
+        filter_label = @hive_model.filter.to_s.empty? ? "-" : @hive_model.filter
+        generated_at = @hive_model.snapshot&.generated_at || "-"
+        line = "hive tui  scope=#{scope_label}  filter=#{filter_label}  generated_at=#{generated_at}"
+        Hive::Tui::Styles::HEADER.render(line)
+      end
+
+      # Default footer — context-aware key hints + flash decay (the
+      # status line). v1 had this in Views::Grid#status_line; lifted here
+      # so the panes stay layout-only.
+      def default_footer
+        if @hive_model.flash_active?
+          Hive::Tui::Styles::FLASH.render(@hive_model.flash.to_s)
+        else
+          Hive::Tui::Styles::HINT.render(footer_hint)
+        end
+      end
+
+      def footer_hint
+        "[Tab] switch  [Enter] next  [n] new  [/] filter  [?] help  [q] quit"
+      end
+
+      # Compute pane widths and join horizontally. Left pane is clamped
+      # to [18, 28] cells with a soft preference for cols * 0.25 — wide
+      # enough for typical project names ("seyarabata", "appcrawl"),
+      # narrow enough not to crowd the tasks table on standard terminals.
+      def join_panes(cols)
+        left_width = pane_widths(cols).first
+        right_width = pane_widths(cols).last
+        Lipgloss.join_horizontal(
+          Lipgloss::TOP,
+          Views::ProjectsPane.render(@hive_model, width: left_width),
+          Views::TasksPane.render(@hive_model, width: right_width)
+        )
+      end
+
+      # Visible for tests so the width formula stays inspectable without
+      # rendering. Returns [left_width, right_width].
+      def pane_widths(cols)
+        soft = (cols * 0.25).floor
+        left = soft.clamp(18, 28)
+        right = cols - left
+        [ left, right ]
       end
     end
   end

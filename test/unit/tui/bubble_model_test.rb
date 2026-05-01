@@ -167,6 +167,100 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "/auth"
   end
 
+  # ---- v2 two-pane composition ----
+
+  def test_grid_mode_renders_both_panes_at_full_width
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [
+        { "name" => "hive", "tasks" => [
+          { "slug" => "fix-cache-x", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+            "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+        ] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 100),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "Projects",      "left pane (Projects header) must render at >=70 cols"
+    assert_includes out, "★ All projects"
+    assert_includes out, "fix-cache-x",   "right pane task row must render"
+    assert_includes out, "Tasks ·",       "tasks pane title must render"
+    assert_includes out, "[Tab] switch",  "default footer hints must appear"
+  end
+
+  def test_grid_mode_collapses_to_single_pane_below_min_cols
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [
+        { "name" => "hive", "tasks" => [
+          { "slug" => "narrow-task", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+            "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+        ] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 60),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "narrow-task", "tasks pane must still render below the threshold"
+    refute_includes out, "Projects\n", "Projects pane title must NOT appear when collapsed"
+    refute_includes out, "★ All projects\n", "left pane (with ★ prefix) must not render at narrow widths"
+  end
+
+  def test_pane_widths_clamps_left_to_18_28_range
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(cols: 200),
+      dispatch: @dispatch
+    )
+    left, right = @model.send(:pane_widths, 200)
+    assert_operator left, :>=, 18
+    assert_operator left, :<=, 28
+    assert_equal 200, left + right
+  end
+
+  def test_pane_widths_floors_quarter
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(cols: 100),
+      dispatch: @dispatch
+    )
+    left, right = @model.send(:pane_widths, 100)
+    assert_equal 25, left, "100 * 0.25 = 25; within [18, 28] so no clamp"
+    assert_equal 75, right
+  end
+
+  def test_two_pane_min_cols_constant_is_70
+    assert_equal 70, Hive::Tui::BubbleModel::TWO_PANE_MIN_COLS
+  end
+
+  def test_grid_mode_renders_at_exactly_70_cols
+    # Boundary: cols == 70 must use two-pane layout (inclusive on the
+    # upper side of the fallback test).
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 70),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "Projects", "70 cols is the inclusive boundary — two-pane must render"
+  end
+
+  def test_grid_mode_handles_nil_snapshot
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: nil, cols: 100),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    refute_nil out, "nil snapshot must not crash compose_two_pane_view"
+    assert out.is_a?(String)
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block

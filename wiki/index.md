@@ -2,7 +2,7 @@
 title: Hive Wiki Index
 type: index
 created: 2026-04-25
-updated: 2026-04-26
+updated: 2026-04-29
 tags: [index]
 ---
 
@@ -12,7 +12,7 @@ tags: [index]
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
 
-**Pages**: 36 (excl. `index.md`/`log.md`) · **Date**: 2026-04-27
+**Pages**: 43 (excl. `index.md`/`log.md`) · **Date**: 2026-05-01
 
 ## Top level
 
@@ -20,11 +20,12 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[state-model]] — directory layout, marker grammar, state files, slug rules, configs, frontmatter, lock files, worktree pointer.
 - [[cli]] — top-level CLI surface (entry point, command table, error conventions).
 - [[dependencies]] — runtime gems, dev gems, external CLI deps, Ruby version, stdlib reliance.
-- [[decisions]] — 21 ADRs (013 + 014–021 added 2026-04-26 alongside 5-review).
+- [[decisions]] — 22 ADRs (ADR-022 covers the agentic e2e layer).
 - [[active-areas]] — what's currently in flight and what's deferred.
 - [[gaps]] — coverage table, open questions, patterns not yet documented.
 - [[templates]] — ERB template catalogue and prompt-injection boundary policy.
 - [[testing]] — minitest layout, fixtures, lint policy.
+- [[e2e]] — outer real-subprocess CLI/TUI e2e suite, scenario DSL, artifact contract.
 
 ## Commands
 

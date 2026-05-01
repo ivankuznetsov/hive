@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-report.v1.json",
+  "title": "hive-e2e run report (v1)",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "schema_version", "run_id", "status", "summary", "scenarios"],
+  "properties": {
+    "schema": { "const": "hive-e2e-report" },
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string" },
+    "started_at": { "type": ["string", "null"] },
+    "ended_at": { "type": "string" },
+    "status": { "type": "string", "enum": ["partial", "complete", "crashed"] },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "passed", "failed", "setup_failed"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "setup_failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "duration_seconds", "failed_step_index", "failed_step_kind", "error_summary", "artifacts_dir", "repro"],
+        "properties": {
+          "name": { "type": "string" },
+          "status": { "type": "string", "enum": ["passed", "failed", "setup_failed"] },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "failed_step_index": { "type": ["integer", "null"], "minimum": 1 },
+          "failed_step_kind": { "type": ["string", "null"] },
+          "error_summary": { "type": ["string", "null"] },
+          "artifacts_dir": { "type": ["string", "null"] },
+          "repro": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "harness_errors": { "type": "array" }
+  }
+}

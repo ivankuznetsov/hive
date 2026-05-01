@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "${HIVE_E2E_EDITOR_CONTENT:-edited by hive e2e}" >> "$1"

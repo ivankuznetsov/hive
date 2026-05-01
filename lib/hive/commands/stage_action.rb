@@ -63,9 +63,12 @@ module Hive
         end
 
         unless current_stage == source_stage
-          raise Hive::WrongStage,
-                "#{@verb} expects #{source_stage} or #{target_stage}, " \
-                "but #{task.slug} is at #{current_stage}"
+          raise Hive::WrongStage.new(
+            "#{@verb} expects #{source_stage} or #{target_stage}, " \
+            "but #{task.slug} is at #{current_stage}",
+            current_stage: current_stage,
+            target_stage: target_stage
+          )
         end
 
         validate_marker!(task, config)
@@ -87,9 +90,12 @@ module Hive
         # pattern in Hive::Commands::Approve#resolve_task.
         task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
         actual = stage_dir(task)
-        raise Hive::WrongStage,
-              "task #{task.slug} is at #{actual} but --from expected #{@from} " \
-              "(idempotency check: a prior call may have already advanced this task)"
+        raise Hive::WrongStage.new(
+          "task #{task.slug} is at #{actual} but --from expected #{@from} " \
+          "(idempotency check: a prior call may have already advanced this task)",
+          current_stage: actual,
+          target_stage: @from
+        )
       end
 
       # Archive on a task already at 7-done with :complete is a no-op.
@@ -110,9 +116,12 @@ module Hive
         return if terminal_marker?(marker)
 
         next_command = "hive #{@verb} #{task.slug} --from #{stage_dir(task)}"
-        raise Hive::WrongStage,
-              "#{@verb} cannot advance #{task.slug} from #{stage_dir(task)} while marker is :#{marker.name}; " \
-              "finish the current stage first, then run `#{next_command}`"
+        raise Hive::WrongStage.new(
+          "#{@verb} cannot advance #{task.slug} from #{stage_dir(task)} while marker is :#{marker.name}; " \
+          "finish the current stage first, then run `#{next_command}`",
+          current_stage: stage_dir(task),
+          target_stage: config.fetch(:target)
+        )
       end
 
       # See `Hive::Markers::TERMINAL_MARKER_NAMES` for the canonical

@@ -2,6 +2,7 @@
 /vendor/bundle/
 /tmp/
 *.gem
+!/test/e2e/sample-project/vendor/cache/*.gem
 .byebug_history
 /coverage/
 /.qmd/
@@ -25,3 +26,5 @@
 # locally-scoped runtime outputs, not source.
 /.context
 /.context/
+/test/e2e/runs/*
+!/test/e2e/runs/.gitkeep

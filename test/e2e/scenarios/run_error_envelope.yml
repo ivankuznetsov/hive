@@ -1,0 +1,56 @@
+name: run_error_envelope
+description: hive run --json against a stale-locked task emits a parseable hive-run ErrorPayload (ok=false, error_kind=concurrent_run, exit_code=75).
+tags: [cli-only, error-envelope]
+steps:
+  # Plant a 4-execute task with EXECUTE_STALE so the runner can find it.
+  - kind: seed_state
+    stage: 4-execute
+    slug: error-envelope-task
+    state_file: task.md
+    content: "# Task\n\n<!-- EXECUTE_STALE pass=2 -->\n"
+    files:
+      - path: plan.md
+        content: "# Plan\n\n<!-- COMPLETE -->\n"
+
+  # Plant a fresh lock owned by the test process so `Hive::Lock` raises
+  # ConcurrentRunError (TEMPFAIL=75) when `hive run` tries to acquire it.
+  - kind: ruby_block
+    block: |
+      lock_path = File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "started_at" => Time.now.utc.iso8601,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
+      }.to_yaml)
+
+  # The envelope itself: schema validates against hive-run.v1.json, ok=false,
+  # error_kind=concurrent_run, exit_code=75. Each json_assert reruns the CLI;
+  # we use one assertion per step because the runner supports a single
+  # pick/equals pair per json_assert.
+  - kind: json_assert
+    args: [run, "{slug}", --stage, 4-execute, --json]
+    schema: hive-run
+    expect_exit: 75
+    pick: [ok]
+    equals: false
+
+  - kind: json_assert
+    args: [run, "{slug}", --stage, 4-execute, --json]
+    schema: hive-run
+    expect_exit: 75
+    pick: [error_kind]
+    equals: concurrent_run
+
+  - kind: json_assert
+    args: [run, "{slug}", --stage, 4-execute, --json]
+    schema: hive-run
+    expect_exit: 75
+    pick: [error_class]
+    equals: ConcurrentRunError
+
+  - kind: json_assert
+    args: [run, "{slug}", --stage, 4-execute, --json]
+    schema: hive-run
+    expect_exit: 75
+    pick: [exit_code]
+    equals: 75

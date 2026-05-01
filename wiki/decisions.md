@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-04-26
+updated: 2026-04-29
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside the initial implementation; once `git log` accumulates substantive merges, future ADRs should anchor on those. ADRs 014–021 added 2026-04-26 alongside the 5-review stage.
+**TLDR**: ADRs below were authored alongside implementation work. ADRs 014–021 cover the 5-review stage; ADR-022 covers the agentic e2e test layer.
 
 ## ADR-001: Folder-as-task, not single markdown file
 
@@ -166,6 +166,13 @@ tags: [decisions, adr]
 **Decision:** `Stages::Base.spawn_agent` takes a `status_mode:` kwarg per spawn. Three values: `:state_file_marker` (legacy default — agent writes its own state to `task.state_file`), `:exit_code_only` (for sub-spawns inside an orchestrator — runner judges success purely by exit code; agent's task.md writes are no-ops via mode-gating), `:output_file_exists` (for cases where a side-effect file is the truth). 5-review uses `:exit_code_only` for every sub-spawn; `:state_file_marker` is reserved for stages where the agent IS the orchestrator (today: 2-brainstorm, 3-plan, 4-execute, 6-pr).
 **Consequences:** No marker collision between orchestrator and sub-spawns. The runner's mark/finalize logic stays simple — every sub-spawn returns `{status:, error_message:}` from `Hive::Agent.run!`, and the orchestrator decides what to write to disk.
 
+## ADR-022: Agentic E2E test layer with structured failure artifacts
+
+**Status:** Active
+**Context:** The unit and integration suites load Ruby objects in-process. They catch command semantics, but not packaging/shebang/Thor wiring failures, real `bin/hive` subprocess behaviour, tmux-rendered TUI output, or cross-command choreography as an agent sees it. TUI rendering has no headless Bubble Tea tester in the Ruby binding, so terminal-level coverage needs a real pty surface.
+**Decision:** Add `test/e2e/` as an opt-in outer layer. Scenarios are YAML with a small locked vocabulary plus `ruby_block` for irreducible setup. The harness copies `test/e2e/sample-project/` per scenario, sets run-local `HIVE_HOME`, drives real `bin/hive`, validates JSON against published schemas via `json_schemer`, and drives `hive tui` through tmux private sockets. Each run writes `report.json` (`schema_version: 1`) and failure bundles with pane snapshots, state/log copies, repro scripts, manifests, and environment snapshots.
+**Consequences:** The new layer catches bug classes the in-process suite cannot, especially binary packaging, schema drift, subprocess environment leakage, and TUI render/input regressions. Cost: a second test convention and test-time dependencies (`tmux`, optional `asciinema`). Mitigation: `rake test` remains unchanged; e2e is opt-in via `bin/hive-e2e`/`rake e2e`, and `wiki/e2e.md` documents the artifact contract.
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.
@@ -174,4 +181,5 @@ Once `git log` accumulates real history, future updates should add ADRs from sub
 
 - [[architecture]]
 - [[state-model]]
+- [[e2e]]
 - [[stages/execute]]

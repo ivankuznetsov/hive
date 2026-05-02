@@ -12,10 +12,16 @@ module Hive
       # box. Replaces v1's project-grouped section format; project
       # context now lives in the left pane (Views::ProjectsPane).
       #
-      # Columns: icon · slug · stage · status · age. Tasks are sorted by
-      # `Hive::Commands::Status::ACTION_LABEL_ORDER` so "Ready to plan"
-      # rows appear above "Agent running" rows etc. — the v1 grouping
-      # value is preserved without v1's section-header overhead.
+      # Columns: icon · slug · stage · status · age. Within each
+      # project, rows are sorted by `Hive::Commands::Status::ACTION_LABEL_ORDER`
+      # at Snapshot construction time, so "Ready to plan" appears above
+      # "Agent running" within the same project. At ★ All projects
+      # scope, projects are interleaved in `Hive::Config.registered_projects`
+      # order — the sort is per-project, not global, so a "Ready to plan"
+      # row in project P1 may visually appear after an "Agent running"
+      # row in project P0. Operators relying on cross-project action
+      # grouping should scope to a single project (1-9 or left-pane
+      # selection) instead of staying on ★ All.
       #
       # Border style is decided by `model.pane_focus`: focused panes use
       # the cyan accent border; the inactive pane uses the dim grey one.
@@ -83,15 +89,23 @@ module Hive
             return lines.join("\n")
           end
 
-          rows = visible_rows(model)
-          if rows.empty?
+          visible = visible_snapshot(model)
+          if visible.nil? || visible.projects.all? { |p| p.rows.empty? }
             lines << Styles::HINT.render(EMPTY_PLACEHOLDER)
             return lines.join("\n")
           end
 
-          slug_width = compute_slug_width(inner_width)
-          rows.each_with_index do |row, idx|
-            lines << render_row(row, idx, model, slug_width)
+          layout = compute_layout(inner_width)
+          # Walk the visible snapshot per-project so the per-row index we
+          # check against `model.cursor[1]` matches the cursor's own
+          # row-within-project semantics. A previous flat-rows iteration
+          # mis-highlighted rows at scope=0 when registries had >1
+          # project, because cursor[1] resets to 0 on next-project jump
+          # while a flat iterator keeps incrementing.
+          visible.projects.each_with_index do |project, project_idx|
+            project.rows.each_with_index do |row, row_idx|
+              lines << render_row(row, project_idx, row_idx, model, layout)
+            end
           end
           lines.join("\n")
         end
@@ -105,38 +119,72 @@ module Hive
           end
         end
 
-        # Visible rows derived from the same scope+filter logic v1 used.
-        # The Snapshot operations are pure and return new instances.
-        def visible_rows(model)
+        # Visible-snapshot derivation — same shape v1 used. Returns the
+        # full Snapshot (preserving project boundaries) so the renderer
+        # can iterate per-project and the cursor's
+        # [project_idx, row_idx_in_project] coordinate aligns with
+        # rendering.
+        def visible_snapshot(model)
           snap = model.snapshot
-          return [] if snap.nil?
+          return nil if snap.nil?
 
-          snap.scope_to_project_index(model.scope).filter_by_slug(model.filter).rows
+          snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
         end
 
-        def compute_slug_width(inner_width)
-          fixed = ICON_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
-          [ inner_width - fixed, 8 ].max
+        # Below `inner_width = ICON+STAGE+STATUS+AGE+SEPARATORS+slug_min`
+        # (~48 cells) the 5-column layout overflows. Drop columns in
+        # priority order — first stage (mostly redundant with status),
+        # then status — to keep the line within `inner_width` even on
+        # very narrow terminals. The dropped columns silently shrink to
+        # zero width; row-line builder pads with the remaining widths.
+        def compute_layout(inner_width)
+          slug_min = 8
+          fixed_full = ICON_WIDTH + STAGE_WIDTH + STATUS_WIDTH + AGE_WIDTH + SEPARATORS
+          if inner_width >= fixed_full + slug_min
+            { slug: inner_width - fixed_full, stage: STAGE_WIDTH, status: STATUS_WIDTH }
+          elsif inner_width >= ICON_WIDTH + STATUS_WIDTH + AGE_WIDTH + 3 + slug_min
+            # Drop the stage column; separators reduce from 4 to 3.
+            { slug: inner_width - (ICON_WIDTH + STATUS_WIDTH + AGE_WIDTH + 3), stage: 0, status: STATUS_WIDTH }
+          elsif inner_width >= ICON_WIDTH + AGE_WIDTH + 2 + slug_min
+            # Drop both stage and status.
+            { slug: inner_width - (ICON_WIDTH + AGE_WIDTH + 2), stage: 0, status: 0 }
+          else
+            # Floor at slug_min; row will overflow visually but won't crash.
+            { slug: slug_min, stage: 0, status: 0 }
+          end
         end
 
-        def render_row(row, idx, model, slug_width)
-          highlighted = model.cursor && model.cursor[1] == idx && model.pane_focus == :right
+        def render_row(row, project_idx, row_idx, model, layout)
+          highlighted = highlight?(model, project_idx, row_idx)
           icon = ICONS.fetch(row.action_key.to_s, DEFAULT_ICON)
-          slug = truncate(row.slug.to_s, slug_width).ljust(slug_width)
-          stage = truncate(row.stage.to_s, STAGE_WIDTH).ljust(STAGE_WIDTH)
-          status = truncate(row.action_label.to_s, STATUS_WIDTH).ljust(STATUS_WIDTH)
+          slug = truncate(row.slug.to_s, layout[:slug]).ljust(layout[:slug])
           age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
-          line = "#{icon} #{slug} #{stage} #{status} #{age}"
+          parts = [ "#{icon} #{slug}" ]
+          parts << truncate(row.stage.to_s, layout[:stage]).ljust(layout[:stage]) if layout[:stage].positive?
+          parts << truncate(row.action_label.to_s, layout[:status]).ljust(layout[:status]) if layout[:status].positive?
+          parts << age
+          line = parts.join(" ")
           colored = Styles.for_action_key(row.action_key).render(line)
           highlighted ? Styles::CURSOR_HIGHLIGHT.render(colored) : colored
         end
 
+        # Local alias so call sites in this module keep their concise
+        # `truncate(...)` shape; delegates to the shared Format helper
+        # so ProjectsPane and TasksPane never drift on truncation rules.
         def truncate(label, max_width)
-          return "" if max_width <= 0
-          return label if label.length <= max_width
-          return label[0, max_width] if max_width < 2
+          Format.truncate(label, max_width)
+        end
 
-          "#{label[0, max_width - 1]}…"
+        # Predicate exposed for unit tests because lipgloss-ruby strips
+        # ANSI in non-tty environments, so the rendered output of the
+        # highlighted-row Style.render call is byte-identical to the
+        # unhighlighted line. Tests verify the highlight DECISION here;
+        # visual styling is verified by tty dogfood + e2e asciinema
+        # frames per docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md.
+        def highlight?(model, project_idx, row_idx)
+          !model.cursor.nil? &&
+            model.cursor == [ project_idx, row_idx ] &&
+            model.pane_focus == :right
         end
       end
     end

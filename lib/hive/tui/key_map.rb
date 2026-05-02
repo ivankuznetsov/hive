@@ -218,6 +218,10 @@ module Hive
         return Messages::FILTER_CANCELLED if ESCAPE_KEYS.include?(key)
         return Messages::FILTER_COMMITTED if ENTER_KEYS.include?(key)
         return Messages::FILTER_CHAR_DELETED if key == :key_backspace
+        # See new_idea_message: BubbleModel emits `:space` for SPACE
+        # keypresses; map back to a literal space so slug filters with
+        # spaces (e.g., "rss feeds") work.
+        return Messages::FilterCharAppended.new(char: " ") if key == :space
         return Messages::FilterCharAppended.new(char: key) if printable_filter_char?(key)
 
         Messages::NOOP
@@ -244,11 +248,15 @@ module Hive
       # produces NewIdea* messages. Esc cancels (clears the buffer +
       # returns to :grid); Enter submits (BubbleModel handles the
       # subprocess dispatch); Backspace deletes the trailing character;
-      # any printable char appends.
+      # any printable char appends. Space arrives as the `:space`
+      # symbol from BubbleModel#bubble_key_to_keymap, so it must be
+      # mapped explicitly to a literal space — without this branch,
+      # multi-word titles like "rss feeds" would land as "rssfeeds".
       def new_idea_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key)
         return Messages::NEW_IDEA_SUBMITTED if ENTER_KEYS.include?(key)
         return Messages::NEW_IDEA_CHAR_DELETED if key == :key_backspace
+        return Messages::NewIdeaCharAppended.new(char: " ") if key == :space
         return Messages::NewIdeaCharAppended.new(char: key) if printable_filter_char?(key)
 
         Messages::NOOP

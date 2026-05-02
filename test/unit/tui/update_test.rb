@@ -407,6 +407,26 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal :left, new_model.pane_focus
   end
 
+  # Regression: below TWO_PANE_MIN_COLS the projects pane is suppressed.
+  # If the user could still move focus to :left, j/k would mutate
+  # hidden project scope and the visible task table would lose its
+  # highlight. Single-pane mode pins focus to :right.
+  def test_pane_focus_toggled_pinned_to_right_below_min_cols
+    starting = model.with(pane_focus: :left, cols: 60)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::PANE_FOCUS_TOGGLED)
+    assert_equal :right, new_model.pane_focus,
+                 "Tab in single-pane mode must pin focus to :right (the only visible pane)"
+  end
+
+  def test_pane_focus_changed_left_rejected_below_min_cols
+    starting = model.with(pane_focus: :right, cols: 60)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::PaneFocusChanged.new(target: :left)
+    )
+    assert_equal :right, new_model.pane_focus,
+                 "h in single-pane mode must NOT focus a hidden pane"
+  end
+
   def test_cursor_down_under_left_focus_increments_scope
     starting = model.with(
       snapshot: snap_with_two_projects_three_rows_each,

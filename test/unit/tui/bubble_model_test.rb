@@ -251,6 +251,84 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "Projects", "70 cols is the inclusive boundary — two-pane must render"
   end
 
+  # Regression for v2 P0: bubble_key_to_keymap previously dropped TAB
+  # and SHIFT_TAB on the floor (returned NOOP), making the headline
+  # pane-focus toggle silently dead. KeyMap unit tests bypass the
+  # translator by passing :key_tab directly, so this lives here at the
+  # BubbleModel layer where the bug actually surfaced.
+  def test_bubble_key_to_keymap_translates_tab_to_key_tab
+    fake_km = Object.new
+    fake_km.define_singleton_method(:enter?) { false }
+    fake_km.define_singleton_method(:esc?) { false }
+    fake_km.define_singleton_method(:up?) { false }
+    fake_km.define_singleton_method(:down?) { false }
+    fake_km.define_singleton_method(:backspace?) { false }
+    fake_km.define_singleton_method(:space?) { false }
+    fake_km.define_singleton_method(:tab?) { true }
+    fake_km.define_singleton_method(:char) { "" }
+    fake_km.define_singleton_method(:key_type) { 0 }
+    assert_equal :key_tab, @model.send(:bubble_key_to_keymap, fake_km)
+  end
+
+  def test_bubble_key_to_keymap_translates_shift_tab_to_key_backtab
+    fake_km = Object.new
+    fake_km.define_singleton_method(:enter?) { false }
+    fake_km.define_singleton_method(:esc?) { false }
+    fake_km.define_singleton_method(:up?) { false }
+    fake_km.define_singleton_method(:down?) { false }
+    fake_km.define_singleton_method(:backspace?) { false }
+    fake_km.define_singleton_method(:space?) { false }
+    fake_km.define_singleton_method(:tab?) { false }
+    fake_km.define_singleton_method(:char) { "" }
+    fake_km.define_singleton_method(:key_type) { Bubbletea::KeyMessage::KEY_SHIFT_TAB }
+    assert_equal :key_backtab, @model.send(:bubble_key_to_keymap, fake_km)
+  end
+
+  def test_grid_mode_falls_back_at_cols_69_exclusive_boundary
+    # The exclusive lower boundary of the two-pane layout. cols = 69
+    # must collapse to single-pane (TWO_PANE_MIN_COLS = 70). Without
+    # this test only cols=60 (well below) and cols=70 (inclusive) are
+    # pinned; a refactor that changes < to <= would slip through.
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [
+        { "name" => "hive", "tasks" => [
+          { "slug" => "boundary-task", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+            "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+        ] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 69),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "boundary-task", "tasks pane must still render at the fallback boundary"
+    refute_includes out, "Projects\n", "Projects pane title must NOT appear at cols < 70"
+  end
+
+  # Regression: deleting v1 Views::Grid silently dropped the
+  # stalled-poll banner — transient StateSource errors became
+  # invisible. The v2 composer must surface model.last_error.
+  def test_grid_mode_renders_stalled_banner_when_last_error_set
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    err = StandardError.new("connection refused")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :grid, snapshot: snap, cols: 100, last_error: err
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "stalled",
+                    "stalled banner must appear when last_error is set"
+    assert_includes out, "connection refused",
+                    "stalled banner must surface the error message for diagnosis"
+  end
+
   def test_grid_mode_handles_nil_snapshot
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: nil, cols: 100),
@@ -289,8 +367,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
     with_run_quiet_stub(->(argv) { captured_argv = argv; [ 0, "", "" ] }) do
       @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
     end
-    assert_equal [ "new", "hive", "rss feeds" ], captured_argv,
-                 "submission must shell out to `hive new <project> <title>`"
+    assert_equal [ "hive", "new", "hive", "rss feeds" ], captured_argv,
+                 "submission must shell out to `hive new <project> <title>` " \
+                 "(argv[0] is the executable; Open3.popen3 execs literally)"
     assert_equal :grid, @model.hive_model.mode, "successful submit must return to :grid"
     assert_equal "", @model.hive_model.new_idea_buffer
   end

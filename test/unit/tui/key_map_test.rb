@@ -151,6 +151,24 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  # Regression: BubbleModel#bubble_key_to_keymap emits `:space` for the
+  # SPACE key, but printable_filter_char? returns false for symbols.
+  # Without an explicit branch, multi-word titles like "rss feeds"
+  # would land as "rssfeeds" in the buffer.
+  def test_new_idea_space_symbol_appends_literal_space
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :space, row: nil)
+    assert_kind_of Hive::Tui::Messages::NewIdeaCharAppended, msg
+    assert_equal " ", msg.char
+  end
+
+  # Same regression for filter mode — slug filters with spaces like
+  # "rss feeds" must work too.
+  def test_filter_space_symbol_appends_literal_space
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :space, row: nil)
+    assert_kind_of Hive::Tui::Messages::FilterCharAppended, msg
+    assert_equal " ", msg.char
+  end
+
   def test_grid_enter_from_left_pane_jumps_focus_to_right
     # On the left pane Enter is "select project, focus tasks" — never
     # a verb dispatch. KeyMap routes this without consulting `row`.

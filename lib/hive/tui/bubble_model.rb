@@ -215,6 +215,11 @@ module Hive
         return :key_down if km.down?
         return :key_backspace if km.backspace?
         return :space if km.space?
+        return :key_tab if km.tab?
+        # Bubbletea-Ruby v0.1.4 exposes KEY_SHIFT_TAB as a constant but
+        # not a `shift_tab?` predicate; compare key_type directly so the
+        # v2 two-pane Shift+Tab focus-cycle binding fires.
+        return :key_backtab if km.key_type == Bubbletea::KeyMessage::KEY_SHIFT_TAB
 
         char = km.char
         char.is_a?(String) && !char.empty? ? char[0] : Hive::Tui::Messages::NOOP
@@ -638,25 +643,45 @@ module Hive
       # to :grid without spawning a child.
       def submit_new_idea
         title = @hive_model.new_idea_buffer.to_s.strip
-        return [ flashed("title required").with(mode: :grid, new_idea_buffer: ""), nil ] if title.empty?
+        return [ reset_to_grid_with_flash("title required"), nil ] if title.empty?
 
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
-        if project.nil?
-          return [
-            flashed("no projects — run `hive init <path>` first").with(mode: :grid, new_idea_buffer: ""),
-            nil
-          ]
-        end
+        return [ reset_to_grid_with_flash("no projects — run `hive init <path>` first"), nil ] if project.nil?
 
-        argv = [ "new", project, title ]
+        # argv[0] must be the executable name. `Subprocess.run_quiet!`
+        # invokes Open3.popen3(*cmd) directly, so a missing "hive" prefix
+        # would exec a literal "new" binary and ENOENT (exit 127). Mirror
+        # the canonical shape used by every other run_quiet! caller in
+        # this file and in lib/hive/tui/triage_state.rb.
+        argv = [ "hive", "new", project, title ]
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
-        new_model = @hive_model.with(mode: :grid, new_idea_buffer: "")
         if exit_code.zero?
-          [ new_model.with(flash: "+ #{title.inspect} → #{project}", flash_set_at: Time.now), nil ]
+          [ reset_to_grid_with_flash("+ #{title.inspect} → #{project}"), nil ]
         else
           msg = err.to_s.lines.first&.chomp || "hive new exit #{exit_code}"
-          [ new_model.with(flash: "new failed: #{msg}", flash_set_at: Time.now), nil ]
+          [ reset_to_grid_with_flash("new failed: #{msg}"), nil ]
         end
+      rescue StandardError => e
+        # If the subprocess raises (Errno::ENOENT, Errno::E2BIG from an
+        # oversized title, JSON::GeneratorError on weird bytes, etc.) the
+        # Bubbletea outer rescue would surface a flash but leave us
+        # stuck in :new_idea mode with the buffer intact. Reset to :grid
+        # so the operator can retry without first hitting Esc.
+        Hive::Tui::Debug.log("submit_new_idea", "rescued #{e.class}: #{e.message}")
+        [ reset_to_grid_with_flash("new failed: #{e.class}: #{e.message[0, 80]}"), nil ]
+      end
+
+      # Shared transition for every submit_new_idea exit path: clear the
+      # buffer, return to :grid, set a flash. Three call sites in the
+      # success/validation branches plus the rescue all funnel through
+      # this so the mode/buffer/flash trio always moves together.
+      def reset_to_grid_with_flash(text)
+        @hive_model.with(
+          mode: :grid,
+          new_idea_buffer: "",
+          flash: text,
+          flash_set_at: Time.now
+        )
       end
 
       def reload_findings_into_state(state, _row)
@@ -699,8 +724,14 @@ module Hive
       def compose_two_pane_view(footer: default_footer)
         cols = @hive_model.cols.to_i
         sections = [ header_strip ]
+        sections << stalled_banner if stalled?
         if cols < TWO_PANE_MIN_COLS
-          sections << Views::TasksPane.render(@hive_model, width: [ cols, 40 ].max)
+          # Hand the actual terminal width to the tasks pane; previously
+          # a `[cols, 40].max` floor produced boxes wider than narrow
+          # terminals could render, breaking the rounded border. The
+          # pane already truncates intelligently — let it work with the
+          # real width.
+          sections << Views::TasksPane.render(@hive_model, width: cols)
         else
           sections << join_panes(cols)
         end
@@ -717,6 +748,22 @@ module Hive
         generated_at = @hive_model.snapshot&.generated_at || "-"
         line = "hive tui  scope=#{scope_label}  filter=#{filter_label}  generated_at=#{generated_at}"
         Hive::Tui::Styles::HEADER.render(line)
+      end
+
+      # Stalled-poll banner — surfaces transient StateSource errors so
+      # the operator sees that the displayed snapshot is stale. Without
+      # this, deleting v1 Views::Grid silently dropped the visual cue
+      # (the previous snapshot stayed on screen with no indication).
+      def stalled?
+        !@hive_model.last_error.nil?
+      end
+
+      def stalled_banner
+        err = @hive_model.last_error
+        klass = err.class.name.split("::").last
+        msg = err.message.to_s.lines.first&.chomp.to_s[0, 60]
+        line = msg.empty? ? "[stalled — #{klass}]" : "[stalled — #{klass}: #{msg}]"
+        Hive::Tui::Styles::STALLED.render(line)
       end
 
       # Default footer — context-aware key hints + flash decay (the

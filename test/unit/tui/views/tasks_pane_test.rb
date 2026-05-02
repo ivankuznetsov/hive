@@ -110,22 +110,43 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   # ---- Cursor highlight ----
 
   def test_cursor_highlight_only_applies_when_pane_focus_right
+    # Verifies the focus-gating predicate directly. lipgloss strips ANSI
+    # in non-tty so the rendered output cannot distinguish highlighted
+    # rows; visual confirmation is via tty dogfood + e2e asciinema. The
+    # boolean decision is what unit tests can pin.
+    snap = make_snapshot([ { "name" => "p", "tasks" => [ make_task(slug: "t") ] } ])
+    model_right = make_model(snapshot: snap, pane_focus: :right, cursor: [ 0, 0 ])
+    model_left = make_model(snapshot: snap, pane_focus: :left, cursor: [ 0, 0 ])
+    assert Hive::Tui::Views::TasksPane.highlight?(model_right, 0, 0),
+           "right-focus cursor at [0,0] must highlight that row"
+    refute Hive::Tui::Views::TasksPane.highlight?(model_left, 0, 0),
+           "left-focus cursor at [0,0] must NOT highlight the right pane's row"
+  end
+
+  # Regression for the cursor-coord mismatch that flat-rows iteration
+  # introduced. With cursor [1, 0] at scope=0 multi-project, the render
+  # must highlight the FIRST row of the SECOND project, not the first
+  # row of the first project (which the old `cursor[1] == flat_idx`
+  # check did). Verified via the predicate.
+  def test_highlight_aligns_with_project_idx_at_multi_project_scope
     snap = make_snapshot([
-      { "name" => "hive", "tasks" => [
-        make_task(slug: "row-zero", action: "ready_to_plan", action_label: "Ready to plan")
-      ] }
+      { "name" => "p0", "tasks" => [ make_task(slug: "p0a"), make_task(slug: "p0b") ] },
+      { "name" => "p1", "tasks" => [ make_task(slug: "p1c"), make_task(slug: "p1d") ] }
     ])
-    # Render twice — once with right focus, once with left — and assert
-    # both produce text containing the slug. The actual reverse-video
-    # styling is ANSI-stripped under non-tty.
-    out_right = Hive::Tui::Views::TasksPane.render(
-      make_model(snapshot: snap, pane_focus: :right, cursor: [ 0, 0 ]), width: 80
-    )
-    out_left = Hive::Tui::Views::TasksPane.render(
-      make_model(snapshot: snap, pane_focus: :left, cursor: [ 0, 0 ]), width: 80
-    )
-    assert_includes out_right, "row-zero"
-    assert_includes out_left, "row-zero"
+    model = make_model(snapshot: snap, scope: 0, pane_focus: :right, cursor: [ 1, 0 ])
+    refute Hive::Tui::Views::TasksPane.highlight?(model, 0, 0),
+           "cursor [1, 0] must NOT highlight project 0's first row " \
+           "(regression: flat-rows iteration mismatched cursor coord)"
+    assert Hive::Tui::Views::TasksPane.highlight?(model, 1, 0),
+           "cursor [1, 0] must highlight project 1's first row"
+    refute Hive::Tui::Views::TasksPane.highlight?(model, 1, 1),
+           "cursor [1, 0] must NOT highlight project 1's second row"
+  end
+
+  def test_highlight_returns_false_when_cursor_is_nil
+    model = Hive::Tui::Model.initial.with(snapshot: nil, pane_focus: :right, cursor: nil)
+    refute Hive::Tui::Views::TasksPane.highlight?(model, 0, 0),
+           "nil cursor must not highlight any row"
   end
 
   # ---- Border focus state ----

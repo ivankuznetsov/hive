@@ -87,4 +87,31 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     )
     assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
   end
+
+  # ---- project_label decoration logic ----
+  # The render path covers these transitively, but a direct test pins
+  # the ★→ fallback marker, the explicit-scope path, and the empty-
+  # snapshot placeholder so a regression in the decoration logic
+  # surfaces independently of the prompt layout.
+
+  def test_project_label_marks_star_fallback_with_arrow_prefix
+    model = Hive::Tui::Model.initial.with(
+      snapshot: make_snapshot(%w[hive seyarabata]), scope: 0
+    )
+    assert_equal "★→hive", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
+                 "scope=0 fallback must be visually distinguished from explicit selection"
+  end
+
+  def test_project_label_returns_plain_name_when_scope_n
+    model = Hive::Tui::Model.initial.with(
+      snapshot: make_snapshot(%w[hive seyarabata]), scope: 2
+    )
+    assert_equal "seyarabata", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
+                 "explicit scope must NOT carry the ★→ fallback marker"
+  end
+
+  def test_project_label_handles_no_projects_gracefully
+    model = Hive::Tui::Model.initial.with(snapshot: nil)
+    assert_equal "(no projects)", Hive::Tui::Views::NewIdeaPrompt.project_label(model)
+  end
 end

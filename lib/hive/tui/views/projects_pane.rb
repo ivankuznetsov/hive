@@ -1,5 +1,6 @@
 require "lipgloss"
 require "hive/tui/styles"
+require "hive/tui/views/format"
 
 module Hive
   module Tui
@@ -75,19 +76,15 @@ module Hive
         end
 
         def render_row(label, selected, inner_width)
-          truncated = truncate(label, inner_width)
+          truncated = Format.truncate(label, inner_width)
           padded = truncated.ljust(inner_width)
           selected ? Styles::CURSOR_HIGHLIGHT.render(padded) : padded
         end
 
-        # Truncate with a trailing ellipsis when the label exceeds the
-        # available width. Names of length 1..2 fall back to a hard cut.
+        # Local alias so call sites in this module keep their concise
+        # `truncate(...)` shape; delegates to the shared Format helper.
         def truncate(label, max_width)
-          return "" if max_width <= 0
-          return label if label.length <= max_width
-          return label[0, max_width] if max_width < 2
-
-          "#{label[0, max_width - 1]}…"
+          Format.truncate(label, max_width)
         end
       end
     end

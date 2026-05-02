@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-04-28T00:00:00Z
+updated: 2026-05-01T15:00:00Z
 tags: [command, tui, observability, interactive]
 ---
 

@@ -20,6 +20,21 @@ module Hive
 
           "#{seconds / 86_400}d"
         end
+
+        # Truncate `label` to `max_width` cells, appending an ellipsis
+        # (U+2026) when truncation occurs. `max_width < 2` falls back to
+        # a hard cut without ellipsis (no room for the suffix). Used by
+        # both ProjectsPane and TasksPane for column/cell fitting.
+        # Note: counts code units, not display cells — wide-character
+        # cell math is not done here; emoji and CJK can overflow on
+        # terminals that render them double-width. Acknowledged.
+        def truncate(label, max_width)
+          return "" if max_width <= 0
+          return label if label.length <= max_width
+          return label[0, max_width] if max_width < 2
+
+          "#{label[0, max_width - 1]}…"
+        end
       end
     end
   end

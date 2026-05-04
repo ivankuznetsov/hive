@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-04T11:50:00Z] commands/init — beautified summary
+
+**Action:** Replaced the plain key:value summary printed at the end of `hive init` with a styled summary: green ✔ + bold heading + bold-cyan project name, dim labels in an aligned two-column block, and a cyan `→ next:` prompt. Colors are emitted only when `$stdout.tty?` and `NO_COLOR` is unset/empty, so piped/CI output stays plain. Field labels are now spaced (`default branch`, `hive state`, `worktree root`) instead of underscore-cased. Implementation lives in a nested `Hive::Commands::Init::Palette` so it can be lifted out if other commands want the same treatment.
+
+**Refreshed pages:** none (the existing summary description in `wiki/commands/init.md` already describes it at a level that survives the cosmetic change).
+
 ## [2026-05-01T15:00:00Z] tui — v2 two-pane redesign
 
 **Action:** Replaced v1's single-column action-grouped `Views::Grid` with a two-pane composition: `Views::ProjectsPane` (left, project list with `★ All projects` virtual entry) and `Views::TasksPane` (right, 5-column compact table — icon · slug · stage · status · age). `Views::Grid` and its tests were deleted in the same PR — no `HIVE_TUI_LAYOUT=v1` escape hatch. Pane focus is keyboard-only via `Tab` / `Shift+Tab` / `h` / `l`. `j` / `k` route by `model.pane_focus`: left-pane navigation drives `model.scope`; right-pane navigation drives the row cursor. New `n` keystroke opens an inline new-idea prompt that dispatches `hive new <project> "<title>"` via `Subprocess.run_quiet!` (project resolved from left-pane selection; `★ All` falls back to the first registered project, label shows `★→<name>` so the resolved target is visible). Below 70 cols the project pane is suppressed and the tasks pane occupies the full width. Visual style refresh: rounded borders, focused/dim border distinction (cyan/faint), refined action-key palette (magenta=agent_running, red=error, blue=ready_*, green=archived, yellow=needs_input/review_findings).

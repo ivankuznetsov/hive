@@ -7,7 +7,20 @@ class InitTest < Minitest::Test
   def test_initializes_project_with_orphan_branch_and_global_registration
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        out, _err = capture_io { Hive::Commands::Init.new(dir).call }
+
+        # Summary content contract — agents and humans both rely on these tokens
+        # surviving future refactors of print_summary's layout.
+        name = File.basename(dir)
+        assert_includes out, "hive: initialized"
+        assert_includes out, name
+        assert_includes out, dir
+        assert_includes out, "next: hive new #{name}"
+
+        # capture_io yields a non-tty StringIO; ANSI must be suppressed there
+        # so piped/CI output stays clean. Load-bearing safety property of the
+        # styled summary.
+        refute_match(/\e\[/, out, "ANSI escapes must not appear in non-tty output")
 
         assert File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox"))
         assert File.exist?(File.join(dir, ".hive-state", "config.yml"))

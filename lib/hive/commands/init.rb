@@ -27,11 +27,26 @@ module Hive
 
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
 
-        puts "hive: initialized #{entry['name']} at #{@project_path}"
-        puts "  default_branch: #{ops.default_branch}"
-        puts "  hive_state_path: #{ops.hive_state_path}"
-        puts "  worktree_root: #{worktree_root}"
-        puts "next: hive new #{entry['name']} '<short task description>'"
+        print_summary(entry: entry, ops: ops)
+      end
+
+      def print_summary(entry:, ops:)
+        c = Palette.for($stdout)
+        name = entry["name"]
+        rows = [
+          [ "project",        @project_path ],
+          [ "default branch", ops.default_branch ],
+          [ "hive state",     ops.hive_state_path ],
+          [ "worktree root",  worktree_root ]
+        ]
+        label_width = rows.map { |k, _| k.length }.max
+
+        $stdout.puts "#{c.green('✔')} #{c.bold('hive: initialized')} #{c.bold_cyan(name)}"
+        rows.each do |label, value|
+          $stdout.puts "  #{c.dim(label.ljust(label_width))}  #{value}"
+        end
+        $stdout.puts
+        $stdout.puts "#{c.cyan('→')} #{c.bold('next:')} hive new #{name} '<short task description>'"
       end
 
       def validate_git_repo!
@@ -83,6 +98,37 @@ module Hive
 
       def worktree_root
         File.expand_path("~/Dev/#{File.basename(@project_path)}.worktrees")
+      end
+
+      # Minimal ANSI palette for one-shot CLI summaries. Honors
+      # NO_COLOR and falls back to plain text on non-tty IO so piped
+      # callers (CI, `hive init … | tee …`) get clean output.
+      class Palette
+        CODES = {
+          reset: "\e[0m",
+          bold: "\e[1m",
+          dim: "\e[2m",
+          green: "\e[32m",
+          cyan: "\e[36m",
+          bold_cyan: "\e[1;36m"
+        }.freeze
+
+        def self.for(io)
+          color = io.respond_to?(:tty?) && io.tty? && (ENV["NO_COLOR"].nil? || ENV["NO_COLOR"].empty?)
+          new(color: color)
+        end
+
+        def initialize(color:)
+          @color = color
+        end
+
+        CODES.each_key do |name|
+          next if name == :reset
+
+          define_method(name) do |text|
+            @color ? "#{CODES[name]}#{text}#{CODES[:reset]}" : text.to_s
+          end
+        end
       end
 
       class ProjectConfigBinding

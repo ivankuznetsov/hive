@@ -219,17 +219,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     left, right = @model.send(:pane_widths, 200)
     assert_operator left, :>=, 18
     assert_operator left, :<=, 28
-    assert_equal 200, left + right
+    # Right pane reserves a 1-cell margin so the rightmost border
+    # glyph never lands in the terminal's last column (some terminals
+    # don't reliably render that cell).
+    assert_equal 199, left + right
   end
 
-  def test_pane_widths_floors_quarter
+  def test_pane_widths_floors_quarter_with_right_margin
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(cols: 100),
       dispatch: @dispatch
     )
     left, right = @model.send(:pane_widths, 100)
     assert_equal 25, left, "100 * 0.25 = 25; within [18, 28] so no clamp"
-    assert_equal 75, right
+    assert_equal 74, right, "right pane reserves 1-cell margin (cols - left - 1)"
   end
 
   def test_two_pane_min_cols_constant_is_70

@@ -839,10 +839,19 @@ module Hive
 
       # Visible for tests so the width formula stays inspectable without
       # rendering. Returns [left_width, right_width].
+      #
+      # Right pane gets `cols - left - 1`: leaves a 1-cell right margin
+      # so the bordered-box's rightmost glyph (`│` / `╮` / `╯`) lands
+      # at column `cols - 2`, not `cols - 1`. Some terminals (and some
+      # PTY/tmux configs) don't reliably render the last column —
+      # writing the right border one cell shy guarantees it's visible.
+      # The alternative (writing border to the last column) loses the
+      # right edge on those terminals; the alternative (joining panes
+      # with extra spacing) wastes the same cell anyway.
       def pane_widths(cols)
         soft = (cols * 0.25).floor
         left = soft.clamp(18, 28)
-        right = cols - left
+        right = [ cols - left - 1, 1 ].max
         [ left, right ]
       end
     end

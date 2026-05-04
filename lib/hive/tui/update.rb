@@ -59,6 +59,10 @@ module Hive
           [ apply_cursor_down(model), nil ]
         when Messages::CursorUp
           [ apply_cursor_up(model), nil ]
+        when Messages::CursorJumpTop
+          [ apply_cursor_jump_top(model), nil ]
+        when Messages::CursorJumpBottom
+          [ apply_cursor_jump_bottom(model), nil ]
         when Messages::TriageCursorDown
           [ apply_triage_cursor_down(model), nil ]
         when Messages::TriageCursorUp
@@ -71,6 +75,18 @@ module Hive
           [ apply_back(model), nil ]
         when Messages::ProjectScope
           [ apply_project_scope(model, message), nil ]
+        when Messages::PaneFocusToggled
+          [ apply_pane_focus_toggled(model), nil ]
+        when Messages::PaneFocusChanged
+          [ apply_pane_focus_changed(model, message), nil ]
+        when Messages::OpenNewIdeaPrompt
+          [ apply_open_new_idea_prompt(model), nil ]
+        when Messages::NewIdeaCharAppended
+          [ apply_new_idea_char_appended(model, message), nil ]
+        when Messages::NewIdeaCharDeleted
+          [ apply_new_idea_char_deleted(model), nil ]
+        when Messages::NewIdeaCancelled
+          [ apply_new_idea_cancelled(model), nil ]
         when Messages::Noop
           [ model, nil ]
         when Messages::KeyPressed
@@ -207,12 +223,44 @@ module Hive
         model.with(flash: msg.text, flash_set_at: Time.now)
       end
 
-      # Cursor moves one row down within the same project; on overflow,
-      # advances to the first row of the next project that has visible
-      # rows. Stays clamped at the last row of the last non-empty project
-      # rather than wrapping — wrap would mask the grid's scroll
-      # boundary.
+      # j / KEY_DOWN. Routes by `pane_focus`:
+      #   :left  → advance the projects-pane selection (model.scope).
+      #   :right → advance the task cursor (existing v1 behaviour: row,
+      #            then next project's first row, clamped at the last
+      #            row of the last non-empty project).
       def apply_cursor_down(model)
+        return apply_left_pane_cursor_down(model) if model.pane_focus == :left
+
+        apply_right_pane_cursor_down(model)
+      end
+
+      def apply_cursor_up(model)
+        return apply_left_pane_cursor_up(model) if model.pane_focus == :left
+
+        apply_right_pane_cursor_up(model)
+      end
+
+      # Left-pane navigation drives `model.scope`. Scope 0 = ★ All projects;
+      # 1..projects.size = the Nth registered project. Clamped at both
+      # ends (no wrap — same boundary contract as the right pane).
+      # ProjectScope's snapshot/cursor recompute is reused via
+      # `apply_project_scope` so the right pane stays coherent with
+      # the new scope.
+      def apply_left_pane_cursor_down(model)
+        snap = model.snapshot
+        max_scope = snap ? snap.projects.size : 0
+        return model if model.scope >= max_scope
+
+        apply_project_scope(model, Messages::ProjectScope.new(n: model.scope + 1))
+      end
+
+      def apply_left_pane_cursor_up(model)
+        return model if model.scope <= 0
+
+        apply_project_scope(model, Messages::ProjectScope.new(n: model.scope - 1))
+      end
+
+      def apply_right_pane_cursor_down(model)
         visible = visible_snapshot(model)
         return model if visible.nil? || model.cursor.nil?
 
@@ -228,7 +276,7 @@ module Hive
         end
       end
 
-      def apply_cursor_up(model)
+      def apply_right_pane_cursor_up(model)
         visible = visible_snapshot(model)
         return model if visible.nil? || model.cursor.nil?
 
@@ -246,6 +294,93 @@ module Hive
             model
           end
         end
+      end
+
+      # When the project pane is suppressed (cols < Model::TWO_PANE_MIN_COLS),
+      # focus has nowhere to go on the left — the visible task table
+      # would lose its highlight and j/k would mutate hidden project
+      # scope. Force right focus in that regime; it's the only visible
+      # surface anyway. Threshold lives on Model so render layer
+      # (BubbleModel#compose_two_pane_view) and focus layer here cannot
+      # drift out of sync.
+
+      # `g` jumps to the top of the focused pane. Left pane → scope=0
+      # (★ All projects); right pane → cursor=[first_visible_project, 0].
+      def apply_cursor_jump_top(model)
+        if model.pane_focus == :left
+          model.with(scope: 0)
+        else
+          visible = visible_snapshot(model)
+          return model if visible.nil?
+
+          first_idx = next_non_empty_project_idx(visible, 0)
+          first_idx ? model.with(cursor: [ first_idx, 0 ]) : model
+        end
+      end
+
+      # `G` jumps to the bottom of the focused pane. Left pane →
+      # scope=projects.size (last registered project); right pane →
+      # cursor=[last_visible_project, last_row].
+      def apply_cursor_jump_bottom(model)
+        if model.pane_focus == :left
+          snap = model.snapshot
+          return model if snap.nil?
+
+          model.with(scope: snap.projects.size)
+        else
+          visible = visible_snapshot(model)
+          return model if visible.nil?
+
+          last_idx = prev_non_empty_project_idx(visible, visible.projects.size - 1)
+          return model if last_idx.nil?
+
+          last_row = visible.projects[last_idx].rows.size - 1
+          model.with(cursor: [ last_idx, last_row ])
+        end
+      end
+
+      def apply_pane_focus_toggled(model)
+        return model.with(pane_focus: :right) if model.cols.to_i < Model::TWO_PANE_MIN_COLS
+
+        target = model.pane_focus == :left ? :right : :left
+        model.with(pane_focus: target)
+      end
+
+      def apply_pane_focus_changed(model, msg)
+        return model unless %i[left right].include?(msg.target)
+        # Reject :left transitions when the project pane is suppressed —
+        # h/Tab in single-pane mode is a no-op rather than a stuck focus
+        # on a hidden pane.
+        return model.with(pane_focus: :right) if msg.target == :left && model.cols.to_i < Model::TWO_PANE_MIN_COLS
+
+        model.with(pane_focus: msg.target)
+      end
+
+      # ---- New-idea prompt handlers (U6) ----
+      #
+      # Submit (`Messages::NewIdeaSubmitted`) is intentionally NOT
+      # handled here — it requires a subprocess call (`hive new …`)
+      # which lives in BubbleModel#handle_side_effect. That preserves
+      # Update's purity (no I/O, no Bubbletea coupling). On submit the
+      # BubbleModel reads `model.new_idea_buffer`, dispatches the child,
+      # and resets the model via `apply_new_idea_cancelled`-equivalent
+      # transition (mode → :grid, buffer cleared) on either success or
+      # validation failure.
+
+      def apply_open_new_idea_prompt(model)
+        model.with(mode: :new_idea, new_idea_buffer: "")
+      end
+
+      def apply_new_idea_char_appended(model, msg)
+        model.with(new_idea_buffer: model.new_idea_buffer.to_s + msg.char)
+      end
+
+      def apply_new_idea_char_deleted(model)
+        model.with(new_idea_buffer: model.new_idea_buffer.to_s[0..-2].to_s)
+      end
+
+      def apply_new_idea_cancelled(model)
+        model.with(mode: :grid, new_idea_buffer: "")
       end
 
       def apply_show_help(model)

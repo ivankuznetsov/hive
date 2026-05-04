@@ -19,13 +19,18 @@ module Hive
 
         module_function
 
-        def render(model)
+        def render(model, width: model.cols.to_i)
           # Cursor block at end of buffer — visual feedback that the
           # input is live. Render via Lipgloss reverse so it pops on
-          # both light and dark themes.
+          # both light and dark themes. Long buffers slide the visible
+          # window so the cursor stays at the right edge (real-shell
+          # behavior); without this the rendered line overflows the
+          # terminal and disappears off the right side.
           buffer = model.filter_buffer.to_s
+          available = [ width - PROMPT.length - 2, 1 ].max
+          visible_buffer = buffer.length <= available ? buffer : buffer[-available, available].to_s
           cursor = Styles::CURSOR_HIGHLIGHT.render(" ")
-          "#{PROMPT}#{buffer}#{cursor}"
+          "#{PROMPT}#{visible_buffer}#{cursor}"
         end
       end
     end

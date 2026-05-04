@@ -62,7 +62,7 @@ class TuiHelpTest < Minitest::Test
   end
 
   def test_modes_are_drawn_from_a_known_set
-    expected_modes = %i[grid triage log_tail filter].to_set
+    expected_modes = %i[grid triage log_tail filter new_idea].to_set
     actual_modes = Hive::Tui::Help::BINDINGS.map { |b| b[:mode] }.to_set
     extra = actual_modes - expected_modes
     assert_empty extra, "unexpected modes in BINDINGS: #{extra.inspect}"
@@ -92,7 +92,11 @@ class TuiHelpTest < Minitest::Test
   # known TUI-internal actions. A typo in BINDINGS or a renamed verb
   # would otherwise leave the cheatsheet pointing at vapor.
   def test_no_grid_mode_binding_references_a_nonexistent_verb
-    known_non_verb_actions = %i[cursor_down cursor_up open_contextual filter project_scope help quit]
+    known_non_verb_actions = %i[
+      cursor_down cursor_up cursor_jump_top cursor_jump_bottom
+      open_contextual filter project_scope help quit
+      pane_focus_toggle pane_focus_left pane_focus_right new_idea
+    ]
     Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|
       action = entry[:action]
       next unless action.to_s.match?(/\A[a-z_]+\z/) # skip non-verb actions

@@ -78,4 +78,48 @@ class HiveTuiMessagesTest < Minitest::Test
     msg = Hive::Tui::Messages::KeyPressed.new(key: "q")
     assert msg.frozen?, "Data.define records must be frozen"
   end
+
+  # ---- v2 two-pane messages ----
+
+  def test_pane_focus_toggled_singleton
+    assert Hive::Tui::Messages::PANE_FOCUS_TOGGLED.frozen?
+    assert_kind_of Hive::Tui::Messages::PaneFocusToggled,
+                   Hive::Tui::Messages::PANE_FOCUS_TOGGLED
+  end
+
+  def test_pane_focus_changed_carries_target
+    msg = Hive::Tui::Messages::PaneFocusChanged.new(target: :left)
+    assert_equal :left, msg.target
+  end
+
+  def test_pane_focus_changed_accepts_right
+    msg = Hive::Tui::Messages::PaneFocusChanged.new(target: :right)
+    assert_equal :right, msg.target
+  end
+
+  def test_open_new_idea_prompt_singleton
+    assert Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT.frozen?
+    assert_kind_of Hive::Tui::Messages::OpenNewIdeaPrompt,
+                   Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT
+  end
+
+  def test_new_idea_char_appended_carries_char
+    msg = Hive::Tui::Messages::NewIdeaCharAppended.new(char: "r")
+    assert_equal "r", msg.char
+  end
+
+  def test_new_idea_singletons_are_frozen
+    assert Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_SUBMITTED.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_CANCELLED.frozen?
+  end
+
+  def test_new_idea_singleton_classes
+    assert_kind_of Hive::Tui::Messages::NewIdeaCharDeleted,
+                   Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED
+    assert_kind_of Hive::Tui::Messages::NewIdeaSubmitted,
+                   Hive::Tui::Messages::NEW_IDEA_SUBMITTED
+    assert_kind_of Hive::Tui::Messages::NewIdeaCancelled,
+                   Hive::Tui::Messages::NEW_IDEA_CANCELLED
+  end
 end

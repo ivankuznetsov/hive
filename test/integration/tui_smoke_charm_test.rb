@@ -1,5 +1,6 @@
 require "test_helper"
 require "pty"
+require "io/console"
 require "hive/commands/init"
 require "hive/commands/new"
 
@@ -54,14 +55,23 @@ class TuiSmokeCharmTest < Minitest::Test
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "smoke probe").call }
 
+        # v2 left-pane truncates long project names; match a stable
+        # prefix (production project names like "hive" / "appcrawl"
+        # always fit, but the tmpdir basename does not).
+        project_prefix = project[0, 12]
+
         env = { "TERM" => "xterm-256color", "HIVE_TUI_BACKEND" => "charm" }
         PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+          # Default PTY winsize trips v2's single-pane fallback (<70 cols);
+          # explicitly size to 120x30 so the projects pane renders.
+          reader.winsize = [ 30, 120 ]
+
           buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
-            buf.include?(project)
+            buf.include?(project_prefix)
           end
-          assert_includes buffer, project,
-                          "the seeded project name must appear in the first " \
-                          "frame within 10s, got buffer:\n#{buffer.inspect[0, 500]}"
+          assert_includes buffer, project_prefix,
+                          "a stable prefix of the seeded project name must appear in " \
+                          "the first frame within 10s, got buffer:\n#{buffer.inspect[0, 500]}"
 
           writer.write("q")
           writer.flush

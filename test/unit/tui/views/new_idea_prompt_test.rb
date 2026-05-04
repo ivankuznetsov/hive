@@ -114,4 +114,41 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     model = Hive::Tui::Model.initial.with(snapshot: nil)
     assert_equal "(no projects)", Hive::Tui::Views::NewIdeaPrompt.project_label(model)
   end
+
+  # ---- Width clamping (sliding-window for long buffers) ----
+  # Without this, a long title like "I want to collect and process
+  # bookmarks from my twitter account..." overflows the terminal —
+  # the rendered line just runs off the right edge instead of
+  # scrolling. Operator-visible regression on first dogfood.
+
+  def test_long_buffer_slides_to_show_tail_within_cols
+    long = ("a" * 60) + ("z" * 60) # 120 chars
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_buffer: long, cols: 50
+    )
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+    refute_includes out, ("a" * 60),
+                    "leading 60 a's must NOT render at cols=50; sliding-window keeps the tail"
+    assert_includes out, "zzzz",
+                    "trailing portion of buffer must remain visible (cursor stays at right edge)"
+  end
+
+  def test_buffer_within_cols_renders_in_full
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_buffer: "rss feeds", cols: 100
+    )
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+    assert_includes out, "rss feeds", "short buffer must render verbatim"
+  end
+
+  def test_explicit_width_kwarg_clamps_independently_of_cols
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_buffer: "x" * 80, cols: 200
+    )
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model, width: 30)
+    refute_match(/x{80}/, out, "width: kwarg must clamp regardless of model.cols")
+  end
 end

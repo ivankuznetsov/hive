@@ -22,11 +22,21 @@ module Hive
 
         module_function
 
-        def render(model)
+        # `width:` is the terminal width (model.cols). The label +
+        # buffer + cursor must fit on a single line; longer buffers
+        # slide the visible window so the cursor stays at the right
+        # edge (real-shell behavior). Without this, the rendered line
+        # overflows the terminal and disappears off the right side.
+        def render(model, width: model.cols.to_i)
           buffer = model.new_idea_buffer.to_s
-          cursor = Styles::CURSOR_HIGHLIGHT.render(" ")
           label = "#{PROMPT_PREFIX}#{project_label(model)}): "
-          "#{Styles::HINT.render(label)}#{buffer}#{cursor}"
+          # Available cells for the buffer = total - label - 1 (cursor)
+          # - 1 (right margin so the cursor block doesn't sit at the
+          # very last column where some terminals wrap).
+          available = [ width - label.length - 2, 1 ].max
+          visible_buffer = buffer.length <= available ? buffer : buffer[-available, available].to_s
+          cursor = Styles::CURSOR_HIGHLIGHT.render(" ")
+          "#{Styles::HINT.render(label)}#{visible_buffer}#{cursor}"
         end
 
         # Resolve which project an idea would land in. Pure read of the

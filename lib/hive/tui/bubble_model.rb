@@ -726,13 +726,16 @@ module Hive
       # footer line is replaced by the filter prompt. Bubble Tea diffs
       # against the previous frame so a one-line change paints cheaply.
       def compose_filter_view
-        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model))
+        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model, width: @hive_model.cols.to_i))
       end
 
       # New-idea mode: same composition; footer = the inline prompt with
       # the project label so the operator sees the resolved target.
+      # Width clamps the prompt so long titles don't overflow the
+      # terminal — the visible buffer slides to keep the cursor on
+      # screen (see Views::NewIdeaPrompt.render).
       def compose_new_idea_view
-        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model))
+        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model, width: @hive_model.cols.to_i))
       end
 
       # ---- v2 two-pane composition ----

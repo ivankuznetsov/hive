@@ -130,7 +130,7 @@ A starter shape is committed at `config.example.yml` for reference.
 
 ### Per-project: `<project>/.hive-state/config.yml`
 
-Created by `hive init` from `templates/project_config.yml.erb`. On TTY `hive init` opens an interactive prompt for the per-stage agents and limits; on non-TTY (CI, pipes, scripted callers) it falls through to recommended defaults (`claude` for planning, `codex` for development, all three default reviewers, generous limits). See [[wiki/commands/init.md]] for the full prompt flow.
+Created by `hive init` from `templates/project_config.yml.erb`. On TTY `hive init` opens an interactive prompt for the per-stage agents and limits; on non-TTY (CI, pipes, scripted callers) it falls through to recommended defaults (`claude` for planning, `codex` for development, all three default reviewers, generous limits). See `wiki/commands/init.md` for the full prompt flow.
 
 ```yaml
 project_name: your-project

@@ -51,8 +51,8 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 Auto-required from `lib/hive/agent_profiles.rb`:
 
 - `claude` — `--dangerously-skip-permissions`, `--add-dir`, `--budget`, headless via `-p`. Min version `2.1.118`. `:state_file_marker` mode.
-- `codex` — `--no-confirm`, no add-dir flag (triggers `warn_isolation_reduced` per ADR-018), `--max-cost`. Min version `0.125.0`. `:state_file_marker`.
-- `pi` — preflight checks for `~/.pi/agent/auth.json`. No add-dir flag. Min version `0.70.2`.
+- `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output. No native budget flag (hive enforces wall-clock timeout only). Min version `0.125.0`. `:output_file_exists`.
+- `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `~/.pi/agent/auth.json`. Min version `0.70.2`. `:output_file_exists`.
 
 ## Used by
 

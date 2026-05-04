@@ -14,7 +14,8 @@ tags: [stage, brainstorm, qa]
 - **State file**: `brainstorm.md` (touched empty if absent so the marker write has a target).
 - **Prompt**: `templates/brainstorm_prompt.md.erb`, rendered with `project_name`, `task_folder`, `idea_text`. Idea text is wrapped in `<user_supplied content_type="idea_text">…</user_supplied>` per the prompt-injection boundary policy.
 - **Agent invocation**: `cwd = task.folder`, `--add-dir <project_root>` (so `claude` picks up the project's `CLAUDE.md` / `.claude/`), `log_label = "brainstorm"`.
-- **Budgets**: `cfg["budget_usd"]["brainstorm"]` (default 10), `cfg["timeout_sec"]["brainstorm"]` (default 300).
+- **Profile**: `Hive::Stages::Base.stage_profile(cfg, "brainstorm")` — reads `cfg.dig("brainstorm", "agent")` with `|| "claude"` fallback so legacy configs keep working. Spawn pins `status_mode: :state_file_marker` regardless of profile, because brainstorm's lifecycle contract is the WAITING/COMPLETE marker the agent writes to `brainstorm.md` — codex's profile default `:output_file_exists` would never satisfy that.
+- **Budgets**: `cfg["budget_usd"]["brainstorm"]` (default 50), `cfg["timeout_sec"]["brainstorm"]` (default 1800). Bumped ~5× in plan 2026-05-04-001 — generous sanity caps for runaway agents, not cost targets.
 
 ## Agent behaviour (per `templates/brainstorm_prompt.md.erb`)
 

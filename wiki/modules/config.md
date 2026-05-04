@@ -92,10 +92,11 @@ Rules:
 
 ## Validation (`Config.validate!`)
 
-Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Two checks:
+Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Three checks (in order):
 
-1. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
-2. **`validate_role_agent_names!`** — every path in `ROLE_AGENT_PATHS` (`review.ci.agent`, `review.triage.agent`, `review.fix.agent`, `review.browser_test.agent`) is checked via `validate_agent_name!`.
+1. **`validate_hash_shaped_keys!`** — every key in `HASH_SHAPED_KEYS = %w[brainstorm plan execute budget_usd timeout_sec review agents]` must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` — `deep_merge(default_hash, scalar)` returns the scalar unchanged — and crash later as `TypeError`/`NoMethodError` when stage code calls `cfg.dig("brainstorm", "agent")`. Error message hints either dropping the key (defaults apply) or supplying the right `{ ... }` shape. Closes ce-code-review F1 (P1).
+2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
+3. **`validate_role_agent_names!`** — every path in `ROLE_AGENT_PATHS` (`review.ci.agent`, `review.triage.agent`, `review.fix.agent`, `review.browser_test.agent`, `brainstorm.agent`, `plan.agent`, `execute.agent`) is checked via `validate_agent_name!`.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

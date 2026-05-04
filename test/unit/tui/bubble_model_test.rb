@@ -167,6 +167,338 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "/auth"
   end
 
+  # ---- v2 two-pane composition ----
+
+  def test_grid_mode_renders_both_panes_at_full_width
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [
+        { "name" => "hive", "tasks" => [
+          { "slug" => "fix-cache-x", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+            "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+        ] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 100),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "Projects",      "left pane (Projects header) must render at >=70 cols"
+    assert_includes out, "★ All projects"
+    assert_includes out, "fix-cache-x",   "right pane task row must render"
+    assert_includes out, "Tasks ·",       "tasks pane title must render"
+    assert_includes out, "[Tab] switch",  "default footer hints must appear"
+  end
+
+  def test_grid_mode_collapses_to_single_pane_below_min_cols
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [
+        { "name" => "hive", "tasks" => [
+          { "slug" => "narrow-task", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+            "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+        ] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 60),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "narrow-task", "tasks pane must still render below the threshold"
+    refute_includes out, "Projects\n", "Projects pane title must NOT appear when collapsed"
+    refute_includes out, "★ All projects\n", "left pane (with ★ prefix) must not render at narrow widths"
+  end
+
+  def test_pane_widths_clamps_left_to_18_28_range
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(cols: 200),
+      dispatch: @dispatch
+    )
+    left, right = @model.send(:pane_widths, 200)
+    assert_operator left, :>=, 18
+    assert_operator left, :<=, 28
+    # Right pane reserves a 1-cell margin so the rightmost border
+    # glyph never lands in the terminal's last column (some terminals
+    # don't reliably render that cell).
+    assert_equal 199, left + right
+  end
+
+  def test_pane_widths_floors_quarter_with_right_margin
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(cols: 100),
+      dispatch: @dispatch
+    )
+    left, right = @model.send(:pane_widths, 100)
+    assert_equal 25, left, "100 * 0.25 = 25; within [18, 28] so no clamp"
+    assert_equal 74, right, "right pane reserves 1-cell margin (cols - left - 1)"
+  end
+
+  def test_two_pane_min_cols_constant_is_70
+    assert_equal 70, Hive::Tui::BubbleModel::TWO_PANE_MIN_COLS
+  end
+
+  def test_grid_mode_renders_at_exactly_70_cols
+    # Boundary: cols == 70 must use two-pane layout (inclusive on the
+    # upper side of the fallback test).
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 70),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "Projects", "70 cols is the inclusive boundary — two-pane must render"
+  end
+
+  # Regression for v2 P0: bubble_key_to_keymap previously dropped TAB
+  # and SHIFT_TAB on the floor (returned NOOP), making the headline
+  # pane-focus toggle silently dead. KeyMap unit tests bypass the
+  # translator by passing :key_tab directly, so this lives here at the
+  # BubbleModel layer where the bug actually surfaced.
+  def test_bubble_key_to_keymap_translates_tab_to_key_tab
+    fake_km = Object.new
+    fake_km.define_singleton_method(:enter?) { false }
+    fake_km.define_singleton_method(:esc?) { false }
+    fake_km.define_singleton_method(:up?) { false }
+    fake_km.define_singleton_method(:down?) { false }
+    fake_km.define_singleton_method(:backspace?) { false }
+    fake_km.define_singleton_method(:space?) { false }
+    fake_km.define_singleton_method(:tab?) { true }
+    fake_km.define_singleton_method(:char) { "" }
+    fake_km.define_singleton_method(:key_type) { 0 }
+    assert_equal :key_tab, @model.send(:bubble_key_to_keymap, fake_km)
+  end
+
+  def test_bubble_key_to_keymap_translates_shift_tab_to_key_backtab
+    fake_km = Object.new
+    fake_km.define_singleton_method(:enter?) { false }
+    fake_km.define_singleton_method(:esc?) { false }
+    fake_km.define_singleton_method(:up?) { false }
+    fake_km.define_singleton_method(:down?) { false }
+    fake_km.define_singleton_method(:backspace?) { false }
+    fake_km.define_singleton_method(:space?) { false }
+    fake_km.define_singleton_method(:tab?) { false }
+    fake_km.define_singleton_method(:char) { "" }
+    fake_km.define_singleton_method(:key_type) { Bubbletea::KeyMessage::KEY_SHIFT_TAB }
+    assert_equal :key_backtab, @model.send(:bubble_key_to_keymap, fake_km)
+  end
+
+  def test_grid_mode_falls_back_at_cols_69_exclusive_boundary
+    # The exclusive lower boundary of the two-pane layout. cols = 69
+    # must collapse to single-pane (TWO_PANE_MIN_COLS = 70). Without
+    # this test only cols=60 (well below) and cols=70 (inclusive) are
+    # pinned; a refactor that changes < to <= would slip through.
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [
+        { "name" => "hive", "tasks" => [
+          { "slug" => "boundary-task", "stage" => "2-brainstorm", "action" => "ready_to_plan",
+            "action_label" => "Ready to plan", "age_seconds" => 60, "marker" => "complete" }
+        ] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: snap, cols: 69),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "boundary-task", "tasks pane must still render at the fallback boundary"
+    refute_includes out, "Projects\n", "Projects pane title must NOT appear at cols < 70"
+  end
+
+  # Regression: deleting v1 Views::Grid silently dropped the
+  # stalled-poll banner — transient StateSource errors became
+  # invisible. The v2 composer must surface model.last_error.
+  def test_grid_mode_renders_stalled_banner_when_last_error_set
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    err = StandardError.new("connection refused")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :grid, snapshot: snap, cols: 100, last_error: err
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "stalled",
+                    "stalled banner must appear when last_error is set"
+    assert_includes out, "connection refused",
+                    "stalled banner must surface the error message for diagnosis"
+  end
+
+  def test_grid_mode_handles_nil_snapshot
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, snapshot: nil, cols: 100),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    refute_nil out, "nil snapshot must not crash compose_two_pane_view"
+    assert out.is_a?(String)
+  end
+
+  # ---- v2 new-idea submission ----
+
+  # Stub Hive::Tui::Subprocess.run_quiet! for the duration of a block.
+  # Saves/restores the original via singleton-method swap so multiple
+  # tests don't leak across each other when run in random order.
+  def with_run_quiet_stub(stub_proc)
+    sentinel = Hive::Tui::Subprocess.method(:run_quiet!)
+    Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, sentinel) if sentinel
+  end
+
+  def test_new_idea_submission_dispatches_hive_new_with_resolved_project
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "rss feeds"
+      ),
+      dispatch: @dispatch
+    )
+    captured_argv = nil
+    with_run_quiet_stub(->(argv) { captured_argv = argv; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal [ "hive", "new", "hive", "rss feeds" ], captured_argv,
+                 "submission must shell out to `hive new <project> <title>` " \
+                 "(argv[0] is the executable; Open3.popen3 execs literally)"
+    assert_equal :grid, @model.hive_model.mode, "successful submit must return to :grid"
+    assert_equal "", @model.hive_model.new_idea_buffer
+  end
+
+  def test_new_idea_submission_with_empty_buffer_flashes_and_stays_in_new_idea
+    # Plan §U6: empty/whitespace title flashes "title required" and
+    # STAYS in :new_idea mode so the operator can keep typing without
+    # re-opening via `n` after a fat-finger Enter. The buffer is
+    # preserved (strip is validation-only) so any leading whitespace
+    # the operator typed isn't lost.
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "   "
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "empty/whitespace buffer must NOT spawn a subprocess"
+    assert_equal :new_idea, @model.hive_model.mode,
+                 "fat-finger Enter must NOT close the prompt"
+    assert_equal "   ", @model.hive_model.new_idea_buffer,
+                 "buffer is preserved so the operator's typing isn't lost"
+    assert_match(/title required/, @model.hive_model.flash.to_s)
+  end
+
+  def test_new_idea_submission_with_unhealthy_project_flashes_specific_error
+    # When `demo` is registered but its path is gone (a stale
+    # registration after `rm -rf`), submit must NOT dispatch to a
+    # doomed `bin/hive new` — the resulting subprocess would partially
+    # write idea.md then fail at `git add` against the missing dir.
+    # The flash must name the actual problem so the operator can
+    # `hive deregister` or re-init.
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        { "name" => "demo", "error" => "missing_project_path", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 1, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "must NOT dispatch against a project with error: state"
+    assert_match(/demo.*missing project path/, @model.hive_model.flash.to_s,
+                 "flash must name the project AND the specific error")
+  end
+
+  def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01", "projects" => []
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count
+    assert_match(/no projects/, @model.hive_model.flash.to_s)
+  end
+
+  # Regression for the rescue path in submit_new_idea. Errno::E2BIG
+  # (oversized argv), ArgumentError (downstream model.with typo), or
+  # Encoding::CompatibilityError (weird bytes) all bubble out of
+  # run_quiet!. The rescue must flash a useful message AND preserve
+  # the typed buffer + :new_idea mode so the operator can retry
+  # without retyping — consistent with the empty-title UX, NOT the
+  # validation-failure UX which clears the buffer.
+  def test_new_idea_submission_rescues_subprocess_exception_and_preserves_buffer
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "rss feeds"
+      ),
+      dispatch: @dispatch
+    )
+    with_run_quiet_stub(->(_argv) { raise Errno::E2BIG, "Argument list too long" }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal :new_idea, @model.hive_model.mode,
+                 "rescue path must keep operator in :new_idea, not clobber to :grid"
+    assert_equal "rss feeds", @model.hive_model.new_idea_buffer,
+                 "rescue path must preserve typed buffer (don't make the user retype)"
+    assert_match(/new failed.*E2BIG/, @model.hive_model.flash.to_s,
+                 "flash must surface the actionable error class")
+  end
+
+  def test_new_idea_submission_subprocess_failure_surfaces_in_flash
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    with_run_quiet_stub(->(_argv) { [ 1, "", "boom: bad name\n" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_match(/new failed/, @model.hive_model.flash.to_s)
+    assert_match(/boom: bad name/, @model.hive_model.flash.to_s)
+    assert_equal :grid, @model.hive_model.mode, "failure still returns to :grid"
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block

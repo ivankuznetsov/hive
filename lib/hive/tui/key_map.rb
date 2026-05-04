@@ -56,29 +56,49 @@ module Hive
       }.freeze
 
       # @api public
-      def message_for(mode:, key:, row:)
+      # `pane_focus:` is the v2 two-pane layout's focus indicator. v1
+      # behaviour is preserved for callers that don't pass it (defaults
+      # to :right, matching v1's single-pane interaction surface). Under
+      # `:left` focus, j/k still emit `CURSOR_DOWN` / `CURSOR_UP`; the
+      # routing-by-focus is in `Update.apply_cursor_*`. Enter on the
+      # left pane jumps focus to the right (handled here so the dispatch
+      # machinery in Update doesn't need a focus-aware branch).
+      def message_for(mode:, key:, row:, pane_focus: :right)
         case mode
-        when :grid then grid_message(key: key, row: row)
+        when :grid then grid_message(key: key, row: row, pane_focus: pane_focus)
         when :triage then triage_message(key: key, row: row)
         when :log_tail then log_tail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
+        when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
         end
       end
 
-      def grid_message(key:, row:)
+      def grid_message(key:, row:, pane_focus: :right)
+        # Pane-focus navigation runs first — it doesn't need a row.
+        return Messages::PANE_FOCUS_TOGGLED if key == :key_tab || key == :key_backtab
+        return Messages::PaneFocusChanged.new(target: :left) if key == "h"
+        return Messages::PaneFocusChanged.new(target: :right) if key == "l"
+
         global = global_grid_message(key)
         return global if global
 
-        # Cursor navigation must work even when the cursor sits on no
-        # visible row — without this branch j/k after a filter that
-        # hides the prior cursor returns NOOP, leaving the user wedged
-        # with visible matches and no way to navigate to them. The
-        # downstream apply_cursor_* handlers re-derive a usable cursor
-        # from the visible snapshot when the current cursor is invalid.
+        # Cursor navigation works regardless of focus — Update routes
+        # j/k/g/G by `model.pane_focus` (left → scope, right → row).
         return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
         return Messages::CURSOR_UP if UP_KEYS.include?(key)
+        return Messages::CURSOR_JUMP_TOP if key == "g"
+        return Messages::CURSOR_JUMP_BOTTOM if key == "G"
+
+        # Enter from the left pane jumps focus to the right pane,
+        # regardless of what's under the cursor. This way the operator
+        # selects a project on the left, presses Enter, and immediately
+        # has the task table focused for verb dispatch.
+        if pane_focus == :left && ENTER_KEYS.include?(key)
+          return Messages::PaneFocusChanged.new(target: :right)
+        end
+
         return Messages::NOOP if row.nil?
 
         return verb_message(row) if VERB_KEYS.key?(key)
@@ -93,6 +113,7 @@ module Hive
         return Messages::TERMINATE_REQUESTED if key == "q"
         return Messages::SHOW_HELP if key == "?"
         return Messages::OPEN_FILTER_PROMPT if key == "/"
+        return Messages::OPEN_NEW_IDEA_PROMPT if key == "n"
         return Messages::ProjectScope.new(n: key.to_i) if key.is_a?(String) && key.match?(/\A[0-9]\z/)
 
         nil
@@ -199,6 +220,10 @@ module Hive
         return Messages::FILTER_CANCELLED if ESCAPE_KEYS.include?(key)
         return Messages::FILTER_COMMITTED if ENTER_KEYS.include?(key)
         return Messages::FILTER_CHAR_DELETED if key == :key_backspace
+        # See new_idea_message: BubbleModel emits `:space` for SPACE
+        # keypresses; map back to a literal space so slug filters with
+        # spaces (e.g., "rss feeds") work.
+        return Messages::FilterCharAppended.new(char: " ") if key == :space
         return Messages::FilterCharAppended.new(char: key) if printable_filter_char?(key)
 
         Messages::NOOP
@@ -219,6 +244,24 @@ module Hive
       # cased here because they should also dismiss.
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         Messages::BACK
+      end
+
+      # New-idea prompt mode — same key shape as `:filter` mode but
+      # produces NewIdea* messages. Esc cancels (clears the buffer +
+      # returns to :grid); Enter submits (BubbleModel handles the
+      # subprocess dispatch); Backspace deletes the trailing character;
+      # any printable char appends. Space arrives as the `:space`
+      # symbol from BubbleModel#bubble_key_to_keymap, so it must be
+      # mapped explicitly to a literal space — without this branch,
+      # multi-word titles like "rss feeds" would land as "rssfeeds".
+      def new_idea_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key)
+        return Messages::NEW_IDEA_SUBMITTED if ENTER_KEYS.include?(key)
+        return Messages::NEW_IDEA_CHAR_DELETED if key == :key_backspace
+        return Messages::NewIdeaCharAppended.new(char: " ") if key == :space
+        return Messages::NewIdeaCharAppended.new(char: key) if printable_filter_char?(key)
+
+        Messages::NOOP
       end
 
       # Shared DispatchCommand builder. `argv[1]` is the workflow verb

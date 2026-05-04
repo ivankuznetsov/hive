@@ -367,6 +367,194 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal [ 0, 2 ], new_model.cursor
   end
 
+  # ---- v2 pane focus + left-pane cursor routing ----
+
+  def test_pane_focus_toggled_flips_right_to_left
+    starting = model.with(pane_focus: :right)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::PANE_FOCUS_TOGGLED)
+    assert_equal :left, new_model.pane_focus
+  end
+
+  def test_pane_focus_toggled_flips_left_to_right
+    starting = model.with(pane_focus: :left)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::PANE_FOCUS_TOGGLED)
+    assert_equal :right, new_model.pane_focus
+  end
+
+  def test_pane_focus_changed_sets_explicit_target_left
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model.with(pane_focus: :right),
+      Hive::Tui::Messages::PaneFocusChanged.new(target: :left)
+    )
+    assert_equal :left, new_model.pane_focus
+  end
+
+  def test_pane_focus_changed_sets_explicit_target_right
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model.with(pane_focus: :left),
+      Hive::Tui::Messages::PaneFocusChanged.new(target: :right)
+    )
+    assert_equal :right, new_model.pane_focus
+  end
+
+  def test_pane_focus_changed_with_invalid_target_is_no_op
+    # Defensive guard so a future bug in the keystroke pipeline can't
+    # leave pane_focus in an unrecognised state.
+    starting = model.with(pane_focus: :left)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::PaneFocusChanged.new(target: :sideways)
+    )
+    assert_equal :left, new_model.pane_focus
+  end
+
+  # Regression: below TWO_PANE_MIN_COLS the projects pane is suppressed.
+  # If the user could still move focus to :left, j/k would mutate
+  # hidden project scope and the visible task table would lose its
+  # highlight. Single-pane mode pins focus to :right.
+  def test_pane_focus_toggled_pinned_to_right_below_min_cols
+    starting = model.with(pane_focus: :left, cols: 60)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::PANE_FOCUS_TOGGLED)
+    assert_equal :right, new_model.pane_focus,
+                 "Tab in single-pane mode must pin focus to :right (the only visible pane)"
+  end
+
+  # ---- v2 g/G jump nav ----
+
+  def test_cursor_jump_top_under_left_focus_resets_scope_to_zero
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 2
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_TOP)
+    assert_equal 0, new_model.scope, "g on left pane must jump to ★ All projects (scope=0)"
+  end
+
+  def test_cursor_jump_bottom_under_left_focus_jumps_to_last_project
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 0
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_BOTTOM)
+    assert_equal 2, new_model.scope, "G on left pane must jump to the last registered project"
+  end
+
+  def test_cursor_jump_top_under_right_focus_lands_on_first_visible_row
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right, cursor: [ 1, 2 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_TOP)
+    assert_equal [ 0, 0 ], new_model.cursor, "g on right pane must land on the first row of the first project"
+  end
+
+  def test_cursor_jump_bottom_under_right_focus_lands_on_last_row_of_last_project
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right, cursor: [ 0, 0 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_BOTTOM)
+    assert_equal [ 1, 2 ], new_model.cursor, "G on right pane must land on the last row of the last project"
+  end
+
+  def test_cursor_jump_top_with_nil_snapshot_is_no_op
+    starting = model.with(snapshot: nil, pane_focus: :right, cursor: [ 0, 0 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_TOP)
+    assert_equal starting.cursor, new_model.cursor
+  end
+
+  def test_pane_focus_changed_left_rejected_below_min_cols
+    starting = model.with(pane_focus: :right, cols: 60)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::PaneFocusChanged.new(target: :left)
+    )
+    assert_equal :right, new_model.pane_focus,
+                 "h in single-pane mode must NOT focus a hidden pane"
+  end
+
+  def test_cursor_down_under_left_focus_increments_scope
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 0
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal 1, new_model.scope, "j on left pane should advance scope from 0 → 1"
+  end
+
+  def test_cursor_down_under_left_focus_clamps_at_max_scope
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 2 # already at the last project
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal 2, new_model.scope, "must not advance past projects.size"
+  end
+
+  def test_cursor_up_under_left_focus_decrements_scope
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 2
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal 1, new_model.scope
+  end
+
+  def test_cursor_up_under_left_focus_clamps_at_zero
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 0
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal 0, new_model.scope, "must not decrement below 0 (★ All projects)"
+  end
+
+  # ---- v2 new-idea mode lifecycle ----
+
+  def test_open_new_idea_prompt_sets_mode_and_clears_buffer
+    starting = model.with(mode: :grid, new_idea_buffer: "leftover-text")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea, new_model.mode
+    assert_equal "", new_model.new_idea_buffer
+  end
+
+  def test_new_idea_char_appended_grows_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss")
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaCharAppended.new(char: " ")
+    )
+    assert_equal "rss ", new_model.new_idea_buffer
+  end
+
+  def test_new_idea_char_deleted_shrinks_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+    assert_equal "rss feed", new_model.new_idea_buffer
+  end
+
+  def test_new_idea_char_deleted_on_empty_buffer_stays_empty
+    starting = model.with(mode: :new_idea, new_idea_buffer: "")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+    assert_equal "", new_model.new_idea_buffer
+    assert_equal :new_idea, new_model.mode, "delete-on-empty must not change mode"
+  end
+
+  def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds")
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
+    assert_equal :grid, new_model.mode
+    assert_equal "", new_model.new_idea_buffer
+  end
+
+  def test_cursor_down_under_right_focus_preserves_v1_behaviour
+    # Regression guard: v1 cursor row navigation must still work when
+    # pane_focus is :right (the default and v1 implicit behaviour).
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right, cursor: [ 0, 0 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_DOWN)
+    assert_equal [ 0, 1 ], new_model.cursor
+  end
+
   def test_cursor_up_clamps_at_top
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 0 ])
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)

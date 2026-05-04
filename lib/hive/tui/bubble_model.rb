@@ -11,11 +11,13 @@ require "hive/tui/snapshot"
 require "hive/tui/triage_state"
 require "hive/tui/log_tail"
 require "hive/tui/subprocess"
-require "hive/tui/views/grid"
+require "hive/tui/views/projects_pane"
+require "hive/tui/views/tasks_pane"
 require "hive/tui/views/triage"
 require "hive/tui/views/log_tail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
+require "hive/tui/views/new_idea_prompt"
 
 module Hive
   module Tui
@@ -149,12 +151,13 @@ module Hive
 
       def view
         case @hive_model.mode
-        when :grid then Views::Grid.render(@hive_model)
+        when :grid then compose_two_pane_view
         when :triage then Views::Triage.render(@hive_model)
         when :log_tail then Views::LogTail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
-        else Views::Grid.render(@hive_model)
+        when :new_idea then compose_new_idea_view
+        else compose_two_pane_view
         end
       end
 
@@ -183,7 +186,12 @@ module Hive
       def translate_key(key_message)
         key = bubble_key_to_keymap(key_message)
         row = current_row
-        Hive::Tui::KeyMap.message_for(mode: @hive_model.mode, key: key, row: row)
+        Hive::Tui::KeyMap.message_for(
+          mode: @hive_model.mode,
+          key: key,
+          row: row,
+          pane_focus: @hive_model.pane_focus
+        )
       rescue ArgumentError => e
         # Unknown mode (defensive): treat as Noop. Should never fire
         # since `mode` is constrained by Update transitions; logging
@@ -207,6 +215,16 @@ module Hive
         return :key_down if km.down?
         return :key_backspace if km.backspace?
         return :space if km.space?
+        return :key_tab if km.tab?
+        # Bubbletea-Ruby v0.1.4 exposes KEY_SHIFT_TAB as a constant but
+        # not a `shift_tab?` predicate; compare key_type directly so the
+        # v2 two-pane Shift+Tab focus-cycle binding fires. The
+        # `defined?` guard keeps the TUI booting on a hypothetical
+        # future bubbletea-ruby that renames or drops the constant
+        # (without it, every keystroke would raise NameError and the
+        # outer rescue would convert it to a flash-spam loop).
+        return :key_backtab if defined?(Bubbletea::KeyMessage::KEY_SHIFT_TAB) &&
+                               km.key_type == Bubbletea::KeyMessage::KEY_SHIFT_TAB
 
         char = km.char
         char.is_a?(String) && !char.empty? ? char[0] : Hive::Tui::Messages::NOOP
@@ -263,6 +281,8 @@ module Hive
           bulk_reject
         when Hive::Tui::Messages::TriageDevelop
           triage_develop
+        when Hive::Tui::Messages::NewIdeaSubmitted
+          submit_new_idea
         end
       end
 
@@ -619,6 +639,108 @@ module Hive
         dispatch_command(message)
       end
 
+      # `n` submission: dispatch `bin/hive new <project> <title>` via the
+      # same `run_quiet!` helper that backs accept-finding / reject-
+      # finding so the screen doesn't flash on every idea entry. Project
+      # is resolved from `model.scope` (0 = first registered project per
+      # the v2 brainstorm decision; N = nth registered project). Empty
+      # title or no-projects-registered states flash an error and return
+      # to :grid without spawning a child.
+      def submit_new_idea
+        title = @hive_model.new_idea_buffer.to_s.strip
+        # Empty submit is a likely fat-finger Enter; flash and stay in
+        # the prompt so the operator can keep typing without re-opening
+        # via `n`. The buffer is preserved so any leading whitespace
+        # the operator typed isn't lost — strip happens at submit time
+        # only for validation.
+        if title.empty?
+          return [
+            @hive_model.with(flash: "title required", flash_set_at: Time.now),
+            nil
+          ]
+        end
+
+        project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
+        if project.nil?
+          flash = new_idea_resolution_flash(@hive_model)
+          return [ reset_to_grid_with_flash(flash), nil ]
+        end
+
+        # argv[0] must be the executable name. `Subprocess.run_quiet!`
+        # invokes Open3.popen3(*cmd) directly, so a missing "hive" prefix
+        # would exec a literal "new" binary and ENOENT (exit 127). Mirror
+        # the canonical shape used by every other run_quiet! caller in
+        # this file and in lib/hive/tui/triage_state.rb.
+        argv = [ "hive", "new", project, title ]
+        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
+        if exit_code.zero?
+          [ reset_to_grid_with_flash("+ #{title.inspect} → #{project}"), nil ]
+        else
+          msg = err.to_s.lines.first&.chomp || "hive new exit #{exit_code}"
+          [ reset_to_grid_with_flash("new failed: #{msg}"), nil ]
+        end
+      rescue StandardError => e
+        # `Subprocess.run_quiet!` already swallows Errno::ENOENT
+        # (returns synthetic [127, ...]), so this rescue covers the
+        # narrower set of exceptions that escape the bounded child:
+        # Errno::E2BIG on oversized argv, ArgumentError from a
+        # downstream model.with typo, Encoding::CompatibilityError on
+        # weird bytes the runner can't paint, etc. Without this, the
+        # outer BubbleModel#update rescue would flash a generic message
+        # but leave us stuck in :new_idea mode. Stay in :new_idea and
+        # PRESERVE the typed buffer (consistent with the empty-title
+        # path) so the operator can retry without retyping.
+        Hive::Tui::Debug.log("submit_new_idea", "rescued #{e.class}: #{e.message}")
+        [
+          @hive_model.with(
+            flash: "new failed: #{e.class.name.split('::').last}: #{e.message}",
+            flash_set_at: Time.now
+          ),
+          nil
+        ]
+      end
+
+      # Shared transition for every submit_new_idea exit path: clear the
+      # buffer, return to :grid, set a flash. Three call sites in the
+      # success/validation branches plus the rescue all funnel through
+      # this so the mode/buffer/flash trio always moves together.
+      def reset_to_grid_with_flash(text)
+        @hive_model.with(
+          mode: :grid,
+          new_idea_buffer: "",
+          flash: text,
+          flash_set_at: Time.now
+        )
+      end
+
+      # Build a flash for the case where new-idea resolution returned
+      # nil. Distinguishes three reasons:
+      # - no registered projects at all → "run `hive init <path>`"
+      # - explicit scope onto an unhealthy project → name the error
+      # - scope=0 (★ All) but every registered project is unhealthy
+      # so the operator sees the actual cause rather than a generic
+      # "no projects" message that doesn't match what they see in the
+      # left pane (which shows the project, just broken).
+      def new_idea_resolution_flash(model)
+        snap = model.snapshot
+        return "no projects — run `hive init <path>` first" if snap.nil? || snap.projects.empty?
+
+        if model.scope.between?(1, snap.projects.size)
+          project = snap.projects[model.scope - 1]
+          if project.error
+            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init or `hive deregister`"
+          end
+        end
+
+        # scope=0 with all-unhealthy projects, or scope out-of-range.
+        broken = snap.projects.select(&:error)
+        if broken.size == snap.projects.size
+          "all registered projects are unhealthy — fix or `hive deregister` first"
+        else
+          "no projects — run `hive init <path>` first"
+        end
+      end
+
       def reload_findings_into_state(state, _row)
         document = Hive::Findings::Document.new(state.review_path)
         state.relocate_cursor(document.findings)
@@ -631,22 +753,148 @@ module Hive
         @hive_model.with(flash: text, flash_set_at: Time.now)
       end
 
-      # Filter mode: Views::Grid for the underlying frame; replace the
-      # bottom hint line with the filter prompt. Bubble Tea diffs
-      # against the previous frame so a one-line change paints
-      # cheaply.
+      # Filter mode: same two-pane composition as :grid mode, but the
+      # footer line is replaced by the filter prompt. Bubble Tea diffs
+      # against the previous frame so a one-line change paints cheaply.
       def compose_filter_view
-        grid_lines = Views::Grid.render(@hive_model).lines
-        prompt = Views::FilterPrompt.render(@hive_model)
-        if grid_lines.empty?
-          prompt
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model, width: usable))
+      end
+
+      # New-idea mode: same composition; footer = the inline prompt with
+      # the project label so the operator sees the resolved target.
+      # Width clamps the prompt so long titles don't overflow the
+      # terminal — the visible buffer slides to keep the cursor on
+      # screen (see Views::NewIdeaPrompt.render).
+      def compose_new_idea_view
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model, width: usable))
+      end
+
+      # ---- v2 two-pane composition ----
+
+      # Width threshold for the v2 two-pane layout — defined on Model
+      # so render and focus layers share one source of truth. Re-exposed
+      # here as a delegating reader so callers (and tests pinning the
+      # boundary) keep their `BubbleModel::TWO_PANE_MIN_COLS` reference.
+      TWO_PANE_MIN_COLS = Hive::Tui::Model::TWO_PANE_MIN_COLS
+
+      # Compose the v2 two-pane layout: header strip + ProjectsPane |
+      # TasksPane | footer strip. Below TWO_PANE_MIN_COLS the project
+      # pane is suppressed and only the tasks pane renders, with the
+      # scope label prefixed onto the header so cross-project context
+      # isn't lost.
+      def compose_two_pane_view(footer: nil)
+        cols = @hive_model.cols.to_i
+        # Reserve a 1-cell right margin across every section so no row
+        # ever lands a glyph in the terminal's last column. Header and
+        # footer strips are width-aware — the fixed hint footer was
+        # 75 chars regardless of terminal width and overflowed at
+        # cols<76 before this clamp.
+        usable = [ cols - 1, 1 ].max
+        sections = [ header_strip(usable) ]
+        sections << stalled_banner(usable) if stalled?
+        if cols < TWO_PANE_MIN_COLS
+          sections << Views::TasksPane.render(@hive_model, width: usable)
         else
-          # The status line is always the trailing line — replace it
-          # in place so layout doesn't shift when the user toggles
-          # filter mode.
-          grid_lines[-1] = prompt
-          grid_lines.join
+          sections << join_panes(cols)
         end
+        sections << (footer || default_footer(usable))
+        sections.join("\n")
+      end
+
+      # Top strip — `hive tui · scope=… · filter=… · generated_at=…`.
+      # Same content v1's Views::Grid#header_line carried, lifted to a
+      # composer concern so the panes stay focused on their own boxes.
+      def header_strip(usable_width = nil)
+        scope_label = scope_label_for(@hive_model)
+        filter_label = @hive_model.filter.to_s.empty? ? "-" : @hive_model.filter
+        generated_at = @hive_model.snapshot&.generated_at || "-"
+        line = "hive tui  scope=#{scope_label}  filter=#{filter_label}  generated_at=#{generated_at}"
+        line = Views::Format.truncate(line, usable_width) if usable_width
+        Hive::Tui::Styles::HEADER.render(line)
+      end
+
+      # Resolves model.scope to a human label. scope=0 → "★ All projects";
+      # scope=N → the Nth registered project's name (matches TasksPane's
+      # title resolution so the two surfaces never disagree). Falls
+      # back to the integer if the snapshot is missing or the index is
+      # out-of-range — at least the operator sees a non-empty value.
+      def scope_label_for(model)
+        return "★ All projects" if model.scope.zero?
+
+        project = model.snapshot&.projects&.[](model.scope - 1)
+        project ? project.name.to_s : model.scope.to_s
+      end
+
+      # Stalled-poll banner — surfaces transient StateSource errors so
+      # the operator sees that the displayed snapshot is stale. Without
+      # this, deleting v1 Views::Grid silently dropped the visual cue
+      # (the previous snapshot stayed on screen with no indication).
+      def stalled?
+        !@hive_model.last_error.nil?
+      end
+
+      def stalled_banner(usable_width = nil)
+        err = @hive_model.last_error
+        klass = err.class.name.split("::").last
+        msg = err.message.to_s.lines.first&.chomp.to_s[0, 60]
+        line = msg.empty? ? "[stalled — #{klass}]" : "[stalled — #{klass}: #{msg}]"
+        line = Views::Format.truncate(line, usable_width) if usable_width
+        Hive::Tui::Styles::STALLED.render(line)
+      end
+
+      # Default footer — context-aware key hints + flash decay (the
+      # status line). v1 had this in Views::Grid#status_line; lifted here
+      # so the panes stay layout-only. `usable_width` clamps the line
+      # so the fixed 75-char hint string doesn't overflow narrow
+      # terminals (e.g. cols=70 used to wrap onto a second visible row).
+      def default_footer(usable_width = nil)
+        if @hive_model.flash_active?
+          line = @hive_model.flash.to_s
+          line = Views::Format.truncate(line, usable_width) if usable_width
+          Hive::Tui::Styles::FLASH.render(line)
+        else
+          line = footer_hint
+          line = Views::Format.truncate(line, usable_width) if usable_width
+          Hive::Tui::Styles::HINT.render(line)
+        end
+      end
+
+      def footer_hint
+        "[Tab] switch  [Enter] next  [n] new  [/] filter  [?] help  [q] quit"
+      end
+
+      # Compute pane widths and join horizontally. Left pane is clamped
+      # to [18, 28] cells with a soft preference for cols * 0.25 — wide
+      # enough for typical project names ("seyarabata", "appcrawl"),
+      # narrow enough not to crowd the tasks table on standard terminals.
+      def join_panes(cols)
+        left_width = pane_widths(cols).first
+        right_width = pane_widths(cols).last
+        Lipgloss.join_horizontal(
+          Lipgloss::TOP,
+          Views::ProjectsPane.render(@hive_model, width: left_width),
+          Views::TasksPane.render(@hive_model, width: right_width)
+        )
+      end
+
+      # Visible for tests so the width formula stays inspectable without
+      # rendering. Returns [left_width, right_width].
+      #
+      # Right pane gets `cols - left - 1`: leaves a 1-cell right margin
+      # so the bordered-box's rightmost glyph (`│` / `╮` / `╯`) lands
+      # at column `cols - 2`, not `cols - 1`. Some terminals (and some
+      # PTY/tmux configs) don't reliably render the last column —
+      # writing the right border one cell shy guarantees it's visible.
+      # The alternative (writing border to the last column) loses the
+      # right edge on those terminals; the alternative (joining panes
+      # with extra spacing) wastes the same cell anyway.
+      def pane_widths(cols)
+        soft = (cols * 0.25).floor
+        left = soft.clamp(18, 28)
+        right = [ cols - left - 1, 1 ].max
+        [ left, right ]
       end
     end
   end

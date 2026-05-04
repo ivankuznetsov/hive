@@ -25,14 +25,21 @@ module Hive
         { mode: :grid, key: "P", action: :pr,            description: "run hive pr (capital so it doesn't collide with plan)" },
         { mode: :grid, key: "a", action: :archive,       description: "run hive archive" },
         # Grid mode — navigation + sub-modes.
-        { mode: :grid, key: "j",     action: :cursor_down,    description: "cursor down" },
-        { mode: :grid, key: "k",     action: :cursor_up,      description: "cursor up" },
-        { mode: :grid, key: "Enter", action: :open_contextual, description: "open contextual mode (triage / log tail) or dispatch the suggested command" },
-        { mode: :grid, key: "/",     action: :filter,         description: "open filter prompt" },
-        { mode: :grid, key: "1-9",   action: :project_scope,  description: "scope to the Nth registered project" },
-        { mode: :grid, key: "0",     action: :project_scope,  description: "clear project scope" },
-        { mode: :grid, key: "?",     action: :help,           description: "this help overlay" },
-        { mode: :grid, key: "q",     action: :quit,           description: "quit" },
+        { mode: :grid, key: "j",         action: :cursor_down,        description: "cursor down (left pane: project; right pane: task row)" },
+        { mode: :grid, key: "k",         action: :cursor_up,          description: "cursor up (left pane: project; right pane: task row)" },
+        { mode: :grid, key: "g",         action: :cursor_jump_top,    description: "jump to the top of the focused pane" },
+        { mode: :grid, key: "G",         action: :cursor_jump_bottom, description: "jump to the bottom of the focused pane" },
+        { mode: :grid, key: "Tab",       action: :pane_focus_toggle,  description: "toggle pane focus (left ↔ right)" },
+        { mode: :grid, key: "Shift+Tab", action: :pane_focus_toggle,  description: "toggle pane focus (same as Tab)" },
+        { mode: :grid, key: "h",         action: :pane_focus_left,    description: "jump focus to the projects pane" },
+        { mode: :grid, key: "l",         action: :pane_focus_right,   description: "jump focus to the tasks pane" },
+        { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open contextual mode (triage / log tail) or dispatch the suggested command" },
+        { mode: :grid, key: "n",         action: :new_idea,           description: "open the new-idea prompt; submitting runs `hive new <project> \"<title>\"`" },
+        { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
+        { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },
+        { mode: :grid, key: "0",         action: :project_scope,      description: "clear project scope (★ All projects)" },
+        { mode: :grid, key: "?",         action: :help,               description: "this help overlay" },
+        { mode: :grid, key: "q",         action: :quit,               description: "quit" },
         # Triage mode — Space and bulk rebindings.
         { mode: :triage, key: "j",     action: :cursor_down,    description: "finding cursor down" },
         { mode: :triage, key: "k",     action: :cursor_up,      description: "finding cursor up" },
@@ -46,7 +53,10 @@ module Hive
         { mode: :log_tail, key: "Esc", action: :back, description: "back to grid" },
         # Filter prompt mode.
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
-        { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" }
+        { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" },
+        # New-idea prompt mode (v2).
+        { mode: :new_idea, key: "Enter", action: :submit_new_idea, description: "submit — runs `hive new <project> \"<title>\"` against the project shown in the prompt label" },
+        { mode: :new_idea, key: "Esc",   action: :cancel_new_idea, description: "cancel and return to grid; the typed buffer is discarded" }
       ].each(&:freeze).freeze
     end
   end

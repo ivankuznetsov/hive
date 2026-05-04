@@ -22,6 +22,18 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     assert_includes out, "Triage mode"
     assert_includes out, "Log tail mode"
     assert_includes out, "Filter prompt"
+    assert_includes out, "New-idea prompt",
+                    "v2 :new_idea bindings must surface in the help overlay; without this " \
+                    "header, the n / Enter / Esc bindings in :new_idea mode are invisible"
+  end
+
+  def test_renders_v2_pane_focus_and_navigation_keys
+    out = Hive::Tui::Views::HelpOverlay.render(model)
+    assert_includes out, "Tab",        "Tab pane-focus binding must be discoverable"
+    assert_includes out, "Shift+Tab",  "Shift+Tab pane-focus binding must be discoverable"
+    assert_match(/\bn\b.*new-idea/i, out, "n binding must surface with its action description")
+    assert_match(/\bg\b.*top/i, out, "g (jump to top) must be discoverable")
+    assert_match(/\bG\b.*bottom/i, out, "G (jump to bottom) must be discoverable")
   end
 
   def test_includes_grid_workflow_verb_keys

@@ -123,6 +123,18 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT, msg
   end
 
+  # ---- v2 g/G jump-to-top/bottom (Plan R4 stretch nav) ----
+
+  def test_grid_lowercase_g_returns_cursor_jump_top_singleton
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "g", row: nil)
+    assert_same Hive::Tui::Messages::CURSOR_JUMP_TOP, msg
+  end
+
+  def test_grid_uppercase_G_returns_cursor_jump_bottom_singleton
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "G", row: nil)
+    assert_same Hive::Tui::Messages::CURSOR_JUMP_BOTTOM, msg
+  end
+
   # ---- :new_idea mode keystroke routing ----
 
   def test_new_idea_esc_cancels

@@ -93,7 +93,8 @@ class TuiHelpTest < Minitest::Test
   # would otherwise leave the cheatsheet pointing at vapor.
   def test_no_grid_mode_binding_references_a_nonexistent_verb
     known_non_verb_actions = %i[
-      cursor_down cursor_up open_contextual filter project_scope help quit
+      cursor_down cursor_up cursor_jump_top cursor_jump_bottom
+      open_contextual filter project_scope help quit
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
     ]
     Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|

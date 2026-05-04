@@ -374,7 +374,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal "", @model.hive_model.new_idea_buffer
   end
 
-  def test_new_idea_submission_with_empty_buffer_flashes_and_does_not_dispatch
+  def test_new_idea_submission_with_empty_buffer_flashes_and_stays_in_new_idea
+    # Plan §U6: empty/whitespace title flashes "title required" and
+    # STAYS in :new_idea mode so the operator can keep typing without
+    # re-opening via `n` after a fat-finger Enter. The buffer is
+    # preserved (strip is validation-only) so any leading whitespace
+    # the operator typed isn't lost.
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
@@ -390,7 +395,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
       @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
     end
     assert_equal 0, spawn_count, "empty/whitespace buffer must NOT spawn a subprocess"
-    assert_equal :grid, @model.hive_model.mode
+    assert_equal :new_idea, @model.hive_model.mode,
+                 "fat-finger Enter must NOT close the prompt"
+    assert_equal "   ", @model.hive_model.new_idea_buffer,
+                 "buffer is preserved so the operator's typing isn't lost"
     assert_match(/title required/, @model.hive_model.flash.to_s)
   end
 

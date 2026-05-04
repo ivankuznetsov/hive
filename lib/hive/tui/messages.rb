@@ -163,6 +163,16 @@ module Hive
       CursorUp = Class.new
       CURSOR_UP = CursorUp.new.freeze
 
+      # `g` — jump to the top of the focused pane (first project on
+      # left; first row of first project on right). Vim convention.
+      CursorJumpTop = Class.new
+      CURSOR_JUMP_TOP = CursorJumpTop.new.freeze
+
+      # `G` — jump to the bottom of the focused pane (last project on
+      # left; last row of last non-empty project on right).
+      CursorJumpBottom = Class.new
+      CURSOR_JUMP_BOTTOM = CursorJumpBottom.new.freeze
+
       # Triage-mode `j` / KEY_DOWN. Distinct from grid-mode `CursorDown`
       # so Update can route to `TriageState#cursor_down` instead of
       # mutating `model.cursor` (which is the grid coord).

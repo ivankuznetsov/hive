@@ -27,6 +27,8 @@ module Hive
         # Grid mode — navigation + sub-modes.
         { mode: :grid, key: "j",         action: :cursor_down,        description: "cursor down (left pane: project; right pane: task row)" },
         { mode: :grid, key: "k",         action: :cursor_up,          description: "cursor up (left pane: project; right pane: task row)" },
+        { mode: :grid, key: "g",         action: :cursor_jump_top,    description: "jump to the top of the focused pane" },
+        { mode: :grid, key: "G",         action: :cursor_jump_bottom, description: "jump to the bottom of the focused pane" },
         { mode: :grid, key: "Tab",       action: :pane_focus_toggle,  description: "toggle pane focus (left ↔ right)" },
         { mode: :grid, key: "Shift+Tab", action: :pane_focus_toggle,  description: "toggle pane focus (same as Tab)" },
         { mode: :grid, key: "h",         action: :pane_focus_left,    description: "jump focus to the projects pane" },

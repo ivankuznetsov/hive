@@ -59,6 +59,10 @@ module Hive
           [ apply_cursor_down(model), nil ]
         when Messages::CursorUp
           [ apply_cursor_up(model), nil ]
+        when Messages::CursorJumpTop
+          [ apply_cursor_jump_top(model), nil ]
+        when Messages::CursorJumpBottom
+          [ apply_cursor_jump_bottom(model), nil ]
         when Messages::TriageCursorDown
           [ apply_triage_cursor_down(model), nil ]
         when Messages::TriageCursorUp
@@ -298,6 +302,41 @@ module Hive
       # scope. Force right focus in that regime; it's the only visible
       # surface anyway.
       TWO_PANE_MIN_COLS = 70
+
+      # `g` jumps to the top of the focused pane. Left pane → scope=0
+      # (★ All projects); right pane → cursor=[first_visible_project, 0].
+      def apply_cursor_jump_top(model)
+        if model.pane_focus == :left
+          model.with(scope: 0)
+        else
+          visible = visible_snapshot(model)
+          return model if visible.nil?
+
+          first_idx = next_non_empty_project_idx(visible, 0)
+          first_idx ? model.with(cursor: [ first_idx, 0 ]) : model
+        end
+      end
+
+      # `G` jumps to the bottom of the focused pane. Left pane →
+      # scope=projects.size (last registered project); right pane →
+      # cursor=[last_visible_project, last_row].
+      def apply_cursor_jump_bottom(model)
+        if model.pane_focus == :left
+          snap = model.snapshot
+          return model if snap.nil?
+
+          model.with(scope: snap.projects.size)
+        else
+          visible = visible_snapshot(model)
+          return model if visible.nil?
+
+          last_idx = prev_non_empty_project_idx(visible, visible.projects.size - 1)
+          return model if last_idx.nil?
+
+          last_row = visible.projects[last_idx].rows.size - 1
+          model.with(cursor: [ last_idx, last_row ])
+        end
+      end
 
       def apply_pane_focus_toggled(model)
         return model.with(pane_focus: :right) if model.cols.to_i < TWO_PANE_MIN_COLS

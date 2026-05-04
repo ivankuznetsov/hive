@@ -643,7 +643,17 @@ module Hive
       # to :grid without spawning a child.
       def submit_new_idea
         title = @hive_model.new_idea_buffer.to_s.strip
-        return [ reset_to_grid_with_flash("title required"), nil ] if title.empty?
+        # Empty submit is a likely fat-finger Enter; flash and stay in
+        # the prompt so the operator can keep typing without re-opening
+        # via `n`. The buffer is preserved so any leading whitespace
+        # the operator typed isn't lost — strip happens at submit time
+        # only for validation.
+        if title.empty?
+          return [
+            @hive_model.with(flash: "title required", flash_set_at: Time.now),
+            nil
+          ]
+        end
 
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
         return [ reset_to_grid_with_flash("no projects — run `hive init <path>` first"), nil ] if project.nil?

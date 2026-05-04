@@ -85,9 +85,11 @@ module Hive
         return global if global
 
         # Cursor navigation works regardless of focus — Update routes
-        # j/k by `model.pane_focus` (left → scope, right → row cursor).
+        # j/k/g/G by `model.pane_focus` (left → scope, right → row).
         return Messages::CURSOR_DOWN if DOWN_KEYS.include?(key)
         return Messages::CURSOR_UP if UP_KEYS.include?(key)
+        return Messages::CURSOR_JUMP_TOP if key == "g"
+        return Messages::CURSOR_JUMP_BOTTOM if key == "G"
 
         # Enter from the left pane jumps focus to the right pane,
         # regardless of what's under the cursor. This way the operator

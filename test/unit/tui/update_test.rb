@@ -418,6 +418,50 @@ class HiveTuiUpdateTest < Minitest::Test
                  "Tab in single-pane mode must pin focus to :right (the only visible pane)"
   end
 
+  # ---- v2 g/G jump nav ----
+
+  def test_cursor_jump_top_under_left_focus_resets_scope_to_zero
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 2
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_TOP)
+    assert_equal 0, new_model.scope, "g on left pane must jump to ★ All projects (scope=0)"
+  end
+
+  def test_cursor_jump_bottom_under_left_focus_jumps_to_last_project
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :left, scope: 0
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_BOTTOM)
+    assert_equal 2, new_model.scope, "G on left pane must jump to the last registered project"
+  end
+
+  def test_cursor_jump_top_under_right_focus_lands_on_first_visible_row
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right, cursor: [ 1, 2 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_TOP)
+    assert_equal [ 0, 0 ], new_model.cursor, "g on right pane must land on the first row of the first project"
+  end
+
+  def test_cursor_jump_bottom_under_right_focus_lands_on_last_row_of_last_project
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right, cursor: [ 0, 0 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_BOTTOM)
+    assert_equal [ 1, 2 ], new_model.cursor, "G on right pane must land on the last row of the last project"
+  end
+
+  def test_cursor_jump_top_with_nil_snapshot_is_no_op
+    starting = model.with(snapshot: nil, pane_focus: :right, cursor: [ 0, 0 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_JUMP_TOP)
+    assert_equal starting.cursor, new_model.cursor
+  end
+
   def test_pane_focus_changed_left_rejected_below_min_cols
     starting = model.with(pane_focus: :right, cols: 60)
     new_model, _cmd = Hive::Tui::Update.apply(

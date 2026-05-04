@@ -19,7 +19,8 @@ module Hive
           grid: "Grid mode",
           triage: "Triage mode (Enter on a 'review_findings' row)",
           log_tail: "Log tail mode (Enter on an 'agent_running' row)",
-          filter: "Filter prompt"
+          filter: "Filter prompt",
+          new_idea: "New-idea prompt (n)"
         }.freeze
 
         TITLE = "hive tui — keybindings".freeze

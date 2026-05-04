@@ -150,7 +150,8 @@ module Hive
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
-          log_label: "execute-impl"
+          log_label: "execute-impl",
+          profile: Hive::Stages::Base.stage_profile(cfg, "execute")
         )
       end
 

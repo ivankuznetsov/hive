@@ -29,7 +29,8 @@ module Hive
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
-          log_label: "brainstorm"
+          log_label: "brainstorm",
+          profile: Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

@@ -206,6 +206,49 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "no tasks"
   end
 
+  # ---- compute_layout adaptive column dropping ----
+  # The full 5-column layout needs ~48 inner cells (icon=2, stage=12,
+  # status=18, age=4, separators=4, slug_min=8). Below that, columns
+  # drop in priority order: stage first (mostly redundant with status),
+  # then status. These tests pin each branch so a future refactor of
+  # the threshold values can't silently regress narrow-terminal
+  # behavior — the BubbleModel composer tests at cols=60/69/70 only
+  # exercise the full-5-column branch via single-pane fallback.
+
+  def test_compute_layout_full_5_columns_at_wide_inner_width
+    layout = Hive::Tui::Views::TasksPane.compute_layout(60)
+    assert_operator layout[:slug], :>=, 8
+    assert_equal 12, layout[:stage]
+    assert_equal 18, layout[:status]
+  end
+
+  def test_compute_layout_drops_stage_at_medium_narrow_width
+    # Below full-5 threshold (slug+icon+status+age+separators=40, plus
+    # slug_min=8 → 48 cells). Tests an inner_width that fits the
+    # 4-column "no stage" path but not the full 5.
+    layout = Hive::Tui::Views::TasksPane.compute_layout(35)
+    assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
+    assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
+    assert_operator layout[:slug], :>=, 8
+  end
+
+  def test_compute_layout_drops_stage_and_status_at_very_narrow_width
+    # Even narrower — only icon, slug, age fit.
+    layout = Hive::Tui::Views::TasksPane.compute_layout(20)
+    assert_equal 0, layout[:stage]
+    assert_equal 0, layout[:status]
+    assert_operator layout[:slug], :>=, 8
+  end
+
+  def test_compute_layout_floors_slug_below_extreme_minimum
+    # Below the very-narrow threshold: floor at slug_min, dropping all
+    # but icon/slug/age. Visual overflow is acknowledged — but no crash.
+    layout = Hive::Tui::Views::TasksPane.compute_layout(10)
+    assert_equal 8, layout[:slug]
+    assert_equal 0, layout[:stage]
+    assert_equal 0, layout[:status]
+  end
+
   # ---- Format.age helper ----
 
   def test_format_age_handles_seconds

@@ -38,6 +38,14 @@ module Hive
 
     Model::DEFAULT_FLASH_TTL_SECONDS = 5.0
 
+    # Single source of truth for the v2 two-pane width threshold. Below
+    # this value the projects pane is suppressed (single-pane fallback)
+    # AND focus is forced to :right (the only visible surface). Both
+    # invariants must agree — defining the constant once here prevents
+    # render layer (BubbleModel#compose_two_pane_view) and focus layer
+    # (Update#apply_pane_focus_*) from drifting out of sync.
+    Model::TWO_PANE_MIN_COLS = 70
+
     class Model
       # Boot state. App.run constructs the runner with this Model.
       # `pane_focus` defaults to `:right` so the table is the first

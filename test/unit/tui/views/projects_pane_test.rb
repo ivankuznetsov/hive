@@ -51,24 +51,37 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
   end
 
   # ---- Selection (cursor highlight) ----
+  # Verifies the selection predicate directly. lipgloss strips ANSI in
+  # non-tty so render output cannot distinguish selected vs unselected
+  # rows by visual styling — the boolean decision is what unit tests
+  # can pin. Visual confirmation is via tty dogfood + e2e asciinema.
+  # Same pattern as TasksPane#highlight?.
 
-  def test_highlights_all_projects_row_when_scope_zero
-    out = Hive::Tui::Views::ProjectsPane.render(make_model(scope: 0), width: 30)
-    # The reverse-video escape stripped in non-tty leaves text intact, so
-    # we verify selection by checking the cursor row's padding shape:
-    # the ★ row must be padded to inner_width when selected.
-    assert_includes out, "★ All projects"
+  def test_selected_predicate_marks_all_projects_row_when_scope_zero
+    model = make_model(scope: 0)
+    assert Hive::Tui::Views::ProjectsPane.selected?(model, 0),
+           "scope=0 must select the ★ All projects virtual row"
+    refute Hive::Tui::Views::ProjectsPane.selected?(model, 1),
+           "scope=0 must NOT select the first registered project"
   end
 
-  def test_highlights_nth_project_when_scope_n
-    # Render two snapshots — one with scope=2 (seyarabata), one with
-    # scope=1 (hive) — and verify both render successfully without
-    # raising. A more precise highlight assertion requires ANSI which is
-    # stripped here; e2e captures the visual confirmation.
-    out_a = Hive::Tui::Views::ProjectsPane.render(make_model(scope: 1), width: 30)
-    out_b = Hive::Tui::Views::ProjectsPane.render(make_model(scope: 2), width: 30)
-    assert_includes out_a, "hive"
-    assert_includes out_b, "seyarabata"
+  def test_selected_predicate_marks_nth_project_when_scope_n
+    model = make_model(scope: 2)
+    refute Hive::Tui::Views::ProjectsPane.selected?(model, 0),
+           "scope=2 must NOT select the ★ All projects row"
+    refute Hive::Tui::Views::ProjectsPane.selected?(model, 1),
+           "scope=2 must NOT select the first registered project"
+    assert Hive::Tui::Views::ProjectsPane.selected?(model, 2),
+           "scope=2 must select the second registered project"
+  end
+
+  def test_renders_all_rows_regardless_of_selection
+    # Non-selection-specific render assertion: every row appears in
+    # the output. Kept as a smoke check; the selection-specific
+    # behavior is covered by the predicate tests above.
+    out = Hive::Tui::Views::ProjectsPane.render(make_model(scope: 0), width: 30)
+    assert_includes out, "★ All projects"
+    PROJECT_NAMES.each { |name| assert_includes out, name }
   end
 
   # ---- Focus state ----

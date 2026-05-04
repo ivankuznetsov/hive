@@ -420,6 +420,35 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/no projects/, @model.hive_model.flash.to_s)
   end
 
+  # Regression for the rescue path in submit_new_idea. Errno::E2BIG
+  # (oversized argv), ArgumentError (downstream model.with typo), or
+  # Encoding::CompatibilityError (weird bytes) all bubble out of
+  # run_quiet!. The rescue must flash a useful message AND preserve
+  # the typed buffer + :new_idea mode so the operator can retry
+  # without retyping — consistent with the empty-title UX, NOT the
+  # validation-failure UX which clears the buffer.
+  def test_new_idea_submission_rescues_subprocess_exception_and_preserves_buffer
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_buffer: "rss feeds"
+      ),
+      dispatch: @dispatch
+    )
+    with_run_quiet_stub(->(_argv) { raise Errno::E2BIG, "Argument list too long" }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal :new_idea, @model.hive_model.mode,
+                 "rescue path must keep operator in :new_idea, not clobber to :grid"
+    assert_equal "rss feeds", @model.hive_model.new_idea_buffer,
+                 "rescue path must preserve typed buffer (don't make the user retype)"
+    assert_match(/new failed.*E2BIG/, @model.hive_model.flash.to_s,
+                 "flash must surface the actionable error class")
+  end
+
   def test_new_idea_submission_subprocess_failure_surfaces_in_flash
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",

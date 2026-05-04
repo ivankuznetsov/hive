@@ -81,6 +81,18 @@ module Hive
           selected ? Styles::CURSOR_HIGHLIGHT.render(padded) : padded
         end
 
+        # Predicate exposed for unit tests because lipgloss-ruby strips
+        # ANSI in non-tty environments — so the rendered output of a
+        # selected vs unselected row is byte-identical and tests can't
+        # tell them apart from `assert_includes`. The boolean decision
+        # IS observable here; visual styling is verified by tty
+        # dogfood + e2e asciinema (same pattern as TasksPane#highlight?).
+        # `scope_index` is 0 for the ★ All projects virtual row, then
+        # 1..projects.size for each registered project.
+        def selected?(model, scope_index)
+          model.scope == scope_index
+        end
+
         # Local alias so call sites in this module keep their concise
         # `truncate(...)` shape; delegates to the shared Format helper.
         def truncate(label, max_width)

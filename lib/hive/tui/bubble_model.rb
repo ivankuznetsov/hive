@@ -218,8 +218,13 @@ module Hive
         return :key_tab if km.tab?
         # Bubbletea-Ruby v0.1.4 exposes KEY_SHIFT_TAB as a constant but
         # not a `shift_tab?` predicate; compare key_type directly so the
-        # v2 two-pane Shift+Tab focus-cycle binding fires.
-        return :key_backtab if km.key_type == Bubbletea::KeyMessage::KEY_SHIFT_TAB
+        # v2 two-pane Shift+Tab focus-cycle binding fires. The
+        # `defined?` guard keeps the TUI booting on a hypothetical
+        # future bubbletea-ruby that renames or drops the constant
+        # (without it, every keystroke would raise NameError and the
+        # outer rescue would convert it to a flash-spam loop).
+        return :key_backtab if defined?(Bubbletea::KeyMessage::KEY_SHIFT_TAB) &&
+                               km.key_type == Bubbletea::KeyMessage::KEY_SHIFT_TAB
 
         char = km.char
         char.is_a?(String) && !char.empty? ? char[0] : Hive::Tui::Messages::NOOP
@@ -672,13 +677,24 @@ module Hive
           [ reset_to_grid_with_flash("new failed: #{msg}"), nil ]
         end
       rescue StandardError => e
-        # If the subprocess raises (Errno::ENOENT, Errno::E2BIG from an
-        # oversized title, JSON::GeneratorError on weird bytes, etc.) the
-        # Bubbletea outer rescue would surface a flash but leave us
-        # stuck in :new_idea mode with the buffer intact. Reset to :grid
-        # so the operator can retry without first hitting Esc.
+        # `Subprocess.run_quiet!` already swallows Errno::ENOENT
+        # (returns synthetic [127, ...]), so this rescue covers the
+        # narrower set of exceptions that escape the bounded child:
+        # Errno::E2BIG on oversized argv, ArgumentError from a
+        # downstream model.with typo, Encoding::CompatibilityError on
+        # weird bytes the runner can't paint, etc. Without this, the
+        # outer BubbleModel#update rescue would flash a generic message
+        # but leave us stuck in :new_idea mode. Stay in :new_idea and
+        # PRESERVE the typed buffer (consistent with the empty-title
+        # path) so the operator can retry without retyping.
         Hive::Tui::Debug.log("submit_new_idea", "rescued #{e.class}: #{e.message}")
-        [ reset_to_grid_with_flash("new failed: #{e.class}: #{e.message[0, 80]}"), nil ]
+        [
+          @hive_model.with(
+            flash: "new failed: #{e.class.name.split('::').last}: #{e.message}",
+            flash_set_at: Time.now
+          ),
+          nil
+        ]
       end
 
       # Shared transition for every submit_new_idea exit path: clear the
@@ -721,10 +737,11 @@ module Hive
 
       # ---- v2 two-pane composition ----
 
-      # Width below which the project pane is suppressed and the tasks
-      # pane occupies the full screen. Below 70, the cyan-bordered box
-      # plus 5-column table simply has no room to breathe.
-      TWO_PANE_MIN_COLS = 70
+      # Width threshold for the v2 two-pane layout — defined on Model
+      # so render and focus layers share one source of truth. Re-exposed
+      # here as a delegating reader so callers (and tests pinning the
+      # boundary) keep their `BubbleModel::TWO_PANE_MIN_COLS` reference.
+      TWO_PANE_MIN_COLS = Hive::Tui::Model::TWO_PANE_MIN_COLS
 
       # Compose the v2 two-pane layout: header strip + ProjectsPane |
       # TasksPane | footer strip. Below TWO_PANE_MIN_COLS the project
@@ -753,11 +770,23 @@ module Hive
       # Same content v1's Views::Grid#header_line carried, lifted to a
       # composer concern so the panes stay focused on their own boxes.
       def header_strip
-        scope_label = @hive_model.scope.zero? ? "★ All projects" : @hive_model.scope.to_s
+        scope_label = scope_label_for(@hive_model)
         filter_label = @hive_model.filter.to_s.empty? ? "-" : @hive_model.filter
         generated_at = @hive_model.snapshot&.generated_at || "-"
         line = "hive tui  scope=#{scope_label}  filter=#{filter_label}  generated_at=#{generated_at}"
         Hive::Tui::Styles::HEADER.render(line)
+      end
+
+      # Resolves model.scope to a human label. scope=0 → "★ All projects";
+      # scope=N → the Nth registered project's name (matches TasksPane's
+      # title resolution so the two surfaces never disagree). Falls
+      # back to the integer if the snapshot is missing or the index is
+      # out-of-range — at least the operator sees a non-empty value.
+      def scope_label_for(model)
+        return "★ All projects" if model.scope.zero?
+
+        project = model.snapshot&.projects&.[](model.scope - 1)
+        project ? project.name.to_s : model.scope.to_s
       end
 
       # Stalled-poll banner — surfaces transient StateSource errors so

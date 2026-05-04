@@ -296,12 +296,13 @@ module Hive
         end
       end
 
-      # When the project pane is suppressed (cols < TWO_PANE_MIN_COLS),
+      # When the project pane is suppressed (cols < Model::TWO_PANE_MIN_COLS),
       # focus has nowhere to go on the left — the visible task table
       # would lose its highlight and j/k would mutate hidden project
       # scope. Force right focus in that regime; it's the only visible
-      # surface anyway.
-      TWO_PANE_MIN_COLS = 70
+      # surface anyway. Threshold lives on Model so render layer
+      # (BubbleModel#compose_two_pane_view) and focus layer here cannot
+      # drift out of sync.
 
       # `g` jumps to the top of the focused pane. Left pane → scope=0
       # (★ All projects); right pane → cursor=[first_visible_project, 0].
@@ -339,7 +340,7 @@ module Hive
       end
 
       def apply_pane_focus_toggled(model)
-        return model.with(pane_focus: :right) if model.cols.to_i < TWO_PANE_MIN_COLS
+        return model.with(pane_focus: :right) if model.cols.to_i < Model::TWO_PANE_MIN_COLS
 
         target = model.pane_focus == :left ? :right : :left
         model.with(pane_focus: target)
@@ -350,7 +351,7 @@ module Hive
         # Reject :left transitions when the project pane is suppressed —
         # h/Tab in single-pane mode is a no-op rather than a stuck focus
         # on a hidden pane.
-        return model.with(pane_focus: :right) if msg.target == :left && model.cols.to_i < TWO_PANE_MIN_COLS
+        return model.with(pane_focus: :right) if msg.target == :left && model.cols.to_i < Model::TWO_PANE_MIN_COLS
 
         model.with(pane_focus: msg.target)
       end

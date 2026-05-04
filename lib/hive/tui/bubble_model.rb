@@ -726,7 +726,8 @@ module Hive
       # footer line is replaced by the filter prompt. Bubble Tea diffs
       # against the previous frame so a one-line change paints cheaply.
       def compose_filter_view
-        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model, width: @hive_model.cols.to_i))
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model, width: usable))
       end
 
       # New-idea mode: same composition; footer = the inline prompt with
@@ -735,7 +736,8 @@ module Hive
       # terminal — the visible buffer slides to keep the cursor on
       # screen (see Views::NewIdeaPrompt.render).
       def compose_new_idea_view
-        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model, width: @hive_model.cols.to_i))
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model, width: usable))
       end
 
       # ---- v2 two-pane composition ----
@@ -751,32 +753,34 @@ module Hive
       # pane is suppressed and only the tasks pane renders, with the
       # scope label prefixed onto the header so cross-project context
       # isn't lost.
-      def compose_two_pane_view(footer: default_footer)
+      def compose_two_pane_view(footer: nil)
         cols = @hive_model.cols.to_i
-        sections = [ header_strip ]
-        sections << stalled_banner if stalled?
+        # Reserve a 1-cell right margin across every section so no row
+        # ever lands a glyph in the terminal's last column. Header and
+        # footer strips are width-aware — the fixed hint footer was
+        # 75 chars regardless of terminal width and overflowed at
+        # cols<76 before this clamp.
+        usable = [ cols - 1, 1 ].max
+        sections = [ header_strip(usable) ]
+        sections << stalled_banner(usable) if stalled?
         if cols < TWO_PANE_MIN_COLS
-          # Hand the actual terminal width to the tasks pane; previously
-          # a `[cols, 40].max` floor produced boxes wider than narrow
-          # terminals could render, breaking the rounded border. The
-          # pane already truncates intelligently — let it work with the
-          # real width.
-          sections << Views::TasksPane.render(@hive_model, width: cols)
+          sections << Views::TasksPane.render(@hive_model, width: usable)
         else
           sections << join_panes(cols)
         end
-        sections << footer
+        sections << (footer || default_footer(usable))
         sections.join("\n")
       end
 
       # Top strip — `hive tui · scope=… · filter=… · generated_at=…`.
       # Same content v1's Views::Grid#header_line carried, lifted to a
       # composer concern so the panes stay focused on their own boxes.
-      def header_strip
+      def header_strip(usable_width = nil)
         scope_label = scope_label_for(@hive_model)
         filter_label = @hive_model.filter.to_s.empty? ? "-" : @hive_model.filter
         generated_at = @hive_model.snapshot&.generated_at || "-"
         line = "hive tui  scope=#{scope_label}  filter=#{filter_label}  generated_at=#{generated_at}"
+        line = Views::Format.truncate(line, usable_width) if usable_width
         Hive::Tui::Styles::HEADER.render(line)
       end
 
@@ -800,22 +804,29 @@ module Hive
         !@hive_model.last_error.nil?
       end
 
-      def stalled_banner
+      def stalled_banner(usable_width = nil)
         err = @hive_model.last_error
         klass = err.class.name.split("::").last
         msg = err.message.to_s.lines.first&.chomp.to_s[0, 60]
         line = msg.empty? ? "[stalled — #{klass}]" : "[stalled — #{klass}: #{msg}]"
+        line = Views::Format.truncate(line, usable_width) if usable_width
         Hive::Tui::Styles::STALLED.render(line)
       end
 
       # Default footer — context-aware key hints + flash decay (the
       # status line). v1 had this in Views::Grid#status_line; lifted here
-      # so the panes stay layout-only.
-      def default_footer
+      # so the panes stay layout-only. `usable_width` clamps the line
+      # so the fixed 75-char hint string doesn't overflow narrow
+      # terminals (e.g. cols=70 used to wrap onto a second visible row).
+      def default_footer(usable_width = nil)
         if @hive_model.flash_active?
-          Hive::Tui::Styles::FLASH.render(@hive_model.flash.to_s)
+          line = @hive_model.flash.to_s
+          line = Views::Format.truncate(line, usable_width) if usable_width
+          Hive::Tui::Styles::FLASH.render(line)
         else
-          Hive::Tui::Styles::HINT.render(footer_hint)
+          line = footer_hint
+          line = Views::Format.truncate(line, usable_width) if usable_width
+          Hive::Tui::Styles::HINT.render(line)
         end
       end
 

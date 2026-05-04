@@ -30,7 +30,13 @@ module Hive
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
-          profile: Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+          profile: Hive::Stages::Base.stage_profile(cfg, "brainstorm"),
+          # Pin the status-detection mode regardless of which profile the
+          # user picked: brainstorm's lifecycle contract is "agent writes
+          # WAITING/COMPLETE marker to brainstorm.md", which only the
+          # :state_file_marker mode honors. Codex's profile default is
+          # :output_file_exists, which would never satisfy this stage.
+          status_mode: :state_file_marker
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

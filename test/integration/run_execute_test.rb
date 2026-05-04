@@ -10,6 +10,7 @@ class RunExecuteTest < Minitest::Test
 
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
+    @prev_codex_bin = ENV["HIVE_CODEX_BIN"]
     @driver_path = Dir.mktmpdir("execute-driver")
     @driver_script = File.join(@driver_path, "driver.rb")
     File.write(@driver_script, driver_script_body)
@@ -17,6 +18,9 @@ class RunExecuteTest < Minitest::Test
     File.write(@driver_bin, <<~SH)
       #!/usr/bin/env bash
       if [[ "${1:-}" == "--version" ]]; then
+        # Both claude and codex profiles probe --version; emit a string the
+        # SemVer parser accepts for either profile (>= 2.1.118 is fine for
+        # claude; codex's min is 0.125.0 so the same string passes).
         echo "2.1.118 (Claude Code)"
         exit 0
       fi
@@ -24,10 +28,15 @@ class RunExecuteTest < Minitest::Test
     SH
     File.chmod(0o755, @driver_bin)
     ENV["HIVE_CLAUDE_BIN"] = @driver_bin
+    # ADR-023: rendered templates default execute.agent to codex, so the
+    # 4-execute spawn resolves the codex profile. Point both bins at the
+    # same fake driver so the test doesn't depend on which CLI is picked.
+    ENV["HIVE_CODEX_BIN"] = @driver_bin
   end
 
   def teardown
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
+    ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
     FileUtils.rm_rf(@driver_path)
     FileUtils.rm_rf(@local_worktree_root) if @local_worktree_root
     %w[HIVE_EXEC_DRIVER_TASK_DIR HIVE_EXEC_DRIVER_TAMPER].each { |k| ENV.delete(k) }

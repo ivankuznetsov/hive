@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "hive/config"
 require "hive/git_ops"
+require "hive/commands/init/prompts"
 
 module Hive
   module Commands
@@ -70,13 +71,14 @@ module Hive
         File.write(cfg_path, content)
       end
 
-      def render_project_config(ops)
+      def render_project_config(ops, answers: nil)
         require "erb"
         template = File.read(File.expand_path("../../../templates/project_config.yml.erb", __dir__))
         bindings = ProjectConfigBinding.new(
           project_name: File.basename(@project_path),
           default_branch: ops.default_branch,
-          worktree_root: worktree_root
+          worktree_root: worktree_root,
+          answers: answers || ProjectConfigBinding.recommended_answers
         )
         ERB.new(template, trim_mode: "-").result(bindings.binding_for_erb)
       end
@@ -85,17 +87,48 @@ module Hive
         File.expand_path("~/Dev/#{File.basename(@project_path)}.worktrees")
       end
 
+      # ERB binding object for templates/project_config.yml.erb. Holds
+      # the per-project scaffolding values (project name, default
+      # branch, worktree root) and the prompted answers hash from
+      # Hive::Commands::Init::Prompts (planning_agent / development_agent /
+      # enabled_reviewers / budgets / timeouts). When no answers are
+      # supplied (e.g. during the U4 → U5 transition or in a future
+      # caller that bypasses the prompt module), `recommended_answers`
+      # provides the same shape Prompts emits in non-TTY mode, so the
+      # template always renders against a complete binding.
       class ProjectConfigBinding
-        def initialize(project_name:, default_branch:, worktree_root:)
+        def initialize(project_name:, default_branch:, worktree_root:, answers:)
           @project_name = project_name
           @default_branch = default_branch
           @worktree_root = worktree_root
+          @planning_agent = answers.fetch("planning_agent")
+          @development_agent = answers.fetch("development_agent")
+          @enabled_reviewers = answers.fetch("enabled_reviewers")
+          @budgets = answers.fetch("budgets")
+          @timeouts = answers.fetch("timeouts")
         end
 
-        attr_reader :project_name, :default_branch, :worktree_root
+        attr_reader :project_name, :default_branch, :worktree_root,
+                    :planning_agent, :development_agent,
+                    :enabled_reviewers, :budgets, :timeouts
 
         def binding_for_erb
           binding
+        end
+
+        # Mirror of Prompts#non_interactive_defaults, surfaced here so
+        # callers without a Prompts instance (e.g. legacy tests or
+        # render_project_config when invoked without `answers:`) still
+        # produce a complete binding.
+        def self.recommended_answers
+          limit_keys = Hive::Commands::Init::Prompts::LIMIT_KEYS
+          {
+            "planning_agent" => Hive::Commands::Init::Prompts::DEFAULT_PLANNING_AGENT,
+            "development_agent" => Hive::Commands::Init::Prompts::DEFAULT_DEVELOPMENT_AGENT,
+            "enabled_reviewers" => Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES.dup,
+            "budgets"  => limit_keys.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"][k] },
+            "timeouts" => limit_keys.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["timeout_sec"][k] }
+          }
         end
       end
     end

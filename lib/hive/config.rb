@@ -10,28 +10,44 @@ module Hive
       "max_review_passes" => 4,
       "default_branch" => nil,
       "project_name" => nil,
+      # Budget and timeout caps are GENEROUS sanity caps for runaway agents,
+      # not cost targets. Most tasks finish well within them; a stuck loop
+      # still gets cut off. Bumped ~5x from the original conservative values
+      # in plan 2026-05-04-001 (per ADR-023). The deprecated `execute_review`
+      # key was dropped here — 5-review owns reviewer budgets per ADR-014, so
+      # nothing reads it. Existing project configs that still set it survive
+      # via deep-merge but the key is no longer rendered for fresh projects.
       "budget_usd" => {
-        "brainstorm" => 10,
-        "plan" => 20,
-        "execute_implementation" => 100,
-        "execute_review" => 50,
-        "pr" => 10,
-        "review_ci" => 25,
-        "review_triage" => 15,
-        "review_fix" => 100,
-        "review_browser" => 25
+        "brainstorm" => 50,
+        "plan" => 100,
+        "execute_implementation" => 500,
+        "pr" => 50,
+        "review_ci" => 100,
+        "review_triage" => 75,
+        "review_fix" => 500,
+        "review_browser" => 100
       },
       "timeout_sec" => {
-        "brainstorm" => 300,
-        "plan" => 600,
-        "execute_implementation" => 2700,
-        "execute_review" => 600,
-        "pr" => 300,
-        "review_ci" => 600,
-        "review_triage" => 300,
-        "review_fix" => 2700,
-        "review_browser" => 900
+        "brainstorm" => 1800,
+        "plan" => 3600,
+        "execute_implementation" => 14400,
+        "pr" => 1800,
+        "review_ci" => 3600,
+        "review_triage" => 1800,
+        "review_fix" => 14400,
+        "review_browser" => 3600
       },
+      # Stage-level agent for the three single-agent stages. The 5-review
+      # stage has its own per-role agent fields under "review.{ci,triage,
+      # fix,browser_test}.agent". Runtime fallback in stage code stays
+      # `cfg.dig("<stage>", "agent") || "claude"` so legacy configs without
+      # these keys keep behaving as today (ADR-023). The recommended-default
+      # for execute is `codex` only at the rendered-template level, not in
+      # DEFAULTS itself, to avoid silently flipping the implementer for old
+      # projects on next load.
+      "brainstorm" => { "agent" => "claude" },
+      "plan" => { "agent" => "claude" },
+      "execute" => { "agent" => "claude" },
       # Per-CLI agent profiles. Each project may override `bin`,
       # `env_override`, or `min_version` to pin to a different binary or
       # version. Adding a new top-level profile is not yet supported here
@@ -96,6 +112,9 @@ module Hive
     # Roles that take an `agent` profile-name field. Used by validation to
     # check each role's value resolves to a registered AgentProfile.
     ROLE_AGENT_PATHS = [
+      %w[brainstorm agent],
+      %w[plan agent],
+      %w[execute agent],
       %w[review ci agent],
       %w[review triage agent],
       %w[review fix agent],

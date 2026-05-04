@@ -8,8 +8,11 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
       assert_equal 4, cfg["max_review_passes"]
-      assert_equal 10, cfg["budget_usd"]["brainstorm"]
-      assert_equal 100, cfg["budget_usd"]["execute_implementation"]
+      # Generous defaults bumped ~5x in plan 2026-05-04-001 / ADR-023.
+      assert_equal 50, cfg["budget_usd"]["brainstorm"]
+      assert_equal 500, cfg["budget_usd"]["execute_implementation"]
+      assert_nil cfg["budget_usd"]["execute_review"],
+                 "deprecated execute_review key must be absent from DEFAULTS"
       assert_equal dir, cfg["project_root"]
     end
   end
@@ -26,8 +29,66 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
       assert_equal 6, cfg["max_review_passes"]
-      assert_equal 20, cfg["budget_usd"]["brainstorm"]
-      assert_equal 20, cfg["budget_usd"]["plan"], "plan budget should fall back to default"
+      assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
+      assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
+    end
+  end
+
+  # Legacy projects that still carry execute_review explicitly must keep it
+  # via deep-merge — DEFAULTS no longer ships the key but user-supplied
+  # values survive untouched.
+  def test_load_preserves_user_supplied_execute_review_when_legacy
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        budget_usd:
+          execute_review: 50
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal 50, cfg["budget_usd"]["execute_review"],
+                   "legacy explicit execute_review must survive deep-merge"
+    end
+  end
+
+  # ADR-023: stage-level agent keys for brainstorm / plan / execute.
+  # Defaults are "claude" so legacy configs without these keys keep
+  # the same runtime behavior as before this plan landed.
+  def test_load_returns_default_stage_agents_when_keys_absent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal "claude", cfg.dig("brainstorm", "agent"), "brainstorm agent must default to claude"
+      assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
+      assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
+    end
+  end
+
+  def test_load_honors_per_project_stage_agent_overrides
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm:
+          agent: codex
+        plan:
+          agent: pi
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "codex", cfg.dig("brainstorm", "agent")
+      assert_equal "pi",    cfg.dig("plan", "agent")
+      assert_equal "claude", cfg.dig("execute", "agent"),
+                   "execute agent must fall back to default when not overridden"
+    end
+  end
+
+  def test_load_raises_when_stage_agent_is_unknown_profile
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          agent: nonexistent_profile
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/execute\.agent "nonexistent_profile"/, err.message)
+      assert_match(/registered:/, err.message, "error must list registered profiles")
     end
   end
 

@@ -252,9 +252,41 @@ module Hive
     # default value cannot be the cause of a failure — only user input
     # ever fails validation.
     def validate!(cfg, source_path)
+      validate_hash_shaped_keys!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
+    end
+
+    # Top-level keys that MUST be Hashes when present. A scalar override
+    # (e.g. YAML `brainstorm: claude` instead of `brainstorm: { agent: claude }`)
+    # would otherwise survive deep_merge — `deep_merge(default_hash, "claude")`
+    # returns the override unchanged, since override is not a Hash — and
+    # crash later as TypeError/NoMethodError when stage code calls
+    # `cfg.dig("brainstorm", "agent")`. Surface the shape mismatch loudly at
+    # load time with a typed ConfigError instead.
+    HASH_SHAPED_KEYS = %w[
+      brainstorm
+      plan
+      execute
+      budget_usd
+      timeout_sec
+      review
+      agents
+    ].freeze
+
+    def validate_hash_shaped_keys!(cfg, source_path)
+      HASH_SHAPED_KEYS.each do |key|
+        next unless cfg.key?(key)
+
+        value = cfg[key]
+        next if value.is_a?(Hash)
+
+        raise ConfigError,
+              "#{key} in #{describe_source(source_path)} must be a Hash; " \
+              "got #{value.inspect} (#{value.class}). Either remove the key " \
+              "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
+      end
     end
 
     # Numeric review-loop knobs that must be positive integers.

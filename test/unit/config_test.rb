@@ -92,6 +92,45 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # ADR-023 shape-validation gap (ce-code-review F1): non-Hash overrides on
+  # the new top-level keys would otherwise survive deep_merge (because
+  # deep_merge returns the override unchanged when it is not a Hash) and
+  # crash later as TypeError/NoMethodError in stage code. validate! now
+  # rejects them at load time with a typed ConfigError.
+  def test_load_raises_when_stage_block_is_a_scalar_instead_of_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm: claude
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/brainstorm.*must be a Hash/, err.message)
+      assert_match(/got "claude"/, err.message)
+    end
+  end
+
+  def test_load_raises_when_budget_usd_is_nil
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        budget_usd: ~
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/budget_usd.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_timeout_sec_is_a_scalar
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        timeout_sec: 600
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/timeout_sec.*must be a Hash/, err.message)
+    end
+  end
+
   def test_register_and_lookup_project
     with_tmp_global_config do |home|
       Hive::Config.register_project(name: "foo", path: "/tmp/foo")

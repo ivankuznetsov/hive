@@ -231,7 +231,8 @@ module Hive
         @ctx.pre_keystroke_pane = @tmux_lifecycle.snapshot_pane
         tmux.mark_subprocess_log!
         if step.args.key?("text")
-          tmux.send_text(expand_string(step.args["text"]))
+          text = expand_string(step.args["text"])
+          truthy?(step.args["paste"]) ? tmux.send_text_chunk(text) : tmux.send_text(text)
         else
           # `keys:` always carries a tmux named-key token (e.g. "Enter", "Up",
           # "C-c"); send it verbatim. Literal text uses the `text:` branch above.
@@ -279,9 +280,11 @@ module Hive
 
       def run_state_assertion!(step, path)
         if truthy?(step.args["absent"])
-          raise StepFailure.new(step, "expected #{path} to be absent") if File.exist?(path)
+          exists = truthy?(step.args["glob"]) ? Dir.glob(path).any? : File.exist?(path)
+          raise StepFailure.new(step, "expected #{path} to be absent") if exists
           return
         end
+        path = state_assert_target(step, path)
         if !truthy?(step.args["absent"]) || step.args.key?("exists") || step.args.key?("marker") || step.args.key?("contains") || step.args.key?("match")
           raise StepFailure.new(step, "expected #{path} to exist") unless File.exist?(path)
         end
@@ -300,6 +303,12 @@ module Hive
         body = File.read(path)
         regex = Regexp.new(expand_string(step.args["match"].to_s))
         raise StepFailure.new(step, "expected #{path} to match #{regex.inspect}") unless body.match?(regex)
+      end
+
+      def state_assert_target(step, path)
+        return path unless truthy?(step.args["glob"])
+
+        Dir.glob(path).sort.first || path
       end
 
       def discover_slug!

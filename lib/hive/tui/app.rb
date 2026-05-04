@@ -47,6 +47,7 @@ module Hive
       def run_charm
         require "bubbletea"
         require "hive/tui/bubble_model"
+        require "hive/tui/paste_aware_runner"
         require "hive/tui/state_source"
         require "hive/tui/subprocess_registry"
 
@@ -74,7 +75,12 @@ module Hive
           # more often per second so background snapshot polling lands within
           # ~1s instead of stalling for 10s+. Documented in
           # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
-          runner = Bubbletea::Runner.new(bubble_model, alt_screen: true, input_timeout: 1)
+          runner = runner_class.new(
+            bubble_model,
+            alt_screen: true,
+            input_timeout: 1,
+            bracketed_paste: true
+          )
           bubble_model.dispatch = runner.method(:send)
 
           prev_hup = install_terminate_hook(runner)
@@ -135,6 +141,11 @@ module Hive
             next
           end
         end
+      end
+
+      def runner_class
+        require "hive/tui/paste_aware_runner"
+        Hive::Tui::PasteAwareRunner
       end
 
       # SIGHUP cooperative cancellation: the trap fires from a separate

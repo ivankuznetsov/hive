@@ -510,38 +510,149 @@ class HiveTuiUpdateTest < Minitest::Test
   # ---- v2 new-idea mode lifecycle ----
 
   def test_open_new_idea_prompt_sets_mode_and_clears_buffer
-    starting = model.with(mode: :grid, new_idea_buffer: "leftover-text")
+    starting = model.with(mode: :grid, new_idea_buffer: "leftover-text", new_idea_cursor: 4)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
     assert_equal "", new_model.new_idea_buffer
+    assert_equal 0, new_model.new_idea_cursor
   end
 
-  def test_new_idea_char_appended_grows_buffer
-    starting = model.with(mode: :new_idea, new_idea_buffer: "rss")
+  def test_new_idea_char_appended_inserts_at_cursor_for_compatibility
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rs", new_idea_cursor: 1)
     new_model, _cmd = Hive::Tui::Update.apply(
       starting, Hive::Tui::Messages::NewIdeaCharAppended.new(char: " ")
     )
-    assert_equal "rss ", new_model.new_idea_buffer
+    assert_equal "r s", new_model.new_idea_buffer
+    assert_equal 2, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
+    starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaTextInserted.new(text: "rss")
+    )
+    assert_equal "rss", new_model.new_idea_buffer
+    assert_equal 3, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_text_inserted_in_middle_preserves_suffix
+    starting = model.with(mode: :new_idea, new_idea_buffer: "fix bu", new_idea_cursor: 4)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaTextInserted.new(text: "cache ")
+    )
+    assert_equal "fix cache bu", new_model.new_idea_buffer
+    assert_equal 10, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_cursor_left_and_right_clamp_at_boundaries
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss", new_idea_cursor: 1)
+
+    left_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT)
+    assert_equal 0, left_model.new_idea_cursor
+
+    still_left, _cmd = Hive::Tui::Update.apply(left_model, Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT)
+    assert_equal 0, still_left.new_idea_cursor
+
+    right_model, _cmd = Hive::Tui::Update.apply(
+      model.with(mode: :new_idea, new_idea_buffer: "rss", new_idea_cursor: 3),
+      Hive::Tui::Messages::NEW_IDEA_CURSOR_RIGHT
+    )
+    assert_equal 3, right_model.new_idea_cursor
+  end
+
+  def test_new_idea_cursor_home_and_end_jump_to_buffer_edges
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds", new_idea_cursor: 3)
+
+    home_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CURSOR_HOME)
+    assert_equal 0, home_model.new_idea_cursor
+
+    end_model, _cmd = Hive::Tui::Update.apply(home_model, Hive::Tui::Messages::NEW_IDEA_CURSOR_END)
+    assert_equal "rss feeds".length, end_model.new_idea_cursor
   end
 
   def test_new_idea_char_deleted_shrinks_buffer
-    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds")
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds", new_idea_cursor: 9)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
     assert_equal "rss feed", new_model.new_idea_buffer
+    assert_equal 8, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_backspace_deletes_character_before_cursor
+    starting = model.with(mode: :new_idea, new_idea_buffer: "fix bug", new_idea_cursor: 5)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+    assert_equal "fix ug", new_model.new_idea_buffer
+    assert_equal 4, new_model.new_idea_cursor
   end
 
   def test_new_idea_char_deleted_on_empty_buffer_stays_empty
     starting = model.with(mode: :new_idea, new_idea_buffer: "")
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
     assert_equal "", new_model.new_idea_buffer
+    assert_equal 0, new_model.new_idea_cursor
     assert_equal :new_idea, new_model.mode, "delete-on-empty must not change mode"
   end
 
+  def test_new_idea_delete_forward_removes_character_under_cursor
+    starting = model.with(mode: :new_idea, new_idea_buffer: "fix bug", new_idea_cursor: 4)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD
+    )
+    assert_equal "fix ug", new_model.new_idea_buffer
+    assert_equal 4, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_delete_forward_at_tail_is_noop
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss", new_idea_cursor: 3)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD
+    )
+    assert_equal "rss", new_model.new_idea_buffer
+    assert_equal 3, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_unicode_cursor_operations_do_not_split_characters
+    starting = model.with(mode: :new_idea, new_idea_buffer: "åβc", new_idea_cursor: 2)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+    assert_equal "åc", new_model.new_idea_buffer
+    assert_equal 1, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_paste_text_normalizes_line_breaks_and_tabs
+    starting = model.with(mode: :new_idea, new_idea_buffer: "fix ", new_idea_cursor: 4)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaTextInserted.new(text: "bug\n\treport\rnow")
+    )
+    assert_equal "fix bug report now", new_model.new_idea_buffer
+    assert_equal "fix bug report now".length, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_over_limit_insert_preserves_buffer_and_flashes
+    existing = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS - 1)
+    starting = model.with(mode: :new_idea, new_idea_buffer: existing, new_idea_cursor: existing.length)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaTextInserted.new(text: "yz")
+    )
+    assert_equal existing, new_model.new_idea_buffer
+    assert_equal existing.length, new_model.new_idea_cursor
+    assert_equal "title too long", new_model.flash
+    refute_nil new_model.flash_set_at
+  end
+
+  def test_filter_text_inserted_appends_to_filter_buffer
+    starting = model.with(mode: :filter, filter_buffer: "au")
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::FilterTextInserted.new(text: "th")
+    )
+    assert_equal "auth", new_model.filter_buffer
+    assert_equal :filter, new_model.mode
+  end
+
   def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
-    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds")
+    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds", new_idea_cursor: 4)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
     assert_equal :grid, new_model.mode
     assert_equal "", new_model.new_idea_buffer
+    assert_equal 0, new_model.new_idea_cursor
   end
 
   def test_cursor_down_under_right_focus_preserves_v1_behaviour

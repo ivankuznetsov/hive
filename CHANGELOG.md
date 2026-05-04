@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added — `hive tui` new-idea editing and paste support
+
+- The `n` new-idea prompt now supports cursor-aware title editing: Left/Right, Home/End, Ctrl+A/Ctrl+E, Backspace, Delete, and insertion at the cursor.
+- TUI input now uses a Hive-owned paste-aware Bubble Tea runner that drains complete raw terminal chunks. Plain multi-character paste and bracketed paste both reach the prompt, with CR/LF/TAB normalized to spaces for the single-line `hive new` title.
+- The e2e harness gained `tui_keys` `paste: true` for sending one literal text chunk through tmux; `tui_new_idea_editing` covers paste plus mid-title correction before submit.
+
 ### Changed — `hive tui` render layer migrated from curses to Charm bubbletea + lipgloss
 
 - The TUI now boots a [bubbletea-ruby](https://github.com/marcoroth/bubbletea-ruby) MVU runtime and renders frames with [lipgloss-ruby](https://github.com/marcoroth/lipgloss-ruby) styles. `KeyMap` is the single source of truth for keystroke→action mapping, returning typed `Hive::Tui::Messages::*` values that flow through `Hive::Tui::Update.apply(model, msg) → [model, cmd]`. Views are pure functions of the frozen Model — no I/O — which makes layout regressions reproducible in unit tests.

@@ -65,6 +65,11 @@ module Hive
       YieldTick = Class.new
       YIELD_TICK = YieldTick.new.freeze
 
+      # Raw text bytes decoded before mode-specific routing. BubbleModel
+      # translates this by current mode so paste in grid mode cannot
+      # mutate hidden prompt buffers.
+      RawTextInput = Data.define(:text, :paste)
+
       # ---- Filter-prompt messages (consumed in :filter mode) ----
       # Defined in U4 (not U9 where the FilterPrompt view lives) so the
       # message contract is centralized and Update can be unit-tested
@@ -73,6 +78,11 @@ module Hive
       # User typed a printable character into the filter buffer. Char
       # is a single-character String.
       FilterCharAppended = Data.define(:char)
+
+      # User pasted or otherwise entered multiple text characters into
+      # the filter prompt. Kept separate from FilterCharAppended so the
+      # decoder can batch terminal chunks without losing filter support.
+      FilterTextInserted = Data.define(:text)
 
       # User pressed Backspace in the filter prompt.
       FilterCharDeleted = Class.new
@@ -203,9 +213,30 @@ module Hive
       # User typed a printable character into the new-idea buffer.
       NewIdeaCharAppended = Data.define(:char)
 
-      # User pressed Backspace in the new-idea prompt.
+      # User inserted text into the new-idea buffer at the cursor. This
+      # is the primary path for both printable characters and paste.
+      NewIdeaTextInserted = Data.define(:text)
+
+      # Cursor navigation within the new-idea prompt.
+      NewIdeaCursorLeft = Class.new
+      NEW_IDEA_CURSOR_LEFT = NewIdeaCursorLeft.new.freeze
+
+      NewIdeaCursorRight = Class.new
+      NEW_IDEA_CURSOR_RIGHT = NewIdeaCursorRight.new.freeze
+
+      NewIdeaCursorHome = Class.new
+      NEW_IDEA_CURSOR_HOME = NewIdeaCursorHome.new.freeze
+
+      NewIdeaCursorEnd = Class.new
+      NEW_IDEA_CURSOR_END = NewIdeaCursorEnd.new.freeze
+
+      # User pressed Backspace in the new-idea prompt (delete backward).
       NewIdeaCharDeleted = Class.new
       NEW_IDEA_CHAR_DELETED = NewIdeaCharDeleted.new.freeze
+
+      # User pressed Delete in the new-idea prompt (delete forward).
+      NewIdeaCharDeletedForward = Class.new
+      NEW_IDEA_CHAR_DELETED_FORWARD = NewIdeaCharDeletedForward.new.freeze
 
       # User pressed Enter in the new-idea prompt — submit the buffer
       # as a new `hive new <project> "<title>"` invocation. The project

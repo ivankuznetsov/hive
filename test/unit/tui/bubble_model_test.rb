@@ -18,6 +18,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
+  def key_message(key_type, runes: [])
+    Bubbletea::KeyMessage.new(key_type: key_type, runes: runes)
+  end
+
   # ---- Construction / init ----
 
   def test_init_returns_self_and_yield_tick
@@ -136,6 +140,53 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_nil cmd
     assert_equal snapshot_before.mode, @model.hive_model.mode,
       "unknown keystrokes must not flip mode"
+  end
+
+  def test_bubble_key_to_keymap_translates_new_idea_editing_keys
+    {
+      Bubbletea::KeyMessage::KEY_LEFT => :key_left,
+      Bubbletea::KeyMessage::KEY_RIGHT => :key_right,
+      Bubbletea::KeyMessage::KEY_HOME => :key_home,
+      Bubbletea::KeyMessage::KEY_END => :key_end,
+      Bubbletea::KeyMessage::KEY_DELETE => :key_delete,
+      Bubbletea::KeyMessage::KEY_CTRL_A => :key_ctrl_a,
+      Bubbletea::KeyMessage::KEY_CTRL_E => :key_ctrl_e
+    }.each do |key_type, expected|
+      assert_equal expected, @model.send(:bubble_key_to_keymap, key_message(key_type))
+    end
+  end
+
+  def test_raw_text_input_in_new_idea_mode_inserts_at_cursor
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, new_idea_buffer: "ac", new_idea_cursor: 1
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "b", paste: false))
+
+    assert_equal "abc", @model.hive_model.new_idea_buffer
+    assert_equal 2, @model.hive_model.new_idea_cursor
+  end
+
+  def test_raw_text_input_in_filter_mode_appends_to_filter_buffer
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :filter, filter_buffer: "au"),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "th", paste: true))
+
+    assert_equal "auth", @model.hive_model.filter_buffer
+  end
+
+  def test_raw_text_input_in_grid_mode_is_noop
+    before = @model.hive_model
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "paste", paste: true))
+
+    assert_equal before, @model.hive_model
   end
 
   # ---- View dispatch by mode ----

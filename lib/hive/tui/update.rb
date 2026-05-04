@@ -45,6 +45,8 @@ module Hive
           [ model, nil ]
         when Messages::FilterCharAppended
           [ apply_filter_char_appended(model, message), nil ]
+        when Messages::FilterTextInserted
+          [ apply_filter_text_inserted(model, message), nil ]
         when Messages::FilterCharDeleted
           [ apply_filter_char_deleted(model), nil ]
         when Messages::FilterCommitted
@@ -83,8 +85,20 @@ module Hive
           [ apply_open_new_idea_prompt(model), nil ]
         when Messages::NewIdeaCharAppended
           [ apply_new_idea_char_appended(model, message), nil ]
+        when Messages::NewIdeaTextInserted
+          [ apply_new_idea_text_inserted(model, message), nil ]
+        when Messages::NewIdeaCursorLeft
+          [ apply_new_idea_cursor_left(model), nil ]
+        when Messages::NewIdeaCursorRight
+          [ apply_new_idea_cursor_right(model), nil ]
+        when Messages::NewIdeaCursorHome
+          [ apply_new_idea_cursor_home(model), nil ]
+        when Messages::NewIdeaCursorEnd
+          [ apply_new_idea_cursor_end(model), nil ]
         when Messages::NewIdeaCharDeleted
           [ apply_new_idea_char_deleted(model), nil ]
+        when Messages::NewIdeaCharDeletedForward
+          [ apply_new_idea_char_deleted_forward(model), nil ]
         when Messages::NewIdeaCancelled
           [ apply_new_idea_cancelled(model), nil ]
         when Messages::Noop
@@ -184,6 +198,10 @@ module Hive
 
       def apply_filter_char_appended(model, msg)
         model.with(filter_buffer: model.filter_buffer + msg.char)
+      end
+
+      def apply_filter_text_inserted(model, msg)
+        model.with(filter_buffer: model.filter_buffer + msg.text.to_s)
       end
 
       def apply_filter_char_deleted(model)
@@ -368,19 +386,98 @@ module Hive
       # validation failure.
 
       def apply_open_new_idea_prompt(model)
-        model.with(mode: :new_idea, new_idea_buffer: "")
+        model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
       end
 
       def apply_new_idea_char_appended(model, msg)
-        model.with(new_idea_buffer: model.new_idea_buffer.to_s + msg.char)
+        insert_new_idea_text(model, msg.char.to_s)
+      end
+
+      def apply_new_idea_text_inserted(model, msg)
+        insert_new_idea_text(model, msg.text.to_s)
+      end
+
+      def apply_new_idea_cursor_left(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: [ cursor - 1, 0 ].max)
+      end
+
+      def apply_new_idea_cursor_right(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: [ cursor + 1, buffer.length ].min)
+      end
+
+      def apply_new_idea_cursor_home(model)
+        buffer, = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: 0)
+      end
+
+      def apply_new_idea_cursor_end(model)
+        buffer, = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: buffer.length)
       end
 
       def apply_new_idea_char_deleted(model)
-        model.with(new_idea_buffer: model.new_idea_buffer.to_s[0..-2].to_s)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        return model.with(new_idea_buffer: buffer, new_idea_cursor: cursor) if cursor.zero?
+
+        prefix = buffer[0...(cursor - 1)].to_s
+        suffix = buffer[cursor..].to_s
+        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor - 1)
+      end
+
+      def apply_new_idea_char_deleted_forward(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        return model.with(new_idea_buffer: buffer, new_idea_cursor: cursor) if cursor >= buffer.length
+
+        prefix = buffer[0...cursor].to_s
+        suffix = buffer[(cursor + 1)..].to_s
+        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor)
       end
 
       def apply_new_idea_cancelled(model)
-        model.with(mode: :grid, new_idea_buffer: "")
+        model.with(mode: :grid, new_idea_buffer: "", new_idea_cursor: 0)
+      end
+
+      def insert_new_idea_text(model, raw_text)
+        text = normalize_new_idea_text(raw_text)
+        return clamp_new_idea_cursor(model) if text.empty?
+
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        if buffer.length + text.length > Model::NEW_IDEA_BUFFER_MAX_CHARS
+          return model.with(
+            new_idea_buffer: buffer,
+            new_idea_cursor: cursor,
+            flash: "title too long",
+            flash_set_at: Time.now
+          )
+        end
+
+        prefix = buffer[0...cursor].to_s
+        suffix = buffer[cursor..].to_s
+        model.with(
+          new_idea_buffer: prefix + text + suffix,
+          new_idea_cursor: cursor + text.length
+        )
+      end
+
+      def clamp_new_idea_cursor(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: cursor)
+      end
+
+      def normalized_new_idea_buffer_and_cursor(model)
+        buffer = model.new_idea_buffer.to_s
+        cursor = model.new_idea_cursor.to_i.clamp(0, buffer.length)
+        [ buffer, cursor ]
+      end
+
+      def normalize_new_idea_text(text)
+        text.to_s
+            .delete_prefix("\e[200~")
+            .delete_suffix("\e[201~")
+            .gsub(/[\r\n\t]+/, " ")
+            .gsub(/ {2,}/, " ")
       end
 
       def apply_show_help(model)

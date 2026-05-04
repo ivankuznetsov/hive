@@ -80,6 +80,30 @@ class E2EStepExecutorTest < Minitest::Test
     end
   end
 
+  def test_state_assert_supports_glob_paths
+    with_runner do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "state_glob", <<~YAML)
+        name: state_glob
+        steps:
+          - kind: write_file
+            path: "{sandbox}/nested/generated/idea.md"
+            content: "# generated title\\n"
+          - kind: state_assert
+            path: "{sandbox}/nested/*/idea.md"
+            glob: true
+            contains: "# generated title"
+          - kind: state_assert
+            path: "{sandbox}/nested/nope/*.md"
+            glob: true
+            absent: true
+      YAML
+
+      Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+
+      assert_equal 1, report_for(runs_dir)["summary"]["passed"]
+    end
+  end
+
   def test_path_only_state_assert_requires_file_to_exist
     with_runner do |scenarios_dir, runs_dir|
       write_scenario(scenarios_dir, "missing_path_assert", <<~YAML)

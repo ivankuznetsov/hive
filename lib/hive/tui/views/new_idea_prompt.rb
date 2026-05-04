@@ -40,16 +40,17 @@ module Hive
 
         def render(model, width: model.cols.to_i)
           buffer = model.new_idea_buffer.to_s
+          cursor = model.new_idea_cursor.to_i.clamp(0, buffer.length)
           label = "#{PROMPT_PREFIX}#{project_label(model)}): "
           # Available cells per row = width - 1 (cursor block) - 1
           # (right margin). Chunks are sized so `label-width padding +
-          # chunk` always fits within `row_width`, keeping continuation
-          # rows aligned to the same column as the first chunk.
+          # chunk + cursor` always fits within `row_width`, keeping
+          # continuation rows aligned to the same column as the first chunk.
           row_width = [ width - 2, 1 ].max
-          chunk_capacity = [ row_width - label.length, 1 ].max
-          chunks = chunk_buffer(buffer, chunk_capacity)
-          visible = chunks.size > MAX_VISIBLE_ROWS ? chunks.last(MAX_VISIBLE_ROWS) : chunks
-          render_rows(label, visible)
+          chunk_capacity = [ row_width - label.length - 1, 1 ].max
+          chunks, cursor_chunk_idx, cursor_offset = chunk_buffer_with_cursor(buffer, cursor, chunk_capacity)
+          visible, visible_cursor_idx = visible_chunks_for_cursor(chunks, cursor_chunk_idx)
+          render_rows(label, visible, visible_cursor_idx, cursor_offset)
         end
 
         # Split `buffer` into chunks of `capacity` chars each. Always
@@ -67,16 +68,40 @@ module Hive
           chunks
         end
 
+        def chunk_buffer_with_cursor(buffer, cursor, capacity)
+          chunks = chunk_buffer(buffer, capacity)
+          cursor = cursor.to_i.clamp(0, buffer.length)
+          cursor_chunk_idx, cursor_offset = cursor_position(buffer, cursor, capacity, chunks)
+          [ chunks, cursor_chunk_idx, cursor_offset ]
+        end
+
+        def cursor_position(buffer, cursor, capacity, chunks)
+          return [ 0, 0 ] if buffer.empty?
+          return [ chunks.size - 1, chunks.last.length ] if cursor >= buffer.length
+
+          [ cursor / capacity, cursor % capacity ]
+        end
+
+        def visible_chunks_for_cursor(chunks, cursor_chunk_idx)
+          return [ chunks, cursor_chunk_idx ] if chunks.size <= MAX_VISIBLE_ROWS
+
+          start = [ cursor_chunk_idx - MAX_VISIBLE_ROWS + 1, 0 ].max
+          start = [ start, chunks.size - MAX_VISIBLE_ROWS ].min
+          visible = chunks[start, MAX_VISIBLE_ROWS]
+          [ visible, cursor_chunk_idx - start ]
+        end
+
         # Row 1: styled label + chunk
         # Row 2..N: spaces aligned to label width + chunk
-        # Cursor block at the end of the last chunk only.
-        def render_rows(label, chunks)
-          cursor = Styles::CURSOR_HIGHLIGHT.render(" ")
+        # Cursor block at the logical cursor position.
+        def render_rows(label, chunks, cursor_chunk_idx, cursor_offset, cursor: Styles::CURSOR_HIGHLIGHT.render(" "))
           padding = " " * label.length
           rows = chunks.each_with_index.map do |chunk, idx|
             prefix = idx.zero? ? Styles::HINT.render(label) : padding
-            if idx == chunks.size - 1
-              "#{prefix}#{chunk}#{cursor}"
+            if idx == cursor_chunk_idx
+              before_cursor = chunk[0...cursor_offset].to_s
+              after_cursor = chunk[cursor_offset..].to_s
+              "#{prefix}#{before_cursor}#{cursor}#{after_cursor}"
             else
               "#{prefix}#{chunk}"
             end

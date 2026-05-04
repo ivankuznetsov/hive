@@ -84,9 +84,8 @@ module Hive
         when "cli", "json_assert", "editor_action"
           invalid!("#{kind}.args must be an array", line_for(kind)) unless step["args"].is_a?(Array)
         when "tui_keys"
-          unless step.key?("keys") || step.key?("text")
-            invalid!("tui_keys step needs keys or text", line_for(kind))
-          end
+          key_count = %w[keys text].count { |key| step.key?(key) }
+          invalid!("tui_keys step needs exactly one of keys or text", line_for(kind)) unless key_count == 1
         end
       end
 

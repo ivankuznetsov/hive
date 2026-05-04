@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-04T19:10:44Z] tui — new-idea editing and paste support
+
+**Action:** Added cursor-aware editing to the `hive tui` new-idea prompt: Left/Right, Home/End, Ctrl+A/Ctrl+E, Backspace, Delete, insertion at cursor, wrapped cursor rendering, paste normalization, and a conservative 4 KiB title-buffer cap with a `title too long` flash. The terminal input path now uses a Hive-owned `PasteAwareRunner` over `Program#read_raw_input` so complete raw chunks are drained instead of losing bytes through bubbletea-ruby 0.1.4's one-event `poll_event` path. Copy remains terminal/OS-owned; Hive handles paste bytes only.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — documented new-idea prompt editing keys, paste behavior, title cap, and the copy boundary.
+- `wiki/e2e.md` — documented `tui_keys paste: true` and added the `tui_new_idea_editing` scenario to the coverage table.
+
 ## [2026-05-04T11:50:00Z] commands/init — beautified summary
 
 **Action:** Replaced the plain key:value summary printed at the end of `hive init` with a styled summary: green ✔ + bold heading + bold-cyan project name, dim labels in an aligned two-column block, and a cyan `→ next:` prompt. Colors are emitted only when `$stdout.tty?` and `NO_COLOR` is unset/empty, so piped/CI output stays plain. Field labels are now spaced (`default branch`, `hive state`, `worktree root`) instead of underscore-cased. Implementation lives in a nested `Hive::Commands::Init::Palette` so it can be lifted out if other commands want the same treatment.

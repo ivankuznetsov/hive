@@ -118,6 +118,10 @@ module Hive
         text.to_s.each_char { |char| send_keys(char, literal: true) }
       end
 
+      def send_text_chunk(text)
+        send_keys(text.to_s, literal: true)
+      end
+
       def capture_pane
         start
         ensure_live!

@@ -62,4 +62,8 @@ class TuiAppTest < Minitest::Test
     assert_respond_to Hive::Tui::App, :run_charm,
       "App.run_charm is the only TUI backend after U11"
   end
+
+  def test_charm_uses_paste_aware_runner
+    assert_equal "Hive::Tui::PasteAwareRunner", Hive::Tui::App.runner_class.name
+  end
 end

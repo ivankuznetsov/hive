@@ -59,6 +59,17 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal "a", msg.char
   end
 
+  def test_raw_text_input_carries_text_and_paste_flag
+    msg = Hive::Tui::Messages::RawTextInput.new(text: "hello", paste: true)
+    assert_equal "hello", msg.text
+    assert_equal true, msg.paste
+  end
+
+  def test_filter_text_inserted_carries_text
+    msg = Hive::Tui::Messages::FilterTextInserted.new(text: "auth flow")
+    assert_equal "auth flow", msg.text
+  end
+
   def test_filter_singletons_are_frozen
     assert Hive::Tui::Messages::FILTER_CHAR_DELETED.frozen?
     assert Hive::Tui::Messages::FILTER_COMMITTED.frozen?
@@ -108,15 +119,35 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal "r", msg.char
   end
 
+  def test_new_idea_text_inserted_carries_text
+    msg = Hive::Tui::Messages::NewIdeaTextInserted.new(text: "rss feeds")
+    assert_equal "rss feeds", msg.text
+  end
+
   def test_new_idea_singletons_are_frozen
+    assert Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_CURSOR_RIGHT.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_CURSOR_HOME.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_CURSOR_END.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_SUBMITTED.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CANCELLED.frozen?
   end
 
   def test_new_idea_singleton_classes
+    assert_kind_of Hive::Tui::Messages::NewIdeaCursorLeft,
+                   Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT
+    assert_kind_of Hive::Tui::Messages::NewIdeaCursorRight,
+                   Hive::Tui::Messages::NEW_IDEA_CURSOR_RIGHT
+    assert_kind_of Hive::Tui::Messages::NewIdeaCursorHome,
+                   Hive::Tui::Messages::NEW_IDEA_CURSOR_HOME
+    assert_kind_of Hive::Tui::Messages::NewIdeaCursorEnd,
+                   Hive::Tui::Messages::NEW_IDEA_CURSOR_END
     assert_kind_of Hive::Tui::Messages::NewIdeaCharDeleted,
                    Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED
+    assert_kind_of Hive::Tui::Messages::NewIdeaCharDeletedForward,
+                   Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD
     assert_kind_of Hive::Tui::Messages::NewIdeaSubmitted,
                    Hive::Tui::Messages::NEW_IDEA_SUBMITTED
     assert_kind_of Hive::Tui::Messages::NewIdeaCancelled,

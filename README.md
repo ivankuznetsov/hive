@@ -130,7 +130,7 @@ A starter shape is committed at `config.example.yml` for reference.
 
 ### Per-project: `<project>/.hive-state/config.yml`
 
-Created by `hive init` from `templates/project_config.yml.erb`:
+Created by `hive init` from `templates/project_config.yml.erb`. On TTY `hive init` opens an interactive prompt for the per-stage agents and limits; on non-TTY (CI, pipes, scripted callers) it falls through to recommended defaults (`claude` for planning, `codex` for development, all three default reviewers, generous limits). See [[wiki/commands/init.md]] for the full prompt flow.
 
 ```yaml
 project_name: your-project
@@ -138,21 +138,37 @@ default_branch: master            # detected at init
 worktree_root: /home/you/Dev/your-project.worktrees
 hive_state_path: .hive-state
 max_review_passes: 4
-budget_usd:
-  brainstorm: 10
-  plan: 20
-  execute_implementation: 100
-  execute_review: 50
-  pr: 10
+
+# Stage-level agents — each value must be one of: claude, codex, pi.
+# Hand-edit any of these later to override what you picked at init.
+brainstorm:
+  agent: claude
+plan:
+  agent: claude
+execute:
+  agent: codex                    # rendered template recommends codex; runtime fallback is claude
+
+budget_usd:                       # generous sanity caps, NOT cost targets — bumped ~5x in ADR-023
+  brainstorm: 50
+  plan: 100
+  execute_implementation: 500
+  pr: 50
+  review_ci: 100
+  review_triage: 75
+  review_fix: 500
+  review_browser: 100
 timeout_sec:
-  brainstorm: 300
-  plan: 600
-  execute_implementation: 2700
-  execute_review: 600
-  pr: 300
+  brainstorm: 1800
+  plan: 3600
+  execute_implementation: 14400
+  pr: 1800
+  review_ci: 3600
+  review_triage: 1800
+  review_fix: 14400
+  review_browser: 3600
 ```
 
-Override individual keys; deep-merge keeps the rest at defaults. Budgets are sanity caps for runaway agents, not cost control.
+Override individual keys; deep-merge keeps the rest at defaults. The deprecated `execute_review` key was dropped in ADR-023 — 5-review owns reviewer budgets now (`review_ci`, `review_triage`, `review_fix`, `review_browser`).
 
 ## Troubleshooting
 

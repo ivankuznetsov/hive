@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-04T18:00:00Z] init — TTY prompts, stage agents, generous limits (ADR-023)
+
+**Action:** Plan `docs/plans/2026-05-04-001-feat-hive-init-interactive-prompts-plan.md` shipped. `hive init` is now interactive on TTY: asks the operator for planning agent (combined brainstorm+plan), development agent (4-execute), review agents (multi-select), and 8 per-stage limit pairs. Recommended defaults are claude / codex / all-3-reviewers / generous limits. Non-TTY callers (CI, pipes, tests) short-circuit to defaults and emit a one-line summary. `Hive::Stages::Base.stage_profile(cfg, name)` reads the new `brainstorm.agent` / `plan.agent` / `execute.agent` keys with `|| "claude"` fallback; brainstorm / plan / execute spawn sites pin `status_mode: :state_file_marker` so codex's profile-default `:output_file_exists` doesn't break the marker-based lifecycle. `Config::DEFAULTS["budget_usd"]` and `["timeout_sec"]` bumped ~5×; deprecated `execute_review` key dropped.
+
+**Refreshed pages:**
+- `wiki/commands/init.md` — TLDR rewritten; added "Prompt flow", "Stable-iteration-order contract", and "Non-TTY contract" subsections; expanded "Steps performed" with the new prompt step + already-initialized guard ordering; refreshed Tests section with the new test surface.
+- `wiki/decisions.md` — added ADR-023.
+- `wiki/state-model.md` — auto-refreshed by post-commit hook to reflect bumped DEFAULTS and the new `brainstorm` / `plan` / `execute` blocks.
+- `wiki/modules/config.md` — auto-refreshed by post-commit hook with the new DEFAULTS shape, ROLE_AGENT_PATHS extension, and the dropped `execute_review` note.
+
 ## [2026-05-01T15:00:00Z] tui — v2 two-pane redesign
 
 **Action:** Replaced v1's single-column action-grouped `Views::Grid` with a two-pane composition: `Views::ProjectsPane` (left, project list with `★ All projects` virtual entry) and `Views::TasksPane` (right, 5-column compact table — icon · slug · stage · status · age). `Views::Grid` and its tests were deleted in the same PR — no `HIVE_TUI_LAYOUT=v1` escape hatch. Pane focus is keyboard-only via `Tab` / `Shift+Tab` / `h` / `l`. `j` / `k` route by `model.pane_focus`: left-pane navigation drives `model.scope`; right-pane navigation drives the row cursor. New `n` keystroke opens an inline new-idea prompt that dispatches `hive new <project> "<title>"` via `Subprocess.run_quiet!` (project resolved from left-pane selection; `★ All` falls back to the first registered project, label shows `★→<name>` so the resolved target is visible). Below 70 cols the project pane is suppressed and the tasks pane occupies the full width. Visual style refresh: rounded borders, focused/dim border distinction (cyan/faint), refined action-key palette (magenta=agent_running, red=error, blue=ready_*, green=archived, yellow=needs_input/review_findings).

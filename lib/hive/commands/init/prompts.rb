@@ -50,16 +50,21 @@ module Hive
           review_browser
         ].freeze
 
-        def initialize(input: $stdin, output: $stdout,
-                       registered_agents: nil,
-                       default_reviewers: DEFAULT_REVIEWER_NAMES)
+        # Streams default to stderr for prompt UI (intro / menus / re-prompts /
+        # confirmation) and stdout for the machine-parseable result line emitted
+        # in non-TTY mode. This matches standard CLI discipline: a caller running
+        # `summary=$(hive init)` captures only the result, not the menu choreography.
+        # Tests inject `output: StringIO.new, summary_io: StringIO.new` to assert
+        # both streams independently.
+        def initialize(input: $stdin, output: $stderr, summary_io: $stdout,
+                       registered_agents: nil)
           @input = input
           @output = output
+          @summary_io = summary_io
           # registered_agents is a list of strings (agent profile names).
           # When not injected, ask the live registry. Tests inject a fixed
           # list so they don't depend on registration order.
           @registered_agents = (registered_agents || Hive::AgentProfiles.registered_names.map(&:to_s))
-          @default_reviewers = default_reviewers
         end
 
         # Run the prompt flow (or short-circuit to defaults).
@@ -67,7 +72,7 @@ module Hive
         #   {
         #     "planning_agent"    => String,           # one of @registered_agents
         #     "development_agent" => String,           # one of @registered_agents
-        #     "enabled_reviewers" => Array<String>,    # subset of @default_reviewers
+        #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "budgets"  => Hash<String, Integer>,     # 8 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>      # 8 keys (LIMIT_KEYS)
         #   }
@@ -108,14 +113,16 @@ module Hive
           answers = {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
-            "enabled_reviewers" => @default_reviewers.dup,
+            "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts
           }
-          @output.puts(
+          # Goes to @summary_io (stdout by default) so a non-TTY caller's
+          # `summary=$(hive init)` capture has a parseable single line.
+          @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
-            "reviewers=all#{@default_reviewers.size}, limits=defaults"
+            "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, limits=defaults"
           )
           answers
         end
@@ -164,12 +171,12 @@ module Hive
         def prompt_reviewers
           @output.puts ""
           @output.puts "Review agents — pick numbers/names, comma-separated, blank = all enabled:"
-          @default_reviewers.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
+          DEFAULT_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
           loop do
             @output.print "  > "
             @output.flush
             answer = read_line
-            return @default_reviewers.dup if answer.empty?
+            return DEFAULT_REVIEWER_NAMES.dup if answer.empty?
 
             resolved = resolve_reviewer_tokens(answer)
             return resolved if resolved.is_a?(Array)
@@ -185,12 +192,14 @@ module Hive
           tokens.each do |token|
             if token =~ /\A\d+\z/
               idx = token.to_i
-              return "invalid index #{token}; pick 1..#{@default_reviewers.size}" unless idx.between?(1, @default_reviewers.size)
+              return "invalid index #{token}; pick 1..#{DEFAULT_REVIEWER_NAMES.size}" unless idx.between?(1, DEFAULT_REVIEWER_NAMES.size)
 
-              out << @default_reviewers[idx - 1]
+              out << DEFAULT_REVIEWER_NAMES[idx - 1]
             else
-              match = @default_reviewers.find { |r| r == token }
-              return "unknown reviewer #{token.inspect}; valid names: #{@default_reviewers.join(', ')}" unless match
+              # Case-insensitive match for parity with prompt_agent's
+              # resolve_agent_choice. Closes ce-code-review F9.
+              match = DEFAULT_REVIEWER_NAMES.find { |r| r.casecmp(token).zero? }
+              return "unknown reviewer #{token.inspect}; valid names: #{DEFAULT_REVIEWER_NAMES.join(', ')}" unless match
 
               out << match
             end
@@ -283,7 +292,12 @@ module Hive
 
         def read_line
           line = @input.gets
-          return "" if line.nil?
+          # Distinguish nil (EOF — closed pipe / Ctrl-D / terminal disconnect)
+          # from "" (blank line / Enter for default). Treating EOF as a blank
+          # answer would silently confirm init at the final prompt, writing
+          # disk state with whatever was already collected. Bubble Aborted
+          # so Init#call's rescue path catches it cleanly.
+          raise Aborted, "input stream closed (EOF)" if line.nil?
 
           line.chomp.strip
         end

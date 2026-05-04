@@ -25,7 +25,43 @@ module Hive
     end
     map "--version" => :version
 
-    desc "init [PROJECT_PATH]", "Bootstrap .hive-state in a project (orphan hive/state branch)"
+    desc "init [PROJECT_PATH]", "Bootstrap .hive-state (orphan hive/state branch); TTY-prompts for agents + limits"
+    long_desc <<~DESC
+      Initialises hive in PROJECT_PATH (defaults to the current directory):
+      creates the orphan `hive/state` branch, attaches it as a worktree at
+      `<project>/.hive-state/`, scaffolds stage folders, ignores
+      `.hive-state/` on master, and registers the project globally.
+
+      On a TTY, init asks the operator four questions before writing
+      anything to disk:
+
+        1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
+        2. Development agent (drives 4-execute)                  — default codex
+        3. Review agents (multi-select over 3 default reviewers) — default all
+        4. Per-stage budget+timeout (8 stage/role pairs)         — default generous
+
+      Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
+      OR a 1-based index. Blank input takes the default. Answer `n` at
+      the final confirmation to abort with no disk side effects.
+
+      On non-TTY (CI, pipes, scripted callers) the prompts are skipped
+      and a one-line summary is emitted to stdout so the caller can see
+      which defaults landed:
+
+        hive: using defaults — planning=claude, dev=codex, reviewers=all3, limits=defaults
+
+      To set non-default values from automation, run init and then
+      hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
+      for the schema). Piped STDIN is intentionally NOT consumed.
+
+      Exit codes:
+        0  — initialised successfully
+        1  — generic / unexpected error
+        2  — already initialised (`hive/state` branch already exists)
+        64 — user aborted at the confirmation prompt
+
+      See `wiki/commands/init.md` for the full prompt flow and ADR-023.
+    DESC
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"

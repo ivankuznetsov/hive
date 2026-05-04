@@ -48,11 +48,15 @@ module Hive
       end
 
       def collect_prompt_answers
-        prompts = @prompts || Hive::Commands::Init::Prompts.new(input: $stdin, output: $stdout)
+        prompts = @prompts || Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: $stdout)
         prompts.collect
       rescue Hive::Commands::Init::Prompts::Aborted => e
+        # Distinct exit code (USAGE / 64) from generic crashes (GENERIC / 1)
+        # so a scripted agent can tell "user explicitly declined" from
+        # "init crashed transiently" and decide whether to retry. Closes
+        # ce-code-review F6.
         warn "hive: aborted (#{e.message}); no changes made"
-        exit 1
+        exit Hive::ExitCodes::USAGE
       end
 
       def validate_git_repo!
@@ -83,7 +87,7 @@ module Hive
         exit 1
       end
 
-      def write_per_project_config(ops, answers: nil)
+      def write_per_project_config(ops, answers:)
         cfg_path = File.join(ops.hive_state_path, "config.yml")
         return if File.exist?(cfg_path)
 
@@ -91,14 +95,14 @@ module Hive
         File.write(cfg_path, content)
       end
 
-      def render_project_config(ops, answers: nil)
+      def render_project_config(ops, answers:)
         require "erb"
         template = File.read(File.expand_path("../../../templates/project_config.yml.erb", __dir__))
         bindings = ProjectConfigBinding.new(
           project_name: File.basename(@project_path),
           default_branch: ops.default_branch,
           worktree_root: worktree_root,
-          answers: answers || ProjectConfigBinding.recommended_answers
+          answers: answers
         )
         ERB.new(template, trim_mode: "-").result(bindings.binding_for_erb)
       end
@@ -107,15 +111,14 @@ module Hive
         File.expand_path("~/Dev/#{File.basename(@project_path)}.worktrees")
       end
 
-      # ERB binding object for templates/project_config.yml.erb. Holds
-      # the per-project scaffolding values (project name, default
-      # branch, worktree root) and the prompted answers hash from
+      # ERB binding object for templates/project_config.yml.erb. Carries
+      # the per-project scaffolding values (project name, default branch,
+      # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / development_agent /
-      # enabled_reviewers / budgets / timeouts). When no answers are
-      # supplied (e.g. during the U4 → U5 transition or in a future
-      # caller that bypasses the prompt module), `recommended_answers`
-      # provides the same shape Prompts emits in non-TTY mode, so the
-      # template always renders against a complete binding.
+      # enabled_reviewers / budgets / timeouts). The single source of
+      # truth for the answers hash is `Prompts#collect`; this binding
+      # never invents defaults of its own — callers always supply
+      # `answers:` (production: from Prompts; tests: explicit hashes).
       class ProjectConfigBinding
         def initialize(project_name:, default_branch:, worktree_root:, answers:)
           @project_name = project_name
@@ -134,21 +137,6 @@ module Hive
 
         def binding_for_erb
           binding
-        end
-
-        # Mirror of Prompts#non_interactive_defaults, surfaced here so
-        # callers without a Prompts instance (e.g. legacy tests or
-        # render_project_config when invoked without `answers:`) still
-        # produce a complete binding.
-        def self.recommended_answers
-          limit_keys = Hive::Commands::Init::Prompts::LIMIT_KEYS
-          {
-            "planning_agent" => Hive::Commands::Init::Prompts::DEFAULT_PLANNING_AGENT,
-            "development_agent" => Hive::Commands::Init::Prompts::DEFAULT_DEVELOPMENT_AGENT,
-            "enabled_reviewers" => Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES.dup,
-            "budgets"  => limit_keys.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"][k] },
-            "timeouts" => limit_keys.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["timeout_sec"][k] }
-          }
         end
       end
     end

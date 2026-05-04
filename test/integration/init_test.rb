@@ -185,7 +185,11 @@ class InitTest < Minitest::Test
     require "stringio"
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true }
-    Hive::Commands::Init::Prompts.new(input: input, output: StringIO.new)
+    Hive::Commands::Init::Prompts.new(
+      input: input,
+      output: StringIO.new,
+      summary_io: StringIO.new
+    )
   end
 
   def test_init_with_piped_user_choices_writes_matching_config
@@ -221,7 +225,8 @@ class InitTest < Minitest::Test
         _, err, status = with_captured_exit do
           Hive::Commands::Init.new(dir, prompts: prompts).call
         end
-        assert_equal 1, status, "abort must exit 1"
+        assert_equal Hive::ExitCodes::USAGE, status,
+                     "abort must exit USAGE (64), distinct from generic crashes (1)"
         assert_includes err, "aborted"
 
         # Critical: nothing on disk. No orphan branch, no worktree, no

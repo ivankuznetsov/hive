@@ -10,21 +10,26 @@ require "hive/commands/init/prompts"
 # Plan: docs/plans/2026-05-04-001-feat-hive-init-interactive-prompts-plan.md (U3)
 class InitPromptsTest < Minitest::Test
   AGENT_NAMES = %w[claude codex pi].freeze
-  REVIEWER_NAMES = %w[claude-ce-code-review codex-ce-code-review pr-review-toolkit].freeze
+  REVIEWER_NAMES = Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES
 
   # Build prompts instance with a tty-flagged StringIO for interactive
-  # tests, or a plain StringIO for non-TTY tests.
-  def make_prompts(input_text, tty: true, registered_agents: AGENT_NAMES, default_reviewers: REVIEWER_NAMES)
+  # tests, or a plain StringIO for non-TTY tests. `output` carries prompt
+  # UI (defaults to stderr in production); `summary_io` carries the
+  # non-TTY result line (defaults to stdout in production). Both are
+  # injected as separate StringIOs so tests can assert against each
+  # stream independently.
+  def make_prompts(input_text, tty: true, registered_agents: AGENT_NAMES)
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true } if tty
     output = StringIO.new
+    summary_io = StringIO.new
     prompts = Hive::Commands::Init::Prompts.new(
       input: input,
       output: output,
-      registered_agents: registered_agents,
-      default_reviewers: default_reviewers
+      summary_io: summary_io,
+      registered_agents: registered_agents
     )
-    [ prompts, output ]
+    [ prompts, output, summary_io ]
   end
 
   # Build the canonical "all defaults" answer key set so tests can assert
@@ -64,10 +69,13 @@ class InitPromptsTest < Minitest::Test
     assert_equal all_defaults, answers
   end
 
-  def test_non_tty_emits_one_line_summary_to_output
-    prompts, output = make_prompts("", tty: false)
+  def test_non_tty_emits_one_line_summary_to_summary_io
+    prompts, output, summary_io = make_prompts("", tty: false)
     prompts.collect
-    summary = output.string
+
+    # The machine-parseable result line goes to summary_io (stdout in
+    # production); UI output stays empty in non-TTY mode.
+    summary = summary_io.string
     assert_match(/hive: using defaults/, summary)
     assert_match(/planning=claude/, summary)
     assert_match(/dev=codex/, summary)
@@ -75,6 +83,11 @@ class InitPromptsTest < Minitest::Test
     assert_match(/limits=defaults/, summary)
     assert_equal 1, summary.lines.size,
                  "non-TTY mode must write exactly one summary line, no prompt copy"
+
+    # Prompt UI stream must stay silent — non-TTY callers should see only
+    # the structured summary, not menu choreography.
+    assert_equal "", output.string,
+                 "prompt UI stream (output:) must stay empty when non-TTY"
   end
 
   def test_non_tty_consumes_no_input
@@ -119,19 +132,18 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_planning_agent_unknown_reprompts_then_accepts
     # First answer is invalid → re-prompt; second answer is valid.
-    # Note: invalid input doesn't consume the next agent prompt's slot —
-    # we feed two values for the planning prompt before falling through
-    # to the rest of the flow.
-    raw = "nonexistent\nclaude\n" + ([ "" ] * 9).join("\n") + "\n"
-    prompts, output = make_prompts(raw)
+    # 13 reads total: planning (invalid + retry) + dev + reviewers
+    # + 8 limits + confirm. Each blank line accepts the default.
+    raw = "nonexistent\nclaude\n" + ([ "" ] * 11).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "claude", answers["planning_agent"]
     assert_match(/unknown agent "nonexistent"/, output.string)
   end
 
   def test_interactive_planning_agent_index_out_of_range_reprompts
-    raw = "7\nclaude\n" + ([ "" ] * 9).join("\n") + "\n"
-    prompts, output = make_prompts(raw)
+    raw = "7\nclaude\n" + ([ "" ] * 11).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "claude", answers["planning_agent"]
     assert_match(/unknown agent "7"/, output.string)
@@ -320,5 +332,35 @@ class InitPromptsTest < Minitest::Test
     p_pipe, _ = make_prompts("", tty: false)
     assert p_tty.interactive?
     refute p_pipe.interactive?
+  end
+
+  # --- EOF / Ctrl-D handling (ce-code-review F3) ---------------------------
+
+  def test_eof_at_confirmation_raises_aborted_not_silent_yes
+    # Truncate the input transcript right before confirmation. read_line
+    # must distinguish nil-from-gets (EOF) from an empty line and bubble
+    # Aborted up the stack rather than silently confirming.
+    inputs = ([ "" ] * 11).join("\n") + "\n"  # 12 blank reads, then EOF
+    prompts, _output, _summary = make_prompts(inputs)
+    assert_raises(Hive::Commands::Init::Prompts::Aborted) { prompts.collect }
+  end
+
+  def test_eof_mid_planning_prompt_raises_aborted
+    prompts, _output, _summary = make_prompts("")  # immediate EOF
+    assert_raises(Hive::Commands::Init::Prompts::Aborted) { prompts.collect }
+  end
+
+  # --- Case-insensitive matching parity (ce-code-review F9) ----------------
+
+  def test_planning_agent_accepts_mixed_case_name
+    prompts, _output, _summary = make_prompts(interactive_input(planning: "CODEX"))
+    answers = prompts.collect
+    assert_equal "codex", answers["planning_agent"]
+  end
+
+  def test_reviewers_accept_mixed_case_names
+    prompts, _output, _summary = make_prompts(interactive_input(reviewers: "Claude-CE-Code-Review,PR-Review-Toolkit"))
+    answers = prompts.collect
+    assert_equal %w[claude-ce-code-review pr-review-toolkit], answers["enabled_reviewers"]
   end
 end

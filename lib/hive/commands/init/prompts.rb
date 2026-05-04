@@ -188,6 +188,17 @@ module Hive
 
         def resolve_reviewer_tokens(answer)
           tokens = answer.split(",").map(&:strip).reject(&:empty?)
+          # Comma-only input (e.g. ",", ",,", "  ,  ") drops to zero tokens
+          # after the reject. Treating that as "user picked zero reviewers"
+          # would render `reviewers:` as a YAML key with no value, which
+          # YAML.safe_load parses to nil, which validate_reviewers! then
+          # rejects on the next `hive run` — silent corruption between
+          # init and the first hive run. Re-prompt explicitly: blank input
+          # already maps to "all enabled" via the empty?-early-return at
+          # prompt_reviewers; non-blank input that resolves to zero tokens
+          # is a typo, not a valid selection.
+          return "input had no reviewer tokens; type a name/index list, or blank for all" if tokens.empty?
+
           out = []
           tokens.each do |token|
             if token =~ /\A\d+\z/

@@ -131,6 +131,47 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # AgentProfiles.registered?(name) calls name.to_sym; non-String values
+  # (Integer, Hash, Array, Boolean) crash with NoMethodError. validate_agent_name!
+  # type-checks first so a typo like `execute.agent: 42` surfaces as
+  # ConfigError, not NoMethodError. Closes ce-code-review F2 (P2).
+  def test_load_raises_when_stage_agent_is_an_integer
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          agent: 42
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/execute\.agent.*must be a String/, err.message)
+      assert_match(/got 42 \(Integer\)/, err.message)
+    end
+  end
+
+  def test_load_raises_when_stage_agent_is_a_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          agent:
+            name: claude
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/plan\.agent.*must be a String/, err.message)
+    end
+  end
+
+  # Symbol agents (e.g. from a Ruby-injected config) should still pass —
+  # AgentProfiles.registered? handles both symbols and strings.
+  def test_load_accepts_symbol_stage_agent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.send(:merge_defaults, { "execute" => { "agent" => :claude } })
+      cfg["project_root"] = dir
+      Hive::Config.send(:validate!, cfg, "synthetic")
+      assert_equal :claude, cfg.dig("execute", "agent")
+    end
+  end
+
   def test_register_and_lookup_project
     with_tmp_global_config do |home|
       Hive::Config.register_project(name: "foo", path: "/tmp/foo")

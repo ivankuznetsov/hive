@@ -28,7 +28,7 @@ hive init [PROJECT_PATH] [--force]
 
 1. **Validate** — `validate_git_repo!` then `validate_clean_tree!` (skipped under `--force`).
 2. **Already-initialized guard** — if `hive/state` exists, raise `Hive::AlreadyInitialized` (exit 2). Runs **before** the prompt so a re-run never asks the user anything.
-3. **Collect prompt answers** — `Hive::Commands::Init::Prompts.new(input: $stdin, output: $stdout).collect`. On TTY this opens the interactive flow described below; on non-TTY (CI, pipes, test harness) it short-circuits to recommended defaults and emits a one-line summary so scripted callers see what was applied. Aborting the prompt (`n` at confirmation) exits 1 with **zero disk side effects** — no orphan branch, no worktree, no master gitignore commit.
+3. **Collect prompt answers** — `Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: $stdout).collect`. Prompt UI (intro / menus / re-prompts / confirmation) goes to **stderr**; the non-TTY one-line summary goes to **stdout** so scripted callers can `summary=$(hive init)` cleanly. On TTY this opens the interactive flow described below; on non-TTY (CI, pipes, test harness) it short-circuits to recommended defaults. Aborting the prompt (`n` at confirmation) exits **64** (`Hive::ExitCodes::USAGE`, distinct from generic crashes at 1) with **zero disk side effects** — no orphan branch, no worktree, no master gitignore commit.
 4. **Create orphan worktree** via `Hive::GitOps#hive_state_init` (`lib/hive/git_ops.rb:34`):
    - `git worktree add --no-checkout --detach <path>/.hive-state <default_branch>`
    - `git -C .hive-state checkout --orphan hive/state`
@@ -45,7 +45,7 @@ hive init [PROJECT_PATH] [--force]
 On TTY input streams the prompt walks the operator through four sections in order:
 
 1. **Planning agent** (`brainstorm.agent` + `plan.agent`): one combined choice; the answer maps to both keys. Recommended default `claude`.
-2. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work; selecting it surfaces an ADR-018 isolation-reduced warning on each spawn).
+2. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
 3. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
 4. **Per-stage limits**: budget+timeout for each of 8 effective keys (`brainstorm`, `plan`, `execute_implementation`, `pr`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
 

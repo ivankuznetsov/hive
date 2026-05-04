@@ -403,6 +403,18 @@ module Hive
     # an agent reading the failure output learns the valid set.
     def validate_agent_name!(agent_name, label, source_path)
       return if agent_name.nil?
+
+      # AgentProfiles.registered?(name) calls `name.to_sym`, which crashes
+      # on Integer / Hash / Array / Boolean with NoMethodError. Guard with
+      # a String check first so a user typo like `execute: { agent: 42 }`
+      # surfaces as a typed ConfigError instead of an opaque NoMethodError.
+      unless agent_name.is_a?(String) || agent_name.is_a?(Symbol)
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} must be a String " \
+              "(an agent profile name like \"claude\" or \"codex\"); " \
+              "got #{agent_name.inspect} (#{agent_name.class})"
+      end
+
       return if Hive::AgentProfiles.registered?(agent_name)
 
       raise ConfigError,

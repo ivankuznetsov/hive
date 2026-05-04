@@ -363,4 +363,23 @@ class InitPromptsTest < Minitest::Test
     answers = prompts.collect
     assert_equal %w[claude-ce-code-review pr-review-toolkit], answers["enabled_reviewers"]
   end
+
+  # Comma-only input must not silently render an empty reviewers: list —
+  # that would produce an invalid YAML key (parses to nil) which
+  # validate_reviewers! rejects on the next `hive run`. Re-prompt instead.
+  def test_reviewers_comma_only_reprompts
+    input = "\n\n,\n1\n" + (([ "" ] * 8) + [ "" ]).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(input)
+    answers = prompts.collect
+    assert_equal %w[claude-ce-code-review], answers["enabled_reviewers"]
+    assert_match(/no reviewer tokens/, output.string)
+  end
+
+  def test_reviewers_whitespace_only_reprompts
+    input = "\n\n  ,  ,  \n2\n" + (([ "" ] * 8) + [ "" ]).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(input)
+    answers = prompts.collect
+    assert_equal %w[codex-ce-code-review], answers["enabled_reviewers"]
+    assert_match(/no reviewer tokens/, output.string)
+  end
 end

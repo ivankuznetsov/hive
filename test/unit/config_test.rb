@@ -172,6 +172,58 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # Table-driven coverage so every key in HASH_SHAPED_KEYS — not just the
+  # 3 we sampled in the original tests — is defended against scalar
+  # overrides. A future refactor that subsetted the constant (e.g.
+  # conditionalised the check per-key) would otherwise pass tests while
+  # silently letting `agents: claude` or `review: foo` bypass validation.
+  def test_load_rejects_scalar_override_on_every_hash_shaped_key
+    Hive::Config::HASH_SHAPED_KEYS.each do |key|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "#{key}: scalar-value\n")
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/#{key}.*must be a Hash/, err.message,
+                     "HASH_SHAPED_KEYS member #{key.inspect} must reject scalar overrides")
+      end
+    end
+  end
+
+  # Table-driven coverage for the type-check in validate_agent_name!.
+  # Every path in ROLE_AGENT_PATHS — including all four review.* paths —
+  # must reject non-String/non-Symbol values with ConfigError, not crash
+  # with NoMethodError on `name.to_sym`.
+  def test_load_rejects_non_string_agent_value_on_every_role_agent_path
+    Hive::Config::ROLE_AGENT_PATHS.each do |path|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        # Build a nested YAML hash matching the path with the leaf as
+        # an Integer (the canonical NoMethodError trigger for to_sym).
+        yaml = path.reverse.reduce(42) { |acc, key| { key => acc } }.to_yaml
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        label = path.join(".")
+        assert_match(/#{Regexp.escape(label)}.*must be a String/, err.message,
+                     "#{label} must reject Integer agent values with ConfigError, not crash on to_sym")
+      end
+    end
+  end
+
+  # Boolean is the documented crash class in validate_agent_name!'s
+  # comment but isn't exercised anywhere else. Pin it explicitly.
+  def test_load_rejects_boolean_agent_value
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            agent: true
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.ci\.agent.*must be a String/, err.message)
+    end
+  end
+
   def test_register_and_lookup_project
     with_tmp_global_config do |home|
       Hive::Config.register_project(name: "foo", path: "/tmp/foo")

@@ -15,9 +15,12 @@ module Hive
       # without touching real STDIN/STDOUT or the live AgentProfiles
       # registry. See plan 2026-05-04-001 / ADR-023.
       class Prompts
-        # Raised when the user answers `n` at the final confirmation. The
-        # caller (`Init#call`) catches this and exits cleanly without
-        # writing anything to disk.
+        # Raised when the operator declines to proceed: either by
+        # answering `n` at the final confirmation OR by closing the input
+        # stream mid-flow (Ctrl-D / EOF / disconnected pipe). Caught in
+        # `Init#collect_prompt_answers`, which warns to stderr and exits
+        # with `Hive::ExitCodes::USAGE` (64) — distinct from generic
+        # crashes at exit 1, so a scripted caller can tell the two apart.
         class Aborted < StandardError; end
 
         DEFAULT_PLANNING_AGENT = "claude".freeze
@@ -26,8 +29,9 @@ module Hive
         # Reviewer entries shipped in templates/project_config.yml.erb. The
         # multi-select prompt offers these as the toggleable set; rendering
         # honours the user's subset. The order is the stable iteration
-        # contract documented in wiki/modules/config.md — reordering is a
-        # breaking change for scripted automation that uses index answers.
+        # contract documented in wiki/commands/init.md (see "Stable-iteration-
+        # order contract") — reordering is a breaking change for scripted
+        # automation that uses index answers.
         DEFAULT_REVIEWER_NAMES = %w[
           claude-ce-code-review
           codex-ce-code-review
@@ -65,6 +69,19 @@ module Hive
           # When not injected, ask the live registry. Tests inject a fixed
           # list so they don't depend on registration order.
           @registered_agents = (registered_agents || Hive::AgentProfiles.registered_names.map(&:to_s))
+
+          # Construction-time guards: turn latent invariant violations
+          # (empty registry, recommended-default not in the registry)
+          # into loud ArgumentErrors at construction instead of an
+          # infinite re-prompt loop or a downstream Config.load failure.
+          raise ArgumentError, "registered_agents must be non-empty" if @registered_agents.empty?
+
+          missing = [ DEFAULT_PLANNING_AGENT, DEFAULT_DEVELOPMENT_AGENT ] - @registered_agents
+          unless missing.empty?
+            raise ArgumentError,
+                  "default agents not in registered_agents: #{missing.inspect} " \
+                  "(registered: #{@registered_agents.inspect})"
+          end
         end
 
         # Run the prompt flow (or short-circuit to defaults).
@@ -128,11 +145,16 @@ module Hive
         end
 
         def default_budgets
-          LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"][k] }
+          # `fetch` rather than `[]`: if LIMIT_KEYS and Config::DEFAULTS["budget_usd"]
+          # ever drift (a key added to one but not the other), surface as KeyError
+          # at first run instead of silently rendering a YAML key with no value
+          # (which YAML.safe_load parses to nil and validate_review_attempts!
+          # accepts only for the four `review_*` paths it knows about).
+          LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"].fetch(k) }
         end
 
         def default_timeouts
-          LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["timeout_sec"][k] }
+          LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["timeout_sec"].fetch(k) }
         end
 
         def intro

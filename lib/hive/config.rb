@@ -217,7 +217,8 @@ module Hive
     # override like `review: { ci: { command: "bin/ci" } }` keeps every
     # other default at `review.ci.*` and at every other `review.*` key
     # intact. Arrays replace wholesale (no per-element merge) — this is
-    # the explicit semantic for `review.reviewers` per ADR-018, and it
+    # the explicit semantic for ordered lists like `review.reviewers`,
+    # where per-element merge would have ambiguous semantics, and it
     # generalises to any Array-typed setting. Scalars override directly.
     #
     # Closes doc-review F3 (P0): the previous implementation was a

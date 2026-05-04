@@ -315,16 +315,18 @@ class InitPromptsTest < Minitest::Test
   # --- testability contract (R9) -------------------------------------------
 
   def test_uses_injected_registered_agents_not_live_registry
-    # Inject a sentinel-only list. Result must reflect it, proving the
-    # class never reaches into Hive::AgentProfiles directly.
-    fake_agents = %w[fake-a fake-b]
-    prompts, _output = make_prompts(
-      interactive_input(planning: "fake-b", development: "fake-a"),
+    # Inject a sentinel-only list that includes the recommended defaults
+    # (the construction guard requires them to be members). Picking
+    # `fake-bonus` as the planning override proves the class consults
+    # the injected list, not Hive::AgentProfiles.registered_names.
+    fake_agents = %w[claude codex fake-bonus]
+    prompts, _output, _summary = make_prompts(
+      interactive_input(planning: "fake-bonus"),
       registered_agents: fake_agents
     )
     answers = prompts.collect
-    assert_equal "fake-b", answers["planning_agent"]
-    assert_equal "fake-a", answers["development_agent"]
+    assert_equal "fake-bonus", answers["planning_agent"]
+    assert_equal "codex", answers["development_agent"]
   end
 
   def test_interactive_predicate_reflects_input_tty
@@ -381,5 +383,32 @@ class InitPromptsTest < Minitest::Test
     answers = prompts.collect
     assert_equal %w[codex-ce-code-review], answers["enabled_reviewers"]
     assert_match(/no reviewer tokens/, output.string)
+  end
+
+  # --- Construction guards (pr-review-toolkit type-design feedback) -------
+
+  def test_initialize_raises_on_empty_registered_agents
+    err = assert_raises(ArgumentError) do
+      Hive::Commands::Init::Prompts.new(
+        input: StringIO.new, output: StringIO.new, summary_io: StringIO.new,
+        registered_agents: []
+      )
+    end
+    assert_match(/registered_agents must be non-empty/, err.message)
+  end
+
+  def test_initialize_raises_when_default_agents_not_in_registry
+    # Inject a registry that lacks the recommended defaults — the prompt's
+    # blank-input fallback would otherwise return 'claude'/'codex' which
+    # downstream Config validation would reject as unregistered.
+    err = assert_raises(ArgumentError) do
+      Hive::Commands::Init::Prompts.new(
+        input: StringIO.new, output: StringIO.new, summary_io: StringIO.new,
+        registered_agents: %w[other-agent]
+      )
+    end
+    assert_match(/default agents not in registered_agents/, err.message)
+    assert_match(/claude/, err.message)
+    assert_match(/codex/, err.message)
   end
 end

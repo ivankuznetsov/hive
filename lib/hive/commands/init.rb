@@ -13,7 +13,9 @@ module Hive
         # Optional Prompts instance for testability. Tests inject a
         # pre-fed StringIO-backed instance to drive the interactive flow
         # without touching $stdin. Production keeps this nil so the
-        # default `Prompts.new(input: $stdin, output: $stdout)` runs.
+        # default `Prompts.new(input: $stdin, output: $stderr,
+        # summary_io: $stdout)` runs (UI on stderr, machine-parseable
+        # summary on stdout — see #collect_prompt_answers below).
         @prompts = prompts
       end
 

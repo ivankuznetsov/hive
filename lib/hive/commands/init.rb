@@ -7,9 +7,14 @@ require "hive/commands/init/prompts"
 module Hive
   module Commands
     class Init
-      def initialize(project_path, force: false)
+      def initialize(project_path, force: false, prompts: nil)
         @project_path = File.expand_path(project_path)
         @force = force
+        # Optional Prompts instance for testability. Tests inject a
+        # pre-fed StringIO-backed instance to drive the interactive flow
+        # without touching $stdin. Production keeps this nil so the
+        # default `Prompts.new(input: $stdin, output: $stdout)` runs.
+        @prompts = prompts
       end
 
       def call
@@ -22,8 +27,15 @@ module Hive
                 "already initialized; hive/state branch present at #{@project_path}"
         end
 
+        # Prompt placement is load-bearing (per ADR-023): runs AFTER the
+        # already-initialized guard above, BEFORE any disk writes below.
+        # An aborted prompt (`n` at confirmation) leaves zero footprint —
+        # no orphan branch, no worktree, no master .gitignore update —
+        # so a re-run of `hive init` proceeds normally.
+        answers = collect_prompt_answers
+
         ops.hive_state_init
-        write_per_project_config(ops)
+        write_per_project_config(ops, answers: answers)
         ops.add_hive_state_to_master_gitignore!
 
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
@@ -33,6 +45,14 @@ module Hive
         puts "  hive_state_path: #{ops.hive_state_path}"
         puts "  worktree_root: #{worktree_root}"
         puts "next: hive new #{entry['name']} '<short task description>'"
+      end
+
+      def collect_prompt_answers
+        prompts = @prompts || Hive::Commands::Init::Prompts.new(input: $stdin, output: $stdout)
+        prompts.collect
+      rescue Hive::Commands::Init::Prompts::Aborted => e
+        warn "hive: aborted (#{e.message}); no changes made"
+        exit 1
       end
 
       def validate_git_repo!
@@ -63,11 +83,11 @@ module Hive
         exit 1
       end
 
-      def write_per_project_config(ops)
+      def write_per_project_config(ops, answers: nil)
         cfg_path = File.join(ops.hive_state_path, "config.yml")
         return if File.exist?(cfg_path)
 
-        content = render_project_config(ops)
+        content = render_project_config(ops, answers: answers)
         File.write(cfg_path, content)
       end
 

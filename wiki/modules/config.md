@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-04-26
+updated: 2026-05-04
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, max review passes, agent profiles, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, max review passes, **stage agents**, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -18,18 +18,31 @@ tags: [config, yaml, validation]
   "max_review_passes" => 4,
   "default_branch"    => nil,
   "project_name"      => nil,
+  # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
+  # caps for runaway agents, not cost targets. The deprecated
+  # `execute_review` key was DROPPED — 5-review owns reviewer budgets per
+  # ADR-014. Old project configs that still set it survive deep-merge but
+  # nothing reads it and fresh `hive init` no longer renders it.
   "budget_usd" => {
-    "brainstorm" => 10, "plan" => 20,
-    "execute_implementation" => 100, "execute_review" => 50, "pr" => 10,
-    "review_ci" => 25, "review_triage" => 15,
-    "review_fix" => 100, "review_browser" => 25
+    "brainstorm" => 50, "plan" => 100,
+    "execute_implementation" => 500, "pr" => 50,
+    "review_ci" => 100, "review_triage" => 75,
+    "review_fix" => 500, "review_browser" => 100
   },
   "timeout_sec" => {
-    "brainstorm" => 300, "plan" => 600,
-    "execute_implementation" => 2700, "execute_review" => 600, "pr" => 300,
-    "review_ci" => 600, "review_triage" => 300,
-    "review_fix" => 2700, "review_browser" => 900
+    "brainstorm" => 1800, "plan" => 3600,
+    "execute_implementation" => 14400, "pr" => 1800,
+    "review_ci" => 3600, "review_triage" => 1800,
+    "review_fix" => 14400, "review_browser" => 3600
   },
+  # Stage-level agent for the three single-agent stages (ADR-023). 5-review
+  # keeps its own per-role agent fields under review.{ci,triage,fix,
+  # browser_test}.agent. Runtime fallback is `cfg.dig("<stage>", "agent")
+  # || "claude"` (see Hive::Stages::Base.stage_profile in
+  # [[modules/stages]]) so legacy configs keep working.
+  "brainstorm" => { "agent" => "claude" },
+  "plan"       => { "agent" => "claude" },
+  "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
   "agents" => {
     "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },
     "codex"  => { "bin" => "codex",  "env_override" => "HIVE_CODEX_BIN",  "min_version" => "0.125.0" },

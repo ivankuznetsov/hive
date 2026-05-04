@@ -661,7 +661,10 @@ module Hive
         end
 
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
-        return [ reset_to_grid_with_flash("no projects — run `hive init <path>` first"), nil ] if project.nil?
+        if project.nil?
+          flash = new_idea_resolution_flash(@hive_model)
+          return [ reset_to_grid_with_flash(flash), nil ]
+        end
 
         # argv[0] must be the executable name. `Subprocess.run_quiet!`
         # invokes Open3.popen3(*cmd) directly, so a missing "hive" prefix
@@ -708,6 +711,34 @@ module Hive
           flash: text,
           flash_set_at: Time.now
         )
+      end
+
+      # Build a flash for the case where new-idea resolution returned
+      # nil. Distinguishes three reasons:
+      # - no registered projects at all → "run `hive init <path>`"
+      # - explicit scope onto an unhealthy project → name the error
+      # - scope=0 (★ All) but every registered project is unhealthy
+      # so the operator sees the actual cause rather than a generic
+      # "no projects" message that doesn't match what they see in the
+      # left pane (which shows the project, just broken).
+      def new_idea_resolution_flash(model)
+        snap = model.snapshot
+        return "no projects — run `hive init <path>` first" if snap.nil? || snap.projects.empty?
+
+        if model.scope.between?(1, snap.projects.size)
+          project = snap.projects[model.scope - 1]
+          if project.error
+            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init or `hive deregister`"
+          end
+        end
+
+        # scope=0 with all-unhealthy projects, or scope out-of-range.
+        broken = snap.projects.select(&:error)
+        if broken.size == snap.projects.size
+          "all registered projects are unhealthy — fix or `hive deregister` first"
+        else
+          "no projects — run `hive init <path>` first"
+        end
       end
 
       def reload_findings_into_state(state, _row)

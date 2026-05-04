@@ -123,6 +123,35 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     assert_includes out, "hive"
   end
 
+  # ---- Unhealthy-project label decoration ----
+
+  def test_unhealthy_project_renders_with_warning_marker
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        { "name" => "hive", "tasks" => [] },
+        { "name" => "demo", "error" => "missing_project_path", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, pane_focus: :left)
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 40)
+    assert_includes out, "⚠ demo (missing)",
+                    "broken project must surface the error short-name so operator sees it at a glance"
+    refute_match(/⚠ hive/, out, "healthy project must NOT carry the warning marker")
+  end
+
+  def test_unhealthy_project_with_not_initialised_error
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        { "name" => "stale", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, pane_focus: :left)
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 40)
+    assert_includes out, "⚠ stale (needs init)"
+  end
+
   def test_long_project_name_is_truncated_with_ellipsis
     long_name = "this-is-a-very-long-project-name-that-overflows"
     model = Hive::Tui::Model.initial.with(snapshot: make_snapshot(names: [ long_name ]),

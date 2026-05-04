@@ -22,21 +22,66 @@ module Hive
 
         module_function
 
-        # `width:` is the terminal width (model.cols). The label +
-        # buffer + cursor must fit on a single line; longer buffers
-        # slide the visible window so the cursor stays at the right
-        # edge (real-shell behavior). Without this, the rendered line
-        # overflows the terminal and disappears off the right side.
+        # Multi-line wrap renderer. The buffer stays a single logical
+        # line (Enter still submits — `hive new` takes a title, not
+        # multi-paragraph content), but visually wraps across as many
+        # rows as needed so the operator can see everything they typed.
+        #
+        # Row 1: `<label><first buffer chunk>`
+        # Row 2..N: `<spaces aligned to label width><buffer chunk>`
+        # Cursor block at the end of the last chunk.
+        #
+        # Caps the visible buffer at `MAX_VISIBLE_ROWS` rows; if the
+        # buffer overflows that, the EARLIEST chunks scroll off (slide
+        # like the single-line variant) so the cursor stays in view.
+        # This keeps the prompt from growing unbounded and pushing the
+        # task panes off-screen on a tall paste.
+        MAX_VISIBLE_ROWS = 6
+
         def render(model, width: model.cols.to_i)
           buffer = model.new_idea_buffer.to_s
           label = "#{PROMPT_PREFIX}#{project_label(model)}): "
-          # Available cells for the buffer = total - label - 1 (cursor)
-          # - 1 (right margin so the cursor block doesn't sit at the
-          # very last column where some terminals wrap).
-          available = [ width - label.length - 2, 1 ].max
-          visible_buffer = buffer.length <= available ? buffer : buffer[-available, available].to_s
+          # Available cells per row = width - 1 (cursor block) - 1
+          # (right margin). Chunks are sized so `label-width padding +
+          # chunk` always fits within `row_width`, keeping continuation
+          # rows aligned to the same column as the first chunk.
+          row_width = [ width - 2, 1 ].max
+          chunk_capacity = [ row_width - label.length, 1 ].max
+          chunks = chunk_buffer(buffer, chunk_capacity)
+          visible = chunks.size > MAX_VISIBLE_ROWS ? chunks.last(MAX_VISIBLE_ROWS) : chunks
+          render_rows(label, visible)
+        end
+
+        # Split `buffer` into chunks of `capacity` chars each. Always
+        # returns at least one chunk (empty string) so the cursor has
+        # somewhere to land.
+        def chunk_buffer(buffer, capacity)
+          return [ "" ] if buffer.empty?
+
+          chunks = []
+          offset = 0
+          while offset < buffer.length
+            chunks << buffer[offset, capacity].to_s
+            offset += capacity
+          end
+          chunks
+        end
+
+        # Row 1: styled label + chunk
+        # Row 2..N: spaces aligned to label width + chunk
+        # Cursor block at the end of the last chunk only.
+        def render_rows(label, chunks)
           cursor = Styles::CURSOR_HIGHLIGHT.render(" ")
-          "#{Styles::HINT.render(label)}#{visible_buffer}#{cursor}"
+          padding = " " * label.length
+          rows = chunks.each_with_index.map do |chunk, idx|
+            prefix = idx.zero? ? Styles::HINT.render(label) : padding
+            if idx == chunks.size - 1
+              "#{prefix}#{chunk}#{cursor}"
+            else
+              "#{prefix}#{chunk}"
+            end
+          end
+          rows.join("\n")
         end
 
         # Resolve which project an idea would land in. Pure read of the
@@ -52,10 +97,27 @@ module Hive
         def resolve_project_name(model)
           snap = model.snapshot
           return nil if snap.nil? || snap.projects.empty?
-          return snap.projects.first.name if model.scope.zero?
+
+          if model.scope.zero?
+            # ★ All projects fallback: pick the first project that
+            # is HEALTHY. Skipping projects with `error:` (missing
+            # path / not initialised) prevents `hive new` from
+            # exploding inside the dispatched subprocess against a
+            # stale registration whose directory no longer exists.
+            healthy = snap.projects.find { |p| p.error.nil? }
+            return healthy&.name
+          end
           return nil unless model.scope.between?(1, snap.projects.size)
 
-          snap.projects[model.scope - 1].name
+          project = snap.projects[model.scope - 1]
+          # An explicit scope onto an unhealthy project also returns
+          # nil — submit_new_idea then flashes "no projects" rather
+          # than dispatching against a doomed directory. The TUI's
+          # left pane still shows the project (with its name) so the
+          # operator can navigate elsewhere.
+          return nil if project.error
+
+          project.name
         end
       end
     end

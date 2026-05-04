@@ -405,6 +405,34 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/title required/, @model.hive_model.flash.to_s)
   end
 
+  def test_new_idea_submission_with_unhealthy_project_flashes_specific_error
+    # When `demo` is registered but its path is gone (a stale
+    # registration after `rm -rf`), submit must NOT dispatch to a
+    # doomed `bin/hive new` — the resulting subprocess would partially
+    # write idea.md then fail at `git add` against the missing dir.
+    # The flash must name the actual problem so the operator can
+    # `hive deregister` or re-init.
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        { "name" => "demo", "error" => "missing_project_path", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 1, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "must NOT dispatch against a project with error: state"
+    assert_match(/demo.*missing project path/, @model.hive_model.flash.to_s,
+                 "flash must name the project AND the specific error")
+  end
+
   def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01", "projects" => []

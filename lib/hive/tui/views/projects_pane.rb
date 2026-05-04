@@ -65,7 +65,8 @@ module Hive
 
           project_rows = projects.each_with_index.map do |project, idx|
             scope_index = idx + 1
-            render_row(project.name.to_s, model.scope == scope_index, inner_width)
+            label = project_label(project)
+            render_row(label, model.scope == scope_index, inner_width)
           end
           [
             Styles::HEADER.render(truncate(TITLE, inner_width)),
@@ -79,6 +80,24 @@ module Hive
           truncated = Format.truncate(label, inner_width)
           padded = truncated.ljust(inner_width)
           selected ? Styles::CURSOR_HIGHLIGHT.render(padded) : padded
+        end
+
+        # Project-row label decoration. Healthy projects render as
+        # their name. Unhealthy projects (missing path, not initialised)
+        # render with a `⚠` prefix and the short error label so the
+        # operator sees at a glance which project to skip — without
+        # this, broken projects are visually identical to healthy ones
+        # and the user only finds out by trying to dispatch and seeing
+        # `hive brainstorm` exit 70.
+        def project_label(project)
+          return project.name.to_s if project.error.nil?
+
+          short = case project.error
+          when "missing_project_path" then "missing"
+          when "not_initialised" then "needs init"
+          else project.error.to_s
+          end
+          "⚠ #{project.name} (#{short})"
         end
 
         # Predicate exposed for unit tests because lipgloss-ruby strips

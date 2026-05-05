@@ -139,7 +139,7 @@ module Hive
       def foreground_takeover_command(callable)
         Bubbletea.sequence(
           Bubbletea.exit_alt_screen,
-          Bubbletea.public_send(:exec, callable),
+          Bubbletea.exec(callable),
           Bubbletea.enter_alt_screen
         )
       end

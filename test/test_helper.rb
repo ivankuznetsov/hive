@@ -3,10 +3,30 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "minitest/autorun"
 require "tmpdir"
 require "fileutils"
+require "stringio"
 require "yaml"
 require "shellwords"
 require "English"
 require "hive"
+
+module HiveTestStdinIsolation
+  # Keep tests hermetic when the suite is launched from a real terminal:
+  # production `hive init` prompts on TTY stdin, but tests that need the
+  # interactive path inject their own tty-flagged StringIO explicitly.
+  def before_setup
+    @hive_original_stdin = $stdin
+    $stdin = StringIO.new
+    super
+  end
+
+  def after_teardown
+    super
+  ensure
+    $stdin = @hive_original_stdin if defined?(@hive_original_stdin)
+  end
+end
+
+Minitest::Test.include(HiveTestStdinIsolation)
 
 module HiveTestHelper
   def with_tmp_dir(&block)

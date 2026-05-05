@@ -63,8 +63,9 @@ module Hive
       end
 
       # Inspect the model's current mode after a batch of messages has
-      # been handled. If we just transitioned out of an editable mode
-      # (`:new_idea` or `:filter`) the decoder is purged so any half-
+      # been handled. If we just transitioned away from the previous
+      # editable mode (`:new_idea` or `:filter`) — including jumping
+      # `:new_idea ↔ :filter` — the decoder is purged so any half-
       # parsed paste / pending escape doesn't leak into the next mode's
       # input stream. The two-step latch (`@last_editable_mode`) is
       # needed because we only have access to the new mode here — we

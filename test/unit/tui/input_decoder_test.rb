@@ -128,6 +128,20 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal "abc", text_messages.first.text
   end
 
+  def test_unmapped_control_byte_in_separate_chunk_does_not_block_subsequent_input
+    # Reproduces the production wedge scenario where the unconsumable
+    # byte arrives in chunk N and the legitimate text in chunk N+1.
+    # Pre-fix the byte sat at head of @pending, blocking every later
+    # drain from making forward progress. The single-chunk variant
+    # above passes even with a regression that buffers \x02; this one
+    # is the strict pin.
+    assert_empty decoder.drain("\x02"), "lone unmapped C0 must not emit a message"
+    follow_up = decoder.drain("hello")
+    text = follow_up.find { |m| m.is_a?(Hive::Tui::Messages::RawTextInput) }
+    refute_nil text, "expected text after unmapped C0 — decoder must drain pending byte"
+    assert_equal "hello", text.text
+  end
+
   # ---- Fix 2: paste buffer cap ----
 
   def test_unbounded_paste_buffer_is_capped_with_flash
@@ -226,13 +240,23 @@ class HiveTuiInputDecoderTest < Minitest::Test
 
   # ---- Fix 11: ESC-then-Enter cancel gesture absorbs the trailing CR/LF ----
 
-  def test_esc_followed_by_enter_emits_only_esc_not_enter
+  def test_esc_followed_by_cr_emits_only_esc_not_enter
     # Send ESC then a non-recognized escape continuation that flushes
-    # the lone ESC + a trailing CR/LF, all in one read.
+    # the lone ESC + a trailing CR, all in one read.
     messages = decoder.drain("\e\r")
     esc_messages = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_ESC }
     enter_messages = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_ENTER }
     assert_equal 1, esc_messages.size, "expected exactly one KEY_ESC"
     assert_empty enter_messages, "trailing CR must be absorbed, not promoted to KEY_ENTER"
+  end
+
+  def test_esc_followed_by_lf_emits_only_esc_not_enter
+    # Same contract as the CR variant. Pinning both so a regression
+    # that drops `"\n".b` from the start_with? predicate fails loudly.
+    messages = Hive::Tui::InputDecoder.new.drain("\e\n")
+    esc_messages = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_ESC }
+    enter_messages = messages.select { |m| m.is_a?(Bubbletea::KeyMessage) && m.key_type == Bubbletea::KeyMessage::KEY_ENTER }
+    assert_equal 1, esc_messages.size, "expected exactly one KEY_ESC"
+    assert_empty enter_messages, "trailing LF must be absorbed, not promoted to KEY_ENTER"
   end
 end

@@ -785,9 +785,12 @@ module Hive
       # Filter mode: same two-pane composition as :grid mode, but the
       # footer line is replaced by the filter prompt. Bubble Tea diffs
       # against the previous frame so a one-line change paints cheaply.
+      # Active flash (paste truncated, paste timed out, etc.) is stacked
+      # above the prompt — `default_footer` is bypassed in this mode so
+      # the flash would otherwise be invisible.
       def compose_filter_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model, width: usable))
+        compose_two_pane_view(footer: prompt_footer(Views::FilterPrompt.render(@hive_model, width: usable), usable))
       end
 
       # New-idea mode: same composition; footer = the inline prompt with
@@ -797,7 +800,26 @@ module Hive
       # screen (see Views::NewIdeaPrompt.render).
       def compose_new_idea_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model, width: usable))
+        compose_two_pane_view(footer: prompt_footer(Views::NewIdeaPrompt.render(@hive_model, width: usable), usable))
+      end
+
+      # Stack an active flash above the prompt strip so error states
+      # raised inside `:new_idea` / `:filter` mode (paste truncated,
+      # title too long, decoder overflow, paste timed out) reach the
+      # operator. Without this the flash sets `model.flash` but the
+      # prompt-mode views replace `default_footer` entirely, so the
+      # flash never renders.
+      def prompt_footer(prompt_strip, usable_width)
+        flash = active_flash_line(usable_width)
+        flash ? "#{flash}\n#{prompt_strip}" : prompt_strip
+      end
+
+      def active_flash_line(usable_width)
+        return nil unless @hive_model.flash_active?
+
+        line = @hive_model.flash.to_s
+        line = Views::Format.truncate(line, usable_width) if usable_width
+        Hive::Tui::Styles::FLASH.render(line)
       end
 
       # ---- v2 two-pane composition ----

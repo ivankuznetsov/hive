@@ -640,7 +640,10 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     assert_equal existing, new_model.new_idea_buffer
     assert_equal existing.length, new_model.new_idea_cursor
-    assert_equal "title too long", new_model.flash
+    # Match by intent rather than exact string so a UX copy edit
+    # ("title at max length", localisation, etc.) does not break the
+    # behavioural contract pin.
+    assert_match(/too long|max/i, new_model.flash.to_s)
     refute_nil new_model.flash_set_at
   end
 

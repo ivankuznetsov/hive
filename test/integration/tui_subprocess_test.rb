@@ -36,6 +36,22 @@ class TuiSubprocessTest < Minitest::Test
     assert File.executable?(FAKE_CHILD), "fake child fixture must be executable"
   end
 
+  def test_foreground_takeover_command_wraps_callable_with_alt_screen_sequence
+    ran = false
+    cmd = Hive::Tui::Subprocess.foreground_takeover_command(-> { ran = true })
+
+    assert_kind_of Bubbletea::SequenceCommand, cmd
+    assert_equal(
+      [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+      cmd.commands.map(&:class)
+    )
+
+    exec_cmd = cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
+    exec_cmd.callable.call
+
+    assert_equal true, ran
+  end
+
   # ---- run_quiet! ----
 
   def test_run_quiet_captures_stdout
@@ -289,8 +305,8 @@ class TuiSubprocessDispatchBackgroundTest < Minitest::Test
     assert wait_for_messages(1)
 
     after = existing_spawn_capture_paths
-    assert_equal before.size, after.size,
-      "exit 0 must delete the per-spawn capture so disk usage is bounded by failures, not spawn count"
+    assert_empty after - before,
+      "exit 0 must delete its own per-spawn capture so disk usage is bounded by failures, not spawn count"
   end
 
   # NOTE: the diagnose-by-per-spawn-capture flow is pinned by

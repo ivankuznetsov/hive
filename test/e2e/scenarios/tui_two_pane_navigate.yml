@@ -54,10 +54,11 @@ steps:
     anchor: "New idea"
     timeout: 3
 
-  # Type the title one character at a time (avoids Bubble Tea input
-  # quirks; matches the v1 filter scenario pattern).
+  # Type the title as one literal chunk; the paste-aware runner must
+  # deliver the full buffer to the prompt.
   - kind: tui_keys
     text: "rss feeds"
+    paste: true
 
   # Submit — Enter dispatches `bin/hive new <project> "rss feeds"`.
   - kind: tui_keys

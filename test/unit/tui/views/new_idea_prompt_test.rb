@@ -125,7 +125,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     long = ("a" * 60) + ("z" * 60) # 120 chars
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: long, cols: 50
+      scope: 0, new_idea_buffer: long, new_idea_cursor: long.length, cols: 50
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     refute_includes out, ("a" * 60),
@@ -200,6 +200,60 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       scope: 0, new_idea_buffer: "x" * 2000, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+    assert_operator out.lines.count, :<=, Hive::Tui::Views::NewIdeaPrompt::MAX_VISIBLE_ROWS
+  end
+
+  # ---- Cursor placement ----
+
+  def test_render_rows_places_cursor_at_start
+    out = Hive::Tui::Views::NewIdeaPrompt.render_rows("New: ", [ "abc" ], 0, 0, cursor: "|")
+    assert_equal "New: |abc", out
+  end
+
+  def test_render_rows_places_cursor_in_middle
+    out = Hive::Tui::Views::NewIdeaPrompt.render_rows("New: ", [ "abcd" ], 0, 2, cursor: "|")
+    assert_equal "New: ab|cd", out
+  end
+
+  def test_render_rows_places_cursor_at_end
+    out = Hive::Tui::Views::NewIdeaPrompt.render_rows("New: ", [ "abc" ], 0, 3, cursor: "|")
+    assert_equal "New: abc|", out
+  end
+
+  def test_chunk_buffer_with_cursor_tracks_wrapped_cursor_position
+    chunks, cursor_chunk_idx, cursor_offset =
+      Hive::Tui::Views::NewIdeaPrompt.chunk_buffer_with_cursor("abcdef", 4, 3)
+
+    assert_equal [ "abc", "def" ], chunks
+    assert_equal 1, cursor_chunk_idx
+    assert_equal 1, cursor_offset
+  end
+
+  def test_visible_chunks_for_cursor_keeps_non_tail_cursor_visible
+    chunks = %w[aa bb cc dd ee ff gg hh]
+    visible, visible_cursor_idx = Hive::Tui::Views::NewIdeaPrompt.visible_chunks_for_cursor(chunks, 2)
+
+    assert_equal %w[aa bb cc dd ee ff], visible
+    assert_equal 2, visible_cursor_idx
+  end
+
+  def test_visible_chunks_for_cursor_scrolls_to_late_cursor
+    chunks = %w[aa bb cc dd ee ff gg hh]
+    visible, visible_cursor_idx = Hive::Tui::Views::NewIdeaPrompt.visible_chunks_for_cursor(chunks, 7)
+
+    assert_equal %w[cc dd ee ff gg hh], visible
+    assert_equal 5, visible_cursor_idx
+  end
+
+  def test_wrapped_render_keeps_cursor_row_visible
+    buffer = "abcdefghij" * 10
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_buffer: buffer, new_idea_cursor: 4, cols: 45
+    )
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+
+    assert_includes out, "abcd", "cursor near the start should keep the start of the buffer visible"
     assert_operator out.lines.count, :<=, Hive::Tui::Views::NewIdeaPrompt::MAX_VISIBLE_ROWS
   end
 

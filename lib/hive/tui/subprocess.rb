@@ -129,9 +129,17 @@ module Hive
           exit_code = run_takeover_child_sync(argv)
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
         end
+        foreground_takeover_command(callable)
+      end
+
+      # @api private
+      # Shared Bubble Tea foreground handoff wrapper. Any operation that
+      # needs the user's terminal should use this instead of rebuilding
+      # the alt-screen lifecycle at the call site.
+      def foreground_takeover_command(callable)
         Bubbletea.sequence(
           Bubbletea.exit_alt_screen,
-          Bubbletea.public_send(:exec, callable),
+          Bubbletea.exec(callable),
           Bubbletea.enter_alt_screen
         )
       end

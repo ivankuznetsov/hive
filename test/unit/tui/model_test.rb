@@ -19,6 +19,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal "", model.filter_buffer
     assert_equal 0, model.scope
     assert_equal "", model.new_idea_buffer
+    assert_equal 0, model.new_idea_cursor
     assert_nil model.flash
     assert_nil model.flash_set_at
     assert_nil model.triage_state
@@ -100,9 +101,13 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal 5.0, Hive::Tui::Model::DEFAULT_FLASH_TTL_SECONDS
   end
 
+  def test_new_idea_buffer_cap_is_positive
+    assert_operator Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS, :>, 0
+  end
+
   def test_model_carries_all_documented_fields
     # Schema-pinning test: catch accidental field renames or removals.
-    expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_buffer
+    expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_buffer new_idea_cursor
                   flash flash_set_at triage_state tail_state cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end
@@ -120,5 +125,12 @@ class HiveTuiModelTest < Minitest::Test
     b = a.with(new_idea_buffer: "rss feeds")
     assert_equal "", a.new_idea_buffer
     assert_equal "rss feeds", b.new_idea_buffer
+  end
+
+  def test_new_idea_cursor_can_be_overridden_via_with
+    a = Hive::Tui::Model.initial
+    b = a.with(new_idea_buffer: "rss feeds", new_idea_cursor: 3)
+    assert_equal 0, a.new_idea_cursor
+    assert_equal 3, b.new_idea_cursor
   end
 end

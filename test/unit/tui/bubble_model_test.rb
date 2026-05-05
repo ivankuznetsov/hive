@@ -18,6 +18,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
+  def key_message(key_type, runes: [])
+    Bubbletea::KeyMessage.new(key_type: key_type, runes: runes)
+  end
+
   # ---- Construction / init ----
 
   def test_init_returns_self_and_yield_tick
@@ -138,6 +142,53 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "unknown keystrokes must not flip mode"
   end
 
+  def test_bubble_key_to_keymap_translates_new_idea_editing_keys
+    {
+      Bubbletea::KeyMessage::KEY_LEFT => :key_left,
+      Bubbletea::KeyMessage::KEY_RIGHT => :key_right,
+      Bubbletea::KeyMessage::KEY_HOME => :key_home,
+      Bubbletea::KeyMessage::KEY_END => :key_end,
+      Bubbletea::KeyMessage::KEY_DELETE => :key_delete,
+      Bubbletea::KeyMessage::KEY_CTRL_A => :key_ctrl_a,
+      Bubbletea::KeyMessage::KEY_CTRL_E => :key_ctrl_e
+    }.each do |key_type, expected|
+      assert_equal expected, @model.send(:bubble_key_to_keymap, key_message(key_type))
+    end
+  end
+
+  def test_raw_text_input_in_new_idea_mode_inserts_at_cursor
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, new_idea_buffer: "ac", new_idea_cursor: 1
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "b", paste: false))
+
+    assert_equal "abc", @model.hive_model.new_idea_buffer
+    assert_equal 2, @model.hive_model.new_idea_cursor
+  end
+
+  def test_raw_text_input_in_filter_mode_appends_to_filter_buffer
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :filter, filter_buffer: "au"),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "th", paste: true))
+
+    assert_equal "auth", @model.hive_model.filter_buffer
+  end
+
+  def test_raw_text_input_in_grid_mode_is_noop
+    before = @model.hive_model
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "paste", paste: true))
+
+    assert_equal before, @model.hive_model
+  end
+
   # ---- View dispatch by mode ----
 
   def test_view_renders_grid_in_grid_mode
@@ -165,6 +216,59 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     out = @model.view
     assert_includes out, "/auth"
+  end
+
+  # Regression: paste-truncated / paste-timeout / overflow flashes
+  # raised inside :filter mode were invisible because compose_filter_view
+  # passed the filter prompt as the footer, replacing default_footer
+  # (the only place flashes render).
+  def test_view_renders_active_flash_above_filter_prompt
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :filter, filter_buffer: "auth",
+        flash: "paste truncated", flash_set_at: Time.now
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "/auth", "filter prompt must still render"
+    assert_includes out, "paste truncated", "active flash must surface above the prompt"
+    assert out.index("paste truncated") < out.index("/auth"),
+           "flash row must precede the prompt strip so it is visible"
+  end
+
+  # Same regression for :new_idea mode — the partial-fit truncation
+  # flash, the title-too-long flash, and the decoder overflow Flash all
+  # land here.
+  def test_view_renders_active_flash_above_new_idea_prompt
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, new_idea_buffer: "rss feeds", new_idea_cursor: 9,
+        flash: "title truncated to 4096 chars", flash_set_at: Time.now
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "rss feeds", "new-idea prompt must still render the buffer"
+    assert_includes out, "title truncated", "active flash must surface above the prompt"
+    assert out.index("title truncated") < out.index("rss feeds"),
+           "flash row must precede the prompt strip so it is visible"
+  end
+
+  # Negative: when no active flash, the prompt is the only footer line —
+  # no blank flash row, no "nil" rendering.
+  def test_view_omits_flash_row_when_no_active_flash_in_new_idea_mode
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, new_idea_buffer: "draft", new_idea_cursor: 5,
+        flash: nil, flash_set_at: nil
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "draft"
+    refute_match(/^\s*$/, out.lines.last(2).first.to_s,
+                 "no spurious blank flash row when flash is nil")
   end
 
   # ---- v2 two-pane composition ----

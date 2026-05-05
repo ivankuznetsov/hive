@@ -251,4 +251,53 @@ class SpawnAgentTest < Minitest::Test
     refute_equal naive_hostile, close_a
     refute_equal naive_hostile, close_b
   end
+
+  # --- stage_profile: reads cfg[stage].agent with claude fallback ---------
+
+  def test_stage_profile_falls_back_to_claude_when_key_absent
+    cfg = {}
+    profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+    assert_equal :claude, profile.name
+  end
+
+  def test_stage_profile_resolves_configured_agent_name
+    cfg = { "brainstorm" => { "agent" => "codex" } }
+    profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+    assert_equal :codex, profile.name
+  end
+
+  def test_stage_profile_independently_resolved_per_stage
+    cfg = {
+      "brainstorm" => { "agent" => "claude" },
+      "plan"       => { "agent" => "codex" },
+      "execute"    => { "agent" => "pi" }
+    }
+    assert_equal :claude, Hive::Stages::Base.stage_profile(cfg, "brainstorm").name
+    assert_equal :codex,  Hive::Stages::Base.stage_profile(cfg, "plan").name
+    assert_equal :pi,     Hive::Stages::Base.stage_profile(cfg, "execute").name
+  end
+
+  def test_stage_profile_honors_per_cli_overrides_under_agents_block
+    # cfg.agents.<name>.bin override flows through AgentProfiles.lookup and
+    # produces a profile whose bin reflects the override. Used by tests and
+    # non-default per-project binary pinning.
+    cfg = {
+      "execute" => { "agent" => "codex" },
+      "agents"  => { "codex" => { "bin" => "/custom/codex/path" } }
+    }
+    profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+    assert_equal :codex, profile.name
+    assert_equal "/custom/codex/path", profile.bin
+  end
+
+  def test_stage_profile_raises_on_unknown_agent_name
+    # Config.load's validate_role_agent_names! already prevents this case
+    # for project configs, but the helper itself must surface the error
+    # rather than returning a nil profile silently — protects callers that
+    # pass synthetic cfg hashes (e.g. tests, future hive-config CLI).
+    cfg = { "brainstorm" => { "agent" => "no_such_agent" } }
+    assert_raises(Hive::AgentProfiles::UnknownAgent) do
+      Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+    end
+  end
 end

@@ -26,7 +26,11 @@ module Hive
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "plan"),
           timeout_sec: cfg.dig("timeout_sec", "plan"),
-          log_label: "plan"
+          log_label: "plan",
+          profile: Hive::Stages::Base.stage_profile(cfg, "plan"),
+          # Same rationale as brainstorm: plan's lifecycle contract is
+          # the marker the agent writes to plan.md, not an output file.
+          status_mode: :state_file_marker
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

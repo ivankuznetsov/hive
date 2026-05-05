@@ -5,27 +5,31 @@ worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
 max_review_passes: 4
 
+# Stage-level agent for the three single-agent stages. (5-review uses
+# the per-role agent fields under `review.{ci,triage,fix,browser_test}`
+# below.) Defaults are claude for planning (deeper reasoning) and codex
+# for development (its edit-mode is more efficient for implementation).
+brainstorm:
+  agent: <%= planning_agent %>
+plan:
+  agent: <%= planning_agent %>
+execute:
+  agent: <%= development_agent %>
+
+# Generous sanity caps for runaway agents, not cost targets. Most
+# tasks finish well within them; tighten manually only if you hit a
+# cap repeatedly. (The deprecated execute_review key from older
+# configs has been dropped — 5-review owns reviewer budgets per
+# ADR-014.)
 budget_usd:
-  brainstorm: 10
-  plan: 20
-  execute_implementation: 100
-  execute_review: 50
-  pr: 10
-  review_ci: 25
-  review_triage: 15
-  review_fix: 100
-  review_browser: 25
+<% Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key| -%>
+  <%= key %>: <%= budgets[key] %>
+<% end -%>
 
 timeout_sec:
-  brainstorm: 300
-  plan: 600
-  execute_implementation: 2700
-  execute_review: 600
-  pr: 300
-  review_ci: 600
-  review_triage: 300
-  review_fix: 2700
-  review_browser: 900
+<% Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key| -%>
+  <%= key %>: <%= timeouts[key] %>
+<% end -%>
 
 # 5-review stage configuration. Each role takes an `agent` (one of the
 # names registered in Hive::AgentProfiles — claude, codex, pi by default)
@@ -68,10 +72,12 @@ review:
   # Hive's recommended reviewer set: claude /ce-code-review + codex
   # /ce-code-review + claude /pr-review-toolkit:review-pr. Each entry's
   # `name` becomes part of the output filename (`reviews/<name>-<pass>.md`).
-  # To disable an entry, comment it out or remove it. To replace the set
-  # entirely, edit this list — the deep-merge replaces `review.reviewers`
-  # wholesale (no per-element merge).
+  # The init prompt's reviewer multiselect controls which entries land
+  # here; disabled reviewers are omitted from the array entirely. The
+  # deep-merge replaces `review.reviewers` wholesale, so editing this
+  # list later replaces it (no per-element merge).
   reviewers:
+<% if enabled_reviewers.include?("claude-ce-code-review") -%>
     - name: claude-ce-code-review
       kind: agent
       agent: claude
@@ -80,6 +86,8 @@ review:
       prompt_template: reviewer_claude_ce_code_review.md.erb
       budget_usd: 50
       timeout_sec: 600
+<% end -%>
+<% if enabled_reviewers.include?("codex-ce-code-review") -%>
     - name: codex-ce-code-review
       kind: agent
       agent: codex
@@ -88,6 +96,8 @@ review:
       prompt_template: reviewer_codex_ce_code_review.md.erb
       budget_usd: 50
       timeout_sec: 600
+<% end -%>
+<% if enabled_reviewers.include?("pr-review-toolkit") -%>
     - name: pr-review-toolkit
       kind: agent
       agent: claude
@@ -96,3 +106,4 @@ review:
       prompt_template: reviewer_pr_review_toolkit.md.erb
       budget_usd: 50
       timeout_sec: 600
+<% end -%>

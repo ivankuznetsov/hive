@@ -16,6 +16,23 @@ Append-only log of all wiki operations.
 - `wiki/commands/tui.md` — documented new-idea prompt editing keys, paste behavior, title cap, and the copy boundary.
 - `wiki/e2e.md` — documented `tui_keys paste: true` and added the `tui_new_idea_editing` scenario to the coverage table.
 
+## [2026-05-04T19:00:00Z] config — Hash-shape validation on top-level keys
+
+**Action:** `Config.validate!` now runs `validate_hash_shaped_keys!` first. Keys in `HASH_SHAPED_KEYS = %w[brainstorm plan execute budget_usd timeout_sec review agents]` must be Hashes when present; scalar/nil/integer overrides (e.g. `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) would survive `deep_merge` (override-not-Hash → returned unchanged) and crash later as `TypeError`/`NoMethodError` at `cfg.dig(...)` sites. Now raises typed `ConfigError` at load with a fix hint. Closes ce-code-review F1 (P1, gated_auto). State-model surface (schemas, marker grammar, layout) unchanged — pure validation tightening.
+
+**Refreshed pages:**
+- `wiki/modules/config.md` — Validation section now lists three ordered checks; `validate_hash_shaped_keys!` is #1.
+
+## [2026-05-04T18:00:00Z] init — TTY prompts, stage agents, generous limits (ADR-023)
+
+**Action:** Plan `docs/plans/2026-05-04-001-feat-hive-init-interactive-prompts-plan.md` shipped. `hive init` is now interactive on TTY: asks the operator for planning agent (combined brainstorm+plan), development agent (4-execute), review agents (multi-select), and 8 per-stage limit pairs. Recommended defaults are claude / codex / all-3-reviewers / generous limits. Non-TTY callers (CI, pipes, tests) short-circuit to defaults and emit a one-line summary. `Hive::Stages::Base.stage_profile(cfg, name)` reads the new `brainstorm.agent` / `plan.agent` / `execute.agent` keys with `|| "claude"` fallback; brainstorm / plan / execute spawn sites pin `status_mode: :state_file_marker` so codex's profile-default `:output_file_exists` doesn't break the marker-based lifecycle. `Config::DEFAULTS["budget_usd"]` and `["timeout_sec"]` bumped ~5×; deprecated `execute_review` key dropped.
+
+**Refreshed pages:**
+- `wiki/commands/init.md` — TLDR rewritten; added "Prompt flow", "Stable-iteration-order contract", and "Non-TTY contract" subsections; expanded "Steps performed" with the new prompt step + already-initialized guard ordering; refreshed Tests section with the new test surface.
+- `wiki/decisions.md` — added ADR-023.
+- `wiki/state-model.md` — auto-refreshed by post-commit hook to reflect bumped DEFAULTS and the new `brainstorm` / `plan` / `execute` blocks.
+- `wiki/modules/config.md` — auto-refreshed by post-commit hook with the new DEFAULTS shape, ROLE_AGENT_PATHS extension, and the dropped `execute_review` note.
+
 ## [2026-05-04T11:50:00Z] commands/init — beautified summary
 
 **Action:** Replaced the plain key:value summary printed at the end of `hive init` with a styled summary: green ✔ + bold heading + bold-cyan project name, dim labels in an aligned two-column block, and a cyan `→ next:` prompt. Colors are emitted only when `$stdout.tty?` and `NO_COLOR` is unset/empty, so piped/CI output stays plain. Field labels are now spaced (`default branch`, `hive state`, `worktree root`) instead of underscore-cased. Implementation lives in a nested `Hive::Commands::Init::Palette` so it can be lifted out if other commands want the same treatment.

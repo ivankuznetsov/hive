@@ -8,8 +8,11 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
       assert_equal 4, cfg["max_review_passes"]
-      assert_equal 10, cfg["budget_usd"]["brainstorm"]
-      assert_equal 100, cfg["budget_usd"]["execute_implementation"]
+      # Generous defaults bumped ~5x in plan 2026-05-04-001 / ADR-023.
+      assert_equal 50, cfg["budget_usd"]["brainstorm"]
+      assert_equal 500, cfg["budget_usd"]["execute_implementation"]
+      assert_nil cfg["budget_usd"]["execute_review"],
+                 "deprecated execute_review key must be absent from DEFAULTS"
       assert_equal dir, cfg["project_root"]
     end
   end
@@ -26,8 +29,198 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
       assert_equal 6, cfg["max_review_passes"]
-      assert_equal 20, cfg["budget_usd"]["brainstorm"]
-      assert_equal 20, cfg["budget_usd"]["plan"], "plan budget should fall back to default"
+      assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
+      assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
+    end
+  end
+
+  # Legacy projects that still carry execute_review explicitly must keep it
+  # via deep-merge — DEFAULTS no longer ships the key but user-supplied
+  # values survive untouched.
+  def test_load_preserves_user_supplied_execute_review_when_legacy
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        budget_usd:
+          execute_review: 50
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal 50, cfg["budget_usd"]["execute_review"],
+                   "legacy explicit execute_review must survive deep-merge"
+    end
+  end
+
+  # ADR-023: stage-level agent keys for brainstorm / plan / execute.
+  # Defaults are "claude" so legacy configs without these keys keep
+  # the same runtime behavior as before this plan landed.
+  def test_load_returns_default_stage_agents_when_keys_absent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal "claude", cfg.dig("brainstorm", "agent"), "brainstorm agent must default to claude"
+      assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
+      assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
+    end
+  end
+
+  def test_load_honors_per_project_stage_agent_overrides
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm:
+          agent: codex
+        plan:
+          agent: pi
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "codex", cfg.dig("brainstorm", "agent")
+      assert_equal "pi",    cfg.dig("plan", "agent")
+      assert_equal "claude", cfg.dig("execute", "agent"),
+                   "execute agent must fall back to default when not overridden"
+    end
+  end
+
+  def test_load_raises_when_stage_agent_is_unknown_profile
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          agent: nonexistent_profile
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/execute\.agent "nonexistent_profile"/, err.message)
+      assert_match(/registered:/, err.message, "error must list registered profiles")
+    end
+  end
+
+  # ADR-023 shape-validation gap (ce-code-review F1): non-Hash overrides on
+  # the new top-level keys would otherwise survive deep_merge (because
+  # deep_merge returns the override unchanged when it is not a Hash) and
+  # crash later as TypeError/NoMethodError in stage code. validate! now
+  # rejects them at load time with a typed ConfigError.
+  def test_load_raises_when_stage_block_is_a_scalar_instead_of_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm: claude
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/brainstorm.*must be a Hash/, err.message)
+      assert_match(/got "claude"/, err.message)
+    end
+  end
+
+  def test_load_raises_when_budget_usd_is_nil
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        budget_usd: ~
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/budget_usd.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_timeout_sec_is_a_scalar
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        timeout_sec: 600
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/timeout_sec.*must be a Hash/, err.message)
+    end
+  end
+
+  # AgentProfiles.registered?(name) calls name.to_sym; non-String values
+  # (Integer, Hash, Array, Boolean) crash with NoMethodError. validate_agent_name!
+  # type-checks first so a typo like `execute.agent: 42` surfaces as
+  # ConfigError, not NoMethodError. Closes ce-code-review F2 (P2).
+  def test_load_raises_when_stage_agent_is_an_integer
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          agent: 42
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/execute\.agent.*must be a String/, err.message)
+      assert_match(/got 42 \(Integer\)/, err.message)
+    end
+  end
+
+  def test_load_raises_when_stage_agent_is_a_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          agent:
+            name: claude
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/plan\.agent.*must be a String/, err.message)
+    end
+  end
+
+  # Symbol agents (e.g. from a Ruby-injected config) should still pass —
+  # AgentProfiles.registered? handles both symbols and strings.
+  def test_load_accepts_symbol_stage_agent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.send(:merge_defaults, { "execute" => { "agent" => :claude } })
+      cfg["project_root"] = dir
+      Hive::Config.send(:validate!, cfg, "synthetic")
+      assert_equal :claude, cfg.dig("execute", "agent")
+    end
+  end
+
+  # Table-driven coverage so every key in HASH_SHAPED_KEYS — not just the
+  # 3 we sampled in the original tests — is defended against scalar
+  # overrides. A future refactor that subsetted the constant (e.g.
+  # conditionalised the check per-key) would otherwise pass tests while
+  # silently letting `agents: claude` or `review: foo` bypass validation.
+  def test_load_rejects_scalar_override_on_every_hash_shaped_key
+    Hive::Config::HASH_SHAPED_KEYS.each do |key|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "#{key}: scalar-value\n")
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/#{key}.*must be a Hash/, err.message,
+                     "HASH_SHAPED_KEYS member #{key.inspect} must reject scalar overrides")
+      end
+    end
+  end
+
+  # Table-driven coverage for the type-check in validate_agent_name!.
+  # Every path in ROLE_AGENT_PATHS — including all four review.* paths —
+  # must reject non-String/non-Symbol values with ConfigError, not crash
+  # with NoMethodError on `name.to_sym`.
+  def test_load_rejects_non_string_agent_value_on_every_role_agent_path
+    Hive::Config::ROLE_AGENT_PATHS.each do |path|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        # Build a nested YAML hash matching the path with the leaf as
+        # an Integer (the canonical NoMethodError trigger for to_sym).
+        yaml = path.reverse.reduce(42) { |acc, key| { key => acc } }.to_yaml
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        label = path.join(".")
+        assert_match(/#{Regexp.escape(label)}.*must be a String/, err.message,
+                     "#{label} must reject Integer agent values with ConfigError, not crash on to_sym")
+      end
+    end
+  end
+
+  # Boolean is the documented crash class in validate_agent_name!'s
+  # comment but isn't exercised anywhere else. Pin it explicitly.
+  def test_load_rejects_boolean_agent_value
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            agent: true
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.ci\.agent.*must be a String/, err.message)
     end
   end
 

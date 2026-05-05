@@ -150,7 +150,16 @@ module Hive
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
-          log_label: "execute-impl"
+          log_label: "execute-impl",
+          profile: Hive::Stages::Base.stage_profile(cfg, "execute"),
+          # Pin :state_file_marker regardless of which profile the user
+          # picked: execute's lifecycle contract is "stage runner writes
+          # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
+          # which depends on the spawn returning a non-error/non-timeout
+          # marker status. Codex's profile default is :output_file_exists,
+          # which would treat a successful run as :error because no
+          # explicit expected_output is supplied here.
+          status_mode: :state_file_marker
         )
       end
 

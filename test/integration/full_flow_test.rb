@@ -10,6 +10,7 @@ class FullFlowTest < Minitest::Test
   def setup
     @prev_path = ENV["PATH"]
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
+    @prev_codex_bin = ENV["HIVE_CODEX_BIN"]
     @driver_dir = Dir.mktmpdir("flow-driver")
     @driver_log = File.join(@driver_dir, "driver.log")
     write_driver
@@ -18,12 +19,18 @@ class FullFlowTest < Minitest::Test
                  File.join(@gh_dir, "gh"))
     ENV["PATH"] = "#{@gh_dir}:#{@prev_path}"
     ENV["HIVE_CLAUDE_BIN"] = File.join(@driver_dir, "claude")
+    # ADR-023: rendered templates default execute.agent to codex, so the
+    # full-pipeline run spawns the codex profile for 4-execute. Point
+    # codex at the same fake driver so this end-to-end test still drives
+    # one shared script.
+    ENV["HIVE_CODEX_BIN"] = File.join(@driver_dir, "claude")
     ENV["HIVE_FLOW_DRIVER_LOG"] = @driver_log
   end
 
   def teardown
     ENV["PATH"] = @prev_path
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
+    ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
     FileUtils.rm_rf(@driver_dir) if @driver_dir
     FileUtils.rm_rf(@gh_dir) if @gh_dir
     %w[HIVE_FLOW_FOLDER HIVE_FLOW_PHASE HIVE_FLOW_FINDINGS HIVE_FLOW_PASS

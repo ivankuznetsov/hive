@@ -20,7 +20,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[state-model]] — directory layout, marker grammar, state files, slug rules, configs, frontmatter, lock files, worktree pointer.
 - [[cli]] — top-level CLI surface (entry point, command table, error conventions).
 - [[dependencies]] — runtime gems, dev gems, external CLI deps, Ruby version, stdlib reliance.
-- [[decisions]] — 22 ADRs (ADR-022 covers the agentic e2e layer).
+- [[decisions]] — 23 ADRs (ADR-023 covers TTY-prompted hive init / stage agents / generous limits).
 - [[active-areas]] — what's currently in flight and what's deferred.
 - [[gaps]] — coverage table, open questions, patterns not yet documented.
 - [[templates]] — ERB template catalogue and prompt-injection boundary policy.

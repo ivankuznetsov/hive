@@ -96,6 +96,21 @@ module Hive
         resolved
       end
 
+      # Resolve the AgentProfile to use for a single-agent stage
+      # (brainstorm / plan / execute). Reads `cfg.dig(stage_name, "agent")`
+      # and falls back to "claude" when the key is absent so legacy configs
+      # written before plan 2026-05-04-001 keep working unchanged. The
+      # `cfg:` argument is forwarded to AgentProfiles.lookup so per-CLI
+      # overrides under `agents.<name>.<key>` are honored. Raises
+      # Hive::ConfigError (via AgentProfiles::UnknownAgent) when the
+      # configured value is not a registered profile — but that case is
+      # already prevented at config-load time by validate_role_agent_names!,
+      # so callers see UnknownAgent only if they bypass Config.load.
+      def stage_profile(cfg, stage_name)
+        name = cfg.dig(stage_name, "agent") || "claude"
+        Hive::AgentProfiles.lookup(name, cfg: cfg)
+      end
+
       # Spawn an agent and return its result hash.
       #
       # Default profile is :claude so existing callers (4-execute /

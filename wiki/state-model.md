@@ -147,22 +147,38 @@ default_branch: master              # detected by GitOps#detect_default_branch
 worktree_root: /home/.../<name>.worktrees
 hive_state_path: .hive-state
 max_review_passes: 4
+# Budgets and timeouts are GENEROUS sanity caps for runaway agents — not
+# cost targets. Bumped ~5× from pre-2026-05-04 values (ADR-023). The
+# `execute_review` key was DROPPED from DEFAULTS in plan 2026-05-04-001:
+# 5-review owns reviewer budgets per ADR-014. Old project configs that
+# still set `execute_review` survive deep-merge but the key is no longer
+# rendered for fresh projects and nothing reads it.
 budget_usd:
-  brainstorm: 10
-  plan: 20
-  execute_implementation: 100
-  execute_review: 50
-  pr: 10
+  brainstorm: 50
+  plan: 100
+  execute_implementation: 500
+  pr: 50
+  review_ci: 100
+  review_triage: 75
+  review_fix: 500
+  review_browser: 100
 timeout_sec:
-  brainstorm: 300
-  plan: 600
-  execute_implementation: 2700
-  execute_review: 600
-  pr: 300
-  review_ci: 600
-  review_triage: 300
-  review_fix: 2700
-  review_browser: 900
+  brainstorm: 1800
+  plan: 3600
+  execute_implementation: 14400
+  pr: 1800
+  review_ci: 3600
+  review_triage: 1800
+  review_fix: 14400
+  review_browser: 3600
+# Stage-level agent for the three single-agent stages (ADR-023). The
+# 5-review stage keeps per-role agent fields under `review.{ci,triage,
+# fix,browser_test}.agent`. Runtime fallback in stage code stays
+# `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
+# these keys keep working.
+brainstorm: { agent: claude }
+plan:       { agent: claude }
+execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`
 agents:                 # per-CLI profile overrides (claude, codex, pi)
   claude: { bin: claude, env_override: HIVE_CLAUDE_BIN, min_version: 2.1.118 }
   codex:  { bin: codex,  env_override: HIVE_CODEX_BIN,  min_version: 0.125.0 }
@@ -175,8 +191,9 @@ review:                 # 5-review stage config (U2)
   max_passes: 4
   max_wall_clock_sec: 5400
   reviewers: [...]      # Array — REPLACED wholesale on override (no per-element merge)
-budget_usd: { ..., review_ci: 25, review_triage: 15, review_fix: 100, review_browser: 25 }
 ```
+
+`Config::ROLE_AGENT_PATHS` (validated by `validate_role_agent_names!`) now also covers the three new stage-agent paths: `%w[brainstorm agent]`, `%w[plan agent]`, `%w[execute agent]` — alongside the existing `review.{ci,triage,fix,browser_test}.agent` paths.
 
 Loaded by `Hive::Config.load`, recursively deep-merged onto `Hive::Config::DEFAULTS` (`lib/hive/config.rb:6`) and validated via `Config.validate!` before return. Templated from `templates/project_config.yml.erb`. The `review.reviewers` Array is replaced wholesale (not per-element merged) — see [[modules/config]].
 

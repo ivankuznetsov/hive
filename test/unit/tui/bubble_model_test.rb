@@ -142,6 +142,28 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "unknown keystrokes must not flip mode"
   end
 
+  def test_left_key_message_focuses_projects_pane_in_grid_mode
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, pane_focus: :right, cols: 100),
+      dispatch: @dispatch
+    )
+
+    @model.update(key_message(Bubbletea::KeyMessage::KEY_LEFT))
+
+    assert_equal :left, @model.hive_model.pane_focus
+  end
+
+  def test_right_key_message_focuses_tasks_pane_in_grid_mode
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid, pane_focus: :left, cols: 100),
+      dispatch: @dispatch
+    )
+
+    @model.update(key_message(Bubbletea::KeyMessage::KEY_RIGHT))
+
+    assert_equal :right, @model.hive_model.pane_focus
+  end
+
   def test_bubble_key_to_keymap_translates_new_idea_editing_keys
     {
       Bubbletea::KeyMessage::KEY_LEFT => :key_left,

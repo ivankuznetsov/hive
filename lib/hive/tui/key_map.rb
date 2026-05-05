@@ -78,8 +78,8 @@ module Hive
       def grid_message(key:, row:, pane_focus: :right)
         # Pane-focus navigation runs first — it doesn't need a row.
         return Messages::PANE_FOCUS_TOGGLED if key == :key_tab || key == :key_backtab
-        return Messages::PaneFocusChanged.new(target: :left) if key == "h"
-        return Messages::PaneFocusChanged.new(target: :right) if key == "l"
+        return Messages::PaneFocusChanged.new(target: :left) if key == "h" || key == :key_left
+        return Messages::PaneFocusChanged.new(target: :right) if key == "l" || key == :key_right
 
         global = global_grid_message(key)
         return global if global

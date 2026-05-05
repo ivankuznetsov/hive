@@ -112,8 +112,20 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal :left, msg.target
   end
 
+  def test_grid_key_left_jumps_pane_focus_to_left
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_left, row: nil)
+    assert_kind_of Hive::Tui::Messages::PaneFocusChanged, msg
+    assert_equal :left, msg.target
+  end
+
   def test_grid_l_jumps_pane_focus_to_right
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "l", row: nil)
+    assert_kind_of Hive::Tui::Messages::PaneFocusChanged, msg
+    assert_equal :right, msg.target
+  end
+
+  def test_grid_key_right_jumps_pane_focus_to_right
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_right, row: nil)
     assert_kind_of Hive::Tui::Messages::PaneFocusChanged, msg
     assert_equal :right, msg.target
   end
@@ -202,6 +214,13 @@ class TuiKeyMapMessageForTest < Minitest::Test
     msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :space, row: nil)
     assert_kind_of Hive::Tui::Messages::FilterCharAppended, msg
     assert_equal " ", msg.char
+  end
+
+  def test_filter_left_and_right_keys_are_noop
+    assert_same Hive::Tui::Messages::NOOP,
+      Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_left, row: nil)
+    assert_same Hive::Tui::Messages::NOOP,
+      Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_right, row: nil)
   end
 
   def test_grid_enter_from_left_pane_jumps_focus_to_right

@@ -154,11 +154,34 @@ class TuiKeyMapMessageForTest < Minitest::Test
 
   def test_new_idea_printable_char_appends
     msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: "r", row: nil)
-    assert_kind_of Hive::Tui::Messages::NewIdeaCharAppended, msg
-    assert_equal "r", msg.char
+    assert_kind_of Hive::Tui::Messages::NewIdeaTextInserted, msg
+    assert_equal "r", msg.text
   end
 
-  def test_new_idea_unknown_key_is_noop
+  def test_new_idea_cursor_keys_route_to_prompt_navigation
+    assert_same Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_left, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CURSOR_RIGHT,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_right, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CURSOR_HOME,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_home, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CURSOR_END,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_end, row: nil)
+  end
+
+  def test_new_idea_ctrl_a_and_ctrl_e_route_to_home_and_end
+    assert_same Hive::Tui::Messages::NEW_IDEA_CURSOR_HOME,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_ctrl_a, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CURSOR_END,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_ctrl_e, row: nil)
+  end
+
+  def test_new_idea_delete_routes_to_forward_delete
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_delete, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD, msg
+  end
+
+  def test_new_idea_unbound_grid_navigation_key_is_noop
     msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_up, row: nil)
     assert_same Hive::Tui::Messages::NOOP, msg
   end
@@ -169,8 +192,8 @@ class TuiKeyMapMessageForTest < Minitest::Test
   # would land as "rssfeeds" in the buffer.
   def test_new_idea_space_symbol_appends_literal_space
     msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :space, row: nil)
-    assert_kind_of Hive::Tui::Messages::NewIdeaCharAppended, msg
-    assert_equal " ", msg.char
+    assert_kind_of Hive::Tui::Messages::NewIdeaTextInserted, msg
+    assert_equal " ", msg.text
   end
 
   # Same regression for filter mode — slug filters with spaces like

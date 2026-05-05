@@ -89,11 +89,12 @@ On failure, the harness writes a scenario bundle containing:
 | `run_error_envelope` | `hive run --json` against a stale-locked task emits a parseable `hive-run` error payload. |
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
+| `tui_new_idea_editing` | TUI new-idea prompt paste delivery plus cursor navigation/insertion before submit. |
 | `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |
 
 ## Operational Notes
 
-The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. It also sends literal text to tmux one character at a time; multi-character `send-keys -l` only delivered the first character reliably through the Bubble Tea input path.
+The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 

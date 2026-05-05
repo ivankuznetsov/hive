@@ -48,7 +48,7 @@ steps:
   # Required: path
   # Optional: absent (true to assert non-existence),
   #           marker: { current: <NAME> } to assert the marker enum,
-  #           contains: <substring>, match: <regex string>,
+  #           contains: <substring>, match: <regex string>, glob: true,
   #           timeout (seconds, default 0 — single-shot)
   - kind: state_assert
     path: "{task_dir:2-brainstorm}/brainstorm.md"
@@ -96,8 +96,8 @@ steps:
     anchor: "hive tui"
 
   # tui_keys — deliver keystrokes to the live tmux pane. Use `keys` for named
-  # tmux keys ("Enter", "Up", "C-c"); use `text` for literal characters
-  # (sent one at a time to avoid Bubble Tea input quirks).
+  # tmux keys ("Enter", "Up", "C-c"); use `text` for literal characters.
+  # Optional: paste: true sends `text` as one literal chunk to exercise paste.
   # Required: exactly one of `keys` (named tmux key) or `text` (literal string)
   - kind: tui_keys
     keys: "q"

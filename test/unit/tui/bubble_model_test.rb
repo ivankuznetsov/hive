@@ -1410,4 +1410,79 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model.kill_inflight_heals!
     # Must not raise; nothing to assert beyond the absence of exception.
   end
+
+  # ---- X-key drop on missing project ----
+  # The drop handler is the gate: KeyMap always emits the singleton; the
+  # gate ("only missing-path entries") is enforced here. Tests pin the
+  # gate behavior because it's the safety net that prevents healthy
+  # projects being silently deregistered by accident.
+
+  def snapshot_with_projects(*specs)
+    project_views = specs.each_with_index.map do |spec, _i|
+      Hive::Tui::Snapshot::ProjectView.new(
+        name: spec.fetch(:name),
+        path: spec.fetch(:path),
+        hive_state_path: File.join(spec[:path], ".hive-state"),
+        error: spec[:error],
+        rows: [].freeze
+      ).freeze
+    end
+    Hive::Tui::Snapshot.new(generated_at: "2026-05-05T00:00:00Z", projects: project_views)
+  end
+
+  def test_x_key_drops_missing_project_and_resets_scope
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "live", path: "/tmp/hive-live-#{rand(1_000_000)}")
+      Hive::Config.register_project(name: "dead", path: "/tmp/hive-dead-#{rand(1_000_000)}")
+      snap = snapshot_with_projects(
+        { name: "live", path: "/tmp/live", error: nil },
+        { name: "dead", path: "/tmp/dead", error: "missing_project_path" }
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 2),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+
+      remaining = Hive::Config.registered_projects.map { |p| p["name"] }
+      assert_equal [ "live" ], remaining, "missing entry must be deregistered"
+      assert_equal 0, @model.hive_model.scope,
+                   "scope must reset to ★ All so the cursor doesn't hang on a vanished entry"
+      assert_match(/dropped dead/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_x_key_refuses_healthy_project_with_flash
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "live", path: "/tmp/hive-live-#{rand(1_000_000)}")
+      snap = snapshot_with_projects({ name: "live", path: "/tmp/live", error: nil })
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+
+      assert_equal 1, Hive::Config.registered_projects.size,
+                   "healthy project must NOT be deregistered by X"
+      assert_match(/only missing projects/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_x_key_at_all_scope_flashes_hint_without_modifying_registry
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "live", path: "/tmp/hive-live-#{rand(1_000_000)}")
+      snap = snapshot_with_projects({ name: "live", path: "/tmp/live", error: nil })
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 0),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+
+      assert_equal 1, Hive::Config.registered_projects.size
+      assert_match(/select a project/, @model.hive_model.flash.to_s)
+    end
+  end
 end

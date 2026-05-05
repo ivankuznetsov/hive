@@ -778,4 +778,90 @@ class ConfigTest < Minitest::Test
       end
     end
   end
+
+  def test_unregister_project_removes_named_entry_and_returns_it
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "keep", path: "/tmp/keep")
+      Hive::Config.register_project(name: "drop", path: "/tmp/drop")
+
+      removed = Hive::Config.unregister_project(name: "drop")
+      assert_equal "drop", removed["name"]
+      assert_equal "/tmp/drop", removed["path"]
+
+      remaining = Hive::Config.registered_projects.map { |p| p["name"] }
+      assert_equal [ "keep" ], remaining
+    end
+  end
+
+  def test_unregister_project_returns_nil_for_unknown_name
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "keep", path: "/tmp/keep")
+      assert_nil Hive::Config.unregister_project(name: "ghost"),
+                 "unregister_project must return nil for an unknown name (idempotent inverse of register)"
+      assert_equal 1, Hive::Config.registered_projects.size,
+                   "config must be untouched when no entry matched"
+    end
+  end
+
+  def test_unregister_project_returns_nil_when_no_global_config_file
+    Dir.mktmpdir("hive-no-config") do |dir|
+      prev = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+      begin
+        assert_nil Hive::Config.unregister_project(name: "anything")
+        refute File.exist?(File.join(dir, "config.yml")),
+               "unregister must not lazy-create config.yml when there's nothing to remove"
+      ensure
+        ENV["HIVE_HOME"] = prev
+      end
+    end
+  end
+
+  def test_prune_missing_projects_drops_entries_whose_path_is_gone
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        Hive::Config.register_project(name: "live", path: live_dir)
+        Hive::Config.register_project(name: "dead", path: "/tmp/hive-prune-#{rand(1_000_000)}-gone")
+        Hive::Config.register_project(name: "dead2", path: "/tmp/hive-prune-#{rand(1_000_000)}-also-gone")
+
+        removed = Hive::Config.prune_missing_projects!
+        names = removed.map { |e| e["name"] }.sort
+        assert_equal [ "dead", "dead2" ], names
+
+        kept = Hive::Config.registered_projects.map { |p| p["name"] }
+        assert_equal [ "live" ], kept
+      end
+    end
+  end
+
+  def test_prune_missing_projects_dry_run_returns_targets_without_writing
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        Hive::Config.register_project(name: "live", path: live_dir)
+        Hive::Config.register_project(name: "dead", path: "/tmp/hive-prune-#{rand(1_000_000)}-gone")
+
+        before = File.read(File.join(home, "config.yml"))
+        removed = Hive::Config.prune_missing_projects!(dry_run: true)
+        after = File.read(File.join(home, "config.yml"))
+
+        assert_equal [ "dead" ], removed.map { |e| e["name"] }
+        assert_equal before, after, "dry-run must not rewrite config.yml"
+        assert_equal 2, Hive::Config.registered_projects.size,
+                     "registry must still contain both entries after a dry-run"
+      end
+    end
+  end
+
+  def test_prune_missing_projects_returns_empty_when_all_paths_exist
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-live-1") do |a|
+        Dir.mktmpdir("hive-live-2") do |b|
+          Hive::Config.register_project(name: "a", path: a)
+          Hive::Config.register_project(name: "b", path: b)
+          assert_empty Hive::Config.prune_missing_projects!
+          assert_equal 2, Hive::Config.registered_projects.size
+        end
+      end
+    end
+  end
 end

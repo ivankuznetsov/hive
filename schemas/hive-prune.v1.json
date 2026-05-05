@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-prune.v1.json",
+  "title": "hive prune output (v1)",
+  "description": "Stable contract emitted by `hive prune --json`. Drops every registry entry in ~/Dev/hive/config.yml whose `path` no longer points at a directory on disk. With `--dry-run` the registry is not rewritten and the would-be-removed list is returned for inspection.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "dry_run",
+        "removed",
+        "removed_count",
+        "kept_count"
+      ],
+      "properties": {
+        "schema": { "const": "hive-prune" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "dry_run": {
+          "type": "boolean",
+          "description": "true when invoked with --dry-run; the registry is not rewritten."
+        },
+        "removed": {
+          "type": "array",
+          "description": "Entries that were (or would have been) dropped because their path is gone.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "path", "hive_state_path"],
+            "properties": {
+              "name": { "type": "string" },
+              "path": { "type": "string" },
+              "hive_state_path": { "type": "string" }
+            }
+          }
+        },
+        "removed_count": { "type": "integer", "minimum": 0 },
+        "kept_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-prune" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "config",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC, 70=SOFTWARE, 78=CONFIG."
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

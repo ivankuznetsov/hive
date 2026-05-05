@@ -314,7 +314,48 @@ module Hive
           triage_develop
         when Hive::Tui::Messages::NewIdeaSubmitted
           submit_new_idea
+        when Hive::Tui::Messages::DropScopedProjectIfMissing
+          drop_scoped_project_if_missing
         end
+      end
+
+      # Handler for the grid-mode `X` keystroke. Resolves the target
+      # project from `model.scope` against `snapshot.projects` and
+      # deregisters it via `Hive::Config.unregister_project` IFF the
+      # project's `error == "missing_project_path"`. Healthy or
+      # not-initialised projects are intentionally NOT droppable from
+      # the TUI — the `X` key is a registry-cleanup escape hatch for
+      # `mktemp -d` test entries whose paths are gone, not a
+      # project-uninstall verb. Use `hive forget NAME` from the shell
+      # for the broader case.
+      #
+      # After a successful drop, scope resets to 0 (★ All) so the
+      # cursor doesn't hang on a now-vanished entry; the next 1Hz
+      # snapshot poll repopulates the projects pane.
+      def drop_scoped_project_if_missing
+        snap = @hive_model.snapshot
+        scope = @hive_model.scope
+
+        if scope.zero?
+          return [ flashed("select a project on the left first (use 1-9 or focus the projects pane)"), nil ]
+        end
+        return [ @hive_model, nil ] if snap.nil?
+
+        idx = scope - 1
+        project = snap.projects[idx]
+        return [ @hive_model, nil ] if project.nil?
+
+        if project.error != "missing_project_path"
+          return [ flashed("only missing projects can be dropped from the TUI; use `hive forget #{project.name}`"), nil ]
+        end
+
+        removed = Hive::Config.unregister_project(name: project.name)
+        message = removed ? "dropped #{removed['name']}" : "no entry named #{project.name} in registry"
+        new_model = @hive_model.with(scope: 0, cursor: [ 0, 0 ], flash: message, flash_set_at: Time.now)
+        [ new_model, nil ]
+      rescue Hive::ConfigError => e
+        Hive::Tui::Debug.log("drop_project", "ConfigError: #{e.message}")
+        [ flashed("drop failed: #{e.message[0, 80]}"), nil ]
       end
 
       def close_tail_if_log_tail
@@ -924,14 +965,14 @@ module Hive
         if model.scope.between?(1, snap.projects.size)
           project = snap.projects[model.scope - 1]
           if project.error
-            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init or `hive deregister`"
+            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init, press X to drop, or `hive forget`"
           end
         end
 
         # scope=0 with all-unhealthy projects, or scope out-of-range.
         broken = snap.projects.select(&:error)
         if broken.size == snap.projects.size
-          "all registered projects are unhealthy — fix or `hive deregister` first"
+          "all registered projects are unhealthy — press X (or `hive prune`) to drop missing entries"
         else
           "no projects — run `hive init <path>` first"
         end

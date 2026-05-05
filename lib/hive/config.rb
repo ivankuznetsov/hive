@@ -213,6 +213,53 @@ module Hive
       entry
     end
 
+    # Inverse of register_project: remove the entry whose name matches.
+    # Returns the removed Hash entry, or nil if no entry matched. Does
+    # not touch the project's `.hive-state` directory on disk — the
+    # registry and the on-disk state are independent, and a deregister
+    # may target a project whose path is gone (the common case) or one
+    # the user simply no longer wants tracked.
+    def unregister_project(name:)
+      return nil unless File.exist?(global_config_path)
+
+      data = YAML.safe_load(File.read(global_config_path)) || {}
+      raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
+
+      entries = Array(data["registered_projects"])
+      removed = entries.find { |p| p.is_a?(Hash) && p["name"] == name }
+      return nil if removed.nil?
+
+      data["registered_projects"] = entries - [ removed ]
+      File.write(global_config_path, data.to_yaml)
+      removed
+    end
+
+    # Drop every registry entry whose `path` no longer points at a
+    # directory on disk. Returns the removed entries (possibly empty).
+    # Used by `hive prune` and the TUI's stale-project drop key. The
+    # filesystem check is `File.directory?` (not `exist?`) so a stray
+    # leftover file at the registered path doesn't masquerade as live.
+    # Pass `dry_run: true` to compute the would-be-removed list without
+    # rewriting global_config_path.
+    def prune_missing_projects!(dry_run: false)
+      return [] unless File.exist?(global_config_path)
+
+      data = YAML.safe_load(File.read(global_config_path)) || {}
+      raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
+
+      entries = Array(data["registered_projects"])
+      removed, kept = entries.partition do |entry|
+        entry.is_a?(Hash) && entry["path"].is_a?(String) && !File.directory?(entry["path"])
+      end
+      return [] if removed.empty?
+
+      unless dry_run
+        data["registered_projects"] = kept
+        File.write(global_config_path, data.to_yaml)
+      end
+      removed
+    end
+
     # Recursive deep-merge: descends into nested Hashes so a partial
     # override like `review: { ci: { command: "bin/ci" } }` keeps every
     # other default at `review.ci.*` and at every other `review.*` key

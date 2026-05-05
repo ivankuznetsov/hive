@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-forget.v1.json",
+  "title": "hive forget output (v1)",
+  "description": "Stable contract emitted by `hive forget NAME --json`. Removes the named entry from the global registry (~/Dev/hive/config.yml). Does not touch the project's .hive-state directory on disk. Idempotency: an unknown name is a USAGE error (64), mirroring `hive metrics --project NAME`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "name",
+        "path",
+        "hive_state_path"
+      ],
+      "properties": {
+        "schema": { "const": "hive-forget" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "name": {
+          "type": "string",
+          "description": "The name of the registry entry that was removed."
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute path the removed entry was bound to."
+        },
+        "hive_state_path": {
+          "type": "string",
+          "description": "Absolute path of the entry's .hive-state directory (informational; not deleted)."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-forget" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "unknown_project",
+            "config",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 64, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 78=CONFIG."
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

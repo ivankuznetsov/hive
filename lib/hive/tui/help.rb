@@ -40,6 +40,7 @@ module Hive
         { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
         { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },
         { mode: :grid, key: "0",         action: :project_scope,      description: "clear project scope (★ All projects)" },
+        { mode: :grid, key: "X",         action: :drop_missing,       description: "deregister the scoped project — only when shown as `(missing)`; healthy projects are refused" },
         { mode: :grid, key: "?",         action: :help,               description: "this help overlay" },
         { mode: :grid, key: "q",         action: :quit,               description: "quit" },
         # Triage mode — Space and bulk rebindings.

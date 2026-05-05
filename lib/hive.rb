@@ -14,7 +14,9 @@ module Hive
       "hive-findings" => 1,
       "hive-stage-action" => 1,
       "hive-metrics-rollback-rate" => 1,
-      "hive-markers-clear" => 1
+      "hive-markers-clear" => 1,
+      "hive-forget" => 1,
+      "hive-prune" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use

@@ -174,6 +174,8 @@ module Hive
           translate_key(message)
         when Bubbletea::WindowSizeMessage
           Hive::Tui::Messages::WindowSized.new(cols: message.width, rows: message.height)
+        when Hive::Tui::Messages::RawTextInput
+          translate_raw_text_input(message)
         else
           message
         end
@@ -205,6 +207,20 @@ module Hive
         Hive::Tui::Messages::NOOP
       end
 
+      def translate_raw_text_input(message)
+        text = message.text.to_s
+        return Hive::Tui::Messages::NOOP if text.empty?
+
+        case @hive_model.mode
+        when :new_idea
+          Hive::Tui::Messages::NewIdeaTextInserted.new(text: text)
+        when :filter
+          Hive::Tui::Messages::FilterTextInserted.new(text: text)
+        else
+          Hive::Tui::Messages::NOOP
+        end
+      end
+
       # Bubbletea::KeyMessage → KeyMap-shaped key (single-char String or
       # `:key_*` Symbol). Mirror the same surface KeyMap accepts from
       # the curses backend's curses_keys translator.
@@ -213,9 +229,21 @@ module Hive
         return :key_escape if km.esc?
         return :key_up if km.up?
         return :key_down if km.down?
+        return :key_left if km.respond_to?(:left?) && km.left?
+        return :key_right if km.respond_to?(:right?) && km.right?
         return :key_backspace if km.backspace?
         return :space if km.space?
         return :key_tab if km.tab?
+        return :key_home if defined?(Bubbletea::KeyMessage::KEY_HOME) &&
+                            km.key_type == Bubbletea::KeyMessage::KEY_HOME
+        return :key_end if defined?(Bubbletea::KeyMessage::KEY_END) &&
+                          km.key_type == Bubbletea::KeyMessage::KEY_END
+        return :key_delete if defined?(Bubbletea::KeyMessage::KEY_DELETE) &&
+                              km.key_type == Bubbletea::KeyMessage::KEY_DELETE
+        return :key_ctrl_a if defined?(Bubbletea::KeyMessage::KEY_CTRL_A) &&
+                              km.key_type == Bubbletea::KeyMessage::KEY_CTRL_A
+        return :key_ctrl_e if defined?(Bubbletea::KeyMessage::KEY_CTRL_E) &&
+                              km.key_type == Bubbletea::KeyMessage::KEY_CTRL_E
         # Bubbletea-Ruby v0.1.4 exposes KEY_SHIFT_TAB as a constant but
         # not a `shift_tab?` predicate; compare key_type directly so the
         # v2 two-pane Shift+Tab focus-cycle binding fires. The
@@ -708,6 +736,7 @@ module Hive
         @hive_model.with(
           mode: :grid,
           new_idea_buffer: "",
+          new_idea_cursor: 0,
           flash: text,
           flash_set_at: Time.now
         )
@@ -756,9 +785,12 @@ module Hive
       # Filter mode: same two-pane composition as :grid mode, but the
       # footer line is replaced by the filter prompt. Bubble Tea diffs
       # against the previous frame so a one-line change paints cheaply.
+      # Active flash (paste truncated, paste timed out, etc.) is stacked
+      # above the prompt — `default_footer` is bypassed in this mode so
+      # the flash would otherwise be invisible.
       def compose_filter_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: Views::FilterPrompt.render(@hive_model, width: usable))
+        compose_two_pane_view(footer: prompt_footer(Views::FilterPrompt.render(@hive_model, width: usable), usable))
       end
 
       # New-idea mode: same composition; footer = the inline prompt with
@@ -768,7 +800,26 @@ module Hive
       # screen (see Views::NewIdeaPrompt.render).
       def compose_new_idea_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: Views::NewIdeaPrompt.render(@hive_model, width: usable))
+        compose_two_pane_view(footer: prompt_footer(Views::NewIdeaPrompt.render(@hive_model, width: usable), usable))
+      end
+
+      # Stack an active flash above the prompt strip so error states
+      # raised inside `:new_idea` / `:filter` mode (paste truncated,
+      # title too long, decoder overflow, paste timed out) reach the
+      # operator. Without this the flash sets `model.flash` but the
+      # prompt-mode views replace `default_footer` entirely, so the
+      # flash never renders.
+      def prompt_footer(prompt_strip, usable_width)
+        flash = active_flash_line(usable_width)
+        flash ? "#{flash}\n#{prompt_strip}" : prompt_strip
+      end
+
+      def active_flash_line(usable_width)
+        return nil unless @hive_model.flash_active?
+
+        line = @hive_model.flash.to_s
+        line = Views::Format.truncate(line, usable_width) if usable_width
+        Hive::Tui::Styles::FLASH.render(line)
       end
 
       # ---- v2 two-pane composition ----

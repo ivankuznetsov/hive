@@ -1,0 +1,48 @@
+name: tui_new_idea_editing
+description: |
+  TUI new-idea prompt supports chunk paste plus cursor navigation before submit.
+tags: [tui, v2, paste]
+steps:
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 5
+  - kind: tui_expect
+    anchor: "sandbox"
+    timeout: 5
+
+  - kind: tui_keys
+    keys: "n"
+  - kind: tui_expect
+    anchor: "New idea"
+    timeout: 3
+
+  - kind: tui_keys
+    text: "fix bg"
+    paste: true
+  - kind: tui_keys
+    keys: "Left"
+  - kind: tui_keys
+    text: "u"
+  - kind: tui_keys
+    keys: "End"
+  - kind: tui_keys
+    text: " report"
+    paste: true
+  - kind: tui_expect
+    anchor: "fix bug report"
+    timeout: 5
+
+  - kind: tui_keys
+    keys: "Enter"
+  - kind: state_assert
+    path: "{sandbox}/.hive-state/stages/1-inbox/*/idea.md"
+    glob: true
+    contains: "fix bug report"
+    timeout: 15
+
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 5
+
+  - kind: tui_keys
+    keys: "q"

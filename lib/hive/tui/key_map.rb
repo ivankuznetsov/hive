@@ -258,8 +258,13 @@ module Hive
         return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key)
         return Messages::NEW_IDEA_SUBMITTED if ENTER_KEYS.include?(key)
         return Messages::NEW_IDEA_CHAR_DELETED if key == :key_backspace
-        return Messages::NewIdeaCharAppended.new(char: " ") if key == :space
-        return Messages::NewIdeaCharAppended.new(char: key) if printable_filter_char?(key)
+        return Messages::NEW_IDEA_CHAR_DELETED_FORWARD if key == :key_delete
+        return Messages::NEW_IDEA_CURSOR_LEFT if key == :key_left
+        return Messages::NEW_IDEA_CURSOR_RIGHT if key == :key_right
+        return Messages::NEW_IDEA_CURSOR_HOME if key == :key_home || key == :key_ctrl_a
+        return Messages::NEW_IDEA_CURSOR_END if key == :key_end || key == :key_ctrl_e
+        return Messages::NewIdeaTextInserted.new(text: " ") if key == :space
+        return Messages::NewIdeaTextInserted.new(text: key) if printable_filter_char?(key)
 
         Messages::NOOP
       end

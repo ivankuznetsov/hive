@@ -45,6 +45,8 @@ module Hive
           [ model, nil ]
         when Messages::FilterCharAppended
           [ apply_filter_char_appended(model, message), nil ]
+        when Messages::FilterTextInserted
+          [ apply_filter_text_inserted(model, message), nil ]
         when Messages::FilterCharDeleted
           [ apply_filter_char_deleted(model), nil ]
         when Messages::FilterCommitted
@@ -81,10 +83,20 @@ module Hive
           [ apply_pane_focus_changed(model, message), nil ]
         when Messages::OpenNewIdeaPrompt
           [ apply_open_new_idea_prompt(model), nil ]
-        when Messages::NewIdeaCharAppended
-          [ apply_new_idea_char_appended(model, message), nil ]
+        when Messages::NewIdeaTextInserted
+          [ apply_new_idea_text_inserted(model, message), nil ]
+        when Messages::NewIdeaCursorLeft
+          [ apply_new_idea_cursor_left(model), nil ]
+        when Messages::NewIdeaCursorRight
+          [ apply_new_idea_cursor_right(model), nil ]
+        when Messages::NewIdeaCursorHome
+          [ apply_new_idea_cursor_home(model), nil ]
+        when Messages::NewIdeaCursorEnd
+          [ apply_new_idea_cursor_end(model), nil ]
         when Messages::NewIdeaCharDeleted
           [ apply_new_idea_char_deleted(model), nil ]
+        when Messages::NewIdeaCharDeletedForward
+          [ apply_new_idea_char_deleted_forward(model), nil ]
         when Messages::NewIdeaCancelled
           [ apply_new_idea_cancelled(model), nil ]
         when Messages::Noop
@@ -184,6 +196,10 @@ module Hive
 
       def apply_filter_char_appended(model, msg)
         model.with(filter_buffer: model.filter_buffer + msg.char)
+      end
+
+      def apply_filter_text_inserted(model, msg)
+        model.with(filter_buffer: model.filter_buffer + msg.text.to_s)
       end
 
       def apply_filter_char_deleted(model)
@@ -368,19 +384,118 @@ module Hive
       # validation failure.
 
       def apply_open_new_idea_prompt(model)
-        model.with(mode: :new_idea, new_idea_buffer: "")
+        model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
       end
 
-      def apply_new_idea_char_appended(model, msg)
-        model.with(new_idea_buffer: model.new_idea_buffer.to_s + msg.char)
+      def apply_new_idea_text_inserted(model, msg)
+        insert_new_idea_text(model, msg.text.to_s)
+      end
+
+      def apply_new_idea_cursor_left(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: [ cursor - 1, 0 ].max)
+      end
+
+      def apply_new_idea_cursor_right(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: [ cursor + 1, buffer.length ].min)
+      end
+
+      def apply_new_idea_cursor_home(model)
+        buffer, = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: 0)
+      end
+
+      def apply_new_idea_cursor_end(model)
+        buffer, = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: buffer.length)
       end
 
       def apply_new_idea_char_deleted(model)
-        model.with(new_idea_buffer: model.new_idea_buffer.to_s[0..-2].to_s)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        return model.with(new_idea_buffer: buffer, new_idea_cursor: cursor) if cursor.zero?
+
+        prefix = buffer[0...(cursor - 1)].to_s
+        suffix = buffer[cursor..].to_s
+        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor - 1)
+      end
+
+      def apply_new_idea_char_deleted_forward(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        return model.with(new_idea_buffer: buffer, new_idea_cursor: cursor) if cursor >= buffer.length
+
+        prefix = buffer[0...cursor].to_s
+        suffix = buffer[(cursor + 1)..].to_s
+        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor)
       end
 
       def apply_new_idea_cancelled(model)
-        model.with(mode: :grid, new_idea_buffer: "")
+        model.with(mode: :grid, new_idea_buffer: "", new_idea_cursor: 0)
+      end
+
+      # Partial-fit on overflow: a 4096-char paste against a buffer with
+      # 10 chars left fits 10 chars and flashes a truncation notice
+      # rather than dropping the whole paste. Dropping was the previous
+      # behavior; operators reported this as "the paste did nothing"
+      # — partial-fit gives them as much of the title as we can take
+      # plus a clear signal about the cap.
+      def insert_new_idea_text(model, raw_text)
+        text = normalize_new_idea_text(raw_text)
+        return clamp_new_idea_cursor(model) if text.empty?
+
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        remaining = Model::NEW_IDEA_BUFFER_MAX_CHARS - buffer.length
+        if remaining <= 0
+          return model.with(
+            new_idea_buffer: buffer,
+            new_idea_cursor: cursor,
+            flash: "title too long",
+            flash_set_at: Time.now
+          )
+        end
+
+        flash_text = nil
+        if text.length > remaining
+          text = text[0, remaining]
+          flash_text = "title truncated to #{Model::NEW_IDEA_BUFFER_MAX_CHARS} chars"
+        end
+
+        prefix = buffer[0...cursor].to_s
+        suffix = buffer[cursor..].to_s
+        new_model = model.with(
+          new_idea_buffer: prefix + text + suffix,
+          new_idea_cursor: cursor + text.length
+        )
+        return new_model unless flash_text
+
+        new_model.with(flash: flash_text, flash_set_at: Time.now)
+      end
+
+      def clamp_new_idea_cursor(model)
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        model.with(new_idea_buffer: buffer, new_idea_cursor: cursor)
+      end
+
+      def normalized_new_idea_buffer_and_cursor(model)
+        buffer = model.new_idea_buffer.to_s
+        cursor = model.new_idea_cursor.to_i.clamp(0, buffer.length)
+        [ buffer, cursor ]
+      end
+
+      # InputDecoder.normalize_paste is the canonical normalizer for
+      # paste content (strips PASTE_START/END markers and embedded
+      # control bytes before delivery). This second pass guards against
+      # *direct typed* RawTextInput — a short multi-byte read that
+      # legitimately contains CR/LF/TAB without ever entering paste
+      # mode — so the new-idea buffer stays single-line. We do not
+      # re-strip PASTE_START/END here because the decoder already
+      # consumes them; if they appear in `text`, treat them as literal
+      # (they will never match in practice but the codepath stays
+      # honest about who owns the marker contract).
+      def normalize_new_idea_text(text)
+        text.to_s
+            .gsub(/[\r\n\t]+/, " ")
+            .gsub(/ {2,}/, " ")
       end
 
       def apply_show_help(model)

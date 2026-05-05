@@ -101,7 +101,7 @@ PLATFORMS
 
 DEPENDENCIES
   brakeman (~> 8.0)
-  bubbletea (~> 0.1.4)
+  bubbletea (= 0.1.4)
   bundler-audit (~> 0.9)
   json_schemer (~> 2.5)
   lipgloss (~> 0.2.2)

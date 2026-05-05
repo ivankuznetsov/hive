@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-05-01T15:00:00Z
+updated: 2026-05-04T19:10:44Z
 tags: [command, tui, observability, interactive]
 ---
 
@@ -70,6 +70,12 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `Esc` | back to default mode (any sub-mode) |
 
 In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (against `hive accept-finding --all` / `hive reject-finding --all`). The help overlay groups bindings by mode for the disambiguation.
+
+## New Idea Prompt Editing
+
+The `n` prompt is a cursor-aware single-line title editor. Printable typing inserts at the cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
+
+Copy is still terminal/OS-owned. Hive does not implement an in-app clipboard and does not bind copy shortcuts; it only consumes bytes the terminal sends as paste input.
 
 ## Visual style
 

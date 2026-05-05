@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-05-04T19:10:44Z
+updated: 2026-05-05T20:00:00Z
 tags: [command, tui, observability, interactive]
 ---
 
@@ -28,7 +28,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │  seyarabata     │  ⚠  oauth-…       5-review      Review findings     1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
-│ Footer: [Tab] switch  [Enter] next  [n] new  [/] filter  [?] help  [q]  │
+│ Footer: [Tab] switch  [Enter] open  [n] new  [/] filter  [?] help  [q]  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -41,6 +41,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Two-pane dashboard (default) | boot | `q` |
 | Findings triage | `Enter` on a `review_findings` row | `Esc` |
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
+| Input editor | `Enter` on a `needs_input` row | editor exit |
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
 | New idea prompt | `n` | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Help overlay | `?` | any key |
@@ -60,7 +61,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `r` | run `hive review` |
 | `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
 | `a` | run `hive archive` |
-| `Enter` | from left pane: focus right pane. From right pane: open the row's contextual mode (triage on `review_findings`, log tail on `agent_running` / `error`) or dispatch the suggested command |
+| `Enter` | from left pane: focus right pane. From right pane: open the row's contextual mode: input editor on `needs_input`, triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -110,6 +111,8 @@ Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is
 Workflow verbs default to background dispatch: `Hive::Tui::Subprocess.dispatch_background(argv, dispatch:)` `Process.spawn`s the child detached into its own pgroup with stdout/stderr captured to a per-spawn file (see below), returns immediately, and a reaper Thread waits for the child and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the TUI flashes the result. The renderer keeps painting and multiple agents across multiple projects run concurrently. `Hive::Workflows::VERBS` carries an optional `interactive: true` flag for verbs that need the user's tty (stdin prompts); none of the v1 verbs are flagged interactive, so every workflow keystroke takes the background path today.
 
 Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_command(argv, dispatch:)`, which returns a `Bubbletea::SequenceCommand` of three steps: exit alt-screen, run a callable synchronously inside the framework's suspend window (raw mode disabled, cursor shown, input reader stopped), then re-enter alt-screen. The callable spawns the child with stdio inherited, blocks on `Process.wait2`, and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the user sees the same flash. Used only for verbs that genuinely need the tty.
+
+`needs_input` rows use the same alt-screen suspension pattern, but for the row's input file instead of a workflow verb. Pressing `Enter` opens the stage state file (`brainstorm.md`, `plan.md`, `task.md`, `pr.md`) in `$VISUAL`, `$EDITOR`, or `vi` so the user can fill inline answers. For `:review_waiting`, the editor opens the relevant review gate file for the pass (`reviews/escalations-NN.md` or `reviews/fix-guardrail-NN.md`) instead of `task.md`. The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash can distinguish a saved edit from a no-op cancel. Workflow verb keys (`b` / `p` / `d` / `r` / `P`) remain the explicit way to rerun the agent after editing — the editor handler intentionally does NOT auto-dispatch.
 
 Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — a bounded captured-stdio child runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line; a hung helper is terminated as a process group and reported as exit 124.
 

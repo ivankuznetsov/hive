@@ -1,4 +1,5 @@
 require "bubbletea"
+require "shellwords"
 require "hive"
 require "hive/task"
 require "hive/findings"
@@ -34,7 +35,7 @@ module Hive
     #     wraps takeover_command with `runner.method(:send)` — Update
     #     can't, since it's runner-agnostic).
     #   * Handle messages that perform synchronous I/O (OpenFindings,
-    #     OpenLogTail, BulkAccept, BulkReject, ToggleFinding) — same
+    #     OpenLogTail, OpenInputEditor, BulkAccept, BulkReject, ToggleFinding) — same
     #     pattern as the curses path's run_triage / run_quiet! calls.
     #     I/O lands here, not in Update, to keep Update pure.
     #   * Dispatch view by `model.mode` to one of the Views modules.
@@ -292,6 +293,8 @@ module Hive
           open_findings(message.row)
         when Hive::Tui::Messages::OpenLogTail
           open_log_tail(message.row)
+        when Hive::Tui::Messages::OpenInputEditor
+          open_input_editor(message.row)
         when Hive::Tui::Messages::LogTailPoll
           poll_log_tail
         when Hive::Tui::Messages::Back
@@ -575,6 +578,152 @@ module Hive
         [ flashed("no logs yet for #{row.slug}"), nil ]
       rescue Hive::InvalidTaskPath, Errno::ENOENT, Errno::EACCES
         [ flashed("log file gone"), nil ]
+      end
+
+      # Foreground takeover: open the row's input target in $EDITOR
+      # (with $VISUAL preferred over $EDITOR; vi as the final fallback)
+      # so the operator can answer inline questions before re-running
+      # the stage. The verb keys (b/p/d/r/P) remain the way to spawn
+      # the agent — opening the editor is intentionally just an editor.
+      #
+      # mtime is sampled before/after the spawn so InputEditorExited
+      # carries a `changed:` flag, distinguishing a saved edit from a
+      # cancelled session in the post-edit flash.
+      def open_input_editor(row)
+        path = input_editor_path(row)
+        return [ flashed("no input file for #{row.slug}"), nil ] if path.empty?
+
+        argv = editor_argv
+        callable = lambda do
+          before_mtime = file_mtime(path)
+          exit_code = run_editor(argv, path)
+          after_mtime = file_mtime(path)
+          # Wipe whatever the editor left on the main screen before
+          # bubbletea re-enters alt-screen. Alt-screen *should* hide
+          # the main buffer regardless, but on some terminals the
+          # transition flickers if the editor's cursor or partial
+          # output is still being painted. Mirror of the pre-spawn
+          # clear in `clear_terminal_for_takeover`.
+          clear_terminal_for_takeover
+          @dispatch.call(
+            Hive::Tui::Messages::InputEditorExited.new(
+              slug: row.slug,
+              exit_code: exit_code,
+              changed: before_mtime != after_mtime
+            )
+          )
+        end
+
+        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
+        [
+          @hive_model.with(
+            flash: "editing #{row.slug} in #{File.basename(argv.first)}",
+            flash_set_at: Time.now
+          ),
+          cmd
+        ]
+      rescue ArgumentError => e
+        [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      # Resolve the path the editor should open for a given row.
+      # Default: the stage's state file (`brainstorm.md` / `plan.md` /
+      # `task.md` / `pr.md`). For `:review_waiting` we open the gate
+      # file the reviewer/fix-guardrail wrote, since that's the file
+      # carrying the actual question — not `task.md` which only carries
+      # the marker.
+      def input_editor_path(row)
+        return review_waiting_editor_path(row) if row.marker.to_s == "review_waiting"
+
+        row.state_file.to_s
+      end
+
+      def review_waiting_editor_path(row)
+        folder = row.folder.to_s
+        return "" if folder.empty?
+
+        if (pass = review_waiting_pass(row))
+          basename = review_waiting_reason(row) == "fix_guardrail" ? "fix-guardrail" : "escalations"
+          return File.join(folder, "reviews", "#{basename}-#{format('%02d', pass)}.md")
+        end
+
+        reviews_dir = File.join(folder, "reviews")
+        Dir.exist?(reviews_dir) ? reviews_dir : folder
+      end
+
+      def review_waiting_pass(row)
+        raw = (row.attrs || {})["pass"]
+        return nil unless raw.to_s.match?(/\A\d+\z/)
+
+        pass = raw.to_i
+        pass.positive? ? pass : nil
+      end
+
+      def review_waiting_reason(row)
+        (row.attrs || {})["reason"].to_s
+      end
+
+      # $VISUAL → $EDITOR → vi. Shellwords.split lets users carry
+      # flags ("code --wait") without losing argv structure. An empty
+      # split (e.g. quote-only $EDITOR) raises ArgumentError so the
+      # caller flashes a setup hint instead of silently spawning vi.
+      def editor_argv
+        raw = ENV["VISUAL"].to_s
+        raw = ENV["EDITOR"].to_s if raw.empty?
+        raw = "vi" if raw.empty?
+        argv = Shellwords.split(raw)
+        raise ArgumentError, "empty $VISUAL/$EDITOR" if argv.empty?
+
+        argv
+      end
+
+      # Stdio inherited so the editor owns the user's tty during the
+      # alt-screen suspension. ENOENT/EACCES translate to the same
+      # COMMAND_NOT_FOUND_EXIT (127) Subprocess uses, so the post-edit
+      # flash names the missing binary instead of crashing the runner.
+      #
+      # `clear_terminal_for_takeover` writes `\e[2J\e[H` before the
+      # spawn: belt-and-suspenders against the alt-screen exit
+      # escape (`\e[?1049l`) racing with leftover bubbletea render
+      # output. Without it, the prior frame of the dashboard could
+      # paint over the editor's first redraw — Ivan reported this as
+      # "tui rendered above the editor, visual mess." `pgroup: true`
+      # mirrors the workflow-verb takeover so the editor lives in its
+      # own process group; if the user Ctrl-C's during the edit, the
+      # signal hits the editor, not the parent TUI.
+      def run_editor(argv, path)
+        clear_terminal_for_takeover
+        pid = Process.spawn(*(argv + [ path ]), pgroup: true)
+        _, status = Process.wait2(pid)
+        Hive::Tui::Subprocess.translate_status(status)
+      rescue Errno::ENOENT, Errno::EACCES
+        Hive::Tui::Subprocess::COMMAND_NOT_FOUND_EXIT
+      end
+
+      # @api private
+      # Reset cursor + erase main-screen content so a misbehaved
+      # alt-screen exit (or a render-loop tick that fired between
+      # exit_alt_screen and exec) cannot leave dashboard glyphs
+      # underneath the editor's first paint. Two ANSI sequences:
+      #   \e[2J  — clear entire screen
+      #   \e[H   — cursor to home (top-left)
+      # Stdout flush is explicit because bubbletea-ruby's exec
+      # callable runs with the runner's render loop suspended, and
+      # without the flush the bytes can sit in libc's buffer past
+      # the spawn boundary.
+      def clear_terminal_for_takeover
+        return unless $stdout.tty?
+
+        $stdout.write("\e[2J\e[H")
+        $stdout.flush
+      rescue IOError, Errno::EPIPE
+        nil
+      end
+
+      def file_mtime(path)
+        File.mtime(path).to_f
+      rescue Errno::ENOENT, Errno::EACCES
+        nil
       end
 
       # 0.5s tick: long enough that a slow agent log doesn't cost a
@@ -913,7 +1062,7 @@ module Hive
       end
 
       def footer_hint
-        "[Tab] switch  [Enter] next  [n] new  [/] filter  [?] help  [q] quit"
+        "[Tab] switch  [Enter] open  [n] new  [/] filter  [?] help  [q] quit"
       end
 
       # Compute pane widths and join horizontally. Left pane is clamped

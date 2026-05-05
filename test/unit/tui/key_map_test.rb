@@ -348,12 +348,39 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
-  def test_enter_on_needs_input_dispatches_when_command_present
+  def test_enter_on_needs_input_opens_input_editor_when_command_present
+    # Enter on `needs_input` opens the row's input file in $EDITOR —
+    # the agent emitted `<!-- WAITING -->` because it wants human
+    # edits, so re-dispatching the same verb on Enter would just
+    # spawn another agent against the unchanged file. The verb keys
+    # remain the explicit way to rerun the agent after editing.
     row = make_row(action_key: "needs_input", action_label: "Needs input",
                    suggested_command: "hive plan some-slug --project alpha --from 3-plan")
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenInputEditor, msg
+    assert_same row, msg.row
+  end
+
+  def test_enter_on_needs_input_opens_input_editor_without_command
+    # Even when the row has no `suggested_command` (e.g., a future
+    # state we haven't mapped a verb to yet), Enter still opens the
+    # editor — the operator's editing the file, not the verb.
+    row = make_row(action_key: "needs_input", action_label: "Needs input",
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenInputEditor, msg
+    assert_same row, msg.row
+  end
+
+  def test_verb_key_on_needs_input_still_dispatches_suggested_command
+    # The verb key path is the explicit "rerun the stage" surface and
+    # must stay independent of the Enter-opens-editor change above.
+    row = make_row(action_key: "needs_input", action_label: "Needs input",
+                   suggested_command: "hive plan some-slug --project alpha --from 3-plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "p", row: row)
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
     assert_equal "plan", msg.verb
+    assert_equal [ "hive", "plan", "some-slug", "--project", "alpha", "--from", "3-plan" ], msg.argv
   end
 
   # -------- Triage rebindings --------

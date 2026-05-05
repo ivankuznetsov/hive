@@ -114,11 +114,6 @@ class HiveTuiMessagesTest < Minitest::Test
                    Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT
   end
 
-  def test_new_idea_char_appended_carries_char
-    msg = Hive::Tui::Messages::NewIdeaCharAppended.new(char: "r")
-    assert_equal "r", msg.char
-  end
-
   def test_new_idea_text_inserted_carries_text
     msg = Hive::Tui::Messages::NewIdeaTextInserted.new(text: "rss feeds")
     assert_equal "rss feeds", msg.text

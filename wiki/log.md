@@ -884,3 +884,10 @@ Append-only log of all wiki operations.
 - `wiki/e2e.md` — added the `run_error_envelope` scenario to Current Scenarios.
 - `wiki/testing.md` — updated the e2e starter scenario count to six.
 - `wiki/commands/tui.md` — documented bounded quiet subprocesses and truncated retained spawn captures.
+
+## [2026-05-05T18:00:00Z] architecture — TUI/MVU pipeline
+
+**Action:** Documented the TUI MVU pipeline (`BubbleModel ↔ Update ↔ KeyMap ↔ PasteAwareRunner ↔ InputDecoder`) in `wiki/architecture.md`, including the side-effect seam in `BubbleModel#handle_side_effect`, the paste-routing-by-mode contract for `RawTextInput`, decoder reset on cancel, and the GVL-yielding `YieldTick`. Hardened `InputDecoder` against unmapped C0 bytes (Ctrl+C now decodes to `KEY_CTRL_C`; other unmapped bytes are silently dropped), added 4 KiB `@pending` and 1 MiB `@paste_buffer` caps with truncation flashes, a 5 s paste-timeout flush, stray `\e[201~` consumption, ESC+CR/LF cancel-gesture absorption, and C0 stripping in `normalize_paste`. `PasteAwareRunner` now resets the decoder on transitions out of `:new_idea` / `:filter` and asserts `Bubbletea::VERSION == "0.1.4"` at load. Removed the dead `Messages::NewIdeaCharAppended` path; consolidated paste normalization on the decoder; switched the new-idea over-limit branch from drop-everything to partial-fit with a truncation flash; raised `input_timeout` from 1 ms to 5 ms to absorb fragmented paste markers; pinned bubbletea to `= 0.1.4` in the Gemfile.
+
+**Refreshed pages:**
+- `wiki/architecture.md` — added the TUI / MVU pipeline section.

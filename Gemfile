@@ -8,7 +8,15 @@ gem "thor", "~> 1.3"
 # Bubble Tea drives the MVU loop in `Hive::Tui::App.run_charm`; lipgloss
 # styles every rendered frame. U2 verification:
 # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
-gem "bubbletea", "~> 0.1.4"
+#
+# Pinned exactly to 0.1.4: `Hive::Tui::PasteAwareRunner` overrides
+# `run_loop` / `process_input` and reads private superclass instance
+# variables (`@program`, `@running`, `@options`, `@model`). Any minor
+# bump may rename or remove those, silently breaking paste handling.
+# `PasteAwareRunner` ships a boot-time assertion that re-checks
+# `Bubbletea::VERSION` on load, but the lock-down at the dependency
+# layer is the first line of defence.
+gem "bubbletea", "= 0.1.4"
 gem "lipgloss", "~> 0.2.2"
 
 group :development, :test do

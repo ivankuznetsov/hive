@@ -210,11 +210,11 @@ module Hive
       OpenNewIdeaPrompt = Class.new
       OPEN_NEW_IDEA_PROMPT = OpenNewIdeaPrompt.new.freeze
 
-      # User typed a printable character into the new-idea buffer.
-      NewIdeaCharAppended = Data.define(:char)
-
       # User inserted text into the new-idea buffer at the cursor. This
       # is the primary path for both printable characters and paste.
+      # (Note: `NewIdeaCharAppended` was an earlier separate-character
+      # path; KeyMap only emits TextInserted now, so the Char variant
+      # was removed in PR #25.)
       NewIdeaTextInserted = Data.define(:text)
 
       # Cursor navigation within the new-idea prompt.

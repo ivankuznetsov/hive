@@ -517,15 +517,6 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, new_model.new_idea_cursor
   end
 
-  def test_new_idea_char_appended_inserts_at_cursor_for_compatibility
-    starting = model.with(mode: :new_idea, new_idea_buffer: "rs", new_idea_cursor: 1)
-    new_model, _cmd = Hive::Tui::Update.apply(
-      starting, Hive::Tui::Messages::NewIdeaCharAppended.new(char: " ")
-    )
-    assert_equal "r s", new_model.new_idea_buffer
-    assert_equal 2, new_model.new_idea_cursor
-  end
-
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
     starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
     new_model, _cmd = Hive::Tui::Update.apply(
@@ -626,8 +617,23 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "fix bug report now".length, new_model.new_idea_cursor
   end
 
-  def test_new_idea_over_limit_insert_preserves_buffer_and_flashes
-    existing = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS - 1)
+  def test_new_idea_over_limit_insert_partial_fits_and_flashes_truncation
+    # 6 cells of remaining capacity, 10-char paste → fit 6, flash truncation.
+    existing = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS - 6)
+    starting = model.with(mode: :new_idea, new_idea_buffer: existing, new_idea_cursor: existing.length)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting, Hive::Tui::Messages::NewIdeaTextInserted.new(text: "abcdefghij")
+    )
+    assert_equal existing + "abcdef", new_model.new_idea_buffer
+    assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS, new_model.new_idea_buffer.length
+    assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS, new_model.new_idea_cursor
+    assert_match(/truncated/i, new_model.flash.to_s)
+    refute_nil new_model.flash_set_at
+  end
+
+  def test_new_idea_at_limit_insert_preserves_buffer_and_flashes_too_long
+    # Buffer already at the cap → any further insert is rejected entirely.
+    existing = "x" * Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS
     starting = model.with(mode: :new_idea, new_idea_buffer: existing, new_idea_cursor: existing.length)
     new_model, _cmd = Hive::Tui::Update.apply(
       starting, Hive::Tui::Messages::NewIdeaTextInserted.new(text: "yz")

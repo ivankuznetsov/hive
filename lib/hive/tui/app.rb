@@ -68,17 +68,25 @@ module Hive
 
           seed_model = Hive::Tui::Model.initial
           bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
-          # `input_timeout: 1` (ms) is the GVL-friendly setting: bubbletea-ruby's
-          # `tea_input_read_raw` C call holds the Ruby GVL for the full timeout
-          # without releasing it, which starves the StateSource polling thread
-          # at the default 10ms. With 1ms, the main loop yields the GVL ~10x
-          # more often per second so background snapshot polling lands within
-          # ~1s instead of stalling for 10s+. Documented in
+          # `input_timeout: 5` (ms) trades a tiny amount of GVL-yield
+          # latency for substantially less escape-sequence fragmentation.
+          # bubbletea-ruby's `tea_input_read_raw` C call holds the GVL for
+          # the full timeout, so a 1ms window starved the StateSource
+          # poller; 5ms still yields the GVL frequently enough for the
+          # background snapshot poll to land within ~1s, while giving
+          # the InputDecoder a wider window to absorb a fragmented
+          # PASTE_START / multi-byte arrow sequence in a single read
+          # (a 1ms window split `\e[200~` into two reads on a slow
+          # terminal, so paste markers were emitted as Esc + literal
+          # `[200~`). YieldTick is the primary GVL-yield mechanism; this
+          # value just shapes how aggressively input is polled.
+          # Documented in
           # `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`.
+          # Follow-up: benchmark on a real slow tty (ssh-over-mobile).
           runner = runner_class.new(
             bubble_model,
             alt_screen: true,
-            input_timeout: 1,
+            input_timeout: 5,
             bracketed_paste: true
           )
           bubble_model.dispatch = runner.method(:send)

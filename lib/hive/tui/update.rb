@@ -83,8 +83,6 @@ module Hive
           [ apply_pane_focus_changed(model, message), nil ]
         when Messages::OpenNewIdeaPrompt
           [ apply_open_new_idea_prompt(model), nil ]
-        when Messages::NewIdeaCharAppended
-          [ apply_new_idea_char_appended(model, message), nil ]
         when Messages::NewIdeaTextInserted
           [ apply_new_idea_text_inserted(model, message), nil ]
         when Messages::NewIdeaCursorLeft
@@ -389,10 +387,6 @@ module Hive
         model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
       end
 
-      def apply_new_idea_char_appended(model, msg)
-        insert_new_idea_text(model, msg.char.to_s)
-      end
-
       def apply_new_idea_text_inserted(model, msg)
         insert_new_idea_text(model, msg.text.to_s)
       end
@@ -439,12 +433,19 @@ module Hive
         model.with(mode: :grid, new_idea_buffer: "", new_idea_cursor: 0)
       end
 
+      # Partial-fit on overflow: a 4096-char paste against a buffer with
+      # 10 chars left fits 10 chars and flashes a truncation notice
+      # rather than dropping the whole paste. Dropping was the previous
+      # behavior; operators reported this as "the paste did nothing"
+      # — partial-fit gives them as much of the title as we can take
+      # plus a clear signal about the cap.
       def insert_new_idea_text(model, raw_text)
         text = normalize_new_idea_text(raw_text)
         return clamp_new_idea_cursor(model) if text.empty?
 
         buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
-        if buffer.length + text.length > Model::NEW_IDEA_BUFFER_MAX_CHARS
+        remaining = Model::NEW_IDEA_BUFFER_MAX_CHARS - buffer.length
+        if remaining <= 0
           return model.with(
             new_idea_buffer: buffer,
             new_idea_cursor: cursor,
@@ -453,12 +454,21 @@ module Hive
           )
         end
 
+        flash_text = nil
+        if text.length > remaining
+          text = text[0, remaining]
+          flash_text = "title truncated to #{Model::NEW_IDEA_BUFFER_MAX_CHARS} chars"
+        end
+
         prefix = buffer[0...cursor].to_s
         suffix = buffer[cursor..].to_s
-        model.with(
+        new_model = model.with(
           new_idea_buffer: prefix + text + suffix,
           new_idea_cursor: cursor + text.length
         )
+        return new_model unless flash_text
+
+        new_model.with(flash: flash_text, flash_set_at: Time.now)
       end
 
       def clamp_new_idea_cursor(model)
@@ -472,10 +482,18 @@ module Hive
         [ buffer, cursor ]
       end
 
+      # InputDecoder.normalize_paste is the canonical normalizer for
+      # paste content (strips PASTE_START/END markers and embedded
+      # control bytes before delivery). This second pass guards against
+      # *direct typed* RawTextInput — a short multi-byte read that
+      # legitimately contains CR/LF/TAB without ever entering paste
+      # mode — so the new-idea buffer stays single-line. We do not
+      # re-strip PASTE_START/END here because the decoder already
+      # consumes them; if they appear in `text`, treat them as literal
+      # (they will never match in practice but the codepath stays
+      # honest about who owns the marker contract).
       def normalize_new_idea_text(text)
         text.to_s
-            .delete_prefix("\e[200~")
-            .delete_suffix("\e[201~")
             .gsub(/[\r\n\t]+/, " ")
             .gsub(/ {2,}/, " ")
       end

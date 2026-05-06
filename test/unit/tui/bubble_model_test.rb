@@ -25,9 +25,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def make_task_row(action_key: "needs_input", slug: "some-slug", stage: "2-brainstorm",
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
-                    marker: "waiting", attrs: {})
+                    marker: "waiting", attrs: {}, folder: nil)
     Hive::Tui::Snapshot::Row.new(
-      project_name: "demo", stage: stage, slug: slug, folder: "/tmp/hive/#{slug}",
+      project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: "Needs your input",
@@ -820,37 +820,71 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal Hive::Tui::Subprocess::COMMAND_NOT_FOUND_EXIT, exit_code
   end
 
-  def test_open_input_editor_targets_review_waiting_escalations_file
-    row = make_task_row(
-      stage: "5-review",
-      state_file: "/tmp/hive/some-slug/task.md",
-      marker: "review_waiting",
-      attrs: { "pass" => "2", "escalations" => "1" }
-    )
-    seen_editor_invocation = nil
-    @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
-    @model.define_singleton_method(:file_mtime) { |_path| 0.0 }
-    @model.define_singleton_method(:run_editor) do |argv, path|
-      seen_editor_invocation = [ argv, path ]
-      0
+  def test_open_input_editor_targets_single_review_waiting_source_reviewer_file
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] real finding\n")
+      File.write(File.join(reviews, "escalations-02.md"), "## claude-02.md\n- [ ] real finding\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "escalations" => "1" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal(
+        [ [ "fake-editor" ], File.join(reviews, "claude-02.md") ],
+        seen_editor_invocation
+      )
     end
-
-    _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
-    cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
-
-    assert_equal(
-      [ [ "fake-editor" ], "/tmp/hive/some-slug/reviews/escalations-02.md" ],
-      seen_editor_invocation
-    )
   end
 
-  def test_open_input_editor_targets_fix_guardrail_review_waiting_file
-    row = make_task_row(
-      stage: "5-review",
-      state_file: "/tmp/hive/some-slug/task.md",
-      marker: "review_waiting",
-      attrs: { "pass" => "3", "reason" => "fix_guardrail" }
-    )
+  def test_open_input_editor_targets_reviews_dir_when_multiple_review_waiting_sources
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] claude finding\n")
+      File.write(File.join(reviews, "codex-02.md"), "## High\n- [ ] codex finding\n")
+      File.write(File.join(reviews, "escalations-02.md"), "## mixed\n- [ ] real finding\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "escalations" => "2" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], reviews ], seen_editor_invocation
+    end
+  end
+
+  def test_open_input_editor_targets_reviews_dir_for_fix_guardrail_review_waiting
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-03.md"), "## High\n- [x] original fix\n")
+      File.write(File.join(reviews, "fix-guardrail-03.md"), "- [ ] shell_pipe_to_interpreter\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "3", "reason" => "fix_guardrail" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], reviews ], seen_editor_invocation
+    end
+  end
+
+  def capture_input_editor_invocation(row)
     seen_editor_invocation = nil
     @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
     @model.define_singleton_method(:file_mtime) { |_path| 0.0 }
@@ -861,11 +895,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
     cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
-
-    assert_equal(
-      [ [ "fake-editor" ], "/tmp/hive/some-slug/reviews/fix-guardrail-03.md" ],
-      seen_editor_invocation
-    )
+    seen_editor_invocation
   end
 
   # ---- Late-binding dispatch (so App.run_charm can wire runner.method(:send)) ----

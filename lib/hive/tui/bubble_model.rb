@@ -628,10 +628,10 @@ module Hive
 
       # Resolve the path the editor should open for a given row.
       # Default: the stage's state file (`brainstorm.md` / `plan.md` /
-      # `task.md` / `pr.md`). For `:review_waiting` we open the gate
-      # file the reviewer/fix-guardrail wrote, since that's the file
-      # carrying the actual question — not `task.md` which only carries
-      # the marker.
+      # `task.md` / `pr.md`). For `:review_waiting`, send the operator
+      # to files the resume path actually consumes: reviewer-authored
+      # files for the pass, or the reviews directory when there are
+      # multiple possible sources / a fix-guardrail inspection gate.
       def input_editor_path(row)
         return review_waiting_editor_path(row) if row.marker.to_s == "review_waiting"
 
@@ -642,13 +642,35 @@ module Hive
         folder = row.folder.to_s
         return "" if folder.empty?
 
-        if (pass = review_waiting_pass(row))
-          basename = review_waiting_reason(row) == "fix_guardrail" ? "fix-guardrail" : "escalations"
-          return File.join(folder, "reviews", "#{basename}-#{format('%02d', pass)}.md")
+        reviews_dir = File.join(folder, "reviews")
+
+        if review_waiting_reason(row) != "fix_guardrail" && (pass = review_waiting_pass(row))
+          reviewer_files = review_waiting_reviewer_files(reviews_dir, pass)
+          return reviewer_files.first if reviewer_files.size == 1
         end
 
-        reviews_dir = File.join(folder, "reviews")
         Dir.exist?(reviews_dir) ? reviews_dir : folder
+      end
+
+      def review_waiting_reviewer_files(reviews_dir, pass)
+        return [] unless Dir.exist?(reviews_dir)
+
+        reviewer_files = Dir[File.join(reviews_dir, "*-#{format('%02d', pass)}.md")]
+                         .sort
+                         .select { |path| review_waiting_reviewer_file?(File.basename(path)) }
+        unresolved = reviewer_files.select { |path| file_has_unchecked_finding?(path) }
+        unresolved.empty? ? reviewer_files : unresolved
+      end
+
+      def review_waiting_reviewer_file?(name)
+        require "hive/stages/review"
+        Hive::Stages::Review.reviewer_file?(name)
+      end
+
+      def file_has_unchecked_finding?(path)
+        File.readlines(path).any? { |line| line =~ /^\s*-\s+\[\s*\]\s+/ }
+      rescue Errno::ENOENT, Errno::EACCES
+        false
       end
 
       def review_waiting_pass(row)

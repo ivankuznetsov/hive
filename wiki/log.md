@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-05T20:15:00Z] tui — review-waiting editor target correction
+
+**Action:** Corrected the needs-input editor docs after review found that `reviews/escalations-NN.md` and `reviews/fix-guardrail-NN.md` are orchestrator-owned files, while the review resume path consumes `[x]` decisions from reviewer-authored files. `Enter` on `:review_waiting` now targets the single reviewer file for the pass when unambiguous, or the `reviews/` directory when multiple source files or a fix-guardrail inspection gate are involved.
+
+**Refreshed pages:**
+- [[commands/tui]] — updated the Input editor takeover section to describe reviewer-file / reviews-directory resolution instead of claiming the editor opens orchestrator gate files.
+
 ## [2026-05-05T20:00:00Z] tui — needs-input editor takeover (rescued from 2026-05-04 stash)
 
 **Action:** Restored the lost editor-takeover behavior that was originally drafted on `feat/init-pretty-summary` on 2026-05-04 but stashed and dropped (only the new-idea-paste half of that stash made it into PR #25). `Enter` on a `needs_input` row no longer re-dispatches the suggested workflow verb — `KeyMap` now emits `Messages::OpenInputEditor` and `BubbleModel#open_input_editor` opens the row's input file in `$VISUAL` / `$EDITOR` / `vi` via the shared `Hive::Tui::Subprocess.foreground_takeover_command` wrapper introduced in PR #26. mtime is sampled either side of the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash distinguishes a saved edit ("press the stage verb key to continue") from a no-op cancel. For `:review_waiting` rows the takeover targets the per-pass review gate file (`reviews/escalations-NN.md` or `reviews/fix-guardrail-NN.md`) instead of `task.md`, so the operator edits the file the reviewer/fix-guardrail actually wrote. Workflow verb keys (`b`/`p`/`d`/`r`/`P`) remain the explicit "rerun the stage" surface — the editor handler intentionally does NOT auto-dispatch. Footer hint flips from `[Enter] next` to `[Enter] open` to reflect the new surface. Help-overlay description for `Enter` enumerates the per-state contextual modes.

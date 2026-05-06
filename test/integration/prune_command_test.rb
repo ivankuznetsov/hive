@@ -165,4 +165,29 @@ class PruneCommandTest < Minitest::Test
       end
     end
   end
+
+  # P3 #25: schema describes `path` / `hive_state_path` as absolute. A
+  # hand-edited row carrying `~/foo` or `./foo` must be normalized in
+  # the prune success-payload `removed[]` array.
+  def test_prune_success_payload_normalizes_relative_paths_in_removed_entries
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            { "name" => "rel-gone", "path" => "relative/that/does/not/exist", "hive_state_path" => "relative/that/does/not/exist/.hive-state" }
+          ]
+        }.to_yaml
+      )
+
+      out, _err = capture_io { Hive::Commands::Prune.new(json: true).call }
+      payload = JSON.parse(out)
+      removed = payload["removed"]
+      assert_equal 1, removed.size
+      assert removed.first["path"].start_with?("/"),
+             "schema says 'Absolute path' — relative input must be normalized in prune output"
+      assert removed.first["hive_state_path"].start_with?("/"),
+             "hive_state_path must also be absolute"
+    end
+  end
 end

@@ -1529,4 +1529,55 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_match(/select a project/, @model.hive_model.flash.to_s)
     end
   end
+
+  # P2 #18: ConfigError-rescue path on the X-key handler. A typoed
+  # $HIVE_HOME (or any registry-config error) used to be dead code under
+  # tests because the handler short-circuits on `snap.nil?` / scope=0
+  # before reaching the rescue. Pin the rescue with a real ConfigError
+  # raised from the registry mutation.
+  def test_x_key_rescues_config_error_into_flash
+    snap = snapshot_with_projects(
+      { name: "dead", path: "/tmp/dead", error: "missing_project_path" }
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1),
+      dispatch: @dispatch
+    )
+    with_config_stub(:unregister_project, ->(*) { raise Hive::ConfigError, "bad config" }) do
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+    end
+    assert_match(/drop failed.*bad config/, @model.hive_model.flash.to_s,
+                 "ConfigError on registry write must surface as a flash, not crash the runner")
+  end
+
+  # P2 #18: snapshot/registry race — the snapshot's project at the
+  # cursor's scope index is `(missing)` but Config has already had the
+  # entry forgotten by a concurrent shell between the keypress and the
+  # handler. unregister_project returns nil; the handler must flash
+  # rather than crash.
+  def test_x_key_handles_concurrent_registry_mutation_via_nil_removed
+    snap = snapshot_with_projects(
+      { name: "vanished", path: "/tmp/vanished", error: "missing_project_path" }
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1),
+      dispatch: @dispatch
+    )
+    with_config_stub(:unregister_project, ->(*) { nil }) do
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+    end
+    assert_match(/no entry named/i, @model.hive_model.flash.to_s)
+  end
+
+  # Module-level stub helper (Hive::Config is a module, so MiniTest's
+  # instance-method stub doesn't apply). Saves the original singleton
+  # method and restores it in the ensure block — same shape as the
+  # `with_editor_env` helper above, just for module methods.
+  def with_config_stub(method, callable)
+    original = Hive::Config.method(method)
+    Hive::Config.singleton_class.send(:define_method, method, callable)
+    yield
+  ensure
+    Hive::Config.singleton_class.send(:define_method, method, original) if original
+  end
 end

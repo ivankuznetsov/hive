@@ -209,13 +209,33 @@ module Hive
     # files. Without this rewrap the error escaped as ConfigError or
     # InternalError depending on the call site — schemas promised
     # exit 78 for "bad config" but the caller observed exit 70. Map
-    # all Psych errors to ConfigError so every command's --json
-    # envelope reports `error_kind: "config"` / `exit_code: 78` and
-    # the TUI's narrow rescue (`Hive::ConfigError` only) catches them.
+    # all Psych errors AND filesystem permission/IO errors on the
+    # config file to ConfigError so every command's --json envelope
+    # reports `error_kind: "config"` / `exit_code: 78` and the TUI's
+    # narrow rescue (`Hive::ConfigError` only) catches them.
+    #
+    # EACCES specifically is the most user-facing of the IO group:
+    # `chmod 000 ~/Dev/hive/config.yml` (or running as a different
+    # user) used to surface as `internal error: Errno::EACCES: ...`
+    # at exit 70. The root cause is configuration access, not a Hive
+    # bug — exit 78 is the right shape.
     def load_global_config(path)
       YAML.safe_load(File.read(path)) || {}
     rescue Psych::SyntaxError => e
       raise ConfigError, "global config at #{path} is not valid YAML: #{e.message}"
+    rescue Errno::EACCES, Errno::EISDIR => e
+      raise ConfigError, "global config at #{path} is not readable: #{e.message}"
+    end
+
+    # Atomic + EACCES-aware writer for ~/Dev/hive/config.yml. Mirrors
+    # the shape of `Hive::Markers.write_atomic` so a future flock
+    # upgrade (Issue #31) can swap in here without rewriting every
+    # call site. Permission errors on write surface as ConfigError
+    # (exit 78), matching the read-side classification.
+    def write_global_config!(data)
+      File.write(global_config_path, data.to_yaml)
+    rescue Errno::EACCES, Errno::EROFS, Errno::ENOSPC => e
+      raise ConfigError, "global config at #{global_config_path} could not be written: #{e.message}"
     end
 
     def find_project(name)
@@ -239,7 +259,7 @@ module Hive
       else
         data["registered_projects"] << entry
       end
-      File.write(global_config_path, data.to_yaml)
+      write_global_config!(data)
       entry
     end
 
@@ -267,15 +287,22 @@ module Hive
       data = load_global_config(global_config_path)
       raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
+      # Stringify both sides of the name match. CLI passes argv as a
+      # String; TUI X-key dispatches against the snapshot's project.name
+      # (also a String). Hand-edited registry entries can carry an
+      # Integer "name" (e.g. `name: 42` in YAML), which would never
+      # match `Integer == "42"` and silently exit `unknown_project`.
+      # `to_s.==.to_s` makes the lookup symmetric across both surfaces.
+      key = name.to_s
       entries = Array(data["registered_projects"])
-      idx = entries.index { |p| p.is_a?(Hash) && p["name"] == name }
+      idx = entries.index { |p| p.is_a?(Hash) && p["name"].to_s == key }
       return nil if idx.nil?
 
       removed = entries[idx]
       remaining = entries.dup
       remaining.delete_at(idx)
       data["registered_projects"] = remaining
-      File.write(global_config_path, data.to_yaml)
+      write_global_config!(data)
       removed
     end
 
@@ -311,7 +338,7 @@ module Hive
 
       unless dry_run
         data["registered_projects"] = kept
-        File.write(global_config_path, data.to_yaml)
+        write_global_config!(data)
       end
       result
     end

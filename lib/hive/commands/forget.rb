@@ -15,6 +15,8 @@ module Hive
     # so agent retry wrappers can distinguish a typo against a real
     # registry from a missing argv entirely.
     class Forget
+      include Hive::Schemas::EnvelopeEmitter
+
       class UsageError < Hive::Error
         attr_reader :error_kind
 
@@ -34,15 +36,15 @@ module Hive
       end
 
       def call
-        @stdout_written = false
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-forget"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       def do_call
@@ -70,42 +72,31 @@ module Hive
       end
 
       def success_payload(removed)
+        # Schema describes `path` and `hive_state_path` as "Absolute path".
+        # The raw registry row may carry a relative or `~`-prefixed string
+        # (hand-edited config.yml, or pre-normaliser entries). Run both
+        # through File.expand_path here so the JSON envelope matches the
+        # documented contract regardless of how the row got into the file.
+        abs_path = File.expand_path(removed["path"].to_s)
+        hive_state = removed["hive_state_path"] ? File.expand_path(removed["hive_state_path"]) : File.join(abs_path, ".hive-state")
         {
           "schema" => "hive-forget",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-forget"),
           "ok" => true,
           "name" => removed["name"],
-          "path" => removed["path"],
-          "hive_state_path" => removed["hive_state_path"] || File.join(removed["path"], ".hive-state")
+          "path" => abs_path,
+          "hive_state_path" => hive_state
         }
       end
 
       def fail_usage!(message, kind:)
         error = UsageError.new(message, error_kind: kind)
         if @json
-          payload = Hive::Schemas::ErrorEnvelope.build(
-            schema: "hive-forget",
-            error: error,
-            error_kind: kind
-          )
-          puts JSON.generate(payload)
-          @stdout_written = true
+          emit_envelope(error)
         else
           warn message
         end
         raise error
-      end
-
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-forget",
-          error: error,
-          error_kind: error_kind_for(error)
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        @stdout_written = true
       end
 
       def error_kind_for(error)

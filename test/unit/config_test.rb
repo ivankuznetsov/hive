@@ -978,4 +978,61 @@ class ConfigTest < Minitest::Test
   ensure
     ENV["HIVE_HOME"] = prev
   end
+
+  # P3 #21: a hand-edited row with `name: 42` (Integer) used to be
+  # invisible to `hive forget 42` because String != Integer, but the
+  # TUI X-key (which compared name-strings end-to-end) could drop it.
+  # Stringify both sides so the two surfaces stay in sync.
+  def test_unregister_project_matches_integer_named_entry_via_string_coercion
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            { "name" => 42, "path" => "/tmp/hive-int", "hive_state_path" => "/tmp/hive-int/.hive-state" }
+          ]
+        }.to_yaml
+      )
+
+      removed = Hive::Config.unregister_project(name: "42")
+      refute_nil removed, "Integer name must be reachable via the String passed by the CLI"
+      assert_equal 42, removed["name"]
+    end
+  end
+
+  # P3 #22: EACCES on the config file used to surface as
+  # `internal error: Errno::EACCES: ...` at exit 70. Now: ConfigError
+  # (exit 78) — the root cause is a configuration-access problem, not
+  # a Hive bug.
+  def test_load_global_config_rewraps_eacces_as_config_error
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [] }.to_yaml)
+      File.chmod(0o000, path)
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.registered_projects }
+      assert_match(/not readable/, err.message)
+    ensure
+      File.chmod(0o644, path) if path && File.exist?(path)
+    end
+  end
+
+  # P3 #22 (write half): ENOSPC / EACCES on the config write surface
+  # as ConfigError, not InternalError. This mirrors the read-side
+  # classification so an agent's error envelope is consistent across
+  # the two failure paths.
+  def test_write_global_config_rewraps_eacces_as_config_error
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [] }.to_yaml)
+      File.chmod(0o400, path) # read-only
+
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:write_global_config!, { "registered_projects" => [{ "name" => "x", "path" => "/tmp/x" }] })
+      end
+      assert_match(/could not be written/, err.message)
+    ensure
+      File.chmod(0o644, path) if path && File.exist?(path)
+    end
+  end
 end

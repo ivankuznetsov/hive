@@ -148,4 +148,27 @@ class ForgetCommandTest < Minitest::Test
   ensure
     ENV["HIVE_HOME"] = prev
   end
+
+  # P3 #25: schema describes `path` / `hive_state_path` as "Absolute path",
+  # but a hand-edited row can carry a relative or `~`-prefixed string.
+  # Normalize via File.expand_path in the success payload.
+  def test_forget_success_payload_normalizes_relative_path_to_absolute
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            { "name" => "rel", "path" => "relative/dir", "hive_state_path" => "relative/dir/.hive-state" }
+          ]
+        }.to_yaml
+      )
+
+      out, _err = capture_io { Hive::Commands::Forget.new("rel", json: true).call }
+      payload = JSON.parse(out)
+      assert_equal File.expand_path("relative/dir"), payload["path"],
+                   "schema says 'Absolute path' — relative input must be normalized"
+      assert payload["hive_state_path"].start_with?("/"),
+             "hive_state_path must also be absolute"
+    end
+  end
 end

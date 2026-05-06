@@ -14,21 +14,23 @@ module Hive
     # for tests/dogfooding: the tmp dirs vanish, the registry entries do
     # not, and the TUI's project list keeps showing them as `(missing)`.
     class Prune
+      include Hive::Schemas::EnvelopeEmitter
+
       def initialize(dry_run: false, json: false)
         @dry_run = dry_run
         @json = json
       end
 
       def call
-        @stdout_written = false
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-prune"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       def do_call
@@ -57,12 +59,25 @@ module Hive
       end
 
       def entry_payload(entry)
-        path = entry["path"].is_a?(String) ? entry["path"] : ""
+        # Schema describes `path` / `hive_state_path` as absolute. Run
+        # through File.expand_path so a hand-edited row carrying `~/foo`
+        # or `./foo` lands as the absolute form in the envelope. Empty/
+        # missing path is preserved as "" rather than expanded against
+        # `Dir.pwd` (which would lie about where the row pointed).
+        raw_path = entry["path"].is_a?(String) ? entry["path"] : ""
+        abs_path = raw_path.empty? ? "" : File.expand_path(raw_path)
+        raw_hive_state = entry["hive_state_path"]
+        hive_state = if raw_hive_state.is_a?(String) && !raw_hive_state.empty?
+                       File.expand_path(raw_hive_state)
+        elsif abs_path.empty?
+                       ""
+        else
+                       File.join(abs_path, ".hive-state")
+        end
         {
           "name" => entry["name"].to_s,
-          "path" => path,
-          "hive_state_path" => entry["hive_state_path"] ||
-            (path.empty? ? "" : File.join(path, ".hive-state"))
+          "path" => abs_path,
+          "hive_state_path" => hive_state
         }
       end
 
@@ -85,18 +100,6 @@ module Hive
           puts "  - #{entry['name']} (#{entry['path']})"
         end
         puts "(dry-run; rerun without --dry-run to apply)" if @dry_run
-      end
-
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-prune",
-          error: error,
-          error_kind: error_kind_for(error)
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        @stdout_written = true
       end
 
       def error_kind_for(error)

@@ -2,6 +2,24 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-06T22:00:00Z] tui — extracted BrainstormAnswers + hardened the auto-continue parser
+
+**Action:** Moved the brainstorm-completeness predicate and its five helper methods out of `BubbleModel` (already a 1240-line MVU class) into a standalone `Hive::Tui::BrainstormAnswers` module at `lib/hive/tui/brainstorm_answers.rb`, with one public entrypoint `BrainstormAnswers.complete?(path)`. While extracting, hardened the parser so the auto-continue gate cannot be tricked or accidentally fire:
+
+- **Code-fence aware.** Lines inside ``` or ~~~ fenced blocks no longer count as live structure, so a pasted brainstorm template with `## Round 99` / `### Q1` / `### A1` inside a fence cannot dictate completeness while real Round 1 is still empty.
+- **CommonMark-correct heading indent.** Heading regexes accept 0–3 leading spaces only; 4+ space indentation is treated as an indented code block per CommonMark, not as an ATX heading.
+- **Latest round by N, not by file position.** Picks the round with the highest N (ties broken by later position). A stale duplicate `## Round 1` pasted below an in-progress `## Round 2` no longer hijacks the selection.
+- **Refuses on duplicate Q/A numbers** within the same round. A typoed copy-paste that produces two `### Q1` headings keeps the row on the manual path instead of auto-firing on the surviving last occurrence.
+- **HTML comment handling.** `<!-- WAITING -->` / `<!-- COMPLETE -->` / inline `<!-- thinking -->` comments are stripped from answer bodies before the emptiness check; comment lines no longer truncate body collection mid-answer.
+- **Wider rescue + Debug.log.** `complete?` rescues `SystemCallError, EncodingError, IOError, ArgumentError` (covers `EISDIR` on a directory path, encoding errors on non-UTF-8 bytes, and the `ArgumentError: invalid byte sequence in UTF-8` from `String#match?`) and routes through `Hive::Tui::Debug.log` so a recurring permissions/encoding issue is diagnosable rather than silent.
+- **Tighter rescue scope in `BubbleModel#input_editor_exit_messages`.** The `rescue ArgumentError` now narrowly wraps the `dispatch_command_for` call rather than the whole method, so future kwarg drift in `Hive::Tui::Messages::InputEditorExited` no longer gets caught and silently re-raised by the recovery branch.
+- **Both messages dispatched on auto-continue.** Manual path: `[InputEditorExited]`. Auto path: `[InputEditorExited, DispatchCommand]`. Future observers added to `InputEditorExited` will fire on auto-fired editor closes too.
+
+Coverage: 23-test unit suite directly against the new module (real fixtures on disk, including code-fence bypasses, tilde fences, indented headings, duplicate Q/A numbers, multi-round selection, WAITING-marker bodies, encoding errors, missing files, directory paths) plus four new BubbleModel integration tests (non-zero editor exit, mtime-unchanged with complete answers, malformed `suggested_command` rescue branch, real `File.mtime` end-to-end). All 4 actionable + 7 advisory follow-ups from issue #39 are now closed.
+
+**Refreshed pages:**
+- (none — the user-facing behavior in [[commands/tui]] is unchanged; this was a refactor + parser hardening for resilience.)
+
 ## [2026-05-06T17:30:00Z] tui — completed brainstorm answers auto-continue
 
 **Action:** `Enter` on a `needs_input` brainstorm row still opens `brainstorm.md` in the user's editor, but saving a completed answer round now dispatches the row's existing `hive brainstorm <slug> --from 2-brainstorm` command automatically. The TUI only auto-continues when the editor exits 0, the file mtime changed, the row is in `2-brainstorm`, and the latest `## Round N` has every `### Qn` paired with a non-empty `### An`; partial answers and non-brainstorm input states keep the manual verb-key path. This preserves the marker contract (`brainstorm.md` stays `WAITING` / `none` until the brainstorm agent rewrites it) while removing the confusing "I saved answers but the row still says Needs your input" dead-end.

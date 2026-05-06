@@ -11,6 +11,7 @@ require "hive/tui/update"
 require "hive/tui/snapshot"
 require "hive/tui/triage_state"
 require "hive/tui/log_tail"
+require "hive/tui/brainstorm_answers"
 require "hive/tui/subprocess"
 require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
@@ -648,7 +649,9 @@ module Hive
           # clear in `clear_terminal_for_takeover`.
           clear_terminal_for_takeover
           changed = before_mtime != after_mtime
-          @dispatch.call(input_editor_exit_message(row, path, exit_code, changed))
+          input_editor_exit_messages(row, path, exit_code, changed).each do |message|
+            @dispatch.call(message)
+          end
         end
 
         cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
@@ -722,23 +725,31 @@ module Hive
         (row.attrs || {})["reason"].to_s
       end
 
-      def input_editor_exit_message(row, path, exit_code, changed)
-        if auto_continue_after_edit?(row, path, exit_code, changed)
-          return Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+      # Returns the messages to dispatch after the editor exits.
+      # Manual path: [InputEditorExited]. Auto-continue path:
+      # [InputEditorExited, DispatchCommand] — both fire so any
+      # observer of InputEditorExited (e.g. the post-save flash)
+      # also runs on the auto path. The narrow rescue around
+      # `dispatch_command_for` catches Shellwords::ParseError
+      # (an ArgumentError) on a malformed `suggested_command`
+      # without swallowing constructor errors from
+      # InputEditorExited itself.
+      def input_editor_exit_messages(row, path, exit_code, changed)
+        exited = Hive::Tui::Messages::InputEditorExited.new(
+          slug: row.slug,
+          exit_code: exit_code,
+          changed: changed
+        )
+        return [ exited ] unless auto_continue_after_edit?(row, path, exit_code, changed)
+
+        begin
+          dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+        rescue ArgumentError => e
+          Hive::Tui::Debug.log("input_editor", "auto-continue skipped for #{row.slug}: #{e.message}")
+          return [ exited ]
         end
 
-        Hive::Tui::Messages::InputEditorExited.new(
-          slug: row.slug,
-          exit_code: exit_code,
-          changed: changed
-        )
-      rescue ArgumentError => e
-        Hive::Tui::Debug.log("input_editor", "auto-continue skipped for #{row.slug}: #{e.message}")
-        Hive::Tui::Messages::InputEditorExited.new(
-          slug: row.slug,
-          exit_code: exit_code,
-          changed: changed
-        )
+        [ exited, dispatch ]
       end
 
       def auto_continue_after_edit?(row, path, exit_code, changed)
@@ -747,57 +758,7 @@ module Hive
         return false unless row.stage.to_s == "2-brainstorm"
         return false if row.suggested_command.to_s.empty?
 
-        brainstorm_answers_complete?(path)
-      end
-
-      def brainstorm_answers_complete?(path)
-        lines = File.readlines(path, chomp: true)
-        round_start = latest_brainstorm_round_start(lines)
-        return false if round_start.nil?
-
-        block = lines[(round_start + 1)..] || []
-        questions = numbered_headings(block, "Q")
-        answers = numbered_headings(block, "A")
-        return false if questions.empty? || answers.empty?
-        return false unless (questions.keys - answers.keys).empty?
-
-        answers.values.all? { |heading| answer_heading_filled?(block, heading) }
-      rescue SystemCallError, EncodingError, IOError => e
-        Hive::Tui::Debug.log("brainstorm_answers", "completeness check failed: #{e.class}: #{e.message}")
-        false
-      end
-
-      def latest_brainstorm_round_start(lines)
-        lines.each_index.select { |idx| lines[idx].match?(/^\s*##\s+Round\s+\d+\b/i) }.last
-      end
-
-      def numbered_headings(lines, prefix)
-        headings = {}
-        regex = /^\s*###\s+#{prefix}(\d+)\b/i
-        lines.each_with_index do |line, idx|
-          match = line.match(regex)
-          headings[match[1]] = idx if match
-        end
-        headings
-      end
-
-      def answer_heading_filled?(lines, heading_idx)
-        heading = lines[heading_idx].sub(/^\s*###\s+A\d+\s*\.?\s*/i, "")
-        stop_idx = next_brainstorm_heading_index(lines, heading_idx + 1) || lines.length
-        body = lines[(heading_idx + 1)...stop_idx].join("\n")
-        stripped_answer_text("#{heading}\n#{body}").length.positive?
-      end
-
-      def next_brainstorm_heading_index(lines, start_idx)
-        (start_idx...lines.length).find do |idx|
-          lines[idx].match?(/^\s*###\s+[QA]\d+\b/i) ||
-            lines[idx].match?(/^\s*##\s+/) ||
-            lines[idx].match?(/^\s*<!--/)
-        end
-      end
-
-      def stripped_answer_text(text)
-        text.gsub(/<!--.*?-->/m, "").strip
+        Hive::Tui::BrainstormAnswers.complete?(path)
       end
 
       # $VISUAL → $EDITOR → vi. Shellwords.split lets users carry

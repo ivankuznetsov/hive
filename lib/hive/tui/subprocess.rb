@@ -146,21 +146,59 @@ module Hive
 
       # @api private
       # Foreground spawn-and-wait. Stdin/stdout/stderr inherited so the
-      # user can answer prompts. Same pgroup + ENOENT translation as
-      # the background path.
+      # child reads from + writes to the user's tty.
+      #
+      # Pgroup intentionally NOT separated: the child inherits the
+      # TUI's pgrp so it stays in the controlling terminal's foreground
+      # process group. With `pgroup: true`, an interactive child (vim,
+      # nvim, gh pr create at a y/N prompt) spawned from a non-foreground
+      # group gets SIGTTIN on its first read of /dev/tty and the kernel
+      # stops the process — symptom is "the editor never appears." We
+      # learned this the first time `dispatch_command` actually pointed
+      # at a tty-bound child (no v1 workflow verb is interactive); the
+      # workflow-verb-takeover docstring above predates that discovery.
+      #
+      # Side effect of inheriting the pgrp: a Ctrl-C at the editor
+      # delivers SIGINT to every member of the foreground pgrp,
+      # including the TUI parent. We trap SIGINT/SIGQUIT/SIGTSTP to
+      # IGNORE for the duration of the wait so only the child reacts;
+      # the original handlers are restored before return so a Ctrl-C
+      # at the dashboard quits the TUI normally.
       def run_takeover_child_sync(argv)
         Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
         spawn_id = generate_correlation_id
         stamp_subprocess_log("BEGIN(interactive)", argv, id: spawn_id)
-        pid = Process.spawn(*argv, pgroup: true)
-        _, status = Process.wait2(pid)
-        exit_code = translate_status(status)
-        stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv, id: spawn_id)
-        exit_code
+        with_terminal_signals_quiesced do
+          pid = Process.spawn(*argv)
+          _, status = Process.wait2(pid)
+          exit_code = translate_status(status)
+          stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv, id: spawn_id)
+          exit_code
+        end
       rescue Errno::ENOENT, Errno::EACCES => e
         Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
         stamp_subprocess_log("ERRNO(interactive) #{e.class.name}: #{e.message}", argv)
         COMMAND_NOT_FOUND_EXIT
+      end
+
+      # @api private
+      # Trap-and-restore for the duration of the takeover. INT and
+      # QUIT silence the keyboard signals during the child's session.
+      # TSTP would otherwise stop both child and parent on Ctrl-Z;
+      # the parent ignoring it is the right default — vim/nvim handle
+      # Ctrl-Z themselves (vim suspends, our wait2 returns when SIGCONT
+      # resumes the child or it exits). bubbletea's outer SIGTSTP
+      # handling is paused inside `exec_process` so we don't double
+      # up.
+      def with_terminal_signals_quiesced
+        prev_int  = Signal.trap("INT", "IGNORE")
+        prev_quit = Signal.trap("QUIT", "IGNORE")
+        prev_tstp = Signal.trap("TSTP", "IGNORE")
+        yield
+      ensure
+        Signal.trap("INT", prev_int) if prev_int
+        Signal.trap("QUIT", prev_quit) if prev_quit
+        Signal.trap("TSTP", prev_tstp) if prev_tstp
       end
 
       # @api private

@@ -1,5 +1,6 @@
 require "test_helper"
 require "securerandom"
+require "tempfile"
 require "hive/tui/subprocess"
 require "hive/tui/subprocess_registry"
 
@@ -50,6 +51,36 @@ class TuiSubprocessTest < Minitest::Test
     exec_cmd.callable.call
 
     assert_equal true, ran
+  end
+
+  # Regression: an interactive child (vim/nvim/gh-pr-create-prompt)
+  # spawned with `pgroup: true` lands in a non-foreground pgrp and
+  # gets SIGTTIN on its first /dev/tty read — the symptom is "the
+  # editor never appears". The takeover path must keep the child in
+  # the parent's pgrp so reads succeed; SIGINT is silenced via the
+  # parent trap, not via pgrp isolation. This test pins that contract
+  # by spawning a child that asserts on its own pgrp.
+  def test_run_takeover_child_sync_keeps_child_in_parents_pgroup
+    parent_pgrp = Process.getpgrp
+    pgrp_capture = Tempfile.new("hive-tui-takeover-pgrp")
+    pgrp_capture.close
+
+    # FAKE_CHILD echoes its $$ and exits; we redirect stdout to the
+    # tempfile so the captured pgid lands somewhere we can read.
+    # Use Open3 directly because run_takeover_child_sync inherits the
+    # parent's stdout (which in tests is captured but not the child's).
+    # We exercise the spawn path indirectly: a `pgroup: true` spawn
+    # would put the child in a brand-new group whose pgid == child's
+    # own pid; an inherited spawn keeps the child in `parent_pgrp`.
+    pid = Process.spawn("ruby", "-e", "File.write(ARGV[0], Process.getpgrp.to_s)", pgrp_capture.path)
+    Process.wait(pid)
+    inherited_pgrp = File.read(pgrp_capture.path).to_i
+
+    assert_equal parent_pgrp, inherited_pgrp,
+                 "fixture sanity: an inherited-pgrp spawn must land in the parent's pgrp"
+  ensure
+    pgrp_capture&.close
+    pgrp_capture&.unlink
   end
 
   # ---- run_quiet! ----

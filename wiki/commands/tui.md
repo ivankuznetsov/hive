@@ -51,8 +51,8 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Key | Action |
 |-----|--------|
 | `Tab` / `Shift+Tab` | toggle pane focus (left ↔ right) |
-| `h` | jump focus to the projects pane |
-| `l` | jump focus to the tasks pane |
+| `h` / `Left` | jump focus to the projects pane; below the two-pane breakpoint the tasks pane remains focused |
+| `l` / `Right` | jump focus to the tasks pane |
 | `j` / `↓` | within the focused pane: next project (left) or next task row (right) |
 | `k` / `↑` | within the focused pane: previous project (left) or previous task row (right) |
 | `b` | run `hive brainstorm <slug>` on the highlighted row |

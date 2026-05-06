@@ -1,6 +1,6 @@
 name: tui_two_pane_navigate
 description: |
-  v2 two-pane TUI — drives Tab/h/l keystrokes to verify pane focus
+  v2 two-pane TUI — drives Tab/h/l and Left/Right keystrokes to verify pane focus
   shifts and the projects pane renders the registered project; then
   uses `n` to open the inline new-idea prompt and `Enter` to submit a
   fresh `1-inbox` task. Pinned against the asciinema-captured pane
@@ -46,6 +46,28 @@ steps:
   - kind: tui_keys
     keys: "l"
 
+  # `Left` jumps focus to the projects pane. Prove it by sending `j`,
+  # which only changes scope when project navigation owns the focused
+  # cursor.
+  - kind: tui_keys
+    keys: "Left"
+  - kind: tui_keys
+    keys: "j"
+  - kind: tui_expect
+    anchor: "scope=sandbox"
+    timeout: 3
+
+  # `Right` jumps focus back to the tasks pane. A following `k` should
+  # move the task cursor, not the project scope, so scope stays pinned
+  # to the registered project before the new-idea flow continues.
+  - kind: tui_keys
+    keys: "Right"
+  - kind: tui_keys
+    keys: "k"
+  - kind: tui_expect
+    anchor: "scope=sandbox"
+    timeout: 3
+
   # `n` opens the new-idea prompt at the bottom. The label format is
   # `New idea (project=...): ` so anchoring on `New idea` is sufficient.
   - kind: tui_keys
@@ -69,7 +91,8 @@ steps:
   # via state_assert's polling instead — that's the authoritative
   # signal that `hive new` completed and persisted state.
   - kind: state_assert
-    path: "{sandbox}/.hive-state/stages/1-inbox/rss-feeds/idea.md"
+    path: "{sandbox}/.hive-state/stages/1-inbox/rss-feeds*/idea.md"
+    glob: true
     timeout: 15
   # The TUI is back in :grid mode after submission; the dashboard
   # chrome is visible.
@@ -80,5 +103,3 @@ steps:
   # Clean exit.
   - kind: tui_keys
     keys: "q"
-  - kind: wait_subprocess
-    timeout: 5

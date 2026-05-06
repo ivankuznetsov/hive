@@ -32,7 +32,7 @@ module Hive
         { mode: :grid, key: "Tab",       action: :pane_focus_toggle,  description: "toggle pane focus (left ↔ right)" },
         { mode: :grid, key: "Shift+Tab", action: :pane_focus_toggle,  description: "toggle pane focus (same as Tab)" },
         { mode: :grid, key: "h",         action: :pane_focus_left,    description: "jump focus to the projects pane" },
-        { mode: :grid, key: "Left",      action: :pane_focus_left,    description: "jump focus to the projects pane (two-pane layout only)" },
+        { mode: :grid, key: "Left",      action: :pane_focus_left,    description: "jump focus to the projects pane" },
         { mode: :grid, key: "l",         action: :pane_focus_right,   description: "jump focus to the tasks pane" },
         { mode: :grid, key: "Right",     action: :pane_focus_right,   description: "jump focus to the tasks pane" },
         { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open contextual mode (triage / log tail) or dispatch the suggested command" },

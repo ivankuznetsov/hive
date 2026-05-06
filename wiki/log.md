@@ -914,3 +914,10 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:**
 - `wiki/architecture.md` — added the TUI / MVU pipeline section.
+
+## [2026-05-06T00:00:00Z] tui — arrow-key pane-focus shortcuts
+
+**Action:** Added `Left` and `Right` arrow keys as explicit pane-focus shortcuts in grid mode (`lib/hive/tui/key_map.rb`, `lib/hive/tui/help.rb`), preserving the existing `Tab` / `Shift+Tab` toggle and `h` / `l` directional bindings. Behavior is grid-mode only — `:new_idea` keeps Left/Right cursor movement and `:filter` keeps Left/Right as no-ops. Help overlay and `wiki/commands/tui.md` updated; `tui_two_pane_navigate` e2e scenario extended to prove pane focus via follow-up `j` / `k` navigation rather than visibility alone.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — documented `Left` / `Right` arrow keys alongside `h` / `l` and noted that left-pane focus shortcuts pin focus to the tasks pane below the two-pane breakpoint.

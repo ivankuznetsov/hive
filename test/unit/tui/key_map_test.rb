@@ -564,4 +564,31 @@ class TuiKeyMapMessageForTest < Minitest::Test
                       "#{key.inspect} would dispatch a phantom verb."
     end
   end
+
+  # `X` is the registry-cleanup escape hatch for projects that show as
+  # `(missing)`. KeyMap emits a payload-free singleton; the gate
+  # ("only when project.error == 'missing_project_path'") is enforced
+  # in BubbleModel#drop_scoped_project_if_missing because KeyMap has
+  # no snapshot/scope reference. The unit contract is just: X in grid
+  # mode produces DROP_SCOPED_PROJECT_IF_MISSING regardless of row.
+  def test_grid_capital_x_emits_drop_scoped_project_singleton
+    row = make_row(action_key: "ready_to_brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: row)
+    assert_same Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING, msg
+  end
+
+  def test_grid_capital_x_works_with_no_row
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: nil)
+    assert_same Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING, msg,
+                "X is a global grid binding (resolved before the row check) so an empty grid still emits the message"
+  end
+
+  def test_grid_lowercase_x_is_not_bound_to_drop
+    # Lowercase x must NOT trigger the drop — the binding deliberately
+    # uses Shift+X to make accidental fat-finger drops unlikely. This
+    # also leaves lowercase x available for future bindings.
+    row = make_row(action_key: "ready_to_brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "x", row: row)
+    refute_same Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING, msg
+  end
 end

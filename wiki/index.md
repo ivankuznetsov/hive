@@ -2,7 +2,7 @@
 title: Hive Wiki Index
 type: index
 created: 2026-04-25
-updated: 2026-04-29
+updated: 2026-05-06
 tags: [index]
 ---
 
@@ -12,7 +12,7 @@ tags: [index]
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
 
-**Pages**: 43 (excl. `index.md`/`log.md`) · **Date**: 2026-05-01
+**Pages**: 45 (excl. `index.md`/`log.md`) · **Date**: 2026-05-06
 
 ## Top level
 
@@ -38,6 +38,8 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[commands/findings]] — `hive findings` / `accept-finding` / `reject-finding`: list and toggle GFM-checkbox findings in `reviews/ce-review-NN.md`.
 - [[commands/stage_action]] — `hive brainstorm` / `plan` / `develop` / `pr` / `archive` workflow verbs (promote-or-run).
 - [[commands/markers]] — `hive markers clear FOLDER --name <NAME>` removes a recovery marker (`REVIEW_STALE` etc.) from `task.md` so an agent can recover from `REVIEW_*_STALE` / `REVIEW_ERROR` without hand-editing.
+- [[commands/forget]] — `hive forget NAME [--json]` drop one named entry from the global registry (inverse of `hive init`). `.hive-state` on disk is not touched.
+- [[commands/prune]] — `hive prune [--dry-run] [--json]` bulk-drop registry entries whose `path` is gone or whose row shape is invalid.
 - `hive metrics rollback-rate [--days N] [--project NAME] [--json]` — fraction of fix-agent commits later reverted, broken down by triage bias / fix phase. See [[cli]] and [[stages/review]].
 
 ## Stages

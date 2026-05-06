@@ -114,6 +114,7 @@ module Hive
         return Messages::SHOW_HELP if key == "?"
         return Messages::OPEN_FILTER_PROMPT if key == "/"
         return Messages::OPEN_NEW_IDEA_PROMPT if key == "n"
+        return Messages::DROP_SCOPED_PROJECT_IF_MISSING if key == "X"
         return Messages::ProjectScope.new(n: key.to_i) if key.is_a?(String) && key.match?(/\A[0-9]\z/)
 
         nil

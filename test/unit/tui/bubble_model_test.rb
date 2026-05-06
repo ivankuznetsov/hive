@@ -583,6 +583,50 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "flash must name the project AND the specific error")
   end
 
+  # NEW-2: all-unhealthy flash used to unconditionally suggest X / `hive
+  # prune`, but those only drop `missing_project_path` rows. With every
+  # project at `not_initialised`, the suggestion would land the operator
+  # on refusal flashes. The fix branches on the error mix.
+  def test_all_unhealthy_flash_points_at_prune_when_every_error_is_missing_path
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-05",
+      "projects" => [
+        { "name" => "a", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "b", "error" => "missing_project_path", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    assert_match(/press X/i, @model.hive_model.flash.to_s,
+                 "missing-only set must steer the operator at the X-key + hive prune surfaces")
+  end
+
+  def test_all_unhealthy_flash_points_at_forget_when_errors_mix
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-05",
+      "projects" => [
+        { "name" => "a", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "b", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    refute_match(/press X/i, @model.hive_model.flash.to_s,
+                 "mixed-error set must NOT suggest X (which only drops missing-path rows)")
+    assert_match(/hive forget|re-init/i, @model.hive_model.flash.to_s,
+                 "mixed-error set must point at re-init or per-name `hive forget`")
+  end
+
   def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01", "projects" => []
@@ -1409,5 +1453,131 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # Common shape: TUI quits before any kill-class error arrived.
     @model.kill_inflight_heals!
     # Must not raise; nothing to assert beyond the absence of exception.
+  end
+
+  # ---- X-key drop on missing project ----
+  # The drop handler is the gate: KeyMap always emits the singleton; the
+  # gate ("only missing-path entries") is enforced here. Tests pin the
+  # gate behavior because it's the safety net that prevents healthy
+  # projects being silently deregistered by accident.
+
+  def snapshot_with_projects(*specs)
+    project_views = specs.each_with_index.map do |spec, _i|
+      Hive::Tui::Snapshot::ProjectView.new(
+        name: spec.fetch(:name),
+        path: spec.fetch(:path),
+        hive_state_path: File.join(spec[:path], ".hive-state"),
+        error: spec[:error],
+        rows: [].freeze
+      ).freeze
+    end
+    Hive::Tui::Snapshot.new(generated_at: "2026-05-05T00:00:00Z", projects: project_views)
+  end
+
+  def test_x_key_drops_missing_project_and_resets_scope
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "live", path: "/tmp/hive-live-#{rand(1_000_000)}")
+      Hive::Config.register_project(name: "dead", path: "/tmp/hive-dead-#{rand(1_000_000)}")
+      snap = snapshot_with_projects(
+        { name: "live", path: "/tmp/live", error: nil },
+        { name: "dead", path: "/tmp/dead", error: "missing_project_path" }
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 2),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+
+      remaining = Hive::Config.registered_projects.map { |p| p["name"] }
+      assert_equal [ "live" ], remaining, "missing entry must be deregistered"
+      assert_equal 0, @model.hive_model.scope,
+                   "scope must reset to ★ All so the cursor doesn't hang on a vanished entry"
+      assert_match(/dropped dead/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_x_key_refuses_healthy_project_with_flash
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "live", path: "/tmp/hive-live-#{rand(1_000_000)}")
+      snap = snapshot_with_projects({ name: "live", path: "/tmp/live", error: nil })
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+
+      assert_equal 1, Hive::Config.registered_projects.size,
+                   "healthy project must NOT be deregistered by X"
+      assert_match(/only missing projects/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_x_key_at_all_scope_flashes_hint_without_modifying_registry
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "live", path: "/tmp/hive-live-#{rand(1_000_000)}")
+      snap = snapshot_with_projects({ name: "live", path: "/tmp/live", error: nil })
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 0),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+
+      assert_equal 1, Hive::Config.registered_projects.size
+      assert_match(/select a project/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  # P2 #18: ConfigError-rescue path on the X-key handler. A typoed
+  # $HIVE_HOME (or any registry-config error) used to be dead code under
+  # tests because the handler short-circuits on `snap.nil?` / scope=0
+  # before reaching the rescue. Pin the rescue with a real ConfigError
+  # raised from the registry mutation.
+  def test_x_key_rescues_config_error_into_flash
+    snap = snapshot_with_projects(
+      { name: "dead", path: "/tmp/dead", error: "missing_project_path" }
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1),
+      dispatch: @dispatch
+    )
+    with_config_stub(:unregister_project, ->(*) { raise Hive::ConfigError, "bad config" }) do
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+    end
+    assert_match(/drop failed.*bad config/, @model.hive_model.flash.to_s,
+                 "ConfigError on registry write must surface as a flash, not crash the runner")
+  end
+
+  # P2 #18: snapshot/registry race — the snapshot's project at the
+  # cursor's scope index is `(missing)` but Config has already had the
+  # entry forgotten by a concurrent shell between the keypress and the
+  # handler. unregister_project returns nil; the handler must flash
+  # rather than crash.
+  def test_x_key_handles_concurrent_registry_mutation_via_nil_removed
+    snap = snapshot_with_projects(
+      { name: "vanished", path: "/tmp/vanished", error: "missing_project_path" }
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: snap, scope: 1),
+      dispatch: @dispatch
+    )
+    with_config_stub(:unregister_project, ->(*) { nil }) do
+      @model.update(Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING)
+    end
+    assert_match(/no entry named/i, @model.hive_model.flash.to_s)
+  end
+
+  # Module-level stub helper (Hive::Config is a module, so MiniTest's
+  # instance-method stub doesn't apply). Saves the original singleton
+  # method and restores it in the ensure block — same shape as the
+  # `with_editor_env` helper above, just for module methods.
+  def with_config_stub(method, callable)
+    original = Hive::Config.method(method)
+    Hive::Config.singleton_class.send(:define_method, method, callable)
+    yield
+  ensure
+    Hive::Config.singleton_class.send(:define_method, method, original) if original
   end
 end

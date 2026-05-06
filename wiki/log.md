@@ -2,12 +2,19 @@
 
 Append-only log of all wiki operations.
 
-## [2026-05-06T20:49:00Z] tui — auto-continue rechecks the current marker
+## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues
 
-**Action:** Tightened the brainstorm auto-continue gate so the post-editor path re-reads the state-file marker before dispatching the suggested command. Auto-continue now only fires when the current marker is still `WAITING` / `none`; if another actor completes, starts, or errors the brainstorm while the editor is open, the stale row falls back to the manual `InputEditorExited` path instead of spawning an old `hive brainstorm ... --from 2-brainstorm` command.
+**Action:** Made the brainstorm auto-continue path observable instead of silently degrading to the generic post-save flash. `auto_continue_after_edit?` was replaced by `auto_continue_outcome`, which returns one of `:proceed`, `:silent`, `:empty_command`, or `:marker_changed`. The race / data-anomaly cases (`:empty_command`, `:marker_changed`, plus the rescue path on a malformed `suggested_command`) now dispatch a follow-up `Messages::Flash` like `auto-continue skipped for <slug>: brainstorm marker changed during edit`, so a user whose mental model is "I filled in answers, expected `hive brainstorm` to auto-fire" can actually see why it didn't. Expected-refusal cases (`exit_code != 0`, mtime unchanged, off-stage, parser says incomplete) stay silent — those are self-evident.
+
+Also tightened the surrounding rescues:
+- **`BrainstormAnswers.complete?`** extracted a private `read_lines(path)` helper that holds the only I/O rescue (`SystemCallError, EncodingError, IOError`) and `.scrub`s bytes so the parser body never sees garbled UTF-8. The parser body itself no longer has a method-level rescue; a real `ArgumentError` from a future refactor now surfaces as a crash during dev/test instead of silently turning into "auto-continue refuses to fire."
+- **`current_brainstorm_input_marker?`** dropped `EncodingError` and `ArgumentError` from its rescue list. The remaining `SystemCallError, IOError` covers the legitimate I/O failure modes; a future marker-corruption `ArgumentError` from `Hive::Markers.parse_attrs` now propagates so state-file corruption doesn't mask itself as "auto-continue stopped working." Added a docstring explaining the race-protection rationale.
+- **Editor callable mtime sample.** `before_mtime != after_mtime` was upgraded to `!before_mtime.nil? && !after_mtime.nil? && before_mtime != after_mtime`. A transient `ENOENT/EACCES` between samples no longer registers as a bogus `changed: true` (which would have produced a misleading "edited <slug>" flash even when the user saved nothing).
+
+Coverage expanded: 5 new BubbleModel integration tests (marker race tested for `<!-- COMPLETE -->`, `<!-- AGENT_WORKING -->`, `<!-- ERROR -->`; empty `suggested_command`; nil `mtime` returns `changed: false`) plus 2 new parser tests (empty file, CRLF line endings via SMB / Windows editors). The pre-existing marker-race test was strengthened to set `marker: "complete"` on the row, proving the production code reads from disk via `Hive::Markers.current` and ignores the row attr.
 
 **Refreshed pages:**
-- [[commands/tui]] — documented the fresh marker re-check and stale-row manual fallback.
+- (none — the on-screen guarantees in [[commands/tui]] are unchanged for the success path; the new failure-mode flashes are an additive UX improvement.)
 
 ## [2026-05-06T22:00:00Z] tui — extracted BrainstormAnswers + hardened the auto-continue parser
 
@@ -26,6 +33,13 @@ Coverage: 23-test unit suite directly against the new module (real fixtures on d
 
 **Refreshed pages:**
 - (none — the user-facing behavior in [[commands/tui]] is unchanged; this was a refactor + parser hardening for resilience.)
+
+## [2026-05-06T20:49:00Z] tui — auto-continue rechecks the current marker
+
+**Action:** Tightened the brainstorm auto-continue gate so the post-editor path re-reads the state-file marker before dispatching the suggested command. Auto-continue now only fires when the current marker is still `WAITING` / `none`; if another actor completes, starts, or errors the brainstorm while the editor is open, the stale row falls back to the manual `InputEditorExited` path instead of spawning an old `hive brainstorm ... --from 2-brainstorm` command.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the fresh marker re-check and stale-row manual fallback.
 
 ## [2026-05-06T17:30:00Z] tui — completed brainstorm answers auto-continue
 

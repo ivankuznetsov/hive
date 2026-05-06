@@ -34,8 +34,15 @@ module Hive
       # round in the file has every numbered question paired with a
       # numbered answer whose body is non-empty after stripping
       # HTML comments and whitespace.
+      #
+      # The I/O rescue lives in `read_lines` so that any genuine
+      # `ArgumentError`/`StandardError` from the parser body surfaces
+      # as a real crash during dev/test rather than silently turning
+      # into "auto-continue refuses to fire."
       def complete?(path)
-        lines = File.readlines(path, chomp: true)
+        lines = read_lines(path)
+        return false if lines.nil?
+
         live = live_structure_mask(lines)
         round_start = latest_round_start(lines, live)
         return false if round_start.nil?
@@ -47,14 +54,19 @@ module Hive
         return false unless questions.keys.sort == answers.keys.sort
 
         answers.values.all? { |idx| answer_filled?(lines, live, idx) }
-      rescue SystemCallError, EncodingError, IOError, ArgumentError => e
-        # ArgumentError covers `invalid byte sequence in UTF-8` raised by
-        # String#match? on garbled bytes — same conservative direction
-        # as the Errno paths: refuse to auto-continue on a file we
-        # cannot reliably parse.
-        Hive::Tui::Debug.log("brainstorm_answers", "completeness check failed: #{e.class}: #{e.message}")
-        false
       end
+
+      # `.scrub` replaces invalid byte sequences with `?` so the
+      # parser's `String#match?` calls cannot raise ArgumentError on
+      # garbled input. Returns nil on file-level failure so the caller
+      # can short-circuit without a parser-body rescue.
+      def read_lines(path)
+        File.readlines(path, chomp: true).map(&:scrub)
+      rescue SystemCallError, EncodingError, IOError => e
+        Hive::Tui::Debug.log("brainstorm_answers", "read failed: #{e.class}: #{e.message}")
+        nil
+      end
+      private_class_method :read_lines
 
       # Boolean array, parallel to `lines`, marking which lines are
       # eligible to count as live structure. A line is "dead" when

@@ -54,6 +54,27 @@ class HiveTuiBrainstormAnswersTest < Minitest::Test
     end
   end
 
+  def test_empty_file_returns_false
+    with_tmp_dir do |dir|
+      path = write_md(dir, "")
+
+      assert_equal false, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
+  def test_crlf_line_endings_parse_correctly
+    # A brainstorm.md round-tripped through a Windows editor (or
+    # touched over an SMB mount) ends up with CRLF line endings.
+    # `File.readlines(chomp: true)` strips `\n` but leaves a trailing
+    # `\r`; the parser must still recognize the structure.
+    with_tmp_dir do |dir|
+      path = File.join(dir, "brainstorm.md")
+      File.binwrite(path, "## Round 1\r\n### Q1. Scope?\r\n### A1. Done.\r\n")
+
+      assert_equal true, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
   def test_round_with_no_questions_or_answers_returns_false
     with_tmp_dir do |dir|
       path = write_md(dir, "## Round 1\n\nempty round\n")

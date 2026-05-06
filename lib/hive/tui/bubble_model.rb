@@ -649,7 +649,11 @@ module Hive
           # output is still being painted. Mirror of the pre-spawn
           # clear in `clear_terminal_for_takeover`.
           clear_terminal_for_takeover
-          changed = before_mtime != after_mtime
+          # Both samples must be non-nil to claim a change. A transient
+          # ENOENT/EACCES between samples turns `file_mtime` into nil and
+          # the asymmetric `nil != Float` would otherwise register as a
+          # bogus save.
+          changed = !before_mtime.nil? && !after_mtime.nil? && before_mtime != after_mtime
           input_editor_exit_messages(row, path, exit_code, changed).each do |message|
             @dispatch.call(message)
           end
@@ -727,46 +731,77 @@ module Hive
       end
 
       # Returns the messages to dispatch after the editor exits.
-      # Manual path: [InputEditorExited]. Auto-continue path:
-      # [InputEditorExited, DispatchCommand] — both fire so any
-      # observer of InputEditorExited (e.g. the post-save flash)
-      # also runs on the auto path. The narrow rescue around
-      # `dispatch_command_for` catches Shellwords::ParseError
-      # (an ArgumentError) on a malformed `suggested_command`
-      # without swallowing constructor errors from
-      # InputEditorExited itself.
+      # Manual path:               [InputEditorExited].
+      # Auto-continue success:     [InputEditorExited, DispatchCommand].
+      # Auto-continue suppressed:  [InputEditorExited] OR
+      #                            [InputEditorExited, Flash(reason)] for
+      #                            race / data-anomaly cases the user
+      #                            would otherwise be unable to diagnose
+      #                            from the generic post-save flash alone.
+      #
+      # The rescue around `dispatch_command_for` catches the plain
+      # `ArgumentError` raised by `Shellwords.split` on a malformed
+      # `suggested_command` without swallowing constructor errors from
+      # `InputEditorExited.new` (which lives outside the begin/rescue).
       def input_editor_exit_messages(row, path, exit_code, changed)
         exited = Hive::Tui::Messages::InputEditorExited.new(
           slug: row.slug,
           exit_code: exit_code,
           changed: changed
         )
-        return [ exited ] unless auto_continue_after_edit?(row, path, exit_code, changed)
 
-        begin
-          dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
-        rescue ArgumentError => e
-          Hive::Tui::Debug.log("input_editor", "auto-continue skipped for #{row.slug}: #{e.message}")
-          return [ exited ]
+        case auto_continue_outcome(row, path, exit_code, changed)
+        when :proceed
+          dispatch_messages_for(row, exited)
+        when :empty_command
+          [ exited, suppression_flash(row, "no suggested command on row") ]
+        when :marker_changed
+          [ exited, suppression_flash(row, "brainstorm marker changed during edit") ]
+        else # :silent — expected refusals (parser incomplete, exit nonzero, unchanged, off-stage)
+          [ exited ]
         end
+      end
 
+      def dispatch_messages_for(row, exited)
+        dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
         [ exited, dispatch ]
+      rescue ArgumentError => e
+        Hive::Tui::Debug.log("input_editor", "auto-continue skipped for #{row.slug}: #{e.message}")
+        [ exited, suppression_flash(row, "malformed suggested command") ]
       end
 
-      def auto_continue_after_edit?(row, path, exit_code, changed)
-        return false unless exit_code == 0 && changed
-        return false unless row.action_key == "needs_input"
-        return false unless row.stage.to_s == "2-brainstorm"
-        return false if row.suggested_command.to_s.empty?
-        return false unless current_brainstorm_input_marker?(path)
-
-        Hive::Tui::BrainstormAnswers.complete?(path)
+      def suppression_flash(row, reason)
+        Hive::Tui::Messages::Flash.new(text: "auto-continue skipped for #{row.slug}: #{reason}")
       end
 
+      # Returns one of:
+      #   :proceed         — fire DispatchCommand
+      #   :silent          — refuse, common-case (user can self-diagnose)
+      #   :empty_command   — refuse, surface to user (data anomaly)
+      #   :marker_changed  — refuse, surface to user (race with another actor)
+      def auto_continue_outcome(row, path, exit_code, changed)
+        return :silent unless exit_code == 0 && changed
+        return :silent unless row.action_key == "needs_input"
+        return :silent unless row.stage.to_s == "2-brainstorm"
+        return :empty_command if row.suggested_command.to_s.empty?
+        return :marker_changed unless current_brainstorm_input_marker?(path)
+        return :silent unless Hive::Tui::BrainstormAnswers.complete?(path)
+
+        :proceed
+      end
+
+      # Re-reads the on-disk marker after the editor exits to defend
+      # against a race where another actor (a sibling `hive` process,
+      # an editor on a sync mount) advanced the brainstorm to
+      # `:agent_working`, `:complete`, or `:error` while the long-lived
+      # editor was open. The captured `row.marker` is from the snapshot
+      # taken when Enter was pressed; only the freshly-read marker
+      # reflects current truth. `:none` is permitted because the first
+      # round may have no marker yet on a fresh brainstorm.md.
       def current_brainstorm_input_marker?(path)
         marker = Hive::Markers.current(path)
         marker.name == :waiting || marker.name == :none
-      rescue SystemCallError, EncodingError, IOError, ArgumentError => e
+      rescue SystemCallError, IOError => e
         Hive::Tui::Debug.log("input_editor", "auto-continue marker check failed: #{e.class}: #{e.message}")
         false
       end

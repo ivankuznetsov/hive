@@ -987,9 +987,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_open_input_editor_no_auto_dispatch_when_marker_changed_while_editing
-    # Simulates a stale row captured before the editor opened. If another
-    # actor completes the brainstorm while the editor is open, the old
-    # needs_input row must not spawn the stale suggested command.
+    # Stale row captured before the editor opened. The on-disk marker
+    # is fresh and reads `<!-- COMPLETE -->`; the `row.marker` attr is
+    # deliberately set to `"complete"` to prove the production code
+    # reads from disk via `Hive::Markers.current` and ignores
+    # the row attr (otherwise the suppression test could pass for the
+    # wrong reason — being driven by the stale row attribute).
     with_tmp_dir do |dir|
       brainstorm_md = File.join(dir, "brainstorm.md")
       File.write(brainstorm_md, <<~MD)
@@ -998,7 +1001,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         ### A1. Done.
         <!-- COMPLETE -->
       MD
-      row = make_task_row(state_file: brainstorm_md, marker: "waiting")
+      row = make_task_row(state_file: brainstorm_md, marker: "complete")
       mtimes = [ 70.0, 71.0 ]
       @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
       @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
@@ -1007,10 +1010,123 @@ class HiveTuiBubbleModelTest < Minitest::Test
       _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
 
+      assert_equal 2, @messages.length,
+        "marker race must dispatch [InputEditorExited, suppression Flash]"
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_equal true, @messages[0].changed
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1]
+      assert_match(/marker changed during edit/, @messages[1].text)
+      assert_empty mtimes
+    end
+  end
+
+  def test_open_input_editor_no_auto_dispatch_when_marker_is_agent_working
+    # Concurrent brainstorm agent picked up answers and is mid-run.
+    # Auto-continue must NOT spawn a second `hive brainstorm` against
+    # the same slug — that would race the existing process on
+    # brainstorm.md.
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. Done.
+        <!-- AGENT_WORKING -->
+      MD
+      row = make_task_row(state_file: brainstorm_md)
+      mtimes = [ 90.0, 91.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1],
+        "AGENT_WORKING marker must trigger marker-changed suppression flash"
+      assert_match(/marker changed during edit/, @messages[1].text)
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+        "AGENT_WORKING marker must NOT auto-dispatch")
+    end
+  end
+
+  def test_open_input_editor_no_auto_dispatch_when_marker_is_error
+    # Brainstorm agent crashed and left the row in :error. Re-running
+    # against an unacknowledged error state would silently retry.
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. Done.
+        <!-- ERROR -->
+      MD
+      row = make_task_row(state_file: brainstorm_md)
+      mtimes = [ 95.0, 96.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+        "ERROR marker must NOT auto-dispatch")
+    end
+  end
+
+  def test_open_input_editor_no_auto_dispatch_when_suggested_command_empty
+    # Pins the `suggested_command.to_s.empty?` guard. Without this
+    # test, removing the guard would let a nil-suggested_command row
+    # crash inside `Shellwords.split(nil)` (TypeError, not caught by
+    # the ArgumentError rescue below it).
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. Done.
+      MD
+      row = make_task_row(state_file: brainstorm_md, suggested_command: "")
+      mtimes = [ 80.0, 81.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 2, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1]
+      assert_match(/no suggested command/, @messages[1].text)
+    end
+  end
+
+  def test_open_input_editor_treats_nil_mtime_as_no_change
+    # A transient ENOENT/EACCES on either mtime sample yields nil.
+    # `nil != Float` previously registered as `changed: true` and
+    # produced a misleading "edited <slug>" flash even when the user
+    # saved nothing. Both samples must be non-nil to claim a change.
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. Done.
+      MD
+      row = make_task_row(state_file: brainstorm_md)
+      mtimes = [ nil, 100.0 ] # transient pre-edit ENOENT
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
       assert_equal 1, @messages.length
-      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first,
-        "fresh COMPLETE marker must suppress stale auto-dispatch"
-      assert_equal true, @messages.first.changed
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
+      assert_equal false, @messages.first.changed
       assert_empty mtimes
     end
   end
@@ -1040,9 +1156,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
 
-      assert_equal 1, @messages.length,
-        "malformed suggested_command falls back to manual path with no DispatchCommand"
-      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
+      assert_equal 2, @messages.length,
+        "malformed suggested_command falls back to manual path + suppression flash"
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1]
+      assert_match(/malformed suggested command/, @messages[1].text)
       assert_empty mtimes
     end
   end

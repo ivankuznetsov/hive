@@ -31,6 +31,8 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     out = Hive::Tui::Views::HelpOverlay.render(model)
     assert_includes out, "Tab",        "Tab pane-focus binding must be discoverable"
     assert_includes out, "Shift+Tab",  "Shift+Tab pane-focus binding must be discoverable"
+    assert_includes out, "Left",       "Left pane-focus binding must be discoverable"
+    assert_includes out, "Right",      "Right pane-focus binding must be discoverable"
     assert_match(/\bn\b.*new-idea/i, out, "n binding must surface with its action description")
     assert_match(/\bg\b.*top/i, out, "g (jump to top) must be discoverable")
     assert_match(/\bG\b.*bottom/i, out, "G (jump to bottom) must be discoverable")

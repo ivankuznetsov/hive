@@ -143,6 +143,33 @@ module Hive
       ERROR    = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
+
+    # Closed enum of `error_kind` values emitted by `hive forget --json`.
+    # `MISSING_NAME` is the missing-positional-argument case; `UNKNOWN_PROJECT`
+    # is a typo against a real registry; both used to share `unknown_project`,
+    # which collapsed two distinct failure modes for agent retry wrappers.
+    # `CONFIG` covers malformed config.yml + missing $HIVE_HOME — surfaced
+    # via Hive::ConfigError → exit 78. Same self-derived ALL pattern as the
+    # other ErrorKind modules so a constant added without a schema-enum
+    # update is caught by schema_files_test.
+    module ForgetErrorKind
+      MISSING_NAME    = "missing_name".freeze
+      UNKNOWN_PROJECT = "unknown_project".freeze
+      CONFIG          = "config".freeze
+      INTERNAL        = "internal".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive prune --json`.
+    # `USAGE` covers `--dry-run` flag-validation (currently unreachable; reserved
+    # for future flag work so v1 can absorb it without a v2 bump). `CONFIG`
+    # covers malformed config.yml + missing $HIVE_HOME via Hive::ConfigError.
+    module PruneErrorKind
+      USAGE    = "usage".freeze
+      CONFIG   = "config".freeze
+      INTERNAL = "internal".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
   end
 
   # Process exit-code contract for the `hive` CLI.

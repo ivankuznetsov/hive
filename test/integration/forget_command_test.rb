@@ -76,4 +76,76 @@ class ForgetCommandTest < Minitest::Test
       assert_match(/missing project NAME/, err)
     end
   end
+
+  # Distinct error_kind for missing-NAME (empty argv) vs unknown-NAME
+  # (typo against a real registry). Used to share `unknown_project`,
+  # which collapsed two distinct failure modes for agent retry wrappers.
+  def test_forget_missing_name_json_emits_missing_name_error_kind
+    with_tmp_global_config do
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Forget.new(nil, json: true).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+
+      payload = JSON.parse(out)
+      assert_equal "missing_name", payload["error_kind"],
+                   "empty NAME positional must surface as missing_name, not unknown_project"
+      assert_equal "UsageError", payload["error_class"]
+    end
+  end
+
+  # Every error envelope must carry `error_class` (cross-reviewer P1).
+  # The shared Hive::Schemas::ErrorEnvelope.build helper guarantees it;
+  # this test pins the contract end-to-end so a future rewrite that
+  # bypasses the helper trips here.
+  def test_forget_error_envelope_carries_error_class
+    with_tmp_global_config do
+      out, _err, _status = with_captured_exit do
+        Hive::Commands::Forget.new("ghost", json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal "UsageError", payload["error_class"]
+    end
+  end
+
+  # P1 #4: malformed YAML used to leak as InternalError(70). It must
+  # now surface as ConfigError → exit 78 with `error_kind: "config"`.
+  def test_forget_malformed_yaml_emits_config_error
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "registered_projects: [\nthis: is: not: yaml")
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Forget.new("anything", json: true).call
+      end
+      assert_equal Hive::ExitCodes::CONFIG, status,
+                   "malformed YAML must exit 78 (CONFIG), not 70 (SOFTWARE)"
+
+      payload = JSON.parse(out)
+      assert_equal "config", payload["error_kind"]
+      assert_equal "ConfigError", payload["error_class"]
+      assert_match(/not valid YAML/, payload["message"])
+    end
+  end
+
+  # NEW-1: typoed $HIVE_HOME used to surface as `unknown_project` /
+  # exit 64 because unregister_project silently returned nil when the
+  # config path didn't exist. validate_hive_home! is now called first
+  # so the operator sees the real cause.
+  def test_forget_with_typoed_hive_home_emits_config_error
+    bad = "/tmp/hive-typo-#{Process.pid}-#{rand(1_000_000)}"
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = bad
+
+    out, _err, status = with_captured_exit do
+      Hive::Commands::Forget.new("anything", json: true).call
+    end
+    assert_equal Hive::ExitCodes::CONFIG, status,
+                 "typoed HIVE_HOME must exit 78 (CONFIG), not 64 (USAGE)"
+
+    payload = JSON.parse(out)
+    assert_equal "config", payload["error_kind"],
+                 "typoed HIVE_HOME must not masquerade as unknown_project"
+  ensure
+    ENV["HIVE_HOME"] = prev
+  end
 end

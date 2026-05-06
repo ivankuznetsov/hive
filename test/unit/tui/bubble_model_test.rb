@@ -583,6 +583,50 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "flash must name the project AND the specific error")
   end
 
+  # NEW-2: all-unhealthy flash used to unconditionally suggest X / `hive
+  # prune`, but those only drop `missing_project_path` rows. With every
+  # project at `not_initialised`, the suggestion would land the operator
+  # on refusal flashes. The fix branches on the error mix.
+  def test_all_unhealthy_flash_points_at_prune_when_every_error_is_missing_path
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-05",
+      "projects" => [
+        { "name" => "a", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "b", "error" => "missing_project_path", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    assert_match(/press X/i, @model.hive_model.flash.to_s,
+                 "missing-only set must steer the operator at the X-key + hive prune surfaces")
+  end
+
+  def test_all_unhealthy_flash_points_at_forget_when_errors_mix
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-05",
+      "projects" => [
+        { "name" => "a", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "b", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    refute_match(/press X/i, @model.hive_model.flash.to_s,
+                 "mixed-error set must NOT suggest X (which only drops missing-path rows)")
+    assert_match(/hive forget|re-init/i, @model.hive_model.flash.to_s,
+                 "mixed-error set must point at re-init or per-name `hive forget`")
+  end
+
   def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01", "projects" => []

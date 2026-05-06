@@ -5,7 +5,10 @@ module Hive
   module Commands
     # `hive prune [--dry-run] [--json]` — drop every registry entry in
     # ~/Dev/hive/config.yml whose `path` no longer points at a directory.
-    # The .hive-state directory on disk (when present) is not touched.
+    # Also drops malformed entries (non-Hash rows, rows missing `path`,
+    # rows whose `path` isn't a String) — these are hand-edit accidents
+    # and have always been undisplayable in `hive status`. The
+    # .hive-state directory on disk (when present) is not touched.
     #
     # Common after running `hive init` against `mktemp -d` directories
     # for tests/dogfooding: the tmp dirs vanish, the registry entries do
@@ -29,9 +32,9 @@ module Hive
       end
 
       def do_call
-        before = Hive::Config.registered_projects
-        removed = Hive::Config.prune_missing_projects!(dry_run: @dry_run)
-        kept_count = before.size - removed.size
+        result = Hive::Config.prune_missing_projects!(dry_run: @dry_run)
+        removed = result.fetch(:removed)
+        kept_count = result.fetch(:kept_count)
 
         if @json
           puts JSON.generate(success_payload(removed, kept_count))
@@ -54,17 +57,26 @@ module Hive
       end
 
       def entry_payload(entry)
+        path = entry["path"].is_a?(String) ? entry["path"] : ""
         {
-          "name" => entry["name"],
-          "path" => entry["path"],
-          "hive_state_path" => entry["hive_state_path"] || File.join(entry["path"], ".hive-state")
+          "name" => entry["name"].to_s,
+          "path" => path,
+          "hive_state_path" => entry["hive_state_path"] ||
+            (path.empty? ? "" : File.join(path, ".hive-state"))
         }
       end
 
       def render_text(removed, kept_count)
         verb = @dry_run ? "would remove" : "removed"
         if removed.empty?
-          puts "no stale entries (kept #{kept_count})"
+          # Same hint regardless of dry-run state: the registry is
+          # already clean, and a dry-run vs. live invocation produces
+          # the same result. Without naming dry-run here, an operator
+          # who ran `hive prune --dry-run` couldn't tell the flag was
+          # honoured (versus silently dropped) when there's nothing to
+          # remove.
+          suffix = @dry_run ? " (dry-run; nothing to do)" : ""
+          puts "no stale entries (kept #{kept_count})#{suffix}"
           return
         end
 
@@ -76,14 +88,11 @@ module Hive
       end
 
       def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-prune",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-prune"),
-          "ok" => false,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-prune",
+          error: error,
+          error_kind: error_kind_for(error)
+        )
         puts JSON.generate(payload)
         @stdout_written = true
       rescue Errno::EPIPE, JSON::GeneratorError
@@ -92,9 +101,9 @@ module Hive
 
       def error_kind_for(error)
         case error
-        when Hive::ConfigError   then "config"
-        when Hive::InternalError then "internal"
-        else                          "error"
+        when Hive::ConfigError   then Hive::Schemas::PruneErrorKind::CONFIG
+        when Hive::InternalError then Hive::Schemas::PruneErrorKind::INTERNAL
+        else                          Hive::Schemas::PruneErrorKind::INTERNAL
         end
       end
     end

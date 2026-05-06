@@ -970,11 +970,18 @@ module Hive
         end
 
         # scope=0 with all-unhealthy projects, or scope out-of-range.
+        # The recovery hint depends on the actual error mix: X-key and
+        # `hive prune` only work for `missing_project_path` rows, so
+        # pointing at them when every broken project is `not_initialised`
+        # would steer the operator at refusal flashes. Branch on the
+        # error set so the suggested action matches what's drop-eligible.
         broken = snap.projects.select(&:error)
-        if broken.size == snap.projects.size
+        return "no projects — run `hive init <path>` first" if broken.size != snap.projects.size
+
+        if broken.all? { |p| p.error == "missing_project_path" }
           "all registered projects are unhealthy — press X (or `hive prune`) to drop missing entries"
         else
-          "no projects — run `hive init <path>` first"
+          "all registered projects are unhealthy — re-init the broken ones or `hive forget` per-name"
         end
       end
 

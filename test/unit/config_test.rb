@@ -824,9 +824,11 @@ class ConfigTest < Minitest::Test
         Hive::Config.register_project(name: "dead", path: "/tmp/hive-prune-#{rand(1_000_000)}-gone")
         Hive::Config.register_project(name: "dead2", path: "/tmp/hive-prune-#{rand(1_000_000)}-also-gone")
 
-        removed = Hive::Config.prune_missing_projects!
-        names = removed.map { |e| e["name"] }.sort
+        result = Hive::Config.prune_missing_projects!
+        names = result.fetch(:removed).map { |e| e["name"] }.sort
         assert_equal [ "dead", "dead2" ], names
+        assert_equal 1, result.fetch(:kept_count),
+                     "kept_count must reflect rows surviving the prune"
 
         kept = Hive::Config.registered_projects.map { |p| p["name"] }
         assert_equal [ "live" ], kept
@@ -841,10 +843,11 @@ class ConfigTest < Minitest::Test
         Hive::Config.register_project(name: "dead", path: "/tmp/hive-prune-#{rand(1_000_000)}-gone")
 
         before = File.read(File.join(home, "config.yml"))
-        removed = Hive::Config.prune_missing_projects!(dry_run: true)
+        result = Hive::Config.prune_missing_projects!(dry_run: true)
         after = File.read(File.join(home, "config.yml"))
 
-        assert_equal [ "dead" ], removed.map { |e| e["name"] }
+        assert_equal [ "dead" ], result.fetch(:removed).map { |e| e["name"] }
+        assert_equal 1, result.fetch(:kept_count)
         assert_equal before, after, "dry-run must not rewrite config.yml"
         assert_equal 2, Hive::Config.registered_projects.size,
                      "registry must still contain both entries after a dry-run"
@@ -852,16 +855,127 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_prune_missing_projects_returns_empty_when_all_paths_exist
+  def test_prune_missing_projects_returns_empty_removed_when_all_paths_exist
     with_tmp_global_config do
       Dir.mktmpdir("hive-live-1") do |a|
         Dir.mktmpdir("hive-live-2") do |b|
           Hive::Config.register_project(name: "a", path: a)
           Hive::Config.register_project(name: "b", path: b)
-          assert_empty Hive::Config.prune_missing_projects!
+          result = Hive::Config.prune_missing_projects!
+          assert_empty result.fetch(:removed),
+                       "no rows should be dropped when every path exists"
+          assert_equal 2, result.fetch(:kept_count)
           assert_equal 2, Hive::Config.registered_projects.size
         end
       end
     end
+  end
+
+  # Regression for the P0 Array#- subtraction bug: two registry rows
+  # with identical content (same name + same path) used to be both
+  # deleted by `entries - [removed]` because Array# uses Hash#==
+  # equality. Index-based delete removes exactly the row at the matched
+  # index. We can't reach this state via register_project (which dedups
+  # by name) but a hand-edited config.yml or a write race can produce
+  # it, and the loader's tolerance for malformed rows means it survives
+  # to runtime.
+  def test_unregister_project_with_identical_duplicate_entries_removes_only_one
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            { "name" => "dup", "path" => "/tmp/hive-dup", "hive_state_path" => "/tmp/hive-dup/.hive-state" },
+            { "name" => "dup", "path" => "/tmp/hive-dup", "hive_state_path" => "/tmp/hive-dup/.hive-state" }
+          ]
+        }.to_yaml
+      )
+
+      removed = Hive::Config.unregister_project(name: "dup")
+      refute_nil removed
+      assert_equal "dup", removed["name"]
+
+      remaining = YAML.safe_load(File.read(File.join(home, "config.yml")))["registered_projects"]
+      assert_equal 1, remaining.size,
+                   "Array#- subtraction would have cleared both identical rows; index-based delete must keep one"
+      assert_equal "dup", remaining.first["name"]
+    end
+  end
+
+  # Loader tolerance: a hand-edited row (non-Hash, missing path, nil
+  # path) used to crash `registered_projects` and brick every command.
+  # Now the loader skips invalid rows so the rest of the surface stays
+  # usable; `hive prune` operates below the loader and drops them.
+  def test_registered_projects_skips_malformed_rows_instead_of_raising
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            { "name" => "good", "path" => "/tmp/hive-good" },
+            "not-a-hash",
+            { "name" => "missing-path" },
+            { "name" => nil, "path" => "/tmp/hive-anon" },
+            { "name" => "nil-path", "path" => nil }
+          ]
+        }.to_yaml
+      )
+
+      assert_equal [ "good" ], Hive::Config.registered_projects.map { |p| p["name"] }
+    end
+  end
+
+  def test_prune_drops_malformed_rows_and_reports_them
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live") do |live_dir|
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              { "name" => "live", "path" => live_dir, "hive_state_path" => File.join(live_dir, ".hive-state") },
+              "not-a-hash",
+              { "name" => "missing-path" }
+            ]
+          }.to_yaml
+        )
+
+        result = Hive::Config.prune_missing_projects!
+        assert_equal 2, result.fetch(:removed).size,
+                     "the non-Hash row and the missing-path row must both be dropped"
+        assert_equal 1, result.fetch(:kept_count)
+      end
+    end
+  end
+
+  # Psych::SyntaxError on malformed YAML used to leak as InternalError
+  # (exit 70) — schemas promise exit 78 (CONFIG) for "bad config".
+  def test_registered_projects_rewraps_psych_syntax_error_as_config_error
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "registered_projects: [\nthis: is: not: yaml")
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.registered_projects }
+      assert_match(/not valid YAML/, err.message)
+    end
+  end
+
+  # NEW-1: unregister_project must validate $HIVE_HOME first so a typoed
+  # env var surfaces as ConfigError (exit 78), not as a missing-name
+  # USAGE error (exit 64) that masks the real problem.
+  def test_unregister_project_validates_hive_home_when_explicitly_missing
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = "/tmp/hive-does-not-exist-#{Process.pid}-#{rand(1_000_000)}"
+    err = assert_raises(Hive::ConfigError) { Hive::Config.unregister_project(name: "anything") }
+    assert_match(/HIVE_HOME/, err.message)
+  ensure
+    ENV["HIVE_HOME"] = prev
+  end
+
+  def test_prune_missing_projects_validates_hive_home_when_explicitly_missing
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = "/tmp/hive-does-not-exist-#{Process.pid}-#{rand(1_000_000)}"
+    err = assert_raises(Hive::ConfigError) { Hive::Config.prune_missing_projects! }
+    assert_match(/HIVE_HOME/, err.message)
+  ensure
+    ENV["HIVE_HOME"] = prev
   end
 end

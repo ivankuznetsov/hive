@@ -173,19 +173,49 @@ module Hive
       path = global_config_path
       return [] unless File.exist?(path)
 
-      data = YAML.safe_load(File.read(path)) || {}
+      data = load_global_config(path)
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
 
-      Array(data["registered_projects"]).map do |entry|
-        raise ConfigError, "registered_projects entries must be hashes" unless entry.is_a?(Hash)
+      # Tolerate hand-edit accidents: a non-Hash row, a row missing
+      # `name`, or a row whose `path` isn't a String would previously
+      # raise here and brick every command (status / forget / prune /
+      # the TUI) until the operator hand-fixed config.yml. Treat such
+      # rows as invisible at the loader level so the rest of the
+      # surface stays usable; `hive prune` operates on the raw entries
+      # below the loader and is the cleanup verb for this case.
+      Array(data["registered_projects"]).each_with_object([]) do |entry, out|
+        next unless valid_registry_entry?(entry)
 
-        {
-          "name" => entry.fetch("name"),
-          "path" => File.expand_path(entry.fetch("path")),
-          "hive_state_path" => entry["hive_state_path"] ||
-            File.join(File.expand_path(entry.fetch("path")), ".hive-state")
+        abs_path = File.expand_path(entry["path"])
+        out << {
+          "name" => entry["name"],
+          "path" => abs_path,
+          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state")
         }
       end
+    end
+
+    # Shape gate shared by the loader and `prune`'s predicate so the
+    # two surfaces agree on what counts as a valid registry row.
+    # Without this, the loader would silently skip a corrupted entry
+    # while prune would also fail to drop it (its old predicate only
+    # matched `!File.directory?` on rows that already had a String
+    # path), and the entry would persist forever.
+    def valid_registry_entry?(entry)
+      entry.is_a?(Hash) && entry["name"].is_a?(String) && entry["path"].is_a?(String)
+    end
+
+    # YAML.safe_load surfaces Psych::SyntaxError on malformed config
+    # files. Without this rewrap the error escaped as ConfigError or
+    # InternalError depending on the call site — schemas promised
+    # exit 78 for "bad config" but the caller observed exit 70. Map
+    # all Psych errors to ConfigError so every command's --json
+    # envelope reports `error_kind: "config"` / `exit_code: 78` and
+    # the TUI's narrow rescue (`Hive::ConfigError` only) catches them.
+    def load_global_config(path)
+      YAML.safe_load(File.read(path)) || {}
+    rescue Psych::SyntaxError => e
+      raise ConfigError, "global config at #{path} is not valid YAML: #{e.message}"
     end
 
     def find_project(name)
@@ -195,7 +225,7 @@ module Hive
     def register_project(name:, path:)
       FileUtils.mkdir_p(hive_home)
       data = if File.exist?(global_config_path)
-               YAML.safe_load(File.read(global_config_path)) || {}
+               load_global_config(global_config_path)
       else
                {}
       end
@@ -219,45 +249,82 @@ module Hive
     # registry and the on-disk state are independent, and a deregister
     # may target a project whose path is gone (the common case) or one
     # the user simply no longer wants tracked.
+    #
+    # Validates $HIVE_HOME first so a typoed env var surfaces as
+    # ConfigError (exit 78) rather than masquerading as `unknown_project`
+    # / exit 64 — without this, an operator with a bad HIVE_HOME saw
+    # "no entry named foo" and would chase a non-existent registry typo
+    # instead of fixing the env var.
+    #
+    # Index-based delete (not Array#- subtraction): two registry rows
+    # with the same name and content are equal under `Hash#==`, so
+    # `entries - [removed]` would clear BOTH. delete_at on the matched
+    # index removes exactly the row the operator named.
     def unregister_project(name:)
+      validate_hive_home!
       return nil unless File.exist?(global_config_path)
 
-      data = YAML.safe_load(File.read(global_config_path)) || {}
+      data = load_global_config(global_config_path)
       raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
       entries = Array(data["registered_projects"])
-      removed = entries.find { |p| p.is_a?(Hash) && p["name"] == name }
-      return nil if removed.nil?
+      idx = entries.index { |p| p.is_a?(Hash) && p["name"] == name }
+      return nil if idx.nil?
 
-      data["registered_projects"] = entries - [ removed ]
+      removed = entries[idx]
+      remaining = entries.dup
+      remaining.delete_at(idx)
+      data["registered_projects"] = remaining
       File.write(global_config_path, data.to_yaml)
       removed
     end
 
     # Drop every registry entry whose `path` no longer points at a
-    # directory on disk. Returns the removed entries (possibly empty).
-    # Used by `hive prune` and the TUI's stale-project drop key. The
-    # filesystem check is `File.directory?` (not `exist?`) so a stray
-    # leftover file at the registered path doesn't masquerade as live.
-    # Pass `dry_run: true` to compute the would-be-removed list without
-    # rewriting global_config_path.
+    # directory on disk OR whose row shape is invalid (non-Hash / missing
+    # / non-String name or path). Used by `hive prune` and the TUI's
+    # stale-project drop key. The filesystem check is `File.directory?`
+    # (not `exist?`) so a stray leftover file at the registered path
+    # doesn't masquerade as live. Pass `dry_run: true` to compute the
+    # would-be-removed list without rewriting global_config_path.
+    #
+    # Returns a Hash:
+    #   {
+    #     removed: Array<Hash>,    # entries dropped (or that would be)
+    #     kept_count: Integer      # entries remaining after the drop
+    #   }
+    #
+    # Computing kept_count from the in-memory `entries` array (rather
+    # than re-reading via `registered_projects.size`) closes the
+    # consistency window where a concurrent register/forget between the
+    # two reads produced inconsistent counts.
     def prune_missing_projects!(dry_run: false)
-      return [] unless File.exist?(global_config_path)
+      validate_hive_home!
+      return { removed: [], kept_count: 0 } unless File.exist?(global_config_path)
 
-      data = YAML.safe_load(File.read(global_config_path)) || {}
+      data = load_global_config(global_config_path)
       raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
       entries = Array(data["registered_projects"])
-      removed, kept = entries.partition do |entry|
-        entry.is_a?(Hash) && entry["path"].is_a?(String) && !File.directory?(entry["path"])
-      end
-      return [] if removed.empty?
+      removed, kept = entries.partition { |entry| droppable_registry_entry?(entry) }
+      result = { removed: removed, kept_count: kept.size }
+      return result if removed.empty?
 
       unless dry_run
         data["registered_projects"] = kept
         File.write(global_config_path, data.to_yaml)
       end
-      removed
+      result
+    end
+
+    # Predicate for prune: drops invalid rows AND rows whose path is
+    # gone. The shape branch and the directory-existence branch are
+    # both true for "this row should not be in the registry", so
+    # corrupted rows surface in the prune output (and `removed_count`)
+    # exactly like missing-path rows.
+    def droppable_registry_entry?(entry)
+      return true unless valid_registry_entry?(entry)
+
+      !File.directory?(entry["path"])
     end
 
     # Recursive deep-merge: descends into nested Hashes so a partial

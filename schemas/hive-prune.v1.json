@@ -49,23 +49,36 @@
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
       "properties": {
         "schema": { "const": "hive-prune" },
         "schema_version": { "const": 1 },
         "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Matches every other hive-* error envelope."
+        },
         "error_kind": {
           "type": "string",
           "enum": [
+            "usage",
             "config",
-            "internal",
-            "error"
-          ]
+            "internal"
+          ],
+          "description": "usage = reserved for future flag-validation (currently unreachable; pre-declared so v1 absorbs it without a v2 bump). config = malformed config.yml or missing $HIVE_HOME (exit 78). internal = uncategorised crash (exit 70)."
         },
         "exit_code": {
           "type": "integer",
-          "enum": [1, 70, 78],
-          "description": "Hive::ExitCodes. 1=GENERIC, 70=SOFTWARE, 78=CONFIG."
+          "enum": [1, 64, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 78=CONFIG."
         },
         "message": { "type": "string" }
       }

@@ -91,4 +91,78 @@ class PruneCommandTest < Minitest::Test
       end
     end
   end
+
+  # P1 #4 + #5: a malformed config used to leak as InternalError(70).
+  # Now: ConfigError → exit 78 with `error_kind: "config"`.
+  def test_prune_malformed_yaml_emits_config_error
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), "registered_projects: [\nthis: is: not: yaml")
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Prune.new(json: true).call
+      end
+      assert_equal Hive::ExitCodes::CONFIG, status
+
+      payload = JSON.parse(out)
+      assert_equal "config", payload["error_kind"]
+      assert_equal "ConfigError", payload["error_class"]
+    end
+  end
+
+  # NEW-1: typoed $HIVE_HOME must surface as CONFIG, not silently no-op.
+  def test_prune_with_typoed_hive_home_emits_config_error
+    bad = "/tmp/hive-typo-#{Process.pid}-#{rand(1_000_000)}"
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = bad
+
+    out, _err, status = with_captured_exit do
+      Hive::Commands::Prune.new(json: true).call
+    end
+    assert_equal Hive::ExitCodes::CONFIG, status
+
+    payload = JSON.parse(out)
+    assert_equal "config", payload["error_kind"]
+  ensure
+    ENV["HIVE_HOME"] = prev
+  end
+
+  # P1 #5: hand-edited malformed registry rows must be reported as
+  # droppable instead of bricking the loader. They show up in `removed`
+  # alongside missing-path entries.
+  def test_prune_drops_malformed_registry_rows
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live") do |live_dir|
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              { "name" => "live", "path" => live_dir, "hive_state_path" => File.join(live_dir, ".hive-state") },
+              "garbage-non-hash-row",
+              { "name" => "missing-path-key" }
+            ]
+          }.to_yaml
+        )
+
+        out, _err = capture_io { Hive::Commands::Prune.new(json: true).call }
+        payload = JSON.parse(out)
+        assert_equal true, payload["ok"]
+        assert_equal 2, payload["removed_count"],
+                     "both malformed rows must be dropped"
+        assert_equal 1, payload["kept_count"]
+      end
+    end
+  end
+
+  # `prune --dry-run` on an empty / clean registry must say so AND
+  # surface that the dry-run flag was honoured (P3 #27 fix).
+  def test_prune_dry_run_with_no_stale_entries_says_dry_run
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        Hive::Config.register_project(name: "live", path: live_dir)
+        out, _err = capture_io { Hive::Commands::Prune.new(dry_run: true).call }
+        assert_match(/no stale entries/, out)
+        assert_match(/dry-run/, out, "dry-run flag must be visible even when nothing changes")
+      end
+    end
+  end
 end

@@ -40,19 +40,32 @@
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
       "properties": {
         "schema": { "const": "hive-forget" },
         "schema_version": { "const": 1 },
         "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Matches every other hive-* error envelope."
+        },
         "error_kind": {
           "type": "string",
           "enum": [
+            "missing_name",
             "unknown_project",
             "config",
-            "internal",
-            "error"
-          ]
+            "internal"
+          ],
+          "description": "missing_name = NAME positional was empty/whitespace. unknown_project = NAME does not match any registry entry. config = malformed config.yml or missing $HIVE_HOME (exit 78). internal = uncategorised crash (exit 70)."
         },
         "exit_code": {
           "type": "integer",

@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-06T10:00:00Z] forget / prune / TUI X-key — registry cleanup surfaces
+
+**Action:** Three new registry-cleanup surfaces landed (`hive forget NAME`, `hive prune [--dry-run]`, TUI grid `X` keystroke), all idempotent and gated to safe targets. Each CLI verb honours `--json` with a published schema (`hive-forget.v1.json` / `hive-prune.v1.json`); error envelopes route through `Hive::Schemas::ErrorEnvelope.build` and carry `error_class` like every other hive-* envelope. `Hive::Schemas::ForgetErrorKind` and `PruneErrorKind` modules pin the closed enums (`missing_name`, `unknown_project`, `usage`, `config`, `internal`); `schema_files_test.rb` enforces producer/schema parity. `Hive::Config.unregister_project` now uses index-based delete (Array#- subtraction would have cleared duplicate-content rows). `Hive::Config.registered_projects` tolerates malformed registry entries (non-Hash, missing `path`, nil values) by skipping them; `Hive::Config.prune_missing_projects!` reports them as droppable so the cleanup path is complete. `Psych::SyntaxError` on a malformed `config.yml` is rewrapped as `Hive::ConfigError` (exit 78) instead of leaking as `InternalError` (exit 70) — the TUI's narrow `Hive::ConfigError` rescue now catches malformed-YAML cases too. `unregister_project` and `prune_missing_projects!` validate `$HIVE_HOME` first so a typoed env var surfaces as `config` (exit 78) rather than masquerading as `unknown_project` (exit 64). The TUI all-unhealthy flash branches on the actual error mix instead of unconditionally pointing at X / `hive prune` (which are gated to `missing_project_path` rows only).
+
+**Refreshed pages:**
+- New: [[commands/forget]] — full surface, idempotency caveat, error_kind table.
+- New: [[commands/prune]] — full surface, dry-run semantics, symlink note.
+- [[cli]] — added `hive forget` and `hive prune` rows to the command table; updated the `--json` enumeration to include both new verbs and to mention `error_class` on error envelopes.
+- [[commands/tui]] — added the grid-mode `X` keystroke row to the keybindings table with cross-links to forget/prune.
+- [[index]] — bumped page count to 45; added forget/prune list entries.
+
 ## [2026-05-05T20:15:00Z] tui — review-waiting editor target correction
 
 **Action:** Corrected the needs-input editor docs after review found that `reviews/escalations-NN.md` and `reviews/fix-guardrail-NN.md` are orchestrator-owned files, while the review resume path consumes `[x]` decisions from reviewer-authored files. `Enter` on `:review_waiting` now targets the single reviewer file for the pass when unambiguous, or the `reviews/` directory when multiple source files or a fix-guardrail inspection gate are involved.

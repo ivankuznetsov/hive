@@ -155,16 +155,17 @@ module Hive
         end
       end
 
-      # Enter on a `needs_input` row dispatches the row's suggested
-      # command — same effect as pressing the verb keystroke for that
-      # action. The TUI is for keystroke-driven dispatch; editing the
-      # state file belongs in the user's own shell.
+      # Enter on a `needs_input` row opens the row's input file in the
+      # user's editor. Re-running the agent on Enter would just spawn
+      # another spawn against an unchanged state file — but the agent
+      # emitted `<!-- WAITING -->` precisely because it wants human
+      # edits. The verb keys (`b`/`p`/`d`/`r`/`P`) remain the explicit
+      # way to rerun the stage after editing. BubbleModel resolves the
+      # editor target from the row (state_file by default; reviewer
+      # source files / reviews directory for `:review_waiting`) so
+      # KeyMap stays pure.
       def needs_input_message(row)
-        if row.suggested_command.nil?
-          return Messages::Flash.new(text: "no command available — task is #{row.action_label}")
-        end
-
-        dispatch_command_for(row.suggested_command)
+        Messages::OpenInputEditor.new(row: row)
       end
 
       def enter_fallback_message(row)

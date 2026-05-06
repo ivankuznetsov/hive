@@ -32,7 +32,7 @@ module Hive
         { mode: :grid, key: "Tab",       action: :pane_focus_toggle,  description: "toggle pane focus (left ↔ right)" },
         { mode: :grid, key: "Shift+Tab", action: :pane_focus_toggle,  description: "toggle pane focus (same as Tab)" },
         { mode: :grid, key: "h",         action: :pane_focus_left,    description: "jump focus to the projects pane" },
-        { mode: :grid, key: "Left",      action: :pane_focus_left,    description: "jump focus to the projects pane" },
+        { mode: :grid, key: "Left",      action: :pane_focus_left,    description: "jump focus to the projects pane (two-pane layout only)" },
         { mode: :grid, key: "l",         action: :pane_focus_right,   description: "jump focus to the tasks pane" },
         { mode: :grid, key: "Right",     action: :pane_focus_right,   description: "jump focus to the tasks pane" },
         { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open contextual mode: input editor on `needs_input`, triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command" },
@@ -40,6 +40,7 @@ module Hive
         { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
         { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },
         { mode: :grid, key: "0",         action: :project_scope,      description: "clear project scope (★ All projects)" },
+        { mode: :grid, key: "X",         action: :drop_missing,       description: "drop the scoped project from the registry (same as `hive forget`) — only when shown as `(missing)`; healthy projects are refused" },
         { mode: :grid, key: "?",         action: :help,               description: "this help overlay" },
         { mode: :grid, key: "q",         action: :quit,               description: "quit" },
         # Triage mode — Space and bulk rebindings.

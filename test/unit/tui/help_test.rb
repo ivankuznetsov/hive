@@ -96,6 +96,7 @@ class TuiHelpTest < Minitest::Test
       cursor_down cursor_up cursor_jump_top cursor_jump_bottom
       open_contextual filter project_scope help quit
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
+      drop_missing
     ]
     Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|
       action = entry[:action]

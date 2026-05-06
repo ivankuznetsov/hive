@@ -2,6 +2,8 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "hive/commands/approve"
+require "hive/commands/forget"
+require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
@@ -542,5 +544,149 @@ class SchemaFilesTest < Minitest::Test
       by_bias by_phase project project_root reverted_commits rollback_rate total_fix_commits
     ].sort, project_required,
                  "schema/producer required-key drift in hive-metrics-rollback-rate.v1.json (project)"
+  end
+
+  # ── hive-forget ────────────────────────────────────────────────────────
+
+  def test_hive_forget_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-forget")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-forget",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_forget_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+
+    assert_equal %w[hive_state_path name ok path schema schema_version].sort,
+                 schema_required,
+                 "schema/producer required-key drift in hive-forget.v1.json"
+
+    # Producer-driven check: build a payload via the actual emitter and
+    # confirm its keys match the schema's required set. If a future
+    # producer change adds or removes a field without a schema update,
+    # this will fail before CI.
+    producer = Hive::Commands::Forget.new("anything", json: true).send(
+      :success_payload,
+      { "name" => "demo", "path" => "/tmp/hive-demo", "hive_state_path" => "/tmp/hive-demo/.hive-state" }
+    )
+    assert_equal schema_required, producer.keys.sort,
+                 "Forget#success_payload must emit exactly the schema's required keys"
+  end
+
+  def test_hive_forget_error_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Schemas::ForgetErrorKind::ALL.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror Hive::Schemas::ForgetErrorKind::ALL"
+  end
+
+  def test_hive_forget_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget"))))
+    cases = {
+      Hive::Schemas::ForgetErrorKind::MISSING_NAME =>
+        Hive::Commands::Forget::UsageError.new("missing", error_kind: Hive::Schemas::ForgetErrorKind::MISSING_NAME),
+      Hive::Schemas::ForgetErrorKind::UNKNOWN_PROJECT =>
+        Hive::Commands::Forget::UsageError.new("not found", error_kind: Hive::Schemas::ForgetErrorKind::UNKNOWN_PROJECT),
+      Hive::Schemas::ForgetErrorKind::CONFIG => Hive::ConfigError.new("bad config"),
+      Hive::Schemas::ForgetErrorKind::INTERNAL => Hive::InternalError.new("boom")
+    }
+    cases.each do |kind, error|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-forget",
+        error: error,
+        error_kind: kind
+      )
+      assert schemer.valid?(payload),
+             "hive-forget ErrorPayload arm must accept error_kind=#{kind.inspect} (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_hive_forget_error_payload_rejects_unknown_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget"))))
+    payload = {
+      "schema" => "hive-forget",
+      "schema_version" => 1,
+      "ok" => false,
+      "error_class" => "MysteryError",
+      "error_kind" => "made_up_kind",
+      "exit_code" => 1,
+      "message" => "nope"
+    }
+    refute schemer.valid?(payload),
+           "schema must reject error_kind values outside ForgetErrorKind::ALL"
+  end
+
+  # ── hive-prune ─────────────────────────────────────────────────────────
+
+  def test_hive_prune_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-prune")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-prune",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_prune_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-prune")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+
+    assert_equal %w[dry_run kept_count ok removed removed_count schema schema_version].sort,
+                 schema_required,
+                 "schema/producer required-key drift in hive-prune.v1.json"
+
+    producer = Hive::Commands::Prune.new(json: true).send(:success_payload, [], 0)
+    assert_equal schema_required, producer.keys.sort,
+                 "Prune#success_payload must emit exactly the schema's required keys"
+  end
+
+  def test_hive_prune_error_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-prune")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Schemas::PruneErrorKind::ALL.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror Hive::Schemas::PruneErrorKind::ALL"
+  end
+
+  def test_hive_prune_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-prune"))))
+    cases = {
+      Hive::Schemas::PruneErrorKind::USAGE => Hive::InvalidTaskPath.new("usage"),
+      Hive::Schemas::PruneErrorKind::CONFIG => Hive::ConfigError.new("bad config"),
+      Hive::Schemas::PruneErrorKind::INTERNAL => Hive::InternalError.new("boom")
+    }
+    cases.each do |kind, error|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-prune",
+        error: error,
+        error_kind: kind
+      )
+      assert schemer.valid?(payload),
+             "hive-prune ErrorPayload arm must accept error_kind=#{kind.inspect} (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_hive_prune_error_payload_rejects_unknown_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-prune"))))
+    payload = {
+      "schema" => "hive-prune",
+      "schema_version" => 1,
+      "ok" => false,
+      "error_class" => "MysteryError",
+      "error_kind" => "made_up_kind",
+      "exit_code" => 1,
+      "message" => "nope"
+    }
+    refute schemer.valid?(payload),
+           "schema must reject error_kind values outside PruneErrorKind::ALL"
   end
 end

@@ -14,7 +14,9 @@ module Hive
       "hive-findings" => 1,
       "hive-stage-action" => 1,
       "hive-metrics-rollback-rate" => 1,
-      "hive-markers-clear" => 1
+      "hive-markers-clear" => 1,
+      "hive-forget" => 1,
+      "hive-prune" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
@@ -139,6 +141,73 @@ module Hive
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze
       ERROR    = "error".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Mixin for command classes that emit a versioned JSON envelope
+    # under `--json`. Centralises the `@stdout_written` guard, the
+    # twin `Hive::Error` / `StandardError` rescue scaffold, and the
+    # JSON-write+EPIPE-swallow boilerplate. Each consumer provides:
+    #
+    #   * `envelope_schema` — the schema name (e.g. "hive-forget")
+    #   * `envelope_error_kind(error)` — map an exception to a
+    #     closed-enum `error_kind` value
+    #
+    # Used by `Hive::Commands::Forget` and `Hive::Commands::Prune`.
+    # The eight pre-existing emit sites (Approve, Markers, Metrics,
+    # FindingToggle, Status, Run, Findings, StageAction) have not yet
+    # been migrated — see Issue for the full sweep. This module exists
+    # so new emit sites do not add an 11th copy.
+    module EnvelopeEmitter
+      def call_with_envelope
+        @stdout_written = false
+        yield
+      rescue Hive::Error => e
+        emit_envelope(e) if @json && !@stdout_written
+        raise
+      rescue StandardError => e
+        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        emit_envelope(wrapped) if @json && !@stdout_written
+        raise wrapped
+      end
+
+      def emit_envelope(error)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: envelope_schema,
+          error: error,
+          error_kind: envelope_error_kind(error)
+        )
+        puts JSON.generate(payload)
+        @stdout_written = true
+      rescue Errno::EPIPE, JSON::GeneratorError
+        @stdout_written = true
+      end
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive forget --json`.
+    # `MISSING_NAME` is the missing-positional-argument case; `UNKNOWN_PROJECT`
+    # is a typo against a real registry; both used to share `unknown_project`,
+    # which collapsed two distinct failure modes for agent retry wrappers.
+    # `CONFIG` covers malformed config.yml + missing $HIVE_HOME — surfaced
+    # via Hive::ConfigError → exit 78. Same self-derived ALL pattern as the
+    # other ErrorKind modules so a constant added without a schema-enum
+    # update is caught by schema_files_test.
+    module ForgetErrorKind
+      MISSING_NAME    = "missing_name".freeze
+      UNKNOWN_PROJECT = "unknown_project".freeze
+      CONFIG          = "config".freeze
+      INTERNAL        = "internal".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive prune --json`.
+    # `USAGE` covers `--dry-run` flag-validation (currently unreachable; reserved
+    # for future flag work so v1 can absorb it without a v2 bump). `CONFIG`
+    # covers malformed config.yml + missing $HIVE_HOME via Hive::ConfigError.
+    module PruneErrorKind
+      USAGE    = "usage".freeze
+      CONFIG   = "config".freeze
+      INTERNAL = "internal".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
   end

@@ -68,6 +68,58 @@ module Hive
       Hive::Commands::Init.new(project_path, force: options[:force]).call
     end
 
+    desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
+    long_desc <<~DESC
+      Drops the entry whose `name` matches NAME from ~/Dev/hive/config.yml.
+      The project's .hive-state directory on disk (if any) is left alone.
+
+      An unknown name is a USAGE error (64), mirroring `hive metrics
+      --project NAME`. To bulk-remove every entry whose path no longer
+      exists, use `hive prune` instead.
+
+      Exit codes: 0 success; 64 unknown project / missing NAME positional;
+      70 internal error; 78 bad config (malformed config.yml or typoed
+      $HIVE_HOME).
+
+      Examples:
+
+        hive forget demo                  # remove the entry named 'demo'
+        hive forget demo --json           # same, machine-readable envelope
+        hive forget nonexistent --json    # error envelope w/ error_kind: unknown_project
+    DESC
+    def forget(name = nil)
+      require "hive/commands/forget"
+      Hive::Commands::Forget.new(name, json: options[:json]).call
+    end
+
+    desc "prune", "Drop registry entries whose project path no longer exists"
+    long_desc <<~DESC
+      Walks ~/Dev/hive/config.yml and removes every `registered_projects`
+      entry whose `path` is not a directory on disk OR whose row shape is
+      invalid (non-Hash, missing `path`, etc. — hand-edit accidents).
+      Useful after running `hive init` against `mktemp -d` directories
+      that have since been cleaned up — the entries linger forever
+      otherwise and the TUI's project list keeps showing them as
+      `(missing)`.
+
+      With `--dry-run` the registry is not rewritten; the would-be-removed
+      list is printed (or returned via --json) for review.
+
+      Exit codes: 0 success; 70 internal error; 78 bad config.
+
+      Examples:
+
+        hive prune                        # write; print one-line summary
+        hive prune --dry-run              # preview; do not write
+        hive prune --json                 # write; emit hive-prune.v1 envelope
+        hive prune --dry-run --json       # preview as JSON for agent review
+    DESC
+    option :dry_run, type: :boolean, default: false, desc: "preview without writing"
+    def prune
+      require "hive/commands/prune"
+      Hive::Commands::Prune.new(dry_run: options[:dry_run], json: options[:json]).call
+    end
+
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
     def new_task(project, *text_parts)
       require "hive/commands/new"

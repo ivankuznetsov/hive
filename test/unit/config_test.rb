@@ -1028,7 +1028,7 @@ class ConfigTest < Minitest::Test
       File.chmod(0o400, path) # read-only
 
       err = assert_raises(Hive::ConfigError) do
-        Hive::Config.send(:write_global_config!, { "registered_projects" => [{ "name" => "x", "path" => "/tmp/x" }] })
+        Hive::Config.send(:write_global_config!, { "registered_projects" => [ { "name" => "x", "path" => "/tmp/x" } ] })
       end
       assert_match(/could not be written/, err.message)
     ensure

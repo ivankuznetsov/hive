@@ -139,6 +139,51 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil new_model.flash
   end
 
+  # ---------- InputEditorExited ----------
+
+  def test_input_editor_exited_success_with_changes_sets_continue_hint
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::InputEditorExited.new(
+        slug: "idea-260504-a1b2",
+        exit_code: 0,
+        changed: true
+      )
+    )
+
+    assert_match(/edited idea-260504-a1b2/, new_model.flash)
+    assert_match(/stage verb key/, new_model.flash)
+    refute_nil new_model.flash_set_at
+  end
+
+  def test_input_editor_exited_success_without_changes_sets_noop_hint
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::InputEditorExited.new(
+        slug: "idea-260504-a1b2",
+        exit_code: 0,
+        changed: false
+      )
+    )
+
+    assert_match(/without changes/, new_model.flash)
+    refute_nil new_model.flash_set_at
+  end
+
+  def test_input_editor_exited_nonzero_sets_exit_flash
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::InputEditorExited.new(
+        slug: "idea-260504-a1b2",
+        exit_code: 127,
+        changed: false
+      )
+    )
+
+    assert_match(/editor exited 127/, new_model.flash)
+    refute_nil new_model.flash_set_at
+  end
+
   # ---------- Tick (flash TTL aging) ----------
 
   def test_tick_clears_expired_flash

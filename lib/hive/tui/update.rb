@@ -35,6 +35,8 @@ module Hive
           [ apply_poll_failed(model, message), nil ]
         when Messages::SubprocessExited
           [ apply_subprocess_exited(model, message), nil ]
+        when Messages::InputEditorExited
+          [ apply_input_editor_exited(model, message), nil ]
         when Messages::Tick
           [ apply_tick(model), nil ]
         when Messages::YieldTick
@@ -183,6 +185,26 @@ module Hive
           flash: "`#{msg.verb}` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess.log_path}",
           flash_set_at: Time.now
         )
+      end
+
+      # Editor takeover finished. The flash distinguishes three cases
+      # so the operator can tell at a glance whether to re-run the
+      # stage (`changed`), no-op (unchanged), or investigate a missing
+      # editor binary (non-zero exit). Re-running the stage stays
+      # explicit via the verb keys; the editor handler intentionally
+      # does NOT auto-dispatch.
+      def apply_input_editor_exited(model, msg)
+        flash = if msg.exit_code == 0
+          if msg.changed
+            "edited #{msg.slug}; press the stage verb key to continue"
+          else
+            "editor closed without changes for #{msg.slug}"
+          end
+        else
+          "editor exited #{msg.exit_code} for #{msg.slug}"
+        end
+
+        model.with(flash: flash, flash_set_at: Time.now)
       end
 
       # Periodic age-out — clears expired flash messages so the status

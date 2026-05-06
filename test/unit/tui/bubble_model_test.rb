@@ -22,6 +22,30 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Bubbletea::KeyMessage.new(key_type: key_type, runes: runes)
   end
 
+  def make_task_row(action_key: "needs_input", slug: "some-slug", stage: "2-brainstorm",
+                    state_file: "/tmp/hive/some-slug/brainstorm.md",
+                    suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
+                    marker: "waiting", attrs: {}, folder: nil)
+    Hive::Tui::Snapshot::Row.new(
+      project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
+      state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: action_key, action_label: "Needs your input",
+      suggested_command: suggested_command
+    )
+  end
+
+  def with_editor_env(visual:, editor:)
+    old_visual = ENV["VISUAL"]
+    old_editor = ENV["EDITOR"]
+    visual.nil? ? ENV.delete("VISUAL") : ENV["VISUAL"] = visual
+    editor.nil? ? ENV.delete("EDITOR") : ENV["EDITOR"] = editor
+    yield
+  ensure
+    old_visual.nil? ? ENV.delete("VISUAL") : ENV["VISUAL"] = old_visual
+    old_editor.nil? ? ENV.delete("EDITOR") : ENV["EDITOR"] = old_editor
+  end
+
   # ---- Construction / init ----
 
   def test_init_returns_self_and_yield_tick
@@ -693,7 +717,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_dispatch_command_flashes_running_message_for_immediate_feedback
-    # Without the flash, pressing Enter on a `needs_input` row would
+    # Without the flash, pressing a workflow verb key would
     # produce zero visual feedback because the spawn is asynchronous —
     # the user couldn't tell their keypress did anything. The flash is
     # overwritten by SubprocessExited's success/failure flash on
@@ -716,6 +740,162 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/running.*hive develop.*hello-world-test/, @model.hive_model.flash,
       "flash must name the verb and slug the user dispatched on")
     refute_nil @model.hive_model.flash_set_at, "flash_set_at must stamp for TTL aging"
+  end
+
+  # ---- OpenInputEditor → foreground editor takeover ----
+
+  def test_open_input_editor_returns_sequence_command_and_dispatches_result
+    row = make_task_row(state_file: "/tmp/hive/some-slug/brainstorm.md")
+    seen_editor_invocation = nil
+    mtime_reads = 0
+    @model.define_singleton_method(:editor_argv) { [ "fake-editor", "--wait" ] }
+    @model.define_singleton_method(:file_mtime) do |_path|
+      mtime_reads += 1
+    end
+    @model.define_singleton_method(:run_editor) do |argv, path|
+      seen_editor_invocation = [ argv, path ]
+      0
+    end
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+
+    assert_kind_of Bubbletea::SequenceCommand, cmd
+    classes = cmd.commands.map(&:class)
+    assert_equal(
+      [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+      classes
+    )
+    assert_match(/editing some-slug/, @model.hive_model.flash)
+
+    exec_cmd = cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
+    exec_cmd.callable.call
+
+    assert_equal [ [ "fake-editor", "--wait" ], "/tmp/hive/some-slug/brainstorm.md" ], seen_editor_invocation
+    assert_equal 1, @messages.length
+    assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
+    assert_equal "some-slug", @messages.first.slug
+    assert_equal 0, @messages.first.exit_code
+    assert_equal true, @messages.first.changed
+    assert_equal 2, mtime_reads
+  end
+
+  def test_open_input_editor_dispatches_unchanged_when_mtime_is_same
+    row = make_task_row(state_file: "/tmp/hive/some-slug/brainstorm.md")
+    mtimes = [ 42.0, 42.0 ]
+    @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+    @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+    @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+    cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+    assert_equal false, @messages.first.changed
+    assert_empty mtimes
+  end
+
+  def test_open_input_editor_with_missing_state_file_flashes_without_command
+    row = make_task_row(state_file: nil)
+    _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+
+    assert_nil cmd
+    assert_match(/no input file/, @model.hive_model.flash)
+  end
+
+  def test_open_input_editor_with_invalid_editor_command_flashes_without_command
+    row = make_task_row
+
+    with_editor_env(visual: "\"", editor: nil) do
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+
+      assert_nil cmd
+      assert_match(/editor command invalid/, @model.hive_model.flash)
+    end
+  end
+
+  def test_run_editor_translates_missing_editor_to_command_not_found_exit
+    missing_editor = "hive-test-missing-editor-#{Process.pid}-#{object_id}"
+
+    exit_code = @model.send(:run_editor, [ missing_editor ], "/tmp/missing-state.md")
+
+    assert_equal Hive::Tui::Subprocess::COMMAND_NOT_FOUND_EXIT, exit_code
+  end
+
+  def test_open_input_editor_targets_single_review_waiting_source_reviewer_file
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] real finding\n")
+      File.write(File.join(reviews, "escalations-02.md"), "## claude-02.md\n- [ ] real finding\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "escalations" => "1" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal(
+        [ [ "fake-editor" ], File.join(reviews, "claude-02.md") ],
+        seen_editor_invocation
+      )
+    end
+  end
+
+  def test_open_input_editor_targets_reviews_dir_when_multiple_review_waiting_sources
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] claude finding\n")
+      File.write(File.join(reviews, "codex-02.md"), "## High\n- [ ] codex finding\n")
+      File.write(File.join(reviews, "escalations-02.md"), "## mixed\n- [ ] real finding\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "escalations" => "2" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], reviews ], seen_editor_invocation
+    end
+  end
+
+  def test_open_input_editor_targets_reviews_dir_for_fix_guardrail_review_waiting
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-03.md"), "## High\n- [x] original fix\n")
+      File.write(File.join(reviews, "fix-guardrail-03.md"), "- [ ] shell_pipe_to_interpreter\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "3", "reason" => "fix_guardrail" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], reviews ], seen_editor_invocation
+    end
+  end
+
+  def capture_input_editor_invocation(row)
+    seen_editor_invocation = nil
+    @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+    @model.define_singleton_method(:file_mtime) { |_path| 0.0 }
+    @model.define_singleton_method(:run_editor) do |argv, path|
+      seen_editor_invocation = [ argv, path ]
+      0
+    end
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+    cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+    seen_editor_invocation
   end
 
   # ---- Late-binding dispatch (so App.run_charm can wire runner.method(:send)) ----

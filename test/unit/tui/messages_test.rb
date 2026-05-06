@@ -41,6 +41,23 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal 4, msg.exit_code
   end
 
+  def test_input_editor_exited_carries_edit_result
+    msg = Hive::Tui::Messages::InputEditorExited.new(
+      slug: "idea-260504-a1b2",
+      exit_code: 0,
+      changed: true
+    )
+    assert_equal "idea-260504-a1b2", msg.slug
+    assert_equal 0, msg.exit_code
+    assert_equal true, msg.changed
+  end
+
+  def test_open_input_editor_carries_row
+    row = Object.new
+    msg = Hive::Tui::Messages::OpenInputEditor.new(row: row)
+    assert_same row, msg.row
+  end
+
   def test_terminate_requested_singleton
     # Parameterless messages use a frozen singleton so callers don't
     # allocate per-trigger and so identity comparisons work.

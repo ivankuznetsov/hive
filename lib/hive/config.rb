@@ -266,6 +266,35 @@ module Hive
       registered_projects.find { |p| p["name"] == name }
     end
 
+    # Load and validate the global `daemon` block from
+    # `~/Dev/hive/config.yml`. Returns the merged Hash (operator
+    # overrides on top of `Config::DEFAULTS["daemon"]`). Used by
+    # `hive daemon start` / `reload` so operator knobs in the global
+    # config (max_concurrent_runs, poll_interval_sec, log_*, etc.)
+    # actually take effect at runtime.
+    #
+    # Returns the bare DEFAULTS["daemon"] when no global config is
+    # present (first-run scenario, no projects registered yet).
+    def load_global_daemon
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["daemon"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "daemon in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["daemon"]), override)
+      # Re-use the existing validator by wrapping the daemon block in a
+      # cfg-shaped hash. validate_daemon! is idempotent and operates on
+      # cfg["daemon"].
+      validate_daemon!({ "daemon" => merged }, path)
+      merged
+    end
+
     def register_project(name:, path:)
       FileUtils.mkdir_p(hive_home)
       data = if File.exist?(global_config_path)

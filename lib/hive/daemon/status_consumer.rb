@@ -79,13 +79,16 @@ module Hive
       end
 
       def parse_mtime(iso_string, state_file_path)
-        return Time.parse(iso_string) if iso_string && !iso_string.empty?
-      rescue ArgumentError
-        # Fallthrough to File.mtime
-      ensure
-        # If the envelope didn't include mtime (unlikely with current
-        # schema, but be defensive), stat the state file directly.
-        return File.mtime(state_file_path) if state_file_path && File.exist?(state_file_path)
+        if iso_string && !iso_string.empty?
+          begin
+            return Time.parse(iso_string)
+          rescue ArgumentError
+            # Fall through to File.mtime
+          end
+        end
+        # If the envelope didn't include mtime, or it didn't parse,
+        # stat the state file directly. nil if the file is gone.
+        File.mtime(state_file_path) if state_file_path && File.exist?(state_file_path)
       end
     end
   end

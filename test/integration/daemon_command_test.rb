@@ -54,12 +54,53 @@ class HiveDaemonCommandTest < Minitest::Test
 
   def test_stop_with_stale_pid_file_cleans_up
     with_isolated_hive_home do |home, env|
-      # Write a PID file pointing at a process that doesn't exist
+      # Bare-integer PID format (back-compat path for older daemon
+      # versions) pointing at a process that doesn't exist.
       File.write(File.join(home, ".daemon.pid"), "999999")
       _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "stop")
       assert_equal 0, status.exitstatus
       assert_match(/stale/, err)
       refute File.exist?(File.join(home, ".daemon.pid")), "stale PID file must be removed"
+    end
+  end
+
+  def test_stop_with_yaml_pid_payload_for_dead_pid_cleans_up
+    # PR-40 review P2 #3: new daemons write a YAML payload (pid +
+    # process_start_time + started_at). A YAML payload pointing at a
+    # dead PID is the same scenario as the bare-int legacy path.
+    with_isolated_hive_home do |home, env|
+      File.write(File.join(home, ".daemon.pid"), <<~YAML)
+        ---
+        pid: 999999
+        process_start_time: "1234567890"
+        started_at: "2026-05-06T20:00:00Z"
+      YAML
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "stop")
+      assert_equal 0, status.exitstatus
+      assert_match(/stale|not alive/, err)
+      refute File.exist?(File.join(home, ".daemon.pid")), "stale PID file must be removed"
+    end
+  end
+
+  def test_stop_refuses_signal_when_pid_reused
+    # PR-40 review P2 #3: PID file points at a live PID, but the
+    # recorded process_start_time differs from the live process's
+    # start_time → another process took over the PID. Don't TERM it.
+    # Use the test runner's own PID with a fake/wrong start_time.
+    with_isolated_hive_home do |home, env|
+      File.write(File.join(home, ".daemon.pid"), <<~YAML)
+        ---
+        pid: #{Process.pid}
+        process_start_time: "definitely-not-the-real-start-time-#{rand(100_000)}"
+        started_at: "2026-05-06T20:00:00Z"
+      YAML
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "stop")
+      assert_equal 0, status.exitstatus, "stop must not fail when refusing a reused PID"
+      assert_match(/reused/, err.downcase)
+      # Test process is still alive — we never sent it SIGTERM.
+      assert Process.kill(0, Process.pid),
+             "the test runner process must NOT have received SIGTERM"
+      refute File.exist?(File.join(home, ".daemon.pid")), "stale PID file removed"
     end
   end
 

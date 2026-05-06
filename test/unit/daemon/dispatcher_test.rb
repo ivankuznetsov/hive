@@ -58,7 +58,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakeMergeWatcher
-    attr_reader :enqueued, :next_archives
+    attr_reader :enqueued
+    attr_accessor :next_archives
     def initialize
       @enqueued = []
       @next_archives = []
@@ -169,21 +170,105 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "s1", mw.enqueued.first[:slug]
   end
 
-  def test_edit_action_within_debounce_does_not_dispatch
+  def test_merged_pr_archive_dispatches_through_supervisor
+    # PR-40 review P2 #4: when PrMergeWatcher.tick returns an archive
+    # dispatch entry (PR is MERGED), Dispatcher routes it through the
+    # supervisor + caps just like a regular advance dispatch.
+    dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "6-pr",
+      command: "hive archive s1 --from 6-pr --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+    dispatcher.tick(now: T0)
+    assert_equal 1, sup.spawned.size
+    assert_equal "hive archive s1 --from 6-pr --project p1 --json", sup.spawned.first[:command]
+  end
+
+  def test_merged_pr_archive_skips_when_project_disabled_after_enqueue
+    # PR-40 review P2 #4: a project disabled between merge-watch
+    # enqueue and the merge-completion tick must NOT be archived.
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
+      rows: [], with_merge_watcher: true, project_enabled: false
+    )
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "6-pr",
+      command: "hive archive s1 --from 6-pr --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+    dispatcher.tick(now: T0)
+    assert_equal 0, sup.spawned.size
+    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "project_disabled_after_enqueue" }
+    refute_nil skipped, "must log :skipped reason: project_disabled_after_enqueue"
+  end
+
+  def test_merged_pr_archive_respects_global_cap
+    # PR-40 review P2 #4: with N PRs ready to archive but only M
+    # capacity slots open, only M archives spawn this tick; the rest
+    # block (and re-enqueue for the next tick).
+    dispatcher, sup, ctrl, logger, mw = make_dispatcher(
+      rows: [], with_merge_watcher: true
+    )
+    # Force global cap to 1 with one slot already used.
+    ctrl.instance_variable_set(:@max_concurrent_runs, 1)
+    ctrl.record_dispatch(
+      pid: 999, project: "px", slug: "running",
+      stage: "5-review", command: "hive run", started_at: T0,
+      state_file_mtime: T0 - 60
+    )
+
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "6-pr",
+      command: "hive archive s1 --from 6-pr --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+    dispatcher.tick(now: T0)
+    assert_equal 0, sup.spawned.size, "global cap reached → no archive spawn"
+    blocked = logger.events.find { |(n, a)| n == :blocked && a[:action] == "archive" }
+    refute_nil blocked, "must log :blocked for the archive dispatch"
+    assert_equal "global_cap", blocked[1][:reason]
+  end
+
+  def test_edit_action_within_debounce_after_baseline_logs_debouncing
+    # With a baseline already recorded (i.e. NOT first sight), a fresh
+    # edit within the debounce window logs :debouncing and does not
+    # dispatch.
     rows = [ row(action: "needs_input", marker: "waiting",
                  command: "hive brainstorm s1 --from 2-brainstorm",
                  mtime: T0 - 5) ]
-    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    ctrl.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
     dispatcher.tick(now: T0)
     assert_equal 0, sup.spawned.size
     assert events_include?(logger, :debouncing)
   end
 
-  def test_edit_action_after_debounce_dispatches
+  def test_edit_action_first_sight_records_baseline_does_not_dispatch
+    # PR-40 review P1 #1: first sight of `kind: edit` cannot tell if
+    # the file has fresh user edits or just the agent's WAITING write.
+    # Skip + seed the controller with the current mtime so the next
+    # tick has a baseline. A subsequent tick where mtime moves past
+    # the baseline triggers the actual dispatch.
     rows = [ row(action: "needs_input", marker: "waiting",
                  command: "hive brainstorm s1 --from 2-brainstorm",
                  mtime: T0 - 600) ]
-    dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(rows: rows)
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.tick(now: T0)
+    assert_equal 0, sup.spawned.size, "first-sight kind: edit must not dispatch"
+    # Baseline got recorded
+    refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+    # Logged as :skipped with reason: baseline_recorded
+    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
+    refute_nil skipped, "must log :skipped reason: baseline_recorded"
+  end
+
+  def test_edit_action_after_baseline_user_edit_dispatches
+    rows = [ row(action: "needs_input", marker: "waiting",
+                 command: "hive brainstorm s1 --from 2-brainstorm",
+                 mtime: T0 - 60) ]
+    dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: rows)
+    # Pretend a previous tick recorded an older baseline
+    ctrl.observe_state_file_mtime(project: "p1", slug: "s1", mtime: T0 - 600)
     dispatcher.tick(now: T0)
     assert_equal 1, sup.spawned.size
   end

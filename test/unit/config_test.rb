@@ -1180,4 +1180,75 @@ class ConfigTest < Minitest::Test
       assert_match(/daemon.*must be a Hash/, err.message)
     end
   end
+
+  # PR-40 review P1 #2: load_global_daemon merges the operator's
+  # ~/Dev/hive/config.yml `daemon:` overrides over Config::DEFAULTS,
+  # so `hive daemon start` actually honours configured caps.
+
+  def test_load_global_daemon_returns_defaults_when_no_global_config
+    with_tmp_global_config do |home|
+      # Default with_tmp_global_config writes an empty registered_projects.
+      # With no `daemon:` block in the global yaml, defaults flow through.
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+      cfg = Hive::Config.load_global_daemon
+      assert_equal 30, cfg["poll_interval_sec"]
+      assert_equal 3, cfg["max_concurrent_runs"]
+      assert_equal 50, cfg["max_runs_per_day_per_project"]
+    end
+  end
+
+  def test_load_global_daemon_honors_global_config_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        daemon:
+          poll_interval_sec: 60
+          max_concurrent_runs: 8
+          log_max_bytes: 524288
+      YAML
+      cfg = Hive::Config.load_global_daemon
+      assert_equal 60,     cfg["poll_interval_sec"]
+      assert_equal 8,      cfg["max_concurrent_runs"]
+      assert_equal 524_288, cfg["log_max_bytes"]
+      # Unspecified keys still pull from defaults
+      assert_equal 50, cfg["max_runs_per_day_per_project"]
+      assert_equal 1,  cfg["max_concurrent_per_project"]
+    end
+  end
+
+  def test_load_global_daemon_validates_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        daemon:
+          poll_interval_sec: 1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+      assert_match(/daemon.poll_interval_sec.*>= 5/, err.message)
+    end
+  end
+
+  def test_load_global_daemon_rejects_non_hash_daemon_block
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        daemon: enabled
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+      assert_match(/daemon.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_global_daemon_falls_back_to_defaults_when_no_file
+    # No ~/Dev/hive/config.yml at all (first-run before any project
+    # was registered): return bare DEFAULTS["daemon"] without raising.
+    Dir.mktmpdir do |dir|
+      old = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+      cfg = Hive::Config.load_global_daemon
+      assert_equal 30, cfg["poll_interval_sec"]
+    ensure
+      ENV["HIVE_HOME"] = old
+    end
+  end
 end

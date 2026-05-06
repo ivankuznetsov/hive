@@ -48,21 +48,24 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   # ── edit-resume: mtime-debounced re-runs ───────────────────────────────
 
-  def test_needs_input_first_sight_with_settled_mtime_dispatches
-    # No prior dispatch + mtime > debounce ago → fresh entry, dispatch.
-    assert_equal :dispatch, decide(action: "needs_input",
-                                   command: "hive brainstorm slug-a --from 2-brainstorm",
-                                   state_file_mtime: T0 - 60,
-                                   last_dispatched_state_file_mtime: nil)
+  def test_needs_input_first_sight_records_baseline
+    # PR-40 review P1 #1: first-sight `kind: edit` cannot distinguish
+    # "agent just wrote WAITING" from "user already answered". The
+    # safe choice is to skip + record the current mtime as baseline;
+    # the dispatcher seeds the controller. The next genuine user edit
+    # (mtime > baseline) triggers a dispatch.
+    assert_equal :record_baseline, decide(action: "needs_input",
+                                          command: "hive brainstorm slug-a --from 2-brainstorm",
+                                          state_file_mtime: T0 - 60,
+                                          last_dispatched_state_file_mtime: nil)
   end
 
-  def test_needs_input_first_sight_with_fresh_mtime_waits_for_debounce
-    # No prior dispatch but mtime is fresh — operator might still be
-    # typing. Wait for the file to settle.
-    assert_equal :wait_for_debounce, decide(action: "needs_input",
-                                            command: "hive brainstorm slug-a --from 2-brainstorm",
-                                            state_file_mtime: T0 - 5,
-                                            last_dispatched_state_file_mtime: nil)
+  def test_needs_input_first_sight_with_fresh_mtime_records_baseline
+    # First-sight always records baseline regardless of mtime age.
+    assert_equal :record_baseline, decide(action: "needs_input",
+                                          command: "hive brainstorm slug-a --from 2-brainstorm",
+                                          state_file_mtime: T0 - 5,
+                                          last_dispatched_state_file_mtime: nil)
   end
 
   def test_needs_input_unchanged_mtime_skips
@@ -99,14 +102,47 @@ class HiveDaemonPolicyTest < Minitest::Test
                                last_dispatched_state_file_mtime: nil)
   end
 
-  def test_review_findings_treated_as_edit_resume
-    # Legacy 4-execute findings path (mostly inert post-ADR-014 since
-    # 5-review owns triage). Still classified as edit-resume so the
-    # daemon respects user edits to the findings file.
-    assert_equal :dispatch, decide(action: "review_findings",
-                                   command: "hive findings slug-a",
-                                   state_file_mtime: T0 - 600,
-                                   last_dispatched_state_file_mtime: nil)
+  def test_needs_input_after_agent_write_does_not_redispatch
+    # PR-40 review P1 #1: agent's own write of `_WAITING` bumps mtime,
+    # but the Dispatcher refreshes `last_dispatched_state_file_mtime`
+    # to the post-completion value. Status's snapshot mtime equals the
+    # recorded mtime → :skip (no spurious re-dispatch).
+    agent_post_write_mtime = T0 - 100
+    assert_equal :skip, decide(action: "needs_input",
+                               command: "hive brainstorm slug-a --from 2-brainstorm",
+                               state_file_mtime: agent_post_write_mtime,
+                               last_dispatched_state_file_mtime: agent_post_write_mtime)
+  end
+
+  def test_needs_input_after_user_edit_dispatches_when_debounce_clears
+    # User edits AFTER agent's write → state_file_mtime > recorded.
+    # If debounce has elapsed, dispatch.
+    agent_post_write = T0 - 600
+    user_edit = T0 - 60
+    assert_equal :dispatch, decide(action: "needs_input",
+                                   command: "hive brainstorm slug-a --from 2-brainstorm",
+                                   state_file_mtime: user_edit,
+                                   last_dispatched_state_file_mtime: agent_post_write)
+  end
+
+  def test_needs_input_after_user_edit_within_debounce_waits
+    agent_post_write = T0 - 600
+    user_edit_recent = T0 - 5
+    assert_equal :wait_for_debounce, decide(action: "needs_input",
+                                            command: "hive brainstorm slug-a --from 2-brainstorm",
+                                            state_file_mtime: user_edit_recent,
+                                            last_dispatched_state_file_mtime: agent_post_write)
+  end
+
+  def test_review_findings_skips
+    # PR-40 review P2 #5: `Hive::TaskAction` emits `hive findings <slug>`
+    # for this row, which is a read-only listing — auto-dispatching
+    # produces a no-op spawn. Daemon must skip and let the user run
+    # findings/accept-finding/reject-finding manually.
+    assert_equal :skip, decide(action: "review_findings",
+                               command: "hive findings slug-a",
+                               state_file_mtime: T0 - 600,
+                               last_dispatched_state_file_mtime: nil)
   end
 
   def test_custom_debounce_respected

@@ -21,10 +21,23 @@ module Hive
     #
     # The only non-marker-driven decision is the `:edit` debounce: when
     # the task is in a `:waiting` state, the daemon dispatches only if
-    # the state-file mtime moved since the last dispatch AND
-    # `now - mtime >= edit_debounce_sec` (so a partial mid-save draft
-    # doesn't trigger an early dispatch). First sight (no prior dispatch
-    # recorded) dispatches when the file has been settled long enough.
+    # the state-file mtime is strictly newer than the last observed
+    # mtime AND `now - mtime >= edit_debounce_sec` (so a partial
+    # mid-save draft doesn't trigger an early dispatch).
+    #
+    # First-sight policy on `kind: edit`: the daemon sees a `_WAITING`
+    # task with no prior observation. We CANNOT distinguish "agent just
+    # wrote the WAITING marker" from "user already answered hours ago",
+    # so the safe choice is to skip + record the current mtime as the
+    # baseline. The next genuine user edit (mtime > baseline) triggers
+    # dispatch. Operators of dormant-task scenarios can `touch` the
+    # state file to wake the daemon.
+    #
+    # Post-completion mtime refresh (handled by Dispatcher, not Policy):
+    # after every child reaps, the controller's recorded mtime is
+    # updated to the current state-file mtime. This way the agent's
+    # own write of the next `_WAITING` marker doesn't look like a
+    # user edit on the next tick.
     module Policy
       module_function
 
@@ -48,9 +61,14 @@ module Hive
       # Actions that mean "the task is in a stage and ready to RE-RUN with
       # fresh user input from the state file". Detection is mtime-debounced
       # so a mid-save partial draft doesn't trigger an early dispatch.
+      #
+      # `review_findings` is deliberately EXCLUDED (PR-40 review P2 #5):
+      # `Hive::TaskAction` emits `hive findings <slug>` for that case,
+      # which is a read-only listing command, not a workflow verb.
+      # Auto-dispatching it would produce a no-op spawn. Treat it as
+      # `:skip` (falls through to the default branch).
       EDIT_RESUME_ACTIONS = %w[
         needs_input
-        review_findings
       ].freeze
 
       # Decide what to do with one task row.
@@ -64,7 +82,13 @@ module Hive
       # @param edit_debounce_sec [Integer] minimum age of mtime before a
       #   `:edit`-class row is eligible for dispatch (default 30s)
       #
-      # @return [Symbol] one of :dispatch, :poll_for_merge, :wait_for_debounce, :skip
+      # @return [Symbol] one of :dispatch, :poll_for_merge, :wait_for_debounce,
+      #   :record_baseline, :skip
+      #
+      # `:record_baseline` is the first-sight `kind: edit` outcome:
+      # the dispatcher does NOT spawn a child, but it MUST call
+      # ConcurrencyController#observe_state_file_mtime so the next tick
+      # has a baseline to compare against.
       def decide(action:, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
                  now:, edit_debounce_sec: 30)
         return :skip if action.nil?
@@ -101,18 +125,20 @@ module Hive
         return :skip if state_file_mtime.nil?
 
         if last_dispatched.nil?
-          # First sight of this task — fresh `mv`-into-stage, brand-new
-          # 1-inbox idea, or a daemon-restart on an existing :waiting
-          # task. The mtime check still applies so a mid-edit save
-          # doesn't fire prematurely; once the file has been settled for
-          # at least `debounce_sec` we dispatch.
-          return :wait_for_debounce if (now - state_file_mtime) < debounce_sec
-
-          return :dispatch
+          # First sight of this `kind: edit` row. We can't distinguish
+          # "agent just wrote the WAITING marker" from "user answered
+          # hours ago", so we record the current mtime as the baseline
+          # and skip. The dispatcher must observe this signal to seed
+          # the controller; the next genuine user edit (mtime > baseline)
+          # then triggers a dispatch on a subsequent tick.
+          return :record_baseline
         end
 
         # Subsequent visits: only re-fire if the user has actually edited
-        # the state file since our last dispatch.
+        # the state file since our last observation. The Dispatcher
+        # refreshes `last_dispatched_state_file_mtime` to the post-
+        # completion mtime after each child exit — so the agent's own
+        # write of a fresh `_WAITING` marker won't look like user input.
         return :skip if state_file_mtime <= last_dispatched
 
         return :wait_for_debounce if (now - state_file_mtime) < debounce_sec

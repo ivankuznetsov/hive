@@ -69,11 +69,31 @@ module Hive
         :ok
       end
 
-      # Returns the mtime captured at the LAST successful dispatch on
-      # (project, slug), or nil if no prior dispatch is recorded. Fed
-      # to Hive::Daemon::Policy.decide for the kind: edit debounce.
+      # Returns the mtime LAST observed on (project, slug)'s state file —
+      # captured at dispatch time AND refreshed post-completion (so the
+      # agent's own marker write doesn't look like a user edit on the
+      # next tick), AND seeded by Policy's `:record_baseline` decision
+      # on first-sight `kind: edit` rows.
+      #
+      # Returns nil if no prior observation is recorded (first-ever
+      # sight of this task in this daemon's lifetime).
       def last_dispatched_state_file_mtime_for(project:, slug:)
         @last_dispatched_mtime[[ project, slug ]]
+      end
+
+      # Update the recorded mtime without consuming a dispatch slot.
+      # Used by the Dispatcher in two flows: (a) when Policy returns
+      # `:record_baseline` on a first-sight `kind: edit` row, the
+      # dispatcher seeds the controller with the current mtime so the
+      # next tick has something to compare against; (b) post-child-
+      # completion, the dispatcher refreshes the recorded mtime to the
+      # current state-file mtime so the agent's own `_WAITING`-marker
+      # write (which moves mtime past the at-dispatch value) doesn't
+      # trigger a redundant re-dispatch on the next tick.
+      def observe_state_file_mtime(project:, slug:, mtime:)
+        return if mtime.nil?
+
+        @last_dispatched_mtime[[ project, slug ]] = mtime
       end
 
       # Record a fresh dispatch. Caller is the dispatcher AFTER the

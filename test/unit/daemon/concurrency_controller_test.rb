@@ -217,6 +217,31 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal mtime, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
   end
 
+  # PR-40 review P1 #1: post-completion mtime refresh + first-sight
+  # baseline both flow through observe_state_file_mtime.
+  def test_observe_state_file_mtime_updates_recorded_value_without_consuming_slot
+    c = make
+    initial = T0 - 600
+    later = T0 - 60
+    c.observe_state_file_mtime(project: "p1", slug: "s1", mtime: initial)
+    assert_equal initial, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+    # No daily slot consumed by observation (vs record_dispatch).
+    assert_equal 0, c.daily_count_for("p1", T0)
+
+    # Updating to a later mtime works.
+    c.observe_state_file_mtime(project: "p1", slug: "s1", mtime: later)
+    assert_equal later, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+  end
+
+  def test_observe_state_file_mtime_with_nil_is_a_no_op
+    c = make
+    initial = T0 - 600
+    c.observe_state_file_mtime(project: "p1", slug: "s1", mtime: initial)
+    c.observe_state_file_mtime(project: "p1", slug: "s1", mtime: nil)
+    # Prior value preserved.
+    assert_equal initial, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+  end
+
   # ── in_flight bookkeeping ─────────────────────────────────────────────
 
   def test_in_flight_count_tracks_running_entries
@@ -253,11 +278,11 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
       dispatch(c, pid, project, slug, mtime: T0 - 60, started_at: T0 + i)
       # Mix of success / transient / tempfail
       code = case i % 4
-             when 0 then Hive::ExitCodes::SUCCESS
-             when 1 then Hive::ExitCodes::TEMPFAIL
-             when 2 then Hive::ExitCodes::SOFTWARE
-             else        Hive::ExitCodes::SUCCESS
-             end
+      when 0 then Hive::ExitCodes::SUCCESS
+      when 1 then Hive::ExitCodes::TEMPFAIL
+      when 2 then Hive::ExitCodes::SOFTWARE
+      else        Hive::ExitCodes::SUCCESS
+      end
       c.record_completion(pid: pid, exit_code: code, completed_at: T0 + i + 1)
       seed += 1
     end

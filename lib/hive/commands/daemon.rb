@@ -1,7 +1,9 @@
 require "fileutils"
 require "json"
 require "time"
+require "yaml"
 require "hive/config"
+require "hive/lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
@@ -78,25 +80,32 @@ module Hive
           Process.daemon(true, true)
         end
 
-        File.write(pid_file, Process.pid.to_s)
+        # Write the PID file as YAML with process_start_time so `stop`
+        # can detect PID reuse before sending TERM/KILL to a random
+        # process that happens to have the same PID. PR-40 review P2 #3.
+        File.write(pid_file, pid_file_payload(Process.pid).to_yaml)
 
-        config = Hive::Config.send(:merge_defaults, {})
-        daemon_cfg = config["daemon"] || {}
+        # Load the daemon block from ~/Dev/hive/config.yml so operator
+        # overrides (max_concurrent_runs, poll_interval_sec, log paths,
+        # etc.) actually take effect. PR-40 review P1 #2: this used to
+        # call merge_defaults({}) which discarded the global config.
+        daemon_cfg = Hive::Config.load_global_daemon
+        config = { "daemon" => daemon_cfg }
 
         controller = Hive::Daemon::ConcurrencyController.new(
-          max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs", 3),
-          max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project", 1),
-          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project", 50)
+          max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
+          max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
+          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project")
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
         status_consumer = Hive::Daemon::StatusConsumer.new
         logger = Hive::Daemon::Logger.new(
           path: daemon_cfg.fetch("log_file", log_file),
-          max_bytes: daemon_cfg.fetch("log_max_bytes", 10_485_760),
-          max_files: daemon_cfg.fetch("log_max_files", 5)
+          max_bytes: daemon_cfg.fetch("log_max_bytes"),
+          max_files: daemon_cfg.fetch("log_max_files")
         )
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
-          poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec", 300)
+          poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
         )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
@@ -122,8 +131,9 @@ module Hive
           return
         end
 
-        pid = File.read(pid_file).strip.to_i
-        if pid <= 0
+        payload = read_pid_file_payload
+        pid = payload && payload["pid"]
+        if pid.nil? || pid <= 0
           warn "hive: daemon PID file at #{pid_file} is malformed; removing"
           File.delete(pid_file)
           return
@@ -140,6 +150,26 @@ module Hive
           return
         end
 
+        # PR-40 review P2 #3: PID-reuse safety. Verify the live process
+        # at `pid` has the same start_time we recorded when the daemon
+        # wrote the PID file. If the start times differ, the original
+        # daemon already exited and the OS handed `pid` to a different
+        # (unrelated) process — sending SIGTERM/SIGKILL would harm
+        # that bystander.
+        recorded_start = payload["process_start_time"]
+        live_start = Hive::Lock.send(:process_start_time, pid)
+        if recorded_start && live_start && recorded_start != live_start
+          File.delete(pid_file)
+          if @json
+            puts JSON.generate(stop_envelope(running: false, was_running: false,
+                                             stale_pid: pid, reason: "pid_reused"))
+          else
+            warn "hive: PID #{pid} appears reused (start_time mismatch); " \
+                 "refusing to signal. Removed stale #{pid_file}."
+          end
+          return
+        end
+
         send_signal_safely(pid, :TERM)
         # Wait up to shutdown_grace_sec for the daemon to exit
         deadline = Time.now + 600
@@ -148,8 +178,15 @@ module Hive
         end
 
         if pid_alive?(pid)
-          # Escalate to KILL
-          send_signal_safely(pid, :KILL)
+          # Escalate to KILL — but re-verify start_time again before
+          # the second signal, in case the original daemon JUST died
+          # in the grace window and the OS handed the PID off.
+          live_start = Hive::Lock.send(:process_start_time, pid)
+          if recorded_start && live_start && recorded_start != live_start
+            warn "hive: PID #{pid} reused mid-stop; aborting KILL signal"
+          else
+            send_signal_safely(pid, :KILL)
+          end
           File.delete(pid_file) if File.exist?(pid_file)
         end
 
@@ -166,8 +203,9 @@ module Hive
         uptime_sec = nil
 
         if File.exist?(pid_file)
-          pid = File.read(pid_file).strip.to_i
-          if pid > 0 && pid_alive?(pid)
+          payload = read_pid_file_payload
+          pid = payload && payload["pid"]
+          if pid && pid > 0 && pid_alive?(pid) && pid_owned_by_us?(payload, pid)
             running = true
             stat = File.stat(pid_file)
             uptime_sec = (Time.now - stat.mtime).to_i
@@ -200,10 +238,17 @@ module Hive
           raise Hive::Error, "daemon not running"
         end
 
-        pid = File.read(pid_file).strip.to_i
-        unless pid > 0 && pid_alive?(pid)
+        payload = read_pid_file_payload
+        pid = payload && payload["pid"]
+        unless pid && pid > 0 && pid_alive?(pid)
           warn "hive: daemon PID #{pid} is not alive; remove #{pid_file} and restart"
           raise Hive::Error, "daemon PID is dead"
+        end
+
+        # PR-40 review P2 #3: same start_time verification as stop.
+        unless pid_owned_by_us?(payload, pid)
+          warn "hive: PID #{pid} appears reused (start_time mismatch); refusing HUP"
+          raise Hive::Error, "daemon PID is reused"
         end
 
         send_signal_safely(pid, :HUP)
@@ -237,9 +282,13 @@ module Hive
       def read_live_pid
         return nil unless File.exist?(pid_file)
 
-        pid = File.read(pid_file).strip.to_i
-        return nil unless pid > 0
+        payload = read_pid_file_payload
+        pid = payload && payload["pid"]
+        return nil unless pid && pid > 0
         return nil unless pid_alive?(pid)
+        # PR-40 review P2 #3: a `pid_alive?` PID owned by an unrelated
+        # process (after PID reuse) must NOT be treated as our daemon.
+        return nil unless pid_owned_by_us?(payload, pid)
 
         pid
       end
@@ -253,6 +302,45 @@ module Hive
         true
       end
 
+      # Compares the recorded process_start_time against the live PID's
+      # start_time. Returns true if either side is missing (best-effort
+      # fallback when /proc and `ps` both fail) or if they match. False
+      # only when both are present AND differ.
+      def pid_owned_by_us?(payload, pid)
+        recorded = payload && payload["process_start_time"]
+        live = Hive::Lock.send(:process_start_time, pid)
+        return true if recorded.nil? || live.nil?
+
+        recorded == live
+      end
+
+      def read_pid_file_payload
+        return nil unless File.exist?(pid_file)
+
+        raw = File.read(pid_file)
+        # New YAML format
+        parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
+        return parsed if parsed.is_a?(Hash) && parsed["pid"]
+
+        # Back-compat: a bare-integer PID file (older daemon versions
+        # OR a hand-written PID for testing). Wrap it in a payload
+        # without process_start_time — the start-time check then
+        # short-circuits to "match" via the nil-side fallback.
+        if raw.strip =~ /\A\d+\z/
+          return { "pid" => raw.strip.to_i, "process_start_time" => nil }
+        end
+
+        nil
+      end
+
+      def pid_file_payload(pid)
+        {
+          "pid" => pid,
+          "process_start_time" => Hive::Lock.send(:process_start_time, pid),
+          "started_at" => Time.now.utc.iso8601
+        }
+      end
+
       def send_signal_safely(pid, signal)
         Process.kill(signal, pid)
       rescue Errno::ESRCH
@@ -261,14 +349,15 @@ module Hive
         warn "hive: insufficient permissions to signal pid #{pid}"
       end
 
-      def stop_envelope(running:, was_running:, stale_pid: nil)
+      def stop_envelope(running:, was_running:, stale_pid: nil, reason: nil)
         {
           "schema" => "hive-daemon-stop",
           "schema_version" => 1,
           "ok" => true,
           "running" => running,
           "was_running" => was_running,
-          "stale_pid" => stale_pid
+          "stale_pid" => stale_pid,
+          "reason" => reason
         }.compact
       end
     end

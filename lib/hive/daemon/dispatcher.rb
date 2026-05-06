@@ -72,15 +72,14 @@ module Hive
           return
         end
 
-        # 3. PrMergeWatcher tick (if present): check pending merges first
+        # 3. PrMergeWatcher tick (if present): check pending merges
+        # first. Archive dispatches MUST flow through the same enable +
+        # cap checks that advance dispatches use, so a project disabled
+        # after enqueue can't sneak through and N concurrent merges
+        # can't blow past the global / per-project caps.
+        # PR-40 review P2 #4.
         @merge_watcher&.tick(now: now)&.each do |archive_dispatch|
-          dispatch_command(archive_dispatch[:command],
-                           project: archive_dispatch[:project],
-                           slug: archive_dispatch[:slug],
-                           stage: archive_dispatch[:stage],
-                           state_file_mtime: archive_dispatch[:state_file_mtime],
-                           hive_state_path: archive_dispatch[:hive_state_path],
-                           now: now)
+          dispatch_archive_with_gates(archive_dispatch, now: now)
         end
 
         # 4. Per-row dispatch
@@ -130,6 +129,13 @@ module Hive
           @controller.record_completion(
             pid: entry.pid, exit_code: entry.exit_code, completed_at: now
           )
+          # Refresh the recorded state-file mtime to its POST-completion
+          # value. The agent likely wrote a fresh terminal/WAITING marker
+          # which bumped the mtime; without this refresh, the next tick
+          # would interpret the agent's own write as a user edit and
+          # re-dispatch, flooding the agent. See PR-40 review P1 #1.
+          refresh_post_completion_mtime(entry)
+
           @logger.event(:child_exited,
                         pid: entry.pid, exit_code: entry.exit_code,
                         project: entry.project, slug: entry.slug, stage: entry.stage,
@@ -140,6 +146,55 @@ module Hive
           if entry.exit_code == Hive::ExitCodes::CONFIG
             @logger.event(:project_dropped, project: entry.project)
           end
+        end
+      end
+
+      # After a child exits, re-stat the task's state file and store
+      # the result in the controller as the new "last observed" mtime.
+      # The path is reconstructed from the latest `hive status --json`
+      # snapshot — the dispatcher doesn't keep a separate record of
+      # paths, since status is the authoritative source.
+      def refresh_post_completion_mtime(child_entry)
+        # Best-effort stat of the standard state-file paths for the
+        # stage; if the file is gone (task moved by the run itself)
+        # we leave the controller's recording unchanged so nothing
+        # spurious re-dispatches.
+        path = guess_state_file_path(child_entry)
+        return unless path && File.exist?(path)
+
+        @controller.observe_state_file_mtime(
+          project: child_entry.project, slug: child_entry.slug,
+          mtime: File.mtime(path)
+        )
+      rescue StandardError
+        # Stat failure is non-fatal; just don't update.
+      end
+
+      def guess_state_file_path(child_entry)
+        # Reconstruct from project registry + stage + slug. The status
+        # snapshot Dispatcher used had the exact path; if we needed
+        # stronger guarantees we'd stash it on dispatch. For now, look
+        # up the project root and walk the standard layout.
+        project_entry = Hive::Config.find_project(child_entry.project)
+        return nil unless project_entry
+
+        File.join(
+          project_entry["hive_state_path"],
+          "stages",
+          child_entry.stage,
+          child_entry.slug,
+          state_filename_for(child_entry.stage)
+        )
+      end
+
+      def state_filename_for(stage)
+        case stage
+        when "1-inbox"      then "idea.md"
+        when "2-brainstorm" then "brainstorm.md"
+        when "3-plan"       then "plan.md"
+        when "4-execute", "5-review", "7-done" then "task.md"
+        when "6-pr"         then "pr.md"
+        else "task.md"
         end
       end
 
@@ -174,6 +229,18 @@ module Hive
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,
                                      stage: row.stage, mtime: row.state_file_mtime&.utc&.iso8601)
+        when :record_baseline
+          # First-sight kind: edit row — seed the controller with the
+          # current mtime so the next tick has something to compare
+          # against. No dispatch on this tick; the next genuine user
+          # edit (mtime > baseline) will trigger one. See PR-40 review
+          # P1 #1.
+          @controller.observe_state_file_mtime(
+            project: row.project, slug: row.slug, mtime: row.state_file_mtime
+          )
+          @logger.event(:skipped, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "baseline_recorded")
         when :poll_for_merge
           enqueue_merge_watch(row)
         when :skip
@@ -196,6 +263,56 @@ module Hive
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: gate.to_s)
         end
+      end
+
+      # PR-40 review P2 #4: archive dispatches must respect both
+      # `daemon.enabled` (the project may have been disabled after the
+      # PR-merge enqueue) and the concurrency caps (multiple PRs
+      # merging at once would otherwise spawn N archives ignoring the
+      # global / per-project ceiling).
+      def dispatch_archive_with_gates(archive_dispatch, now:)
+        project = archive_dispatch[:project]
+        slug = archive_dispatch[:slug]
+
+        unless project_enabled?(project)
+          @logger.event(:skipped, project: project, slug: slug,
+                                  stage: archive_dispatch[:stage],
+                                  action: "archive",
+                                  reason: "project_disabled_after_enqueue")
+          return
+        end
+
+        gate = @controller.can_dispatch?(project: project, slug: slug, now: now)
+        if gate == :ok
+          dispatch_command(
+            archive_dispatch[:command],
+            project: project, slug: slug, stage: archive_dispatch[:stage],
+            state_file_mtime: archive_dispatch[:state_file_mtime],
+            hive_state_path: archive_dispatch[:hive_state_path],
+            now: now
+          )
+        else
+          # Archive will retry on the next tick if the gate clears.
+          # The watcher already cleared this entry from its pending
+          # set when it returned MERGED, so we need to re-enqueue so
+          # the next tick attempts the dispatch again.
+          @merge_watcher&.enqueue(
+            project: project, slug: slug,
+            task_folder: File.join(
+              Hive::Config.find_project(project)["hive_state_path"],
+              "stages", archive_dispatch[:stage], slug
+            )
+          ) if Hive::Config.find_project(project)
+          @logger.event(:blocked, project: project, slug: slug,
+                                  stage: archive_dispatch[:stage],
+                                  action: "archive",
+                                  reason: gate.to_s)
+        end
+      rescue StandardError => e
+        # Defensive: re-enqueue path uses File.join + Config lookup
+        # which can throw on edge cases. Don't let it crash the tick.
+        @logger.event(:fatal, message: "archive dispatch error: #{e.class}: #{e.message}",
+                              project: project, slug: slug)
       end
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
@@ -246,13 +363,20 @@ module Hive
       end
 
       def reload_config!
-        @config = Hive::Config.send(:merge_defaults, {}) # rebase on bare DEFAULTS for safety
-        @daemon_cfg = @config["daemon"] || {}
+        # PR-40 review P1 #2: rebase on the global ~/Dev/hive/config.yml's
+        # daemon block, not bare DEFAULTS.
+        @daemon_cfg = Hive::Config.load_global_daemon
+        @config = { "daemon" => @daemon_cfg }
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
         @enabled_cache.clear
         @logger.event(:config_reloaded)
+      rescue Hive::ConfigError => e
+        # If the operator broke the config mid-run, log and keep
+        # running on the old values rather than crashing.
+        @logger.event(:fatal, message: "config reload failed: #{e.message}",
+                              keeping_previous: true)
       end
 
       def install_signal_handlers!

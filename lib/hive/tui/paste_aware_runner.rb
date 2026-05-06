@@ -55,6 +55,23 @@ module Hive
         end
       end
 
+      # Sequence commands run on a background thread in bubbletea-ruby.
+      # Suppress rendering through foreground takeovers so the main loop
+      # cannot repaint the dashboard onto the editor's screen.
+      def execute_sequence_sync(commands)
+        suppress_render = foreground_takeover_sequence?(commands)
+        @suppress_render_for_foreground_takeover = true if suppress_render
+        super
+      ensure
+        @suppress_render_for_foreground_takeover = false if suppress_render
+      end
+
+      def render
+        return if @suppress_render_for_foreground_takeover
+
+        super
+      end
+
       def process_input
         raw = @program.read_raw_input(@options[:input_timeout])
         messages = raw ? @input_decoder.drain(raw) : @input_decoder.flush
@@ -76,6 +93,12 @@ module Hive
           @input_decoder.reset!
         end
         @last_editable_mode = EDITABLE_MODES.include?(mode) ? mode : nil
+      end
+
+      def foreground_takeover_sequence?(commands)
+        commands.any? { |cmd| cmd.is_a?(Bubbletea::ExitAltScreenCommand) } &&
+          commands.any? { |cmd| cmd.is_a?(Bubbletea::ExecCommand) } &&
+          commands.any? { |cmd| cmd.is_a?(Bubbletea::EnterAltScreenCommand) }
       end
 
       def current_mode

@@ -96,4 +96,44 @@ class HiveTuiPasteAwareRunnerTest < Minitest::Test
     assert_equal "\e[", runner.input_decoder.instance_variable_get(:@pending),
                  "latch must not re-fire on subsequent :grid → :grid"
   end
+
+  def test_foreground_takeover_sequence_suppresses_render_until_sequence_finishes
+    runner, = runner_for(initial_mode: :grid)
+    runner.instance_variable_set(:@running, true)
+    observed = []
+    commands = [
+      Bubbletea.exit_alt_screen,
+      Bubbletea.exec(-> { }),
+      Bubbletea.enter_alt_screen
+    ]
+
+    runner.define_singleton_method(:execute_command_sync) do |cmd|
+      observed << [ cmd.class, instance_variable_get(:@suppress_render_for_foreground_takeover) ]
+    end
+
+    runner.__send__(:execute_sequence_sync, commands)
+
+    assert_equal(
+      [
+        [ Bubbletea::ExitAltScreenCommand, true ],
+        [ Bubbletea::ExecCommand, true ],
+        [ Bubbletea::EnterAltScreenCommand, true ]
+      ],
+      observed,
+      "rendering must stay suppressed across exit-alt-screen, editor exec, and re-entry"
+    )
+    refute runner.instance_variable_get(:@suppress_render_for_foreground_takeover),
+           "render suppression must clear after the foreground takeover sequence"
+  end
+
+  def test_render_is_noop_while_foreground_takeover_is_suppressed
+    runner, = runner_for(initial_mode: :grid)
+    runner.instance_variable_set(:@renderer_id, 1)
+    fake_program = Object.new
+    fake_program.define_singleton_method(:render) { |_renderer_id, _view| raise "rendered during takeover" }
+    runner.instance_variable_set(:@program, fake_program)
+    runner.instance_variable_set(:@suppress_render_for_foreground_takeover, true)
+
+    assert_nil runner.__send__(:render)
+  end
 end

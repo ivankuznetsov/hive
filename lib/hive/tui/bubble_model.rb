@@ -699,27 +699,23 @@ module Hive
         argv
       end
 
-      # Stdio inherited so the editor owns the user's tty during the
-      # alt-screen suspension. ENOENT/EACCES translate to the same
-      # COMMAND_NOT_FOUND_EXIT (127) Subprocess uses, so the post-edit
-      # flash names the missing binary instead of crashing the runner.
+      # Delegates the spawn/wait/translate/ENOENT-rescue dance to
+      # `Hive::Tui::Subprocess.run_takeover_child_sync` so editor
+      # takeovers share the same BEGIN(interactive)/END(interactive)
+      # / ERRNO(interactive) stamps that workflow-verb takeovers
+      # write to `hive-tui-subprocess.log` — useful for diagnosing
+      # "I pressed Enter on a needs_input row and the TUI froze"
+      # reports. The shared helper also owns `pgroup: true` (so a
+      # mid-edit Ctrl-C hits the editor, not the TUI) and the
+      # ENOENT/EACCES → COMMAND_NOT_FOUND_EXIT (127) translation.
       #
-      # `clear_terminal_for_takeover` writes `\e[2J\e[H` before the
-      # spawn: belt-and-suspenders against the alt-screen exit
-      # escape (`\e[?1049l`) racing with leftover bubbletea render
-      # output. Without it, the prior frame of the dashboard could
-      # paint over the editor's first redraw — Ivan reported this as
-      # "tui rendered above the editor, visual mess." `pgroup: true`
-      # mirrors the workflow-verb takeover so the editor lives in its
-      # own process group; if the user Ctrl-C's during the edit, the
-      # signal hits the editor, not the parent TUI.
+      # The pre-spawn `clear_terminal_for_takeover` stays here: it's
+      # specific to the editor handoff and addresses a visual-only
+      # bug (Ivan's "tui rendered above the editor, visual mess")
+      # that doesn't apply to the workflow-verb takeover path.
       def run_editor(argv, path)
         clear_terminal_for_takeover
-        pid = Process.spawn(*(argv + [ path ]), pgroup: true)
-        _, status = Process.wait2(pid)
-        Hive::Tui::Subprocess.translate_status(status)
-      rescue Errno::ENOENT, Errno::EACCES
-        Hive::Tui::Subprocess::COMMAND_NOT_FOUND_EXIT
+        Hive::Tui::Subprocess.run_takeover_child_sync(argv + [ path ])
       end
 
       # @api private

@@ -762,7 +762,8 @@ module Hive
         return false unless (questions.keys - answers.keys).empty?
 
         answers.values.all? { |heading| answer_heading_filled?(block, heading) }
-      rescue Errno::ENOENT, Errno::EACCES
+      rescue SystemCallError, EncodingError, IOError => e
+        Hive::Tui::Debug.log("brainstorm_answers", "completeness check failed: #{e.class}: #{e.message}")
         false
       end
 

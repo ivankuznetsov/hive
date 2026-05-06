@@ -623,9 +623,10 @@ module Hive
 
       # Foreground takeover: open the row's input target in $EDITOR
       # (with $VISUAL preferred over $EDITOR; vi as the final fallback)
-      # so the operator can answer inline questions before re-running
-      # the stage. The verb keys (b/p/d/r/P) remain the way to spawn
-      # the agent — opening the editor is intentionally just an editor.
+      # so the operator can answer inline questions. For brainstorm
+      # rows, saving a completed answer round auto-runs the row's
+      # suggested command; partial answers and non-brainstorm rows stay
+      # manual via the verb keys (b/p/d/r/P).
       #
       # mtime is sampled before/after the spawn so InputEditorExited
       # carries a `changed:` flag, distinguishing a saved edit from a
@@ -646,13 +647,8 @@ module Hive
           # output is still being painted. Mirror of the pre-spawn
           # clear in `clear_terminal_for_takeover`.
           clear_terminal_for_takeover
-          @dispatch.call(
-            Hive::Tui::Messages::InputEditorExited.new(
-              slug: row.slug,
-              exit_code: exit_code,
-              changed: before_mtime != after_mtime
-            )
-          )
+          changed = before_mtime != after_mtime
+          @dispatch.call(input_editor_exit_message(row, path, exit_code, changed))
         end
 
         cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
@@ -724,6 +720,83 @@ module Hive
 
       def review_waiting_reason(row)
         (row.attrs || {})["reason"].to_s
+      end
+
+      def input_editor_exit_message(row, path, exit_code, changed)
+        if auto_continue_after_edit?(row, path, exit_code, changed)
+          return Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+        end
+
+        Hive::Tui::Messages::InputEditorExited.new(
+          slug: row.slug,
+          exit_code: exit_code,
+          changed: changed
+        )
+      rescue ArgumentError => e
+        Hive::Tui::Debug.log("input_editor", "auto-continue skipped for #{row.slug}: #{e.message}")
+        Hive::Tui::Messages::InputEditorExited.new(
+          slug: row.slug,
+          exit_code: exit_code,
+          changed: changed
+        )
+      end
+
+      def auto_continue_after_edit?(row, path, exit_code, changed)
+        return false unless exit_code == 0 && changed
+        return false unless row.action_key == "needs_input"
+        return false unless row.stage.to_s == "2-brainstorm"
+        return false if row.suggested_command.to_s.empty?
+
+        brainstorm_answers_complete?(path)
+      end
+
+      def brainstorm_answers_complete?(path)
+        lines = File.readlines(path, chomp: true)
+        round_start = latest_brainstorm_round_start(lines)
+        return false if round_start.nil?
+
+        block = lines[(round_start + 1)..] || []
+        questions = numbered_headings(block, "Q")
+        answers = numbered_headings(block, "A")
+        return false if questions.empty? || answers.empty?
+        return false unless (questions.keys - answers.keys).empty?
+
+        answers.values.all? { |heading| answer_heading_filled?(block, heading) }
+      rescue Errno::ENOENT, Errno::EACCES
+        false
+      end
+
+      def latest_brainstorm_round_start(lines)
+        lines.each_index.select { |idx| lines[idx].match?(/^\s*##\s+Round\s+\d+\b/i) }.last
+      end
+
+      def numbered_headings(lines, prefix)
+        headings = {}
+        regex = /^\s*###\s+#{prefix}(\d+)\b/i
+        lines.each_with_index do |line, idx|
+          match = line.match(regex)
+          headings[match[1]] = idx if match
+        end
+        headings
+      end
+
+      def answer_heading_filled?(lines, heading_idx)
+        heading = lines[heading_idx].sub(/^\s*###\s+A\d+\s*\.?\s*/i, "")
+        stop_idx = next_brainstorm_heading_index(lines, heading_idx + 1) || lines.length
+        body = lines[(heading_idx + 1)...stop_idx].join("\n")
+        stripped_answer_text("#{heading}\n#{body}").length.positive?
+      end
+
+      def next_brainstorm_heading_index(lines, start_idx)
+        (start_idx...lines.length).find do |idx|
+          lines[idx].match?(/^\s*###\s+[QA]\d+\b/i) ||
+            lines[idx].match?(/^\s*##\s+/) ||
+            lines[idx].match?(/^\s*<!--/)
+        end
+      end
+
+      def stripped_answer_text(text)
+        text.gsub(/<!--.*?-->/m, "").strip
       end
 
       # $VISUAL → $EDITOR → vi. Shellwords.split lets users carry

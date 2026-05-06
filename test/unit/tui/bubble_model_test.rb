@@ -859,6 +859,99 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_empty mtimes
   end
 
+  def test_open_input_editor_auto_dispatches_completed_brainstorm_answers
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        # Brainstorm
+
+        ## Round 2
+        ### Q1. Scope?
+        ### A1.
+        Build the smallest useful slice.
+        ### Q2. Cadence?
+        ### A2. Daily cron.
+      MD
+      row = make_task_row(
+        slug: "answered-task",
+        state_file: brainstorm_md,
+        suggested_command: "hive brainstorm answered-task --project demo --from 2-brainstorm"
+      )
+      mtimes = [ 10.0, 11.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 1, @messages.length
+      assert_kind_of Hive::Tui::Messages::DispatchCommand, @messages.first
+      assert_equal(
+        [ "hive", "brainstorm", "answered-task", "--project", "demo", "--from", "2-brainstorm" ],
+        @messages.first.argv
+      )
+      assert_equal "brainstorm", @messages.first.verb
+      assert_empty mtimes
+    end
+  end
+
+  def test_open_input_editor_keeps_partial_brainstorm_answers_manual
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        # Brainstorm
+
+        ## Round 1
+        ### Q1. Scope?
+        ### A1.
+        Answered.
+        ### Q2. Cadence?
+        ### A2.
+      MD
+      row = make_task_row(state_file: brainstorm_md)
+      mtimes = [ 20.0, 21.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 1, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
+      assert_equal true, @messages.first.changed
+      assert_empty mtimes
+    end
+  end
+
+  def test_open_input_editor_does_not_auto_dispatch_non_brainstorm_rows
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. Complete-looking, but this is not brainstorm.
+      MD
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --from 3-plan"
+      )
+      mtimes = [ 30.0, 31.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 1, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
+      assert_empty mtimes
+    end
+  end
+
   def test_open_input_editor_with_missing_state_file_flashes_without_command
     row = make_task_row(state_file: nil)
     _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))

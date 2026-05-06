@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-06T20:49:00Z] tui — auto-continue rechecks the current marker
+
+**Action:** Tightened the brainstorm auto-continue gate so the post-editor path re-reads the state-file marker before dispatching the suggested command. Auto-continue now only fires when the current marker is still `WAITING` / `none`; if another actor completes, starts, or errors the brainstorm while the editor is open, the stale row falls back to the manual `InputEditorExited` path instead of spawning an old `hive brainstorm ... --from 2-brainstorm` command.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the fresh marker re-check and stale-row manual fallback.
+
 ## [2026-05-06T22:00:00Z] tui — extracted BrainstormAnswers + hardened the auto-continue parser
 
 **Action:** Moved the brainstorm-completeness predicate and its five helper methods out of `BubbleModel` (already a 1240-line MVU class) into a standalone `Hive::Tui::BrainstormAnswers` module at `lib/hive/tui/brainstorm_answers.rb`, with one public entrypoint `BrainstormAnswers.complete?(path)`. While extracting, hardened the parser so the auto-continue gate cannot be tricked or accidentally fire:

@@ -1,6 +1,7 @@
 require "bubbletea"
 require "shellwords"
 require "hive"
+require "hive/markers"
 require "hive/task"
 require "hive/findings"
 require "hive/tui/debug"
@@ -757,8 +758,17 @@ module Hive
         return false unless row.action_key == "needs_input"
         return false unless row.stage.to_s == "2-brainstorm"
         return false if row.suggested_command.to_s.empty?
+        return false unless current_brainstorm_input_marker?(path)
 
         Hive::Tui::BrainstormAnswers.complete?(path)
+      end
+
+      def current_brainstorm_input_marker?(path)
+        marker = Hive::Markers.current(path)
+        marker.name == :waiting || marker.name == :none
+      rescue SystemCallError, EncodingError, IOError, ArgumentError => e
+        Hive::Tui::Debug.log("input_editor", "auto-continue marker check failed: #{e.class}: #{e.message}")
+        false
       end
 
       # $VISUAL → $EDITOR → vi. Shellwords.split lets users carry

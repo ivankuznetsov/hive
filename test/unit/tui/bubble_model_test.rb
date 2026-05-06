@@ -871,6 +871,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         Build the smallest useful slice.
         ### Q2. Cadence?
         ### A2. Daily cron.
+        <!-- WAITING -->
       MD
       row = make_task_row(
         slug: "answered-task",
@@ -981,6 +982,35 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first,
         "unchanged mtime must NOT auto-dispatch even with completed answers"
       assert_equal false, @messages.first.changed
+      assert_empty mtimes
+    end
+  end
+
+  def test_open_input_editor_no_auto_dispatch_when_marker_changed_while_editing
+    # Simulates a stale row captured before the editor opened. If another
+    # actor completes the brainstorm while the editor is open, the old
+    # needs_input row must not spawn the stale suggested command.
+    with_tmp_dir do |dir|
+      brainstorm_md = File.join(dir, "brainstorm.md")
+      File.write(brainstorm_md, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. Done.
+        <!-- COMPLETE -->
+      MD
+      row = make_task_row(state_file: brainstorm_md, marker: "waiting")
+      mtimes = [ 70.0, 71.0 ]
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:file_mtime) { |_path| mtimes.shift }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 1, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first,
+        "fresh COMPLETE marker must suppress stale auto-dispatch"
+      assert_equal true, @messages.first.changed
       assert_empty mtimes
     end
   end

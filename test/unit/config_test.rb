@@ -1035,4 +1035,149 @@ class ConfigTest < Minitest::Test
       File.chmod(0o644, path) if path && File.exist?(path)
     end
   end
+
+  # ── ADR-024: daemon settings ──────────────────────────────────────────
+
+  # Per-project default `daemon.enabled` is `false` so legacy projects
+  # whose YAML predates the `daemon:` block don't silently flip on. Same
+  # pattern ADR-023 used for stage agents.
+  def test_load_returns_default_daemon_disabled_when_key_absent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal false, cfg.dig("daemon", "enabled"),
+                   "legacy projects without daemon: key must default to disabled"
+    end
+  end
+
+  def test_load_returns_documented_daemon_numeric_defaults
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal 30,    cfg.dig("daemon", "poll_interval_sec")
+      assert_equal 30,    cfg.dig("daemon", "edit_debounce_sec")
+      assert_equal 300,   cfg.dig("daemon", "pr_merge_poll_interval_sec")
+      assert_equal 3,     cfg.dig("daemon", "max_concurrent_runs")
+      assert_equal 1,     cfg.dig("daemon", "max_concurrent_per_project")
+      assert_equal 50,    cfg.dig("daemon", "max_runs_per_day_per_project")
+      assert_equal 60,    cfg.dig("daemon", "transient_retry_backoff_sec")
+      assert_equal 600,   cfg.dig("daemon", "shutdown_grace_sec")
+    end
+  end
+
+  def test_load_honors_per_project_daemon_enabled_true
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          enabled: true
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal true, cfg.dig("daemon", "enabled")
+      # Other daemon defaults should still come from DEFAULTS via deep-merge.
+      assert_equal 30, cfg.dig("daemon", "poll_interval_sec")
+    end
+  end
+
+  def test_load_honors_per_project_daemon_partial_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          enabled: true
+          poll_interval_sec: 15
+          max_concurrent_runs: 5
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal true, cfg.dig("daemon", "enabled")
+      assert_equal 15,   cfg.dig("daemon", "poll_interval_sec")
+      assert_equal 5,    cfg.dig("daemon", "max_concurrent_runs")
+      # Unspecified keys still fall back to defaults via deep-merge.
+      assert_equal 50,   cfg.dig("daemon", "max_runs_per_day_per_project")
+    end
+  end
+
+  def test_load_rejects_non_boolean_daemon_enabled
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          enabled: "yes"
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.enabled.*must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_rejects_too_small_daemon_poll_interval
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          poll_interval_sec: 2
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.poll_interval_sec.*>= 5/, err.message)
+    end
+  end
+
+  def test_load_rejects_too_small_pr_merge_poll_interval
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          pr_merge_poll_interval_sec: 30
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.pr_merge_poll_interval_sec.*>= 60/, err.message)
+    end
+  end
+
+  def test_load_rejects_zero_max_concurrent_runs
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          max_concurrent_runs: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.max_concurrent_runs.*>= 1/, err.message)
+    end
+  end
+
+  def test_load_rejects_negative_edit_debounce
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          edit_debounce_sec: -1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.edit_debounce_sec.*>= 0/, err.message)
+    end
+  end
+
+  def test_load_accepts_zero_edit_debounce
+    # 0 is a valid choice (operator wants instant dispatch on first
+    # mtime move, no debounce window).
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          edit_debounce_sec: 0
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal 0, cfg.dig("daemon", "edit_debounce_sec")
+    end
+  end
+
+  def test_load_rejects_non_hash_daemon_section
+    # daemon: enabled    (scalar; user forgot the nested mapping)
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon: enabled
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.*must be a Hash/, err.message)
+    end
+  end
 end

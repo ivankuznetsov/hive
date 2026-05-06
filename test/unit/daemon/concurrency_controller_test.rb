@@ -1,0 +1,274 @@
+require "test_helper"
+require "hive/daemon/concurrency_controller"
+
+# Pin the concurrency controller's caps + cooldown + quarantine + daily-
+# rate semantics. Pure unit — no I/O, no Process.spawn. The controller
+# is the daemon's load-bearing budget gate; misclassifying an exit code
+# (e.g., consuming a daily slot on TEMPFAIL) breaks fairness across the
+# whole pipeline.
+class HiveDaemonConcurrencyControllerTest < Minitest::Test
+  T0 = Time.utc(2026, 5, 6, 12, 0, 0)
+
+  def make(global: 3, per_project: 1, daily: 50)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: global,
+      max_concurrent_per_project: per_project,
+      max_runs_per_day_per_project: daily
+    )
+  end
+
+  def dispatch(c, pid, project, slug, mtime: T0 - 60, started_at: T0)
+    c.record_dispatch(
+      pid: pid, project: project, slug: slug,
+      stage: "5-review", command: "hive run #{slug}",
+      started_at: started_at, state_file_mtime: mtime
+    )
+  end
+
+  # ── caps ──────────────────────────────────────────────────────────────
+
+  def test_empty_controller_allows_dispatch
+    assert_equal :ok, make.can_dispatch?(project: "p1", slug: "s1", now: T0)
+  end
+
+  def test_global_cap_blocks_third_dispatch_when_max_is_two
+    c = make(global: 2, per_project: 5)
+    dispatch(c, 100, "p1", "s1")
+    dispatch(c, 101, "p2", "s2")
+    assert_equal :global_cap, c.can_dispatch?(project: "p3", slug: "s3", now: T0)
+  end
+
+  def test_per_project_cap_blocks_within_global_room
+    c = make(global: 5, per_project: 1)
+    dispatch(c, 100, "p1", "s1")
+    assert_equal :project_cap, c.can_dispatch?(project: "p1", slug: "s2", now: T0)
+    # Another project still allowed
+    assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s1", now: T0)
+  end
+
+  def test_daily_cap_blocks_after_n_dispatches
+    c = make(daily: 2)
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
+    dispatch(c, 101, "p1", "s2", started_at: T0 + 600)
+    c.record_completion(pid: 101, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 601)
+    # Both completed; cooldown only blocks the same slug, not new ones
+    # → daily cap is the gate now.
+    result = c.can_dispatch?(project: "p1", slug: "s3", now: T0 + 1000)
+    assert_equal :daily_cap, result
+  end
+
+  def test_daily_counter_rolls_at_midnight
+    c = make(daily: 1)
+    dispatch(c, 100, "p1", "s1", started_at: T0)
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
+    # Same day — daily cap reached.
+    assert_equal :daily_cap,
+                 c.can_dispatch?(project: "p1", slug: "s2", now: T0 + 600)
+    # Next day — cooldown for s1 may persist, but s2 is fresh.
+    next_day = T0 + 86_400
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s2", now: next_day)
+  end
+
+  # ── cooldown after SUCCESS ────────────────────────────────────────────
+
+  def test_success_triggers_cooldown_for_same_slug
+    c = make
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 5)
+    assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 100)
+    # After cooldown elapses
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1",
+                                      now: T0 + Hive::Daemon::ConcurrencyController::SUCCESS_COOLDOWN_SEC + 100)
+  end
+
+  # ── transient retry → quarantine after schedule exhausted ──────────────
+
+  def test_transient_failure_backs_off_then_quarantines
+    c = make
+    pid = 100
+    Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.each_with_index do |backoff, idx|
+      dispatch(c, pid + idx, "p1", "s1")
+      c.record_completion(pid: pid + idx, exit_code: Hive::ExitCodes::SOFTWARE,
+                          completed_at: T0 + idx)
+      # During cooldown the slug is blocked.
+      result = c.can_dispatch?(project: "p1", slug: "s1", now: T0 + idx + 1)
+      assert_equal :cooldown, result, "after failure ##{idx + 1} must be in cooldown (#{backoff}s)"
+    end
+
+    # One more failure past the schedule's last entry → quarantine.
+    next_pid = pid + Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.size
+    dispatch(c, next_pid, "p1", "s1",
+             started_at: T0 + Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.size + 1000)
+    c.record_completion(pid: next_pid, exit_code: Hive::ExitCodes::SOFTWARE,
+                        completed_at: T0 + 100_000)
+    assert c.quarantined?(project: "p1", slug: "s1"),
+           "exhausted backoff schedule must transition to :quarantined"
+    assert_equal :quarantined,
+                 c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 1_000_000)
+  end
+
+  def test_success_after_transient_resets_failure_counter
+    c = make
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SOFTWARE, completed_at: T0 + 1)
+
+    # Re-attempt later (simulate cooldown elapsed by passing future now)
+    future = T0 + 10_000
+    dispatch(c, 101, "p1", "s1", started_at: future)
+    c.record_completion(pid: 101, exit_code: Hive::ExitCodes::SUCCESS, completed_at: future + 1)
+
+    refute c.quarantined?(project: "p1", slug: "s1"),
+           "SUCCESS after transient must clear the failure counter, not preserve it"
+  end
+
+  # ── TEMPFAIL refunds daily slot ───────────────────────────────────────
+
+  def test_tempfail_refunds_daily_slot
+    c = make(daily: 1)
+    dispatch(c, 100, "p1", "s1")
+    assert_equal 1, c.daily_count_for("p1", T0)
+
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TEMPFAIL, completed_at: T0 + 1)
+    assert_equal 0, c.daily_count_for("p1", T0),
+                 "TEMPFAIL means we didn't do work; refund the slot"
+    # And the daily cap should not be reached:
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s2", now: T0 + 100)
+  end
+
+  def test_tempfail_does_not_quarantine_or_cooldown
+    c = make
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TEMPFAIL, completed_at: T0 + 1)
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
+    refute c.quarantined?(project: "p1", slug: "s1")
+  end
+
+  # ── TASK_IN_ERROR clears running entry but doesn't quarantine ─────────
+
+  def test_task_in_error_does_not_quarantine_in_controller
+    # Marker handles the recovery via Policy upstream; controller just
+    # cleans up the running entry.
+    c = make
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TASK_IN_ERROR, completed_at: T0 + 1)
+    refute c.quarantined?(project: "p1", slug: "s1")
+    assert_equal 0, c.in_flight_count
+  end
+
+  # ── USAGE quarantines ────────────────────────────────────────────────
+
+  def test_usage_quarantines_for_daemon_lifetime
+    c = make
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::USAGE, completed_at: T0 + 1)
+    assert c.quarantined?(project: "p1", slug: "s1")
+    assert_equal :quarantined, c.can_dispatch?(project: "p1", slug: "s1",
+                                               now: T0 + 1_000_000)
+  end
+
+  # ── CONFIG drops the project ─────────────────────────────────────────
+
+  def test_config_drops_entire_project
+    c = make
+    dispatch(c, 100, "p1", "s1")
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0 + 1)
+    assert c.project_dropped?("p1")
+    # Every task in the dropped project is now blocked, regardless of slug.
+    assert_equal :project_dropped,
+                 c.can_dispatch?(project: "p1", slug: "totally-different-slug", now: T0 + 100)
+    # Other projects unaffected.
+    assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s1", now: T0 + 100)
+  end
+
+  def test_record_project_dropped_direct_api
+    c = make
+    c.record_project_dropped(project: "p1")
+    assert c.project_dropped?("p1")
+  end
+
+  # ── mtime tracking ────────────────────────────────────────────────────
+
+  def test_record_dispatch_records_state_file_mtime
+    c = make
+    mtime = T0 - 120
+    dispatch(c, 100, "p1", "s1", mtime: mtime)
+    assert_equal mtime, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+  end
+
+  def test_last_dispatched_mtime_returns_nil_when_no_prior_dispatch
+    c = make
+    assert_nil c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+  end
+
+  def test_dispatch_with_nil_mtime_does_not_overwrite_recorded_value
+    # If a later dispatch can't read mtime (status row malformation),
+    # don't blow away the previously-recorded value.
+    c = make
+    mtime = T0 - 120
+    dispatch(c, 100, "p1", "s1", mtime: mtime)
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
+    # Force a follow-on dispatch with nil mtime
+    c.record_dispatch(
+      pid: 101, project: "p1", slug: "s1", stage: "5-review",
+      command: "hive run", started_at: T0 + 10_000, state_file_mtime: nil
+    )
+    # The prior recorded value should still be there.
+    assert_equal mtime, c.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+  end
+
+  # ── in_flight bookkeeping ─────────────────────────────────────────────
+
+  def test_in_flight_count_tracks_running_entries
+    c = make(global: 5, per_project: 5)
+    assert_equal 0, c.in_flight_count
+    dispatch(c, 100, "p1", "s1")
+    dispatch(c, 101, "p1", "s2")
+    assert_equal 2, c.in_flight_count
+
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
+    assert_equal 1, c.in_flight_count
+    refute_includes c.running_pids, 100
+    assert_includes c.running_pids, 101
+  end
+
+  def test_completion_for_unknown_pid_is_a_no_op
+    c = make
+    # Should not raise / corrupt state.
+    c.record_completion(pid: 99_999, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0)
+    assert_equal 0, c.in_flight_count
+  end
+
+  # ── integration-style 100-tick smoke test ─────────────────────────────
+
+  def test_simulation_keeps_state_internally_consistent
+    c = make(global: 3, per_project: 1, daily: 50)
+    seed = 0
+    100.times do |i|
+      project = "p#{(i % 3) + 1}"
+      slug = "task-#{(i % 5) + 1}"
+      next unless c.can_dispatch?(project: project, slug: slug, now: T0 + i) == :ok
+
+      pid = 1000 + seed
+      dispatch(c, pid, project, slug, mtime: T0 - 60, started_at: T0 + i)
+      # Mix of success / transient / tempfail
+      code = case i % 4
+             when 0 then Hive::ExitCodes::SUCCESS
+             when 1 then Hive::ExitCodes::TEMPFAIL
+             when 2 then Hive::ExitCodes::SOFTWARE
+             else        Hive::ExitCodes::SUCCESS
+             end
+      c.record_completion(pid: pid, exit_code: code, completed_at: T0 + i + 1)
+      seed += 1
+    end
+
+    # No leaked running entries.
+    assert_equal 0, c.in_flight_count
+
+    # Daily counts should never go negative (TEMPFAIL refund logic).
+    %w[p1 p2 p3].each do |proj|
+      count = c.daily_count_for(proj, T0)
+      assert count >= 0, "#{proj} daily count went negative"
+    end
+  end
+end

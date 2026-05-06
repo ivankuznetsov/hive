@@ -29,6 +29,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 | CI | `.github/workflows/ci.yml`, `.github/dependabot.yml`, `config/brakeman.ignore` | Wired |
 | Repo hygiene | `CHANGELOG.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | Authored |
 | Docs | `README.md`, `wiki/` knowledge base | Authored |
+| Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 6-pr after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
 
 ## Phase 1 deferred work
 
@@ -42,11 +43,13 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 
 ## Phase 2/3 work (also deferred)
 
-- Dispatcher daemon at `~/Dev/hive/daemon.rb` with polling + fswatch.
+- ~~Dispatcher daemon at `~/Dev/hive/daemon.rb` with polling + fswatch.~~ Shipped (polling-only) under ADR-024. fswatch deferred behind `daemon.fswatch.enabled: true`.
 - Telegram bot bidirectional adapter.
 - Observability probes track (`<project>/.hive-state/reports/`).
 - QMD export of `7-done/` task artefacts to per-project learning collections.
 - `gh api` PR-comment ingestion into `reviews/pr-comments-NN.md`.
+- `hive daemon doctor` — first-time-setup health check (verifies `gh auth status`, registered projects, daemon-enabled flags).
+- TUI live integration of daemon state (read-only "Daemon" pane).
 
 ## What's NOT implemented yet (per plan)
 

@@ -183,6 +183,34 @@ tags: [decisions, adr]
   3. **Bumped-generous limit defaults.** `budget_usd` / `timeout_sec` bumped ~5×: per-task aggregate cap rises from ~$305 to ~$1475. Caps are sanity caps for runaway agents, not cost targets. The deprecated `execute_review` key (orphaned by ADR-014 — 5-review owns reviewer budgets) is dropped from `DEFAULTS` and the rendered template; existing project configs that still set it survive deep-merge.
 **Consequences:** First-time `hive init` is self-documenting — every knob is visible at the prompt. Scripted automation gets a stable contract: agent and reviewer prompts accept **names** in addition to indices, and the iteration orders of `Hive::AgentProfiles.registered_names` and `Prompts::DEFAULT_REVIEWER_NAMES` are documented stability contracts. Trade-off: codex's `:output_file_exists` status mode would treat brainstorm/plan/execute spawns (which write a state-file marker, not an output file) as `:error`, so those three stage runners explicitly pin `status_mode: :state_file_marker` regardless of which profile is selected — this preserves the marker-based lifecycle independent of the operator's agent choice. Test surface added: 29 unit tests for the prompt module plus 7 new integration tests for the rendered template and the piped-input / abort / re-run guard flows. Deferred: a future `hive config edit` subcommand for tightening / loosening settings on already-initialized projects.
 
+## ADR-024: Hive daemon — automation-first; the only gate is "user input required"; supersedes ADR-004 for daemon-enabled projects
+
+**Status:** Active (shipped with plan `docs/plans/2026-05-06-001-feat-hive-daemon-dispatcher-plan.md`)
+
+**Context:** ADR-004 established `mv` between stage directories as the single human approval gesture. That was the right gate during the prototype phase: every transition was an explicit human "yes, the previous stage's output looks good, advance." Once the system was used in anger and trusted, the gate became wasteful — the user typed `mv` (or `hive plan` / `hive develop` / etc.) on every transition for every task across 40 projects, mostly because nothing went wrong, defeating the original `hive-pipeline-requirements.md` success criterion (`Ivan закидывает идею в 1-inbox/ и к утру следующего дня видит ... brainstorm + plan + execute с findings`).
+
+Meanwhile the system grew its own load-bearing safety net: `hive approve` (`wiki/commands/approve.md`) enforces a closed terminal-marker set (`Hive::Commands::Approve::VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete]`). Forward-advance on any non-terminal marker raises `Hive::WrongStage` (exit 4). The promote-or-run workflow verbs (`wiki/commands/stage_action.md`) inherit this check. Every safety property the prototype-era `mv` gesture protected (don't advance past WAITING, don't skip review, don't merge a STALE task forward) is now codified in a closed enum + a unit-tested marker check.
+
+**Decision:** For daemon-enabled projects, the daemon does maximum work autonomously. Stage transitions, in-stage re-runs, and the post-merge archive are all daemon-driven. The ONLY gates that stop the daemon are points where the system literally cannot proceed without human input:
+
+  1. **Q&A waits** (`:waiting`, `:execute_waiting`) — agent asked questions, user answers in the file.
+  2. **Triage waits** (`:review_waiting`, including `reason=fix_guardrail`) — user ticks `[x]` on accepted findings or removes rogue commits.
+  3. **Recovery waits** (`:execute_stale`, `:review_stale`, `:review_ci_stale`, `:review_error`, `:error`) — these markers EXIST to demand human intervention; skipping them is correct.
+  4. **External-state waits** — 6-pr/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
+
+The human approval gesture for the daemon is **enabling it at `hive init`** (TTY prompt, default `Y`, per ADR-023 onboarding pattern). Per-project `daemon.enabled: true` is the explicit, durable consent. Legacy projects already on disk (configs without the `daemon:` key) fall back to `Config::DEFAULTS`'s per-project default of `false` — same "don't silently flip legacy" pattern ADR-023 used for stage agents.
+
+**Relationship to ADR-004:**
+  - ADR-004 stays valid for the manual-CLI surface (operators who never enable the daemon, or who run `hive run` / workflow verbs directly). The marker check still governs every advance.
+  - For daemon-enabled projects, ADR-024 supersedes ADR-004's "per-task `mv` is approval" framing. Approval is given once per project at enrollment time. The closed `VALID_TERMINAL_MARKERS` set still does the per-task safety check — just enforced inside `hive approve` (called by the workflow verbs the daemon dispatches), not by a human typing `mv`.
+
+**Consequences:**
+  - Origin's "next morning" success criterion becomes achievable end-to-end: idea → brainstorm answers (human) → plan → execute → review → PR opened → PR merged on GitHub (human) → auto-archived. Human touchpoints reduce to: `hive new`, brainstorm Q&A, optional review-escalation triage, GitHub merge button.
+  - Trust boundary unchanged from ADR-008/018: daemon spawns the same `hive run` / workflow verbs the user already runs. No new permission grants.
+  - ADR-020 (fix-guardrail) and ADR-021 (orchestrator-owned markers) invariants preserved automatically — both manifest as `kind: edit` or `agent_running` rows the daemon never advances past.
+  - Cost ceiling under daemon load: `max_concurrent_runs × per-task-budget-cap` (ADR-023) ≈ ~$4425 worst-case in-flight at default `max_concurrent_runs=3`. First per-project rollout requires `--dry-run` validation.
+  - For operators who want the prototype-era manual-`mv` model, the answer is `daemon.enabled: false` (or no daemon running). The CLI surface is unchanged; the daemon is purely additive.
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.

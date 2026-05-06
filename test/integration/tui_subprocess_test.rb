@@ -1,5 +1,6 @@
 require "test_helper"
 require "securerandom"
+require "tempfile"
 require "hive/tui/subprocess"
 require "hive/tui/subprocess_registry"
 
@@ -50,6 +51,90 @@ class TuiSubprocessTest < Minitest::Test
     exec_cmd.callable.call
 
     assert_equal true, ran
+  end
+
+  # Regression: an interactive child (vim/nvim/gh-pr-create-prompt)
+  # spawned with `pgroup: true` lands in a non-foreground pgrp and
+  # gets SIGTTIN on its first /dev/tty read — the symptom is "the
+  # editor never appears". The takeover path must keep the child in
+  # the parent's pgrp so reads succeed; SIGINT is silenced via the
+  # parent trap, not via pgrp isolation. This test pins that contract
+  # by using the real helper to spawn a child that asserts on its own
+  # pgrp and inherited signal dispositions.
+  def test_run_takeover_child_sync_keeps_child_in_parents_pgroup
+    parent_pgrp = Process.getpgrp
+    pgrp_capture = Tempfile.new("hive-tui-takeover-pgrp")
+    pgrp_capture.close
+
+    exit_code = Hive::Tui::Subprocess.run_takeover_child_sync(
+      [ "ruby", "-e", "File.write(ARGV[0], Process.getpgrp.to_s)", pgrp_capture.path ]
+    )
+    inherited_pgrp = File.read(pgrp_capture.path).to_i
+
+    assert_equal 0, exit_code
+    assert_equal parent_pgrp, inherited_pgrp,
+                 "takeover helper must spawn the child in the parent's pgrp"
+  ensure
+    pgrp_capture&.close
+    pgrp_capture&.unlink
+  end
+
+  def test_run_takeover_child_sync_does_not_leak_ignored_signals_to_child
+    signal_capture = Tempfile.new("hive-tui-takeover-signals")
+    signal_capture.close
+    child_script = <<~RUBY
+      values = %w[INT QUIT TSTP].map { |signal| Signal.trap(signal, "DEFAULT").inspect }
+      File.write(ARGV[0], values.join("\\n"))
+    RUBY
+
+    prev_int = Signal.trap("INT", "DEFAULT")
+    prev_quit = Signal.trap("QUIT", "DEFAULT")
+    prev_tstp = Signal.trap("TSTP", "DEFAULT")
+    exit_code = Hive::Tui::Subprocess.run_takeover_child_sync(
+      [ "ruby", "-e", child_script, signal_capture.path ]
+    )
+    child_handlers = File.read(signal_capture.path).lines(chomp: true)
+
+    assert_equal 0, exit_code
+    assert_equal %w["DEFAULT" "DEFAULT"], child_handlers.first(2),
+                 "takeover helper must not make INT/QUIT inherit parent-side ignored traps"
+    assert_includes %w["DEFAULT" "SYSTEM_DEFAULT"], child_handlers[2],
+                    "takeover helper must leave TSTP at a stoppable default"
+    refute_includes child_handlers, %("IGNORE"),
+                    "takeover helper must not make children inherit parent-side ignored traps"
+  ensure
+    Signal.trap("INT", prev_int) if prev_int
+    Signal.trap("QUIT", prev_quit) if prev_quit
+    Signal.trap("TSTP", prev_tstp) if prev_tstp
+    signal_capture&.close
+    signal_capture&.unlink
+  end
+
+  def test_run_takeover_child_sync_restores_parent_terminal_signal_traps
+    sentinel_int = proc { :sentinel_int }
+    sentinel_quit = proc { :sentinel_quit }
+    sentinel_tstp = proc { :sentinel_tstp }
+    before_int = Signal.trap("INT", sentinel_int)
+    before_quit = Signal.trap("QUIT", sentinel_quit)
+    before_tstp = Signal.trap("TSTP", sentinel_tstp)
+    begin
+      exit_code = Hive::Tui::Subprocess.run_takeover_child_sync([ "ruby", "-e", "exit 0" ])
+      after_int = Signal.trap("INT", "DEFAULT")
+      after_quit = Signal.trap("QUIT", "DEFAULT")
+      after_tstp = Signal.trap("TSTP", "DEFAULT")
+
+      assert_equal 0, exit_code
+      assert_same sentinel_int, after_int,
+                  "run_takeover_child_sync must restore the parent's INT trap"
+      assert_same sentinel_quit, after_quit,
+                  "run_takeover_child_sync must restore the parent's QUIT trap"
+      assert_same sentinel_tstp, after_tstp,
+                  "run_takeover_child_sync must restore the parent's TSTP trap"
+    ensure
+      Signal.trap("INT", before_int)
+      Signal.trap("QUIT", before_quit)
+      Signal.trap("TSTP", before_tstp)
+    end
   end
 
   # ---- run_quiet! ----

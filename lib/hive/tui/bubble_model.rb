@@ -746,9 +746,9 @@ module Hive
       # / ERRNO(interactive) stamps that workflow-verb takeovers
       # write to `hive-tui-subprocess.log` — useful for diagnosing
       # "I pressed Enter on a needs_input row and the TUI froze"
-      # reports. The shared helper also owns `pgroup: true` (so a
-      # mid-edit Ctrl-C hits the editor, not the TUI) and the
-      # ENOENT/EACCES → COMMAND_NOT_FOUND_EXIT (127) translation.
+      # reports. The shared helper also owns the foreground pgrp
+      # contract, parent-side signal quiescing, and the ENOENT/EACCES
+      # → COMMAND_NOT_FOUND_EXIT (127) translation.
       #
       # The pre-spawn `clear_terminal_for_takeover` stays here: it's
       # specific to the editor handoff and addresses a visual-only

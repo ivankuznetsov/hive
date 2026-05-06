@@ -146,21 +146,57 @@ module Hive
 
       # @api private
       # Foreground spawn-and-wait. Stdin/stdout/stderr inherited so the
-      # user can answer prompts. Same pgroup + ENOENT translation as
-      # the background path.
+      # child reads from + writes to the user's tty.
+      #
+      # Pgroup intentionally NOT separated: the child inherits the
+      # TUI's pgrp so it stays in the controlling terminal's foreground
+      # process group. With `pgroup: true`, an interactive child (vim,
+      # nvim, gh pr create at a y/N prompt) spawned from a non-foreground
+      # group gets SIGTTIN on its first read of /dev/tty and the kernel
+      # stops the process — symptom is "the editor never appears." We
+      # learned this the first time `dispatch_command` actually pointed
+      # at a tty-bound child (no v1 workflow verb is interactive); the
+      # workflow-verb-takeover docstring above predates that discovery.
+      #
+      # Side effect of inheriting the pgrp: keyboard-generated signals
+      # deliver to every member of the foreground pgrp, including the
+      # TUI parent. We spawn before quiescing the parent so the child
+      # does NOT inherit ignored signal dispositions. During the wait,
+      # INT/QUIT are ignored by the parent so only the child reacts;
+      # TSTP is left at default so Ctrl-Z can stop the whole foreground
+      # job instead of leaving the parent alive in wait2 with a stopped
+      # child. Original handlers are restored before return so a Ctrl-C
+      # at the dashboard quits the TUI normally.
       def run_takeover_child_sync(argv)
         Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
         spawn_id = generate_correlation_id
         stamp_subprocess_log("BEGIN(interactive)", argv, id: spawn_id)
-        pid = Process.spawn(*argv, pgroup: true)
-        _, status = Process.wait2(pid)
-        exit_code = translate_status(status)
-        stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv, id: spawn_id)
-        exit_code
+        pid = Process.spawn(*argv)
+        with_parent_terminal_signals_quiesced do
+          _, status = Process.wait2(pid)
+          exit_code = translate_status(status)
+          stamp_subprocess_log("END(interactive) exit=#{exit_code}", argv, id: spawn_id)
+          exit_code
+        end
       rescue Errno::ENOENT, Errno::EACCES => e
         Hive::Tui::Debug.log("takeover_command", "errno=#{e.class.name}: #{e.message}")
         stamp_subprocess_log("ERRNO(interactive) #{e.class.name}: #{e.message}", argv)
         COMMAND_NOT_FOUND_EXIT
+      end
+
+      # @api private
+      # Trap-and-restore for the duration of the parent wait. Install
+      # these after spawn so the child keeps normal interactive signal
+      # handling across exec.
+      def with_parent_terminal_signals_quiesced
+        prev_int  = Signal.trap("INT", "IGNORE")
+        prev_quit = Signal.trap("QUIT", "IGNORE")
+        prev_tstp = Signal.trap("TSTP", "DEFAULT")
+        yield
+      ensure
+        Signal.trap("INT", prev_int) if prev_int
+        Signal.trap("QUIT", prev_quit) if prev_quit
+        Signal.trap("TSTP", prev_tstp) if prev_tstp
       end
 
       # @api private

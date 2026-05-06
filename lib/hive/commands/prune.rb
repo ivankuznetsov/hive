@@ -64,6 +64,16 @@ module Hive
         # or `./foo` lands as the absolute form in the envelope. Empty/
         # missing path is preserved as "" rather than expanded against
         # `Dir.pwd` (which would lie about where the row pointed).
+        #
+        # Non-Hash rows reach here from `prune_missing_projects!` (the
+        # loader-level `valid_registry_entry?` filter is mirrored in
+        # `droppable_registry_entry?` so the cleanup verb sees them).
+        # `42["path"]` raises TypeError, which previously crashed the
+        # success payload AFTER the registry was already rewritten. Emit
+        # the row's own representation as `name` so the operator can see
+        # what was dropped, and leave path / hive_state_path as "".
+        return non_hash_entry_payload(entry) unless entry.is_a?(Hash)
+
         raw_path = entry["path"].is_a?(String) ? entry["path"] : ""
         abs_path = raw_path.empty? ? "" : File.expand_path(raw_path)
         raw_hive_state = entry["hive_state_path"]
@@ -78,6 +88,14 @@ module Hive
           "name" => entry["name"].to_s,
           "path" => abs_path,
           "hive_state_path" => hive_state
+        }
+      end
+
+      def non_hash_entry_payload(entry)
+        {
+          "name" => entry.to_s,
+          "path" => "",
+          "hive_state_path" => ""
         }
       end
 

@@ -77,13 +77,19 @@ module Hive
         # (hand-edited config.yml, or pre-normaliser entries). Run both
         # through File.expand_path here so the JSON envelope matches the
         # documented contract regardless of how the row got into the file.
+        #
+        # `name` is also stringified: `unregister_project` matches via
+        # `to_s.==.to_s` so a hand-edited `name: 42` (Integer) is reachable
+        # from the CLI's String argv. Without `.to_s` here, that drop would
+        # leak an Integer into the envelope, violating the schema's
+        # `"name": { "type": "string" }` contract.
         abs_path = File.expand_path(removed["path"].to_s)
         hive_state = removed["hive_state_path"] ? File.expand_path(removed["hive_state_path"]) : File.join(abs_path, ".hive-state")
         {
           "schema" => "hive-forget",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-forget"),
           "ok" => true,
-          "name" => removed["name"],
+          "name" => removed["name"].to_s,
           "path" => abs_path,
           "hive_state_path" => hive_state
         }

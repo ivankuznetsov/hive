@@ -205,14 +205,13 @@ module Hive
       entry.is_a?(Hash) && entry["name"].is_a?(String) && entry["path"].is_a?(String)
     end
 
-    # YAML.safe_load surfaces Psych::SyntaxError on malformed config
-    # files. Without this rewrap the error escaped as ConfigError or
-    # InternalError depending on the call site — schemas promised
-    # exit 78 for "bad config" but the caller observed exit 70. Map
-    # all Psych errors AND filesystem permission/IO errors on the
-    # config file to ConfigError so every command's --json envelope
-    # reports `error_kind: "config"` / `exit_code: 78` and the TUI's
-    # narrow rescue (`Hive::ConfigError` only) catches them.
+    # YAML.safe_load can raise more than `Psych::SyntaxError`:
+    # `Psych::DisallowedClass` (e.g. `!ruby/object:Object` in a hand-edited
+    # config) and `Psych::AliasesNotEnabled` (anchor + alias) are also
+    # "operator wrote bad YAML" cases that used to leak as InternalError
+    # (exit 70) despite the documented exit 78 contract. Rescue
+    # `Psych::Exception` so every malformed-YAML shape funnels through the
+    # same `error_kind: "config"` envelope the TUI's narrow rescue catches.
     #
     # EACCES specifically is the most user-facing of the IO group:
     # `chmod 000 ~/Dev/hive/config.yml` (or running as a different
@@ -221,7 +220,7 @@ module Hive
     # bug — exit 78 is the right shape.
     def load_global_config(path)
       YAML.safe_load(File.read(path)) || {}
-    rescue Psych::SyntaxError => e
+    rescue Psych::Exception => e
       raise ConfigError, "global config at #{path} is not valid YAML: #{e.message}"
     rescue Errno::EACCES, Errno::EISDIR => e
       raise ConfigError, "global config at #{path} is not readable: #{e.message}"
@@ -348,10 +347,15 @@ module Hive
     # both true for "this row should not be in the registry", so
     # corrupted rows surface in the prune output (and `removed_count`)
     # exactly like missing-path rows.
+    #
+    # `File.expand_path` mirrors `registered_projects` (which expands
+    # before exposing the row to the rest of the surface). Without it,
+    # a hand-edited row like `path: ~/project` would be dropped as stale
+    # because `File.directory?` does not expand `~`.
     def droppable_registry_entry?(entry)
       return true unless valid_registry_entry?(entry)
 
-      !File.directory?(entry["path"])
+      !File.directory?(File.expand_path(entry["path"]))
     end
 
     # Recursive deep-merge: descends into nested Hashes so a partial

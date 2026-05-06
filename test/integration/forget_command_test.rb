@@ -149,6 +149,26 @@ class ForgetCommandTest < Minitest::Test
     ENV["HIVE_HOME"] = prev
   end
 
+  # PR-review P2 #4: `unregister_project` matches `name: 42` (Integer)
+  # via `to_s.==.to_s`, so a hand-edited row with an Integer name is
+  # reachable from the CLI's String argv. The success envelope used to
+  # leak that Integer into `"name": 42`, violating the schema's
+  # `"name": { "type": "string" }` contract. `to_s` in the payload keeps
+  # the JSON envelope schema-conformant.
+  def test_forget_success_payload_stringifies_integer_name
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        { "registered_projects" => [ { "name" => 42, "path" => "/tmp/hive-int" } ] }.to_yaml
+      )
+
+      out, _err = capture_io { Hive::Commands::Forget.new("42", json: true).call }
+      payload = JSON.parse(out)
+      assert_equal "42", payload["name"],
+                   "schema requires string `name`; Integer registry row must be stringified"
+    end
+  end
+
   # P3 #25: schema describes `path` / `hive_state_path` as "Absolute path",
   # but a hand-edited row can carry a relative or `~`-prefixed string.
   # Normalize via File.expand_path in the success payload.

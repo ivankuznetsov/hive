@@ -122,6 +122,17 @@ module Hive
       # Enter on an `agent_running` row — push log-tail mode for `row`.
       OpenLogTail = Data.define(:row)
 
+      # Enter on a `needs_input` row — suspend the TUI and open the
+      # row's input target in the user's editor so they can answer or
+      # revise inline questions before re-running the stage.
+      OpenInputEditor = Data.define(:row)
+
+      # Sent by the editor takeover callable after the editor exits.
+      # `changed` is true when the input target's mtime changed during
+      # the edit window, so the status flash can distinguish a saved
+      # edit from a no-op/cancel.
+      InputEditorExited = Data.define(:slug, :exit_code, :changed)
+
       # Triage Space — toggle accept/reject on the current finding.
       # `row` is the parent task row from grid mode, used by the
       # triage subloop to derive slug + finding context.

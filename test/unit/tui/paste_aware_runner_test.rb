@@ -103,7 +103,7 @@ class HiveTuiPasteAwareRunnerTest < Minitest::Test
     observed = []
     commands = [
       Bubbletea.exit_alt_screen,
-      Bubbletea.exec(-> {}),
+      Bubbletea.exec(-> { }),
       Bubbletea.enter_alt_screen
     ]
 

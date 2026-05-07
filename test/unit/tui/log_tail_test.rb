@@ -17,6 +17,56 @@ class TuiLogTailTest < Minitest::Test
     end
   end
 
+  # ---------- Formatter ----------
+
+  def test_formatter_compacts_stream_json_system_events
+    payload = {
+      "type" => "system", "subtype" => "task_progress",
+      "task_id" => "a0ac6000829a0b140", "tool_use_id" => "toolu_abcdef"
+    }
+    line = "[stream] 2026-05-07T14:37:13Z #{JSON.generate(payload)}"
+
+    assert_equal "14:37:13 system task_progress task=a0ac6000829a tool=toolu_abcdef",
+                 Hive::Tui::LogTail::Formatter.format(line)
+  end
+
+  def test_formatter_compacts_stream_json_assistant_events
+    payload = {
+      "type" => "assistant",
+      "message" => { "model" => "claude-opus-4-7", "id" => "msg_abcdefghi" }
+    }
+    line = "[stream] 2026-05-07T14:37:13Z #{JSON.generate(payload)}"
+
+    assert_equal "14:37:13 assistant claude-opus-4-7 msg=msg_abcdefgh",
+                 Hive::Tui::LogTail::Formatter.format(line)
+  end
+
+  def test_formatter_compacts_stream_json_user_tool_results
+    payload = {
+      "type" => "user",
+      "message" => {
+        "role" => "user",
+        "content" => [ { "type" => "tool_result", "tool_use_id" => "toolu_abc123" } ]
+      }
+    }
+    line = "[stream] 2026-05-07T14:37:13Z #{JSON.generate(payload)}"
+
+    assert_equal "14:37:13 user tool=toolu_abc123 content=tool_result",
+                 Hive::Tui::LogTail::Formatter.format(line)
+  end
+
+  def test_formatter_leaves_unparseable_stream_lines_raw
+    line = "[stream] 2026-05-07T14:37:13Z not-json"
+
+    assert_equal line, Hive::Tui::LogTail::Formatter.format(line)
+  end
+
+  def test_formatter_leaves_non_hash_json_stream_lines_raw
+    line = "[stream] 2026-05-07T14:37:13Z []"
+
+    assert_equal line, Hive::Tui::LogTail::Formatter.format(line)
+  end
+
   # ---------- FileResolver ----------
 
   def test_latest_returns_file_with_newest_mtime

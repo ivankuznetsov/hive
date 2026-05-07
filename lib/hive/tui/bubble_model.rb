@@ -1,6 +1,7 @@
 require "bubbletea"
 require "shellwords"
 require "hive"
+require "hive/markers"
 require "hive/task"
 require "hive/findings"
 require "hive/tui/debug"
@@ -11,6 +12,7 @@ require "hive/tui/update"
 require "hive/tui/snapshot"
 require "hive/tui/triage_state"
 require "hive/tui/log_tail"
+require "hive/tui/brainstorm_answers"
 require "hive/tui/subprocess"
 require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
@@ -623,9 +625,10 @@ module Hive
 
       # Foreground takeover: open the row's input target in $EDITOR
       # (with $VISUAL preferred over $EDITOR; vi as the final fallback)
-      # so the operator can answer inline questions before re-running
-      # the stage. The verb keys (b/p/d/r/P) remain the way to spawn
-      # the agent — opening the editor is intentionally just an editor.
+      # so the operator can answer inline questions. For brainstorm
+      # rows, saving a completed answer round auto-runs the row's
+      # suggested command; partial answers and non-brainstorm rows stay
+      # manual via the verb keys (b/p/d/r/P).
       #
       # mtime is sampled before/after the spawn so InputEditorExited
       # carries a `changed:` flag, distinguishing a saved edit from a
@@ -646,13 +649,14 @@ module Hive
           # output is still being painted. Mirror of the pre-spawn
           # clear in `clear_terminal_for_takeover`.
           clear_terminal_for_takeover
-          @dispatch.call(
-            Hive::Tui::Messages::InputEditorExited.new(
-              slug: row.slug,
-              exit_code: exit_code,
-              changed: before_mtime != after_mtime
-            )
-          )
+          # Both samples must be non-nil to claim a change. A transient
+          # ENOENT/EACCES between samples turns `file_mtime` into nil and
+          # the asymmetric `nil != Float` would otherwise register as a
+          # bogus save.
+          changed = !before_mtime.nil? && !after_mtime.nil? && before_mtime != after_mtime
+          input_editor_exit_messages(row, path, exit_code, changed).each do |message|
+            @dispatch.call(message)
+          end
         end
 
         cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
@@ -724,6 +728,82 @@ module Hive
 
       def review_waiting_reason(row)
         (row.attrs || {})["reason"].to_s
+      end
+
+      # Returns the messages to dispatch after the editor exits.
+      # Manual path:               [InputEditorExited].
+      # Auto-continue success:     [InputEditorExited, DispatchCommand].
+      # Auto-continue suppressed:  [InputEditorExited] OR
+      #                            [InputEditorExited, Flash(reason)] for
+      #                            race / data-anomaly cases the user
+      #                            would otherwise be unable to diagnose
+      #                            from the generic post-save flash alone.
+      #
+      # The rescue around `dispatch_command_for` catches the plain
+      # `ArgumentError` raised by `Shellwords.split` on a malformed
+      # `suggested_command` without swallowing constructor errors from
+      # `InputEditorExited.new` (which lives outside the begin/rescue).
+      def input_editor_exit_messages(row, path, exit_code, changed)
+        exited = Hive::Tui::Messages::InputEditorExited.new(
+          slug: row.slug,
+          exit_code: exit_code,
+          changed: changed
+        )
+
+        case auto_continue_outcome(row, path, exit_code, changed)
+        when :proceed
+          dispatch_messages_for(row, exited)
+        when :empty_command
+          [ exited, suppression_flash(row, "no suggested command on row") ]
+        when :marker_changed
+          [ exited, suppression_flash(row, "brainstorm marker changed during edit") ]
+        else # :silent — expected refusals (parser incomplete, exit nonzero, unchanged, off-stage)
+          [ exited ]
+        end
+      end
+
+      def dispatch_messages_for(row, exited)
+        dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+        [ exited, dispatch ]
+      rescue ArgumentError => e
+        Hive::Tui::Debug.log("input_editor", "auto-continue skipped for #{row.slug}: #{e.message}")
+        [ exited, suppression_flash(row, "malformed suggested command") ]
+      end
+
+      def suppression_flash(row, reason)
+        Hive::Tui::Messages::Flash.new(text: "auto-continue skipped for #{row.slug}: #{reason}")
+      end
+
+      # Returns one of:
+      #   :proceed         — fire DispatchCommand
+      #   :silent          — refuse, common-case (user can self-diagnose)
+      #   :empty_command   — refuse, surface to user (data anomaly)
+      #   :marker_changed  — refuse, surface to user (race with another actor)
+      def auto_continue_outcome(row, path, exit_code, changed)
+        return :silent unless exit_code == 0 && changed
+        return :silent unless row.action_key == "needs_input"
+        return :silent unless row.stage.to_s == "2-brainstorm"
+        return :empty_command if row.suggested_command.to_s.empty?
+        return :marker_changed unless current_brainstorm_input_marker?(path)
+        return :silent unless Hive::Tui::BrainstormAnswers.complete?(path)
+
+        :proceed
+      end
+
+      # Re-reads the on-disk marker after the editor exits to defend
+      # against a race where another actor (a sibling `hive` process,
+      # an editor on a sync mount) advanced the brainstorm to
+      # `:agent_working`, `:complete`, or `:error` while the long-lived
+      # editor was open. The captured `row.marker` is from the snapshot
+      # taken when Enter was pressed; only the freshly-read marker
+      # reflects current truth. `:none` is permitted because the first
+      # round may have no marker yet on a fresh brainstorm.md.
+      def current_brainstorm_input_marker?(path)
+        marker = Hive::Markers.current(path)
+        marker.name == :waiting || marker.name == :none
+      rescue SystemCallError, IOError => e
+        Hive::Tui::Debug.log("input_editor", "auto-continue marker check failed: #{e.class}: #{e.message}")
+        false
       end
 
       # $VISUAL → $EDITOR → vi. Shellwords.split lets users carry

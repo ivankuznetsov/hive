@@ -2,6 +2,52 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues
+
+**Action:** Made the brainstorm auto-continue path observable instead of silently degrading to the generic post-save flash. `auto_continue_after_edit?` was replaced by `auto_continue_outcome`, which returns one of `:proceed`, `:silent`, `:empty_command`, or `:marker_changed`. The race / data-anomaly cases (`:empty_command`, `:marker_changed`, plus the rescue path on a malformed `suggested_command`) now dispatch a follow-up `Messages::Flash` like `auto-continue skipped for <slug>: brainstorm marker changed during edit`, so a user whose mental model is "I filled in answers, expected `hive brainstorm` to auto-fire" can actually see why it didn't. Expected-refusal cases (`exit_code != 0`, mtime unchanged, off-stage, parser says incomplete) stay silent — those are self-evident.
+
+Also tightened the surrounding rescues:
+- **`BrainstormAnswers.complete?`** extracted a private `read_lines(path)` helper that holds the only I/O rescue (`SystemCallError, EncodingError, IOError`) and `.scrub`s bytes so the parser body never sees garbled UTF-8. The parser body itself no longer has a method-level rescue; a real `ArgumentError` from a future refactor now surfaces as a crash during dev/test instead of silently turning into "auto-continue refuses to fire."
+- **`current_brainstorm_input_marker?`** dropped `EncodingError` and `ArgumentError` from its rescue list. The remaining `SystemCallError, IOError` covers the legitimate I/O failure modes; a future marker-corruption `ArgumentError` from `Hive::Markers.parse_attrs` now propagates so state-file corruption doesn't mask itself as "auto-continue stopped working." Added a docstring explaining the race-protection rationale.
+- **Editor callable mtime sample.** `before_mtime != after_mtime` was upgraded to `!before_mtime.nil? && !after_mtime.nil? && before_mtime != after_mtime`. A transient `ENOENT/EACCES` between samples no longer registers as a bogus `changed: true` (which would have produced a misleading "edited <slug>" flash even when the user saved nothing).
+
+Coverage expanded: 5 new BubbleModel integration tests (marker race tested for `<!-- COMPLETE -->`, `<!-- AGENT_WORKING -->`, `<!-- ERROR -->`; empty `suggested_command`; nil `mtime` returns `changed: false`) plus 2 new parser tests (empty file, CRLF line endings via SMB / Windows editors). The pre-existing marker-race test was strengthened to set `marker: "complete"` on the row, proving the production code reads from disk via `Hive::Markers.current` and ignores the row attr.
+
+**Refreshed pages:**
+- (none — the on-screen guarantees in [[commands/tui]] are unchanged for the success path; the new failure-mode flashes are an additive UX improvement.)
+
+## [2026-05-06T22:00:00Z] tui — extracted BrainstormAnswers + hardened the auto-continue parser
+
+**Action:** Moved the brainstorm-completeness predicate and its five helper methods out of `BubbleModel` (already a 1240-line MVU class) into a standalone `Hive::Tui::BrainstormAnswers` module at `lib/hive/tui/brainstorm_answers.rb`, with one public entrypoint `BrainstormAnswers.complete?(path)`. While extracting, hardened the parser so the auto-continue gate cannot be tricked or accidentally fire:
+
+- **Code-fence aware.** Lines inside ``` or ~~~ fenced blocks no longer count as live structure, so a pasted brainstorm template with `## Round 99` / `### Q1` / `### A1` inside a fence cannot dictate completeness while real Round 1 is still empty.
+- **CommonMark-correct heading indent.** Heading regexes accept 0–3 leading spaces only; 4+ space indentation is treated as an indented code block per CommonMark, not as an ATX heading.
+- **Latest round by N, not by file position.** Picks the round with the highest N (ties broken by later position). A stale duplicate `## Round 1` pasted below an in-progress `## Round 2` no longer hijacks the selection.
+- **Refuses on duplicate Q/A numbers** within the same round. A typoed copy-paste that produces two `### Q1` headings keeps the row on the manual path instead of auto-firing on the surviving last occurrence.
+- **HTML comment handling.** `<!-- WAITING -->` / `<!-- COMPLETE -->` / inline `<!-- thinking -->` comments are stripped from answer bodies before the emptiness check; comment lines no longer truncate body collection mid-answer.
+- **Wider rescue + Debug.log.** `complete?` rescues `SystemCallError, EncodingError, IOError, ArgumentError` (covers `EISDIR` on a directory path, encoding errors on non-UTF-8 bytes, and the `ArgumentError: invalid byte sequence in UTF-8` from `String#match?`) and routes through `Hive::Tui::Debug.log` so a recurring permissions/encoding issue is diagnosable rather than silent.
+- **Tighter rescue scope in `BubbleModel#input_editor_exit_messages`.** The `rescue ArgumentError` now narrowly wraps the `dispatch_command_for` call rather than the whole method, so future kwarg drift in `Hive::Tui::Messages::InputEditorExited` no longer gets caught and silently re-raised by the recovery branch.
+- **Both messages dispatched on auto-continue.** Manual path: `[InputEditorExited]`. Auto path: `[InputEditorExited, DispatchCommand]`. Future observers added to `InputEditorExited` will fire on auto-fired editor closes too.
+
+Coverage: 23-test unit suite directly against the new module (real fixtures on disk, including code-fence bypasses, tilde fences, indented headings, duplicate Q/A numbers, multi-round selection, WAITING-marker bodies, encoding errors, missing files, directory paths) plus four new BubbleModel integration tests (non-zero editor exit, mtime-unchanged with complete answers, malformed `suggested_command` rescue branch, real `File.mtime` end-to-end). All 4 actionable + 7 advisory follow-ups from issue #39 are now closed.
+
+**Refreshed pages:**
+- (none — the user-facing behavior in [[commands/tui]] is unchanged; this was a refactor + parser hardening for resilience.)
+
+## [2026-05-06T20:49:00Z] tui — auto-continue rechecks the current marker
+
+**Action:** Tightened the brainstorm auto-continue gate so the post-editor path re-reads the state-file marker before dispatching the suggested command. Auto-continue now only fires when the current marker is still `WAITING` / `none`; if another actor completes, starts, or errors the brainstorm while the editor is open, the stale row falls back to the manual `InputEditorExited` path instead of spawning an old `hive brainstorm ... --from 2-brainstorm` command.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the fresh marker re-check and stale-row manual fallback.
+
+## [2026-05-06T17:30:00Z] tui — completed brainstorm answers auto-continue
+
+**Action:** `Enter` on a `needs_input` brainstorm row still opens `brainstorm.md` in the user's editor, but saving a completed answer round now dispatches the row's existing `hive brainstorm <slug> --from 2-brainstorm` command automatically. The TUI only auto-continues when the editor exits 0, the file mtime changed, the row is in `2-brainstorm`, and the latest `## Round N` has every `### Qn` paired with a non-empty `### An`; partial answers and non-brainstorm input states keep the manual verb-key path. This preserves the marker contract (`brainstorm.md` stays `WAITING` / `none` until the brainstorm agent rewrites it) while removing the confusing "I saved answers but the row still says Needs your input" dead-end.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the completed-answer auto-continue behavior and the guardrails that keep partial answers manual.
+
 ## [2026-05-06T10:00:00Z] forget / prune / TUI X-key — registry cleanup surfaces
 
 **Action:** Three new registry-cleanup surfaces landed (`hive forget NAME`, `hive prune [--dry-run]`, TUI grid `X` keystroke), gated to safe targets. `hive prune` and the TUI X-key are idempotent (re-running on a clean registry / a row whose path is already gone is a no-op); `hive forget X` is **not** retry-idempotent today — a second invocation after a successful drop returns `unknown_project` / exit 64 (see [[commands/forget]] § Idempotency). Each CLI verb honours `--json` with a published schema (`hive-forget.v1.json` / `hive-prune.v1.json`); error envelopes route through `Hive::Schemas::ErrorEnvelope.build` and carry `error_class` like every other hive-* envelope. `Hive::Schemas::ForgetErrorKind` and `PruneErrorKind` modules pin the closed enums (`missing_name`, `unknown_project`, `usage`, `config`, `internal`); `schema_files_test.rb` enforces producer/schema parity. `Hive::Config.unregister_project` now uses index-based delete (Array#- subtraction would have cleared duplicate-content rows). `Hive::Config.registered_projects` tolerates malformed registry entries (non-Hash, missing `path`, nil values) by skipping them; `Hive::Config.prune_missing_projects!` reports them as droppable so the cleanup path is complete. `Psych::SyntaxError` on a malformed `config.yml` is rewrapped as `Hive::ConfigError` (exit 78) instead of leaking as `InternalError` (exit 70) — the TUI's narrow `Hive::ConfigError` rescue now catches malformed-YAML cases too. `unregister_project` and `prune_missing_projects!` validate `$HIVE_HOME` first so a typoed env var surfaces as `config` (exit 78) rather than masquerading as `unknown_project` (exit 64). The TUI all-unhealthy flash branches on the actual error mix instead of unconditionally pointing at X / `hive prune` (which are gated to `missing_project_path` rows only).

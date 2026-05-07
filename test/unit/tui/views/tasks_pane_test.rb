@@ -96,6 +96,66 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     refute_includes out, "Needs recovery"
   end
 
+  def test_recover_review_status_falls_back_to_marker_when_reason_missing
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "recover-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: {},
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "review_stale",
+                    "review recovery rows must fall back to the marker name when no reason attr is present"
+    refute_includes out, "Needs recovery"
+  end
+
+  def test_recover_review_status_falls_back_to_action_label_when_marker_blank
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "recover-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "",
+          attrs: {},
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "Needs recovery",
+                    "review recovery rows must fall back to action_label when both reason and marker are blank"
+  end
+
+  def test_status_label_non_recover_review_ignores_reason_attr
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "broken-task",
+          stage: "5-review",
+          action: "error",
+          action_label: "Error",
+          marker: "review_error",
+          attrs: { "reason" => "should_not_appear" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "Error",
+                    "non-recover_review rows must keep their action_label as status"
+    refute_includes out, "should_not_appear",
+                     "non-recover_review rows must not surface attrs[reason] in the status column"
+  end
+
   def test_action_keys_pick_distinct_icons
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [

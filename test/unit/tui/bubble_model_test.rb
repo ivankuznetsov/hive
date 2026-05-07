@@ -878,6 +878,140 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/attr "pass" mismatch/, @model.hive_model.flash.to_s)
   end
 
+  def test_recover_review_flashes_when_folder_missing
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "no-folder",
+      stage: "5-review",
+      folder: "",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    refute ran_clear, "marker clear must not run when folder is missing"
+    refute ran_dispatch, "hive run must not dispatch when folder is missing"
+    assert_match(/task folder missing/, @model.hive_model.flash.to_s)
+  end
+
+  def test_recover_review_flashes_when_marker_not_recoverable
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "unknown-marker",
+      stage: "5-review",
+      folder: "/tmp/hive/unknown-marker",
+      marker: "review_timeout",
+      attrs: { "reason" => "future_marker" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    refute ran_clear, "marker clear must not run for an unknown marker"
+    refute ran_dispatch, "hive run must not dispatch for an unknown marker"
+    assert_match(/review recovery unavailable/, @model.hive_model.flash.to_s)
+    assert_match(/marker=review_timeout/, @model.hive_model.flash.to_s)
+  end
+
+  def test_recover_review_flashes_when_run_quiet_raises
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "exploded",
+      stage: "5-review",
+      folder: "/tmp/hive/exploded",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed" },
+      suggested_command: nil
+    )
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { raise RuntimeError, "subprocess exploded" }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    refute ran_dispatch, "hive run must not dispatch when run_quiet! raises"
+    assert_match(/review recovery failed/, @model.hive_model.flash.to_s)
+    assert_match(/RuntimeError/, @model.hive_model.flash.to_s)
+  end
+
+  def test_recover_review_omits_match_attr_when_no_recoverable_attrs
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "no-attrs",
+      stage: "5-review",
+      folder: "/tmp/hive/no-attrs",
+      marker: "review_stale",
+      attrs: {},
+      suggested_command: nil
+    )
+    clear_argv = nil
+    run_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", "/tmp/hive/no-attrs",
+      "--name", "REVIEW_STALE"
+    ], clear_argv, "argv must omit --match-attr when no REVIEW_RECOVERY_MATCH_ATTRS keys are present"
+    assert_equal [ "hive", "run", "/tmp/hive/no-attrs" ], run_argv
+    flash = @model.hive_model.flash.to_s
+    assert_match(/REVIEW_STALE/, flash, "flash must include marker name")
+    refute_match(/REVIEW_STALE \S/, flash, "flash must not append attr pairs after marker name when attrs is empty")
+  end
+
+  def test_recover_review_detail_appends_unknown_attrs_sorted
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "extra-attrs",
+      stage: "5-review",
+      folder: "/tmp/hive/extra-attrs",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed", "zebra" => "z", "apple" => "a" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    flash = @model.hive_model.flash.to_s
+    reason_idx = flash.index("reason=triage_failed")
+    apple_idx = flash.index("apple=a")
+    zebra_idx = flash.index("zebra=z")
+    refute_nil reason_idx
+    refute_nil apple_idx
+    refute_nil zebra_idx
+    assert reason_idx < apple_idx, "known DETAIL_ATTRS keys must appear before extra keys"
+    assert apple_idx < zebra_idx, "extra keys must be appended in sorted order"
+  end
+
   # ---- OpenInputEditor → foreground editor takeover ----
 
   def test_open_input_editor_returns_sequence_command_and_dispatches_result

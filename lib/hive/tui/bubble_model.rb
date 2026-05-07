@@ -1,4 +1,5 @@
 require "bubbletea"
+require "digest"
 require "shellwords"
 require "hive"
 require "hive/markers"
@@ -640,8 +641,10 @@ module Hive
         argv = editor_argv
         callable = lambda do
           before_mtime = file_mtime(path)
+          before_hash = file_content_hash(path)
           exit_code = run_editor(argv, path)
           after_mtime = file_mtime(path)
+          after_hash = file_content_hash(path)
           # Wipe whatever the editor left on the main screen before
           # bubbletea re-enters alt-screen. Alt-screen *should* hide
           # the main buffer regardless, but on some terminals the
@@ -649,12 +652,16 @@ module Hive
           # output is still being painted. Mirror of the pre-spawn
           # clear in `clear_terminal_for_takeover`.
           clear_terminal_for_takeover
-          # Both samples must be non-nil to claim a change. A transient
-          # ENOENT/EACCES between samples turns `file_mtime` into nil and
-          # the asymmetric `nil != Float` would otherwise register as a
-          # bogus save.
+          # mtime answers "did the user save at all" (cheap, used as
+          # the InputEditorExited `changed:` flag). Hash answers "did
+          # the user actually change content" (precise, used by
+          # plan-stage auto-advance to distinguish 'approved as-is'
+          # from 'added feedback'). mtime samples must both be non-nil
+          # to claim a change — a transient ENOENT/EACCES otherwise
+          # produces a bogus `nil != Float` true.
           changed = !before_mtime.nil? && !after_mtime.nil? && before_mtime != after_mtime
-          input_editor_exit_messages(row, path, exit_code, changed).each do |message|
+          content_changed = !before_hash.nil? && !after_hash.nil? && before_hash != after_hash
+          input_editor_exit_messages(row, path, exit_code, changed, content_changed).each do |message|
             @dispatch.call(message)
           end
         end
@@ -732,7 +739,14 @@ module Hive
 
       # Returns the messages to dispatch after the editor exits.
       # Manual path:               [InputEditorExited].
-      # Auto-continue success:     [InputEditorExited, DispatchCommand].
+      # Auto-continue (re-run):    [InputEditorExited, DispatchCommand]
+      #                            for `:proceed` (brainstorm complete)
+      #                            and `:revise_plan` (user added plan
+      #                            feedback). Both re-run the same
+      #                            stage agent via `row.suggested_command`.
+      # Auto-advance (next stage): [InputEditorExited, DispatchCommand]
+      #                            for `:advance_to_develop` (plan
+      #                            approved as-is — no content changes).
       # Auto-continue suppressed:  [InputEditorExited] OR
       #                            [InputEditorExited, Flash(reason)] for
       #                            race / data-anomaly cases the user
@@ -743,20 +757,22 @@ module Hive
       # `ArgumentError` raised by `Shellwords.split` on a malformed
       # `suggested_command` without swallowing constructor errors from
       # `InputEditorExited.new` (which lives outside the begin/rescue).
-      def input_editor_exit_messages(row, path, exit_code, changed)
+      def input_editor_exit_messages(row, path, exit_code, changed, content_changed)
         exited = Hive::Tui::Messages::InputEditorExited.new(
           slug: row.slug,
           exit_code: exit_code,
           changed: changed
         )
 
-        case auto_continue_outcome(row, path, exit_code, changed)
-        when :proceed
+        case auto_continue_outcome(row, path, exit_code, changed, content_changed)
+        when :proceed, :revise_plan
           dispatch_messages_for(row, exited)
+        when :advance_to_develop
+          dispatch_develop_for(row, exited)
         when :empty_command
           [ exited, suppression_flash(row, "no suggested command on row") ]
         when :marker_changed
-          [ exited, suppression_flash(row, "brainstorm marker changed during edit") ]
+          [ exited, suppression_flash(row, "marker changed during edit") ]
         else # :silent — expected refusals (parser incomplete, exit nonzero, unchanged, off-stage)
           [ exited ]
         end
@@ -770,35 +786,95 @@ module Hive
         [ exited, suppression_flash(row, "malformed suggested command") ]
       end
 
+      # Build a `hive develop <slug> ...` dispatch by swapping the verb
+      # in the row's plan-stage `suggested_command`. Preserves
+      # `--project` / `--from` flags so the develop spawn keeps the
+      # same idempotency lever the plan command had.
+      def dispatch_develop_for(row, exited)
+        dispatch = develop_command_from_plan(row.suggested_command)
+        [ exited, dispatch ]
+      rescue ArgumentError => e
+        Hive::Tui::Debug.log("input_editor", "advance-to-develop skipped for #{row.slug}: #{e.message}")
+        [ exited, suppression_flash(row, "couldn't build develop command") ]
+      end
+
+      def develop_command_from_plan(suggested_command)
+        argv = Shellwords.split(suggested_command.to_s)
+        unless argv.length >= 3 && argv[0] == "hive" && argv[1] == "plan"
+          raise ArgumentError, "expected `hive plan ...`, got #{suggested_command.inspect}"
+        end
+
+        argv[1] = "develop"
+        Hive::Tui::Messages::DispatchCommand.new(argv: argv, verb: "develop")
+      end
+
       def suppression_flash(row, reason)
         Hive::Tui::Messages::Flash.new(text: "auto-continue skipped for #{row.slug}: #{reason}")
       end
 
       # Returns one of:
-      #   :proceed         — fire DispatchCommand
-      #   :silent          — refuse, common-case (user can self-diagnose)
-      #   :empty_command   — refuse, surface to user (data anomaly)
-      #   :marker_changed  — refuse, surface to user (race with another actor)
-      def auto_continue_outcome(row, path, exit_code, changed)
-        return :silent unless exit_code == 0 && changed
+      #   :proceed             — fire DispatchCommand for brainstorm re-run
+      #   :revise_plan         — fire DispatchCommand for plan re-run (user added feedback)
+      #   :advance_to_develop  — fire DispatchCommand for `hive develop` (plan approved as-is)
+      #   :silent              — refuse, common-case (user can self-diagnose)
+      #   :empty_command       — refuse, surface to user (data anomaly)
+      #   :marker_changed      — refuse, surface to user (race with another actor)
+      #
+      # `changed` is mtime-based ("did the user save at all"); `content_changed`
+      # is hash-based ("did content actually differ"). Brainstorm gates on
+      # `changed` (parser then decides). Plan needs `content_changed` to
+      # distinguish "approved by saving without edits" (advance) from
+      # "added feedback" (revise).
+      def auto_continue_outcome(row, path, exit_code, changed, content_changed)
+        return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
-        return :silent unless row.stage.to_s == "2-brainstorm"
+
+        case row.stage.to_s
+        when "2-brainstorm"
+          brainstorm_outcome(row, path, changed)
+        when "3-plan"
+          plan_outcome(row, path, exit_code, changed, content_changed)
+        else
+          :silent
+        end
+      end
+
+      def brainstorm_outcome(row, path, changed)
+        return :silent unless changed
         return :empty_command if row.suggested_command.to_s.empty?
-        return :marker_changed unless current_brainstorm_input_marker?(path)
+        return :marker_changed unless marker_still_open_for_input?(path)
         return :silent unless Hive::Tui::BrainstormAnswers.complete?(path)
 
         :proceed
       end
 
+      def plan_outcome(row, path, exit_code, _changed, content_changed)
+        # The only safety gate is a clean editor exit. By design, an
+        # exit-0 close on a `:waiting` plan row is a "user is done"
+        # signal even when nothing was edited — see PR description on
+        # advance-on-clean-exit. Aborts (SIGINT/130) take the manual
+        # path so a half-typed plan isn't accidentally advanced.
+        return :silent unless exit_code == 0
+        return :marker_changed unless marker_still_open_for_input?(path)
+
+        if content_changed
+          return :empty_command if row.suggested_command.to_s.empty?
+
+          :revise_plan
+        else
+          :advance_to_develop
+        end
+      end
+
       # Re-reads the on-disk marker after the editor exits to defend
       # against a race where another actor (a sibling `hive` process,
-      # an editor on a sync mount) advanced the brainstorm to
+      # an editor on a sync mount) advanced the stage to
       # `:agent_working`, `:complete`, or `:error` while the long-lived
       # editor was open. The captured `row.marker` is from the snapshot
       # taken when Enter was pressed; only the freshly-read marker
       # reflects current truth. `:none` is permitted because the first
-      # round may have no marker yet on a fresh brainstorm.md.
-      def current_brainstorm_input_marker?(path)
+      # round of a fresh brainstorm/plan may have no marker yet.
+      def marker_still_open_for_input?(path)
         marker = Hive::Markers.current(path)
         marker.name == :waiting || marker.name == :none
       rescue SystemCallError, IOError => e
@@ -862,6 +938,18 @@ module Hive
       def file_mtime(path)
         File.mtime(path).to_f
       rescue Errno::ENOENT, Errno::EACCES
+        nil
+      end
+
+      # Content fingerprint used by the plan-stage auto-continue gate
+      # to distinguish "user saved without editing" (advance to next
+      # stage) from "user added feedback" (revise plan). SHA1 is
+      # cryptographically weak but plenty for change detection on a
+      # local file the user just edited; `Digest::SHA1.file` does a
+      # single read and never raises on bytes (no encoding work).
+      def file_content_hash(path)
+        Digest::SHA1.file(path).hexdigest
+      rescue SystemCallError, IOError
         nil
       end
 

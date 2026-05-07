@@ -41,7 +41,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Two-pane dashboard (default) | boot | `q` |
 | Findings triage | `Enter` on a `review_findings` row | `Esc` |
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
-| Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue |
+| Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue; plan rows auto-advance to `develop` (or auto-revise if user added feedback) |
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
 | New idea prompt | `n` | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Help overlay | `?` | any key |
@@ -61,7 +61,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `r` | run `hive review` |
 | `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
 | `a` | run `hive archive` |
-| `Enter` | from left pane: focus right pane. From right pane: open the row's contextual mode: input editor on `needs_input` (completed brainstorm answer rounds auto-run), triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command |
+| `Enter` | from left pane: focus right pane. From right pane: open the row's contextual mode: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |

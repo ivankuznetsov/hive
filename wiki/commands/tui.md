@@ -25,7 +25,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │                 │                                                        │
 │  ★ All projects │  ▶  fix-cache-…   2-brainstorm  Ready to plan      2h │
 │  hive           │  🤖 metrics-…     4-execute     Agent running       1m │
-│  myapp     │  ⚠  oauth-…       5-review      Review findings     1h │
+│  myapp          │  ⚠  oauth-…       5-review      Review findings     1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
 │ Footer: [Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q]│

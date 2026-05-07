@@ -12,13 +12,14 @@ Hive is a local, folder-based pipeline for taking a software idea from rough not
 
 Stage agents run as `claude -p` subprocesses. They read the task folder, write their result back into that folder, and exit. You stay in control at each stage by approving the next move.
 
-No daemon. No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and the CLI is a small wrapper around ordinary folder moves and git commits.
+No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and the CLI is a small wrapper around ordinary folder moves and git commits. An optional auto-advancing daemon (ADR-024) drives the pipeline forward up to human-input gates — opt in per project; the manual `mv` workflow keeps working unchanged when it's off.
 
 **Status:** local single-user pilot. The original `mv` workflow still works, but the current CLI also includes agent-callable commands for the common handoff points:
 
 - `hive status` shows current slugs grouped by the next useful action.
 - `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, and `hive archive` move-or-run tasks by slug.
 - `hive approve` remains the lower-level move command with marker checks, locking, retries, and JSON output.
+- `hive daemon` (opt-in, ADR-024) auto-advances enrolled projects through the pipeline. Enable on existing projects via `hive daemon enable PROJECT` (or `--all`); install the autostart unit per `wiki/operating.md` (sample systemd-user unit at `examples/systemd/`, sample launchd plist at `examples/launchd/`).
 - `hive findings`, `hive accept-finding`, and `hive reject-finding` replace hand-editing review checkboxes.
 - `hive run`, `hive status`, `hive approve`, and findings commands have stable machine-readable contracts for agent callers.
 

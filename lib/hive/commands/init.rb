@@ -177,11 +177,15 @@ module Hive
           @enabled_reviewers = answers.fetch("enabled_reviewers")
           @budgets = answers.fetch("budgets")
           @timeouts = answers.fetch("timeouts")
+          # Default to true for legacy answer hashes that don't carry the
+          # daemon key (e.g. integration fixtures predating ADR-024).
+          # Production answers always set this explicitly via Prompts.
+          @daemon_enabled = answers.fetch("daemon_enabled", true)
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :planning_agent, :development_agent,
-                    :enabled_reviewers, :budgets, :timeouts
+                    :enabled_reviewers, :budgets, :timeouts, :daemon_enabled
 
         def binding_for_erb
           binding

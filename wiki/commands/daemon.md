@@ -1,0 +1,155 @@
+---
+title: hive daemon
+type: command
+source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
+created: 2026-05-06
+updated: 2026-05-06
+tags: [command, daemon, automation, json]
+---
+
+**TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
+auto-advancing dispatcher (ADR-024). One long-running process polls
+`hive status --json` every 30s, dispatches workflow verbs (`hive plan`
+/ `develop` / `review` / `pr`) on tasks ready to advance, and
+auto-archives 6-pr → 7-done after `gh pr view` reports `MERGED`. Stops
+only at human-input gates: `_WAITING` markers (Q&A / triage), recovery
+markers (`_STALE` / `_ERROR`), and 6-pr while the PR is still open on
+GitHub.
+
+## Subcommands
+
+```
+hive daemon start [--detach] [--dry-run]
+hive daemon stop
+hive daemon status [--json]
+hive daemon reload
+hive daemon tail
+```
+
+| Subcommand | Behavior |
+|-----------|----------|
+| `start`   | Acquires the PID file (`~/Dev/hive/.daemon.pid`); without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
+| `stop`    | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. |
+| `status`  | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`. |
+| `reload`  | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Exit 1 if no daemon running. |
+| `tail`    | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
+
+## What the daemon dispatches
+
+Per `Hive::Daemon::Policy.decide`, the daemon classifies each `hive
+status --json` task row by `next_action.kind` (a `Hive::Schemas::TaskActionKind`
+value) and routes:
+
+| `tasks[].action`      | Daemon action                                |
+|-----------------------|----------------------------------------------|
+| `ready_to_brainstorm` | Dispatch `hive brainstorm <slug>` (1→2)      |
+| `ready_to_plan`       | Dispatch `hive plan <slug> --from 2-brainstorm` (2→3) |
+| `ready_to_develop`    | Dispatch `hive develop <slug> --from 3-plan` (3→4) |
+| `ready_for_review`    | Dispatch `hive review <slug> --from 4-execute` (4→5) |
+| `ready_for_pr`        | Dispatch `hive pr <slug> --from 5-review` (5→6) |
+| `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 6-pr` (6→7) |
+| `needs_input`         | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. |
+| `review_findings`     | Same as `needs_input` (legacy 4-execute findings; rare post-ADR-014). |
+| `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
+| `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
+| `archived`            | Skip — terminal. |
+| `error`               | Skip. |
+
+The closed-default policy means any unknown future `TaskActionKind`
+value falls through to `:skip` until the daemon is taught about it.
+
+## Per-project enrollment
+
+Each project's `.hive-state/config.yml` carries:
+
+```yaml
+daemon:
+  enabled: true   # asked at `hive init`, default Y
+```
+
+Newly-init'd projects render `daemon.enabled: true` from the init
+prompt's default. **Legacy projects** whose YAML predates the `daemon:`
+key fall back to `Config::DEFAULTS["daemon"]["enabled"] = false` — same
+"don't silently flip legacy projects" pattern ADR-023 used for
+stage agents. Operators of legacy projects opt in by adding `daemon: { enabled: true }` and running `hive daemon reload`.
+
+## Concurrency caps
+
+All under `daemon:` in `~/Dev/hive/config.yml`:
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `poll_interval_sec` | 30 | Tick cadence for status polling. Min 5. |
+| `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
+| `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
+| `max_concurrent_runs` | 3 | Global cap. ADR-023 per-task cap × this = ~$4425 worst-case in-flight. |
+| `max_concurrent_per_project` | 1 | Fairness across projects. |
+| `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
+| `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
+| `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
+| `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
+| `log_max_bytes` | 10485760 | 10 MB rotation threshold. |
+| `log_max_files` | 5 | 5 × 10 MB = 50 MB log budget. |
+
+## Retry policy on child exit
+
+| Exit | Constant | Action |
+|------|----------|--------|
+| 0 | `SUCCESS` | 5-min cooldown on `(project, slug)`; daily counter +1 |
+| 3 | `TASK_IN_ERROR` | No retry; marker now classifies row as `recover_*` → Policy returns `:skip` |
+| 4 | `WRONG_STAGE` | 5-min cooldown (race or classifier bug) |
+| 64 | `USAGE` | Quarantine `(project, slug)` for daemon lifetime |
+| 70 / 1 | `SOFTWARE` / `GENERIC` | Transient: 60→120→300 s backoff, then quarantine |
+| 75 | `TEMPFAIL` | Refund daily slot, allow immediate retry next tick |
+| 78 | `CONFIG` | Drop the entire project from active dispatch until daemon restart |
+
+## Structured log
+
+`~/Dev/hive/logs/daemon.log` is one JSON document per line:
+
+```json
+{"ts":"2026-05-06T12:00:00Z","schema":"hive-daemon-log","schema_version":1,"event":"dispatched","pid":12345,"project":"writero","slug":"fix-x","stage":"5-review","command":"hive run fix-x --json","dry_run":false}
+```
+
+Closed `event` enum (`Hive::Daemon::Logger::EVENTS`). Adding an event
+without updating the enum raises `ArgumentError` at the call site so
+new events are caught at CI rather than logged silently.
+
+## Operational notes
+
+- **First-time rollout:** `hive daemon start --dry-run` for ~24 hours
+  before going live. Inspect `daemon.log` to validate dispatch
+  decisions. Then `hive daemon stop` and re-start without `--dry-run`.
+- **Cost runaway response:** `hive daemon stop` is one command. To
+  exclude a single project mid-flight, set `daemon.enabled: false` in
+  its `.hive-state/config.yml` and run `hive daemon reload`. In-flight
+  children continue to completion; the next tick excludes the project.
+- **macOS / Linux:** `Process.daemon` works on both; the daemon does
+  not require `systemd`. A sample systemd user unit is at
+  `wiki/operating.md` once that page lands.
+- **Pausing a single task:** edit the state file to remove the terminal
+  marker (e.g., delete `<!-- EXECUTE_COMPLETE -->`) so the row no
+  longer classifies as advance-ready. Daemon will skip until you write
+  the marker back.
+
+## Exit codes
+
+| Subcommand | Code | Condition |
+|------------|------|-----------|
+| `start`    | 0    | (foreground daemon exited cleanly) |
+| `start`    | 75   | Another daemon already running (TEMPFAIL) |
+| `stop`     | 0    | Always (idempotent) |
+| `status`   | 0    | Daemon is running |
+| `status`   | 1    | Daemon is not running |
+| `reload`   | 0    | SIGHUP sent successfully |
+| `reload`   | 1    | Daemon is not running |
+| `tail`     | 0    | Stream ended via Ctrl-C |
+| `tail`     | 1    | Log file does not exist |
+| (any)      | 64   | Unknown subcommand |
+
+## Backlinks
+
+- [[cli]] · [[commands/run]] · [[commands/status]] · [[commands/approve]]
+- [[modules/daemon]]
+- [[decisions]] (ADR-024)
+- [[architecture]]

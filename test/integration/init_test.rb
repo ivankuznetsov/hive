@@ -207,9 +207,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect: planning, development, reviewers,
-    # 8 limit prompts, confirm. Choose codex for both, only first +
-    # third reviewer, override `plan` budget/timeout, accept the rest.
-    inputs = "codex\n2\n1,3\n\n30,900\n\n\n\n\n\n\n\n"
+    # 8 limit prompts, daemon-enable, confirm. Choose codex for both, only
+    # first + third reviewer, override `plan` budget/timeout, accept the rest
+    # (daemon defaults to enabled on blank, confirm defaults to yes on blank).
+    inputs = "codex\n2\n1,3\n\n30,900\n\n\n\n\n\n\n\n\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -225,13 +226,35 @@ class InitTest < Minitest::Test
         names = cfg.dig("review", "reviewers").map { |r| r["name"] }.sort
         assert_equal %w[claude-ce-code-review pr-review-toolkit], names,
                      "only the two selected reviewers should be rendered"
+
+        # ADR-024: daemon prompt defaults to Y at the prompt; rendered
+        # template must carry `daemon: { enabled: true }` so the daemon
+        # picks up new projects out of the box.
+        assert_equal true, cfg.dig("daemon", "enabled"),
+                     "blank daemon prompt → enabled true rendered into config"
+      end
+    end
+  end
+
+  def test_init_with_daemon_disabled_writes_disabled_config
+    # Same shape as above but explicitly answer `n` to the daemon prompt.
+    inputs = "\n\n\n\n\n\n\n\n\n\n\nn\n\n"
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        prompts = make_tty_prompts(inputs)
+        capture_io { Hive::Commands::Init.new(dir, prompts: prompts).call }
+
+        cfg = Hive::Config.load(dir)
+        assert_equal false, cfg.dig("daemon", "enabled"),
+                     "explicit n at daemon prompt → enabled false rendered"
       end
     end
   end
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    inputs = ([ "" ] * 11).join("\n") + "\nn\n"
+    # 12 blanks: planning, dev, reviewers, 8 limits, daemon-enable.
+    inputs = ([ "" ] * 12).join("\n") + "\nn\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)

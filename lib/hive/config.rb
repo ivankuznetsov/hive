@@ -106,6 +106,31 @@ module Hive
         },
         "max_passes" => 4,
         "max_wall_clock_sec" => 5400
+      },
+      # Hive daemon settings (ADR-024). The daemon polls
+      # `hive status --json`, dispatches workflow verbs on tasks the
+      # classifier marks safe, and stops only at human-input gates.
+      #
+      # Per-project `daemon.enabled` is rendered into a project's
+      # `.hive-state/config.yml` by `hive init` (TTY prompt, default Y).
+      # The `Config::DEFAULTS["daemon"]["enabled"]` value is the LEGACY
+      # FALLBACK for projects whose YAML doesn't carry the `daemon:`
+      # key at all — same "do not silently flip legacy projects"
+      # pattern ADR-023 used for stage agents. Default `false` here
+      # means existing projects need an explicit one-line config edit
+      # before the daemon will touch them.
+      "daemon" => {
+        "enabled" => false,
+        "poll_interval_sec" => 30,
+        "edit_debounce_sec" => 30,
+        "pr_merge_poll_interval_sec" => 300,
+        "max_concurrent_runs" => 3,
+        "max_concurrent_per_project" => 1,
+        "max_runs_per_day_per_project" => 50,
+        "transient_retry_backoff_sec" => 60,
+        "shutdown_grace_sec" => 600,
+        "log_max_bytes" => 10_485_760,
+        "log_max_files" => 5
       }
     }.freeze
 
@@ -239,6 +264,35 @@ module Hive
 
     def find_project(name)
       registered_projects.find { |p| p["name"] == name }
+    end
+
+    # Load and validate the global `daemon` block from
+    # `~/Dev/hive/config.yml`. Returns the merged Hash (operator
+    # overrides on top of `Config::DEFAULTS["daemon"]`). Used by
+    # `hive daemon start` / `reload` so operator knobs in the global
+    # config (max_concurrent_runs, poll_interval_sec, log_*, etc.)
+    # actually take effect at runtime.
+    #
+    # Returns the bare DEFAULTS["daemon"] when no global config is
+    # present (first-run scenario, no projects registered yet).
+    def load_global_daemon
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["daemon"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "daemon in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["daemon"]), override)
+      # Re-use the existing validator by wrapping the daemon block in a
+      # cfg-shaped hash. validate_daemon! is idempotent and operates on
+      # cfg["daemon"].
+      validate_daemon!({ "daemon" => merged }, path)
+      merged
     end
 
     def register_project(name:, path:)
@@ -402,6 +456,7 @@ module Hive
       validate_reviewers!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
+      validate_daemon!(cfg, source_path)
     end
 
     # Top-level keys that MUST be Hashes when present. A scalar override
@@ -419,6 +474,7 @@ module Hive
       timeout_sec
       review
       agents
+      daemon
     ].freeze
 
     def validate_hash_shaped_keys!(cfg, source_path)
@@ -576,6 +632,57 @@ module Hive
       return path if File.exist?(path)
 
       "#{path} (defaults; no file present)"
+    end
+
+    # Numeric daemon knobs that must be positive integers. Lower bounds
+    # encode behavioural floors:
+    #   poll_interval_sec >= 5         — anything tighter starves CPU on
+    #                                    `hive status` subprocesses
+    #   edit_debounce_sec >= 0         — 0 means "no debounce, dispatch
+    #                                    on first mtime move"; valid choice
+    #   pr_merge_poll_interval_sec >= 60 — `gh pr view` is rate-limited
+    #                                      under heavy load
+    #   max_concurrent_*  >= 1         — caps below 1 disable dispatch
+    #   max_runs_per_day_per_project >= 1
+    #   transient_retry_backoff_sec >= 1
+    #   shutdown_grace_sec >= 0        — 0 means "no grace, immediate
+    #                                    SIGTERM on stop"; valid choice
+    #   log_max_bytes >= 1024          — anything smaller breaks Logger
+    #   log_max_files >= 1
+    DAEMON_NUMERIC_BOUNDS = [
+      [ "poll_interval_sec", 5 ],
+      [ "edit_debounce_sec", 0 ],
+      [ "pr_merge_poll_interval_sec", 60 ],
+      [ "max_concurrent_runs", 1 ],
+      [ "max_concurrent_per_project", 1 ],
+      [ "max_runs_per_day_per_project", 1 ],
+      [ "transient_retry_backoff_sec", 1 ],
+      [ "shutdown_grace_sec", 0 ],
+      [ "log_max_bytes", 1024 ],
+      [ "log_max_files", 1 ]
+    ].freeze
+
+    def validate_daemon!(cfg, source_path)
+      daemon = cfg["daemon"]
+      return if daemon.nil?
+
+      enabled = daemon["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "daemon.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      DAEMON_NUMERIC_BOUNDS.each do |key, min|
+        value = daemon[key]
+        next if value.nil?
+
+        unless value.is_a?(Integer) && value >= min
+          raise ConfigError,
+                "daemon.#{key} in #{describe_source(source_path)} must be an integer " \
+                ">= #{min}; got #{value.inspect} (#{value.class})"
+        end
+      end
     end
   end
 end

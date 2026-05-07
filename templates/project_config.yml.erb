@@ -107,3 +107,14 @@ review:
       budget_usd: 50
       timeout_sec: 600
 <% end -%>
+
+# Hive daemon (ADR-024): auto-advances tasks through the pipeline up to
+# human-input gates. When `enabled: true`, `hive daemon start` polls
+# every project's status and dispatches workflow verbs on tasks ready
+# to advance. Stops at `:waiting` / `:review_waiting` / recovery markers
+# (where a human is needed) and at 6-pr while the PR is open on GitHub
+# (auto-archives once `gh pr view --json state` returns `MERGED`).
+# Disable per-project by flipping this flag and running `hive daemon reload`.
+daemon:
+  enabled: <%= daemon_enabled %>
+

@@ -62,6 +62,15 @@ module Hive
       # markers in the background so the TUI doesn't permanently
       # display "Error" rows the user can resume by simply re-running.
       KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
+      REVIEW_RECOVERY_MARKERS = {
+        "review_error" => "REVIEW_ERROR",
+        "review_stale" => "REVIEW_STALE",
+        "review_ci_stale" => "REVIEW_CI_STALE"
+      }.freeze
+      REVIEW_RECOVERY_MATCH_ATTRS = %w[pass reason attempts phase].freeze
+      REVIEW_RECOVERY_DETAIL_ATTRS = %w[
+        phase reason pass attempts elapsed files matches exception_class
+      ].freeze
 
       def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
         @hive_model = hive_model
@@ -296,6 +305,8 @@ module Hive
           open_findings(message.row)
         when Hive::Tui::Messages::OpenLogTail
           open_log_tail(message.row)
+        when Hive::Tui::Messages::RecoverReview
+          recover_review(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
         when Hive::Tui::Messages::LogTailPoll
@@ -535,6 +546,63 @@ module Hive
       rescue StandardError => e
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         evict_heal_attempt(row.folder)
+      end
+
+      # Enter-driven review recovery. Review-stage recovery markers are
+      # intentionally explicit gates: the old flow told the operator to
+      # leave the TUI, clear a marker, then re-run `hive run`. The TUI
+      # keeps that exact command surface but sequences it for the
+      # highlighted row so Enter becomes "try again" after the operator
+      # has addressed the underlying cause (for example API quota reset).
+      def recover_review(row)
+        if row.folder.to_s.strip.empty?
+          return [ flashed("review recovery unavailable: task folder missing"), nil ]
+        end
+
+        marker_name = review_recovery_marker_name(row)
+        unless marker_name
+          marker = row.marker.to_s.empty? ? "none" : row.marker
+          return [ flashed("review recovery unavailable: marker=#{marker}"), nil ]
+        end
+
+        clear_argv = review_recovery_clear_argv(row, marker_name)
+        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(clear_argv)
+        unless exit_code.zero?
+          reason = err.to_s.lines.first&.chomp.to_s
+          reason = "exit #{exit_code}" if reason.empty?
+          return [ flashed("review recovery failed: #{reason[0, 120]}"), nil ]
+        end
+
+        Hive::Tui::Subprocess.dispatch_background([ "hive", "run", row.folder ], dispatch: @dispatch)
+        detail = review_recovery_detail(row, marker_name)
+        [ flashed("review recovery: #{detail[0, 160]}; running `hive run`…"), nil ]
+      rescue StandardError => e
+        Hive::Tui::Debug.log("review_recovery", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
+        [ flashed("review recovery failed: #{e.class.name}: #{e.message[0, 80]}"), nil ]
+      end
+
+      def review_recovery_marker_name(row)
+        REVIEW_RECOVERY_MARKERS[row.marker.to_s]
+      end
+
+      def review_recovery_clear_argv(row, marker_name)
+        argv = [ "hive", "markers", "clear", row.folder, "--name", marker_name ]
+        match_attr = review_recovery_match_attr(row)
+        match_attr ? argv + [ "--match-attr", match_attr ] : argv
+      end
+
+      def review_recovery_match_attr(row)
+        attrs = row.attrs || {}
+        key = REVIEW_RECOVERY_MATCH_ATTRS.find { |candidate| !attrs[candidate].to_s.empty? }
+        key ? "#{key}=#{attrs[key]}" : nil
+      end
+
+      def review_recovery_detail(row, marker_name)
+        attrs = row.attrs || {}
+        keys = REVIEW_RECOVERY_DETAIL_ATTRS.select { |key| attrs.key?(key) }
+        keys += (attrs.keys.map(&:to_s) - keys).sort
+        attr_text = keys.map { |key| "#{key}=#{attrs[key]}" }.join(" ")
+        attr_text.empty? ? marker_name : "#{marker_name} #{attr_text}"
       end
 
       # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:

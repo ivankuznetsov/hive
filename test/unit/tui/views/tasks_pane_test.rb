@@ -12,14 +12,15 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def make_task(slug:, stage: "2-brainstorm", action: "ready_to_plan",
                 action_label: "Ready to plan", age: 120,
-                marker: "complete", suggested: "hive plan #{slug} --from 2-brainstorm")
+                marker: "complete", attrs: {},
+                suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
       "marker" => marker,
-      "attrs" => {},
+      "attrs" => attrs,
       "mtime" => "2026-05-01T00:00:00Z",
       "age_seconds" => age,
       "claude_pid" => nil,
@@ -73,6 +74,26 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "3-plan",           "stage column must render"
     assert_includes out, "Needs your input", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_recover_review_status_shows_marker_reason
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "recover-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "triage_failed",
+                    "review recovery rows must show the exact marker reason, not generic status text"
+    refute_includes out, "Needs recovery"
   end
 
   def test_action_keys_pick_distinct_icons

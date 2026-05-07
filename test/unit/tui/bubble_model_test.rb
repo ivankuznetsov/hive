@@ -25,12 +25,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def make_task_row(action_key: "needs_input", slug: "some-slug", stage: "2-brainstorm",
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
-                    marker: "waiting", attrs: {}, folder: nil)
+                    marker: "waiting", attrs: {}, folder: nil,
+                    action_label: "Needs your input")
     Hive::Tui::Snapshot::Row.new(
       project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: action_key, action_label: "Needs your input",
+      action_key: action_key, action_label: action_label,
       suggested_command: suggested_command
     )
   end
@@ -507,6 +508,14 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, sentinel) if sentinel
   end
 
+  def with_dispatch_background_stub(stub_proc)
+    sentinel = Hive::Tui::Subprocess.method(:dispatch_background)
+    Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
+  end
+
   def test_new_idea_submission_dispatches_hive_new_with_resolved_project
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",
@@ -808,6 +817,65 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/running.*hive develop.*hello-world-test/, @model.hive_model.flash,
       "flash must name the verb and slug the user dispatched on")
     refute_nil @model.hive_model.flash_set_at, "flash_set_at must stamp for TTL aging"
+  end
+
+  # ---- RecoverReview → marker clear + hive run ----
+
+  def test_recover_review_clears_observed_marker_and_reruns_hive_run
+    folder = "/tmp/hive/recover-me"
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "recover-me",
+      stage: "5-review",
+      folder: folder,
+      marker: "review_error",
+      attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+    run_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", folder,
+      "--name", "REVIEW_ERROR",
+      "--match-attr", "pass=2"
+    ], clear_argv
+    assert_equal [ "hive", "run", folder ], run_argv
+    assert_match(/REVIEW_ERROR/, @model.hive_model.flash.to_s)
+    assert_match(/phase=triage/, @model.hive_model.flash.to_s)
+    assert_match(/reason=triage_failed/, @model.hive_model.flash.to_s)
+    assert_match(/pass=2/, @model.hive_model.flash.to_s)
+  end
+
+  def test_recover_review_does_not_rerun_when_marker_clear_fails
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "recover-me",
+      stage: "5-review",
+      folder: "/tmp/hive/recover-me",
+      marker: "review_stale",
+      attrs: { "reason" => "wall_clock", "pass" => "3" },
+      suggested_command: nil
+    )
+    run_count = 0
+
+    with_run_quiet_stub(->(_argv) { [ 4, "", "attr \"pass\" mismatch\n" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { run_count += 1; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      end
+    end
+
+    assert_equal 0, run_count
+    assert_match(/review recovery failed/, @model.hive_model.flash.to_s)
+    assert_match(/attr "pass" mismatch/, @model.hive_model.flash.to_s)
   end
 
   # ---- OpenInputEditor → foreground editor takeover ----

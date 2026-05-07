@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T20:17:15Z] tui — Enter-driven review recovery
+
+**Action:** Made `recover_review` rows actionable from the TUI. The status column now renders the exact observed recovery reason when the marker carries one (for example `triage_failed` from `REVIEW_ERROR phase=triage reason=triage_failed pass=2`) instead of the generic `Needs recovery` label. `Enter` on the row now clears the observed review recovery marker via `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_STALE|REVIEW_CI_STALE`, includes one available `--match-attr` guard to avoid clearing a newer concurrent marker, and only then dispatches `hive run <folder>` through the existing background subprocess path. A failed marker clear flashes the captured error and does not rerun.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+
+
 ## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
 
 **Action:** Added `hive doctor` — a CLI verb that walks brainstorm + plan stage configs and asks each stage's agent profile to verify its configured skill (`<stage>.skill`) actually resolves to an installed slash-command or skill on disk. Output is a status table; `--json` emits a `hive-doctor.v1` envelope. Exit codes: `0` (all present or N/A), `65` (at least one missing), `78` (config error).

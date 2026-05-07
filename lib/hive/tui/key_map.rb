@@ -51,8 +51,7 @@ module Hive
       # can see WHY the agent failed without leaving the TUI.
       ENTER_FLASH_MESSAGES = {
         "archived" => "task is archived; no further action",
-        "recover_execute" => "task needs recovery — open findings to re-prioritise",
-        "recover_review" => "task needs recovery — clear the stale review marker"
+        "recover_execute" => "task needs recovery — open findings to re-prioritise"
       }.freeze
 
       # @api public
@@ -151,6 +150,7 @@ module Hive
         when "review_findings" then Messages::OpenFindings.new(row: row)
         when "agent_running" then Messages::OpenLogTail.new(row: row)
         when "error" then Messages::OpenLogTail.new(row: row)
+        when "recover_review" then Messages::RecoverReview.new(row: row)
         when "needs_input" then needs_input_message(row)
         else enter_fallback_message(row)
         end

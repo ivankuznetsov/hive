@@ -161,11 +161,26 @@ module Hive
           age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
           parts = [ "#{icon} #{slug}" ]
           parts << truncate(row.stage.to_s, layout[:stage]).ljust(layout[:stage]) if layout[:stage].positive?
-          parts << truncate(row.action_label.to_s, layout[:status]).ljust(layout[:status]) if layout[:status].positive?
+          parts << truncate(status_label(row), layout[:status]).ljust(layout[:status]) if layout[:status].positive?
           parts << age
           line = parts.join(" ")
           colored = Styles.for_action_key(row.action_key).render(line)
           highlighted ? Styles::CURSOR_HIGHLIGHT.render(colored) : colored
+        end
+
+        def status_label(row)
+          return review_recovery_status(row) if row.action_key.to_s == "recover_review"
+
+          row.action_label.to_s
+        end
+
+        def review_recovery_status(row)
+          attrs = row.attrs || {}
+          reason = attrs["reason"].to_s
+          return reason unless reason.empty?
+
+          marker = row.marker.to_s
+          marker.empty? ? row.action_label.to_s : marker
         end
 
         # Local alias so call sites in this module keep their concise

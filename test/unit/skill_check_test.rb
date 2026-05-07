@@ -105,6 +105,42 @@ class HiveSkillCheckClaudeTest < Minitest::Test
       status, msg = Hive::SkillCheck::Claude.verify("/nonexistent-skill")
       assert_equal :missing, status
       assert_match(/not found under ~\/\.claude\/\{commands,skills\}/, msg)
+      assert_match(/installed plugin/, msg, "hint mentions plugin fallback path")
+    end
+  end
+
+  def test_present_via_plugin_cache_for_bare_invocation
+    # Claude resolves `/foo` against any installed plugin's skill
+    # named `foo` (in addition to user-level commands/skills). A user
+    # who ran `claude plugin install some-marketplace` to bring in
+    # `compound-engineering` and writes `skill: ce-code-review` in
+    # config expects `/ce-code-review` to resolve against the plugin
+    # — even though there's no explicit `<plugin>:` prefix.
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/every-marketplace/compound-engineering/3.0.1/skills/ce-code-review/SKILL.md")
+      status, msg = Hive::SkillCheck::Claude.verify("/ce-code-review")
+      assert_equal :present, status
+      assert_match(%r{cache/every-marketplace/compound-engineering/3\.0\.1/skills/ce-code-review/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_present_via_plugin_marketplace_source_for_bare_invocation
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/marketplaces/some-mp/plugins/compound-engineering/skills/ce-code-review/SKILL.md")
+      status, msg = Hive::SkillCheck::Claude.verify("/ce-code-review")
+      assert_equal :present, status
+      assert_match(%r{plugins/compound-engineering/skills/ce-code-review/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_user_level_command_takes_precedence_over_plugin_fallback
+    with_fake_home do |home|
+      write_file("#{home}/.claude/commands/ce-code-review.md", "user")
+      write_file("#{home}/.claude/plugins/cache/mp/foo/1.0/skills/ce-code-review/SKILL.md", "plugin")
+      status, msg = Hive::SkillCheck::Claude.verify("/ce-code-review")
+      assert_equal :present, status
+      assert_match(%r{commands/ce-code-review\.md\z}, msg,
+        "user-level command must beat the plugin-fallback path")
     end
   end
 
@@ -175,6 +211,16 @@ class HiveSkillCheckCodexTest < Minitest::Test
       status, msg = Hive::SkillCheck::Codex.verify("/no-such-skill")
       assert_equal :missing, status
       assert_match(/no user-level slash-command directory/, msg)
+      assert_match(/install a plugin that ships it/, msg, "hint mentions plugin fallback path")
+    end
+  end
+
+  def test_codex_present_via_plugin_cache_for_bare_invocation
+    with_fake_home do |home|
+      write_file("#{home}/.codex/plugins/cache/some-mp/compound-engineering/3.7.0/skills/ce-code-review/SKILL.md")
+      status, msg = Hive::SkillCheck::Codex.verify("/ce-code-review")
+      assert_equal :present, status
+      assert_match(%r{compound-engineering/3\.7\.0/skills/ce-code-review/SKILL.md\z}, msg)
     end
   end
 

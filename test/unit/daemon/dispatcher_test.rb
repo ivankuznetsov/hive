@@ -151,6 +151,26 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute events_include?(logger, :dispatched)
   end
 
+  # PR-40 follow-up #2: the @enabled_cache must clear at the start of
+  # each tick so a `daemon.enabled: false` edit in the project's YAML
+  # takes effect on the next poll. Previously the cache persisted for
+  # the daemon's lifetime and only SIGHUP cleared it — meaning a
+  # disable could be silently ignored for hours.
+  def test_enable_cache_clears_at_start_of_each_tick
+    rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+    dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(rows: rows, project_enabled: true)
+
+    # Pre-seed the cache as if a previous tick saw the project enabled.
+    dispatcher.instance_variable_get(:@enabled_cache)["p1"] = true
+    # Now redefine project_enabled? to return false from THIS point on
+    # (simulates the operator editing the YAML to disable the project).
+    dispatcher.define_singleton_method(:project_enabled?) { |_| false }
+
+    dispatcher.tick(now: T0)
+    assert_equal 0, sup.spawned.size,
+                 "tick must re-resolve enable status — stale cache cannot keep dispatch alive"
+  end
+
   def test_recover_stale_action_is_skipped_with_log
     rows = [ row(action: "recover_review", marker: "review_error", stage: "5-review",
                  command: nil) ]

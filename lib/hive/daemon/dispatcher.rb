@@ -48,7 +48,12 @@ module Hive
         @started_at = nil
         @last_tick_at = nil
         @dispatched_today = 0
-        # Per-project enable cache, refreshed on tick to pick up YAML edits.
+        # Per-tick enable cache. Populated lazily within one tick so
+        # each row-handler call does at most one `Config.load(project_root)`
+        # per project, and cleared at the start of every tick so YAML
+        # edits to `daemon.enabled` take effect within one poll
+        # interval without the operator having to send SIGHUP.
+        # PR-40 follow-up #2.
         @enabled_cache = {}
       end
 
@@ -57,6 +62,12 @@ module Hive
       # deterministically.
       def tick(now: Time.now)
         @last_tick_at = now
+        # PR-40 follow-up #2: clear the per-tick enable cache so a
+        # `daemon.enabled` flip in `<project>/.hive-state/config.yml`
+        # takes effect within one poll interval. Without this, the
+        # cache populated on first sight stuck for the daemon's
+        # lifetime and the only way to honour a disable was SIGHUP.
+        @enabled_cache.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
 
         # 1. Reap completed children, update controller, log decisions

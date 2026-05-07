@@ -157,14 +157,11 @@ module Hive
       end
 
       # Enter on a `needs_input` row opens the row's input file in the
-      # user's editor. Re-running the agent on Enter would just spawn
-      # another spawn against an unchanged state file — but the agent
-      # emitted `<!-- WAITING -->` precisely because it wants human
-      # edits. The verb keys (`b`/`p`/`d`/`r`/`P`) remain the explicit
-      # way to rerun the stage after editing. BubbleModel resolves the
-      # editor target from the row (state_file by default; reviewer
-      # source files / reviews directory for `:review_waiting`) so
-      # KeyMap stays pure.
+      # user's editor. Re-running the agent before edits would just
+      # spawn against an unchanged state file — but the agent emitted
+      # `<!-- WAITING -->` precisely because it wants human edits.
+      # BubbleModel owns any post-edit auto-continue rules; the verb
+      # keys (`b`/`p`/`d`/`r`/`P`) remain the explicit manual rerun path.
       def needs_input_message(row)
         Messages::OpenInputEditor.new(row: row)
       end

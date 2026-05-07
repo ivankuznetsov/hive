@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-05-05T20:00:00Z
+updated: 2026-05-06T17:30:00Z
 tags: [command, tui, observability, interactive]
 ---
 
@@ -41,7 +41,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Two-pane dashboard (default) | boot | `q` |
 | Findings triage | `Enter` on a `review_findings` row | `Esc` |
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
-| Input editor | `Enter` on a `needs_input` row | editor exit |
+| Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue |
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
 | New idea prompt | `n` | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Help overlay | `?` | any key |
@@ -61,7 +61,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `r` | run `hive review` |
 | `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
 | `a` | run `hive archive` |
-| `Enter` | from left pane: focus right pane. From right pane: open the row's contextual mode: input editor on `needs_input`, triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command |
+| `Enter` | from left pane: focus right pane. From right pane: open the row's contextual mode: input editor on `needs_input` (completed brainstorm answer rounds auto-run), triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -113,7 +113,7 @@ Workflow verbs default to background dispatch: `Hive::Tui::Subprocess.dispatch_b
 
 Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_command(argv, dispatch:)`, which returns a `Bubbletea::SequenceCommand` of three steps: exit alt-screen, run a callable synchronously inside the framework's suspend window (raw mode disabled, cursor shown, input reader stopped), then re-enter alt-screen. The callable spawns the child with stdio inherited, blocks on `Process.wait2`, and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the user sees the same flash. Used only for verbs that genuinely need the tty.
 
-`needs_input` rows use the same alt-screen suspension pattern, but for the row's input file instead of a workflow verb. Pressing `Enter` opens the stage state file (`brainstorm.md`, `plan.md`, `task.md`, `pr.md`) in `$VISUAL`, `$EDITOR`, or `vi` so the user can fill inline answers. For `:review_waiting`, the editor targets reviewer-authored files for the pass because those are what the resume path reads for `[x]` decisions; when there are multiple candidate files or a fix-guardrail inspection gate, it opens the `reviews/` directory instead. The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash can distinguish a saved edit from a no-op cancel. Workflow verb keys (`b` / `p` / `d` / `r` / `P`) remain the explicit way to rerun the agent after editing — the editor handler intentionally does NOT auto-dispatch.
+`needs_input` rows use the same alt-screen suspension pattern, but for the row's input file instead of a workflow verb. Pressing `Enter` opens the stage state file (`brainstorm.md`, `plan.md`, `task.md`, `pr.md`) in `$VISUAL`, `$EDITOR`, or `vi` so the user can fill inline answers. For `:review_waiting`, the editor targets reviewer-authored files for the pass because those are what the resume path reads for `[x]` decisions; when there are multiple candidate files or a fix-guardrail inspection gate, it opens the `reviews/` directory instead. The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash can distinguish a saved edit from a no-op cancel. Brainstorm rows get one extra convenience: if the editor exits cleanly, the file changed, the current file marker is still `WAITING` / `none`, and the latest `## Round N` has every `### Qn` paired with a non-empty `### An`, the TUI dispatches the row's existing `hive brainstorm ... --from 2-brainstorm` suggested command automatically. Partial answers, stale rows whose marker changed while the editor was open, and non-brainstorm input states stay manual; workflow verb keys (`b` / `p` / `d` / `r` / `P`) remain the explicit rerun path.
 
 Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — a bounded captured-stdio child runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line; a hung helper is terminated as a process group and reported as exit 124.
 

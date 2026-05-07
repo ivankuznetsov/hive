@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/skill_check"
 
 module Hive
   module AgentProfiles
@@ -25,7 +26,8 @@ module Hive
       skill_syntax_format: "/%{skill}",
       headless_supported: true,
       min_version: Hive::MIN_CLAUDE_VERSION,
-      status_detection_mode: :state_file_marker
+      status_detection_mode: :state_file_marker,
+      skill_verifier: Hive::SkillCheck::Claude.method(:verify)
     )
 
     register(:claude, CLAUDE)

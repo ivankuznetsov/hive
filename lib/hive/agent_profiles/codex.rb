@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/skill_check"
 
 module Hive
   module AgentProfiles
@@ -28,7 +29,8 @@ module Hive
       skill_syntax_format: "/%{skill}",
       headless_supported: true,
       min_version: "0.125.0",
-      status_detection_mode: :output_file_exists
+      status_detection_mode: :output_file_exists,
+      skill_verifier: Hive::SkillCheck::Codex.method(:verify)
     )
 
     register(:codex, CODEX)

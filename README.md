@@ -36,11 +36,37 @@ ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive   # or add bin/ to PATH
 | Tool | Min version | Why |
 |------|-------------|-----|
 | Ruby | 3.4 | the runtime |
-| `claude` CLI | 2.1.118 | every active stage; verified at runtime |
+| `claude` CLI | 2.1.118 | every active stage by default; verified at runtime |
 | `gh` CLI | recent | `6-pr` stage (`gh pr create`); must be authenticated |
 | `git` | 2.40 | worktrees, orphan branches |
 
 Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep works as fallback).
+
+### Required slash-commands / skills
+
+The brainstorm and plan stages instruct the agent to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume **both** of these are installed alongside the agent CLI:
+
+| Stage | Default invocation | Install for claude | Install for codex |
+|-------|--------------------|--------------------|-------------------|
+| `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
+| `3-plan` | `/plan` | A user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | A skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
+| | | Pi has no slash-command resolver; if you set `<stage>.agent: pi`, the slash-command is sent verbatim as prompt text and the model decides what to do. |
+
+To verify your install:
+
+```bash
+hive doctor              # tabular status of each (stage, agent, skill) triple
+hive doctor --json       # machine-readable envelope
+```
+
+Exit codes: `0` all present (or N/A for pi); `65` at least one skill missing; `78` config error.
+
+To override a stage's skill per-project, set `<stage>.skill` in `<project>/.hive-state/config.yml`:
+
+```yaml
+plan:
+  skill: /compound-engineering:ce-plan   # opt out of /plan, use the CE skill directly
+```
 
 ## Quickstart
 

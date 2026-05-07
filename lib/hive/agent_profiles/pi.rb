@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/skill_check"
 
 module Hive
   module AgentProfiles
@@ -80,7 +81,8 @@ module Hive
       headless_supported: true,
       min_version: "0.70.2",
       status_detection_mode: :output_file_exists,
-      preflight: PI_PREFLIGHT
+      preflight: PI_PREFLIGHT,
+      skill_verifier: Hive::SkillCheck::Pi.method(:verify)
     )
 
     register(:pi, PI)

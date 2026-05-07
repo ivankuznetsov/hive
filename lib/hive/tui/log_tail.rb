@@ -1,4 +1,5 @@
 require "fileutils"
+require "json"
 require "hive"
 require "hive/tui/debug"
 
@@ -20,6 +21,115 @@ module Hive
     # keystrokes on the same loop, so the buffer stays fresh without
     # the synchronisation footprint of a worker thread.
     module LogTail
+      module Formatter
+        STREAM_LINE = /\A\[stream\]\s+(\S+)\s+(.+)\z/
+        HIVE_LINE = /\A\[hive\]\s+(\S+)\s+(.+)\z/
+        ID_WIDTH = 12
+
+        module_function
+
+        def format(line)
+          text = line.to_s
+
+          if (match = STREAM_LINE.match(text))
+            return format_stream(match[1], match[2], fallback: text)
+          end
+
+          if (match = HIVE_LINE.match(text))
+            return "#{time_label(match[1])} hive #{match[2]}"
+          end
+
+          text
+        end
+
+        def format_lines(lines)
+          lines.map { |line| format(line) }
+        end
+
+        def format_stream(timestamp, payload, fallback:)
+          doc = JSON.parse(payload)
+          return fallback unless doc.is_a?(Hash)
+
+          case doc["type"]
+          when "system" then format_system(timestamp, doc)
+          when "assistant" then format_assistant(timestamp, doc)
+          when "user" then format_user(timestamp, doc)
+          else
+            parts = [ time_label(timestamp), doc["type"].to_s ]
+            append_id(parts, "task", doc["task_id"])
+            append_id(parts, "tool", doc["tool_use_id"])
+            parts.join(" ")
+          end
+        rescue JSON::ParserError, TypeError
+          fallback
+        end
+
+        def format_system(timestamp, doc)
+          parts = [ time_label(timestamp), "system" ]
+          parts << doc["subtype"].to_s if present?(doc["subtype"])
+          append_id(parts, "task", doc["task_id"])
+          append_id(parts, "tool", doc["tool_use_id"])
+          parts.join(" ")
+        end
+
+        def format_assistant(timestamp, doc)
+          message = hash_or_empty(doc["message"])
+          parts = [ time_label(timestamp), "assistant" ]
+          parts << message["model"].to_s if present?(message["model"])
+          append_id(parts, "msg", message["id"])
+          append_content_summary(parts, message["content"])
+          parts.join(" ")
+        end
+
+        def format_user(timestamp, doc)
+          message = hash_or_empty(doc["message"])
+          role = present?(message["role"]) ? message["role"].to_s : "user"
+          parts = [ time_label(timestamp), role ]
+          append_id(parts, "msg", message["id"])
+          append_id(parts, "tool", first_content_value(message["content"], "tool_use_id"))
+          append_content_summary(parts, message["content"])
+          parts.join(" ")
+        end
+
+        def append_content_summary(parts, content)
+          return unless content.is_a?(Array)
+
+          types = content.filter_map { |entry| entry["type"] if entry.is_a?(Hash) }.uniq
+          parts << "content=#{types.join(',')}" unless types.empty?
+        end
+
+        def first_content_value(content, key)
+          return nil unless content.is_a?(Array)
+
+          entry = content.find { |item| item.is_a?(Hash) && present?(item[key]) }
+          entry&.fetch(key)
+        end
+
+        def append_id(parts, label, value)
+          return unless present?(value)
+
+          parts << "#{label}=#{compact_id(value)}"
+        end
+
+        def compact_id(value)
+          text = value.to_s
+          text.length > ID_WIDTH ? text[0, ID_WIDTH] : text
+        end
+
+        def time_label(timestamp)
+          text = timestamp.to_s
+          text.length >= 19 ? text[11, 8] : text
+        end
+
+        def hash_or_empty(value)
+          value.is_a?(Hash) ? value : {}
+        end
+
+        def present?(value)
+          !value.nil? && !value.to_s.empty?
+        end
+      end
+
       module FileResolver
         module_function
 

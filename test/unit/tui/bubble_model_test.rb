@@ -339,6 +339,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "fix-cache-x",   "right pane task row must render"
     assert_includes out, "Tasks ·",       "tasks pane title must render"
     assert_includes out, "[Tab] switch",  "default footer hints must appear"
+    assert_includes out, "[Enter] action", "Enter footer hint must describe contextual behavior"
+    refute_includes out, "[Enter] open",   "Enter is not only an open action"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols

@@ -979,7 +979,7 @@ module Hive
         end
 
         def lines(count)
-          @tail.lines(count)
+          Hive::Tui::LogTail::Formatter.format_lines(@tail.lines(count))
         end
       end
 
@@ -1296,7 +1296,7 @@ module Hive
       end
 
       def footer_hint
-        "[Tab] switch  [Enter] open  [n] new  [/] filter  [?] help  [q] quit"
+        "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q] quit"
       end
 
       # Compute pane widths and join horizontally. Left pane is clamped

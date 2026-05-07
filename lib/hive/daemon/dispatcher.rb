@@ -1,4 +1,5 @@
 require "hive/config"
+require "hive/stages"
 require "hive/daemon/policy"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
@@ -151,15 +152,18 @@ module Hive
 
       # After a child exits, re-stat the task's state file and store
       # the result in the controller as the new "last observed" mtime.
-      # The path is reconstructed from the latest `hive status --json`
-      # snapshot — the dispatcher doesn't keep a separate record of
-      # paths, since status is the authoritative source.
+      # The path was stashed on @running at dispatch time (passed
+      # through from the status row) — PR-40 follow-up review C4.
+      #
+      # Stage-advancing runs (4-execute → 5-review) move the task
+      # folder forward; the dispatched path no longer exists. We try
+      # the at-dispatch path first (covers in-stage re-runs of
+      # brainstorm/plan/review) and fall back to a slug-keyed search
+      # of the project's stage directories so the controller's mtime
+      # tracking still reflects the agent's most recent write at the
+      # task's CURRENT location.
       def refresh_post_completion_mtime(child_entry)
-        # Best-effort stat of the standard state-file paths for the
-        # stage; if the file is gone (task moved by the run itself)
-        # we leave the controller's recording unchanged so nothing
-        # spurious re-dispatches.
-        path = guess_state_file_path(child_entry)
+        path = resolve_post_completion_path(child_entry)
         return unless path && File.exist?(path)
 
         @controller.observe_state_file_mtime(
@@ -170,32 +174,40 @@ module Hive
         # Stat failure is non-fatal; just don't update.
       end
 
-      def guess_state_file_path(child_entry)
-        # Reconstruct from project registry + stage + slug. The status
-        # snapshot Dispatcher used had the exact path; if we needed
-        # stronger guarantees we'd stash it on dispatch. For now, look
-        # up the project root and walk the standard layout.
-        project_entry = Hive::Config.find_project(child_entry.project)
-        return nil unless project_entry
+      # Resolution order:
+      #   1. The path stashed at dispatch (status snapshot's state_file)
+      #      — works when the task did NOT advance stage.
+      #   2. A slug-keyed search of the project's stage directories —
+      #      covers stage-advance runs where the source path is gone.
+      def resolve_post_completion_path(child_entry)
+        original = child_entry.state_file_path
+        return original if original && File.exist?(original)
 
-        File.join(
-          project_entry["hive_state_path"],
-          "stages",
-          child_entry.stage,
-          child_entry.slug,
-          state_filename_for(child_entry.stage)
-        )
+        project_entry = Hive::Config.find_project(child_entry.project)
+        return original unless project_entry
+
+        find_post_advance_state_file(project_entry["hive_state_path"], child_entry.slug) || original
       end
 
-      def state_filename_for(stage)
-        case stage
-        when "1-inbox"      then "idea.md"
-        when "2-brainstorm" then "brainstorm.md"
-        when "3-plan"       then "plan.md"
-        when "4-execute", "5-review", "7-done" then "task.md"
-        when "6-pr"         then "pr.md"
-        else "task.md"
+      def find_post_advance_state_file(hive_state_path, slug)
+        return nil unless hive_state_path && Dir.exist?(hive_state_path)
+
+        # Stage names from the SSOT — covers all seven directories,
+        # so adding a new stage in modules/stages.rb auto-extends.
+        Hive::Stages::DIRS.each do |stage_dir|
+          slug_dir = File.join(hive_state_path, "stages", stage_dir, slug)
+          next unless Dir.exist?(slug_dir)
+
+          # The stage runner is the authoritative writer of the state
+          # file's name; instead of hardcoding a stage→filename map
+          # (which would silently drift on a rename), pick the most
+          # recently modified .md in the slug folder.
+          candidates = Dir[File.join(slug_dir, "*.md")]
+          next if candidates.empty?
+
+          return candidates.max_by { |f| File.mtime(f) }
         end
+        nil
       end
 
       def reap_dry_run(now:)
@@ -256,6 +268,7 @@ module Hive
             row.suggested_command,
             project: row.project, slug: row.slug, stage: row.stage,
             state_file_mtime: row.state_file_mtime,
+            state_file_path: row.state_file,
             hive_state_path: nil, # supervisor falls back to tmpdir
             now: now
           )
@@ -288,6 +301,7 @@ module Hive
             archive_dispatch[:command],
             project: project, slug: slug, stage: archive_dispatch[:stage],
             state_file_mtime: archive_dispatch[:state_file_mtime],
+            state_file_path: nil, # archive doesn't track an mtime baseline
             hive_state_path: archive_dispatch[:hive_state_path],
             now: now
           )
@@ -316,7 +330,7 @@ module Hive
       end
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
-                           hive_state_path:, now:)
+                           state_file_path:, hive_state_path:, now:)
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
@@ -325,6 +339,7 @@ module Hive
           command_string: command,
           project: project, slug: slug, stage: stage,
           hive_state_path: hive_state_path,
+          state_file_path: state_file_path,
           dry_run: @dry_run
         )
         @controller.record_dispatch(

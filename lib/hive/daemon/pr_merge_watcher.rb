@@ -44,6 +44,7 @@ module Hive
         @pending[key] = {
           pr_url: pr_url,
           last_polled_at: nil,
+          next_eligible_at: nil,
           last_state: nil,
           failure_count: 0,
           enqueued_at: Time.now,
@@ -66,10 +67,16 @@ module Hive
         keys_to_drop = []
 
         @pending.each do |key, entry|
-          # Cadence: only re-poll if poll_interval_sec has elapsed
-          # since the last poll (or never polled).
+          # Cadence: respect both the regular poll interval AND any
+          # per-entry backoff deadline set after a previous failure.
+          # PR-40 follow-up review C3 — without this, GH_BACKOFF_SCHEDULE
+          # was advisory only and the watcher hammered `gh` at the
+          # regular cadence under outage / rate-limit.
           last = entry[:last_polled_at]
           next if last && (now - last) < @poll_interval_sec
+
+          deadline = entry[:next_eligible_at]
+          next if deadline && now < deadline
 
           state, error = poll_state(entry[:pr_url])
           entry[:last_polled_at] = now
@@ -78,12 +85,21 @@ module Hive
             entry[:failure_count] += 1
             if entry[:failure_count] >= GH_MAX_FAILURES
               keys_to_drop << key
+            else
+              # Schedule the next eligible poll using the backoff
+              # schedule (60 → 300 → 900 s). Index is failure_count - 1
+              # so the first failure waits 60s, the second 300s, etc.
+              # Past the schedule's tail we keep the last value until
+              # GH_MAX_FAILURES drops the entry.
+              idx = [ entry[:failure_count] - 1, GH_BACKOFF_SCHEDULE.size - 1 ].min
+              entry[:next_eligible_at] = now + GH_BACKOFF_SCHEDULE[idx]
             end
             next
           end
 
-          # Successful poll resets failure counter
+          # Successful poll resets failure counter and any pending backoff.
           entry[:failure_count] = 0
+          entry[:next_eligible_at] = nil
           entry[:last_state] = state
 
           case state

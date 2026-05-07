@@ -31,12 +31,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @next_pid = 100
     end
 
-    def spawn(command_string:, project:, slug:, stage:, hive_state_path: nil, dry_run: nil)
+    def spawn(command_string:, project:, slug:, stage:,
+              hive_state_path: nil, state_file_path: nil, dry_run: nil)
       pid = @next_pid
       @next_pid += 1
       @spawned << {
         pid: pid, command: command_string, project: project, slug: slug,
-        stage: stage, dry_run: dry_run
+        stage: stage, state_file_path: state_file_path, dry_run: dry_run
       }
       pid
     end

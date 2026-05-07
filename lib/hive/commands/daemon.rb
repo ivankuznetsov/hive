@@ -80,10 +80,26 @@ module Hive
           Process.daemon(true, true)
         end
 
+        # PR-40 follow-up review C5: refuse to start if we can't capture
+        # our own start_time. Without it the PID-reuse defense degrades
+        # to "trust everything" silently — and `hive daemon stop` could
+        # eventually SIGKILL an unrelated process that happened to land
+        # on a reused PID. Better to fail loudly at startup so the
+        # operator can fix their environment (typically: missing /proc,
+        # stripped `ps`, or a containerised host with both unavailable).
+        own_start_time = Hive::Lock.send(:process_start_time, Process.pid)
+        if own_start_time.nil?
+          raise Hive::Error,
+                "hive daemon: cannot read process start time " \
+                "(neither /proc/#{Process.pid}/stat nor `ps -o lstart=` worked); " \
+                "PID-reuse defense would be disabled. Refusing to start. " \
+                "If this is a containerised host, ensure /proc is mounted or `ps` is on PATH."
+        end
+
         # Write the PID file as YAML with process_start_time so `stop`
         # can detect PID reuse before sending TERM/KILL to a random
         # process that happens to have the same PID. PR-40 review P2 #3.
-        File.write(pid_file, pid_file_payload(Process.pid).to_yaml)
+        File.write(pid_file, pid_file_payload(Process.pid, own_start_time).to_yaml)
 
         # Load the daemon block from ~/Dev/hive/config.yml so operator
         # overrides (max_concurrent_runs, poll_interval_sec, log paths,
@@ -117,7 +133,16 @@ module Hive
         begin
           dispatcher.run_forever
         ensure
-          File.delete(pid_file) if File.exist?(pid_file) && File.read(pid_file).strip.to_i == Process.pid
+          # PR-40 follow-up review C2: parse via read_pid_file_payload
+          # so the cleanup matches the YAML-payload format the daemon
+          # writes. The earlier `File.read.strip.to_i` returned 0 against
+          # the YAML doc, so the file leaked on every clean shutdown.
+          payload = begin
+            read_pid_file_payload
+          rescue StandardError
+            nil
+          end
+          File.delete(pid_file) if payload && payload["pid"] == Process.pid && File.exist?(pid_file)
         end
       end
 
@@ -150,15 +175,16 @@ module Hive
           return
         end
 
-        # PR-40 review P2 #3: PID-reuse safety. Verify the live process
-        # at `pid` has the same start_time we recorded when the daemon
-        # wrote the PID file. If the start times differ, the original
-        # daemon already exited and the OS handed `pid` to a different
-        # (unrelated) process — sending SIGTERM/SIGKILL would harm
-        # that bystander.
-        recorded_start = payload["process_start_time"]
-        live_start = Hive::Lock.send(:process_start_time, pid)
-        if recorded_start && live_start && recorded_start != live_start
+        # PR-40 review P2 #3 + follow-up C5: PID-reuse safety. Use the
+        # tri-state `pid_ownership` outcome to decide whether to send
+        # signals at all:
+        #   :verified / :legacy → safe to TERM
+        #   :reused             → refuse, remove stale PID file
+        #   :unverified         → refuse (we cannot prove this PID is
+        #                         actually our daemon; bystander safety)
+        ownership = pid_ownership(payload, pid)
+        case ownership
+        when :reused
           File.delete(pid_file)
           if @json
             puts JSON.generate(stop_envelope(running: false, was_running: false,
@@ -166,6 +192,16 @@ module Hive
           else
             warn "hive: PID #{pid} appears reused (start_time mismatch); " \
                  "refusing to signal. Removed stale #{pid_file}."
+          end
+          return
+        when :unverified
+          if @json
+            puts JSON.generate(stop_envelope(running: false, was_running: false,
+                                             stale_pid: pid, reason: "unverified"))
+          else
+            warn "hive: cannot verify PID #{pid} is the hive daemon " \
+                 "(no /proc, no `ps`?); refusing to signal. " \
+                 "Manually confirm and `kill #{pid}` after, then `rm #{pid_file}`."
           end
           return
         end
@@ -178,12 +214,12 @@ module Hive
         end
 
         if pid_alive?(pid)
-          # Escalate to KILL — but re-verify start_time again before
-          # the second signal, in case the original daemon JUST died
-          # in the grace window and the OS handed the PID off.
-          live_start = Hive::Lock.send(:process_start_time, pid)
-          if recorded_start && live_start && recorded_start != live_start
-            warn "hive: PID #{pid} reused mid-stop; aborting KILL signal"
+          # Escalate to KILL — but re-verify ownership before the
+          # second signal, in case the original daemon JUST died in
+          # the grace window and the OS handed the PID off.
+          ownership_now = pid_ownership(payload, pid)
+          if ownership_now == :reused || ownership_now == :unverified
+            warn "hive: PID #{pid} ownership flipped to #{ownership_now} mid-stop; aborting KILL signal"
           else
             send_signal_safely(pid, :KILL)
           end
@@ -245,10 +281,15 @@ module Hive
           raise Hive::Error, "daemon PID is dead"
         end
 
-        # PR-40 review P2 #3: same start_time verification as stop.
-        unless pid_owned_by_us?(payload, pid)
+        # PR-40 review P2 #3 + follow-up C5: ownership tri-state.
+        ownership = pid_ownership(payload, pid)
+        case ownership
+        when :reused
           warn "hive: PID #{pid} appears reused (start_time mismatch); refusing HUP"
           raise Hive::Error, "daemon PID is reused"
+        when :unverified
+          warn "hive: cannot verify PID #{pid} is the hive daemon; refusing HUP"
+          raise Hive::Error, "daemon PID is unverified"
         end
 
         send_signal_safely(pid, :HUP)
@@ -302,16 +343,39 @@ module Hive
         true
       end
 
-      # Compares the recorded process_start_time against the live PID's
-      # start_time. Returns true if either side is missing (best-effort
-      # fallback when /proc and `ps` both fail) or if they match. False
-      # only when both are present AND differ.
-      def pid_owned_by_us?(payload, pid)
-        recorded = payload && payload["process_start_time"]
-        live = Hive::Lock.send(:process_start_time, pid)
-        return true if recorded.nil? || live.nil?
+      # Verify the live process at `pid` is the daemon we wrote to the
+      # PID file. Returns one of three symbols:
+      #
+      #   :verified   — recorded and live start_time both present AND match.
+      #                 Safe to send signals.
+      #   :reused     — both present but DIFFER. The OS handed `pid` to
+      #                 a different process; refuse signals.
+      #   :unverified — at least one side is nil. Cannot prove it's the
+      #                 daemon. Refuse signals to avoid hitting bystanders.
+      #
+      # PR-40 follow-up review C5 — split from the prior "true on either
+      # nil" boolean which silently degraded to TRUST in stripped
+      # containers. The bare-integer back-compat path (legacy PID files)
+      # produces a :legacy outcome callers may treat as :verified at
+      # their discretion.
+      def pid_ownership(payload, pid)
+        return :unverified if payload.nil?
+        return :legacy     if payload["_legacy"]
 
-        recorded == live
+        recorded = payload["process_start_time"]
+        live = Hive::Lock.send(:process_start_time, pid)
+        return :unverified if recorded.nil? || live.nil?
+
+        recorded == live ? :verified : :reused
+      end
+
+      # Back-compat predicate; true only when the daemon is genuinely
+      # confirmed to own the PID. Legacy files get :verified-class
+      # treatment to match the prior behavior for hand-written PID
+      # files used in tests.
+      def pid_owned_by_us?(payload, pid)
+        ownership = pid_ownership(payload, pid)
+        ownership == :verified || ownership == :legacy
       end
 
       def read_pid_file_payload
@@ -322,21 +386,29 @@ module Hive
         parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
         return parsed if parsed.is_a?(Hash) && parsed["pid"]
 
-        # Back-compat: a bare-integer PID file (older daemon versions
-        # OR a hand-written PID for testing). Wrap it in a payload
-        # without process_start_time — the start-time check then
-        # short-circuits to "match" via the nil-side fallback.
+        # Back-compat: a bare-integer PID file (older daemon versions OR
+        # a hand-written PID for testing). Mark it with `_legacy` so the
+        # ownership check can distinguish "intentional bare-int" from
+        # "process_start_time silently nil at write time on a stripped
+        # container" — the latter is the C5 attack surface we just
+        # closed at write-time but the read-time check still needs to
+        # tell the two cases apart.
         if raw.strip =~ /\A\d+\z/
-          return { "pid" => raw.strip.to_i, "process_start_time" => nil }
+          return { "pid" => raw.strip.to_i, "process_start_time" => nil, "_legacy" => true }
         end
 
         nil
       end
 
-      def pid_file_payload(pid)
+      def pid_file_payload(pid, start_time = nil)
+        # PR-40 follow-up review C5: callers in start_daemon now read
+        # the start_time once and pass it explicitly so the failure
+        # mode is observable at start (refuse to start) rather than
+        # silently dropping a `nil` into the PID file.
+        start_time ||= Hive::Lock.send(:process_start_time, pid)
         {
           "pid" => pid,
-          "process_start_time" => Hive::Lock.send(:process_start_time, pid),
+          "process_start_time" => start_time,
           "started_at" => Time.now.utc.iso8601
         }
       end

@@ -132,6 +132,44 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
 
   # ── terminate_all sends SIGTERM, escalates to SIGKILL ─────────────────
 
+  # PR-40 follow-up review C1: parse_envelope used to call
+  # File.foreach.to_a.last(20), materializing the whole file. A child
+  # writing tens of MB of stdout would OOM the daemon. The fix is a
+  # bounded tail-read; verify it both extracts the envelope correctly
+  # for a normal file AND tolerates a giant prefix.
+  def test_parse_envelope_extracts_tail_envelope_from_large_log
+    skip "skipping large-log test under CI containers" if ENV["CI"] == "true"
+
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "huge.log")
+      # Write 8 MB of prose, then the JSON envelope as the last line.
+      File.open(log_path, "wb") do |f|
+        line = "noise " * 100 + "\n" # ~601 bytes per line
+        12_000.times { f.write(line) } # ~7.2 MB
+        f.write(%({"ok":true,"slug":"big","schema":"hive-run"}\n))
+      end
+      assert File.size(log_path) > 5_000_000, "fixture must exceed the bounded read window"
+
+      sup = make
+      envelope = sup.send(:parse_envelope, log_path)
+      assert_equal({ "ok" => true, "slug" => "big", "schema" => "hive-run" }, envelope)
+    end
+  end
+
+  def test_parse_envelope_returns_nil_on_missing_log
+    sup = make
+    assert_nil sup.send(:parse_envelope, "/no/such/path.log")
+  end
+
+  def test_parse_envelope_returns_nil_when_no_json_in_tail
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "prose-only.log")
+      File.write(log_path, "no json here\nstill no json\n")
+      sup = make
+      assert_nil sup.send(:parse_envelope, log_path)
+    end
+  end
+
   def test_terminate_all_signals_running_children
     skip "skipping signal test under CI containers" if ENV["CI"] == "true"
 

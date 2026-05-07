@@ -16,7 +16,8 @@ module Hive
     # `hive run` doesn't take the daemon down.
     class ChildSupervisor
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
-                             :started_at, :finished_at, :json_envelope, keyword_init: true)
+                             :state_file_path, :started_at, :finished_at, :json_envelope,
+                             keyword_init: true)
 
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
                      log_dir_for_task: nil,
@@ -43,7 +44,7 @@ module Hive
       # ConcurrencyController bookkeeping stays consistent across both
       # modes.
       def spawn(command_string:, project:, slug:, stage:,
-                hive_state_path: nil, dry_run: nil)
+                hive_state_path: nil, state_file_path: nil, dry_run: nil)
         effective_dry_run = dry_run.nil? ? @dry_run : dry_run
 
         argv = parse_command(command_string)
@@ -60,7 +61,7 @@ module Hive
         if effective_dry_run
           @running[next_dry_pid] = {
             project: project, slug: slug, stage: stage,
-            command: command_string,
+            command: command_string, state_file_path: state_file_path,
             started_at: Time.now, log_path: nil, dry_run: true
           }
           return @running.keys.last
@@ -69,9 +70,10 @@ module Hive
         log_path = log_path_for(project: project, slug: slug,
                                 hive_state_path: hive_state_path)
         FileUtils.mkdir_p(File.dirname(log_path))
-        # Open in append + truncate-old-content mode so each daemon run
-        # starts fresh per-task; logs from prior runs roll forward in
-        # the daemon's own log file, not here.
+        # Open with truncation ("w") so each child run starts a fresh
+        # per-task log; logs from prior runs are not preserved here —
+        # the daemon's own log file at ~/Dev/hive/logs/daemon.log
+        # carries the cross-run history.
         log_io = File.open(log_path, "w")
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
@@ -81,7 +83,7 @@ module Hive
 
         @running[pid] = {
           project: project, slug: slug, stage: stage,
-          command: command_string,
+          command: command_string, state_file_path: state_file_path,
           started_at: Time.now, log_path: log_path, dry_run: false
         }
         pid
@@ -109,8 +111,8 @@ module Hive
           completed << ChildExit.new(
             pid: pid, exit_code: status.exitstatus,
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
-            command: entry[:command], started_at: entry[:started_at],
-            finished_at: now, json_envelope: envelope
+            command: entry[:command], state_file_path: entry[:state_file_path],
+            started_at: entry[:started_at], finished_at: now, json_envelope: envelope
           )
         end
         completed
@@ -127,8 +129,8 @@ module Hive
           completed << ChildExit.new(
             pid: pid, exit_code: 0,
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
-            command: entry[:command], started_at: entry[:started_at],
-            finished_at: now, json_envelope: nil
+            command: entry[:command], state_file_path: entry[:state_file_path],
+            started_at: entry[:started_at], finished_at: now, json_envelope: nil
           )
         end
         completed.each { |c| @running.delete(c.pid) }
@@ -195,17 +197,23 @@ module Hive
         File.join(base, "daemon-run-#{ts}-#{Process.pid}.log")
       end
 
+      # Bytes to read from the END of the child log when scanning for
+      # the JSON envelope. The envelope is the last line of stdout per
+      # `wiki/cli.md`'s `--json` contract; 64 KB is enormously generous
+      # for a single JSON document but bounded against a runaway child
+      # that wrote gigabytes of prose. PR-40 follow-up review C1.
+      ENVELOPE_TAIL_BYTES = 64 * 1024
+
       def parse_envelope(log_path)
         return nil if log_path.nil? || !File.exist?(log_path)
 
-        # The JSON envelope (per `wiki/cli.md`) is the LAST line of
-        # stdout. Walk backwards through the log file looking for a
-        # line that parses as JSON — earlier lines may contain prose
-        # output, and we don't want to fail noisily on those.
-        # Cap the read window to ~64 KB so a runaway stdout doesn't
-        # OOM the daemon.
-        lines = File.foreach(log_path).to_a.last(20)
-        lines.reverse_each do |line|
+        tail = read_tail(log_path, ENVELOPE_TAIL_BYTES)
+        return nil if tail.nil? || tail.empty?
+
+        # Walk backwards through the tail looking for a line that
+        # parses as JSON — earlier lines may contain prose output and
+        # the daemon's own [hive-daemon] header line.
+        tail.lines.reverse_each do |line|
           line = line.strip
           next if line.empty? || line.start_with?("[hive-daemon]")
           next unless line.start_with?("{")
@@ -216,6 +224,26 @@ module Hive
             next
           end
         end
+        nil
+      end
+
+      # Stream the last `max_bytes` of a file without materializing the
+      # whole thing. Discards any partial leading line so JSON parse on
+      # the boundary line doesn't fail mid-token. Returns "" when the
+      # file is empty.
+      def read_tail(path, max_bytes)
+        File.open(path, "rb") do |f|
+          size = f.size
+          start = [ size - max_bytes, 0 ].max
+          f.seek(start)
+          chunk = f.read
+          # If we seeked past byte 0, the first line in `chunk` is
+          # almost certainly a partial line — drop it so we never try
+          # to JSON-parse a truncated prefix.
+          chunk = chunk.split("\n", 2)[1].to_s if start.positive?
+          chunk
+        end
+      rescue Errno::ENOENT, Errno::EACCES, IOError
         nil
       end
 

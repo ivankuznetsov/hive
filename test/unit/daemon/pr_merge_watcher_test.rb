@@ -170,9 +170,11 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       ENV["HIVE_FAKE_GH_EXIT"] = "1"
       ENV["HIVE_FAKE_GH_STDERR"] = "boom"
+      # Advance well past every backoff window between attempts so each
+      # tick actually polls (rather than being gated by next_eligible_at).
       now = Time.now
       Hive::Daemon::PrMergeWatcher::GH_MAX_FAILURES.times do |i|
-        watcher.tick(now: now + i * 10)
+        watcher.tick(now: now + i * 10_000)
       end
       refute watcher.watching?(project: "p1", slug: "s1"),
              "after GH_MAX_FAILURES consecutive errors, watcher must drop the entry"
@@ -180,6 +182,72 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
   ensure
     ENV.delete("HIVE_FAKE_GH_EXIT")
     ENV.delete("HIVE_FAKE_GH_STDERR")
+  end
+
+  # PR-40 follow-up review C3: GH_BACKOFF_SCHEDULE must actually delay
+  # subsequent polls after a failure. Without the gate, the watcher
+  # hammered `gh` at the regular poll cadence under auth/rate failure.
+  def test_tick_honors_backoff_after_failure
+    with_pr_md(url: "x") do |folder|
+      watcher = make(poll_interval_sec: 0)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+
+      ENV["HIVE_FAKE_GH_EXIT"] = "1"
+      ENV["HIVE_FAKE_GH_STDERR"] = "boom"
+      now = Time.now
+      watcher.tick(now: now)
+      # Inside the first backoff window (60s), tick should NOT re-poll
+      # even though gh would now succeed.
+      ENV["HIVE_FAKE_GH_EXIT"] = "0"
+      ENV["HIVE_FAKE_GH_STATE"] = "MERGED"
+      result = watcher.tick(now: now + 30)
+      assert_equal [], result, "must NOT re-poll within backoff window"
+      assert watcher.watching?(project: "p1", slug: "s1")
+
+      # Past 60s, the watcher polls again and sees MERGED.
+      result = watcher.tick(now: now + 90)
+      assert_equal 1, result.size
+      assert_equal "s1", result.first[:slug]
+    end
+  ensure
+    ENV.delete("HIVE_FAKE_GH_EXIT")
+    ENV.delete("HIVE_FAKE_GH_STDERR")
+    ENV.delete("HIVE_FAKE_GH_STATE")
+  end
+
+  def test_successful_poll_clears_backoff
+    with_pr_md(url: "x") do |folder|
+      watcher = make(poll_interval_sec: 0)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+
+      now = Time.now
+      ENV["HIVE_FAKE_GH_EXIT"] = "1"
+      ENV["HIVE_FAKE_GH_STDERR"] = "transient"
+      watcher.tick(now: now) # failure → backoff
+
+      # Force a successful OPEN poll well past backoff
+      ENV.delete("HIVE_FAKE_GH_EXIT")
+      ENV.delete("HIVE_FAKE_GH_STDERR")
+      ENV["HIVE_FAKE_GH_STATE"] = "OPEN"
+      watcher.tick(now: now + 90) # success → backoff cleared
+
+      # A subsequent failure must restart from the FIRST backoff slot
+      # (60s), not jump straight to 300s — i.e., success reset the
+      # failure counter.
+      ENV.delete("HIVE_FAKE_GH_STATE")
+      ENV["HIVE_FAKE_GH_EXIT"] = "1"
+      ENV["HIVE_FAKE_GH_STDERR"] = "transient again"
+      watcher.tick(now: now + 100)
+      # Within the first backoff window from this new failure
+      ENV["HIVE_FAKE_GH_EXIT"] = "0"
+      ENV["HIVE_FAKE_GH_STATE"] = "MERGED"
+      result = watcher.tick(now: now + 130) # 30s after the new failure
+      assert_equal [], result, "after success-reset, next failure starts at the first backoff slot"
+    end
+  ensure
+    ENV.delete("HIVE_FAKE_GH_EXIT")
+    ENV.delete("HIVE_FAKE_GH_STDERR")
+    ENV.delete("HIVE_FAKE_GH_STATE")
   end
 
   # ── manual drop ───────────────────────────────────────────────────────

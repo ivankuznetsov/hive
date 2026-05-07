@@ -104,6 +104,45 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
+  def test_stop_refuses_signal_when_pid_ownership_unverified
+    # PR-40 follow-up review C5: when the recorded process_start_time
+    # is nil (a daemon that started in a stripped container without
+    # /proc and `ps` — pre-fix this would write nil and the verifier
+    # would short-circuit to "trust"), `stop` must refuse to signal
+    # the PID rather than risk hitting an unrelated process that was
+    # handed the same PID after reuse. Test process must NOT be TERMed.
+    with_isolated_hive_home do |home, env|
+      File.write(File.join(home, ".daemon.pid"), <<~YAML)
+        ---
+        pid: #{Process.pid}
+        process_start_time:
+        started_at: "2026-05-07T00:00:00Z"
+      YAML
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "stop")
+      assert_equal 0, status.exitstatus
+      assert_match(/cannot verify/i, err)
+      assert Process.kill(0, Process.pid), "test process must NOT have been signaled"
+      # Unverified does NOT remove the PID file — operator must
+      # confirm + clean up manually per the warn message.
+      assert File.exist?(File.join(home, ".daemon.pid")),
+             "unverified ownership leaves the PID file in place for operator inspection"
+    end
+  end
+
+  def test_reload_refuses_when_pid_ownership_unverified
+    with_isolated_hive_home do |home, env|
+      File.write(File.join(home, ".daemon.pid"), <<~YAML)
+        ---
+        pid: #{Process.pid}
+        process_start_time:
+        started_at: "2026-05-07T00:00:00Z"
+      YAML
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "reload")
+      assert_equal 1, status.exitstatus, "reload exits 1 on unverified PID"
+      assert_match(/cannot verify|unverified/i, err)
+    end
+  end
+
   # ── reload: refuses when daemon not running ───────────────────────────
 
   def test_reload_when_not_running_exits_1

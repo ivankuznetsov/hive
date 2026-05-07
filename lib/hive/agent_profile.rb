@@ -127,6 +127,23 @@ module Hive
       @skill_verifier.call(invocation, project_root: project_root)
     end
 
+    # Render a configured skill name for this profile. Stage configs
+    # historically store full Claude/Codex slash invocations (`/plan`,
+    # `/plugin:name`), while reviewer configs store bare names. Profiles
+    # with a non-default syntax, such as pi's `/skill:<name>`, need the
+    # bare skill name in both cases.
+    def format_skill_invocation(skill)
+      raw = skill.to_s
+      if raw.start_with?("/")
+        return raw if @skill_syntax_format == "/%{skill}"
+
+        raw = raw.delete_prefix("/")
+      end
+      raw = raw.split(":", 2).last if @skill_syntax_format != "/%{skill}" && raw.include?(":")
+
+      format(@skill_syntax_format, skill: raw)
+    end
+
     # Resolved binary path: env override (if env_bin_override_key set and
     # the env var is non-empty) else bin_default.
     def bin

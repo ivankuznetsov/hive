@@ -8,6 +8,9 @@ module Hive
       def run!(task, cfg)
         idea_path = File.join(task.folder, "idea.md")
         idea_text = File.exist?(idea_path) ? File.read(idea_path) : ""
+        profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+        skill = cfg.dig("brainstorm", "skill") ||
+          Hive::Config::DEFAULTS.dig("brainstorm", "skill")
         prompt = Hive::Stages::Base.render(
           "brainstorm_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -15,8 +18,7 @@ module Hive
             task_folder: task.folder,
             idea_text: idea_text,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            skill_invocation: cfg.dig("brainstorm", "skill") ||
-              Hive::Config::DEFAULTS.dig("brainstorm", "skill")
+            skill_invocation: profile.format_skill_invocation(skill)
           )
         )
         # add_dirs is intentionally limited to the task folder. Brainstorm
@@ -32,7 +34,7 @@ module Hive
           max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
-          profile: Hive::Stages::Base.stage_profile(cfg, "brainstorm"),
+          profile: profile,
           # Pin the status-detection mode regardless of which profile the
           # user picked: brainstorm's lifecycle contract is "agent writes
           # WAITING/COMPLETE marker to brainstorm.md", which only the

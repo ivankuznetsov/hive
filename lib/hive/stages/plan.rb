@@ -8,6 +8,9 @@ module Hive
       def run!(task, cfg)
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
+        profile = Hive::Stages::Base.stage_profile(cfg, "plan")
+        skill = cfg.dig("plan", "skill") ||
+          Hive::Config::DEFAULTS.dig("plan", "skill")
         prompt = Hive::Stages::Base.render(
           "plan_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -15,8 +18,7 @@ module Hive
             task_folder: task.folder,
             brainstorm_text: brainstorm_text,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            skill_invocation: cfg.dig("plan", "skill") ||
-              Hive::Config::DEFAULTS.dig("plan", "skill")
+            skill_invocation: profile.format_skill_invocation(skill)
           )
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a
@@ -29,7 +31,7 @@ module Hive
           max_budget_usd: cfg.dig("budget_usd", "plan"),
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
-          profile: Hive::Stages::Base.stage_profile(cfg, "plan"),
+          profile: profile,
           # Same rationale as brainstorm: plan's lifecycle contract is
           # the marker the agent writes to plan.md, not an output file.
           status_mode: :state_file_marker

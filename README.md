@@ -70,7 +70,7 @@ hive doctor              # tabular status of each (stage, agent, skill) triple P
 hive doctor --json       # machine-readable envelope (hive-doctor.v1; checks[].kind = "stage" | "reviewer")
 ```
 
-Exit codes: `0` all present (or N/A for pi); `65` at least one skill missing; `78` config error.
+Exit codes: `0` all present or not applicable; `65` at least one skill missing; `78` config error.
 
 `hive init` runs the same doctor as a non-fatal preflight at end-of-bootstrap. Any missing-skill warnings are emitted to **stderr** (so `hive init | …` pipelines stay clean) and init still exits `0` — install gaps surface but don't block bootstrap. Look for `hive: doctor pre-flight — found N issue(s):` after the initialized summary.
 

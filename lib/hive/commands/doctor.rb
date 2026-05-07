@@ -16,9 +16,9 @@ module Hive
     # profile to probe its filesystem, prints a status table, and exits
     # non-zero if any check is `:missing`.
     #
-    # Pi rows always come back `:not_applicable` — pi has no
-    # slash-command resolver. That's not a fail; the prompt text still
-    # gets sent to the model.
+    # Pi rows use pi's `/skill:<name>` form and real skill resolver.
+    # Non-skill-form invocations still come back `:not_applicable`
+    # because pi cannot resolve those as skills.
     #
     # Reviewer entries with `kind:` ≠ `"agent"` also surface as
     # `:not_applicable`. This is the **only load-time signal** for
@@ -78,14 +78,15 @@ module Hive
         agent_name = (@config.dig(stage, "agent") || "claude").to_s
         skill = @config.dig(stage, "skill") || Hive::Config::DEFAULTS.dig(stage, "skill")
         profile = Hive::AgentProfiles.lookup(agent_name.to_sym)
+        invocation = profile.format_skill_invocation(skill)
 
-        status, message = profile.verify_skill(skill, project_root: @project_root)
+        status, message = profile.verify_skill(invocation, project_root: @project_root)
         {
           kind: "stage",
           stage: stage,
           label: stage,
           agent: agent_name,
-          skill: skill,
+          skill: invocation,
           status: status.to_s,
           message: message
         }
@@ -120,7 +121,7 @@ module Hive
         end
 
         profile = Hive::AgentProfiles.lookup(agent_name.to_sym)
-        invocation = format(profile.skill_syntax_format, skill: bare_skill)
+        invocation = profile.format_skill_invocation(bare_skill)
         status, message = profile.verify_skill(invocation, project_root: @project_root)
         reviewer_row(
           name: name,

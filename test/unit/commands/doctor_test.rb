@@ -70,20 +70,41 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
-  def test_pi_stage_is_not_applicable_and_does_not_fail
-    with_fake_home do |_home|
+  def test_pi_stage_uses_profile_skill_format_and_resolves
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
+      write_file("#{home}/.pi/agent/skills/plan/SKILL.md")
       out = StringIO.new
       cfg = {
-        "brainstorm" => { "agent" => "pi", "skill" => "/anything" },
-        "plan" => { "agent" => "pi", "skill" => "/anything" }
+        "brainstorm" => { "agent" => "pi" },
+        "plan" => { "agent" => "pi" }
       }
       exit_code = Hive::Commands::Doctor.new(
         config: cfg,
         project_root: nil,
         output: out
       ).call
-      assert_equal 0, exit_code, "pi-only configs must not fail doctor"
-      assert_match(/— not_applicable/, out.string)
+      assert_equal 0, exit_code
+      assert_match(%r{brainstorm.*pi.*/skill:ce-brainstorm.*✓ present}, out.string)
+      assert_match(%r{plan.*pi.*/skill:plan.*✓ present}, out.string)
+    end
+  end
+
+  def test_pi_stage_missing_when_formatted_skill_absent
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
+      out = StringIO.new
+      cfg = {
+        "brainstorm" => { "agent" => "pi" },
+        "plan" => { "agent" => "pi" }
+      }
+      exit_code = Hive::Commands::Doctor.new(
+        config: cfg,
+        project_root: nil,
+        output: out
+      ).call
+      assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
+      assert_match(%r{plan.*pi.*/skill:plan.*✗ missing}, out.string)
     end
   end
 
@@ -136,13 +157,14 @@ class HiveCommandsDoctorTest < Minitest::Test
   end
 
   def test_project_root_affects_claude_plain_invocation_resolution
-    with_fake_home do |_home|
+    with_fake_home do |home|
       # No user-level claude /plan, but project-level present.
       with_tmp_dir do |project|
+        write_file("#{home}/.claude/commands/x.md")
         write_file("#{project}/.claude/commands/plan.md")
         out = StringIO.new
         cfg = base_config(
-          "brainstorm" => { "agent" => "pi", "skill" => "/x" }, # parked: pi → N/A
+          "brainstorm" => { "agent" => "claude", "skill" => "/x" }, # parked
           "plan" => { "agent" => "claude", "skill" => "/plan" }
         )
         exit_code = Hive::Commands::Doctor.new(

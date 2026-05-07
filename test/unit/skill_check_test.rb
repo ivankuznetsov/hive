@@ -144,6 +144,15 @@ class HiveSkillCheckClaudeTest < Minitest::Test
     end
   end
 
+  def test_glob_metacharacters_do_not_match_claude_plugin_fallback
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/mp/foo/1.0/skills/foobar/SKILL.md")
+      status, msg = Hive::SkillCheck::Claude.verify("/foo*")
+      assert_equal :missing, status
+      assert_match(/foo\*/, msg)
+    end
+  end
+
   def test_missing_returns_install_hint_for_plugin_invocation
     with_fake_home do |_home|
       status, msg = Hive::SkillCheck::Claude.verify("/no-such-plug:no-such-skill")
@@ -224,6 +233,15 @@ class HiveSkillCheckCodexTest < Minitest::Test
     end
   end
 
+  def test_glob_metacharacters_do_not_match_codex_plugin_fallback
+    with_fake_home do |home|
+      write_file("#{home}/.codex/plugins/cache/some-mp/pkg/1.0/skills/foobar/SKILL.md")
+      status, msg = Hive::SkillCheck::Codex.verify("/foo*")
+      assert_equal :missing, status
+      assert_match(/foo\*/, msg)
+    end
+  end
+
   def test_missing_plugin_invocation_with_install_hint
     with_fake_home do |_home|
       status, msg = Hive::SkillCheck::Codex.verify("/missing-plug:missing-name")
@@ -260,6 +278,24 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_present_via_user_pi_recursive_skills_directory
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/pi-skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_equal "#{home}/.pi/agent/skills/pi-skills/foo/SKILL.md", msg
+    end
+  end
+
+  def test_present_via_user_pi_root_markdown_skill
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/foo.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_equal "#{home}/.pi/agent/skills/foo.md", msg
+    end
+  end
+
   def test_present_via_cross_agent_skills_directory
     with_fake_home do |home|
       write_file("#{home}/.agents/skills/foo/SKILL.md")
@@ -280,6 +316,17 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_present_via_project_pi_root_markdown_skill
+    with_fake_home do |_home|
+      with_tmp_dir do |project|
+        write_file("#{project}/.pi/skills/foo.md")
+        status, msg = Hive::SkillCheck::Pi.verify("/skill:foo", project_root: project)
+        assert_equal :present, status
+        assert_equal "#{project}/.pi/skills/foo.md", msg
+      end
+    end
+  end
+
   def test_present_via_project_cross_agent_skills_directory
     with_fake_home do |_home|
       with_tmp_dir do |project|
@@ -291,12 +338,56 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_present_via_ancestor_project_cross_agent_skills_directory
+    with_fake_home do |_home|
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p("#{project}/.git")
+        nested = File.join(project, "nested")
+        FileUtils.mkdir_p(nested)
+        write_file("#{project}/.agents/skills/foo/SKILL.md")
+        status, msg = Hive::SkillCheck::Pi.verify("/skill:foo", project_root: nested)
+        assert_equal :present, status
+        assert_equal "#{project}/.agents/skills/foo/SKILL.md", msg
+      end
+    end
+  end
+
   def test_present_via_pi_package_global_npm_root
     with_fake_home do |home|
       write_file("#{home}/.pi/npm/node_modules/some-package/skills/foo/SKILL.md")
       status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
       assert_equal :present, status
       assert_match(%r{\.pi/npm/node_modules/some-package/skills/foo/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_present_via_pi_package_git_root
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/git/github.com/user/repo/skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_match(%r{\.pi/agent/git/github\.com/user/repo/skills/foo/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_present_via_pi_package_manifest_skill_path
+    with_fake_home do |home|
+      package_root = "#{home}/.pi/agent/git/github.com/user/repo"
+      write_file("#{package_root}/package.json", '{"pi":{"skills":["custom-skills"]}}')
+      write_file("#{package_root}/custom-skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_match(%r{custom-skills/foo/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_present_via_pi_settings_skill_path
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/settings.json", '{"skills":["./extra-skills"]}')
+      write_file("#{home}/.pi/agent/extra-skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_match(%r{\.pi/agent/extra-skills/foo/SKILL.md\z}, msg)
     end
   end
 

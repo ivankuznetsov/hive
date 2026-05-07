@@ -140,8 +140,8 @@ module Hive
       - codex: `~/.codex/skills/<name>/SKILL.md` (and `.system/`) for
         plain; `~/.codex/plugins/cache/*/<plug>/*/skills/...` for
         plug-namespaced.
-      - pi: always `:not_applicable` — pi has no slash-command
-        resolver; the prompt is sent verbatim.
+      - pi: `/skill:<name>` checks `~/.pi/agent/skills`, `~/.agents/skills`,
+        project skill directories, settings skills, and installed pi packages.
 
       Exit codes: 0 all checks present or N/A; 65 at least one missing
       skill; 78 config error.

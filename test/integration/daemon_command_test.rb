@@ -240,6 +240,25 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
+  def test_enable_rejects_malformed_project_yaml_as_config_error
+    with_registered_project(initial_yaml: "daemon:\n  enabled: [\n") do |env, _cfg_path, _root|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_match(/not valid YAML/, err)
+      refute_match(/Psych::SyntaxError/, err)
+    end
+  end
+
+  def test_enable_rejects_non_hash_project_yaml_without_overwriting
+    original = "- not\n- a\n- hash\n"
+    with_registered_project(initial_yaml: original) do |env, cfg_path, _root|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_match(/must be a hash/, err)
+      assert_equal original, File.read(cfg_path)
+    end
+  end
+
   def test_enable_missing_target_without_all_exits_usage
     with_isolated_hive_home do |_home, env|
       _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable")
@@ -272,6 +291,34 @@ class HiveDaemonCommandTest < Minitest::Test
         assert_match(/enabled #{name}/, out)
         data = YAML.safe_load(File.read(File.join(home, name, ".hive-state", "config.yml")))
         assert_equal true, data.dig("daemon", "enabled"), "#{name} must be enabled"
+      end
+    end
+  end
+
+  def test_disable_all_preflights_every_project_before_writing
+    with_isolated_hive_home do |home, env|
+      projects = %w[a broken c].map do |name|
+        root = File.join(home, name)
+        hive_state = File.join(root, ".hive-state")
+        unless name == "broken"
+          FileUtils.mkdir_p(hive_state)
+          File.write(File.join(hive_state, "config.yml"), <<~YAML)
+            default_branch: main
+            daemon:
+              enabled: true
+          YAML
+        end
+        { "name" => name, "path" => root, "hive_state_path" => hive_state }
+      end
+      File.write(File.join(home, "config.yml"), { "registered_projects" => projects }.to_yaml)
+
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "disable", "--all")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_match(/missing .*broken.*config.yml/, err)
+
+      %w[a c].each do |name|
+        data = YAML.safe_load(File.read(File.join(home, name, ".hive-state", "config.yml")))
+        assert_equal true, data.dig("daemon", "enabled"), "#{name} must not be changed after preflight failure"
       end
     end
   end

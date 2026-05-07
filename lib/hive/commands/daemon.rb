@@ -333,12 +333,13 @@ module Hive
       # — handled by the dispatcher on its next tick automatically.
       def set_enabled(enabled)
         targets = resolve_enable_targets
-        results = targets.map do |entry|
-          path = File.join(entry["hive_state_path"], "config.yml")
-          previous = current_daemon_enabled(path)
-          write_daemon_block(path, enabled)
+        prepared = targets.map { |entry| prepare_enable_target(entry) }
+        prepared.each { |target| write_daemon_block(target[:config_yml], target[:data], enabled) }
+        results = prepared.map do |target|
+          entry = target[:entry]
           { "name" => entry["name"], "path" => entry["path"],
-            "previous" => previous, "current" => enabled, "config_yml" => path }
+            "previous" => target[:previous], "current" => enabled,
+            "config_yml" => target[:config_yml] }
         end
 
         if @json
@@ -360,6 +361,18 @@ module Hive
             puts "        hive daemon start --dry-run --detach   # if it's not"
           end
         end
+      end
+
+      def prepare_enable_target(entry)
+        path = project_config_path(entry)
+        data = read_project_config_for_enrollment(path, entry["path"])
+        previous = data["daemon"].is_a?(Hash) ? data["daemon"]["enabled"] : nil
+
+        { entry: entry, config_yml: path, previous: previous, data: data }
+      end
+
+      def project_config_path(entry)
+        File.join(entry["hive_state_path"], "config.yml")
       end
 
       def resolve_enable_targets
@@ -384,26 +397,30 @@ module Hive
         end
       end
 
-      # Returns the current daemon.enabled value (true / false / nil)
-      # for a project's config.yml, or nil if the file is missing.
-      def current_daemon_enabled(cfg_path)
-        return nil unless File.exist?(cfg_path)
-
-        data = YAML.safe_load(File.read(cfg_path)) || {}
-        return nil unless data.is_a?(Hash) && data["daemon"].is_a?(Hash)
-
-        data["daemon"]["enabled"]
-      end
-
-      def write_daemon_block(cfg_path, enabled)
+      def read_project_config_for_enrollment(cfg_path, project_root)
         unless File.exist?(cfg_path)
           raise Hive::ConfigError,
                 "hive daemon #{@subcommand}: missing #{cfg_path}; this project is not initialised"
         end
 
-        data = YAML.safe_load(File.read(cfg_path))
-        data = {} unless data.is_a?(Hash)
+        data = YAML.safe_load(File.read(cfg_path)) || {}
+        unless data.is_a?(Hash)
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: config.yml at #{cfg_path} must be a hash"
+        end
 
+        merged = Hive::Config.merge_defaults(data).merge("project_root" => File.expand_path(project_root))
+        Hive::Config.validate!(merged, cfg_path)
+        data
+      rescue Psych::Exception => e
+        raise Hive::ConfigError,
+              "hive daemon #{@subcommand}: #{cfg_path} is not valid YAML: #{e.message}"
+      rescue Errno::EACCES, Errno::EISDIR => e
+        raise Hive::ConfigError,
+              "hive daemon #{@subcommand}: #{cfg_path} is not readable: #{e.message}"
+      end
+
+      def write_daemon_block(cfg_path, data, enabled)
         existing_block = data["daemon"].is_a?(Hash) ? data["daemon"] : {}
         data["daemon"] = existing_block.merge("enabled" => enabled)
 
@@ -412,9 +429,10 @@ module Hive
         tmp = "#{cfg_path}.tmp.#{Process.pid}"
         File.write(tmp, data.to_yaml)
         File.rename(tmp, cfg_path)
-      rescue Psych::Exception => e
+      rescue Errno::EACCES, Errno::EROFS, Errno::ENOSPC, Errno::EISDIR => e
+        File.delete(tmp) if defined?(tmp) && tmp && File.exist?(tmp)
         raise Hive::ConfigError,
-              "hive daemon #{@subcommand}: #{cfg_path} is not valid YAML: #{e.message}"
+              "hive daemon #{@subcommand}: #{cfg_path} could not be written: #{e.message}"
       end
 
       def read_live_pid

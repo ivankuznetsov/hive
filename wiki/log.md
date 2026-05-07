@@ -2,6 +2,27 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T17:30:00Z] doctor — probe `review.reviewers[]` + non-fatal init preflight
+
+**Action:** Extended `hive doctor` (PR #48 / `cd70f39`) along the two lines the original PR explicitly left for follow-up:
+
+1. **`review.reviewers[]` probing.** `Hive::Commands::Doctor#call` now walks `cfg.dig("review", "reviewers")` after the brainstorm/plan stage rows. Each reviewer entry's bare `skill` (e.g., `ce-code-review`, `pr-review-toolkit:review-pr`) is formatted through `profile.skill_syntax_format` to obtain the full invocation (`/ce-code-review`, `/pr-review-toolkit:review-pr`), then passed to `verify_skill` so the JSON envelope's `skill` field is uniformly a full invocation across stage and reviewer rows. The text-table row label uses `5-review/<reviewer-name>` (matches the user-facing `name:` field in config); the JSON envelope's `checks[]` entries gain a `kind` discriminator (`"stage"` or `"reviewer"`), a `label` field, and (for reviewer rows) a `name` field.
+
+2. **Non-fatal preflight at end of `hive init`.** After `print_summary` returns, `Init#call` invokes `run_init_preflight!`, which loads the freshly-written config, constructs a discard-output `Doctor`, calls `#call`, and emits stderr warnings for any `:missing` rows in the format `[<row-label>/<agent>] <verifier message>`. Init's exit code is unaffected — install gaps surface but never block bootstrap. The rescue scope is `StandardError` (with a `Errno::EPIPE` micro-rescue around `warn`); `Interrupt` and `SystemExit` propagate, and unexpected verifier raises produce a "this may be a hive bug, please report" hint so silent swallow is mitigated.
+
+**Implementation notes:**
+- Non-`agent` reviewer kinds report `:not_applicable` with an explanatory message. `Hive::Config.validate_reviewers!` does NOT check the `kind` field — only `Hive::Reviewers.dispatch` does, at run-time. The doctor's N/A row is therefore the **only load-time signal** for non-agent kinds, not a redundant safety net.
+- `Hive::Commands::Doctor` gained an `attr_reader :rows` so the init preflight can read probe results in-process without re-running the renderer or JSON encoder.
+- The renderer reads `row[:label]` (added by U1) for the first-column display, so long reviewer names don't truncate the table.
+- Schema name stays `hive-doctor.v1`. The `kind`/`label`/`name` additions are forward-compatible; consumers that ignore unknown fields continue to work.
+
+**Test surface:**
+- `test/unit/commands/doctor_test.rb` — 9 new cases covering reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, JSON envelope shape, long-label width, and the `attr_reader :rows` exposure.
+- `test/integration/init_doctor_preflight_test.rb` (new) — 6 cases covering all-green silence, single-missing stderr warning, multi-missing including a reviewer row, init exit-code unchanged, preflight crash → bug-hint warning, config-load error → bug-hint warning.
+
+**Refreshed pages:**
+- `README.md` — Required slash-commands / skills section now also lists the recommended reviewer set + documents the init-preflight behavior.
+
 ## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
 
 **Action:** Added `hive doctor` — a CLI verb that walks brainstorm + plan stage configs and asks each stage's agent profile to verify its configured skill (`<stage>.skill`) actually resolves to an installed slash-command or skill on disk. Output is a status table; `--json` emits a `hive-doctor.v1` envelope. Exit codes: `0` (all present or N/A), `65` (at least one missing), `78` (config error).

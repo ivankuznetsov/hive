@@ -24,15 +24,19 @@ hive daemon stop
 hive daemon status [--json]
 hive daemon reload
 hive daemon tail
+hive daemon enable  PROJECT | --all  [--json]
+hive daemon disable PROJECT | --all  [--json]
 ```
 
 | Subcommand | Behavior |
 |-----------|----------|
-| `start`   | Acquires the PID file (`~/Dev/hive/.daemon.pid`); without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
-| `stop`    | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. |
-| `status`  | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`. |
-| `reload`  | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Exit 1 if no daemon running. |
-| `tail`    | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
+| `start`    | Acquires the PID file (`~/Dev/hive/.daemon.pid`); without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
+| `stop`     | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. |
+| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`. |
+| `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Exit 1 if no daemon running. |
+| `tail`     | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
+| `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. Atomic write (tempfile + rename); preserves every other key in the file. Pass a registered project name OR `--all` to enroll every registered project. Exit 64 (`USAGE`) on a missing/unknown target. With `--json`, emits a `hive-daemon-enroll` envelope. |
+| `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
 
 ## What the daemon dispatches
 
@@ -117,16 +121,21 @@ new events are caught at CI rather than logged silently.
 
 ## Operational notes
 
+- **Day-2 guide is at [[operating]]** — install path (`hive daemon
+  enable PROJECT|--all`), autostart on Linux (systemd-user) and
+  macOS (launchd) with sample units in `examples/systemd/` and
+  `examples/launchd/`, dry-run shakedown, and troubleshooting.
 - **First-time rollout:** `hive daemon start --dry-run` for ~24 hours
   before going live. Inspect `daemon.log` to validate dispatch
   decisions. Then `hive daemon stop` and re-start without `--dry-run`.
 - **Cost runaway response:** `hive daemon stop` is one command. To
-  exclude a single project mid-flight, set `daemon.enabled: false` in
-  its `.hive-state/config.yml` and run `hive daemon reload`. In-flight
-  children continue to completion; the next tick excludes the project.
+  exclude a single project mid-flight: `hive daemon disable PROJECT`
+  (the next tick honours it automatically). In-flight children
+  continue to completion.
 - **macOS / Linux:** `Process.daemon` works on both; the daemon does
-  not require `systemd`. A sample systemd user unit is at
-  `wiki/operating.md` once that page lands.
+  not require `systemd`. Sample autostart units ship at
+  `examples/systemd/hive-daemon.service` (Linux) and
+  `examples/launchd/hive-daemon.plist` (macOS).
 - **Pausing a single task:** edit the state file to remove the terminal
   marker (e.g., delete `<!-- EXECUTE_COMPLETE -->`) so the row no
   longer classifies as advance-ready. Daemon will skip until you write

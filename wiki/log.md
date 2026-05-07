@@ -12,12 +12,52 @@ Append-only log of all wiki operations.
 - `wiki/commands/tui.md`
 
 
+## [2026-05-07T22:00:00Z] doctor — pi gets a real skill verifier; pi's `skill_syntax_format` corrected
+
+**Action:** Two related fixes for pi.
+
+1. **Pi has a real skill discovery system, not the absence I previously claimed.** Per the `@mariozechner/pi-coding-agent` README and `dist/core/package-manager.js`, pi auto-discovers skills from `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `<cwd>/.pi/skills/<name>/SKILL.md` and `<cwd>/.agents/skills/<name>/SKILL.md` (walking up cwd to git root), and pi packages installed via `pi install <source>` (npm/git roots with `skills/` directories). `Hive::SkillCheck::Pi.verify` now probes all of these instead of returning a blanket `:not_applicable`.
+
+2. **Pi resolves skills as `/skill:<name>`, not bare `/<name>`.** Hive's pi profile previously set `skill_syntax_format: "/%{skill}"`, which produced `/<name>` invocations — pi at runtime treats those as extension-command lookups, not skill lookups. Skills from the prompt would silently fail to resolve. Profile now sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches pi's resolver. Behaviour change for pi-using configs; no projects in the registry currently use pi as a stage/reviewer agent, so the rename is safe to land.
+
+The pi verifier accepts `/skill:<name>` (the canonical pi skill form) and probes the discovery paths. For invocations that aren't in `/skill:` form (e.g., a custom profile producing bare `/<name>`), it returns `:not_applicable` with a message explaining the form mismatch — pi can't resolve such an invocation as a skill.
+
+Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `}`, `\` so a name or plugin segment is treated literally inside a `Dir[]` call) — used by pi/claude/codex `build_candidates` whenever the parsed invocation is interpolated into a glob pattern. Without it, an invocation like `/foo*` would silently match plugin caches whose name starts with `foo`.
+
+**Coverage:** 10 new skill-check unit cases (pi happy paths for user/cross-agent/project/pi-package locations, install hint, non-skill-form returns N/A, malformed invocation), 1 doctor-test rename + 1 new doctor test for pi reviewer rows. Full suite: 1542 runs / 5068 assertions / 0 failures.
+
+**Refreshed pages:**
+- `README.md` — pi row in the skills table now describes pi's actual model (with `~/.pi/agent/skills/`, `~/.agents/skills/`, etc.) and the `/skill:<name>` invocation form.
+
+
 ## [2026-05-07T20:17:15Z] tui — Enter-driven review recovery
 
 **Action:** Made `recover_review` rows actionable from the TUI. The status column now renders the exact observed recovery reason when the marker carries one (for example `triage_failed` from `REVIEW_ERROR phase=triage reason=triage_failed pass=2`) instead of the generic `Needs recovery` label. `Enter` on the row now clears the observed review recovery marker via `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_STALE|REVIEW_CI_STALE`, includes one available `--match-attr` guard to avoid clearing a newer concurrent marker, and only then dispatches `hive run <folder>` through the existing background subprocess path. A failed marker clear flashes the captured error and does not rerun.
 
 **Refreshed pages:**
 - `wiki/commands/tui.md`
+
+
+## [2026-05-07T17:30:00Z] doctor — probe `review.reviewers[]` + non-fatal init preflight
+
+**Action:** Extended `hive doctor` (PR #48 / `cd70f39`) along the two lines the original PR explicitly left for follow-up:
+
+1. **`review.reviewers[]` probing.** `Hive::Commands::Doctor#call` now walks `cfg.dig("review", "reviewers")` after the brainstorm/plan stage rows. Each reviewer entry's bare `skill` (e.g., `ce-code-review`, `pr-review-toolkit:review-pr`) is formatted through `profile.skill_syntax_format` to obtain the full invocation (`/ce-code-review`, `/pr-review-toolkit:review-pr`), then passed to `verify_skill` so the JSON envelope's `skill` field is uniformly a full invocation across stage and reviewer rows. The text-table row label uses `5-review/<reviewer-name>` (matches the user-facing `name:` field in config); the JSON envelope's `checks[]` entries gain a `kind` discriminator (`"stage"` or `"reviewer"`), a `label` field, and (for reviewer rows) a `name` field.
+
+2. **Non-fatal preflight at end of `hive init`.** After `print_summary` returns, `Init#call` invokes `run_init_preflight!`, which loads the freshly-written config, constructs a discard-output `Doctor`, calls `#call`, and emits stderr warnings for any `:missing` rows in the format `[<row-label>/<agent>] <verifier message>`. Init's exit code is unaffected — install gaps surface but never block bootstrap. The rescue scope is `StandardError` (with a `Errno::EPIPE` micro-rescue around `warn`); `Interrupt` and `SystemExit` propagate, and unexpected verifier raises produce a "this may be a hive bug, please report" hint so silent swallow is mitigated.
+
+**Implementation notes:**
+- Non-`agent` reviewer kinds report `:not_applicable` with an explanatory message. `Hive::Config.validate_reviewers!` does NOT check the `kind` field — only `Hive::Reviewers.dispatch` does, at run-time. The doctor's N/A row is therefore the **only load-time signal** for non-agent kinds, not a redundant safety net.
+- `Hive::Commands::Doctor` gained an `attr_reader :rows` so the init preflight can read probe results in-process without re-running the renderer or JSON encoder.
+- The renderer reads `row[:label]` (added by U1) for the first-column display, so long reviewer names don't truncate the table.
+- Schema name stays `hive-doctor.v1`. The `kind`/`label`/`name` additions are forward-compatible; consumers that ignore unknown fields continue to work.
+
+**Test surface:**
+- `test/unit/commands/doctor_test.rb` — 9 new cases covering reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, JSON envelope shape, long-label width, and the `attr_reader :rows` exposure.
+- `test/integration/init_doctor_preflight_test.rb` (new) — 6 cases covering all-green silence, single-missing stderr warning, multi-missing including a reviewer row, init exit-code unchanged, preflight crash → bug-hint warning, config-load error → bug-hint warning.
+
+**Refreshed pages:**
+- `README.md` — Required slash-commands / skills section now also lists the recommended reviewer set + documents the init-preflight behavior.
 
 
 ## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
@@ -68,6 +108,21 @@ Coverage: 6 new BubbleModel integration tests for the plan path (advance-on-unch
 
 **Refreshed pages:**
 - `wiki/commands/tui.md` — Subprocess dispatch section names the plan-stage auto-continue alongside brainstorm; Modes table notes "completed plans auto-advance, edited plans auto-revise."
+
+## [2026-05-07T00:00:00Z] daemon — enrollment subcommands + macOS/Linux autostart guide
+
+**Action:** Added `hive daemon enable PROJECT|--all` and `hive daemon disable` so existing projects (initialised before ADR-024 / PR #40) can be enrolled in the auto-advancing pipeline without hand-editing YAML. The toggle is an atomic write to `<project>/.hive-state/config.yml` (tempfile + rename) that preserves every other key, including pre-existing `daemon:` tunables (`poll_interval_sec`, `max_concurrent_runs`, etc.). `--all` iterates `Hive::Config.registered_projects`. Closed `--json` envelope (`hive-daemon-enroll.v1`) carries per-project `previous` and `current` values so scripted callers can diff. Exit 64 (`USAGE`) on missing/unknown target. The dispatcher's per-tick enable-cache invalidation (PR-40 follow-up #2) means the new flag takes effect within one `poll_interval_sec` automatically — `hive daemon reload` is optional. Closes the operator gap "I have existing projects, how do I enroll them?" without requiring a `hive init`-style re-bootstrap.
+
+Also added the autostart install path for both supported platforms. New page [[operating]] is the day-2 guide: prerequisites (claude / gh / /proc-or-ps), per-project enrollment, the mandatory `--dry-run` shakedown with `jq` filters for inspecting `daemon.log`, autostart on Linux (systemd-user; sample unit at `examples/systemd/hive-daemon.service`) and macOS (launchd; sample plist at `examples/launchd/hive-daemon.plist`), tuning concurrency, cost-runaway response, and a troubleshooting block. The systemd unit declares `Type=simple` + `Restart=on-failure` + `KillMode=mixed` so SIGTERM forwards through the PGID and the daemon's own graceful drain (`shutdown_grace_sec`) runs. The launchd plist uses `KeepAlive` with `SuccessfulExit: false` so a clean `hive daemon stop` doesn't trigger a respawn.
+
+Closes the dangling `wiki/operating.md once that page lands` reference flagged by the comment-analyzer review of PR #40.
+
+**Refreshed pages:**
+- New: [[operating]] — full install + autostart guide.
+- New: `examples/systemd/hive-daemon.service`, `examples/launchd/hive-daemon.plist`.
+- [[commands/daemon]] — added `enable`/`disable` rows to the subcommand table; replaced the dangling-reference paragraph with explicit links to the new examples + operating guide.
+- [[cli]] — daemon command-table row mentions enable/disable + points at [[operating]].
+- [[index]] — added [[operating]] under Top level; updated the [[commands/daemon]] one-liner.
 
 
 ## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues

@@ -1,0 +1,42 @@
+# Sample systemd-user unit for `hive daemon` (Linux).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/systemd/hive-daemon.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hive-daemon
+#
+# View logs:
+#   journalctl --user -u hive-daemon -f      # systemd's stderr capture
+#   hive daemon tail                         # the daemon's own JSON-line log
+#
+# Stop / restart:
+#   systemctl --user stop hive-daemon
+#   systemctl --user restart hive-daemon
+#
+# To survive logout (run when no user session is active):
+#   sudo loginctl enable-linger $USER
+#
+# This unit runs in the foreground (no --detach). systemd is the
+# supervisor; Restart=on-failure brings the daemon back if it crashes.
+
+[Unit]
+Description=Hive auto-advancing dispatcher (ADR-024)
+After=default.target
+
+[Service]
+Type=simple
+# `hive` must be on the PATH systemd-user sees. If it's installed via
+# rbenv / rvm / chruby / mise, expand the absolute path here so the
+# unit doesn't depend on shell-loaded shims:
+#   ExecStart=/home/USER/.local/share/mise/shims/hive daemon start
+ExecStart=%h/.local/bin/hive daemon start
+Restart=on-failure
+RestartSec=30s
+# Forward SIGTERM through the PGID so children get the graceful shutdown
+# the daemon's own TERM handler delivers (up to daemon.shutdown_grace_sec).
+KillMode=mixed
+TimeoutStopSec=900
+
+[Install]
+WantedBy=default.target

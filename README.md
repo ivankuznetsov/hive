@@ -12,13 +12,14 @@ Hive is a local, folder-based pipeline for taking a software idea from rough not
 
 Stage agents run as `claude -p` subprocesses. They read the task folder, write their result back into that folder, and exit. You stay in control at each stage by approving the next move.
 
-No daemon. No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and the CLI is a small wrapper around ordinary folder moves and git commits.
+No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and the CLI is a small wrapper around ordinary folder moves and git commits. An optional auto-advancing daemon (ADR-024) drives the pipeline forward up to human-input gates — opt in per project; the manual `mv` workflow keeps working unchanged when it's off.
 
 **Status:** local single-user pilot. The original `mv` workflow still works, but the current CLI also includes agent-callable commands for the common handoff points:
 
 - `hive status` shows current slugs grouped by the next useful action.
 - `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, and `hive archive` move-or-run tasks by slug.
 - `hive approve` remains the lower-level move command with marker checks, locking, retries, and JSON output.
+- `hive daemon` (opt-in, ADR-024) auto-advances enrolled projects through the pipeline. Enable on existing projects via `hive daemon enable PROJECT` (or `--all`); install the autostart unit per `wiki/operating.md` (sample systemd-user unit at `examples/systemd/`, sample launchd plist at `examples/launchd/`).
 - `hive findings`, `hive accept-finding`, and `hive reject-finding` replace hand-editing review checkboxes.
 - `hive run`, `hive status`, `hive approve`, and findings commands have stable machine-readable contracts for agent callers.
 
@@ -44,22 +45,35 @@ Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep wor
 
 ### Required slash-commands / skills
 
-The brainstorm and plan stages instruct the agent to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume **both** of these are installed alongside the agent CLI:
+The brainstorm, plan, and 5-review stages instruct their agents to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume the corresponding skills are installed alongside the agent CLI:
+
+**Stage skills** (single-agent stages):
 
 | Stage | Default invocation | Install for claude | Install for codex |
 |-------|--------------------|--------------------|-------------------|
 | `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
 | `3-plan` | `/plan` | A user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | A skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
-| | | Pi has no slash-command resolver; if you set `<stage>.agent: pi`, the slash-command is sent verbatim as prompt text and the model decides what to do. |
+
+**Reviewer skills** (5-review stage's recommended-default reviewer set, written by `hive init`):
+
+| Reviewer name | Default skill | Install for claude | Install for codex |
+|---|---|---|---|
+| `claude-ce-code-review` | `/ce-code-review` | `~/.claude/skills/ce-code-review/SKILL.md` (or set `skill: compound-engineering:ce-code-review` in config to use the plugin form explicitly) | n/a (this row uses claude) |
+| `codex-ce-code-review` | `/ce-code-review` | n/a (this row uses codex) | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
+| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude plugin install <pr-review-toolkit-marketplace>` | n/a (this row uses claude) |
+
+Pi has its own skill model with a different invocation form. Pi resolves skills as `/skill:<name>` (not bare `/<name>`); hive's pi profile sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches. Pi's discovery paths: `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `.pi/skills/` and `.agents/skills/`, plus pi packages installed via `pi install <source>`.
 
 To verify your install:
 
 ```bash
-hive doctor              # tabular status of each (stage, agent, skill) triple
-hive doctor --json       # machine-readable envelope
+hive doctor              # tabular status of each (stage, agent, skill) triple PLUS each review.reviewer
+hive doctor --json       # machine-readable envelope (hive-doctor.v1; checks[].kind = "stage" | "reviewer")
 ```
 
 Exit codes: `0` all present (or N/A for pi); `65` at least one skill missing; `78` config error.
+
+`hive init` runs the same doctor as a non-fatal preflight at end-of-bootstrap. Any missing-skill warnings are emitted to **stderr** (so `hive init | …` pipelines stay clean) and init still exits `0` — install gaps surface but don't block bootstrap. Look for `hive: doctor pre-flight — found N issue(s):` after the initialized summary.
 
 To override a stage's skill per-project, set `<stage>.skill` in `<project>/.hive-state/config.yml`:
 

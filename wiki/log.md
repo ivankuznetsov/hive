@@ -2,6 +2,22 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T12:00:00Z] tui — auto-continue on plan stage (revise vs advance)
+
+**Action:** Extended the editor-takeover auto-continue path from `2-brainstorm` to `3-plan`. The brainstorm path is unchanged. The plan path adds two outcomes the brainstorm flow does not have: `:revise_plan` (user added inline feedback in the editor — re-run `hive plan ... --from 3-plan`) and `:advance_to_develop` (user saved without changes — interpret as approval, dispatch `hive develop ... --from 3-plan` to start the next stage). Detection is content-hash-based (SHA1 of the file before vs. after the editor session) — mtime is too unreliable across editors for the "saved without edits" semantics.
+
+The only safety gate on the plan path is a clean editor exit: `exit_code == 0`. SIGINT (`130`) and other non-zero exits stay manual. The on-disk marker is re-read after the editor exits; if a sibling actor flipped the marker to `:complete` / `:agent_working` / `:error` during a long edit, the row falls back to the manual path with a `Messages::Flash` saying `auto-continue skipped for <slug>: marker changed during edit`.
+
+The `current_brainstorm_input_marker?` helper was renamed to `marker_still_open_for_input?` since both stages key off the same `:waiting` / `:none` test. The `auto_continue_outcome` predicate became a stage-dispatch (`brainstorm_outcome` / `plan_outcome` / fall-through `:silent`).
+
+`develop_command_from_plan` builds the advance argv by swapping `plan` for `develop` in the row's `suggested_command`, preserving `--project` / `--from` flags so the develop spawn keeps the same idempotency lever.
+
+Coverage: 6 new BubbleModel integration tests for the plan path (advance-on-unchanged, revise-on-edit, marker race to `:complete`, SIGINT abort stays manual, malformed `suggested_command` rescue branch, advance falls back when `suggested_command` is not `hive plan ...`). All 1479 tests pass; rubocop clean.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — Subprocess dispatch section names the plan-stage auto-continue alongside brainstorm; Modes table notes "completed plans auto-advance, edited plans auto-revise."
+
+
 ## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues
 
 **Action:** Made the brainstorm auto-continue path observable instead of silently degrading to the generic post-save flash. `auto_continue_after_edit?` was replaced by `auto_continue_outcome`, which returns one of `:proceed`, `:silent`, `:empty_command`, or `:marker_changed`. The race / data-anomaly cases (`:empty_command`, `:marker_changed`, plus the rescue path on a malformed `suggested_command`) now dispatch a follow-up `Messages::Flash` like `auto-continue skipped for <slug>: brainstorm marker changed during edit`, so a user whose mental model is "I filled in answers, expected `hive brainstorm` to auto-fire" can actually see why it didn't. Expected-refusal cases (`exit_code != 0`, mtime unchanged, off-stage, parser says incomplete) stay silent — those are self-evident.

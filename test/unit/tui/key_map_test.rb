@@ -367,6 +367,14 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_enter_on_recover_review_returns_recover_review_with_row
+    row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::RecoverReview, msg
+    assert_same row, msg.row
+  end
+
   def test_enter_on_needs_input_opens_input_editor_when_command_present
     # Enter on `needs_input` opens the row's input file in $EDITOR —
     # the agent emitted `<!-- WAITING -->` because it wants human

@@ -35,7 +35,7 @@ module Hive
         { mode: :grid, key: "Left",      action: :pane_focus_left,    description: "jump focus to the projects pane (two-pane layout only)" },
         { mode: :grid, key: "l",         action: :pane_focus_right,   description: "jump focus to the tasks pane" },
         { mode: :grid, key: "Right",     action: :pane_focus_right,   description: "jump focus to the tasks pane" },
-        { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open contextual mode: input editor on `needs_input` (completed brainstorm answers auto-run), triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command" },
+        { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open contextual mode: input editor on `needs_input` (completed brainstorm answers auto-run), triage on `review_findings`, log tail on `agent_running` / `error`, recover + rerun on review recovery rows; ready rows still dispatch the suggested command" },
         { mode: :grid, key: "n",         action: :new_idea,           description: "open the new-idea prompt; submitting runs `hive new <project> \"<title>\"`" },
         { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
         { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },

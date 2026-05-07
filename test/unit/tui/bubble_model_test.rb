@@ -25,12 +25,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def make_task_row(action_key: "needs_input", slug: "some-slug", stage: "2-brainstorm",
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
-                    marker: "waiting", attrs: {}, folder: nil)
+                    marker: "waiting", attrs: {}, folder: nil,
+                    action_label: "Needs your input")
     Hive::Tui::Snapshot::Row.new(
       project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: action_key, action_label: "Needs your input",
+      action_key: action_key, action_label: action_label,
       suggested_command: suggested_command
     )
   end
@@ -507,6 +508,14 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, sentinel) if sentinel
   end
 
+  def with_dispatch_background_stub(stub_proc)
+    sentinel = Hive::Tui::Subprocess.method(:dispatch_background)
+    Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
+  end
+
   def test_new_idea_submission_dispatches_hive_new_with_resolved_project
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",
@@ -808,6 +817,360 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/running.*hive develop.*hello-world-test/, @model.hive_model.flash,
       "flash must name the verb and slug the user dispatched on")
     refute_nil @model.hive_model.flash_set_at, "flash_set_at must stamp for TTL aging"
+  end
+
+  # ---- RecoverReview → marker clear + hive run ----
+  #
+  # The handler is asynchronous: the synchronous return only flashes
+  # "review recovery: clearing <detail>…"; the worker thread runs
+  # `hive markers clear` + (on success) `hive run` and dispatches the
+  # final `Messages::Flash` via @dispatch. Tests must wait for the
+  # worker before asserting on stub captures or dispatched messages.
+
+  def last_async_flash_text
+    flash_msg = @messages.reverse.find { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+    flash_msg&.text.to_s
+  end
+
+  def test_recover_review_clears_observed_marker_and_reruns_hive_run
+    folder = "/tmp/hive/recover-me"
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "recover-me",
+      stage: "5-review",
+      folder: folder,
+      marker: "review_error",
+      attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+    run_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", folder,
+      "--name", "REVIEW_ERROR",
+      "--match-attr", "pass=2"
+    ], clear_argv
+    assert_equal [ "hive", "run", folder ], run_argv
+
+    sync_flash = @model.hive_model.flash.to_s
+    assert_match(/clearing/, sync_flash, "synchronous flash must announce the in-progress clear")
+    assert_match(/REVIEW_ERROR/, sync_flash)
+    assert_match(/phase=triage/, sync_flash)
+    assert_match(/reason=triage_failed/, sync_flash)
+    assert_match(/pass=2/, sync_flash)
+
+    final_flash = last_async_flash_text
+    assert_match(/REVIEW_ERROR/, final_flash, "async flash must echo the cleared marker")
+    assert_match(/running.*hive run/, final_flash, "async flash must announce the rerun")
+  end
+
+  def test_recover_review_does_not_rerun_when_marker_clear_fails
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "recover-me",
+      stage: "5-review",
+      folder: "/tmp/hive/recover-me",
+      marker: "review_stale",
+      attrs: { "reason" => "wall_clock", "pass" => "3" },
+      suggested_command: nil
+    )
+    run_count = 0
+
+    with_run_quiet_stub(->(_argv) { [ 4, "", "attr \"pass\" mismatch\n" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { run_count += 1; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal 0, run_count, "hive run must not dispatch when marker clear exits non-zero"
+    final_flash = last_async_flash_text
+    assert_match(/review recovery failed/, final_flash)
+    assert_match(/attr "pass" mismatch/, final_flash)
+  end
+
+  def test_recover_review_flashes_partial_failure_when_dispatch_raises_after_clear_succeeds
+    folder = "/tmp/hive/partial-failure"
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "partial-failure",
+      stage: "5-review",
+      folder: folder,
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { raise Errno::ENOENT, "no such file - hive" }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    final_flash = last_async_flash_text
+    assert_match(/marker cleared/, final_flash,
+                 "partial-failure flash must explicitly say the marker WAS cleared")
+    assert_match(/hive run.*failed to start/, final_flash,
+                 "partial-failure flash must say the rerun did not start")
+    assert_match(/run `hive run #{Regexp.escape(folder)}` manually/, final_flash,
+                 "partial-failure flash must give the operator the manual recovery command")
+  end
+
+  def test_recover_review_flashes_when_folder_missing
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "no-folder",
+      stage: "5-review",
+      folder: "",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_clear, "marker clear must not run when folder is missing"
+    refute ran_dispatch, "hive run must not dispatch when folder is missing"
+    assert_match(/task folder missing/, @model.hive_model.flash.to_s)
+  end
+
+  def test_recover_review_flashes_when_marker_not_recoverable
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "unknown-marker",
+      stage: "5-review",
+      folder: "/tmp/hive/unknown-marker",
+      marker: "review_timeout",
+      attrs: { "reason" => "future_marker" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_clear, "marker clear must not run for an unknown marker"
+    refute ran_dispatch, "hive run must not dispatch for an unknown marker"
+    assert_match(/review recovery unavailable/, @model.hive_model.flash.to_s)
+    assert_match(/marker=review_timeout/, @model.hive_model.flash.to_s)
+  end
+
+  def test_recover_review_catches_io_failure_from_run_quiet
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "io-fail",
+      stage: "5-review",
+      folder: "/tmp/hive/io-fail",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed" },
+      suggested_command: nil
+    )
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { raise Errno::ENOENT, "no such file - hive" }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_dispatch, "hive run must not dispatch when run_quiet! raises"
+    final_flash = last_async_flash_text
+    assert_match(/review recovery failed/, final_flash)
+    assert_match(/Errno::ENOENT/, final_flash,
+                 "narrow rescue must surface the SystemCallError class so logs are actionable")
+  end
+
+  def test_recover_review_does_not_swallow_programmer_errors_from_worker
+    # The narrow rescue catches SystemCallError / IOError /
+    # Subprocess::TimeoutError only — NoMethodError and friends crash
+    # the worker thread loud, so the operator never sees a misleading
+    # "review recovery failed" flash for what is actually a logic bug.
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "logic-bug",
+      stage: "5-review",
+      folder: "/tmp/hive/logic-bug",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed" },
+      suggested_command: nil
+    )
+
+    Thread.report_on_exception = false
+    begin
+      with_run_quiet_stub(->(_argv) { raise NoMethodError, "undefined method `frob` for nil" }) do
+        with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+          @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+          @model.wait_for_background_threads
+        end
+      end
+    ensure
+      Thread.report_on_exception = true
+    end
+
+    flash_messages = @messages.select { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+    refute(
+      flash_messages.any? { |m| m.text.to_s.include?("review recovery failed") },
+      "programmer errors must NOT be swallowed into a 'review recovery failed' flash"
+    )
+  end
+
+  def test_recover_review_dedups_concurrent_attempts_on_same_folder
+    folder = "/tmp/hive/dedup-me"
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "dedup-me",
+      stage: "5-review",
+      folder: folder,
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      suggested_command: nil
+    )
+    # Block the worker on a latch so the second Enter sees an
+    # in-flight slot. Without the latch, the first worker can
+    # finish and evict the slot before the second message arrives,
+    # turning a real-life double-Enter race into an ordered pair.
+    latch = Queue.new
+    clear_calls = 0
+
+    stub = lambda do |_argv|
+      clear_calls += 1
+      latch.pop # block until the test releases
+      [ 0, "", "" ]
+    end
+
+    with_run_quiet_stub(stub) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        # Second Enter while the first worker is blocked inside run_quiet!.
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        latch << :go
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal 1, clear_calls, "second Enter on same folder must be deduped while first is in flight"
+    assert_match(/already in progress/, @model.hive_model.flash.to_s,
+                 "second Enter must flash an 'already in progress' refusal synchronously")
+  end
+
+  def test_recover_review_sanitizes_control_chars_and_ansi_in_flash_detail
+    folder = "/tmp/hive/sanitize-me"
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "sanitize-me",
+      stage: "5-review",
+      folder: folder,
+      marker: "review_error",
+      attrs: { "reason" => "bad\x1b[31mansi\x1b[0m\nNL", "pass" => "2" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    sync_flash = @model.hive_model.flash.to_s
+    refute_match(/\e\[/, sync_flash, "ANSI CSI escapes must be stripped from the flash detail")
+    refute_match(/\n/, sync_flash, "embedded newlines must not appear in the flash detail")
+    refute_match(/\x7f/, sync_flash, "control bytes must not appear in the flash detail")
+    final_flash = last_async_flash_text
+    refute_match(/\e\[/, final_flash, "ANSI CSI escapes must be stripped from the async flash")
+    refute_match(/\n/, final_flash, "embedded newlines must not appear in the async flash")
+  end
+
+  def test_recover_review_omits_match_attr_when_no_recoverable_attrs
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "no-attrs",
+      stage: "5-review",
+      folder: "/tmp/hive/no-attrs",
+      marker: "review_stale",
+      attrs: {},
+      suggested_command: nil
+    )
+    clear_argv = nil
+    run_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", "/tmp/hive/no-attrs",
+      "--name", "REVIEW_STALE"
+    ], clear_argv, "argv must omit --match-attr when no REVIEW_RECOVERY_MATCH_ATTRS keys are present"
+    assert_equal [ "hive", "run", "/tmp/hive/no-attrs" ], run_argv
+    flash = @model.hive_model.flash.to_s
+    assert_match(/REVIEW_STALE/, flash, "flash must include marker name")
+    refute_match(/REVIEW_STALE \S/, flash, "flash must not append attr pairs after marker name when attrs is empty")
+  end
+
+  def test_recover_review_detail_appends_unknown_attrs_sorted
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "extra-attrs",
+      stage: "5-review",
+      folder: "/tmp/hive/extra-attrs",
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed", "zebra" => "z", "apple" => "a" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    flash = @model.hive_model.flash.to_s
+    reason_idx = flash.index("reason=triage_failed")
+    apple_idx = flash.index("apple=a")
+    zebra_idx = flash.index("zebra=z")
+    refute_nil reason_idx
+    refute_nil apple_idx
+    refute_nil zebra_idx
+    assert reason_idx < apple_idx, "known DETAIL_ATTRS keys must appear before extra keys"
+    assert apple_idx < zebra_idx, "extra keys must be appended in sorted order"
   end
 
   # ---- OpenInputEditor → foreground editor takeover ----

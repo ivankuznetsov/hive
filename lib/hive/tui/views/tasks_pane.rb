@@ -1,6 +1,7 @@
 require "lipgloss"
 require "hive/commands/status"
 require "hive/tui/styles"
+require "hive/tui/text"
 require "hive/tui/views/format"
 
 module Hive
@@ -161,11 +162,34 @@ module Hive
           age = Format.age(row.age_seconds).rjust(AGE_WIDTH)
           parts = [ "#{icon} #{slug}" ]
           parts << truncate(row.stage.to_s, layout[:stage]).ljust(layout[:stage]) if layout[:stage].positive?
-          parts << truncate(row.action_label.to_s, layout[:status]).ljust(layout[:status]) if layout[:status].positive?
+          parts << truncate(status_label(row), layout[:status]).ljust(layout[:status]) if layout[:status].positive?
           parts << age
           line = parts.join(" ")
           colored = Styles.for_action_key(row.action_key).render(line)
           highlighted ? Styles::CURSOR_HIGHLIGHT.render(colored) : colored
+        end
+
+        def status_label(row)
+          return review_recovery_status(row) if row.action_key.to_s == "recover_review"
+
+          row.action_label.to_s
+        end
+
+        # Operator-supplied marker reasons (stdout-tail snippets,
+        # exception messages stored in REVIEW_ERROR's `reason` attr)
+        # can carry control characters or ANSI CSI escapes that would
+        # break lipgloss column alignment or hijack the cursor. Strip
+        # them through `Hive::Tui::Text.sanitize` before returning.
+        # The `marker` fallback is a constant from this codebase
+        # (`REVIEW_ERROR` etc.) — sanitising too is cheap and keeps
+        # the contract uniform regardless of which branch fires.
+        def review_recovery_status(row)
+          attrs = row.attrs || {}
+          reason = Hive::Tui::Text.sanitize(attrs["reason"])
+          return reason unless reason.empty?
+
+          marker = Hive::Tui::Text.sanitize(row.marker)
+          marker.empty? ? row.action_label.to_s : marker
         end
 
         # Local alias so call sites in this module keep their concise

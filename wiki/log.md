@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T22:45:00Z] tui — Review recovery hardening (off-thread, dedup, sanitize, narrow rescue, partial-failure flash)
+
+**Action:** Hardened the Enter-driven review recovery handler in `lib/hive/tui/bubble_model.rb` based on `/ce-code-review` actionable findings. (1) The clear+rerun sequence now runs on a background worker thread mirroring `spawn_heal_thread`; the bubbletea update loop returns immediately with a `review recovery: clearing <detail>…` flash and the worker dispatches a follow-up `Messages::Flash` via `@dispatch` on completion. This removes the previously-blocking 30 s `run_quiet!` upper bound from the render loop. (2) Per-folder dedup via `@review_recovery_inflight` (Set, mutex-protected) refuses a second `Enter` while the first worker is in flight with an `already in progress` flash. (3) `Hive::Tui::Subprocess.dispatch_background` is wrapped in its own narrow rescue inside the worker so a failure AFTER the marker clear succeeded surfaces as `marker cleared, but \`hive run\` failed to start: <reason>; run \`hive run <folder>\` manually` — the operator sees a half-cleared state explicitly instead of the misleading old "review recovery failed" attribution. (4) The outer rescue narrows from `StandardError` to `SystemCallError | IOError | Hive::Tui::Subprocess::TimeoutError` so programmer errors (NoMethodError/NameError/ArgumentError) crash the worker thread loud instead of being silently captured into a flash. (5) Operator-supplied marker reasons are stripped of control bytes (0x00–0x1F + 0x7F) and ANSI CSI escapes via a new `Hive::Tui::Text.sanitize` helper before being rendered into the status column or the flash detail; previously a stdout-tail snippet stored in the marker could corrupt lipgloss column alignment.
+
+**Punted:** `--match-attr` aliasing on `REVIEW_ERROR(phase=ci)` markers (the snapshot's `pass` attr is absent so the guard falls back to a lower-cardinality key). The synthesis listed two design options — extend `hive markers clear` to accept multiple `--match-attr` pairs, OR add a high-cardinality `created_at` attr to all `Hive::Markers.set(:review_*)` call sites in `lib/hive/stages/review.rb` (~13 sites). Both options touch surfaces beyond a single fixer pass and warrant explicit design input.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+
+
 ## [2026-05-07T22:00:00Z] doctor — pi gets a real skill verifier; pi's `skill_syntax_format` corrected
 
 **Action:** Two related fixes for pi.
@@ -18,6 +28,14 @@ Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `
 
 **Refreshed pages:**
 - `README.md` — pi row in the skills table now describes pi's actual model (with `~/.pi/agent/skills/`, `~/.agents/skills/`, etc.) and the `/skill:<name>` invocation form.
+
+
+## [2026-05-07T20:17:15Z] tui — Enter-driven review recovery
+
+**Action:** Made `recover_review` rows actionable from the TUI. The status column now renders the exact observed recovery reason when the marker carries one (for example `triage_failed` from `REVIEW_ERROR phase=triage reason=triage_failed pass=2`) instead of the generic `Needs recovery` label. `Enter` on the row now clears the observed review recovery marker via `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_STALE|REVIEW_CI_STALE`, includes one available `--match-attr` guard to avoid clearing a newer concurrent marker, and only then dispatches `hive run <folder>` through the existing background subprocess path. A failed marker clear flashes the captured error and does not rerun.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
 
 
 ## [2026-05-07T17:30:00Z] doctor — probe `review.reviewers[]` + non-fatal init preflight
@@ -40,6 +58,7 @@ Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `
 
 **Refreshed pages:**
 - `README.md` — Required slash-commands / skills section now also lists the recommended reviewer set + documents the init-preflight behavior.
+
 
 ## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
 

@@ -234,19 +234,98 @@ class HiveSkillCheckCodexTest < Minitest::Test
 end
 
 class HiveSkillCheckPiTest < Minitest::Test
-  def test_returns_not_applicable_for_any_invocation
-    [ "/plan", "/compound-engineering:ce-plan", "/foo" ].each do |inv|
-      status, msg = Hive::SkillCheck::Pi.verify(inv)
-      assert_equal :not_applicable, status, "pi must report N/A for #{inv}"
-      assert_match(/no slash-command resolver/, msg)
+  include HiveTestHelper
+
+  def with_fake_home
+    with_tmp_dir do |dir|
+      old = ENV["HOME"]
+      ENV["HOME"] = dir
+      yield dir
+    ensure
+      old.nil? ? ENV.delete("HOME") : ENV["HOME"] = old
     end
   end
 
-  def test_returns_not_applicable_even_for_garbage_invocation
-    # Pi's check is honest: it doesn't even parse the invocation
-    # because no parsing can change the answer (pi sends prompt
-    # text verbatim regardless).
-    status, _msg = Hive::SkillCheck::Pi.verify("not-an-invocation")
-    assert_equal :not_applicable, status
+  def write_file(path, content = "")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, content)
+  end
+
+  def test_present_via_user_pi_skills_directory
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_equal "#{home}/.pi/agent/skills/foo/SKILL.md", msg
+    end
+  end
+
+  def test_present_via_cross_agent_skills_directory
+    with_fake_home do |home|
+      write_file("#{home}/.agents/skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_equal "#{home}/.agents/skills/foo/SKILL.md", msg
+    end
+  end
+
+  def test_present_via_project_pi_skills_directory
+    with_fake_home do |_home|
+      with_tmp_dir do |project|
+        write_file("#{project}/.pi/skills/foo/SKILL.md")
+        status, msg = Hive::SkillCheck::Pi.verify("/skill:foo", project_root: project)
+        assert_equal :present, status
+        assert_equal "#{project}/.pi/skills/foo/SKILL.md", msg
+      end
+    end
+  end
+
+  def test_present_via_project_cross_agent_skills_directory
+    with_fake_home do |_home|
+      with_tmp_dir do |project|
+        write_file("#{project}/.agents/skills/foo/SKILL.md")
+        status, msg = Hive::SkillCheck::Pi.verify("/skill:foo", project_root: project)
+        assert_equal :present, status
+        assert_match(%r{\.agents/skills/foo/SKILL.md\z}, msg)
+      end
+    end
+  end
+
+  def test_present_via_pi_package_global_npm_root
+    with_fake_home do |home|
+      write_file("#{home}/.pi/npm/node_modules/some-package/skills/foo/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+      assert_equal :present, status
+      assert_match(%r{\.pi/npm/node_modules/some-package/skills/foo/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_missing_returns_install_hint
+    with_fake_home do |_home|
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:nonexistent")
+      assert_equal :missing, status
+      assert_match(/pi install/, msg, "hint mentions `pi install`")
+      assert_match(/skills\//, msg, "hint references discovery paths")
+    end
+  end
+
+  def test_returns_not_applicable_for_non_skill_invocation_form
+    # Pi distinguishes: skills are `/skill:<name>`, extension commands
+    # are `/<name>`, prompt templates are `/<templatename>`. Hive's
+    # reviewer/stage prompts are skill invocations, so `/foo` (without
+    # `skill:` prefix) cannot resolve as a skill on pi. Surface that
+    # via `:not_applicable` rather than fabricating a present/missing
+    # answer.
+    [ "/foo", "/compound-engineering:ce-plan" ].each do |inv|
+      status, msg = Hive::SkillCheck::Pi.verify(inv)
+      assert_equal :not_applicable, status, "pi must report N/A for #{inv} (wrong form)"
+      assert_match(/`\/skill:<name>`/, msg)
+    end
+  end
+
+  def test_returns_missing_for_garbage_invocation
+    status, msg = Hive::SkillCheck::Pi.verify("garbage")
+    assert_equal :missing, status
+    assert_match(/expected/, msg, "malformed invocation surfaces parse error")
   end
 end

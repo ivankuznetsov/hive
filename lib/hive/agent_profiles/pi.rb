@@ -77,7 +77,13 @@ module Hive
       budget_flag: nil,
       output_format_flags: [ "--mode", "json", "--no-session" ],
       version_flag: "--version",
-      skill_syntax_format: "/%{skill}",
+      # Pi resolves skills as `/skill:<name>` (extension commands as
+      # `/<name>`, prompt templates as `/<templatename>`). Hive's
+      # reviewer/stage prompts say "Use the <skill_invocation> skill",
+      # so the format must produce the skill form, not the
+      # extension-command form. See pi's README "Slash commands"
+      # section.
+      skill_syntax_format: "/skill:%{skill}",
       headless_supported: true,
       min_version: "0.70.2",
       status_detection_mode: :output_file_exists,

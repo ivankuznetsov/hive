@@ -1,4 +1,6 @@
 require "test_helper"
+require "hive/config"
+require "hive/markers"
 require "hive/stages/brainstorm"
 require "hive/stages/plan"
 

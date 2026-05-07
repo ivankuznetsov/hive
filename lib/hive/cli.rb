@@ -140,8 +140,17 @@ module Hive
       - codex: `~/.codex/skills/<name>/SKILL.md` (and `.system/`) for
         plain; `~/.codex/plugins/cache/*/<plug>/*/skills/...` for
         plug-namespaced.
-      - pi: `/skill:<name>` checks `~/.pi/agent/skills`, `~/.agents/skills`,
-        project skill directories, settings skills, and installed pi packages.
+      - pi: `/skill:<name>` only. Probes (in order) `~/.pi/agent/skills`
+        (recursive, plus root `<name>.md`), `~/.agents/skills` (recursive,
+        cross-agent), `<project>/.pi/skills` (recursive), every ancestor
+        `<dir>/.agents/skills` up to the nearest `.git`, paths listed in
+        `~/.pi/agent/settings.json` and `<project>/.pi/settings.json`
+        (`skills`/`packages` keys, jailed under settings dir / home /
+        project), `~/.pi/npm/node_modules/*/skills`, `~/.pi/agent/git`
+        repos (host/user/repo bounded prefix), and any package-root
+        whose `package.json#pi.skills` lists a path (jailed under
+        package_root). Each row's `message` field is the authoritative
+        install hint.
 
       Exit codes: 0 all checks present or N/A; 65 at least one missing
       skill; 78 config error.

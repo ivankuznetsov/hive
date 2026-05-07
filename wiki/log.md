@@ -2,6 +2,32 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T23:30:00Z] doctor — pi verifier follow-ups (PR #54): discovery extensions, profile-aware skill formatting, glob-escape parity, path jailing
+
+**Action:** Refreshed the doctor / skill-check documentation to match the second wave of verifier improvements landed in PR #54.
+
+1. **`Hive::AgentProfile#format_skill_invocation`** — new public method that renders any configured skill name through the profile's `skill_syntax_format`, accepting both slash-prefixed stage form (`/plan`, `/plug:name`) and bare reviewer form (`ce-code-review`). Used uniformly by `Stages::Brainstorm`, `Stages::Plan`, `Reviewers::Agent`, `Stages::Review::BrowserTest`, and `Hive::Commands::Doctor` so the slash invocation that reaches the agent CLI matches doctor's verification target. For pi, this collapses `/<plug>:<name>` to `/skill:<name>` (pi has no plugin namespace).
+
+2. **Pi discovery extensions** — `Hive::SkillCheck::Pi.verify` now also walks: ancestor `<dir>/.agents/skills/` directories up to the nearest `.git/`, recursive subdirectories of every skills root, root-level `<name>.md` skills (where applicable), `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` `skills` / `packages` entries, `~/.pi/npm/node_modules/*/skills/`, `~/.pi/agent/git/<host>/<user>/<repo>/skills/` (bounded prefix), and `package.json#pi.skills` entries. The earlier wiki claim "pi has no slash-command resolver" was wrong; it's been replaced with a per-source listing.
+
+3. **Glob-escape parity** — claude/codex bare-name plugin-fallback `Dir[...]` calls now escape user-controlled `<name>` segments via `Hive::SkillCheck.glob_escape`, matching the protection pi already had. This closes a false-positive where `/foo*` would silently match an unrelated `/foobar` plugin cache.
+
+4. **Path jailing in pi `settings.json#skills` and `package.json#pi.skills` entries** — every entry is now strictly contained under an expected jail root (settings_dir / `$HOME` / project_root for settings; `package_root` for manifests). An entry that resolves *exactly to* a jail root (e.g., `~/`) is rejected, since recursive globbing from `home` is a DoS shape; `..`-traversal entries are caught via `File.expand_path` collapse.
+
+5. **`hive-doctor.v1` envelope: new `configured_skill` field** — every `checks[]` row now carries both the raw config-supplied value (`configured_skill`) alongside the profile-aware formatted invocation (`skill`). Pi stage rows are the most affected case: configured `/plan` shows `configured_skill: "/plan"`, `skill: "/skill:plan"`. JSON consumers that need to round-trip back to the operator's config should read `configured_skill`. Schema name stays `v1` — fully additive, forward-compatible.
+
+6. **`git_skill_candidates` and `git_package_roots` bounded** — replaced unbounded `**/skills/**/<name>` and `**/package.json` walks with fixed-depth (1–4 level) prefix globs that match pi's known git-cache layouts (`<host>/<repo>/`, `<host>/<user>/<repo>/`, with extra depth for nested mirrors). Every doctor run is now O(prefix_depth × repos) regardless of any single repo's tree size.
+
+7. **JSON parse-error surfacing** — `Hive::SkillCheck::Pi.read_json` now collects parse failures and the `:missing` install_hint suffixes them, so a stray comment in `~/.pi/agent/settings.json` no longer silently disables every settings-derived skill.
+
+**Refreshed pages:**
+- `wiki/commands/doctor.md` — replaced the now-incorrect "Pi — always `:not_applicable`" line with the full per-source pi probe listing; added the `configured_skill` JSON envelope field.
+- `wiki/modules/agent_profile.md` — added `verify_skill` and `format_skill_invocation` to the Key methods table.
+- `wiki/modules/reviewers.md` — `skill_invocation` binding now formats via `profile.format_skill_invocation`, not `profile.skill_syntax_format`.
+- `README.md` — pi description now lists every discovery source (settings, manifests, ancestor walk, git/npm package roots).
+
+**Coverage:** new pi glob-metacharacter test (`/skill:foo*` vs `/skill:foobar`); `test/unit/stages/skill_invocation_format_test.rb` now requires `hive/config` so it runs in isolation. Existing pi/claude/codex tests still pass.
+
 ## [2026-05-07T22:00:00Z] doctor — pi gets a real skill verifier; pi's `skill_syntax_format` corrected
 
 **Action:** Two related fixes for pi.

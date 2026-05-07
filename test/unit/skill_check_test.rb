@@ -391,6 +391,15 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_glob_metacharacters_do_not_match_pi_skill_fallback
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/foobar/SKILL.md")
+      status, msg = Hive::SkillCheck::Pi.verify("/skill:foo*")
+      assert_equal :missing, status
+      assert_match(/foo\*/, msg)
+    end
+  end
+
   def test_missing_returns_install_hint
     with_fake_home do |_home|
       status, msg = Hive::SkillCheck::Pi.verify("/skill:nonexistent")

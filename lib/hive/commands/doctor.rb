@@ -86,6 +86,7 @@ module Hive
           stage: stage,
           label: stage,
           agent: agent_name,
+          configured_skill: skill.to_s,
           skill: invocation,
           status: status.to_s,
           message: message
@@ -114,6 +115,7 @@ module Hive
           return reviewer_row(
             name: name,
             agent: agent_name,
+            configured_skill: bare_skill,
             skill: bare_skill,
             status: "not_applicable",
             message: "kind '#{kind}' is not 'agent'; doctor only checks agent-kind reviewers"
@@ -126,30 +128,37 @@ module Hive
         reviewer_row(
           name: name,
           agent: agent_name,
+          configured_skill: bare_skill,
           skill: invocation,
           status: status.to_s,
           message: message
         )
       end
 
-      def reviewer_row(name:, agent:, skill:, status:, message:)
+      def reviewer_row(name:, agent:, configured_skill:, skill:, status:, message:)
         {
           kind: "reviewer",
           stage: "5-review",
           name: name,
           label: "5-review/#{name}",
           agent: agent,
+          configured_skill: configured_skill,
           skill: skill,
           status: status,
           message: message
         }
       end
 
-      # The `hive-doctor.v1` envelope is additive: `kind`, `name`, and
-      # `label` are new fields on `checks[]` entries (added 2026-05-07).
-      # Schema name stays `v1` because the change is forward-compatible
-      # — consumers that ignore unknown fields continue to work; the
-      # `summary` aggregation is still keyed by `status`.
+      # The `hive-doctor.v1` envelope is additive: `kind`, `name`,
+      # `label`, and `configured_skill` are fields on `checks[]` entries
+      # added 2026-05-07. Schema name stays `v1` because every change
+      # is forward-compatible — consumers that ignore unknown fields
+      # continue to work; the `summary` aggregation is still keyed by
+      # `status`. `configured_skill` carries the raw config-supplied
+      # value (`/anything`), while `skill` carries the formatted
+      # profile-aware invocation (`/skill:anything` for pi). Diff them
+      # to detect when a profile's `format_skill_invocation` rewrote
+      # the operator's input.
       def envelope(rows)
         {
           "schema" => "hive-doctor.v1",

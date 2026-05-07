@@ -36,7 +36,7 @@ The v1 reviewer adapter. `run!`:
 
 1. Resolves the agent profile via `AgentProfiles.lookup(spec["agent"])`.
 2. Reads `spec["prompt_template"]`; resolves it via `Stages::Base.resolve_template_path` (path-escape guard).
-3. Renders the prompt with bindings: `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation` (formatted via `profile.skill_syntax_format`), `user_supplied_tag`.
+3. Renders the prompt with bindings: `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation` (formatted via `profile.format_skill_invocation`, which honors profile-specific syntax — pi receives `/skill:<name>`), `user_supplied_tag`.
 4. Spawns via `Stages::Base.spawn_agent(synthetic_task, prompt:, add_dirs: [task_folder], cwd: worktree_path, profile:, status_mode: :output_file_exists, expected_output: output_path, max_budget_usd: spec["budget_usd"] || 50, timeout_sec: spec["timeout_sec"] || 600, log_label: "review-#{name}-pass#{NN}")`.
 5. Returns `Result.new(status: :ok | :error, ...)`.
 

@@ -108,7 +108,7 @@ module Hive
               attempt: attempt,
               pass: ctx.pass,
               result_path: result_path,
-              skill_invocation: format(profile.skill_syntax_format, skill: "ce-test-browser"),
+              skill_invocation: profile.format_skill_invocation("ce-test-browser"),
               user_supplied_tag: Hive::Stages::Base.user_supplied_tag
             )
           )

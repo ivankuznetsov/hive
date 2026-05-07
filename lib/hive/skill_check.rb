@@ -66,6 +66,20 @@ module Hive
       #     2. <project>/.claude/skills/<name>/SKILL.md    (project skill)
       #     3. ~/.claude/commands/<name>.md                (user slash command)
       #     4. ~/.claude/skills/<name>/SKILL.md            (user skill)
+      #     5. ~/.claude/plugins/cache/*/*/*/skills/<name>/SKILL.md
+      #     6. ~/.claude/plugins/cache/*/*/*/commands/<name>.md
+      #     7. ~/.claude/plugins/marketplaces/*/plugins/*/skills/<name>/SKILL.md
+      #     8. ~/.claude/plugins/marketplaces/*/plugins/*/commands/<name>.md
+      #
+      # Steps 5–8 are the plugin-fallback paths: claude resolves a bare
+      # `/foo` invocation against any installed plugin's skill named
+      # `foo` (in addition to user-level commands/skills). A user who
+      # ran `claude plugin install some-marketplace` to bring in
+      # `compound-engineering` and then writes `skill: ce-code-review`
+      # in their hive config expects `/ce-code-review` to resolve
+      # against the plugin's skill, even though the bare invocation
+      # has no explicit `<plugin>:` prefix. The fallback matches that
+      # runtime behaviour.
       def verify(invocation, project_root: nil)
         inv = Hive::SkillCheck.parse(invocation)
         home = ENV["HOME"] || Dir.home
@@ -95,6 +109,13 @@ module Hive
           end
           paths << File.join(home, ".claude/commands/#{inv.name}.md")
           paths << File.join(home, ".claude/skills/#{inv.name}/SKILL.md")
+          # Plugin-fallback for bare invocations: claude's runtime
+          # resolves `/foo` against any installed plugin's skill named
+          # `foo` (in addition to user-level commands/skills).
+          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/skills/#{inv.name}/SKILL.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/commands/#{inv.name}.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/skills/#{inv.name}/SKILL.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/commands/#{inv.name}.md")])
           paths
         end
       end
@@ -107,10 +128,12 @@ module Hive
             "Install via `claude plugin install <marketplace>` for the marketplace " \
             "that ships #{inv.plugin}."
         else
-          "claude: /#{inv.name} not found under ~/.claude/{commands,skills}/ " \
-            "(or <project>/.claude/...). Install as a user-level slash command " \
-            "(write ~/.claude/commands/#{inv.name}.md) or as a skill " \
-            "(write ~/.claude/skills/#{inv.name}/SKILL.md)."
+          "claude: /#{inv.name} not found under ~/.claude/{commands,skills}/, any " \
+            "installed plugin's skills/<name>/ or commands/<name>.md, or " \
+            "<project>/.claude/.... Install as a user-level slash command " \
+            "(write ~/.claude/commands/#{inv.name}.md), as a user skill " \
+            "(write ~/.claude/skills/#{inv.name}/SKILL.md), or via " \
+            "`claude plugin install <marketplace>` for a plugin that ships #{inv.name}."
         end
       end
     end
@@ -125,6 +148,7 @@ module Hive
       #   /<name>
       #     1. ~/.codex/skills/<name>/SKILL.md
       #     2. ~/.codex/skills/.system/<name>/SKILL.md
+      #     3. ~/.codex/plugins/cache/*/*/*/skills/<name>/SKILL.md (plugin fallback)
       def verify(invocation, project_root: nil)
         inv = Hive::SkillCheck.parse(invocation)
         home = ENV["HOME"] || Dir.home
@@ -150,6 +174,10 @@ module Hive
           end
           paths << File.join(home, ".codex/skills/#{inv.name}/SKILL.md")
           paths << File.join(home, ".codex/skills/.system/#{inv.name}/SKILL.md")
+          # Plugin fallback: codex resolves `/foo` against any installed
+          # plugin's skill named `foo` in addition to user-level
+          # ~/.codex/skills/. Mirrors claude's behaviour.
+          paths.concat(Dir[File.join(home, ".codex/plugins/cache/*/*/*/skills/#{inv.name}/SKILL.md")])
           paths
         end
       end
@@ -161,10 +189,11 @@ module Hive
             "Install via `codex plugin install <marketplace>` for the marketplace " \
             "that ships #{inv.plugin}."
         else
-          "codex: /#{inv.name} not found under ~/.codex/skills/ or skills/.system/. " \
-            "Codex has no user-level slash-command directory; either install a " \
-            "skill named #{inv.name.inspect} or override the stage's skill in " \
-            "config.yml (e.g. `plan.skill: /compound-engineering:ce-plan`)."
+          "codex: /#{inv.name} not found under ~/.codex/skills/, ~/.codex/skills/.system/, " \
+            "or any installed plugin's skills/<name>/SKILL.md. Codex has no user-level " \
+            "slash-command directory; either install a skill named #{inv.name.inspect}, " \
+            "install a plugin that ships it, or override the stage's skill in config.yml " \
+            "(e.g. `plan.skill: /compound-engineering:ce-plan`)."
         end
       end
     end

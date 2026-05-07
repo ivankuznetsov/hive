@@ -350,7 +350,7 @@ module Hive
       ).call
     end
 
-    desc "daemon SUBCOMMAND", "Manage the hive daemon (start / stop / status / reload / tail)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / enable / disable)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]   Run the dispatcher loop. Without
@@ -359,6 +359,9 @@ module Hive
         status [--json]                Show running / not-running.
         reload                         Send SIGHUP to reload config.
         tail                           Stream daemon.log.
+        enable PROJECT  | --all        Set daemon.enabled: true in
+                                       <project>/.hive-state/config.yml.
+        disable PROJECT | --all        Set daemon.enabled: false there.
 
       The daemon polls `hive status --json` periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
@@ -366,24 +369,29 @@ module Hive
       `gh pr view --json state`). Stops at human-input gates (waiting
       markers, recovery markers).
 
-      Per-project enrollment via `daemon.enabled: true` in
-      `<project>/.hive-state/config.yml` (default Y at `hive init`).
+      Per-project enrollment is asked at `hive init` (default Y) for new
+      projects; for projects that pre-date the daemon, run
+      `hive daemon enable <project>` (or `--all`).
 
       Exit codes: 0 success; 1 daemon-not-running for `status`/`reload`
-      when no daemon is up; 75 (TEMPFAIL) when `start` finds an existing
-      live daemon.
+      when no daemon is up; 64 (USAGE) for `enable`/`disable` against an
+      unknown project; 75 (TEMPFAIL) when `start` finds an existing live
+      daemon.
 
-      See `wiki/commands/daemon.md` and ADR-024.
+      See `wiki/commands/daemon.md`, `wiki/operating.md`, and ADR-024.
     DESC
     option :detach, type: :boolean, default: false, desc: "fork to background after start"
     option :dry_run, type: :boolean, default: false,
                      desc: "log dispatch decisions without spawning real children"
-    def daemon(subcommand)
+    option :all, type: :boolean, default: false,
+                 desc: "for enable/disable: apply to every registered project"
+    def daemon(subcommand, target = nil)
       require "hive/commands/daemon"
       Hive::Commands::Daemon.new(
-        subcommand,
+        subcommand, target,
         detach: options[:detach],
         dry_run: options[:dry_run],
+        all: options[:all],
         json: options[:json]
       ).call
     end

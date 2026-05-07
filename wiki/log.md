@@ -2,6 +2,21 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T00:00:00Z] daemon — enrollment subcommands + macOS/Linux autostart guide
+
+**Action:** Added `hive daemon enable PROJECT|--all` and `hive daemon disable` so existing projects (initialised before ADR-024 / PR #40) can be enrolled in the auto-advancing pipeline without hand-editing YAML. The toggle is an atomic write to `<project>/.hive-state/config.yml` (tempfile + rename) that preserves every other key, including pre-existing `daemon:` tunables (`poll_interval_sec`, `max_concurrent_runs`, etc.). `--all` iterates `Hive::Config.registered_projects`. Closed `--json` envelope (`hive-daemon-enroll.v1`) carries per-project `previous` and `current` values so scripted callers can diff. Exit 64 (`USAGE`) on missing/unknown target. The dispatcher's per-tick enable-cache invalidation (PR-40 follow-up #2) means the new flag takes effect within one `poll_interval_sec` automatically — `hive daemon reload` is optional. Closes the operator gap "I have existing projects, how do I enroll them?" without requiring a `hive init`-style re-bootstrap.
+
+Also added the autostart install path for both supported platforms. New page [[operating]] is the day-2 guide: prerequisites (claude / gh / /proc-or-ps), per-project enrollment, the mandatory `--dry-run` shakedown with `jq` filters for inspecting `daemon.log`, autostart on Linux (systemd-user; sample unit at `examples/systemd/hive-daemon.service`) and macOS (launchd; sample plist at `examples/launchd/hive-daemon.plist`), tuning concurrency, cost-runaway response, and a troubleshooting block. The systemd unit declares `Type=simple` + `Restart=on-failure` + `KillMode=mixed` so SIGTERM forwards through the PGID and the daemon's own graceful drain (`shutdown_grace_sec`) runs. The launchd plist uses `KeepAlive` with `SuccessfulExit: false` so a clean `hive daemon stop` doesn't trigger a respawn.
+
+Closes the dangling `wiki/operating.md once that page lands` reference flagged by the comment-analyzer review of PR #40.
+
+**Refreshed pages:**
+- New: [[operating]] — full install + autostart guide.
+- New: `examples/systemd/hive-daemon.service`, `examples/launchd/hive-daemon.plist`.
+- [[commands/daemon]] — added `enable`/`disable` rows to the subcommand table; replaced the dangling-reference paragraph with explicit links to the new examples + operating guide.
+- [[cli]] — daemon command-table row mentions enable/disable + points at [[operating]].
+- [[index]] — added [[operating]] under Top level; updated the [[commands/daemon]] one-liner.
+
 ## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues
 
 **Action:** Made the brainstorm auto-continue path observable instead of silently degrading to the generic post-save flash. `auto_continue_after_edit?` was replaced by `auto_continue_outcome`, which returns one of `:proceed`, `:silent`, `:empty_command`, or `:marker_changed`. The race / data-anomaly cases (`:empty_command`, `:marker_changed`, plus the rescue path on a malformed `suggested_command`) now dispatch a follow-up `Messages::Flash` like `auto-continue skipped for <slug>: brainstorm marker changed during edit`, so a user whose mental model is "I filled in answers, expected `hive brainstorm` to auto-fire" can actually see why it didn't. Expected-refusal cases (`exit_code != 0`, mtime unchanged, off-stage, parser says incomplete) stay silent — those are self-evident.

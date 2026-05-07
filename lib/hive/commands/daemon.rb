@@ -22,14 +22,18 @@ module Hive
     #   status [--json]                Show running / not-running + uptime.
     #   reload                         Send SIGHUP to reload config.
     #   tail                           Stream daemon.log (tail -F semantics).
+    #   enable [PROJECT|--all]         Set daemon.enabled: true in per-project YAML.
+    #   disable [PROJECT|--all]        Set daemon.enabled: false in per-project YAML.
     class Daemon
-      VALID_SUBCOMMANDS = %w[start stop status reload tail].freeze
+      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable].freeze
 
-      def initialize(subcommand, detach: false, dry_run: false, json: false,
-                     hive_home: Hive::Config.hive_home)
+      def initialize(subcommand, target = nil, detach: false, dry_run: false,
+                     all: false, json: false, hive_home: Hive::Config.hive_home)
         @subcommand = subcommand
+        @target = target
         @detach = detach
         @dry_run = dry_run
+        @all = all
         @json = json
         @hive_home = hive_home
       end
@@ -42,11 +46,13 @@ module Hive
         end
 
         case @subcommand
-        when "start"  then start_daemon
-        when "stop"   then stop_daemon
-        when "status" then status_daemon
-        when "reload" then reload_daemon
-        when "tail"   then tail_daemon
+        when "start"   then start_daemon
+        when "stop"    then stop_daemon
+        when "status"  then status_daemon
+        when "reload"  then reload_daemon
+        when "tail"    then tail_daemon
+        when "enable"  then set_enabled(true)
+        when "disable" then set_enabled(false)
         end
       end
 
@@ -318,6 +324,97 @@ module Hive
         end
       rescue Interrupt
         # Ctrl-C → exit cleanly
+      end
+
+      # Toggle `daemon.enabled` in one or more projects' per-project
+      # config.yml. Atomic write via tempfile + rename; preserves every
+      # other key in the file (deep-merge over the existing `daemon:`
+      # block). Followed by a SIGHUP-equivalent enable_cache invalidation
+      # — handled by the dispatcher on its next tick automatically.
+      def set_enabled(enabled)
+        targets = resolve_enable_targets
+        results = targets.map do |entry|
+          path = File.join(entry["hive_state_path"], "config.yml")
+          previous = current_daemon_enabled(path)
+          write_daemon_block(path, enabled)
+          { "name" => entry["name"], "path" => entry["path"],
+            "previous" => previous, "current" => enabled, "config_yml" => path }
+        end
+
+        if @json
+          puts JSON.generate(
+            "schema" => "hive-daemon-enroll",
+            "schema_version" => 1,
+            "ok" => true,
+            "subcommand" => @subcommand,
+            "results" => results
+          )
+        else
+          verb = enabled ? "enabled" : "disabled"
+          results.each do |r|
+            puts "hive daemon: #{verb} #{r['name']} (#{r['config_yml']})"
+          end
+          if @subcommand == "enable" && !@all
+            puts ""
+            puts "  next: hive daemon reload   # if the daemon is already running"
+            puts "        hive daemon start --dry-run --detach   # if it's not"
+          end
+        end
+      end
+
+      def resolve_enable_targets
+        if @all
+          projects = Hive::Config.registered_projects
+          if projects.empty?
+            raise Hive::InvalidTaskPath,
+                  "hive daemon #{@subcommand} --all: no registered projects (run `hive init` first)"
+          end
+          projects
+        elsif @target.nil? || @target.to_s.strip.empty?
+          raise Hive::InvalidTaskPath,
+                "hive daemon #{@subcommand}: missing PROJECT (or pass --all)"
+        else
+          entry = Hive::Config.find_project(@target)
+          unless entry
+            raise Hive::InvalidTaskPath,
+                  "hive daemon #{@subcommand}: unknown project #{@target.inspect} " \
+                  "(see `hive status` for the registered set)"
+          end
+          [ entry ]
+        end
+      end
+
+      # Returns the current daemon.enabled value (true / false / nil)
+      # for a project's config.yml, or nil if the file is missing.
+      def current_daemon_enabled(cfg_path)
+        return nil unless File.exist?(cfg_path)
+
+        data = YAML.safe_load(File.read(cfg_path)) || {}
+        return nil unless data.is_a?(Hash) && data["daemon"].is_a?(Hash)
+
+        data["daemon"]["enabled"]
+      end
+
+      def write_daemon_block(cfg_path, enabled)
+        unless File.exist?(cfg_path)
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: missing #{cfg_path}; this project is not initialised"
+        end
+
+        data = YAML.safe_load(File.read(cfg_path))
+        data = {} unless data.is_a?(Hash)
+
+        existing_block = data["daemon"].is_a?(Hash) ? data["daemon"] : {}
+        data["daemon"] = existing_block.merge("enabled" => enabled)
+
+        # Atomic rewrite — write to a sibling tempfile and rename.
+        # Same idempotency-friendly pattern Hive::Markers uses.
+        tmp = "#{cfg_path}.tmp.#{Process.pid}"
+        File.write(tmp, data.to_yaml)
+        File.rename(tmp, cfg_path)
+      rescue Psych::Exception => e
+        raise Hive::ConfigError,
+              "hive daemon #{@subcommand}: #{cfg_path} is not valid YAML: #{e.message}"
       end
 
       def read_live_pid

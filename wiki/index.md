@@ -26,6 +26,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[templates]] — ERB template catalogue and prompt-injection boundary policy.
 - [[testing]] — minitest layout, fixtures, lint policy.
 - [[e2e]] — outer real-subprocess CLI/TUI e2e suite, scenario DSL, artifact contract.
+- [[operating]] — daemon install + autostart guide for Linux (systemd-user) and macOS (launchd), dry-run shakedown, per-project enrollment, troubleshooting.
 
 ## Commands
 
@@ -40,7 +41,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[commands/markers]] — `hive markers clear FOLDER --name <NAME>` removes a recovery marker (`REVIEW_STALE` etc.) from `task.md` so an agent can recover from `REVIEW_*_STALE` / `REVIEW_ERROR` without hand-editing.
 - [[commands/forget]] — `hive forget NAME [--json]` drop one named entry from the global registry (inverse of `hive init`). `.hive-state` on disk is not touched.
 - [[commands/prune]] — `hive prune [--dry-run] [--json]` bulk-drop registry entries whose `path` is gone or whose row shape is invalid.
-- [[commands/daemon]] — `hive daemon start|stop|status|reload|tail` auto-advancing dispatcher (ADR-024). Polls `hive status --json` and fires workflow verbs on tasks ready to advance.
+- [[commands/daemon]] — `hive daemon start|stop|status|reload|tail|enable|disable` auto-advancing dispatcher (ADR-024). Polls `hive status --json` and fires workflow verbs on tasks ready to advance. Per-project enrollment via `hive daemon enable PROJECT` (or `--all`).
 - `hive metrics rollback-rate [--days N] [--project NAME] [--json]` — fraction of fix-agent commits later reverted, broken down by triage bias / fix phase. See [[cli]] and [[stages/review]].
 
 ## Stages

@@ -272,7 +272,28 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
-  def test_review_reviewers_pi_agent_is_not_applicable
+  def test_review_reviewers_pi_agent_resolves_via_real_skill_paths
+    # Pi has a real skill model (~/.pi/agent/skills/, ~/.agents/skills/,
+    # plus pi packages). With pi's `skill_syntax_format` =
+    # `/skill:%{skill}`, the reviewer's bare `skill: ce-code-review`
+    # formats to `/skill:ce-code-review` and the verifier probes pi's
+    # discovery paths.
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      write_file("#{home}/.pi/agent/skills/ce-code-review/SKILL.md")
+      out = StringIO.new
+      cfg = cfg_with_reviewers([
+        { "name" => "pi-reviewer", "kind" => "agent",
+          "agent" => "pi", "skill" => "ce-code-review" }
+      ])
+      exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
+
+      assert_equal 0, exit_code
+      assert_match(%r{5-review/pi-reviewer.*pi.*✓ present}, out.string)
+    end
+  end
+
+  def test_review_reviewers_pi_agent_missing_when_skill_absent
     with_fake_home do |home|
       install_brainstorm_and_plan_skills(home)
       out = StringIO.new
@@ -282,8 +303,9 @@ class HiveCommandsDoctorTest < Minitest::Test
       ])
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
-      assert_equal 0, exit_code
-      assert_match(%r{5-review/pi-reviewer.*pi.*— not_applicable}, out.string)
+      assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
+      assert_match(%r{5-review/pi-reviewer.*pi.*✗ missing}, out.string)
+      assert_match(/pi install/, out.string)
     end
   end
 

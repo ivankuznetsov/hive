@@ -2,6 +2,24 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T22:00:00Z] doctor — pi gets a real skill verifier; pi's `skill_syntax_format` corrected
+
+**Action:** Two related fixes for pi.
+
+1. **Pi has a real skill discovery system, not the absence I previously claimed.** Per the `@mariozechner/pi-coding-agent` README and `dist/core/package-manager.js`, pi auto-discovers skills from `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `<cwd>/.pi/skills/<name>/SKILL.md` and `<cwd>/.agents/skills/<name>/SKILL.md` (walking up cwd to git root), and pi packages installed via `pi install <source>` (npm/git roots with `skills/` directories). `Hive::SkillCheck::Pi.verify` now probes all of these instead of returning a blanket `:not_applicable`.
+
+2. **Pi resolves skills as `/skill:<name>`, not bare `/<name>`.** Hive's pi profile previously set `skill_syntax_format: "/%{skill}"`, which produced `/<name>` invocations — pi at runtime treats those as extension-command lookups, not skill lookups. Skills from the prompt would silently fail to resolve. Profile now sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches pi's resolver. Behaviour change for pi-using configs; no projects in the registry currently use pi as a stage/reviewer agent, so the rename is safe to land.
+
+The pi verifier accepts `/skill:<name>` (the canonical pi skill form) and probes the discovery paths. For invocations that aren't in `/skill:` form (e.g., a custom profile producing bare `/<name>`), it returns `:not_applicable` with a message explaining the form mismatch — pi can't resolve such an invocation as a skill.
+
+Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `}`, `\` so a name or plugin segment is treated literally inside a `Dir[]` call) — used by pi/claude/codex `build_candidates` whenever the parsed invocation is interpolated into a glob pattern. Without it, an invocation like `/foo*` would silently match plugin caches whose name starts with `foo`.
+
+**Coverage:** 10 new skill-check unit cases (pi happy paths for user/cross-agent/project/pi-package locations, install hint, non-skill-form returns N/A, malformed invocation), 1 doctor-test rename + 1 new doctor test for pi reviewer rows. Full suite: 1542 runs / 5068 assertions / 0 failures.
+
+**Refreshed pages:**
+- `README.md` — pi row in the skills table now describes pi's actual model (with `~/.pi/agent/skills/`, `~/.agents/skills/`, etc.) and the `/skill:<name>` invocation form.
+
+
 ## [2026-05-07T17:30:00Z] doctor — probe `review.reviewers[]` + non-fatal init preflight
 
 **Action:** Extended `hive doctor` (PR #48 / `cd70f39`) along the two lines the original PR explicitly left for follow-up:

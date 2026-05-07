@@ -61,7 +61,7 @@ The brainstorm, plan, and 5-review stages instruct their agents to invoke specif
 | `codex-ce-code-review` | `/ce-code-review` | n/a (this row uses codex) | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
 | `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude plugin install <pr-review-toolkit-marketplace>` | n/a (this row uses claude) |
 
-Pi has no slash-command resolver; if you set any agent to `pi`, the slash-command is sent verbatim as prompt text and the model decides what to do.
+Pi has its own skill model with a different invocation form. Pi resolves skills as `/skill:<name>` (not bare `/<name>`); hive's pi profile sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches. Pi's discovery paths: `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `.pi/skills/` and `.agents/skills/`, plus pi packages installed via `pi install <source>`.
 
 To verify your install:
 

@@ -14,7 +14,9 @@ module Hive
             project_name: File.basename(task.project_root),
             task_folder: task.folder,
             idea_text: idea_text,
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            skill_invocation: cfg.dig("brainstorm", "skill") ||
+              Hive::Config::DEFAULTS.dig("brainstorm", "skill")
           )
         )
         # add_dirs is intentionally limited to the task folder. Brainstorm

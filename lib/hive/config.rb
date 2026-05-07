@@ -45,8 +45,24 @@ module Hive
       # for execute is `codex` only at the rendered-template level, not in
       # DEFAULTS itself, to avoid silently flipping the implementer for old
       # projects on next load.
-      "brainstorm" => { "agent" => "claude" },
-      "plan" => { "agent" => "claude" },
+      # The `skill` field per stage names the slash-command the agent
+      # is told to invoke inside its prompt. Hive ships expecting both
+      # llm-wiki (`/plan`) and compound-engineering (`/compound-
+      # engineering:ce-*`) to be installed alongside the agent CLI:
+      # - `plan` defaults to `/plan` (llm-wiki's wiki-research-first
+      #   wrapper that delegates into the CE planning workflow).
+      # - `brainstorm` defaults to `/compound-engineering:ce-brainstorm`
+      #   (no llm-wiki equivalent today; flip this here if one lands).
+      # Per-project overrides via `<stage>.skill` in config.yml pick a
+      # different skill without touching templates/.
+      "brainstorm" => {
+        "agent" => "claude",
+        "skill" => "/compound-engineering:ce-brainstorm"
+      },
+      "plan" => {
+        "agent" => "claude",
+        "skill" => "/plan"
+      },
       "execute" => { "agent" => "claude" },
       # Per-CLI agent profiles. Each project may override `bin`,
       # `env_override`, or `min_version` to pin to a different binary or

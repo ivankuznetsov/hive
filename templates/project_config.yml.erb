@@ -9,10 +9,20 @@ max_review_passes: 4
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
 # below.) Defaults are claude for planning (deeper reasoning) and codex
 # for development (its edit-mode is more efficient for implementation).
+#
+# `skill` overrides the slash-command the stage's agent invokes inside
+# its prompt. Hive ships expecting llm-wiki (`/plan`) AND
+# compound-engineering (`/compound-engineering:ce-*`) to be installed
+# alongside your agent CLI. Defaults: `plan` → `/plan` (llm-wiki's
+# wiki-research-first Plan wrapper); `brainstorm` →
+# `/compound-engineering:ce-brainstorm`. Override here to pin a
+# different skill per project.
 brainstorm:
   agent: <%= planning_agent %>
+  # skill: /compound-engineering:ce-brainstorm
 plan:
   agent: <%= planning_agent %>
+  # skill: /plan
 execute:
   agent: <%= development_agent %>
 

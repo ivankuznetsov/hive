@@ -2,6 +2,22 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T14:00:00Z] config — per-stage `skill` override + `/plan` becomes the shipped default
+
+**Action:** Added `brainstorm.skill` and `plan.skill` keys to `Hive::Config::DEFAULTS`. The brainstorm and plan stage prompts now reference `<%= skill_invocation %>` so a per-project `config.yml` override redirects the agent to a different slash-command without touching `templates/`.
+
+**Shipped defaults assume both llm-wiki and compound-engineering are installed alongside the agent CLI:**
+- `plan` → `/plan` (llm-wiki's wiki-research-first wrapper that delegates into the CE planning workflow). This is the new default; the previous hardcoded `/compound-engineering:ce-plan` is now invoked transitively through `/plan`.
+- `brainstorm` → `/compound-engineering:ce-brainstorm` (no llm-wiki equivalent today; flip the default if one lands).
+
+`templates/project_config.yml.erb` rendered for fresh `hive init` includes the keys as commented-out hints. Existing projects pick up the new default on next stage run; the deep-merge resolves `cfg.dig("plan", "skill")` to the user's value when set, falls back to the new default otherwise.
+
+The 5-review stage's per-role skills are unchanged in this pass (those flow through `profile.skill_syntax_format` per ADR-014); the override applies only to the two single-agent stages. A follow-up could lift the same pattern to review if needed.
+
+**Refreshed pages:**
+- (none — this is a config-surface addition. On-screen behavior changes only for the plan stage's skill name.)
+
+
 ## [2026-05-07T12:00:00Z] tui — auto-continue on plan stage (revise vs advance)
 
 **Action:** Extended the editor-takeover auto-continue path from `2-brainstorm` to `3-plan`. The brainstorm path is unchanged. The plan path adds two outcomes the brainstorm flow does not have: `:revise_plan` (user added inline feedback in the editor — re-run `hive plan ... --from 3-plan`) and `:advance_to_develop` (user saved without changes — interpret as approval, dispatch `hive develop ... --from 3-plan` to start the next stage). Detection is content-hash-based (SHA1 of the file before vs. after the editor session) — mtime is too unreliable across editors for the "saved without edits" semantics.

@@ -63,7 +63,8 @@ class PromptInjectionTest < Minitest::Test
           project_name: File.basename(dir),
           task_folder: task.folder,
           idea_text: HOSTILE_IDEA,
-          user_supplied_tag: tag
+          user_supplied_tag: tag,
+          skill_invocation: Hive::Config::DEFAULTS.dig("brainstorm", "skill")
         )
       )
 
@@ -97,7 +98,8 @@ class PromptInjectionTest < Minitest::Test
           project_name: File.basename(dir),
           task_folder: task.folder,
           brainstorm_text: HOSTILE_IDEA,
-          user_supplied_tag: tag
+          user_supplied_tag: tag,
+          skill_invocation: Hive::Config::DEFAULTS.dig("plan", "skill")
         )
       )
       assert_includes prompt, "<#{tag} content_type=\"brainstorm_md\">"
@@ -205,5 +207,102 @@ class PromptInjectionTest < Minitest::Test
       assert_equal 2, prompt.scan("<#{tag} ").count
       assert_equal 2, prompt.scan("</#{tag}>").count
     end
+  end
+
+  # ---- Configurable stage skill (`brainstorm.skill` / `plan.skill`) ----
+
+  def test_brainstorm_prompt_default_skill_is_ce_brainstorm
+    with_tmp_dir do |dir|
+      task = make_task(dir, "2-brainstorm")
+      File.write(File.join(task.folder, "idea.md"), "demo idea\n")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "brainstorm_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          task_folder: task.folder,
+          idea_text: "demo idea\n",
+          user_supplied_tag: tag,
+          skill_invocation: Hive::Config::DEFAULTS.dig("brainstorm", "skill")
+        )
+      )
+      assert_includes prompt, "/compound-engineering:ce-brainstorm",
+        "default skill must be the CE brainstorm skill"
+      refute_match(/<%=/, prompt, "no unrendered ERB should leak through")
+    end
+  end
+
+  def test_brainstorm_prompt_uses_overridden_skill
+    with_tmp_dir do |dir|
+      task = make_task(dir, "2-brainstorm")
+      File.write(File.join(task.folder, "idea.md"), "demo idea\n")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "brainstorm_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          task_folder: task.folder,
+          idea_text: "demo idea\n",
+          user_supplied_tag: tag,
+          skill_invocation: "/brainstorm"
+        )
+      )
+      assert_includes prompt, "Use the `/brainstorm` skill"
+      refute_includes prompt, "/compound-engineering:ce-brainstorm",
+        "overridden skill must replace the default; no leftover CE reference"
+    end
+  end
+
+  def test_plan_prompt_default_skill_is_llm_wiki_plan
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "plan_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          task_folder: task.folder,
+          brainstorm_text: "",
+          user_supplied_tag: tag,
+          skill_invocation: Hive::Config::DEFAULTS.dig("plan", "skill")
+        )
+      )
+      assert_includes prompt, "use the `/plan` skill",
+        "default plan skill is llm-wiki's `/plan` wrapper"
+      refute_includes prompt, "/compound-engineering:ce-plan",
+        "default must NOT reference the CE skill — that's now invoked transitively via /plan"
+      refute_match(/<%=/, prompt, "no unrendered ERB should leak through")
+    end
+  end
+
+  def test_plan_prompt_uses_overridden_skill
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "plan_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          task_folder: task.folder,
+          brainstorm_text: "",
+          user_supplied_tag: tag,
+          skill_invocation: "/plan"
+        )
+      )
+      assert_includes prompt, "use the `/plan` skill"
+      refute_includes prompt, "/compound-engineering:ce-plan",
+        "overridden skill must replace the default; no leftover CE reference"
+    end
+  end
+
+  def test_default_skill_values_match_shipped_invocations
+    # Pins the DEFAULTS so a refactor that drops the skill key (or
+    # changes the shipped skill name) trips this test. Hive ships
+    # expecting both llm-wiki (`/plan`) and compound-engineering
+    # (`/compound-engineering:ce-*`) to be installed.
+    assert_equal "/compound-engineering:ce-brainstorm",
+      Hive::Config::DEFAULTS.dig("brainstorm", "skill")
+    assert_equal "/plan",
+      Hive::Config::DEFAULTS.dig("plan", "skill")
   end
 end

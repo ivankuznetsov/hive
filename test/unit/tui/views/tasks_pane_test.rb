@@ -156,6 +156,29 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                      "non-recover_review rows must not surface attrs[reason] in the status column"
   end
 
+  def test_recover_review_status_strips_control_chars_and_ansi_escapes
+    # Operator-supplied marker reasons can carry control bytes (CR/LF
+    # from a stdout-tail snippet) or ANSI CSI escapes that would
+    # corrupt lipgloss column alignment or hijack the cursor. The
+    # status column must sanitise both before rendering.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "tainted-task",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: { "reason" => "bad\x1b[31mansi\x1b[0m\nNL" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    refute_match(/\e\[/, out, "ANSI CSI escapes must be stripped from the status column")
+    refute_match(/\nNL/, out, "embedded newlines must not bleed into the status column")
+  end
+
   def test_action_keys_pick_distinct_icons
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [

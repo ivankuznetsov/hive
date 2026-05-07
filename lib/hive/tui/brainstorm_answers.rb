@@ -5,8 +5,15 @@ module Hive
   module Tui
     # Pure markdown-parsing predicate over a brainstorm.md state file.
     # Returns true only when the latest `## Round N` block has every
-    # `### Qn` paired with a non-empty `### An`, mirroring the contract
-    # in `templates/brainstorm_prompt.md.erb`.
+    # numbered question paired with a non-empty numbered answer.
+    #
+    # Heading-form tolerance:
+    #   The canonical contract in `templates/brainstorm_prompt.md.erb`
+    #   uses `### Q{n}.` for questions and `### A{n}.` for answers,
+    #   but the `/compound-engineering:ce-brainstorm` skill (which the
+    #   prompt invokes for Round 2+) emits `### Q{n} answer.` instead
+    #   of `### A{n}.`. Both forms are accepted as answers so the
+    #   parser does not refuse on legitimate agent output.
     #
     # Conservative on ambiguity:
     # - duplicate Q/A numbers within the same round → not complete
@@ -23,12 +30,15 @@ module Hive
     module BrainstormAnswers
       module_function
 
-      ROUND_HEADING = /\A {0,3}##\s+Round\s+(\d+)\b/i.freeze
-      QA_HEADING    = /\A {0,3}###\s+([QA])(\d+)\b/i.freeze
-      ANSWER_HEAD_PREFIX = /\A {0,3}###\s+A\d+\s*\.?\s*/i.freeze
-      H2_HEADING    = /\A {0,3}##\s+/.freeze
-      FENCE_LINE    = /\A {0,3}(```|~~~)/.freeze
-      HTML_COMMENT  = /<!--.*?-->/m.freeze
+      ROUND_HEADING       = /\A {0,3}##\s+Round\s+(\d+)\b/i.freeze
+      ANSWER_HEAD_LONG    = /\A {0,3}###\s+Q(\d+)\s+answer\b/i.freeze
+      ANSWER_HEAD_SHORT   = /\A {0,3}###\s+A(\d+)\b/i.freeze
+      QUESTION_HEAD       = /\A {0,3}###\s+Q(\d+)\b/i.freeze
+      QA_HEADING_ANY      = /\A {0,3}###\s+(?:Q\d+\s+answer|[QA]\d+)\b/i.freeze
+      ANSWER_HEAD_PREFIX  = /\A {0,3}###\s+(?:A\d+\s*\.?|Q\d+\s+answer\s*\.?)\s*/i.freeze
+      H2_HEADING          = /\A {0,3}##\s+/.freeze
+      FENCE_LINE          = /\A {0,3}(```|~~~)/.freeze
+      HTML_COMMENT        = /<!--.*?-->/m.freeze
 
       # Public entrypoint. Reads `path`, returns true iff the latest
       # round in the file has every numbered question paired with a
@@ -47,8 +57,7 @@ module Hive
         round_start = latest_round_start(lines, live)
         return false if round_start.nil?
 
-        questions, q_dup = numbered_headings(lines, live, round_start + 1, "Q")
-        answers,   a_dup = numbered_headings(lines, live, round_start + 1, "A")
+        questions, answers, q_dup, a_dup = numbered_headings(lines, live, round_start + 1)
         return false if q_dup || a_dup
         return false if questions.empty? || answers.empty?
         return false unless questions.keys.sort == answers.keys.sort
@@ -108,30 +117,53 @@ module Hive
       end
       private_class_method :latest_round_start
 
-      # Walk forward from `start_idx` collecting `### Qn` or `### An`
-      # heading line indices keyed by their digit. Returns
-      # `[Hash{String => Integer}, duplicates_seen?]`. Stops at the
-      # next `## ` (sibling round) so headings from later rounds do
-      # not bleed into the current round's coverage check.
-      def numbered_headings(lines, live, start_idx, prefix)
-        headings = {}
-        duplicates = false
+      # Walk the round body once, collecting numbered question and
+      # answer heading line indices keyed by digit. Returns
+      # `[questions, answers, q_dup, a_dup]`. Stops at the next `## `
+      # (sibling round) so headings from later rounds do not bleed
+      # into the current round's coverage check.
+      #
+      # Recognized answer forms (both yield the same numeric key):
+      #   `### A{n}`            (canonical, per brainstorm template)
+      #   `### Q{n} answer`     (ce-brainstorm skill output for Round 2+)
+      #
+      # Order of `classify_qa_heading` checks matters: the long form
+      # `Q{n} answer` must be tested before the plain `Q{n}` so a
+      # legitimate answer heading is not double-matched as a question.
+      def numbered_headings(lines, live, start_idx)
+        questions = {}
+        answers = {}
+        q_dup = false
+        a_dup = false
         (start_idx...lines.length).each do |idx|
           next unless live[idx]
           line = lines[idx]
           break if line.match?(H2_HEADING)
-          next unless (m = line.match(QA_HEADING))
-          next unless m[1].casecmp?(prefix)
 
-          if headings.key?(m[2])
-            duplicates = true
+          kind, num = classify_qa_heading(line)
+          next if kind.nil?
+
+          target = kind == :q ? questions : answers
+          if target.key?(num)
+            kind == :q ? q_dup = true : a_dup = true
           else
-            headings[m[2]] = idx
+            target[num] = idx
           end
         end
-        [ headings, duplicates ]
+        [ questions, answers, q_dup, a_dup ]
       end
       private_class_method :numbered_headings
+
+      def classify_qa_heading(line)
+        if (m = line.match(ANSWER_HEAD_LONG))
+          [ :a, m[1] ]
+        elsif (m = line.match(ANSWER_HEAD_SHORT))
+          [ :a, m[1] ]
+        elsif (m = line.match(QUESTION_HEAD))
+          [ :q, m[1] ]
+        end
+      end
+      private_class_method :classify_qa_heading
 
       # An answer is filled when the heading line plus the body up to
       # the next Q/A or `## ` heading contains at least one
@@ -158,7 +190,7 @@ module Hive
         (start_idx...lines.length).find do |idx|
           next false unless live[idx]
 
-          lines[idx].match?(QA_HEADING) || lines[idx].match?(H2_HEADING)
+          lines[idx].match?(QA_HEADING_ANY) || lines[idx].match?(H2_HEADING)
         end
       end
       private_class_method :next_section_break

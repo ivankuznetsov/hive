@@ -25,7 +25,23 @@ module Hive
     #   enable [PROJECT|--all]         Set daemon.enabled: true in per-project YAML.
     #   disable [PROJECT|--all]        Set daemon.enabled: false in per-project YAML.
     class Daemon
+      include Hive::Schemas::EnvelopeEmitter
+
       VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable].freeze
+
+      # USAGE-class error specific to enable/disable. Carries an
+      # error_kind drawn from Hive::Schemas::EnrollErrorKind so the
+      # JSON envelope can branch deterministically (mirrors the pattern
+      # in Hive::Commands::Forget). Inherits exit code 64 (USAGE) from
+      # InvalidTaskPath so the bare-text rescue path keeps its semantics.
+      class UsageError < Hive::InvalidTaskPath
+        attr_reader :error_kind
+
+        def initialize(message, error_kind:)
+          super(message)
+          @error_kind = error_kind
+        end
+      end
 
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, hive_home: Hive::Config.hive_home)
@@ -46,13 +62,12 @@ module Hive
         end
 
         case @subcommand
-        when "start"   then start_daemon
-        when "stop"    then stop_daemon
-        when "status"  then status_daemon
-        when "reload"  then reload_daemon
-        when "tail"    then tail_daemon
-        when "enable"  then set_enabled(true)
-        when "disable" then set_enabled(false)
+        when "start"            then start_daemon
+        when "stop"             then stop_daemon
+        when "status"           then status_daemon
+        when "reload"           then reload_daemon
+        when "tail"             then tail_daemon
+        when "enable", "disable" then call_with_envelope { do_call }
         end
       end
 
@@ -257,7 +272,7 @@ module Hive
         if @json
           puts JSON.generate(
             "schema" => "hive-daemon-status",
-            "schema_version" => 1,
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
             "ok" => true,
             "running" => running,
             "pid" => running ? pid : nil,
@@ -275,31 +290,66 @@ module Hive
       end
 
       def reload_daemon
+        result = compute_reload_outcome
+        if @json
+          puts JSON.generate(reload_envelope(**result))
+          # Non-zero exit on every refuse/dead/missing path so agents can
+          # branch on exit code without parsing the envelope. ok=true
+          # only when SIGHUP was actually delivered.
+          raise Hive::Error, result[:message] unless result[:ok]
+        else
+          if result[:ok]
+            puts "hive: daemon reload requested (pid #{result[:pid]})"
+          else
+            warn "hive: #{result[:message]}"
+            raise Hive::Error, result[:message]
+          end
+        end
+      end
+
+      # Compute the reload outcome WITHOUT side-effects on the JSON path
+      # except the actual SIGHUP delivery. Returns a Hash that
+      # `reload_envelope` can stamp directly into the schema-shaped doc.
+      # Failure shapes mirror the closed `reason` enum on the schema:
+      # :not_running / :pid_dead / :pid_reused / :unverified.
+      def compute_reload_outcome
         unless File.exist?(pid_file)
-          warn "hive: daemon not running (no PID file at #{pid_file})"
-          raise Hive::Error, "daemon not running"
+          return { ok: false, reason: "not_running", pid: nil,
+                   message: "daemon not running (no PID file at #{pid_file})" }
         end
 
         payload = read_pid_file_payload
         pid = payload && payload["pid"]
         unless pid && pid > 0 && pid_alive?(pid)
-          warn "hive: daemon PID #{pid} is not alive; remove #{pid_file} and restart"
-          raise Hive::Error, "daemon PID is dead"
+          return { ok: false, reason: "pid_dead", pid: pid,
+                   message: "daemon PID #{pid.inspect} is not alive; " \
+                            "remove #{pid_file} and restart" }
         end
 
         # PR-40 review P2 #3 + follow-up C5: ownership tri-state.
         ownership = pid_ownership(payload, pid)
         case ownership
         when :reused
-          warn "hive: PID #{pid} appears reused (start_time mismatch); refusing HUP"
-          raise Hive::Error, "daemon PID is reused"
+          return { ok: false, reason: "pid_reused", pid: pid,
+                   message: "PID #{pid} appears reused (start_time mismatch); refusing HUP" }
         when :unverified
-          warn "hive: cannot verify PID #{pid} is the hive daemon; refusing HUP"
-          raise Hive::Error, "daemon PID is unverified"
+          return { ok: false, reason: "unverified", pid: pid,
+                   message: "cannot verify PID #{pid} is the hive daemon; refusing HUP" }
         end
 
         send_signal_safely(pid, :HUP)
-        puts "hive: daemon reload requested (pid #{pid})"
+        { ok: true, reason: nil, pid: pid, message: "daemon reload requested (pid #{pid})" }
+      end
+
+      def reload_envelope(ok:, reason:, pid:, message:)
+        {
+          "schema" => "hive-daemon-reload",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-reload"),
+          "ok" => ok,
+          "pid" => pid,
+          "reason" => reason,
+          "message" => message
+        }.compact
       end
 
       def tail_daemon
@@ -326,34 +376,65 @@ module Hive
         # Ctrl-C → exit cleanly
       end
 
+      def envelope_schema
+        "hive-daemon-enroll"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
       # Toggle `daemon.enabled` in one or more projects' per-project
-      # config.yml. Atomic write via tempfile + rename; preserves every
-      # other key in the file (deep-merge over the existing `daemon:`
-      # block). Followed by a SIGHUP-equivalent enable_cache invalidation
-      # — handled by the dispatcher on its next tick automatically.
-      def set_enabled(enabled)
+      # config.yml. Atomic write via tempfile + rename + flock + fsync;
+      # surgical line-level edit so operator comments and key order
+      # survive (see upsert_daemon_enabled). The dispatcher picks up the
+      # change on its next tick (`@enabled_cache.clear` runs every tick),
+      # so SIGHUP is a hint not a requirement.
+      #
+      # Naming: matches the `do_call` convention used by every other
+      # command class in lib/hive/commands/. `enabled` is derived from
+      # @subcommand here rather than passed in so the entry point shape
+      # mirrors Forget / Prune / Status / etc.
+      def do_call
+        enabled = (@subcommand == "enable")
         targets = resolve_enable_targets
-        prepared = targets.map { |entry| prepare_enable_target(entry) }
-        prepared.each { |target| write_daemon_block(target[:config_yml], target[:data], enabled) }
-        results = prepared.map do |target|
-          entry = target[:entry]
+        # Pre-flight: validate every target up front so `--all` can't
+        # leave the registry half-flipped on a bad project mid-loop.
+        preflight_targets(targets)
+        results = targets.map do |entry|
+          path = File.join(entry["hive_state_path"], "config.yml")
+          previous = current_daemon_enabled(path)
+          write_daemon_block(path, enabled)
           { "name" => entry["name"], "path" => entry["path"],
-            "previous" => target[:previous], "current" => enabled,
-            "config_yml" => target[:config_yml] }
+            "previous" => previous, "current" => enabled, "config_yml" => path }
         end
 
         if @json
           puts JSON.generate(
             "schema" => "hive-daemon-enroll",
-            "schema_version" => 1,
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-enroll"),
             "ok" => true,
             "subcommand" => @subcommand,
-            "results" => results
+            "results" => results,
+            "next_action" => enroll_next_action(results, enabled)
           )
+          @stdout_written = true
         else
           verb = enabled ? "enabled" : "disabled"
           results.each do |r|
-            puts "hive daemon: #{verb} #{r['name']} (#{r['config_yml']})"
+            # Idempotency signal in bare-text output: re-running on a
+            # project whose enabled value already matches prints
+            # "(already <verb>)" so the operator sees the no-op.
+            # `previous` may be nil (no daemon block existed), in which
+            # case we emit the "(was: <previous> → <current>)" form.
+            suffix = if r["previous"] == enabled
+                       " (already #{verb})"
+            elsif r["previous"].nil?
+                       " (was: unset → #{enabled})"
+            else
+                       " (was: #{r['previous']} → #{enabled})"
+            end
+            puts "hive daemon: #{verb} #{r['name']} (#{r['config_yml']})#{suffix}"
           end
           if @subcommand == "enable" && !@all
             puts ""
@@ -377,62 +458,354 @@ module Hive
 
       def resolve_enable_targets
         if @all
+          unless @target.nil? || @target.to_s.strip.empty?
+            fail_usage!(
+              "hive daemon #{@subcommand}: cannot combine PROJECT (#{@target.inspect}) with --all " \
+              "(pass one or the other, not both)",
+              kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+            )
+          end
           projects = Hive::Config.registered_projects
           if projects.empty?
-            raise Hive::InvalidTaskPath,
-                  "hive daemon #{@subcommand} --all: no registered projects (run `hive init` first)"
+            fail_usage!(
+              "hive daemon #{@subcommand} --all: no registered projects (run `hive init` first)",
+              kind: Hive::Schemas::EnrollErrorKind::NO_PROJECTS
+            )
           end
           projects
         elsif @target.nil? || @target.to_s.strip.empty?
-          raise Hive::InvalidTaskPath,
-                "hive daemon #{@subcommand}: missing PROJECT (or pass --all)"
+          fail_usage!(
+            "hive daemon #{@subcommand}: missing PROJECT (or pass --all)",
+            kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
+          )
         else
           entry = Hive::Config.find_project(@target)
           unless entry
-            raise Hive::InvalidTaskPath,
-                  "hive daemon #{@subcommand}: unknown project #{@target.inspect} " \
-                  "(see `hive status` for the registered set)"
+            fail_usage!(
+              "hive daemon #{@subcommand}: unknown project #{@target.inspect} " \
+              "(see `hive status` for the registered set)",
+              kind: Hive::Schemas::EnrollErrorKind::UNKNOWN_PROJECT
+            )
           end
           [ entry ]
         end
       end
 
-      def read_project_config_for_enrollment(cfg_path, project_root)
-        unless File.exist?(cfg_path)
-          raise Hive::ConfigError,
-                "hive daemon #{@subcommand}: missing #{cfg_path}; this project is not initialised"
+      def fail_usage!(message, kind:)
+        error = UsageError.new(message, error_kind: kind)
+        if @json
+          emit_envelope(error)
+        else
+          warn message
         end
+        raise error
+      end
 
-        data = YAML.safe_load(File.read(cfg_path)) || {}
-        unless data.is_a?(Hash)
-          raise Hive::ConfigError,
-                "hive daemon #{@subcommand}: config.yml at #{cfg_path} must be a hash"
+      def error_kind_for(error)
+        case error
+        when UsageError              then error.error_kind
+        when Hive::ConfigError       then Hive::Schemas::EnrollErrorKind::CONFIG
+        when Hive::InternalError     then Hive::Schemas::EnrollErrorKind::INTERNAL
+        else                              Hive::Schemas::EnrollErrorKind::INTERNAL
         end
+      end
 
-        merged = Hive::Config.merge_defaults(data).merge("project_root" => File.expand_path(project_root))
-        Hive::Config.validate!(merged, cfg_path)
-        data
+      # Build the success envelope's `next_action` block so an agent can
+      # branch deterministically without parsing the human-readable
+      # bare-text hint. Two shapes:
+      #
+      #   { "kind" => "no_op",  "reason" => "no projects changed" }
+      #     when every result is a no-op (previous == current). Agent
+      #     can short-circuit any reload / restart logic.
+      #
+      #   { "kind" => "reload", "reason" => "daemon picks up the change
+      #     within poll_interval_sec; reload is optional",
+      #     "command" => "hive daemon reload", "required" => false }
+      #     when at least one project's daemon.enabled actually flipped.
+      #     `required: false` because the dispatcher's per-tick cache
+      #     invalidation already picks up the change within
+      #     poll_interval_sec (default 30 s).
+      def enroll_next_action(results, enabled)
+        any_changed = results.any? { |r| r["previous"] != enabled }
+        if any_changed
+          {
+            "kind" => "reload",
+            "command" => "hive daemon reload",
+            "required" => false,
+            "reason" => "daemon picks up daemon.enabled changes within " \
+                        "poll_interval_sec on its next tick; reload is optional"
+          }
+        else
+          { "kind" => "no_op", "reason" => "no projects changed" }
+        end
+      end
+
+      # Single owner of the project-config YAML read. Centralises the
+      # Psych::Exception → Hive::ConfigError translation and the
+      # top-level-mapping shape check, so every read site (preflight,
+      # current_daemon_enabled, write_daemon_block) reports malformed
+      # YAML the same way and produces the same `config` error_kind.
+      #
+      # Returns the parsed Hash (possibly empty) when the file exists
+      # and parses to a mapping, or nil when the file is missing.
+      # Callers handle missing-file via NOT_INITIALISED at their layer
+      # so we can keep this helper free of the USAGE-vs-CONFIG split.
+      def parse_project_config(cfg_path)
+        return nil unless File.exist?(cfg_path)
+
+        data = YAML.safe_load(File.read(cfg_path))
+        if !data.nil? && !data.is_a?(Hash)
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: #{cfg_path} top-level YAML is not a mapping"
+        end
+        data || {}
       rescue Psych::Exception => e
         raise Hive::ConfigError,
               "hive daemon #{@subcommand}: #{cfg_path} is not valid YAML: #{e.message}"
-      rescue Errno::EACCES, Errno::EISDIR => e
-        raise Hive::ConfigError,
-              "hive daemon #{@subcommand}: #{cfg_path} is not readable: #{e.message}"
       end
 
-      def write_daemon_block(cfg_path, data, enabled)
-        existing_block = data["daemon"].is_a?(Hash) ? data["daemon"] : {}
-        data["daemon"] = existing_block.merge("enabled" => enabled)
+      # Returns the current daemon.enabled value (true / false / nil)
+      # for a project's config.yml, or nil if the file is missing.
+      def current_daemon_enabled(cfg_path)
+        data = parse_project_config(cfg_path)
+        return nil unless data.is_a?(Hash) && data["daemon"].is_a?(Hash)
 
-        # Atomic rewrite — write to a sibling tempfile and rename.
-        # Same idempotency-friendly pattern Hive::Markers uses.
-        tmp = "#{cfg_path}.tmp.#{Process.pid}"
-        File.write(tmp, data.to_yaml)
-        File.rename(tmp, cfg_path)
-      rescue Errno::EACCES, Errno::EROFS, Errno::ENOSPC, Errno::EISDIR => e
-        File.delete(tmp) if defined?(tmp) && tmp && File.exist?(tmp)
+        data["daemon"]["enabled"]
+      end
+
+      # Validate every target up front so `--all` can't leave the
+      # registry in a half-flipped state when one project's config is
+      # broken. The previous implementation iterated targets and wrote
+      # each in turn — if project N raised on read or write, projects
+      # 1..N-1 had already been mutated and projects N+1..end were
+      # skipped. That weakens `disable --all` precisely when an
+      # operator needs it (cost-runaway response). Pre-flight raises
+      # the same errors `write_daemon_block` would have raised, but
+      # before any disk mutation happens, so the whole operation is
+      # transactional w.r.t. project-config validity. (Disk-full or
+      # permission errors mid-loop are still possible; pre-flight only
+      # protects against bad input, not bad disk state.)
+      def preflight_targets(targets)
+        targets.each do |entry|
+          cfg_path = File.join(entry["hive_state_path"], "config.yml")
+          unless File.exist?(cfg_path)
+            fail_usage!(
+              "hive daemon #{@subcommand}: missing #{cfg_path}; project #{entry['name'].inspect} is not initialised",
+              kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
+            )
+          end
+          data = parse_project_config(cfg_path)
+          if data.is_a?(Hash) && data["daemon"] && !data["daemon"].is_a?(Hash)
+            raise Hive::ConfigError,
+                  "hive daemon #{@subcommand}: #{cfg_path} `daemon:` is not a mapping"
+          end
+          assert_surgical_edit_possible!(cfg_path, data)
+        end
+      end
+
+      # Reject existing `daemon:` blocks our line-level editor cannot
+      # safely modify. Three rejection paths:
+      #
+      #   (a) Inline-flow style (`daemon: { enabled: false }`): YAML
+      #       parses as Hash but no `^daemon:$` line at column 0.
+      #   (b) CRLF line endings: the regex below matches `\Adaemon:[ \t]*\z`,
+      #       which cannot match `daemon:\r` because `\r` is not in the
+      #       character class. Caught by the `^daemon:$` line probe.
+      #   (c) Non-2-space child indentation (4-space, tab, mixed): YAML
+      #       parses fine but our line scanner expects exactly 2-space
+      #       indentation under the daemon: header. A 4-space child
+      #       slips past the first probe (the header line is at col 0
+      #       and matches), then upsert_daemon_enabled fails to find
+      #       `\A  enabled:` and falls into the "insert as first child"
+      #       branch — producing a duplicate-key file.
+      #
+      # Without these checks, the file would corrupt on the FIRST call
+      # (next safe_load would raise on the duplicate key, leaving the
+      # operator with a config the tool itself can't recover). Fail
+      # fast with a clear remediation.
+      def assert_surgical_edit_possible!(cfg_path, parsed_data)
+        return unless parsed_data.is_a?(Hash) && parsed_data["daemon"].is_a?(Hash)
+
+        text = File.read(cfg_path)
+        # Fast reject for CRLF — split on \r\n boundaries first to give
+        # a precise error rather than the generic "non-2-space" message.
+        if text.include?("\r\n")
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: #{cfg_path} uses CRLF line " \
+                "endings; rewrite with LF endings (e.g., `dos2unix #{cfg_path}`) " \
+                "before flipping daemon.enabled."
+        end
+
+        unless text.match?(/^daemon:[ \t]*(?:#.*)?$/)
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: #{cfg_path} has a `daemon:` block " \
+                "in inline or non-2-space-indented style we can't surgically " \
+                "edit. Rewrite the block in standard form:\n" \
+                "  daemon:\n    enabled: <true|false>"
+        end
+
+        # Validate child indentation: every non-blank/non-comment line
+        # within the daemon: block must use exactly 2-space indent. The
+        # parsed_data tells us at least one child key exists (Hash with
+        # entries), so the block isn't empty.
+        validate_daemon_block_indent!(cfg_path, text) unless parsed_data["daemon"].empty?
+      end
+
+      # Walks the daemon: block in the raw text and ensures every
+      # non-empty, non-comment line uses exactly 2-space indentation.
+      # 4-space, tab-indented, or mixed-indent children would silently
+      # bypass upsert_daemon_enabled's `\A  enabled:` regex and produce
+      # a duplicate-key file on insert. (Tab-indented children are also
+      # rejected by YAML.safe_load itself, surfacing as a Psych error
+      # and exiting CONFIG via parse_project_config; this guard catches
+      # the 4-space case which IS valid YAML but breaks our editor.)
+      def validate_daemon_block_indent!(cfg_path, text)
+        in_block = false
+        text.each_line do |raw|
+          line = raw.chomp
+          if !in_block
+            in_block = true if line =~ /\Adaemon:[ \t]*(?:#.*)?\z/
+            next
+          end
+          # Block continues while line is empty, comment-only, or indented.
+          break unless line.empty? || line.start_with?("#") || line =~ /\A[ \t]/
+          next if line.empty? || line.lstrip.start_with?("#")
+          next if line =~ /\A  \S/  # exactly 2-space indent (good)
+
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: #{cfg_path} has a `daemon:` " \
+                "child line that does not use 2-space indentation: " \
+                "#{line.inspect}. Rewrite children with 2-space indentation:\n" \
+                "  daemon:\n    enabled: <true|false>"
+        end
+      end
+
+      def write_daemon_block(cfg_path, enabled)
+        # Defense-in-depth re-validation inside the per-project write,
+        # in case the file changed between preflight and now (operator
+        # hand-edit, another agent process). Pre-flight is the primary
+        # gate; this re-check turns any race-window malformed write
+        # into ConfigError instead of silent corruption.
+        data = parse_project_config(cfg_path)
+        if data.nil?
+          fail_usage!(
+            "hive daemon #{@subcommand}: missing #{cfg_path}; this project is not initialised",
+            kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
+          )
+        end
+        if data["daemon"] && !data["daemon"].is_a?(Hash)
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: #{cfg_path} `daemon:` is not a mapping"
+        end
+        assert_surgical_edit_possible!(cfg_path, data)
+
+        # Atomic rewrite under an exclusive flock. The flock serialises
+        # concurrent `hive daemon enable` calls against the same inode;
+        # it does NOT protect against a parallel editor that does its own
+        # tempfile + rename (vim/emacs atomic-save), which is treated as
+        # out-of-scope per the single-user-local trust model in SECURITY.md.
+        # Mode bits are preserved so `chmod 0600 config.yml` survives.
+        # `f.fsync` + ensure-cleanup of the tempfile match the durability
+        # contract Hive::Markers#write_atomic provides for marker files.
+        #
+        # Errno::* (ENOSPC / EROFS / EACCES / EXDEV) is rescued and re-raised
+        # as Hive::ConfigError so disk/permission failures route to exit 78
+        # (CONFIG) instead of falling through EnvelopeEmitter's generic
+        # StandardError → InternalError (exit 70). Matches the contract
+        # already used by Hive::Config.write_global_config!.
+        File.open(cfg_path, File::RDONLY) do |lock_fd|
+          lock_fd.flock(File::LOCK_EX)
+          original_mode = File.stat(cfg_path).mode & 0o7777
+          new_text = upsert_daemon_enabled(File.read(cfg_path), enabled)
+          tmp = "#{cfg_path}.tmp.#{Process.pid}"
+          renamed = false
+          begin
+            File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, original_mode) do |f|
+              f.write(new_text)
+              f.flush
+              f.fsync
+            end
+            File.rename(tmp, cfg_path)
+            renamed = true
+          ensure
+            # Cleanup is best-effort: a TOCTOU between exist? and
+            # delete (or an EACCES from antivirus / Spotlight on macOS)
+            # must not mask the original write failure. The tempfile-
+            # leak path is already unusual; rescuing here keeps the
+            # caller's exception intact.
+            if !renamed && File.exist?(tmp)
+              begin
+                File.delete(tmp)
+              rescue StandardError
+                # ignore — original write failure (if any) propagates.
+              end
+            end
+          end
+        end
+      rescue Errno::ENOSPC, Errno::EROFS, Errno::EACCES, Errno::EXDEV, Errno::EDQUOT,
+             Errno::ENOMEM, Errno::EIO, Errno::ENOENT => e
         raise Hive::ConfigError,
-              "hive daemon #{@subcommand}: #{cfg_path} could not be written: #{e.message}"
+              "hive daemon #{@subcommand}: filesystem error rewriting #{cfg_path}: " \
+              "#{e.class.name}: #{e.message}"
+      end
+
+      # Surgical line-level editor: returns a new YAML text with the
+      # daemon.enabled key set to `value`. Preserves every comment, every
+      # other key's order, and any inline comment on the enabled line
+      # itself. Three branches:
+      #
+      #   1. `daemon:` block exists and contains an `enabled:` key  →
+      #      replace only that line's value, keep the rest.
+      #   2. `daemon:` block exists but has no `enabled:` key       →
+      #      insert `  enabled: <value>` as the first child of the block.
+      #   3. No `daemon:` block at all                              →
+      #      append a fresh `daemon:` / `  enabled: <value>` block at EOF
+      #      with a leading blank line for readability.
+      #
+      # Required indentation is 2 spaces (the project's `hive init`
+      # template's convention). Hand-edits that switch to 4-space or tab
+      # indentation under `daemon:` would still parse as YAML but the
+      # surgical edit would not see the existing `enabled:` and would
+      # fall into branch 2 (insert as first child). The duplicate key
+      # then surfaces at YAML.safe_load time on the next call, which
+      # raises ConfigError above.
+      def upsert_daemon_enabled(text, value)
+        bool = value ? "true" : "false"
+        lines = text.split("\n", -1)
+
+        daemon_line_idx = nil
+        block_end_idx = nil
+        enabled_line_idx = nil
+
+        lines.each_with_index do |line, i|
+          if daemon_line_idx.nil?
+            daemon_line_idx = i if line =~ /\Adaemon:[ \t]*(?:#.*)?\z/
+          elsif block_end_idx.nil?
+            if line.empty? || line.start_with?("#") || line =~ /\A[ \t]/
+              if enabled_line_idx.nil? && line =~ /\A  enabled:[ \t]/
+                enabled_line_idx = i
+              end
+            else
+              block_end_idx = i
+            end
+          end
+        end
+
+        if enabled_line_idx
+          lines[enabled_line_idx] = lines[enabled_line_idx].sub(
+            /\A(  enabled:[ \t]+)\S+/, "\\1#{bool}"
+          )
+        elsif daemon_line_idx
+          lines.insert(daemon_line_idx + 1, "  enabled: #{bool}")
+        else
+          lines.pop while lines.last == ""
+          lines << "" unless lines.empty?
+          lines << "daemon:"
+          lines << "  enabled: #{bool}"
+          lines << ""
+        end
+
+        lines.join("\n")
       end
 
       def read_live_pid
@@ -539,7 +912,7 @@ module Hive
       def stop_envelope(running:, was_running:, stale_pid: nil, reason: nil)
         {
           "schema" => "hive-daemon-stop",
-          "schema_version" => 1,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-stop"),
           "ok" => true,
           "running" => running,
           "was_running" => was_running,

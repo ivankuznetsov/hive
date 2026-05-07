@@ -148,6 +148,16 @@ preferred for parsing — the launchd capture is mostly empty.
 crash but not after a clean `hive daemon stop`. `ThrottleInterval: 30`
 is the floor between respawn attempts.
 
+The plist's `ProgramArguments` wraps the invocation in a tiny
+`/bin/sh -c '[ -x "$0" ] || exit 0; exec "$0" "$@"'` precheck —
+launchd has no native equivalent of systemd's `StartLimitBurst`, so
+without this wrapper a wrong binary path would respawn every 30 s
+forever (filling `hive-daemon.err.log` with `command not found`). The
+wrapper turns "binary missing or not executable" into a clean exit 0,
+which `KeepAlive { SuccessfulExit: false }` then respects (no respawn).
+A real daemon crash still exits non-zero through `exec` and respawns
+normally. If you customise `ProgramArguments`, keep the precheck.
+
 ## Day-2 operations
 
 | Need                                          | Command                                               |

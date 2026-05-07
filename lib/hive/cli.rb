@@ -403,15 +403,18 @@ module Hive
     desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / enable / disable)"
     long_desc <<~DESC
       Subcommands:
-        start [--detach] [--dry-run]   Run the dispatcher loop. Without
-                                       --detach, runs in the foreground.
-        stop                           Send SIGTERM to the running daemon.
-        status [--json]                Show running / not-running.
-        reload                         Send SIGHUP to reload config.
-        tail                           Stream daemon.log.
-        enable PROJECT  | --all        Set daemon.enabled: true in
-                                       <project>/.hive-state/config.yml.
-        disable PROJECT | --all        Set daemon.enabled: false there.
+        start [--detach] [--dry-run]      Run the dispatcher loop. Without
+                                          --detach, runs in the foreground.
+        stop                              Send SIGTERM to the running daemon.
+        status [--json]                   Show running / not-running.
+        reload [--json]                   Send SIGHUP to reload config.
+                                          --json emits hive-daemon-reload.v1.
+        tail                              Stream daemon.log.
+        enable  PROJECT|--all [--json]    Set daemon.enabled: true in
+                                          <project>/.hive-state/config.yml.
+                                          --all = every registered project;
+                                          --json emits hive-daemon-enroll.v1.
+        disable PROJECT|--all [--json]    Set daemon.enabled: false there.
 
       The daemon polls `hive status --json` periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
@@ -425,8 +428,11 @@ module Hive
 
       Exit codes: 0 success; 1 daemon-not-running for `status`/`reload`
       when no daemon is up; 64 (USAGE) for `enable`/`disable` against an
-      unknown project; 75 (TEMPFAIL) when `start` finds an existing live
-      daemon.
+      unknown project, missing PROJECT, conflicting PROJECT+--all, or an
+      uninitialised project; 70 (SOFTWARE) for uncategorised internal
+      errors; 75 (TEMPFAIL) when `start` finds an existing live daemon;
+      78 (CONFIG) when `enable`/`disable` reads malformed config.yml or
+      rejects an inline-flow / non-2-space-indented `daemon:` block.
 
       See `wiki/commands/daemon.md`, `wiki/operating.md`, and ADR-024.
     DESC
@@ -435,10 +441,23 @@ module Hive
                      desc: "log dispatch decisions without spawning real children"
     option :all, type: :boolean, default: false,
                  desc: "for enable/disable: apply to every registered project"
-    def daemon(subcommand, target = nil)
+    def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
+      # Normalise positional argv up front so we route every shape
+      # (no subcommand, multi-positional, normal) through the same
+      # Hive::Commands::Daemon constructor + JSON envelope path.
+      if subcommand.nil?
+        raise Hive::InvalidTaskPath,
+              "hive daemon: missing SUBCOMMAND " \
+              "(expected: #{Hive::Commands::Daemon::VALID_SUBCOMMANDS.join(', ')})"
+      end
+      if targets.length > 1
+        raise Hive::InvalidTaskPath,
+              "hive daemon #{subcommand}: too many positional arguments " \
+              "#{targets.inspect}; expected exactly one PROJECT (or --all)"
+      end
       Hive::Commands::Daemon.new(
-        subcommand, target,
+        subcommand, targets.first,
         detach: options[:detach],
         dry_run: options[:dry_run],
         all: options[:all],

@@ -2,6 +2,24 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
+
+**Action:** Added `hive doctor` — a CLI verb that walks brainstorm + plan stage configs and asks each stage's agent profile to verify its configured skill (`<stage>.skill`) actually resolves to an installed slash-command or skill on disk. Output is a status table; `--json` emits a `hive-doctor.v1` envelope. Exit codes: `0` (all present or N/A), `65` (at least one missing), `78` (config error).
+
+Per-agent search rules encoded in `Hive::SkillCheck::{Claude,Codex,Pi}`:
+
+- **Claude** — for `/<name>`: `<project>/.claude/commands/<name>.md`, `<project>/.claude/skills/<name>/SKILL.md`, `~/.claude/commands/<name>.md`, `~/.claude/skills/<name>/SKILL.md`. For `/<plug>:<name>`: cache layout `~/.claude/plugins/cache/<marketplace>/<plug>/<version>/skills/<name>/SKILL.md` AND marketplace source layout `~/.claude/plugins/marketplaces/<marketplace>/plugins/<plug>/skills/<name>/SKILL.md` (plus `commands/`).
+- **Codex** — for `/<name>`: `~/.codex/skills/<name>/SKILL.md`, `~/.codex/skills/.system/<name>/SKILL.md`. For `/<plug>:<name>`: `~/.codex/plugins/cache/<marketplace>/<plug>/<version>/skills/<name>/SKILL.md`. Note that codex has no user-level slash-command directory like claude's `commands/` — if you need `/plan` on codex, install a SKILL.md.
+- **Pi** — always `:not_applicable`. Pi has no slash-command resolver: a `/foo` token in the prompt is just text the model reads. The honest answer is N/A, not `:missing`.
+
+`AgentProfile` gained a `skill_verifier:` constructor kwarg (defaulting to nil → `:not_applicable`), so adding a fourth profile in the future is "register a `Hive::SkillCheck::*` module and pass its `.method(:verify)`."
+
+README install section updated with per-agent install pointers and the `hive doctor` invocation.
+
+**Refreshed pages:**
+- (none — `hive doctor` is a new CLI surface; existing wiki pages don't reference skill installation.)
+
+
 ## [2026-05-07T14:00:00Z] config — per-stage `skill` override + `/plan` becomes the shipped default
 
 **Action:** Added `brainstorm.skill` and `plan.skill` keys to `Hive::Config::DEFAULTS`. The brainstorm and plan stage prompts now reference `<%= skill_invocation %>` so a per-project `config.yml` override redirects the agent to a different slash-command without touching `templates/`.

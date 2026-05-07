@@ -120,6 +120,47 @@ module Hive
       Hive::Commands::Prune.new(dry_run: options[:dry_run], json: options[:json]).call
     end
 
+    desc "doctor", "Verify each stage's configured skill is installed for its agent"
+    long_desc <<~DESC
+      Walks the brainstorm and plan stage configs and asks the
+      configured agent profile (claude / codex / pi) to probe whether
+      its skill (`<stage>.skill` in config.yml) actually resolves to
+      an installed slash-command or skill on disk.
+
+      Hive ships expecting both llm-wiki (`/plan`) and
+      compound-engineering (`/compound-engineering:ce-*`) to be
+      installed alongside your agent CLI. `hive doctor` is the
+      preflight that catches a missing install before a stage spawns
+      and the agent reports `skill not found` mid-run.
+
+      Per-agent search rules:
+      - claude: `~/.claude/{commands/<name>.md, skills/<name>/SKILL.md}`
+        for plain `/<name>`; `~/.claude/plugins/marketplaces/<plug>*/skills/...`
+        for `/<plug>:<name>`. Project-level paths checked too.
+      - codex: `~/.codex/skills/<name>/SKILL.md` (and `.system/`) for
+        plain; `~/.codex/plugins/cache/*/<plug>/*/skills/...` for
+        plug-namespaced.
+      - pi: always `:not_applicable` — pi has no slash-command
+        resolver; the prompt is sent verbatim.
+
+      Exit codes: 0 all checks present or N/A; 65 at least one missing
+      skill; 78 config error.
+
+      Examples:
+
+        hive doctor                       # tabular output
+        hive doctor --json                # machine-readable envelope
+    DESC
+    def doctor
+      require "hive/commands/doctor"
+      cfg = Hive::Config.load(Dir.pwd)
+      exit Hive::Commands::Doctor.new(
+        config: cfg,
+        project_root: Dir.pwd,
+        json: options[:json]
+      ).call
+    end
+
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
     def new_task(project, *text_parts)
       require "hive/commands/new"

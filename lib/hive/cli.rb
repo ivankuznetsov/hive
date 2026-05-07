@@ -350,6 +350,44 @@ module Hive
       ).call
     end
 
+    desc "daemon SUBCOMMAND", "Manage the hive daemon (start / stop / status / reload / tail)"
+    long_desc <<~DESC
+      Subcommands:
+        start [--detach] [--dry-run]   Run the dispatcher loop. Without
+                                       --detach, runs in the foreground.
+        stop                           Send SIGTERM to the running daemon.
+        status [--json]                Show running / not-running.
+        reload                         Send SIGHUP to reload config.
+        tail                           Stream daemon.log.
+
+      The daemon polls `hive status --json` periodically and dispatches
+      workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
+      ready to advance, plus auto-archives 6-pr after PR merge (gated on
+      `gh pr view --json state`). Stops at human-input gates (waiting
+      markers, recovery markers).
+
+      Per-project enrollment via `daemon.enabled: true` in
+      `<project>/.hive-state/config.yml` (default Y at `hive init`).
+
+      Exit codes: 0 success; 1 daemon-not-running for `status`/`reload`
+      when no daemon is up; 75 (TEMPFAIL) when `start` finds an existing
+      live daemon.
+
+      See `wiki/commands/daemon.md` and ADR-024.
+    DESC
+    option :detach, type: :boolean, default: false, desc: "fork to background after start"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "log dispatch decisions without spawning real children"
+    def daemon(subcommand)
+      require "hive/commands/daemon"
+      Hive::Commands::Daemon.new(
+        subcommand,
+        detach: options[:detach],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"
     long_desc <<~DESC
       Opens a full-screen Charm bubbletea + lipgloss dashboard over `hive status`.

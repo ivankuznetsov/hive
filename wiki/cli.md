@@ -7,7 +7,7 @@ updated: 2026-05-06
 tags: [cli, api]
 ---
 
-**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. `hive tui` is the human-only, full-screen, keystroke-driven dashboard over `hive status` (see [[commands/tui]]). There is no daemon, no HTTP server, no sockets — the CLI is the entire control surface. `status`, `run`, `approve`, `findings`, `markers`, and `metrics` support `--json` for machine-readable output (with a structured error envelope on every failure path); `tui` is human-only and rejects `--json` at the command boundary. `hive tui` is the sole `--json`-rejecting command — see `wiki/commands/tui.md`. Process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
+**TLDR**: Hive exposes a Thor-based CLI. The human workflow is `hive status` followed by stage verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`) that move-or-run tasks by slug. `run`, `approve`, `findings`, `markers`, and `metrics` are the lower-level agent/script surface. `hive tui` is the human-only, full-screen, keystroke-driven dashboard over `hive status` (see [[commands/tui]]). `hive daemon` (ADR-024) is an auto-advancing dispatcher that drives the pipeline forward without manual `hive run` invocations — see [[commands/daemon]]. There is no HTTP server, no sockets — the CLI plus the optional daemon are the entire control surface. `status`, `run`, `approve`, `findings`, `markers`, and `metrics` support `--json` for machine-readable output (with a structured error envelope on every failure path); `tui` is human-only and rejects `--json` at the command boundary. `hive tui` is the sole `--json`-rejecting command — see `wiki/commands/tui.md`. Process exit codes are stable per `Hive::ExitCodes` so wrappers can branch deterministically.
 
 ## Entry point
 
@@ -21,6 +21,7 @@ tags: [cli, api]
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project | `Hive::Commands::New` | [[commands/new]] |
 | `hive status` | Action-grouped task list across registered projects | `Hive::Commands::Status` | [[commands/status]] |
 | `hive tui` | Live, keystroke-driven Charm bubbletea + lipgloss dashboard over `hive status` (human-only; rejects `--json`) | `Hive::Tui` | [[commands/tui]] |
+| `hive daemon SUBCOMMAND` | Auto-advance pipeline dispatcher (start / stop / status / reload / tail). Polls `hive status --json` and fires workflow verbs on tasks ready to advance; auto-archives 6-pr after PR merge. Per-project `daemon.enabled: true` (asked at `hive init`, default Y). | `Hive::Commands::Daemon` | [[commands/daemon]] |
 | `hive brainstorm TARGET [--from STAGE]` | Start or re-run brainstorm by slug/path | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive plan TARGET [--from STAGE]` | Promote completed brainstorm to plan, or re-run plan | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive develop TARGET [--from STAGE]` | Promote completed plan to execute, or re-run execute | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |

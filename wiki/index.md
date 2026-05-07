@@ -40,6 +40,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[commands/markers]] — `hive markers clear FOLDER --name <NAME>` removes a recovery marker (`REVIEW_STALE` etc.) from `task.md` so an agent can recover from `REVIEW_*_STALE` / `REVIEW_ERROR` without hand-editing.
 - [[commands/forget]] — `hive forget NAME [--json]` drop one named entry from the global registry (inverse of `hive init`). `.hive-state` on disk is not touched.
 - [[commands/prune]] — `hive prune [--dry-run] [--json]` bulk-drop registry entries whose `path` is gone or whose row shape is invalid.
+- [[commands/daemon]] — `hive daemon start|stop|status|reload|tail` auto-advancing dispatcher (ADR-024). Polls `hive status --json` and fires workflow verbs on tasks ready to advance.
 - `hive metrics rollback-rate [--days N] [--project NAME] [--json]` — fraction of fix-agent commits later reverted, broken down by triage bias / fix phase. See [[cli]] and [[stages/review]].
 
 ## Stages
@@ -72,3 +73,4 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[modules/metrics]] — `hive metrics rollback-rate` library (trailer parsing, revert detection).
 - [[modules/secret_patterns]] — shared regex set for credential/secret detection.
 - [[modules/protected_files]] — SHA-256 snapshot/diff helper for orchestrator-owned files.
+- [[modules/daemon]] — auto-advancing dispatcher (ADR-024): Policy + ConcurrencyController + ChildSupervisor + StatusConsumer + Dispatcher + Logger + PrMergeWatcher.

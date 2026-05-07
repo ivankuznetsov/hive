@@ -91,7 +91,8 @@ module Hive
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "budgets"  => Hash<String, Integer>,     # 8 keys (LIMIT_KEYS)
-        #     "timeouts" => Hash<String, Integer>      # 8 keys (LIMIT_KEYS)
+        #     "timeouts" => Hash<String, Integer>,     # 8 keys (LIMIT_KEYS)
+        #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
         #   }
         # Raises Aborted when the user declines confirmation.
         def collect
@@ -102,13 +103,15 @@ module Hive
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
           budgets, timeouts = prompt_limits
+          daemon_enabled = prompt_daemon_enabled
 
           answers = {
             "planning_agent" => planning,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
             "budgets" => budgets,
-            "timeouts" => timeouts
+            "timeouts" => timeouts,
+            "daemon_enabled" => daemon_enabled
           }
 
           summarize(answers)
@@ -132,14 +135,15 @@ module Hive
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "budgets" => default_budgets,
-            "timeouts" => default_timeouts
+            "timeouts" => default_timeouts,
+            "daemon_enabled" => true
           }
           # Goes to @summary_io (stdout by default) so a non-TTY caller's
           # `summary=$(hive init)` capture has a parseable single line.
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
-            "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, limits=defaults"
+            "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, limits=defaults, daemon=enabled"
           )
           answers
         end
@@ -292,6 +296,26 @@ module Hive
           v.positive? ? v : nil
         end
 
+        def prompt_daemon_enabled
+          @output.puts ""
+          @output.puts "Hive daemon — auto-advance tasks through the pipeline."
+          @output.puts "  When enabled, the daemon polls hive status and dispatches"
+          @output.puts "  workflow verbs (brainstorm/plan/develop/review/pr) on tasks"
+          @output.puts "  ready to advance, plus auto-archives 6-pr after PR merge."
+          @output.puts "  It stops at human-input gates (brainstorm questions, review"
+          @output.puts "  escalations, recovery markers). Disable later by setting"
+          @output.puts "  daemon.enabled: false in .hive-state/config.yml."
+          loop do
+            @output.print "Enable hive daemon for this project? [Y/n]: "
+            @output.flush
+            answer = read_line.downcase
+            return true  if answer.empty? || answer == "y" || answer == "yes"
+            return false if answer == "n" || answer == "no"
+
+            @output.puts "  please answer y or n"
+          end
+        end
+
         def summarize(answers)
           @output.puts ""
           @output.puts "Summary:"
@@ -299,6 +323,7 @@ module Hive
           @output.puts "  development_agent = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
           @output.puts "  limits            = #{summarize_limits(answers)}"
+          @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"
         end
 
         def summarize_limits(answers)

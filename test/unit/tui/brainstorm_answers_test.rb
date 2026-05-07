@@ -44,6 +44,114 @@ class HiveTuiBrainstormAnswersTest < Minitest::Test
     end
   end
 
+  # ---- Heading-form tolerance: `### Q{n} answer.` ----
+
+  def test_q_n_answer_heading_recognized_as_answer
+    # The /compound-engineering:ce-brainstorm skill emits
+    # `### Q{n} answer.` instead of `### A{n}.` for Round 2+. The
+    # parser must accept both forms or it would refuse on legitimate
+    # agent output.
+    with_tmp_dir do |dir|
+      path = write_md(dir, <<~MD)
+        ## Round 2
+        ### Q1. X API access — concrete path for v1
+        Question text on multiple lines.
+        ### Q1 answer.
+        Pricing is now pay per use.
+        ### Q2. What does LLM enrichment do?
+        ### Q2 answer.
+        Just summary, tags, link expansion.
+      MD
+
+      assert_equal true, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
+  def test_q_n_answer_with_inline_text_recognized
+    with_tmp_dir do |dir|
+      path = write_md(dir, <<~MD)
+        ## Round 1
+        ### Q1. Cadence?
+        ### Q1 answer. Daily cron.
+      MD
+
+      assert_equal true, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
+  def test_mixed_a_n_and_q_n_answer_within_same_round
+    # Defensive: an agent that emits a mix of forms in a single round
+    # should still count each as the appropriate answer.
+    with_tmp_dir do |dir|
+      path = write_md(dir, <<~MD)
+        ## Round 1
+        ### Q1. First?
+        ### A1. yes
+        ### Q2. Second?
+        ### Q2 answer. also yes
+      MD
+
+      assert_equal true, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
+  def test_duplicate_answer_across_a_and_q_n_answer_forms_refuses
+    # Both `### A1.` and `### Q1 answer.` populate the answer slot
+    # for digit "1"; a round with both is malformed and must refuse
+    # to auto-continue.
+    with_tmp_dir do |dir|
+      path = write_md(dir, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### A1. one
+        ### Q1 answer. two
+      MD
+
+      assert_equal false, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
+  def test_q_n_answer_with_empty_body_returns_false
+    with_tmp_dir do |dir|
+      path = write_md(dir, <<~MD)
+        ## Round 1
+        ### Q1. Scope?
+        ### Q1 answer.
+      MD
+
+      assert_equal false, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
+  def test_real_xbookmark_round_2_fixture_parses_complete
+    # Captures the exact heading shapes observed in the wild
+    # (xbookmark brainstorm.md): Round 1 used `### A{n}.` and Round 2
+    # used `### Q{n} answer.`. Latest-round-by-N selects Round 2; the
+    # parser must classify each `Q{n} answer.` heading as an answer.
+    with_tmp_dir do |dir|
+      path = write_md(dir, <<~MD)
+        # Brainstorm — xbookmark
+
+        ## Round 1
+        ### Q1. How will the service authenticate to X?
+        ### A1.
+        Use API for my own account.
+
+        ## Round 2
+        ### Q1. X API access — concrete path for v1
+        Long question text spanning multiple lines.
+        ### Q1 answer.
+        pricing is now pay per use.
+        ### Q2. What does LLM enrichment do?
+        ### Q2 answer.
+        summary, tags, link expansion.
+        <!-- WAITING -->
+      MD
+
+      assert_equal true, Hive::Tui::BrainstormAnswers.complete?(path)
+    end
+  end
+
   # ---- Empty / missing structure ----
 
   def test_no_round_heading_returns_false

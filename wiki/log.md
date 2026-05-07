@@ -90,6 +90,15 @@ Coverage: 23-test unit suite directly against the new module (real fixtures on d
 
 **Refreshed pages:** none. `wiki/commands/tui.md` still describes `takeover_command` accurately as the public surface for `interactive: true` verbs; the new helper is an internal building block with one caller today and no immediate user-facing change to surface. Worth refreshing if/when a second caller lands (the `interactive: true` escape hatch is the most likely vector — a future interactive `gh pr create` prompt or a manual review verb), at which point `wiki/commands/tui.md`'s "Subprocess dispatch" section can name `foreground_takeover_command` as the shared primitive and `takeover_command` as one caller of it.
 
+## [2026-05-04T20:00:00Z] state-model trigger fired on init/config polish — wiki note only
+
+**Action:** Commit `93bcc18` (polish: comment drifts, validator coverage, construction guards) touched `lib/hive/commands/init.rb`, `lib/hive/commands/init/prompts.rb`, and `lib/hive/config.rb`. Reviewed every diff hunk: all changes are factual-accuracy comment fixes, table-driven validator-coverage tests, `Hash#fetch`-instead-of-`[]` defense-in-depth in `Prompts#default_budgets/timeouts`, and `Prompts#initialize` ArgumentError guards (empty registry / missing recommended defaults). The state-model surface (`Hive::Task`, `Hive::Markers`, `Hive::Config` schema/DEFAULTS, `Hive::Lock`, `Hive::Worktree`, `Hive::Metrics`) is unchanged — no marker added/removed, no DEFAULTS shape change, no validation rule change, no template field change.
+
+One single propagation made: `lib/hive/config.rb:220` corrected a misattribution ("review.reviewers Array semantic per ADR-018" — ADR-018 is about per-CLI isolation, not array merge). The same misattribution appeared at `wiki/modules/config.md:90` and is now corrected to match the code comment.
+
+**Refreshed pages:**
+- `wiki/modules/config.md` — Recursive deep-merge bullet on Array semantics no longer cites ADR-018; rationale ("per-element merge has ambiguous semantics for ordered lists") matches the code comment verbatim.
+
 ## [2026-05-04T19:10:44Z] tui — new-idea editing and paste support
 
 **Action:** Added cursor-aware editing to the `hive tui` new-idea prompt: Left/Right, Home/End, Ctrl+A/Ctrl+E, Backspace, Delete, insertion at cursor, wrapped cursor rendering, paste normalization, and a conservative 4 KiB title-buffer cap with a `title too long` flash. The terminal input path now uses a Hive-owned `PasteAwareRunner` over `Program#read_raw_input` so complete raw chunks are drained instead of losing bytes through bubbletea-ruby 0.1.4's one-event `poll_event` path. Copy remains terminal/OS-owned; Hive handles paste bytes only.

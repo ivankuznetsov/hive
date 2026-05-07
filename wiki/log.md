@@ -2,6 +2,94 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-07T22:00:00Z] doctor — pi gets a real skill verifier; pi's `skill_syntax_format` corrected
+
+**Action:** Two related fixes for pi.
+
+1. **Pi has a real skill discovery system, not the absence I previously claimed.** Per the `@mariozechner/pi-coding-agent` README and `dist/core/package-manager.js`, pi auto-discovers skills from `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `<cwd>/.pi/skills/<name>/SKILL.md` and `<cwd>/.agents/skills/<name>/SKILL.md` (walking up cwd to git root), and pi packages installed via `pi install <source>` (npm/git roots with `skills/` directories). `Hive::SkillCheck::Pi.verify` now probes all of these instead of returning a blanket `:not_applicable`.
+
+2. **Pi resolves skills as `/skill:<name>`, not bare `/<name>`.** Hive's pi profile previously set `skill_syntax_format: "/%{skill}"`, which produced `/<name>` invocations — pi at runtime treats those as extension-command lookups, not skill lookups. Skills from the prompt would silently fail to resolve. Profile now sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches pi's resolver. Behaviour change for pi-using configs; no projects in the registry currently use pi as a stage/reviewer agent, so the rename is safe to land.
+
+The pi verifier accepts `/skill:<name>` (the canonical pi skill form) and probes the discovery paths. For invocations that aren't in `/skill:` form (e.g., a custom profile producing bare `/<name>`), it returns `:not_applicable` with a message explaining the form mismatch — pi can't resolve such an invocation as a skill.
+
+Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `}`, `\` so a name or plugin segment is treated literally inside a `Dir[]` call) — used by pi/claude/codex `build_candidates` whenever the parsed invocation is interpolated into a glob pattern. Without it, an invocation like `/foo*` would silently match plugin caches whose name starts with `foo`.
+
+**Coverage:** 10 new skill-check unit cases (pi happy paths for user/cross-agent/project/pi-package locations, install hint, non-skill-form returns N/A, malformed invocation), 1 doctor-test rename + 1 new doctor test for pi reviewer rows. Full suite: 1542 runs / 5068 assertions / 0 failures.
+
+**Refreshed pages:**
+- `README.md` — pi row in the skills table now describes pi's actual model (with `~/.pi/agent/skills/`, `~/.agents/skills/`, etc.) and the `/skill:<name>` invocation form.
+
+
+## [2026-05-07T17:30:00Z] doctor — probe `review.reviewers[]` + non-fatal init preflight
+
+**Action:** Extended `hive doctor` (PR #48 / `cd70f39`) along the two lines the original PR explicitly left for follow-up:
+
+1. **`review.reviewers[]` probing.** `Hive::Commands::Doctor#call` now walks `cfg.dig("review", "reviewers")` after the brainstorm/plan stage rows. Each reviewer entry's bare `skill` (e.g., `ce-code-review`, `pr-review-toolkit:review-pr`) is formatted through `profile.skill_syntax_format` to obtain the full invocation (`/ce-code-review`, `/pr-review-toolkit:review-pr`), then passed to `verify_skill` so the JSON envelope's `skill` field is uniformly a full invocation across stage and reviewer rows. The text-table row label uses `5-review/<reviewer-name>` (matches the user-facing `name:` field in config); the JSON envelope's `checks[]` entries gain a `kind` discriminator (`"stage"` or `"reviewer"`), a `label` field, and (for reviewer rows) a `name` field.
+
+2. **Non-fatal preflight at end of `hive init`.** After `print_summary` returns, `Init#call` invokes `run_init_preflight!`, which loads the freshly-written config, constructs a discard-output `Doctor`, calls `#call`, and emits stderr warnings for any `:missing` rows in the format `[<row-label>/<agent>] <verifier message>`. Init's exit code is unaffected — install gaps surface but never block bootstrap. The rescue scope is `StandardError` (with a `Errno::EPIPE` micro-rescue around `warn`); `Interrupt` and `SystemExit` propagate, and unexpected verifier raises produce a "this may be a hive bug, please report" hint so silent swallow is mitigated.
+
+**Implementation notes:**
+- Non-`agent` reviewer kinds report `:not_applicable` with an explanatory message. `Hive::Config.validate_reviewers!` does NOT check the `kind` field — only `Hive::Reviewers.dispatch` does, at run-time. The doctor's N/A row is therefore the **only load-time signal** for non-agent kinds, not a redundant safety net.
+- `Hive::Commands::Doctor` gained an `attr_reader :rows` so the init preflight can read probe results in-process without re-running the renderer or JSON encoder.
+- The renderer reads `row[:label]` (added by U1) for the first-column display, so long reviewer names don't truncate the table.
+- Schema name stays `hive-doctor.v1`. The `kind`/`label`/`name` additions are forward-compatible; consumers that ignore unknown fields continue to work.
+
+**Test surface:**
+- `test/unit/commands/doctor_test.rb` — 9 new cases covering reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, JSON envelope shape, long-label width, and the `attr_reader :rows` exposure.
+- `test/integration/init_doctor_preflight_test.rb` (new) — 6 cases covering all-green silence, single-missing stderr warning, multi-missing including a reviewer row, init exit-code unchanged, preflight crash → bug-hint warning, config-load error → bug-hint warning.
+
+**Refreshed pages:**
+- `README.md` — Required slash-commands / skills section now also lists the recommended reviewer set + documents the init-preflight behavior.
+
+## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
+
+**Action:** Added `hive doctor` — a CLI verb that walks brainstorm + plan stage configs and asks each stage's agent profile to verify its configured skill (`<stage>.skill`) actually resolves to an installed slash-command or skill on disk. Output is a status table; `--json` emits a `hive-doctor.v1` envelope. Exit codes: `0` (all present or N/A), `65` (at least one missing), `78` (config error).
+
+Per-agent search rules encoded in `Hive::SkillCheck::{Claude,Codex,Pi}`:
+
+- **Claude** — for `/<name>`: `<project>/.claude/commands/<name>.md`, `<project>/.claude/skills/<name>/SKILL.md`, `~/.claude/commands/<name>.md`, `~/.claude/skills/<name>/SKILL.md`. For `/<plug>:<name>`: cache layout `~/.claude/plugins/cache/<marketplace>/<plug>/<version>/skills/<name>/SKILL.md` AND marketplace source layout `~/.claude/plugins/marketplaces/<marketplace>/plugins/<plug>/skills/<name>/SKILL.md` (plus `commands/`).
+- **Codex** — for `/<name>`: `~/.codex/skills/<name>/SKILL.md`, `~/.codex/skills/.system/<name>/SKILL.md`. For `/<plug>:<name>`: `~/.codex/plugins/cache/<marketplace>/<plug>/<version>/skills/<name>/SKILL.md`. Note that codex has no user-level slash-command directory like claude's `commands/` — if you need `/plan` on codex, install a SKILL.md.
+- **Pi** — always `:not_applicable`. Pi has no slash-command resolver: a `/foo` token in the prompt is just text the model reads. The honest answer is N/A, not `:missing`.
+
+`AgentProfile` gained a `skill_verifier:` constructor kwarg (defaulting to nil → `:not_applicable`), so adding a fourth profile in the future is "register a `Hive::SkillCheck::*` module and pass its `.method(:verify)`."
+
+README install section updated with per-agent install pointers and the `hive doctor` invocation.
+
+**Refreshed pages:**
+- (none — `hive doctor` is a new CLI surface; existing wiki pages don't reference skill installation.)
+
+
+## [2026-05-07T14:00:00Z] config — per-stage `skill` override + `/plan` becomes the shipped default
+
+**Action:** Added `brainstorm.skill` and `plan.skill` keys to `Hive::Config::DEFAULTS`. The brainstorm and plan stage prompts now reference `<%= skill_invocation %>` so a per-project `config.yml` override redirects the agent to a different slash-command without touching `templates/`.
+
+**Shipped defaults assume both llm-wiki and compound-engineering are installed alongside the agent CLI:**
+- `plan` → `/plan` (llm-wiki's wiki-research-first wrapper that delegates into the CE planning workflow). This is the new default; the previous hardcoded `/compound-engineering:ce-plan` is now invoked transitively through `/plan`.
+- `brainstorm` → `/compound-engineering:ce-brainstorm` (no llm-wiki equivalent today; flip the default if one lands).
+
+`templates/project_config.yml.erb` rendered for fresh `hive init` includes the keys as commented-out hints. Existing projects pick up the new default on next stage run; the deep-merge resolves `cfg.dig("plan", "skill")` to the user's value when set, falls back to the new default otherwise.
+
+The 5-review stage's per-role skills are unchanged in this pass (those flow through `profile.skill_syntax_format` per ADR-014); the override applies only to the two single-agent stages. A follow-up could lift the same pattern to review if needed.
+
+**Refreshed pages:**
+- (none — this is a config-surface addition. On-screen behavior changes only for the plan stage's skill name.)
+
+
+## [2026-05-07T12:00:00Z] tui — auto-continue on plan stage (revise vs advance)
+
+**Action:** Extended the editor-takeover auto-continue path from `2-brainstorm` to `3-plan`. The brainstorm path is unchanged. The plan path adds two outcomes the brainstorm flow does not have: `:revise_plan` (user added inline feedback in the editor — re-run `hive plan ... --from 3-plan`) and `:advance_to_develop` (user saved without changes — interpret as approval, dispatch `hive develop ... --from 3-plan` to start the next stage). Detection is content-hash-based (SHA1 of the file before vs. after the editor session) — mtime is too unreliable across editors for the "saved without edits" semantics.
+
+The only safety gate on the plan path is a clean editor exit: `exit_code == 0`. SIGINT (`130`) and other non-zero exits stay manual. The on-disk marker is re-read after the editor exits; if a sibling actor flipped the marker to `:complete` / `:agent_working` / `:error` during a long edit, the row falls back to the manual path with a `Messages::Flash` saying `auto-continue skipped for <slug>: marker changed during edit`.
+
+The `current_brainstorm_input_marker?` helper was renamed to `marker_still_open_for_input?` since both stages key off the same `:waiting` / `:none` test. The `auto_continue_outcome` predicate became a stage-dispatch (`brainstorm_outcome` / `plan_outcome` / fall-through `:silent`).
+
+`develop_command_from_plan` builds the advance argv by swapping `plan` for `develop` in the row's `suggested_command`, preserving `--project` / `--from` flags so the develop spawn keeps the same idempotency lever.
+
+Coverage: 6 new BubbleModel integration tests for the plan path (advance-on-unchanged, revise-on-edit, marker race to `:complete`, SIGINT abort stays manual, malformed `suggested_command` rescue branch, advance falls back when `suggested_command` is not `hive plan ...`). All 1479 tests pass; rubocop clean.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — Subprocess dispatch section names the plan-stage auto-continue alongside brainstorm; Modes table notes "completed plans auto-advance, edited plans auto-revise."
+
 ## [2026-05-07T00:00:00Z] daemon — enrollment subcommands + macOS/Linux autostart guide
 
 **Action:** Added `hive daemon enable PROJECT|--all` and `hive daemon disable` so existing projects (initialised before ADR-024 / PR #40) can be enrolled in the auto-advancing pipeline without hand-editing YAML. The toggle is an atomic write to `<project>/.hive-state/config.yml` (tempfile + rename) that preserves every other key, including pre-existing `daemon:` tunables (`poll_interval_sec`, `max_concurrent_runs`, etc.). `--all` iterates `Hive::Config.registered_projects`. Closed `--json` envelope (`hive-daemon-enroll.v1`) carries per-project `previous` and `current` values so scripted callers can diff. Exit 64 (`USAGE`) on missing/unknown target. The dispatcher's per-tick enable-cache invalidation (PR-40 follow-up #2) means the new flag takes effect within one `poll_interval_sec` automatically — `hive daemon reload` is optional. Closes the operator gap "I have existing projects, how do I enroll them?" without requiring a `hive init`-style re-bootstrap.
@@ -16,6 +104,7 @@ Closes the dangling `wiki/operating.md once that page lands` reference flagged b
 - [[commands/daemon]] — added `enable`/`disable` rows to the subcommand table; replaced the dangling-reference paragraph with explicit links to the new examples + operating guide.
 - [[cli]] — daemon command-table row mentions enable/disable + points at [[operating]].
 - [[index]] — added [[operating]] under Top level; updated the [[commands/daemon]] one-liner.
+
 
 ## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues
 
@@ -104,6 +193,15 @@ Coverage: 23-test unit suite directly against the new module (real fixtures on d
 **Action:** Extracted the Bubble Tea alt-screen handoff sequence — `exit_alt_screen`, then `Bubbletea.exec` on the callable, then `enter_alt_screen` — out of `Hive::Tui::Subprocess.takeover_command` into a sibling helper `Hive::Tui::Subprocess.foreground_takeover_command(callable)` (`@api private`). `takeover_command` still owns the closure that wraps `run_takeover_child_sync(argv)` plus the `Messages::SubprocessExited` dispatch and now delegates the `SequenceCommand` build to the new helper. Behavior is byte-identical for the existing call site; the wrapper exists so future tty-bound operations do not re-derive the alt-screen lifecycle at the call site. New integration test `test_foreground_takeover_command_wraps_callable_with_alt_screen_sequence` pins the returned shape (`SequenceCommand` wrapping `ExitAltScreenCommand` / `ExecCommand` / `EnterAltScreenCommand`) and verifies the captured callable runs. The same PR tightens `test_successful_spawn_deletes_its_capture_file` from `assert_equal before.size, after.size` to `assert_empty after - before` so the assertion stays correct when the BEGIN-time orphan-capture sweep fires during dispatch and changes the absolute file count — the new form expresses the actual contract documented in `docs/solutions/architecture-patterns/per-spawn-stdio-capture-correlation-id-2026-04-29.md` ("delete on `exit_code.zero?`").
 
 **Refreshed pages:** none. `wiki/commands/tui.md` still describes `takeover_command` accurately as the public surface for `interactive: true` verbs; the new helper is an internal building block with one caller today and no immediate user-facing change to surface. Worth refreshing if/when a second caller lands (the `interactive: true` escape hatch is the most likely vector — a future interactive `gh pr create` prompt or a manual review verb), at which point `wiki/commands/tui.md`'s "Subprocess dispatch" section can name `foreground_takeover_command` as the shared primitive and `takeover_command` as one caller of it.
+
+## [2026-05-04T20:00:00Z] state-model trigger fired on init/config polish — wiki note only
+
+**Action:** Commit `93bcc18` (polish: comment drifts, validator coverage, construction guards) touched `lib/hive/commands/init.rb`, `lib/hive/commands/init/prompts.rb`, and `lib/hive/config.rb`. Reviewed every diff hunk: all changes are factual-accuracy comment fixes, table-driven validator-coverage tests, `Hash#fetch`-instead-of-`[]` defense-in-depth in `Prompts#default_budgets/timeouts`, and `Prompts#initialize` ArgumentError guards (empty registry / missing recommended defaults). The state-model surface (`Hive::Task`, `Hive::Markers`, `Hive::Config` schema/DEFAULTS, `Hive::Lock`, `Hive::Worktree`, `Hive::Metrics`) is unchanged — no marker added/removed, no DEFAULTS shape change, no validation rule change, no template field change.
+
+One single propagation made: `lib/hive/config.rb:220` corrected a misattribution ("review.reviewers Array semantic per ADR-018" — ADR-018 is about per-CLI isolation, not array merge). The same misattribution appeared at `wiki/modules/config.md:90` and is now corrected to match the code comment.
+
+**Refreshed pages:**
+- `wiki/modules/config.md` — Recursive deep-merge bullet on Array semantics no longer cites ADR-018; rationale ("per-element merge has ambiguous semantics for ordered lists") matches the code comment verbatim.
 
 ## [2026-05-04T19:10:44Z] tui — new-idea editing and paste support
 

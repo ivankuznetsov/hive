@@ -37,11 +37,50 @@ ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive   # or add bin/ to PATH
 | Tool | Min version | Why |
 |------|-------------|-----|
 | Ruby | 3.4 | the runtime |
-| `claude` CLI | 2.1.118 | every active stage; verified at runtime |
+| `claude` CLI | 2.1.118 | every active stage by default; verified at runtime |
 | `gh` CLI | recent | `6-pr` stage (`gh pr create`); must be authenticated |
 | `git` | 2.40 | worktrees, orphan branches |
 
 Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep works as fallback).
+
+### Required slash-commands / skills
+
+The brainstorm, plan, and 5-review stages instruct their agents to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume the corresponding skills are installed alongside the agent CLI:
+
+**Stage skills** (single-agent stages):
+
+| Stage | Default invocation | Install for claude | Install for codex |
+|-------|--------------------|--------------------|-------------------|
+| `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
+| `3-plan` | `/plan` | A user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | A skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
+
+**Reviewer skills** (5-review stage's recommended-default reviewer set, written by `hive init`):
+
+| Reviewer name | Default skill | Install for claude | Install for codex |
+|---|---|---|---|
+| `claude-ce-code-review` | `/ce-code-review` | `~/.claude/skills/ce-code-review/SKILL.md` (or set `skill: compound-engineering:ce-code-review` in config to use the plugin form explicitly) | n/a (this row uses claude) |
+| `codex-ce-code-review` | `/ce-code-review` | n/a (this row uses codex) | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
+| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude plugin install <pr-review-toolkit-marketplace>` | n/a (this row uses claude) |
+
+Pi has its own skill model with a different invocation form. Pi resolves skills as `/skill:<name>` (not bare `/<name>`); hive's pi profile sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches. Pi's discovery paths: `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `.pi/skills/` and `.agents/skills/`, plus pi packages installed via `pi install <source>`.
+
+To verify your install:
+
+```bash
+hive doctor              # tabular status of each (stage, agent, skill) triple PLUS each review.reviewer
+hive doctor --json       # machine-readable envelope (hive-doctor.v1; checks[].kind = "stage" | "reviewer")
+```
+
+Exit codes: `0` all present (or N/A for pi); `65` at least one skill missing; `78` config error.
+
+`hive init` runs the same doctor as a non-fatal preflight at end-of-bootstrap. Any missing-skill warnings are emitted to **stderr** (so `hive init | …` pipelines stay clean) and init still exits `0` — install gaps surface but don't block bootstrap. Look for `hive: doctor pre-flight — found N issue(s):` after the initialized summary.
+
+To override a stage's skill per-project, set `<stage>.skill` in `<project>/.hive-state/config.yml`:
+
+```yaml
+plan:
+  skill: /compound-engineering:ce-plan   # opt out of /plan, use the CE skill directly
+```
 
 ## Quickstart
 

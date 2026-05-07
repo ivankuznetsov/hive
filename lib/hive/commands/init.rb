@@ -1,8 +1,10 @@
 require "open3"
 require "fileutils"
+require "stringio"
 require "hive/config"
 require "hive/git_ops"
 require "hive/commands/init/prompts"
+require "hive/commands/doctor"
 
 module Hive
   module Commands
@@ -43,6 +45,62 @@ module Hive
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
 
         print_summary(entry: entry, ops: ops)
+        run_init_preflight!
+      end
+
+      # Non-fatal skill preflight: after init succeeds, run the doctor
+      # against the freshly-written config and emit stderr warnings for
+      # any `:missing` rows. Init's exit code is unaffected — install
+      # gaps surface but never block bootstrap.
+      #
+      # Rescue scope: `StandardError` for verifier bugs (with a
+      # bug-report hint in the warning so silent swallow is mitigated).
+      # `Errno::EPIPE` rescued narrowly around `warn` so a
+      # `hive init | head` pattern doesn't crash. `Interrupt` and
+      # `SystemExit` propagate (Ctrl-C honored as user intent).
+      def run_init_preflight!
+        cfg = Hive::Config.load(@project_path)
+        doctor = Hive::Commands::Doctor.new(
+          config: cfg,
+          project_root: @project_path,
+          output: StringIO.new
+        )
+        exit_code = doctor.call
+        if exit_code == Hive::Commands::Doctor::EXIT_CONFIG_ERROR
+          # Doctor caught a config issue internally; @rows is nil. Surface a
+          # pointer rather than going silent.
+          write_warn("hive: doctor pre-flight — config issue detected; run `hive doctor` for details")
+          return
+        end
+
+        missing = Array(doctor.rows).select { |r| r[:status] == "missing" }
+        return if missing.empty?
+
+        emit_preflight_warnings(missing)
+      rescue StandardError => e
+        emit_preflight_bug(e)
+      end
+
+      def emit_preflight_warnings(missing)
+        write_warn("hive: doctor pre-flight — found #{missing.size} issue(s):")
+        missing.each do |r|
+          write_warn("  [#{r[:label]}/#{r[:agent]}] #{r[:message]}")
+        end
+        write_warn("  See `hive doctor` for details.")
+      end
+
+      def emit_preflight_bug(error)
+        write_warn(
+          "hive: doctor pre-flight failed: #{error.class}: #{error.message} " \
+          "(this may be a hive bug, please report at " \
+          "https://github.com/ivankuznetsov/hive/issues)"
+        )
+      end
+
+      def write_warn(line)
+        warn line
+      rescue Errno::EPIPE
+        nil
       end
 
       def print_summary(entry:, ops:)

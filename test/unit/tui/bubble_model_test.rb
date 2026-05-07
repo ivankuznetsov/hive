@@ -339,6 +339,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "fix-cache-x",   "right pane task row must render"
     assert_includes out, "Tasks ·",       "tasks pane title must render"
     assert_includes out, "[Tab] switch",  "default footer hints must appear"
+    assert_includes out, "[Enter] action", "Enter footer hint must describe contextual behavior"
+    refute_includes out, "[Enter] open",   "Enter is not only an open action"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols
@@ -1199,18 +1201,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_open_input_editor_does_not_auto_dispatch_non_brainstorm_rows
+  def test_open_input_editor_does_not_auto_dispatch_non_auto_stages
+    # Stages other than 2-brainstorm and 3-plan have no auto-continue
+    # path; they must always take the manual InputEditorExited route.
     with_tmp_dir do |dir|
-      plan_md = File.join(dir, "plan.md")
-      File.write(plan_md, <<~MD)
+      task_md = File.join(dir, "task.md")
+      File.write(task_md, <<~MD)
         ## Round 1
         ### Q1. Scope?
-        ### A1. Complete-looking, but this is not brainstorm.
+        ### A1. Complete-looking, but this stage has no auto-continue.
       MD
       row = make_task_row(
-        stage: "3-plan",
-        state_file: plan_md,
-        suggested_command: "hive plan some-slug --from 3-plan"
+        stage: "4-execute",
+        state_file: task_md,
+        suggested_command: "hive develop some-slug --from 4-execute"
       )
       mtimes = [ 30.0, 31.0 ]
       @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
@@ -1223,6 +1227,190 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal 1, @messages.length
       assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
       assert_empty mtimes
+    end
+  end
+
+  # ---- Plan-stage auto-continue (3-plan) ----
+
+  def test_open_input_editor_advances_to_develop_when_plan_unchanged
+    # User opens plan.md, saves without changes → auto-advance to
+    # `hive develop`. The marker on disk is still `<!-- WAITING -->`
+    # (the agent thinks it has questions); the user is overriding by
+    # saving without editing.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, <<~MD)
+        # Plan
+        Some content the agent wrote.
+        <!-- WAITING -->
+      MD
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      # Editor is a no-op: opens, returns 0, file untouched (real
+      # File.mtime / File.read drive the comparison).
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 2, @messages.length,
+        "unchanged plan must dispatch [InputEditorExited, DispatchCommand for develop]"
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_kind_of Hive::Tui::Messages::DispatchCommand, @messages[1]
+      assert_equal "develop", @messages[1].verb
+      assert_equal(
+        [ "hive", "develop", "some-slug", "--from", "3-plan" ],
+        @messages[1].argv
+      )
+    end
+  end
+
+  def test_open_input_editor_revises_plan_when_user_added_feedback
+    # User adds inline feedback in the plan; auto-continue dispatches
+    # the row's existing `hive plan ... --from 3-plan` so the agent
+    # reads the comment and revises.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nOriginal content.\n<!-- WAITING -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      # Stub editor: writes a comment line into the plan, simulating
+      # the user's `:wq` after typing.
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        File.write(path, "# Plan\nOriginal content.\nUser feedback here.\n<!-- WAITING -->\n")
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 2, @messages.length,
+        "edited plan must dispatch [InputEditorExited, DispatchCommand for plan re-run]"
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_equal true, @messages[0].changed
+      assert_kind_of Hive::Tui::Messages::DispatchCommand, @messages[1]
+      assert_equal "plan", @messages[1].verb
+      assert_equal(
+        [ "hive", "plan", "some-slug", "--from", "3-plan" ],
+        @messages[1].argv
+      )
+    end
+  end
+
+  def test_open_input_editor_no_plan_action_when_marker_changed_to_complete
+    # Race: another actor advanced the plan to `<!-- COMPLETE -->`
+    # while the editor was open. Even if the user added content, do
+    # not auto-anything — surface a suppression flash so the user
+    # knows the captured row was stale.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nFinalised by another actor.\n<!-- COMPLETE -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        marker: "waiting", # row attr is stale; production reads marker from disk
+        suggested_command: "hive plan some-slug --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        File.write(path, "# Plan\nFinalised by another actor.\nuser-added.\n<!-- COMPLETE -->\n")
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 2, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1]
+      assert_match(/marker changed during edit/, @messages[1].text)
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+        "marker race must NOT auto-dispatch")
+    end
+  end
+
+  def test_open_input_editor_plan_stays_silent_when_editor_aborted
+    # SIGINT during edit on a plan row: take no auto action either way.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nContent.\n<!-- WAITING -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 130 } # SIGINT
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 1, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
+      assert_equal 130, @messages.first.exit_code
+    end
+  end
+
+  def test_open_input_editor_plan_with_malformed_suggested_command_falls_back_on_revise
+    # User added feedback (revise path) but suggested_command is
+    # malformed. Suppression flash keeps the user informed; no
+    # DispatchCommand fires.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nOriginal.\n<!-- WAITING -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        # Unbalanced quote → Shellwords.split raises ArgumentError.
+        suggested_command: %q(hive plan slug --note 'unclosed)
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        File.write(path, "# Plan\nOriginal.\nUser added.\n<!-- WAITING -->\n")
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal 2, @messages.length
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages[0]
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1]
+      assert_match(/malformed suggested command/, @messages[1].text)
+    end
+  end
+
+  def test_open_input_editor_plan_advance_falls_back_when_command_is_not_hive_plan
+    # `develop_command_from_plan` requires the suggested_command to
+    # start with `hive plan`. If the row is misconfigured (e.g. row
+    # builder bug), surface a suppression flash instead of crashing.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        # Missing `plan` verb — develop_command_from_plan must refuse.
+        suggested_command: "hive develop some-slug --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_kind_of Hive::Tui::Messages::Flash, @messages[1]
+      assert_match(/couldn't build develop command/, @messages[1].text)
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+        "misconfigured suggested_command must NOT spawn anything")
     end
   end
 

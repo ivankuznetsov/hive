@@ -83,7 +83,8 @@ module Hive
                    output_format_flags: [],
                    headless_supported: true, min_version: nil,
                    status_detection_mode: :output_file_exists,
-                   preflight: nil)
+                   preflight: nil,
+                   skill_verifier: nil)
       unless STATUS_DETECTION_MODES.include?(status_detection_mode)
         raise ArgumentError,
               "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
@@ -104,8 +105,26 @@ module Hive
       @min_version = min_version
       @status_detection_mode = status_detection_mode
       @preflight = preflight
+      @skill_verifier = skill_verifier
 
       freeze
+    end
+
+    # Verifies whether `invocation` (e.g. "/plan",
+    # "/compound-engineering:ce-plan") resolves to a real on-disk
+    # skill/command for this agent. Profiles supply a callable via the
+    # `skill_verifier:` constructor kwarg (typically one of the
+    # `Hive::SkillCheck::*` modules). When no verifier is supplied the
+    # default is `[:not_applicable, ...]` — the honest answer for an
+    # agent with no slash-command-resolution model.
+    #
+    # `project_root` lets profiles probe project-level overrides
+    # (`<repo>/.claude/skills/...` etc.); it may be nil for global
+    # checks.
+    def verify_skill(invocation, project_root: nil)
+      return [ :not_applicable, "no skill verifier configured for this profile" ] unless @skill_verifier
+
+      @skill_verifier.call(invocation, project_root: project_root)
     end
 
     # Resolved binary path: env override (if env_bin_override_key set and
@@ -236,7 +255,8 @@ module Hive
         headless_supported: @headless_supported,
         min_version: @min_version,
         status_detection_mode: @status_detection_mode,
-        preflight: @preflight
+        preflight: @preflight,
+        skill_verifier: @skill_verifier
       }
     end
 

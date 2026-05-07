@@ -91,7 +91,7 @@ Closes doc-review F3 (P0). The previous implementation was a **single-level** `H
 Rules:
 
 - **Hash + Hash** → recurse, key-by-key.
-- **Array** (any depth) → replace wholesale. Explicit semantic for `review.reviewers` per ADR-018 (see [[state-model]]); generalises to all Array-typed settings — per-element merge has ambiguous semantics for ordered lists.
+- **Array** (any depth) → replace wholesale. Per-element merge has ambiguous semantics for ordered lists (e.g. `review.reviewers`), so all Array-typed settings replace wholesale. (Earlier wiki/code comments misattributed this to ADR-018, which is actually the per-CLI-isolation trust-model amendment — unrelated.)
 - **Scalar / nil / type mismatch** → override wins.
 
 ## Validation (`Config.validate!`)

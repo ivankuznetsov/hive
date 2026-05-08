@@ -172,4 +172,180 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_match(/unknown subcommand/, err)
     end
   end
+
+  # ── enable / disable: per-project YAML toggle ─────────────────────────
+
+  # Sets up a HIVE_HOME with one registered project at <home>/proj
+  # carrying a minimal `.hive-state/config.yml`. Yields the env hash
+  # plus the project's config.yml path so each test can assert against
+  # the post-toggle YAML.
+  def with_registered_project(initial_yaml: "default_branch: main\n")
+    with_isolated_hive_home do |home, env|
+      project_root = File.join(home, "proj")
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      cfg_path = File.join(hive_state, "config.yml")
+      File.write(cfg_path, initial_yaml)
+      File.write(File.join(home, "config.yml"), {
+        "registered_projects" => [
+          { "name" => "proj", "path" => project_root, "hive_state_path" => hive_state }
+        ]
+      }.to_yaml)
+      yield(env, cfg_path, project_root)
+    end
+  end
+
+  def test_enable_sets_daemon_enabled_true_in_project_yaml
+    with_registered_project do |env, cfg_path, _root|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")
+      assert_equal 0, status.exitstatus
+      assert_match(/enabled proj/, out)
+
+      data = YAML.safe_load(File.read(cfg_path))
+      assert_equal true, data.dig("daemon", "enabled")
+      assert_equal "main", data["default_branch"], "must preserve other keys"
+    end
+  end
+
+  def test_disable_sets_daemon_enabled_false
+    with_registered_project(initial_yaml: <<~YAML) do |env, cfg_path, _root|
+      default_branch: main
+      daemon:
+        enabled: true
+    YAML
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "disable", "proj")
+      assert_equal 0, status.exitstatus
+      assert_match(/disabled proj/, out)
+      data = YAML.safe_load(File.read(cfg_path))
+      assert_equal false, data.dig("daemon", "enabled")
+    end
+  end
+
+  def test_enable_is_idempotent_and_preserves_unrelated_daemon_keys
+    # Pre-existing daemon block with non-default tunables — enable
+    # must NOT clobber them, only flip `enabled`.
+    with_registered_project(initial_yaml: <<~YAML) do |env, cfg_path, _root|
+      default_branch: main
+      daemon:
+        enabled: false
+        poll_interval_sec: 60
+        max_concurrent_runs: 5
+    YAML
+      _out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")
+      assert_equal 0, status.exitstatus
+      data = YAML.safe_load(File.read(cfg_path))
+      assert_equal true, data.dig("daemon", "enabled")
+      assert_equal 60, data.dig("daemon", "poll_interval_sec"), "tunables preserved"
+      assert_equal 5, data.dig("daemon", "max_concurrent_runs"), "tunables preserved"
+    end
+  end
+
+  def test_enable_rejects_malformed_project_yaml_as_config_error
+    with_registered_project(initial_yaml: "daemon:\n  enabled: [\n") do |env, _cfg_path, _root|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_match(/not valid YAML/, err)
+      refute_match(/Psych::SyntaxError/, err)
+    end
+  end
+
+  def test_enable_rejects_non_hash_project_yaml_without_overwriting
+    original = "- not\n- a\n- hash\n"
+    with_registered_project(initial_yaml: original) do |env, cfg_path, _root|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_match(/must be a hash/, err)
+      assert_equal original, File.read(cfg_path)
+    end
+  end
+
+  def test_enable_missing_target_without_all_exits_usage
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable")
+      assert_equal 64, status.exitstatus
+      assert_match(/missing PROJECT/, err)
+    end
+  end
+
+  def test_enable_unknown_project_exits_usage
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "nope")
+      assert_equal 64, status.exitstatus
+      assert_match(/unknown project "nope"/, err)
+    end
+  end
+
+  def test_enable_all_targets_every_registered_project
+    with_isolated_hive_home do |home, env|
+      projects = %w[a b c].map do |name|
+        root = File.join(home, name)
+        FileUtils.mkdir_p(File.join(root, ".hive-state"))
+        File.write(File.join(root, ".hive-state", "config.yml"), "default_branch: main\n")
+        { "name" => name, "path" => root, "hive_state_path" => File.join(root, ".hive-state") }
+      end
+      File.write(File.join(home, "config.yml"), { "registered_projects" => projects }.to_yaml)
+
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "--all")
+      assert_equal 0, status.exitstatus
+      %w[a b c].each do |name|
+        assert_match(/enabled #{name}/, out)
+        data = YAML.safe_load(File.read(File.join(home, name, ".hive-state", "config.yml")))
+        assert_equal true, data.dig("daemon", "enabled"), "#{name} must be enabled"
+      end
+    end
+  end
+
+  def test_disable_all_preflights_every_project_before_writing
+    with_isolated_hive_home do |home, env|
+      projects = %w[a broken c].map do |name|
+        root = File.join(home, name)
+        hive_state = File.join(root, ".hive-state")
+        unless name == "broken"
+          FileUtils.mkdir_p(hive_state)
+          File.write(File.join(hive_state, "config.yml"), <<~YAML)
+            default_branch: main
+            daemon:
+              enabled: true
+          YAML
+        end
+        { "name" => name, "path" => root, "hive_state_path" => hive_state }
+      end
+      File.write(File.join(home, "config.yml"), { "registered_projects" => projects }.to_yaml)
+
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "disable", "--all")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_match(/missing .*broken.*config.yml/, err)
+
+      %w[a c].each do |name|
+        data = YAML.safe_load(File.read(File.join(home, name, ".hive-state", "config.yml")))
+        assert_equal true, data.dig("daemon", "enabled"), "#{name} must not be changed after preflight failure"
+      end
+    end
+  end
+
+  def test_enable_all_with_empty_registry_exits_usage
+    with_isolated_hive_home do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "--all")
+      assert_equal 64, status.exitstatus
+      assert_match(/no registered projects/, err)
+    end
+  end
+
+  def test_enable_json_envelope_shape
+    with_registered_project do |env, _cfg_path, _root|
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "enable", "proj", "--json")
+      assert_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-enroll", doc["schema"]
+      assert_equal 1, doc["schema_version"]
+      assert_equal true, doc["ok"]
+      assert_equal "enable", doc["subcommand"]
+      assert_equal 1, doc["results"].size
+      result = doc["results"].first
+      assert_equal "proj", result["name"]
+      assert_nil result["previous"], "previous was unset (no daemon block) → nil"
+      assert_equal true, result["current"]
+    end
+  end
 end

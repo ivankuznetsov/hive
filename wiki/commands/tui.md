@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-05-06T17:30:00Z
+updated: 2026-05-07T22:45:00Z
 tags: [command, tui, observability, interactive]
 ---
 
@@ -25,7 +25,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │                 │                                                        │
 │  ★ All projects │  ▶  fix-cache-…   2-brainstorm  Ready to plan      2h │
 │  hive           │  🤖 metrics-…     4-execute     Agent running       1m │
-│  myapp     │  ⚠  oauth-…       5-review      Review findings     1h │
+│  myapp          │  ⚠  oauth-…       5-review      Review findings     1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
 │ Footer: [Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q]│
@@ -61,7 +61,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `r` | run `hive review` |
 | `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
 | `a` | run `hive archive` |
-| `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` / `error`; ready rows still dispatch the suggested command |
+| `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` / `error`, clear + rerun on review recovery rows; ready rows still dispatch the suggested command |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -114,6 +114,8 @@ Workflow verbs default to background dispatch: `Hive::Tui::Subprocess.dispatch_b
 Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_command(argv, dispatch:)`, which returns a `Bubbletea::SequenceCommand` of three steps: exit alt-screen, run a callable synchronously inside the framework's suspend window (raw mode disabled, cursor shown, input reader stopped), then re-enter alt-screen. The callable spawns the child with stdio inherited, blocks on `Process.wait2`, and dispatches `Messages::SubprocessExited(verb:, exit_code:)` so the user sees the same flash. Used only for verbs that genuinely need the tty.
 
 `needs_input` rows use the same alt-screen suspension pattern, but for the row's input file instead of a workflow verb. Pressing `Enter` opens the stage state file (`brainstorm.md`, `plan.md`, `task.md`, `pr.md`) in `$VISUAL`, `$EDITOR`, or `vi` so the user can fill inline answers. For `:review_waiting`, the editor targets reviewer-authored files for the pass because those are what the resume path reads for `[x]` decisions; when there are multiple candidate files or a fix-guardrail inspection gate, it opens the `reviews/` directory instead. The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash can distinguish a saved edit from a no-op cancel. Brainstorm rows get one extra convenience: if the editor exits cleanly, the file changed, the current file marker is still `WAITING` / `none`, and the latest `## Round N` has every `### Qn` paired with a non-empty `### An`, the TUI dispatches the row's existing `hive brainstorm ... --from 2-brainstorm` suggested command automatically. Partial answers, stale rows whose marker changed while the editor was open, and non-brainstorm input states stay manual; workflow verb keys (`b` / `p` / `d` / `r` / `P`) remain the explicit rerun path.
+
+`recover_review` rows show the observed recovery cause in the status column (for example `triage_failed` from `<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=2 -->`) instead of the generic `Needs recovery` label; control bytes and ANSI CSI escapes embedded in the reason are stripped through `Hive::Tui::Text.sanitize` before render so a stdout-tail snippet captured into the marker cannot corrupt column alignment or hijack the cursor. Pressing `Enter` sequences the documented CLI recovery flow on a background worker thread (mirroring `auto_heal_kill_class_errors` so the bubbletea render loop never blocks on `run_quiet!`'s 30 s upper bound): first `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_STALE|REVIEW_CI_STALE`, guarded with one observed `--match-attr` when available, then `hive run <folder>` in the normal background-spawn path. The synchronous return flashes `review recovery: clearing <detail>…`; the worker dispatches a follow-up `Messages::Flash` with the final result. A second `Enter` on the same folder while the worker is still in flight refuses with an `already in progress` flash instead of firing duplicate clear+rerun pairs (per-folder dedup tracked on `@review_recovery_inflight`, evicted in the worker's `ensure` block on completion). If the marker clear fails for any reason (concurrent-writer race via `--match-attr`, missing folder, transient I/O, etc.) the rerun is skipped and the captured stderr is flashed. If the clear succeeds but the rerun dispatch raises (Errno-class I/O failure, subprocess timeout) the flash explicitly says `marker cleared, but \`hive run\` failed to start: <reason>; run \`hive run <folder>\` manually` so the operator knows the system is half-cleared and which command will recover. Programmer errors (NoMethodError / NameError / ArgumentError) inside the worker are intentionally NOT swallowed by the rescue — only `SystemCallError`, `IOError`, and `Hive::Tui::Subprocess::TimeoutError` are caught — so logic bugs surface in logs instead of being misattributed to a recovery failure.
 
 Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — a bounded captured-stdio child runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line; a hung helper is terminated as a process group and reported as exit 124.
 

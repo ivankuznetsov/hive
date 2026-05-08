@@ -122,6 +122,11 @@ module Hive
       # Enter on an `agent_running` row — push log-tail mode for `row`.
       OpenLogTail = Data.define(:row)
 
+      # Enter on a `recover_review` row — clear the observed review
+      # recovery marker via `hive markers clear`, then re-run the task
+      # via `hive run <folder>` if the clear succeeds.
+      RecoverReview = Data.define(:row)
+
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or
       # revise inline questions before re-running the stage.

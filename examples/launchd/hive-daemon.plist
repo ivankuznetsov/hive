@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample launchd plist for `hive daemon` (macOS).
+
+  Install:
+    mkdir -p ~/Library/LaunchAgents
+    cp examples/launchd/hive-daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/hive-daemon.plist
+
+  View logs:
+    tail -f ~/Library/Logs/hive-daemon.{out,err}.log    # launchd capture
+    hive daemon tail                                    # daemon's JSON-line log
+
+  Stop / restart:
+    launchctl unload ~/Library/LaunchAgents/hive-daemon.plist
+    launchctl load   ~/Library/LaunchAgents/hive-daemon.plist
+
+  Note the absolute-path requirement: launchd doesn't read your shell's
+  rc files, so the `hive` binary must be invoked at its real location.
+  Replace `/Users/YOU/.local/bin/hive` with the path on your machine
+  (run `which hive` to find it). If installed via rbenv / asdf / mise,
+  point at the corresponding shim.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- launchd Labels are conventionally reverse-DNS strings owned by
+       the publisher. Apple's `local.*` namespace is reserved for
+       per-user plists with no DNS-backed identity, so it's the right
+       neutral default for a sample. Customise to your own reverse-DNS
+       (e.g., `com.example.hive-daemon`) if you want clear ownership. -->
+  <key>Label</key>
+  <string>local.hive-daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/hive</string>
+    <string>daemon</string>
+    <string>start</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/hive-daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/hive-daemon.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

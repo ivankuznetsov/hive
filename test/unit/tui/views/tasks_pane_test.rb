@@ -12,14 +12,15 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def make_task(slug:, stage: "2-brainstorm", action: "ready_to_plan",
                 action_label: "Ready to plan", age: 120,
-                marker: "complete", suggested: "hive plan #{slug} --from 2-brainstorm")
+                marker: "complete", attrs: {},
+                suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
       "marker" => marker,
-      "attrs" => {},
+      "attrs" => attrs,
       "mtime" => "2026-05-01T00:00:00Z",
       "age_seconds" => age,
       "claude_pid" => nil,
@@ -73,6 +74,109 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "3-plan",           "stage column must render"
     assert_includes out, "Needs your input", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_recover_review_status_shows_marker_reason
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "recover-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "triage_failed",
+                    "review recovery rows must show the exact marker reason, not generic status text"
+    refute_includes out, "Needs recovery"
+  end
+
+  def test_recover_review_status_falls_back_to_marker_when_reason_missing
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "recover-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: {},
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "review_stale",
+                    "review recovery rows must fall back to the marker name when no reason attr is present"
+    refute_includes out, "Needs recovery"
+  end
+
+  def test_recover_review_status_falls_back_to_action_label_when_marker_blank
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "recover-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "",
+          attrs: {},
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "Needs recovery",
+                    "review recovery rows must fall back to action_label when both reason and marker are blank"
+  end
+
+  def test_status_label_non_recover_review_ignores_reason_attr
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "broken-task",
+          stage: "5-review",
+          action: "error",
+          action_label: "Error",
+          marker: "review_error",
+          attrs: { "reason" => "should_not_appear" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "Error",
+                    "non-recover_review rows must keep their action_label as status"
+    refute_includes out, "should_not_appear",
+                     "non-recover_review rows must not surface attrs[reason] in the status column"
+  end
+
+  def test_recover_review_status_strips_control_chars_and_ansi_escapes
+    # Operator-supplied marker reasons can carry control bytes (CR/LF
+    # from a stdout-tail snippet) or ANSI CSI escapes that would
+    # corrupt lipgloss column alignment or hijack the cursor. The
+    # status column must sanitise both before rendering.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "tainted-task",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: { "reason" => "bad\x1b[31mansi\x1b[0m\nNL" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    refute_match(/\e\[/, out, "ANSI CSI escapes must be stripped from the status column")
+    refute_match(/\nNL/, out, "embedded newlines must not bleed into the status column")
   end
 
   def test_action_keys_pick_distinct_icons

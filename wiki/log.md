@@ -28,6 +28,16 @@ Append-only log of all wiki operations.
 
 **Coverage:** new pi glob-metacharacter test (`/skill:foo*` vs `/skill:foobar`); `test/unit/stages/skill_invocation_format_test.rb` now requires `hive/config` so it runs in isolation. Existing pi/claude/codex tests still pass.
 
+
+## [2026-05-07T22:45:00Z] tui — Review recovery hardening (off-thread, dedup, sanitize, narrow rescue, partial-failure flash)
+
+**Action:** Hardened the Enter-driven review recovery handler in `lib/hive/tui/bubble_model.rb` based on `/ce-code-review` actionable findings. (1) The clear+rerun sequence now runs on a background worker thread mirroring `spawn_heal_thread`; the bubbletea update loop returns immediately with a `review recovery: clearing <detail>…` flash and the worker dispatches a follow-up `Messages::Flash` via `@dispatch` on completion. This removes the previously-blocking 30 s `run_quiet!` upper bound from the render loop. (2) Per-folder dedup via `@review_recovery_inflight` (Set, mutex-protected) refuses a second `Enter` while the first worker is in flight with an `already in progress` flash. (3) `Hive::Tui::Subprocess.dispatch_background` is wrapped in its own narrow rescue inside the worker so a failure AFTER the marker clear succeeded surfaces as `marker cleared, but \`hive run\` failed to start: <reason>; run \`hive run <folder>\` manually` — the operator sees a half-cleared state explicitly instead of the misleading old "review recovery failed" attribution. (4) The outer rescue narrows from `StandardError` to `SystemCallError | IOError | Hive::Tui::Subprocess::TimeoutError` so programmer errors (NoMethodError/NameError/ArgumentError) crash the worker thread loud instead of being silently captured into a flash. (5) Operator-supplied marker reasons are stripped of control bytes (0x00–0x1F + 0x7F) and ANSI CSI escapes via a new `Hive::Tui::Text.sanitize` helper before being rendered into the status column or the flash detail; previously a stdout-tail snippet stored in the marker could corrupt lipgloss column alignment.
+
+**Punted:** `--match-attr` aliasing on `REVIEW_ERROR(phase=ci)` markers (the snapshot's `pass` attr is absent so the guard falls back to a lower-cardinality key). The synthesis listed two design options — extend `hive markers clear` to accept multiple `--match-attr` pairs, OR add a high-cardinality `created_at` attr to all `Hive::Markers.set(:review_*)` call sites in `lib/hive/stages/review.rb` (~13 sites). Both options touch surfaces beyond a single fixer pass and warrant explicit design input.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+
 ## [2026-05-07T22:00:00Z] doctor — pi gets a real skill verifier; pi's `skill_syntax_format` corrected
 
 **Action:** Two related fixes for pi.
@@ -44,6 +54,14 @@ Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `
 
 **Refreshed pages:**
 - `README.md` — pi row in the skills table now describes pi's actual model (with `~/.pi/agent/skills/`, `~/.agents/skills/`, etc.) and the `/skill:<name>` invocation form.
+
+
+## [2026-05-07T20:17:15Z] tui — Enter-driven review recovery
+
+**Action:** Made `recover_review` rows actionable from the TUI. The status column now renders the exact observed recovery reason when the marker carries one (for example `triage_failed` from `REVIEW_ERROR phase=triage reason=triage_failed pass=2`) instead of the generic `Needs recovery` label. `Enter` on the row now clears the observed review recovery marker via `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_STALE|REVIEW_CI_STALE`, includes one available `--match-attr` guard to avoid clearing a newer concurrent marker, and only then dispatches `hive run <folder>` through the existing background subprocess path. A failed marker clear flashes the captured error and does not rerun.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
 
 
 ## [2026-05-07T17:30:00Z] doctor — probe `review.reviewers[]` + non-fatal init preflight
@@ -66,6 +84,7 @@ Also restored `Hive::SkillCheck.glob_escape` (escapes `*`, `?`, `[`, `]`, `{`, `
 
 **Refreshed pages:**
 - `README.md` — Required slash-commands / skills section now also lists the recommended reviewer set + documents the init-preflight behavior.
+
 
 ## [2026-05-07T15:30:00Z] config — `hive doctor` skill preflight + per-agent verifiers
 
@@ -115,6 +134,21 @@ Coverage: 6 new BubbleModel integration tests for the plan path (advance-on-unch
 
 **Refreshed pages:**
 - `wiki/commands/tui.md` — Subprocess dispatch section names the plan-stage auto-continue alongside brainstorm; Modes table notes "completed plans auto-advance, edited plans auto-revise."
+
+## [2026-05-07T00:00:00Z] daemon — enrollment subcommands + macOS/Linux autostart guide
+
+**Action:** Added `hive daemon enable PROJECT|--all` and `hive daemon disable` so existing projects (initialised before ADR-024 / PR #40) can be enrolled in the auto-advancing pipeline without hand-editing YAML. The toggle is an atomic write to `<project>/.hive-state/config.yml` (tempfile + rename) that preserves every other key, including pre-existing `daemon:` tunables (`poll_interval_sec`, `max_concurrent_runs`, etc.). `--all` iterates `Hive::Config.registered_projects`. Closed `--json` envelope (`hive-daemon-enroll.v1`) carries per-project `previous` and `current` values so scripted callers can diff. Exit 64 (`USAGE`) on missing/unknown target. The dispatcher's per-tick enable-cache invalidation (PR-40 follow-up #2) means the new flag takes effect within one `poll_interval_sec` automatically — `hive daemon reload` is optional. Closes the operator gap "I have existing projects, how do I enroll them?" without requiring a `hive init`-style re-bootstrap.
+
+Also added the autostart install path for both supported platforms. New page [[operating]] is the day-2 guide: prerequisites (claude / gh / /proc-or-ps), per-project enrollment, the mandatory `--dry-run` shakedown with `jq` filters for inspecting `daemon.log`, autostart on Linux (systemd-user; sample unit at `examples/systemd/hive-daemon.service`) and macOS (launchd; sample plist at `examples/launchd/hive-daemon.plist`), tuning concurrency, cost-runaway response, and a troubleshooting block. The systemd unit declares `Type=simple` + `Restart=on-failure` + `KillMode=mixed` so SIGTERM forwards through the PGID and the daemon's own graceful drain (`shutdown_grace_sec`) runs. The launchd plist uses `KeepAlive` with `SuccessfulExit: false` so a clean `hive daemon stop` doesn't trigger a respawn.
+
+Closes the dangling `wiki/operating.md once that page lands` reference flagged by the comment-analyzer review of PR #40.
+
+**Refreshed pages:**
+- New: [[operating]] — full install + autostart guide.
+- New: `examples/systemd/hive-daemon.service`, `examples/launchd/hive-daemon.plist`.
+- [[commands/daemon]] — added `enable`/`disable` rows to the subcommand table; replaced the dangling-reference paragraph with explicit links to the new examples + operating guide.
+- [[cli]] — daemon command-table row mentions enable/disable + points at [[operating]].
+- [[index]] — added [[operating]] under Top level; updated the [[commands/daemon]] one-liner.
 
 
 ## [2026-05-06T23:00:00Z] tui — surface auto-continue suppression reasons + tighten rescues

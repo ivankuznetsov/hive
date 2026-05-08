@@ -128,6 +128,16 @@ module Hive
       # report the manual pass-cleanup step and leave the marker intact.
       RecoverReview = Data.define(:row)
 
+      # Enter on an `error` row whose marker is a non-kill-class ERROR.
+      # Kill-class signal kills (130/137/143) are auto-healed elsewhere;
+      # this message handles real failures (exit_code=1 etc.) the
+      # auto-healer deliberately leaves alone. The handler clears the
+      # ERROR marker via `hive markers clear --name ERROR --match-attr
+      # exit_code=N` and re-runs the task with `hive run <folder>` if
+      # the clear succeeds. Mirrors RecoverReview so the user keeps a
+      # uniform "Enter to retry" gesture across recoverable failures.
+      RecoverError = Data.define(:row)
+
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or
       # revise inline questions before re-running the stage.

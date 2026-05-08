@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "hive/commands/approve"
+require "hive/commands/daemon"
 require "hive/commands/forget"
 require "hive/commands/prune"
 require "hive/commands/run"
@@ -688,5 +689,248 @@ class SchemaFilesTest < Minitest::Test
     }
     refute schemer.valid?(payload),
            "schema must reject error_kind values outside PruneErrorKind::ALL"
+  end
+
+  # ── hive-daemon-status ─────────────────────────────────────────────────
+
+  def test_hive_daemon_status_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-daemon-status")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-daemon-status",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_daemon_status_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-status")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    # The producer's exhaustive key set (kept in sync with
+    # Hive::Commands::Daemon#status_daemon's JSON.generate call).
+    producer_required = %w[
+      schema schema_version ok running pid uptime_sec pid_file log_file
+    ].sort
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-daemon-status.v1.json"
+  end
+
+  # ── hive-daemon-stop ───────────────────────────────────────────────────
+
+  def test_hive_daemon_stop_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-daemon-stop")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-daemon-stop",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_daemon_stop_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-stop")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    # Producer emits via stop_envelope which calls .compact, so optional
+    # keys (stale_pid, reason) may be absent.
+    producer_required = %w[schema schema_version ok running was_running].sort
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-daemon-stop.v1.json"
+  end
+
+  def test_hive_daemon_stop_reason_enum_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-stop")))
+    schema_reasons = doc.dig("$defs", "SuccessPayload", "properties", "reason", "enum").sort
+    # Reasons emitted by the three refusal branches in stop_daemon:
+    # pid_reused / unverified (PID-reuse defense), malformed_pid_file
+    # (PID file exists but unparseable).
+    producer_reasons = %w[pid_reused unverified malformed_pid_file].sort
+    assert_equal producer_reasons, schema_reasons
+  end
+
+  # ── hive-daemon-reload ─────────────────────────────────────────────────
+
+  def test_hive_daemon_reload_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-daemon-reload")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-daemon-reload",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_daemon_reload_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-reload")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    # Producer emits via reload_envelope which calls .compact; only
+    # always-present keys are required. pid/reason are optional.
+    producer_required = %w[schema schema_version ok message].sort
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-daemon-reload.v1.json"
+  end
+
+  def test_hive_daemon_reload_reason_enum_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-reload")))
+    schema_reasons = doc.dig("$defs", "SuccessPayload", "properties", "reason", "enum").sort
+    # Reasons emitted by the four refusal branches in compute_reload_outcome.
+    producer_reasons = %w[not_running pid_dead pid_reused unverified].sort
+    assert_equal producer_reasons, schema_reasons
+  end
+
+  # ── hive-daemon-enroll ─────────────────────────────────────────────────
+
+  def test_hive_daemon_enroll_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-daemon-enroll")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-daemon-enroll",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_daemon_enroll_success_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    # The producer always emits these. `next_action` is OPTIONAL in v1
+    # because PR #45's earlier v1 producer shipped without it; making
+    # next_action required now would silently break consumers pinned
+    # to PR #45's envelope shape. A future v2 may promote it.
+    producer_required = %w[schema schema_version ok subcommand results].sort
+    assert_equal producer_required, schema_required,
+                 "schema/producer required-key drift in hive-daemon-enroll.v1.json (envelope)"
+
+    item_required = doc.dig("$defs", "Result", "required").sort
+    item_producer = %w[name path previous current config_yml].sort
+    assert_equal item_producer, item_required,
+                 "schema/producer required-key drift in hive-daemon-enroll.v1.json (Result)"
+  end
+
+  # Although next_action is OPTIONAL on v1, the current producer always
+  # emits it; that emission must validate against the schema. This pins
+  # the additive shape so a future change can't drop next_action from
+  # the producer without first updating the schema (or a future v2).
+  def test_hive_daemon_enroll_success_with_next_action_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll"))))
+    payload = {
+      "schema" => "hive-daemon-enroll",
+      "schema_version" => 1,
+      "ok" => true,
+      "subcommand" => "enable",
+      "results" => [
+        { "name" => "p", "path" => "/tmp/p", "previous" => false,
+          "current" => true, "config_yml" => "/tmp/p/.hive-state/config.yml" }
+      ],
+      "next_action" => {
+        "kind" => "reload",
+        "command" => "hive daemon reload",
+        "required" => false,
+        "reason" => "daemon picks up daemon.enabled changes within poll_interval_sec"
+      }
+    }
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "current producer payload (with next_action) must validate"
+  end
+
+  # The original PR #45 v1 envelope shape (no next_action) is also
+  # valid v1 — we did not introduce a silent breaking change by
+  # adding the field.
+  def test_hive_daemon_enroll_pr45_legacy_shape_still_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll"))))
+    legacy_payload = {
+      "schema" => "hive-daemon-enroll",
+      "schema_version" => 1,
+      "ok" => true,
+      "subcommand" => "enable",
+      "results" => [
+        { "name" => "p", "path" => "/tmp/p", "previous" => nil,
+          "current" => true, "config_yml" => "/tmp/p/.hive-state/config.yml" }
+      ]
+    }
+    errors = schemer.validate(legacy_payload).map { |e| e["error"] }
+    assert_empty errors, "PR #45's no-next_action envelope shape must still validate as v1 " \
+                         "(otherwise this PR is a silent breaking change)"
+  end
+
+  def test_hive_daemon_enroll_subcommand_enum_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll")))
+    schema_verbs = doc.dig("$defs", "SuccessPayload", "properties", "subcommand", "enum").sort
+    assert_equal %w[disable enable], schema_verbs
+  end
+
+  def test_hive_daemon_enroll_next_action_kind_enum_pinned
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll")))
+    schema_kinds = doc.dig("$defs", "NextAction", "properties", "kind", "enum").sort
+    # Producer emits one of these two from enroll_next_action.
+    producer_kinds = %w[no_op reload].sort
+    assert_equal producer_kinds, schema_kinds,
+                 "schema/producer drift in hive-daemon-enroll NextAction.kind enum"
+  end
+
+  def test_hive_daemon_enroll_error_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Schemas::EnrollErrorKind::ALL.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror Hive::Schemas::EnrollErrorKind::ALL"
+  end
+
+  def test_hive_daemon_enroll_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll"))))
+    cases = {
+      Hive::Schemas::EnrollErrorKind::MISSING_PROJECT =>
+        Hive::Commands::Daemon::UsageError.new(
+          "missing", error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
+        ),
+      Hive::Schemas::EnrollErrorKind::UNKNOWN_PROJECT =>
+        Hive::Commands::Daemon::UsageError.new(
+          "unknown", error_kind: Hive::Schemas::EnrollErrorKind::UNKNOWN_PROJECT
+        ),
+      Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL =>
+        Hive::Commands::Daemon::UsageError.new(
+          "both", error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+        ),
+      Hive::Schemas::EnrollErrorKind::NOT_INITIALISED =>
+        Hive::Commands::Daemon::UsageError.new(
+          "not init", error_kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
+        ),
+      Hive::Schemas::EnrollErrorKind::NO_PROJECTS =>
+        Hive::Commands::Daemon::UsageError.new(
+          "empty", error_kind: Hive::Schemas::EnrollErrorKind::NO_PROJECTS
+        ),
+      Hive::Schemas::EnrollErrorKind::CONFIG => Hive::ConfigError.new("bad config"),
+      Hive::Schemas::EnrollErrorKind::INTERNAL => Hive::InternalError.new("boom")
+    }
+    cases.each do |kind, error|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-daemon-enroll",
+        error: error,
+        error_kind: kind
+      )
+      assert schemer.valid?(payload),
+             "hive-daemon-enroll ErrorPayload arm must accept error_kind=#{kind.inspect} (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_hive_daemon_enroll_error_payload_rejects_unknown_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll"))))
+    payload = {
+      "schema" => "hive-daemon-enroll",
+      "schema_version" => 1,
+      "ok" => false,
+      "error_class" => "MysteryError",
+      "error_kind" => "made_up_kind",
+      "exit_code" => 1,
+      "message" => "nope"
+    }
+    refute schemer.valid?(payload),
+           "schema must reject error_kind values outside EnrollErrorKind::ALL"
   end
 end

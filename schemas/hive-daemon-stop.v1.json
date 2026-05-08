@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-daemon-stop.v1.json",
+  "title": "hive daemon stop output (v1)",
+  "description": "Stable contract emitted by `hive daemon stop --json`. Idempotent: a stop against a non-running daemon returns ok=true with running=false. PID-reuse and unverified-ownership outcomes set `reason` and refuse to send signals.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "running",
+        "was_running"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-stop" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "running": {
+          "type": "boolean",
+          "description": "True only if the daemon is still running after the stop attempt (e.g., refused signal due to unverified ownership)."
+        },
+        "was_running": {
+          "type": "boolean",
+          "description": "True if a live, ownership-verified daemon was actually signalled by this call."
+        },
+        "stale_pid": {
+          "type": [ "integer", "null" ],
+          "description": "PID found in the PID file when it was stale (dead, reused, or unverified). Optional; only present when stop encountered a stale entry."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [ "pid_reused", "unverified", "malformed_pid_file" ],
+          "description": "Why the PID file was treated as stale. `pid_reused` = recorded process_start_time differs from live; `unverified` = either side nil so ownership cannot be proved; `malformed_pid_file` = PID file exists but cannot be parsed as a valid PID. Optional; absent on the simple stop / not-running path."
+        }
+      }
+    }
+  }
+}

@@ -403,15 +403,19 @@ module Hive
     desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / enable / disable)"
     long_desc <<~DESC
       Subcommands:
-        start [--detach] [--dry-run]   Run the dispatcher loop. Without
-                                       --detach, runs in the foreground.
-        stop                           Send SIGTERM to the running daemon.
-        status [--json]                Show running / not-running.
-        reload                         Send SIGHUP to reload config.
-        tail                           Stream daemon.log.
-        enable PROJECT  | --all        Set daemon.enabled: true in
-                                       <project>/.hive-state/config.yml.
-        disable PROJECT | --all        Set daemon.enabled: false there.
+        start [--detach] [--dry-run]      Run the dispatcher loop. Without
+                                          --detach, runs in the foreground.
+        stop [--json]                     Send SIGTERM to the running daemon.
+                                          --json emits hive-daemon-stop.v1.
+        status [--json]                   Show running / not-running.
+        reload [--json]                   Send SIGHUP to reload config.
+                                          --json emits hive-daemon-reload.v1.
+        tail                              Stream daemon.log.
+        enable  PROJECT|--all [--json]    Set daemon.enabled: true in
+                                          <project>/.hive-state/config.yml.
+                                          --all = every registered project;
+                                          --json emits hive-daemon-enroll.v1.
+        disable PROJECT|--all [--json]    Set daemon.enabled: false there.
 
       The daemon polls `hive status --json` periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
@@ -423,10 +427,16 @@ module Hive
       projects; for projects that pre-date the daemon, run
       `hive daemon enable <project>` (or `--all`).
 
-      Exit codes: 0 success; 1 daemon-not-running for `status`/`reload`
-      when no daemon is up; 64 (USAGE) for `enable`/`disable` against an
-      unknown project; 75 (TEMPFAIL) when `start` finds an existing live
-      daemon.
+      Exit codes: 0 success; 1 daemon-not-running — `reload` exits 1 when
+      no daemon is up (caller MUST start one first); `stop` is idempotent
+      and exits 0 in the same condition (re-running stop is always safe);
+      `status` exits 1 to make it scriptable as a precondition probe.
+      64 (USAGE) for `enable`/`disable` against an
+      unknown project, missing PROJECT, conflicting PROJECT+--all, or an
+      uninitialised project; 70 (SOFTWARE) for uncategorised internal
+      errors; 75 (TEMPFAIL) when `start` finds an existing live daemon;
+      78 (CONFIG) when `enable`/`disable` reads malformed config.yml or
+      rejects an inline-flow / non-2-space-indented `daemon:` block.
 
       See `wiki/commands/daemon.md`, `wiki/operating.md`, and ADR-024.
     DESC
@@ -435,15 +445,63 @@ module Hive
                      desc: "log dispatch decisions without spawning real children"
     option :all, type: :boolean, default: false,
                  desc: "for enable/disable: apply to every registered project"
-    def daemon(subcommand, target = nil)
+    def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
+      # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
+      # call_with_envelope inside the command can't catch them. Emit
+      # the hive-daemon-enroll ErrorPayload inline under --json so
+      # agents get the same structured envelope as in-command failures.
+      if subcommand.nil?
+        emit_daemon_argv_error(
+          subcommand: nil,
+          message: "hive daemon: missing SUBCOMMAND " \
+                   "(expected: #{Hive::Commands::Daemon::VALID_SUBCOMMANDS.join(', ')})",
+          error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
+        )
+      end
+      if targets.length > 1
+        emit_daemon_argv_error(
+          subcommand: subcommand,
+          message: "hive daemon #{subcommand}: too many positional arguments " \
+                   "#{targets.inspect}; expected exactly one PROJECT (or --all)",
+          error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+        )
+      end
       Hive::Commands::Daemon.new(
-        subcommand, target,
+        subcommand, targets.first,
         detach: options[:detach],
         dry_run: options[:dry_run],
         all: options[:all],
         json: options[:json]
       ).call
+    end
+
+    no_commands do
+      # Emit a hive-daemon-enroll ErrorPayload to stdout when --json is
+      # set, then raise so the bin/hive top-level rescue maps to the
+      # right exit code. UsageError carries the closed error_kind so
+      # the envelope matches every other --json failure on this surface.
+      def emit_daemon_argv_error(subcommand:, message:, error_kind:)
+        require "hive/commands/daemon"
+        require "json"
+        error = Hive::Commands::Daemon::UsageError.new(message, error_kind: error_kind)
+        if options[:json]
+          payload = Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-daemon-enroll",
+            error: error,
+            error_kind: error_kind
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE, JSON::GeneratorError
+            # caller went away or payload not serialisable — fall
+            # through to the bare-text rescue path below.
+          end
+        else
+          warn message
+        end
+        raise error
+      end
     end
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"

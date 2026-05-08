@@ -16,7 +16,11 @@ module Hive
       "hive-metrics-rollback-rate" => 1,
       "hive-markers-clear" => 1,
       "hive-forget" => 1,
-      "hive-prune" => 1
+      "hive-prune" => 1,
+      "hive-daemon-status" => 1,
+      "hive-daemon-stop" => 1,
+      "hive-daemon-enroll" => 1,
+      "hive-daemon-reload" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use
@@ -153,11 +157,12 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget` and `Hive::Commands::Prune`.
-    # The eight pre-existing emit sites (Approve, Markers, Metrics,
-    # FindingToggle, Status, Run, Findings, StageAction) have not yet
-    # been migrated — see Issue for the full sweep. This module exists
-    # so new emit sites do not add an 11th copy.
+    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`, and
+    # `Hive::Commands::Daemon` (enable/disable). The eight pre-existing
+    # emit sites (Approve, Markers, Metrics, FindingToggle, Status, Run,
+    # Findings, StageAction) have not yet been migrated — see Issue for
+    # the full sweep. This module exists so new emit sites do not add
+    # an 11th copy.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
@@ -195,6 +200,34 @@ module Hive
     module ForgetErrorKind
       MISSING_NAME    = "missing_name".freeze
       UNKNOWN_PROJECT = "unknown_project".freeze
+      CONFIG          = "config".freeze
+      INTERNAL        = "internal".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive daemon enable`
+    # / `hive daemon disable --json`. Each value maps 1:1 to a failure
+    # mode in Hive::Commands::Daemon#set_enabled. Same self-derived ALL
+    # pattern as the other ErrorKind modules.
+    #
+    #   missing_project   — PROJECT positional was missing/empty and
+    #                       --all was not passed.
+    #   unknown_project   — PROJECT does not match any registry entry.
+    #   project_and_all   — both PROJECT and --all were passed; refuses
+    #                       to silently apply --all.
+    #   not_initialised   — PROJECT exists in the registry but its
+    #                       <project>/.hive-state/config.yml is missing
+    #                       (a partial init state).
+    #   no_projects       — --all was passed but the registry is empty.
+    #   config            — malformed config.yml (Psych::Exception or
+    #                       non-mapping shape) → exit 78.
+    #   internal          — uncategorised crash (exit 70).
+    module EnrollErrorKind
+      MISSING_PROJECT = "missing_project".freeze
+      UNKNOWN_PROJECT = "unknown_project".freeze
+      PROJECT_AND_ALL = "project_and_all".freeze
+      NOT_INITIALISED = "not_initialised".freeze
+      NO_PROJECTS     = "no_projects".freeze
       CONFIG          = "config".freeze
       INTERNAL        = "internal".freeze
       ALL = constants.map { |c| const_get(c) }.freeze

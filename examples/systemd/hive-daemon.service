@@ -1,10 +1,26 @@
 # Sample systemd-user unit for `hive daemon` (Linux).
 #
+# BEFORE INSTALLING: edit ExecStart= to match where YOUR `hive` binary
+# lives. `which hive` shows it. Common paths:
+#
+#   %h/.local/bin/hive                           ← README install (option-A
+#                                                  symlink: ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive)
+#   %h/Dev/hive/bin/hive                         ← README install (option-B,
+#                                                  direct from clone, no symlink)
+#   /usr/local/bin/hive                          ← system gem install
+#   %h/.local/share/mise/shims/hive              ← mise / rbenv / asdf / chruby shim
+#
 # Install:
 #   mkdir -p ~/.config/systemd/user
 #   cp examples/systemd/hive-daemon.service ~/.config/systemd/user/
+#   $EDITOR ~/.config/systemd/user/hive-daemon.service   # confirm ExecStart=
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now hive-daemon
+#
+# Verify it actually started (catches a wrong ExecStart= path before the
+# StartLimitBurst kicks in):
+#   systemctl --user status hive-daemon
+#   journalctl --user -u hive-daemon -n 50
 #
 # View logs:
 #   journalctl --user -u hive-daemon -f      # systemd's stderr capture
@@ -19,17 +35,22 @@
 #
 # This unit runs in the foreground (no --detach). systemd is the
 # supervisor; Restart=on-failure brings the daemon back if it crashes.
+# StartLimit* below caps the respawn loop so a wrong ExecStart= path
+# stops cleanly with `failed` instead of relaunching forever.
 
 [Unit]
 Description=Hive auto-advancing dispatcher (ADR-024)
 After=default.target
+# Hard cap on the auto-restart loop. If `hive daemon start` exits non-zero
+# 3 times within 5 minutes, systemd marks the unit `failed` instead of
+# respawning forever. This is the safety net for a misconfigured ExecStart=
+# (binary not on PATH, typo, missing rbenv shim) — `systemctl --user status`
+# will show `failed` rather than silently churning every 30 s.
+StartLimitBurst=3
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-# `hive` must be on the PATH systemd-user sees. If it's installed via
-# rbenv / rvm / chruby / mise, expand the absolute path here so the
-# unit doesn't depend on shell-loaded shims:
-#   ExecStart=/home/USER/.local/share/mise/shims/hive daemon start
 ExecStart=%h/.local/bin/hive daemon start
 Restart=on-failure
 RestartSec=30s

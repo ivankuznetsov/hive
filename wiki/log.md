@@ -2,6 +2,35 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-08T13:00:00Z] daemon — PR #55 review feedback: schemas, atomicity, envelopes
+
+**Action:** Hardened `hive daemon enable/disable` and `hive daemon reload` against three rounds of code-review feedback on PR #45 (the original enrol/autostart PR). Lands as a single follow-up commit on PR #55.
+
+1. **JSON schema files for every `--json` daemon producer** — `schemas/hive-daemon-{status,stop,enroll,reload}.v1.json` now publish the closed contract for each subcommand. All four registered in `Hive::Schemas::SCHEMA_VERSIONS` and pinned by `test/unit/schema_files_test.rb` for required-key drift, error_kind enum drift, and per-kind round-trip validation. CLI subprocess output is also round-trip-validated against the published schemas in 4 representative integration tests.
+
+2. **`EnrollErrorKind` closed enum + `Daemon::UsageError` + `EnvelopeEmitter`** — `hive daemon enable/disable --json` failures now emit a `hive-daemon-enroll` ErrorPayload on stdout (mirroring `hive forget`'s shape) instead of plain stderr text. The 7 error_kinds are `missing_project / unknown_project / project_and_all / not_initialised / no_projects / config / internal`; agents branch on `error_kind` deterministically.
+
+3. **Surgical line-level YAML editor** — `upsert_daemon_enabled` replaces the `YAML.load → mutate → to_yaml` round-trip so operator comments and key order survive every enable/disable flip. Three branches: replace existing `enabled:` line, insert as first child of an existing `daemon:` block, or append a fresh block at EOF. `assert_surgical_edit_possible!` rejects inline-flow `daemon: { ... }`, CRLF line endings, and 4-space-indented children before any write — all three were silent-corruption-on-first-call paths.
+
+4. **`flock(LOCK_EX) + fsync` atomic write** — `write_daemon_block` now holds an exclusive flock around the read+rewrite, calls `f.fsync` before `File.rename`, and ensure-cleans the tempfile on rename failure. `Errno::*` (ENOSPC / EROFS / EACCES / EXDEV / EDQUOT / ENOMEM / EIO / ENOENT) is rescued and re-raised as `Hive::ConfigError` (exit 78), matching `Hive::Config.write_global_config!`'s contract.
+
+5. **Pre-flight `--all` transactionality** — `preflight_targets` validates every project's config.yml before any write, so `disable --all` cannot leave the registry half-flipped on a bad middle project. `parse_project_config` consolidates the YAML read + `Psych::Exception` rescue into a single helper used by every consumer.
+
+6. **`next_action` block in success envelope** — `hive-daemon-enroll` SuccessPayload now carries `{kind: reload | no_op}` so an agent can decide whether to call `hive daemon reload` without parsing the bare-text "next:" paragraph. `kind: reload` carries `command` + `required: false` (per-tick cache picks up changes within `poll_interval_sec`); `kind: no_op` when every result was already at the requested state.
+
+7. **`hive daemon reload --json` envelope** — new `hive-daemon-reload.v1` schema. Closed `reason` enum (`not_running / pid_dead / pid_reused / unverified`) on every refusal path. `compute_reload_outcome` separates the decision logic from emission, mirroring how `stop_envelope` is structured.
+
+8. **`launchd` plist circuit-breaker** — `examples/launchd/hive-daemon.plist`'s `ProgramArguments` is now wrapped in `/bin/sh -c '[ -x "$0" ] || exit 0; exec "$0" "$@"'` — turns "binary not found / not executable" into a clean exit 0 so `KeepAlive { SuccessfulExit: false }` stops respawning. Real crashes still propagate non-zero through `exec` and respawn per `ThrottleInterval`. systemd unit gains `StartLimitBurst=3 + StartLimitIntervalSec=300` for the same purpose.
+
+9. **CLI shape hardening** — bare `hive daemon`, `hive daemon enable PROJECT --all` (mutually exclusive), `hive daemon enable a b c` (multi-positional) all now exit 64 with a structured `hive-daemon-enroll` ErrorPayload under `--json`. Help text long_desc lists `--all`, `--json`, and the full exit-code set including 70 (SOFTWARE) and 78 (CONFIG). `do_set_enabled` renamed to `do_call` to match the convention used by every other command class.
+
+**Refreshed pages:**
+- `wiki/commands/daemon.md` — subcommand table updated for stop/reload/enable to mention `--json` envelopes; enable line documents the surgical editor + flock + preflight + envelope mechanics.
+- `wiki/operating.md` — added a paragraph documenting the launchd `[ -x "$0" ] || exit 0` circuit-breaker rationale and "verify it actually started" steps.
+- `wiki/index.md` — Pages count + `updated:` bumped.
+
+**Coverage:** new tests pin surgical-edit shape rejections (inline-flow / CRLF / 4-space / tab), preflight `--all` atomicity, idempotency-on-no-op (bare-text + envelope), real disk-failure injection (EACCES) for the `Errno::* → ConfigError` chain, internal-envelope chain via stubbed collaborators, every reason value in `hive-daemon-reload` round-tripped through JSONSchemer, `next_action` kind transitions on flip and no-op.
+
 ## [2026-05-07T23:30:00Z] doctor — pi verifier follow-ups (PR #54): discovery extensions, profile-aware skill formatting, glob-escape parity, path jailing
 
 **Action:** Refreshed the doctor / skill-check documentation to match the second wave of verifier improvements landed in PR #54.

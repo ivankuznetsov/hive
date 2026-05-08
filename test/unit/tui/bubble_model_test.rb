@@ -1242,6 +1242,279 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert apple_idx < zebra_idx, "extra keys must be appended in sorted order"
   end
 
+  # ---- RecoverError → ERROR-marker clear + hive run ----
+  #
+  # Mirrors the RecoverReview block above. Same async contract: the
+  # synchronous return only flashes "error recovery: clearing <detail>…",
+  # the worker thread runs `hive markers clear --name ERROR` + (on
+  # success) `hive run`. Tests must call `wait_for_background_threads`
+  # before asserting on stub captures or dispatched flashes.
+
+  def test_recover_error_clears_observed_marker_and_reruns_hive_run
+    folder = "/tmp/hive/error-me"
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      slug: "error-me",
+      stage: "3-plan",
+      folder: folder,
+      marker: "error",
+      attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+    run_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", folder,
+      "--name", "ERROR",
+      "--match-attr", "exit_code=1"
+    ], clear_argv, "argv must clear ERROR with --match-attr exit_code=N to avoid erasing fresher real failures"
+    assert_equal [ "hive", "run", folder ], run_argv
+
+    sync_flash = @model.hive_model.flash.to_s
+    assert_match(/clearing/, sync_flash, "synchronous flash must announce the in-progress clear")
+    assert_match(/ERROR/, sync_flash)
+    assert_match(/reason=exit_code/, sync_flash)
+    assert_match(/exit_code=1/, sync_flash)
+
+    final_flash = last_async_flash_text
+    assert_match(/ERROR/, final_flash, "async flash must echo the cleared marker")
+    assert_match(/running.*hive run/, final_flash, "async flash must announce the rerun")
+  end
+
+  def test_recover_error_does_not_rerun_when_marker_clear_fails
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "error-me", stage: "3-plan", folder: "/tmp/hive/error-me",
+      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    run_count = 0
+
+    with_run_quiet_stub(->(_argv) { [ 4, "", "attr \"exit_code\" mismatch\n" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { run_count += 1; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal 0, run_count, "hive run must not dispatch when markers clear exits non-zero"
+    final_flash = last_async_flash_text
+    assert_match(/error recovery failed/, final_flash)
+    assert_match(/exit_code.*mismatch/, final_flash)
+  end
+
+  def test_recover_error_flashes_partial_failure_when_dispatch_raises_after_clear_succeeds
+    folder = "/tmp/hive/partial-failure"
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "partial-failure", stage: "3-plan", folder: folder,
+      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { raise Errno::ENOENT, "no such file - hive" }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    final_flash = last_async_flash_text
+    assert_match(/marker cleared/, final_flash,
+                 "partial-failure flash must explicitly say the marker WAS cleared")
+    assert_match(/hive run.*failed to start/, final_flash,
+                 "partial-failure flash must say the rerun did not start")
+    assert_match(/run `hive run #{Regexp.escape(folder)}` manually/, final_flash,
+                 "partial-failure flash must give the operator the manual recovery command")
+  end
+
+  def test_recover_error_flashes_when_folder_missing
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "no-folder", stage: "3-plan", folder: "",
+      marker: "error", attrs: { "exit_code" => "1" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_clear, "marker clear must not run when folder is missing"
+    refute ran_dispatch, "hive run must not dispatch when folder is missing"
+    assert_match(/task folder missing/, @model.hive_model.flash.to_s)
+  end
+
+  # Kill-class signal kills (130/137/143) are auto-healed in the
+  # background by `auto_heal_kill_class_errors`. RecoverError refuses
+  # those rows synchronously so the Enter-driven recovery doesn't race
+  # the auto-heal on the same markers-lock.
+  def test_recover_error_skips_kill_class_exit_codes
+    %w[130 137 143].each do |code|
+      row = make_task_row(
+        action_key: "error", action_label: "Error",
+        slug: "killed-#{code}", stage: "3-plan",
+        folder: "/tmp/hive/killed-#{code}",
+        marker: "error", attrs: { "reason" => "exit_code", "exit_code" => code },
+        suggested_command: nil
+      )
+      ran_clear = false
+      with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+        with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+          @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+          @model.wait_for_background_threads
+        end
+      end
+      refute ran_clear, "RecoverError must not clear kill-class markers (auto-heal owns them)"
+      assert_match(/kill-class.*auto-heals/, @model.hive_model.flash.to_s,
+                   "flash must explain why exit_code=#{code} was refused")
+    end
+  end
+
+  def test_recover_error_catches_io_failure_from_run_quiet
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "io-fail", stage: "3-plan", folder: "/tmp/hive/io-fail",
+      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { raise Errno::ENOENT, "no such file - hive" }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_dispatch, "hive run must not dispatch when run_quiet! raises"
+    final_flash = last_async_flash_text
+    assert_match(/error recovery failed/, final_flash)
+    assert_match(/Errno::ENOENT/, final_flash,
+                 "narrow rescue must surface the SystemCallError class so logs are actionable")
+  end
+
+  def test_recover_error_does_not_swallow_programmer_errors_from_worker
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "logic-bug", stage: "3-plan", folder: "/tmp/hive/logic-bug",
+      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+
+    Thread.report_on_exception = false
+    begin
+      with_run_quiet_stub(->(_argv) { raise NoMethodError, "undefined method `frob` for nil" }) do
+        with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+          @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+          @model.wait_for_background_threads
+        end
+      end
+    ensure
+      Thread.report_on_exception = true
+    end
+
+    flash_messages = @messages.select { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+    refute(
+      flash_messages.any? { |m| m.text.to_s.include?("error recovery failed") },
+      "programmer errors must NOT be swallowed into an 'error recovery failed' flash"
+    )
+  end
+
+  def test_recover_error_dedups_concurrent_attempts_on_same_folder
+    folder = "/tmp/hive/dedup-error"
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "dedup-error", stage: "3-plan", folder: folder,
+      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    latch = Queue.new
+    clear_calls = 0
+
+    stub = lambda do |_argv|
+      clear_calls += 1
+      latch.pop
+      [ 0, "", "" ]
+    end
+
+    with_run_quiet_stub(stub) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        latch << :go
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal 1, clear_calls, "second Enter on same folder must be deduped while first is in flight"
+    assert_match(/already in progress/, @model.hive_model.flash.to_s,
+                 "second Enter must flash an 'already in progress' refusal synchronously")
+  end
+
+  def test_recover_error_omits_match_attr_when_no_exit_code
+    # Hand-written / legacy ERROR markers without an exit_code attr take
+    # the recovery path (the markers-clear allowlist accepts ERROR), but
+    # the argv must omit --match-attr so the clear isn't refused for
+    # comparing against an empty value.
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "no-attrs", stage: "3-plan", folder: "/tmp/hive/no-attrs",
+      marker: "error", attrs: {}, suggested_command: nil
+    )
+    clear_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", "/tmp/hive/no-attrs",
+      "--name", "ERROR"
+    ], clear_argv, "argv must omit --match-attr when the row has no exit_code attr"
+  end
+
+  def test_recover_error_sanitizes_control_chars_and_ansi_in_flash_detail
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "sanitize-me", stage: "3-plan", folder: "/tmp/hive/sanitize-me",
+      marker: "error",
+      attrs: { "reason" => "bad\x1b[31mansi\x1b[0m\nNL", "exit_code" => "1" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    sync_flash = @model.hive_model.flash.to_s
+    refute_match(/\e\[/, sync_flash, "ANSI CSI escapes must be stripped from the flash detail")
+    refute_match(/\n/, sync_flash, "embedded newlines must not appear in the flash detail")
+    final_flash = last_async_flash_text
+    refute_match(/\e\[/, final_flash, "ANSI CSI escapes must be stripped from the async flash")
+    refute_match(/\n/, final_flash, "embedded newlines must not appear in the async flash")
+  end
+
   # ---- OpenInputEditor → foreground editor takeover ----
 
   def test_open_input_editor_returns_sequence_command_and_dispatches_result

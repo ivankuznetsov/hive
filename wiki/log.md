@@ -2,6 +2,18 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-08T21:02:58Z] doctor — pi package discovery follow-up: npm global root and project settings packages
+
+**Action:** Refined the Pi verifier docs after the PR #54 follow-up review.
+
+1. **Global npm package roots** — `Hive::SkillCheck::Pi.verify` now includes the path reported by `npm root -g`, matching Pi's documented npm package install model instead of assuming every npm package lives under `~/.pi/...`.
+
+2. **Project settings package jailing** — `<project>/.pi/settings.json` `packages` entries are now jailed with `project_root` just like `skills` entries, so project-local packages such as `../local-package` resolve when the checkout is outside `$HOME`.
+
+**Refreshed pages:** `README.md`, `lib/hive/cli.rb` long description, and `wiki/commands/doctor.md`.
+
+**Coverage:** added regression tests for `npm root -g` package discovery and project `.pi/settings.json` package paths outside `$HOME`.
+
 ## [2026-05-08T13:00:00Z] daemon — PR #55 review feedback: schemas, atomicity, envelopes
 
 **Action:** Hardened `hive daemon enable/disable` and `hive daemon reload` against three rounds of code-review feedback on PR #45 (the original enrol/autostart PR). Lands as a single follow-up commit on PR #55.

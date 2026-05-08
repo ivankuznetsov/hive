@@ -146,8 +146,8 @@ module Hive
         `<dir>/.agents/skills` up to the nearest `.git`, paths listed in
         `~/.pi/agent/settings.json` and `<project>/.pi/settings.json`
         (`skills`/`packages` keys, jailed under settings dir / home /
-        project), `~/.pi/npm/node_modules/*/skills`, `~/.pi/agent/git`
-        repos (host/user/repo bounded prefix), and any package-root
+        project), `npm root -g`, `~/.pi/npm/node_modules/*/skills`,
+        `~/.pi/agent/git` repos (host/user/repo bounded prefix), and any package-root
         whose `package.json#pi.skills` lists a path (jailed under
         package_root). Each row's `message` field is the authoritative
         install hint.

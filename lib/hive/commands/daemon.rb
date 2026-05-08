@@ -82,6 +82,7 @@ module Hive
       private
 
       def start_daemon
+        warn_unsupported_json_flag if @json
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
 
@@ -358,6 +359,7 @@ module Hive
       end
 
       def tail_daemon
+        warn_unsupported_json_flag if @json
         unless File.exist?(log_file)
           warn "hive: daemon log file not found at #{log_file}"
           raise Hive::Error, "daemon log file missing"
@@ -537,25 +539,33 @@ module Hive
         end
       end
 
+      # Struct returned by parse_project_config: the parsed Hash plus
+      # the raw text, so downstream callers can reuse a single read
+      # instead of opening cfg_path again. assert_surgical_edit_possible!
+      # in particular needs the raw text (for BOM / CRLF / indent
+      # checks) and the parsed data (for shape validation).
+      ParsedConfig = Struct.new(:data, :text)
+
       # Single owner of the project-config YAML read. Centralises the
       # Psych::Exception → Hive::ConfigError translation and the
       # top-level-mapping shape check, so every read site (preflight,
       # current_daemon_enabled, write_daemon_block) reports malformed
       # YAML the same way and produces the same `config` error_kind.
       #
-      # Returns the parsed Hash (possibly empty) when the file exists
-      # and parses to a mapping, or nil when the file is missing.
-      # Callers handle missing-file via NOT_INITIALISED at their layer
-      # so we can keep this helper free of the USAGE-vs-CONFIG split.
+      # Returns a ParsedConfig (data + text) when the file exists and
+      # parses to a mapping, or nil when the file is missing. Callers
+      # handle missing-file via NOT_INITIALISED at their layer so we
+      # can keep this helper free of the USAGE-vs-CONFIG split.
       def parse_project_config(cfg_path)
         return nil unless File.exist?(cfg_path)
 
-        data = YAML.safe_load(File.read(cfg_path))
+        text = File.read(cfg_path)
+        data = YAML.safe_load(text)
         if !data.nil? && !data.is_a?(Hash)
           raise Hive::ConfigError,
                 "hive daemon #{@subcommand}: #{cfg_path} top-level YAML is not a mapping"
         end
-        data || {}
+        ParsedConfig.new(data || {}, text)
       rescue Psych::Exception => e
         raise Hive::ConfigError,
               "hive daemon #{@subcommand}: #{cfg_path} is not valid YAML: #{e.message}"
@@ -564,10 +574,11 @@ module Hive
       # Returns the current daemon.enabled value (true / false / nil)
       # for a project's config.yml, or nil if the file is missing.
       def current_daemon_enabled(cfg_path)
-        data = parse_project_config(cfg_path)
-        return nil unless data.is_a?(Hash) && data["daemon"].is_a?(Hash)
+        parsed = parse_project_config(cfg_path)
+        return nil if parsed.nil?
+        return nil unless parsed.data["daemon"].is_a?(Hash)
 
-        data["daemon"]["enabled"]
+        parsed.data["daemon"]["enabled"]
       end
 
       # Validate every target up front so `--all` can't leave the
@@ -593,12 +604,12 @@ module Hive
               kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
             )
           end
-          data = parse_project_config(cfg_path)
-          if data.is_a?(Hash) && data["daemon"] && !data["daemon"].is_a?(Hash)
+          parsed = parse_project_config(cfg_path)
+          if parsed.data["daemon"] && !parsed.data["daemon"].is_a?(Hash)
             raise Hive::ConfigError,
                   "hive daemon #{@subcommand}: #{cfg_path} `daemon:` is not a mapping"
           end
-          assert_surgical_edit_possible!(cfg_path, data)
+          assert_surgical_edit_possible!(cfg_path, parsed)
         end
       end
 
@@ -622,8 +633,14 @@ module Hive
       # (next safe_load would raise on the duplicate key, leaving the
       # operator with a config the tool itself can't recover). Fail
       # fast with a clear remediation.
-      def assert_surgical_edit_possible!(cfg_path, parsed_data)
-        text = File.read(cfg_path)
+      def assert_surgical_edit_possible!(cfg_path, parsed)
+        # parsed is a ParsedConfig (data + text) so this helper does
+        # not re-open cfg_path. Was previously File.read(cfg_path)
+        # here even though parse_project_config had just read the
+        # same file — a 2x-read-per-call waste flagged by the P3
+        # maintainability review.
+        text = parsed.text
+        parsed_data = parsed.data
 
         # BOM check FIRST, before the empty-daemon early-return. UTF-8
         # BOM at the start of config.yml is precisely the case that
@@ -708,19 +725,19 @@ module Hive
         # hand-edit, another agent process). Pre-flight is the primary
         # gate; this re-check turns any race-window malformed write
         # into ConfigError instead of silent corruption.
-        data = parse_project_config(cfg_path)
-        if data.nil?
+        parsed = parse_project_config(cfg_path)
+        if parsed.nil?
           fail_usage!(
             "hive daemon #{@subcommand}: missing #{cfg_path}; " \
             "this project is not initialised (run `hive init` from its root)",
             kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
           )
         end
-        if data["daemon"] && !data["daemon"].is_a?(Hash)
+        if parsed.data["daemon"] && !parsed.data["daemon"].is_a?(Hash)
           raise Hive::ConfigError,
                 "hive daemon #{@subcommand}: #{cfg_path} `daemon:` is not a mapping"
         end
-        assert_surgical_edit_possible!(cfg_path, data)
+        assert_surgical_edit_possible!(cfg_path, parsed)
 
         # Atomic rewrite under an exclusive flock on a SIBLING .lock
         # file (not on cfg_path itself). flock-on-cfg-path would lock
@@ -761,6 +778,18 @@ module Hive
             end
             File.rename(tmp, cfg_path)
             renamed = true
+            # fsync the PARENT directory after rename so the rename
+            # itself survives power loss. Without this, a crash between
+            # File.rename and the next dirty-page flush can revert the
+            # rename (kernel may have committed the data blocks but not
+            # the directory entry pointing at them). EINVAL on
+            # filesystems that don't support directory fsync (rare,
+            # mostly ancient FUSE drivers) — swallow silently.
+            begin
+              File.open(File.dirname(cfg_path), File::RDONLY) { |dir| dir.fsync }
+            rescue Errno::EINVAL, NotImplementedError
+              # filesystem doesn't support fsync on a dir — nothing we can do
+            end
           ensure
             # Cleanup is best-effort: a TOCTOU between exist? and delete
             # (or an EACCES from antivirus / Spotlight on macOS) must not
@@ -824,8 +853,17 @@ module Hive
         end
 
         if enabled_line_idx
+          # Replace the ENTIRE value-portion (everything between the
+          # prefix `  enabled: ` and an optional inline `# comment`),
+          # not just the first non-whitespace token. The earlier
+          # `\S+` left trailing tokens behind: `  enabled: false maybe`
+          # became `  enabled: true maybe`, which YAML parsed as the
+          # STRING "true maybe" (silent corruption — operator's
+          # `dig("daemon","enabled") == true` would then fail). The
+          # non-greedy `.*?` captures the value; the optional
+          # `(\s+#.*)?` preserves any inline comment.
           lines[enabled_line_idx] = lines[enabled_line_idx].sub(
-            /\A(  enabled:[ \t]+)\S+/, "\\1#{bool}"
+            /\A(  enabled:[ \t]+).*?(\s+#.*)?\z/, "\\1#{bool}\\2"
           )
         elsif daemon_line_idx
           lines.insert(daemon_line_idx + 1, "  enabled: #{bool}")
@@ -939,6 +977,16 @@ module Hive
         # Already gone
       rescue Errno::EPERM
         warn "hive: insufficient permissions to signal pid #{pid}"
+      end
+
+      # `start` and `tail` don't emit a JSON envelope (start blocks
+      # forever; tail is a stream). An agent calling reflexively with
+      # --json would get nothing parseable. Surface a one-line stderr
+      # notice so the caller knows their flag was a no-op rather than
+      # silently waiting for a JSON document that will never arrive.
+      def warn_unsupported_json_flag
+        warn "hive: --json is not supported on `#{@subcommand}`; flag ignored " \
+             "(this subcommand is interactive / streaming, not envelope-emitting)"
       end
 
       def stop_envelope(running:, was_running:, stale_pid: nil, reason: nil)

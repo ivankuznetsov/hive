@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: lib/hive/commands/daemon.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-08
 tags: [operating, daemon, systemd, launchd, install]
 ---
 
@@ -115,6 +115,13 @@ The unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
 the graceful drain (`daemon.shutdown_grace_sec`, default 600 s).
+
+The shipped unit hardcodes `TimeoutStopSec=900` (15 min — drain budget
+plus headroom). If you raise `daemon.shutdown_grace_sec` above 900,
+**also** raise `TimeoutStopSec=` in your installed unit to match
+(`shutdown_grace_sec + 300` is a reasonable cushion). Otherwise
+systemd will SIGKILL still-running stage children mid-`hive run`,
+losing in-flight work.
 
 If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user

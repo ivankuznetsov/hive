@@ -700,6 +700,58 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
+  # Block-scalar `daemon: |` parses with `daemon` as a String (the
+  # literal-block content), NOT a Hash. The existing
+  # "daemon: is not a mapping" check at preflight catches this before
+  # the surgical-edit path is reached, so the file is left untouched
+  # and exits 78. Without this test, a future refactor could remove
+  # the non-Hash guard and silently fall through to the line-level
+  # editor, which would then append a duplicate `daemon:` key (since
+  # the YAML-text view shows `daemon:` ambiguously).
+  def test_enable_rejects_block_scalar_daemon_value_without_overwriting
+    initial = "default_branch: main\ndaemon: |\n  some content\n  on multiple lines\n"
+    with_registered_project(initial_yaml: initial) do |env, cfg_path, _root|
+      original_text = File.read(cfg_path)
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "enable", "proj")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus,
+                   "block-scalar daemon: value must exit 78 (CONFIG)"
+      assert_match(/`daemon:` is not a mapping/, err)
+      assert_equal original_text, File.read(cfg_path),
+                   "config.yml must not have been touched on block-scalar rejection"
+    end
+  end
+
+  # Multi-token `enabled:` value (`enabled: false maybe` — a YAML
+  # string scalar, not a boolean). Pre-fix, the surgical-edit regex
+  # `\S+` only replaced the first non-whitespace token, leaving the
+  # trailing tokens behind: `enabled: true maybe`, which YAML parses
+  # as the STRING "true maybe" (silent corruption — dispatcher's
+  # `cfg.dig("daemon","enabled") == true` returns false despite the
+  # CLI reporting `enabled: true`). New behaviour: the entire value-
+  # portion gets replaced cleanly, dropping the unparseable tail.
+  def test_enable_replaces_multi_token_enabled_value_cleanly
+    initial = <<~YAML
+      default_branch: main
+      daemon:
+        enabled: false maybe
+    YAML
+    with_registered_project(initial_yaml: initial) do |env, cfg_path, _root|
+      _out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                          "daemon", "enable", "proj")
+      assert_equal 0, status.exitstatus
+
+      data = YAML.safe_load(File.read(cfg_path))
+      assert_equal true, data.dig("daemon", "enabled"),
+                   "enabled must be the literal boolean true after flip, " \
+                   "not the string 'true maybe'"
+      after = File.read(cfg_path)
+      assert_match(/^  enabled: true$/, after,
+                   "value-portion must be replaced cleanly, dropping the " \
+                   "unparseable trailing tokens")
+    end
+  end
+
   def test_enable_preserves_file_mode_bits
     with_registered_project do |env, cfg_path, _root|
       File.chmod(0o600, cfg_path)

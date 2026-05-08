@@ -427,8 +427,11 @@ module Hive
       projects; for projects that pre-date the daemon, run
       `hive daemon enable <project>` (or `--all`).
 
-      Exit codes: 0 success; 1 daemon-not-running for `status`/`reload`
-      when no daemon is up; 64 (USAGE) for `enable`/`disable` against an
+      Exit codes: 0 success; 1 daemon-not-running — `reload` exits 1 when
+      no daemon is up (caller MUST start one first); `stop` is idempotent
+      and exits 0 in the same condition (re-running stop is always safe);
+      `status` exits 1 to make it scriptable as a precondition probe.
+      64 (USAGE) for `enable`/`disable` against an
       unknown project, missing PROJECT, conflicting PROJECT+--all, or an
       uninitialised project; 70 (SOFTWARE) for uncategorised internal
       errors; 75 (TEMPFAIL) when `start` finds an existing live daemon;

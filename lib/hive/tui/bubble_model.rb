@@ -91,6 +91,7 @@ module Hive
       REVIEW_RECOVERY_DETAIL_ATTRS = %w[
         phase reason pass attempts elapsed files matches exception_class
       ].freeze
+      REVIEW_ORCHESTRATOR_FILE_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail-].freeze
 
       def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
         @hive_model = hive_model
@@ -633,6 +634,9 @@ module Hive
           marker = row.marker.to_s.empty? ? "none" : row.marker
           return [ flashed("review recovery unavailable: marker=#{marker}"), nil ]
         end
+        if marker_name == "REVIEW_STALE" && !retryable_incomplete_triage_pass?(row)
+          return [ flashed(review_stale_recovery_message(row, marker_name)), nil ]
+        end
 
         unless register_review_recovery_attempt(row.folder)
           return [ flashed("review recovery already in progress for #{row.slug}"), nil ]
@@ -764,6 +768,32 @@ module Hive
         attr_text.empty? ? marker_name : "#{marker_name} #{attr_text}"
       end
 
+      def review_stale_recovery_message(row, marker_name)
+        detail = Hive::Tui::Text.sanitize(review_recovery_detail(row, marker_name))[0, 80]
+        "review recovery needs manual pass cleanup: #{detail}; " \
+          "edit/rename highest-pass review files, then clear REVIEW_STALE and run hive run"
+      end
+
+      def retryable_incomplete_triage_pass?(row)
+        attrs = row.attrs || {}
+        pass = attrs["pass"].to_i
+        return false if pass < 1 || row.folder.to_s.strip.empty?
+
+        suffix = format("%02d", pass)
+        reviews_dir = File.join(row.folder, "reviews")
+        reviewer_file_present = Dir[File.join(reviews_dir, "*-#{suffix}.md")].any? do |path|
+          review_recovery_reviewer_file?(File.basename(path))
+        end
+
+        reviewer_file_present && !File.exist?(File.join(reviews_dir, "escalations-#{suffix}.md"))
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def review_recovery_reviewer_file?(name)
+        REVIEW_ORCHESTRATOR_FILE_PREFIXES.none? { |prefix| name.start_with?(prefix) }
+      end
+
       # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:
       #
       #   * Non-interactive (default) → `Subprocess.dispatch_background`
@@ -827,8 +857,9 @@ module Hive
         [ flashed("no review file for #{row.slug}"), nil ]
       end
 
-      # Open the most recent log file under the row's `.hive/logs/`,
-      # build a Tail, flip mode. Race-tolerant: if the file disappears
+      # Open the most recent log file under the task's state log dir
+      # or review-local log dir, build a Tail, flip mode.
+      # Race-tolerant: if the file disappears
       # between resolve and open, flash instead of crashing.
       #
       # `FileResolver.latest` raises `Hive::NoLogFiles` (not nil) when
@@ -838,8 +869,9 @@ module Hive
       # `logs/` dir is created lazily by `Hive::Agent`).
       def open_log_tail(row)
         task = Hive::Task.new(row.folder)
-        log_dir = File.join(task.folder, "logs")
-        log_path = Hive::Tui::LogTail::FileResolver.latest(log_dir)
+        log_path = Hive::Tui::LogTail::FileResolver.latest_in_dirs(
+          [ task.log_dir, File.join(task.folder, "logs") ]
+        )
 
         tail = Hive::Tui::LogTail::Tail.new(log_path)
         tail.open!

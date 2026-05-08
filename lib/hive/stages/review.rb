@@ -81,8 +81,9 @@ module Hive
                "`hive markers clear #{task.folder} --name REVIEW_CI_STALE` and re-run `hive run`"
           return { commit: nil, status: :review_ci_stale }
         when :review_stale
-          warn "hive: REVIEW_STALE — edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, " \
-               "then run `hive markers clear #{task.folder} --name REVIEW_STALE` and re-run `hive run`"
+          warn "hive: REVIEW_STALE — if the highest pass has reviewer files but no escalations-NN.md, clear " \
+               "the marker and re-run to retry it; otherwise edit/rename highest-pass review files, then run " \
+               "`hive markers clear #{task.folder} --name REVIEW_STALE` and re-run `hive run`"
           return { commit: nil, status: :review_stale }
         when :review_error
           warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate, then run " \
@@ -371,8 +372,19 @@ module Hive
           # files and wants a fix run on it.
           [ max, 1 ].max
         else
-          max + 1
+          incomplete_triage_pass?(task.folder, max) ? max : max + 1
         end
+      end
+
+      def incomplete_triage_pass?(task_folder, pass)
+        return false if pass < 1
+
+        pass_suffix = format("%02d", pass)
+        reviewer_files = Dir[File.join(task_folder, "reviews", "*-#{pass_suffix}.md")]
+                         .select { |path| reviewer_file?(File.basename(path)) }
+        return false if reviewer_files.empty?
+
+        !File.exist?(File.join(task_folder, "reviews", "escalations-#{pass_suffix}.md"))
       end
 
       def resuming_from_waiting?(marker, pass)

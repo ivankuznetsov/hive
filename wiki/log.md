@@ -2,6 +2,26 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-08T12:34:03Z] review — Retry incomplete triage passes instead of counting filenames as completion
+
+**Action:** Refined review recovery after dogfooding showed `REVIEW_STALE pass=4` can be caused by partial reviewer artifacts rather than four completed review cycles. `Stages::Review.next_pass_for` now treats the highest pass as incomplete when reviewer-authored `*-NN.md` files exist without the matching `reviews/escalations-NN.md`; a markerless rerun retries that same pass instead of advancing to `NN+1` and immediately hitting `max_passes`. The TUI now auto-clears/reruns `REVIEW_STALE` only for that incomplete-triage shape; completed stale passes still require manual pass cleanup before clearing.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+- `wiki/commands/run.md`
+- `wiki/commands/markers.md`
+- `wiki/modules/markers.md`
+- `wiki/stages/review.md`
+- `wiki/state-model.md`
+
+## [2026-05-08T12:20:00Z] tui — Review stale recovery loop and split log locations
+
+**Action:** Documented the dogfood fix for two related TUI recovery failures. Markerless `5-review` rows now classify as `Ready for review` instead of `Needs your input`, so a cleared recovery marker does not send Enter into the empty `task.md` editor path. `REVIEW_STALE` rows no longer auto-clear and rerun from the TUI because max-pass recovery requires manual pass cleanup first; Enter flashes that instruction and leaves the marker intact. Log-tail resolution now checks both canonical state logs (`.hive-state/logs/<slug>/`) and review-local task logs (`<task>/logs/`) so agent/error rows can tail the logs that actually exist for both stage families.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+- `wiki/modules/task_action.md`
+
 ## [2026-05-07T23:30:00Z] doctor — pi verifier follow-ups (PR #54): discovery extensions, profile-aware skill formatting, glob-escape parity, path jailing
 
 **Action:** Refreshed the doctor / skill-check documentation to match the second wave of verifier improvements landed in PR #54.

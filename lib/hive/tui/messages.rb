@@ -122,9 +122,10 @@ module Hive
       # Enter on an `agent_running` row — push log-tail mode for `row`.
       OpenLogTail = Data.define(:row)
 
-      # Enter on a `recover_review` row — clear the observed review
-      # recovery marker via `hive markers clear`, then re-run the task
-      # via `hive run <folder>` if the clear succeeds.
+      # Enter on a `recover_review` row. REVIEW_ERROR / REVIEW_CI_STALE
+      # clear the observed marker and re-run. REVIEW_STALE does the same
+      # only for incomplete triage artifacts; completed stale passes
+      # report the manual pass-cleanup step and leave the marker intact.
       RecoverReview = Data.define(:row)
 
       # Enter on a `needs_input` row — suspend the TUI and open the

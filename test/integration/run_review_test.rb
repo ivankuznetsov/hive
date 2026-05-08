@@ -3,6 +3,7 @@ require "json"
 require "hive/commands/init"
 require "hive/commands/run"
 require "hive/markers"
+require "hive/stages/review"
 
 # Integration coverage for the 5-review runner. The unit-level tests for
 # CiFix, Triage, BrowserTest, Reviewers cover their internals; this file

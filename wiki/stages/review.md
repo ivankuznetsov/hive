@@ -21,7 +21,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 |----------------|--------|
 | `:review_complete` | print "already complete; mv this folder to 6-pr/", return |
 | `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
-| `:review_stale` | warn; user trims `reviews/` then `hive markers clear FOLDER --name REVIEW_STALE` and re-runs |
+| `:review_stale` | warn; user clears/re-runs if highest pass lacks `escalations-NN.md`, otherwise trims `reviews/` then clears/re-runs |
 | `:review_error` | warn with attrs; user investigates then `hive markers clear FOLDER --name REVIEW_ERROR` and re-runs |
 | `:review_waiting` | resume — skip Phase 2/3, jump straight to Phase 4 with the user's manually-ticked `[x]` marks |
 | no `worktree.yml` | exit 1 (must come from 4-execute) |
@@ -113,7 +113,9 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 
 1. Inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count).
 2. Run `hive markers clear FOLDER --name REVIEW_STALE` to remove the `<!-- REVIEW_STALE … -->` marker (atomic write + hive_commit). See [[commands/markers]].
-3. `hive run` again — the loop picks up at `max_review_pass(reviews/) + 1`.
+3. `hive run` again — the loop picks up at `max_review_pass(reviews/) + 1` once the highest pass has `reviews/escalations-NN.md`.
+
+If the highest-NN per-reviewer files exist but `reviews/escalations-NN.md` is missing, that pass did not finish triage. After clearing the marker, `hive run` retries that same pass instead of treating the reviewer filenames as a completed pass.
 
 For `REVIEW_CI_STALE` (Phase 1 CI never went green) the equivalent flow is: edit `reviews/ci-blocked.md`, fix the CI failures locally, run `hive markers clear FOLDER --name REVIEW_CI_STALE`, then `hive run`. For `REVIEW_ERROR` (any phase failure recorded with `phase=…` and `reason=…`) the same pattern: investigate, run `hive markers clear FOLDER --name REVIEW_ERROR`, then `hive run`. The runner's pre-flight `warn` text emits the exact command per stuck-state.
 

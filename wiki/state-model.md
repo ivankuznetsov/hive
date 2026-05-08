@@ -124,7 +124,7 @@ Per-reviewer file format (checkbox triage lines):
 - [ ] finding C: justification
 ```
 
-Pass derivation is filesystem-native: `Stages::Review` reads the max `-NN` suffix across per-reviewer files in `reviews/` to derive the current pass. No `pass:` frontmatter or sidecar — recovery is "delete the highest-NN files to drop pass back". Accepted findings (`[x]` lines) are concatenated and passed to the Phase 4 fix agent via the per-spawn nonce wrap; orchestrator-owned files (`escalations-`, `ci-blocked-`, `browser-`, `fix-guardrail-`) are excluded from the `Hive-Reviewer-Sources` trailer derivation.
+Pass derivation is filesystem-native: `Stages::Review` reads the max `-NN` suffix across per-reviewer files in `reviews/` to derive the current pass. A highest pass with reviewer files but no matching `reviews/escalations-NN.md` is treated as incomplete triage and retried on the same pass; once `escalations-NN.md` exists, the next markerless run advances to `NN+1`. No `pass:` frontmatter or sidecar — recovery is "delete the highest-NN files to drop pass back" for completed stale passes. Accepted findings (`[x]` lines) are concatenated and passed to the Phase 4 fix agent via the per-spawn nonce wrap; orchestrator-owned files (`escalations-`, `ci-blocked-`, `browser-`, `fix-guardrail-`) are excluded from the `Hive-Reviewer-Sources` trailer derivation.
 
 ## Configs
 

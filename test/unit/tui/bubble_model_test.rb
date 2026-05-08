@@ -822,10 +822,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # ---- RecoverReview → marker clear + hive run ----
   #
   # The handler is asynchronous: the synchronous return only flashes
-  # "review recovery: clearing <detail>…"; the worker thread runs
-  # `hive markers clear` + (on success) `hive run` and dispatches the
-  # final `Messages::Flash` via @dispatch. Tests must wait for the
-  # worker before asserting on stub captures or dispatched messages.
+  # "review recovery: clearing <detail>…" for markers that can be
+  # retried directly; the worker thread runs `hive markers clear` +
+  # (on success) `hive run` and dispatches the final `Messages::Flash`
+  # via @dispatch. REVIEW_STALE is only retried directly when the
+  # highest pass has reviewer files but no escalations-NN.md, which
+  # means triage never completed and the same pass can be retried.
 
   def last_async_flash_text
     flash_msg = @messages.reverse.find { |m| m.is_a?(Hive::Tui::Messages::Flash) }
@@ -880,8 +882,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       slug: "recover-me",
       stage: "5-review",
       folder: "/tmp/hive/recover-me",
-      marker: "review_stale",
-      attrs: { "reason" => "wall_clock", "pass" => "3" },
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed", "pass" => "3" },
       suggested_command: nil
     )
     run_count = 0
@@ -897,6 +899,73 @@ class HiveTuiBubbleModelTest < Minitest::Test
     final_flash = last_async_flash_text
     assert_match(/review recovery failed/, final_flash)
     assert_match(/attr "pass" mismatch/, final_flash)
+  end
+
+  def test_recover_review_stale_does_not_clear_or_rerun
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "stale-review",
+      stage: "5-review",
+      folder: "/tmp/hive/stale-review",
+      marker: "review_stale",
+      attrs: { "pass" => "4" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_clear, "REVIEW_STALE recovery must not blindly clear the marker"
+    refute ran_dispatch, "REVIEW_STALE recovery must not rerun before manual pass cleanup"
+    flash = @model.hive_model.flash.to_s
+    assert_match(/manual pass cleanup/, flash)
+    assert_match(/REVIEW_STALE/, flash)
+    assert_match(/highest-pass review files/, flash)
+  end
+
+  def test_recover_review_stale_with_incomplete_triage_pass_clears_and_reruns
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "claude-ce-code-review-04.md"), "## High\n- [ ] x\n")
+
+      row = make_task_row(
+        action_key: "recover_review",
+        action_label: "Needs recovery",
+        slug: "stale-review",
+        stage: "5-review",
+        folder: dir,
+        marker: "review_stale",
+        attrs: { "pass" => "4" },
+        suggested_command: nil
+      )
+      clear_argv = nil
+      run_argv = nil
+
+      with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+        with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+          @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+          @model.wait_for_background_threads
+        end
+      end
+
+      assert_equal [
+        "hive", "markers", "clear", dir,
+        "--name", "REVIEW_STALE",
+        "--match-attr", "pass=4"
+      ], clear_argv
+      assert_equal [ "hive", "run", dir ], run_argv
+
+      final_flash = last_async_flash_text
+      assert_match(/REVIEW_STALE/, final_flash)
+      assert_match(/running.*hive run/, final_flash)
+    end
   end
 
   def test_recover_review_flashes_partial_failure_when_dispatch_raises_after_clear_succeeds
@@ -1119,7 +1188,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       slug: "no-attrs",
       stage: "5-review",
       folder: "/tmp/hive/no-attrs",
-      marker: "review_stale",
+      marker: "review_error",
       attrs: {},
       suggested_command: nil
     )
@@ -1135,12 +1204,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     assert_equal [
       "hive", "markers", "clear", "/tmp/hive/no-attrs",
-      "--name", "REVIEW_STALE"
+      "--name", "REVIEW_ERROR"
     ], clear_argv, "argv must omit --match-attr when no REVIEW_RECOVERY_MATCH_ATTRS keys are present"
     assert_equal [ "hive", "run", "/tmp/hive/no-attrs" ], run_argv
     flash = @model.hive_model.flash.to_s
-    assert_match(/REVIEW_STALE/, flash, "flash must include marker name")
-    refute_match(/REVIEW_STALE \S/, flash, "flash must not append attr pairs after marker name when attrs is empty")
+    assert_match(/REVIEW_ERROR/, flash, "flash must include marker name")
+    refute_match(/REVIEW_ERROR \S/, flash, "flash must not append attr pairs after marker name when attrs is empty")
   end
 
   def test_recover_review_detail_appends_unknown_attrs_sorted
@@ -2204,7 +2273,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Dir.mktmpdir do |project_root|
       slug = "demo-260426-aaaa"
       task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
-      FileUtils.mkdir_p(File.join(task_folder, "logs")) # logs dir but NO *.log files
+      FileUtils.mkdir_p(File.join(project_root, ".hive-state", "logs", slug)) # logs dir but NO *.log files
 
       row = Hive::Tui::Snapshot::Row.new(
         project_name: File.basename(project_root), stage: "5-review", slug: slug,
@@ -2232,7 +2301,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Dir.mktmpdir do |project_root|
       slug = "tail-260428-aaaa"
       task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
-      logs = File.join(task_folder, "logs")
+      logs = File.join(project_root, ".hive-state", "logs", slug)
       FileUtils.mkdir_p(logs)
       File.write(File.join(logs, "agent.log"), "first line\n")
 
@@ -2247,6 +2316,30 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_kind_of Bubbletea::TickCommand, cmd,
         "successful open_log_tail must seed the LOG_TAIL_POLL tick so new bytes drain"
       assert_equal :log_tail, @model.hive_model.mode
+    end
+  end
+
+  def test_open_log_tail_finds_review_logs_under_task_folder
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "review-tail-260508-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
+      logs = File.join(task_folder, "logs")
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "review-triage-pass04.log"), "review line\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "5-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: "review_stale", attrs: { "pass" => "4" },
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil
+      )
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))
+
+      assert_kind_of Bubbletea::TickCommand, cmd
+      assert_equal :log_tail, @model.hive_model.mode
+      assert_equal File.join(logs, "review-triage-pass04.log"), @model.hive_model.tail_state.path
     end
   end
 

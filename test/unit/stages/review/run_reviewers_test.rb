@@ -136,6 +136,33 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_next_pass_for_markerless_retry_keeps_incomplete_triage_pass
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "foo-04.md"), "## High\n- [ ] x\n")
+
+      task = Task.new(dir, File.join(dir, "task.md"))
+      marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+
+      assert_equal 4, Hive::Stages::Review.next_pass_for(task, marker),
+                   "a reviewer artifact without escalations-NN.md means triage did not finish"
+    end
+  end
+
+  def test_next_pass_for_markerless_advance_after_completed_triage_pass
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "foo-04.md"), "## High\n- [ ] x\n")
+      File.write(File.join(dir, "reviews", "escalations-04.md"), "# Escalations\n")
+
+      task = Task.new(dir, File.join(dir, "task.md"))
+      marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+
+      assert_equal 5, Hive::Stages::Review.next_pass_for(task, marker),
+                   "once escalations-NN.md exists, the pass reached the triage boundary"
+    end
+  end
+
   # --- R5: hostile NN cap ----------------------------------------------
 
   def test_max_review_pass_raises_when_disk_NN_exceeds_max_passes_plus_one

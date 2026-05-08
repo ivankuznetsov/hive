@@ -55,6 +55,21 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_for_pr", Hive::TaskAction.for(task, marker(:review_complete)).key
   end
 
+  def test_review_without_marker_is_ready_for_review
+    task = fake_task(stage_name: "review", stage_index: 5)
+    action = Hive::TaskAction.for(task, marker(:none))
+    assert_equal "ready_for_review", action.key
+    assert_equal "Ready for review", action.label
+    assert_match(/\Ahive review demo-260426-aaaa --from 5-review\z/, action.command)
+  end
+
+  def test_review_waiting_is_needs_input
+    task = fake_task(stage_name: "review", stage_index: 5)
+    action = Hive::TaskAction.for(task, marker(:review_waiting, "pass" => "2"))
+    assert_equal "needs_input", action.key
+    assert_equal "Needs your input", action.label
+  end
+
   # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
   # fell through to :review_waiting and emitted a runnable
   # `hive review … --from 5-review` command while review was active —

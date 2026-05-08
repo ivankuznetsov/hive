@@ -968,6 +968,56 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_recover_review_stale_wall_clock_clears_and_reruns_without_reviewer_files
+    # REVIEW_STALE reason=wall_clock can be set by the runner BEFORE
+    # any reviewer files exist (e.g. wall-clock fired during Phase 1
+    # CI-fix). Pre-fix, the TUI's retryable_incomplete_triage_pass?
+    # gate required reviewer files to be present, so wall-clock stale
+    # without files fell into the manual-cleanup flash that told the
+    # operator to "edit/rename highest-pass review files" — which
+    # don't exist. Now wall-clock stale is explicitly retryable
+    # regardless of reviewer-file presence.
+    with_tmp_dir do |dir|
+      # reviews/ may or may not exist; explicitly leave it absent to
+      # match the worst-case (Phase 1 wall-clock).
+      row = make_task_row(
+        action_key: "recover_review",
+        action_label: "Needs recovery",
+        slug: "wall-clock-stale",
+        stage: "5-review",
+        folder: dir,
+        marker: "review_stale",
+        attrs: { "reason" => "wall_clock", "pass" => "1", "elapsed" => "5400" },
+        suggested_command: nil
+      )
+      clear_argv = nil
+      run_argv = nil
+
+      with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+        with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+          @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+          @model.wait_for_background_threads
+        end
+      end
+
+      refute_nil clear_argv,
+                 "wall-clock REVIEW_STALE must trigger the markers-clear path " \
+                 "(no manual file cleanup is needed; the operator just wants more time)"
+      assert_equal [
+        "hive", "markers", "clear", dir,
+        "--name", "REVIEW_STALE",
+        "--match-attr", "pass=1"
+      ], clear_argv
+      assert_equal [ "hive", "run", dir ], run_argv
+
+      flash = @model.hive_model.flash.to_s
+      refute_match(/manual pass cleanup/, flash,
+                   "wall-clock stale must NOT route through the manual-cleanup flash")
+      refute_match(/highest-pass review files/, flash,
+                   "operator should not be told to edit files that don't exist")
+    end
+  end
+
   def test_recover_review_flashes_partial_failure_when_dispatch_raises_after_clear_succeeds
     folder = "/tmp/hive/partial-failure"
     row = make_task_row(

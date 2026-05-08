@@ -149,17 +149,85 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
-  def test_next_pass_for_markerless_advance_after_completed_triage_pass
+  def test_next_pass_for_markerless_advance_after_completed_pass
+    # Pass 4 reached completion: reviewers ran, triage wrote
+    # escalations, fix succeeded (sentinel present). Markerless rerun
+    # advances to pass 5.
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "reviews"))
       File.write(File.join(dir, "reviews", "foo-04.md"), "## High\n- [ ] x\n")
       File.write(File.join(dir, "reviews", "escalations-04.md"), "# Escalations\n")
+      File.write(File.join(dir, "reviews", "fix-success-04.md"), "ok\n")
 
       task = Task.new(dir, File.join(dir, "task.md"))
       marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
 
       assert_equal 5, Hive::Stages::Review.next_pass_for(task, marker),
-                   "once escalations-NN.md exists, the pass reached the triage boundary"
+                   "fix-success-04.md sentinel proves pass 4 finished cleanly; advance to 5"
+    end
+  end
+
+  def test_pass_completion_falls_back_to_next_pass_reviewer_files
+    # Back-compat fallback: a legacy repo created BEFORE the
+    # fix-success sentinel existed has no `fix-success-NN.md` files.
+    # For a non-topmost pass, the existence of `*-{N+1}.md` reviewer
+    # files is proof the runner advanced past pass N (it only writes
+    # those after a successful fix-N). The topmost pass remains
+    # ambiguous on legacy repos — that's an accepted migration cost.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "foo-04.md"), "## H\n- [x] x\n")
+      File.write(File.join(reviews, "escalations-04.md"), "# E\n")
+      File.write(File.join(reviews, "foo-05.md"), "## H\n- [ ] y\n")
+      # No fix-success-04 sentinel and no pass-6 reviewer files.
+
+      assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "pass 5 reviewer files prove pass 4's fix succeeded (back-compat)"
+    end
+  end
+
+  def test_next_pass_for_retries_pass_when_fix_did_not_complete
+    # Pass 4 had reviewer files AND triage wrote escalations, but
+    # the fix phase failed (REVIEW_ERROR phase=fix) or the runner
+    # was interrupted mid-fix. Markerless rerun must RETRY pass 4
+    # at Phase 4 with the operator's existing [x] marks instead of
+    # advancing to pass 5 and abandoning them — the bug user flagged
+    # against PR #56's narrower incomplete_triage_pass? check.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "foo-04.md"), "## High\n- [x] applied\n")
+      File.write(File.join(dir, "reviews", "escalations-04.md"), "# Escalations\n")
+      # No fix-success-04.md, no pass-05 reviewer files.
+
+      task = Task.new(dir, File.join(dir, "task.md"))
+      marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+
+      assert_equal 4, Hive::Stages::Review.next_pass_for(task, marker),
+                   "without fix-success sentinel or pass-5 reviewer files, " \
+                   "pass 4's fix is incomplete; retry pass 4"
+    end
+  end
+
+  def test_pass_completion_status_classifies_each_phase
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+
+      assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 1),
+                   "empty reviews/ → :complete (nothing to retry)"
+
+      File.write(File.join(reviews, "foo-04.md"), "## High\n- [ ] x\n")
+      assert_equal :triage_incomplete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "reviewer files present, no escalations → :triage_incomplete"
+
+      File.write(File.join(reviews, "escalations-04.md"), "# Escalations\n")
+      assert_equal :fix_incomplete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "escalations present, no fix-success / no pass-5 → :fix_incomplete"
+
+      File.write(File.join(reviews, "fix-success-04.md"), "ok\n")
+      assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "fix-success sentinel → :complete"
     end
   end
 

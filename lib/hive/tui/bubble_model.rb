@@ -634,7 +634,7 @@ module Hive
           marker = row.marker.to_s.empty? ? "none" : row.marker
           return [ flashed("review recovery unavailable: marker=#{marker}"), nil ]
         end
-        if marker_name == "REVIEW_STALE" && !retryable_incomplete_triage_pass?(row)
+        if marker_name == "REVIEW_STALE" && !retryable_review_stale?(row)
           return [ flashed(review_stale_recovery_message(row, marker_name)), nil ]
         end
 
@@ -772,6 +772,27 @@ module Hive
         detail = Hive::Tui::Text.sanitize(review_recovery_detail(row, marker_name))[0, 80]
         "review recovery needs manual pass cleanup: #{detail}; " \
           "edit/rename highest-pass review files, then clear REVIEW_STALE and run hive run"
+      end
+
+      # Top-level gate: a REVIEW_STALE row is retryable from the TUI
+      # (clear+rerun) when ANY of the auto-recoverable shapes hold.
+      # Cases that fall through to the manual-cleanup message:
+      #   * max_passes hit with completed passes (the "trim reviewer
+      #     files" path) — neither sub-predicate matches.
+      def retryable_review_stale?(row)
+        wall_clock_stale?(row) || retryable_incomplete_triage_pass?(row)
+      end
+
+      # `REVIEW_STALE reason=wall_clock` is set by the runner when the
+      # aggregate review wall-clock budget elapsed mid-phase. The
+      # operator's correct response is "give it more time and retry";
+      # the existing reviewer/escalations files (if any) are still
+      # valid input. Crucially, wall-clock can fire BEFORE any reviewer
+      # files exist (e.g. during Phase 1 CI-fix), and a missing-file
+      # state has no operator action to take, so the TUI must NOT
+      # require reviewer files to be present before allowing retry.
+      def wall_clock_stale?(row)
+        (row.attrs || {})["reason"] == "wall_clock"
       end
 
       def retryable_incomplete_triage_pass?(row)

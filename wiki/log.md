@@ -2,6 +2,24 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-08T15:00:00Z] review — Detect mid-pass fix failures + retry wall-clock REVIEW_STALE from TUI
+
+**Action:** Self-review of the earlier review-recovery refinement found two scenarios still broken. Both fixed in this follow-up, with regression tests + sentinel introduction.
+
+1. **Fix-failed pass was indistinguishable from completed pass.** `next_pass_for`'s `incomplete_triage_pass?` predicate only returned true when `escalations-NN.md` was missing. After triage wrote the escalations file but the fix phase failed (`REVIEW_ERROR phase=fix`) — or the runner was interrupted mid-fix — the predicate returned false and `next_pass_for` advanced to `NN+1`, abandoning the operator's `[x]` marks.
+
+   Replaced with `pass_completion_status(folder, N) → :complete | :triage_incomplete | :fix_incomplete`. The new `:fix_incomplete` case (escalations present, neither fix-success sentinel nor pass-`N+1` reviewer files present) makes `next_pass_for` retry pass N AND signals the runner to skip Phase 2/3 on the first iteration — exactly the same `[x]`-preserving short-circuit a `REVIEW_WAITING` resume uses.
+
+   Disambiguating signal: `Stages::Review` now writes `reviews/fix-success-NN.md` at the two "pass N is done, advance" decision points (post-guardrail-not-tripped, and the Phase 2 zero-findings short-circuit to Phase 5). `fix-success-` is added to `ORCHESTRATOR_OWNED_PREFIXES` so the new file is excluded from reviewer-file scanning. Pass-`N+1` reviewer files act as a back-compat fallback at non-topmost passes for legacy repos.
+
+2. **Wall-clock REVIEW_STALE was misclassified as needing manual cleanup.** `Stages::Review.finalize_wall_clock_stale` can fire BEFORE any reviewer files exist (e.g. during Phase 1 CI-fix); the TUI's `retryable_incomplete_triage_pass?` gate required reviewer files to be present, so wall-clock stale fell into the manual-cleanup flash that told the operator to "edit/rename highest-pass review files" — files that don't exist.
+
+   Added `wall_clock_stale?(row)` and a top-level `retryable_review_stale?` gate that ORs the two retryable shapes. Wall-clock REVIEW_STALE now clears + reruns regardless of reviewer-file presence; the operator's lever for "give it more time" is `review.max_wall_clock_sec`.
+
+**Refreshed pages:**
+- `wiki/state-model.md` — pass-derivation paragraph rewrites the completion classifier as a three-state (`:complete` / `:triage_incomplete` / `:fix_incomplete`) with the sentinel write points and the back-compat fallback.
+- `wiki/commands/tui.md` — `recover_review` paragraph splits `REVIEW_STALE` retry into two named cases (wall_clock + incomplete-triage) and notes the wall-clock-without-files exception explicitly.
+
 ## [2026-05-08T12:34:03Z] review — Retry incomplete triage passes instead of counting filenames as completion
 
 **Action:** Refined review recovery after dogfooding showed `REVIEW_STALE pass=4` can be caused by partial reviewer artifacts rather than four completed review cycles. `Stages::Review.next_pass_for` now treats the highest pass as incomplete when reviewer-authored `*-NN.md` files exist without the matching `reviews/escalations-NN.md`; a markerless rerun retries that same pass instead of advancing to `NN+1` and immediately hitting `max_passes`. The TUI now auto-clears/reruns `REVIEW_STALE` only for that incomplete-triage shape; completed stale passes still require manual pass cleanup before clearing.

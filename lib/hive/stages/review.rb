@@ -53,7 +53,17 @@ module Hive
       # all need to skip these — otherwise a `fix-guardrail-NN.md` user
       # tick `[x]` would re-flow into the next pass's fix prompt and
       # over-amplify guardrail findings.
-      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail-].freeze
+      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success-].freeze
+
+      # Per-pass sentinel: `reviews/fix-success-NN.md` is written after
+      # a pass's Phase 4 fix succeeds (or Phase 2 produced zero findings
+      # and the runner short-circuited to Phase 5). Its presence — or
+      # the presence of any reviewer file for pass N+1 — proves pass N
+      # completed cleanly. Absence + `escalations-NN.md` exists =>
+      # the fix didn't complete, and `next_pass_for` retries pass N at
+      # Phase 4 with the operator's existing `[x]` marks instead of
+      # advancing past them.
+      FIX_SUCCESS_FILENAME = "fix-success".freeze
 
       # True for filenames that originate from a reviewer (not the
       # orchestrator). Used by every consumer of `reviews/*.md` so
@@ -61,6 +71,10 @@ module Hive
       # one constant.
       def reviewer_file?(name)
         ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
+      end
+
+      def fix_success_path(task_folder, pass)
+        File.join(task_folder, "reviews", "#{FIX_SUCCESS_FILENAME}-#{format('%02d', pass)}.md")
       end
 
       def run!(task, cfg)
@@ -153,6 +167,17 @@ module Hive
         pass = next_pass_for(task, marker, cfg)
         max_passes = cfg.dig("review", "max_passes") || 4
 
+        # When the runner is re-entering a pass whose Phase 4 fix did
+        # not finish (REVIEW_ERROR phase=fix, or interrupted
+        # REVIEW_WORKING phase=fix), pass_completion_status returns
+        # :fix_incomplete and next_pass_for returns the same pass.
+        # Skip Phase 2/3 on the first iteration (just like a
+        # REVIEW_WAITING resume) so the operator's existing [x] marks
+        # are preserved and the retry runs Phase 4 directly. Only
+        # applies to the FIRST loop iteration; subsequent passes are
+        # fresh and clear fix_retry_pass at the loop tail.
+        fix_retry_pass = pass_completion_status(task.folder, pass) == :fix_incomplete ? pass : nil
+
         loop do
           if wall_clock_exceeded?(started_at, max_wall_clock)
             return finalize_wall_clock_stale(task, started_at, pass: pass)
@@ -165,13 +190,15 @@ module Hive
 
           ctx_pass = ctx.with(pass: pass)
 
-          # On REVIEW_WAITING resume, validate that at least one
-          # reviewer file exists for this pass before short-circuiting
-          # to Phase 4. If the user edited the marker but deleted /
-          # renamed every per-reviewer file, the fix-agent prompt
-          # would be empty and we'd loop indefinitely. Surface as
-          # REVIEW_ERROR resume_no_findings instead.
-          if resuming_from_waiting?(marker, pass) &&
+          # Two paths skip Phase 2/3 and jump to Phase 4 on existing
+          # reviewer artefacts: (a) REVIEW_WAITING resume (user edited
+          # [x] marks), (b) fix-retry on an interrupted pass. Both
+          # require reviewer files for `pass` to exist; if the user
+          # deleted them between runs, surface as REVIEW_ERROR
+          # resume_no_findings instead of looping with an empty fix
+          # prompt.
+          skip_review_and_triage = resuming_from_waiting?(marker, pass) || pass == fix_retry_pass
+          if skip_review_and_triage &&
              Hive::Stages::Review::Triage.discover_reviewer_files(ctx_pass).empty?
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :resume, reason: "resume_no_findings",
@@ -180,9 +207,10 @@ module Hive
                      status: :review_error }
           end
 
-          # If we resumed from REVIEW_WAITING, skip Phase 2/3 — user
-          # already edited [x] marks; go directly to Phase 4.
-          unless resuming_from_waiting?(marker, pass)
+          # If we resumed from REVIEW_WAITING or are retrying an
+          # incomplete-fix pass, skip Phase 2/3 — reviewer files +
+          # [x] marks already exist; go directly to Phase 4.
+          unless skip_review_and_triage
             @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
             reviewers_result = run_reviewers(cfg, ctx_pass, task)
@@ -226,7 +254,12 @@ module Hive
           escalations_count = count_escalations(ctx_pass)
 
           if accepted.strip.empty? && escalations_count.zero?
-            # Phase 2 produced zero findings → skip Phase 4, jump to Phase 5
+            # Phase 2 produced zero findings → skip Phase 4, jump to Phase 5.
+            # Mark the pass complete so a subsequent run that re-enters this
+            # task (e.g. wall-clock-stale fired before Phase 5 records
+            # REVIEW_COMPLETE) doesn't classify the no-fix-needed pass as
+            # "fix incomplete" and try to retry it.
+            write_fix_success(ctx_pass)
             break
           end
 
@@ -290,8 +323,19 @@ module Hive
                      status: :review_waiting }
           end
 
-          # On the next iteration, treat as fresh entry (not waiting-resume).
+          # Phase 4 fix succeeded AND guardrail passed: pass N is
+          # complete. Drop the sentinel so a subsequent re-entry (e.g.
+          # wall-clock fired between this point and the next pass's
+          # reviewers) recognises pass N as done and advances to N+1
+          # rather than retrying the fix on already-applied [x] marks.
+          write_fix_success(ctx_pass)
+
+          # On the next iteration, treat as fresh entry (not waiting-
+          # resume / fix-retry). fix_retry_pass only ever applies to
+          # the very first iteration after entry; once we've executed
+          # a clean Phase 4 and incremented, we're on a brand-new pass.
           marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+          fix_retry_pass = nil
           pass += 1
         end
 
@@ -372,19 +416,67 @@ module Hive
           # files and wants a fix run on it.
           [ max, 1 ].max
         else
-          incomplete_triage_pass?(task.folder, max) ? max : max + 1
+          # Retry pass N when it's not yet complete (either triage
+          # didn't write escalations-NN.md, or fix didn't finish before
+          # the runner exited / was interrupted). pass_completion_status
+          # returns :complete, :triage_incomplete, or :fix_incomplete.
+          pass_completion_status(task.folder, max) == :complete ? max + 1 : max
         end
       end
 
-      def incomplete_triage_pass?(task_folder, pass)
-        return false if pass < 1
+      # Classify whether a pass is fully complete on disk. Used by both
+      # next_pass_for (decide retry vs advance) and the loop body
+      # (decide whether to run Phase 2/3 again or skip straight to
+      # Phase 4 on a fix retry).
+      #
+      # Returns one of:
+      #   :complete           — reviewer files for pass N+1 exist OR a
+      #                         `fix-success-NN.md` sentinel exists; the
+      #                         runner moved past pass N cleanly.
+      #   :triage_incomplete  — reviewer files for pass N exist but no
+      #                         `escalations-NN.md`. Triage never ran.
+      #                         Retry runs Phase 2/3 to re-derive
+      #                         escalations from existing reviewer files.
+      #   :fix_incomplete     — reviewer files AND escalations-NN.md
+      #                         exist, but neither the fix-success
+      #                         sentinel nor any pass-N+1 reviewer file
+      #                         exists. Fix-phase failed (REVIEW_ERROR
+      #                         phase=fix) or the runner was interrupted
+      #                         mid-fix. Retry skips Phase 2/3 and
+      #                         re-runs Phase 4 on the operator's
+      #                         existing [x] marks.
+      #
+      # Pass < 1 or an empty reviews/ dir → :complete (nothing to retry).
+      def pass_completion_status(task_folder, pass)
+        return :complete if pass < 1
 
         pass_suffix = format("%02d", pass)
-        reviewer_files = Dir[File.join(task_folder, "reviews", "*-#{pass_suffix}.md")]
-                         .select { |path| reviewer_file?(File.basename(path)) }
-        return false if reviewer_files.empty?
+        reviews_dir = File.join(task_folder, "reviews")
+        reviewer_files = Dir[File.join(reviews_dir, "*-#{pass_suffix}.md")]
+                          .select { |path| reviewer_file?(File.basename(path)) }
+        return :complete if reviewer_files.empty?
 
-        !File.exist?(File.join(task_folder, "reviews", "escalations-#{pass_suffix}.md"))
+        unless File.exist?(File.join(reviews_dir, "escalations-#{pass_suffix}.md"))
+          return :triage_incomplete
+        end
+
+        # Triage produced escalations. Was the fix completed?
+        return :complete if File.exist?(fix_success_path(task_folder, pass))
+
+        next_pass_suffix = format("%02d", pass + 1)
+        next_pass_started = Dir[File.join(reviews_dir, "*-#{next_pass_suffix}.md")].any? do |path|
+          reviewer_file?(File.basename(path))
+        end
+        return :complete if next_pass_started
+
+        :fix_incomplete
+      end
+
+      # Back-compat shim: PR #56 named the narrower predicate this. Now
+      # derived from pass_completion_status so the broader fix-incomplete
+      # case routes through one source of truth.
+      def incomplete_triage_pass?(task_folder, pass)
+        pass_completion_status(task_folder, pass) == :triage_incomplete
       end
 
       def resuming_from_waiting?(marker, pass)
@@ -599,6 +691,22 @@ module Hive
         matches.each do |m|
           body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: #{m.snippet}\n"
         end
+        File.write(path, body)
+      end
+
+      # Write the per-pass fix-success sentinel. Called from the two
+      # "pass N is done, advance" sites: Phase 2's zero-findings break
+      # and the post-guardrail-not-tripped continuation. Body is
+      # operator-readable; the runner only cares about file presence.
+      def write_fix_success(ctx)
+        path = fix_success_path(ctx.task_folder, ctx.pass)
+        FileUtils.mkdir_p(File.dirname(path))
+        body = +"<!-- HIVE: fix-success sentinel for pass " \
+               "#{format('%02d', ctx.pass)}; do not edit. " \
+               "Removing this file makes the next markerless `hive run` " \
+               "treat the pass as fix-incomplete and retry it. -->\n"
+        body << "# Fix completed for pass #{format('%02d', ctx.pass)}\n\n"
+        body << "Recorded at #{Time.now.utc.iso8601}.\n"
         File.write(path, body)
       end
 

@@ -180,8 +180,13 @@ module Hive
         payload = read_pid_file_payload
         pid = payload && payload["pid"]
         if pid.nil? || pid <= 0
-          warn "hive: daemon PID file at #{pid_file} is malformed; removing"
           File.delete(pid_file)
+          if @json
+            puts JSON.generate(stop_envelope(running: false, was_running: false,
+                                             reason: "malformed_pid_file"))
+          else
+            warn "hive: daemon PID file at #{pid_file} is malformed; removing"
+          end
           return
         end
 
@@ -436,24 +441,16 @@ module Hive
             end
             puts "hive daemon: #{verb} #{r['name']} (#{r['config_yml']})#{suffix}"
           end
-          if @subcommand == "enable" && !@all
+          # Only emit the `next: hive daemon reload` paragraph when the
+          # state actually flipped. JSON envelope emits `kind: no_op`
+          # for the same case; bare-text and envelope must agree.
+          any_changed = results.any? { |r| r["previous"] != enabled }
+          if @subcommand == "enable" && !@all && any_changed
             puts ""
             puts "  next: hive daemon reload   # if the daemon is already running"
             puts "        hive daemon start --dry-run --detach   # if it's not"
           end
         end
-      end
-
-      def prepare_enable_target(entry)
-        path = project_config_path(entry)
-        data = read_project_config_for_enrollment(path, entry["path"])
-        previous = data["daemon"].is_a?(Hash) ? data["daemon"]["enabled"] : nil
-
-        { entry: entry, config_yml: path, previous: previous, data: data }
-      end
-
-      def project_config_path(entry)
-        File.join(entry["hive_state_path"], "config.yml")
       end
 
       def resolve_enable_targets
@@ -590,7 +587,9 @@ module Hive
           cfg_path = File.join(entry["hive_state_path"], "config.yml")
           unless File.exist?(cfg_path)
             fail_usage!(
-              "hive daemon #{@subcommand}: missing #{cfg_path}; project #{entry['name'].inspect} is not initialised",
+              "hive daemon #{@subcommand}: missing #{cfg_path}; project " \
+              "#{entry['name'].inspect} is not initialised " \
+              "(run `hive init #{entry['path']}` to bootstrap it)",
               kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
             )
           end
@@ -624,9 +623,32 @@ module Hive
       # operator with a config the tool itself can't recover). Fail
       # fast with a clear remediation.
       def assert_surgical_edit_possible!(cfg_path, parsed_data)
+        text = File.read(cfg_path)
+
+        # BOM check FIRST, before the empty-daemon early-return. UTF-8
+        # BOM at the start of config.yml is precisely the case that
+        # makes Psych silently lose the daemon: block — so parsed_data
+        # might LOOK like the file has no daemon block when the on-disk
+        # text actually has one. Without this guard, the surgical
+        # editor would append a fresh `daemon:` block past the BOM,
+        # producing a file the dispatcher (which also reads via Psych)
+        # still cannot see. CLI would report `ok: true, current: true`
+        # while the daemon never knows the project is enabled.
+        # Use the explicit byte sequence rather than a literal U+FEFF in
+        # source — embedding the BOM character itself in the source file
+        # would make this file BOM-prefixed, which is the very condition
+        # we're rejecting. The 3 bytes are UTF-8's BOM encoding.
+        utf8_bom = "\xEF\xBB\xBF".dup.force_encoding("UTF-8")
+        if text.start_with?(utf8_bom)
+          raise Hive::ConfigError,
+                "hive daemon #{@subcommand}: #{cfg_path} starts with a UTF-8 BOM " \
+                "(byte sequence ef bb bf), which Psych silently mis-parses. " \
+                "Strip the BOM before flipping daemon.enabled, e.g.:\n" \
+                "  sed -i.bak '1s/^\\xEF\\xBB\\xBF//' #{cfg_path}"
+        end
+
         return unless parsed_data.is_a?(Hash) && parsed_data["daemon"].is_a?(Hash)
 
-        text = File.read(cfg_path)
         # Fast reject for CRLF — split on \r\n boundaries first to give
         # a precise error rather than the generic "non-2-space" message.
         if text.include?("\r\n")
@@ -689,7 +711,8 @@ module Hive
         data = parse_project_config(cfg_path)
         if data.nil?
           fail_usage!(
-            "hive daemon #{@subcommand}: missing #{cfg_path}; this project is not initialised",
+            "hive daemon #{@subcommand}: missing #{cfg_path}; " \
+            "this project is not initialised (run `hive init` from its root)",
             kind: Hive::Schemas::EnrollErrorKind::NOT_INITIALISED
           )
         end
@@ -699,21 +722,32 @@ module Hive
         end
         assert_surgical_edit_possible!(cfg_path, data)
 
-        # Atomic rewrite under an exclusive flock. The flock serialises
-        # concurrent `hive daemon enable` calls against the same inode;
-        # it does NOT protect against a parallel editor that does its own
-        # tempfile + rename (vim/emacs atomic-save), which is treated as
-        # out-of-scope per the single-user-local trust model in SECURITY.md.
+        # Atomic rewrite under an exclusive flock on a SIBLING .lock
+        # file (not on cfg_path itself). flock-on-cfg-path would lock
+        # the pre-rename inode; after our File.rename(tmp, cfg_path)
+        # the path points to a new inode and a concurrent writer
+        # opening cfg_path would take its lock instantly. The sibling
+        # lock file's inode is stable across renames, so two writers
+        # contending on it actually serialise. Pattern matches dpkg /
+        # git's lock discipline.
+        #
         # Mode bits are preserved so `chmod 0600 config.yml` survives.
         # `f.fsync` + ensure-cleanup of the tempfile match the durability
         # contract Hive::Markers#write_atomic provides for marker files.
-        #
-        # Errno::* (ENOSPC / EROFS / EACCES / EXDEV) is rescued and re-raised
-        # as Hive::ConfigError so disk/permission failures route to exit 78
-        # (CONFIG) instead of falling through EnvelopeEmitter's generic
-        # StandardError → InternalError (exit 70). Matches the contract
-        # already used by Hive::Config.write_global_config!.
-        File.open(cfg_path, File::RDONLY) do |lock_fd|
+        atomic_rewrite_with_lock(cfg_path, enabled)
+      end
+
+      # Encapsulates the lock acquire + atomic rewrite under ONE Errno::*
+      # rescue scope. Errno from either the lock-file open OR the
+      # tempfile/rename routes to Hive::ConfigError (exit 78), matching
+      # Hive::Config.write_global_config!'s contract. Read-side errors
+      # from parse_project_config and assert_surgical_edit_possible!
+      # are NOT in scope (they ran in write_daemon_block before this
+      # call), so they retain their NOT_INITIALISED / direct-raise
+      # classification.
+      def atomic_rewrite_with_lock(cfg_path, enabled)
+        lock_path = "#{cfg_path}.lock"
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock_fd|
           lock_fd.flock(File::LOCK_EX)
           original_mode = File.stat(cfg_path).mode & 0o7777
           new_text = upsert_daemon_enabled(File.read(cfg_path), enabled)
@@ -728,11 +762,9 @@ module Hive
             File.rename(tmp, cfg_path)
             renamed = true
           ensure
-            # Cleanup is best-effort: a TOCTOU between exist? and
-            # delete (or an EACCES from antivirus / Spotlight on macOS)
-            # must not mask the original write failure. The tempfile-
-            # leak path is already unusual; rescuing here keeps the
-            # caller's exception intact.
+            # Cleanup is best-effort: a TOCTOU between exist? and delete
+            # (or an EACCES from antivirus / Spotlight on macOS) must not
+            # mask the original write failure.
             if !renamed && File.exist?(tmp)
               begin
                 File.delete(tmp)

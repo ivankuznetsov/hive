@@ -744,8 +744,10 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_daemon_stop_reason_enum_pinned
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-stop")))
     schema_reasons = doc.dig("$defs", "SuccessPayload", "properties", "reason", "enum").sort
-    # Reasons emitted by the two refusal branches in stop_daemon.
-    producer_reasons = %w[pid_reused unverified].sort
+    # Reasons emitted by the three refusal branches in stop_daemon:
+    # pid_reused / unverified (PID-reuse defense), malformed_pid_file
+    # (PID file exists but unparseable).
+    producer_reasons = %w[pid_reused unverified malformed_pid_file].sort
     assert_equal producer_reasons, schema_reasons
   end
 
@@ -798,9 +800,11 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_daemon_enroll_success_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
-    # The producer's exhaustive key set (kept in sync with
-    # Hive::Commands::Daemon#do_call's JSON.generate call).
-    producer_required = %w[schema schema_version ok subcommand results next_action].sort
+    # The producer always emits these. `next_action` is OPTIONAL in v1
+    # because PR #45's earlier v1 producer shipped without it; making
+    # next_action required now would silently break consumers pinned
+    # to PR #45's envelope shape. A future v2 may promote it.
+    producer_required = %w[schema schema_version ok subcommand results].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-daemon-enroll.v1.json (envelope)"
 
@@ -808,6 +812,52 @@ class SchemaFilesTest < Minitest::Test
     item_producer = %w[name path previous current config_yml].sort
     assert_equal item_producer, item_required,
                  "schema/producer required-key drift in hive-daemon-enroll.v1.json (Result)"
+  end
+
+  # Although next_action is OPTIONAL on v1, the current producer always
+  # emits it; that emission must validate against the schema. This pins
+  # the additive shape so a future change can't drop next_action from
+  # the producer without first updating the schema (or a future v2).
+  def test_hive_daemon_enroll_success_with_next_action_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll"))))
+    payload = {
+      "schema" => "hive-daemon-enroll",
+      "schema_version" => 1,
+      "ok" => true,
+      "subcommand" => "enable",
+      "results" => [
+        { "name" => "p", "path" => "/tmp/p", "previous" => false,
+          "current" => true, "config_yml" => "/tmp/p/.hive-state/config.yml" }
+      ],
+      "next_action" => {
+        "kind" => "reload",
+        "command" => "hive daemon reload",
+        "required" => false,
+        "reason" => "daemon picks up daemon.enabled changes within poll_interval_sec"
+      }
+    }
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "current producer payload (with next_action) must validate"
+  end
+
+  # The original PR #45 v1 envelope shape (no next_action) is also
+  # valid v1 — we did not introduce a silent breaking change by
+  # adding the field.
+  def test_hive_daemon_enroll_pr45_legacy_shape_still_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-enroll"))))
+    legacy_payload = {
+      "schema" => "hive-daemon-enroll",
+      "schema_version" => 1,
+      "ok" => true,
+      "subcommand" => "enable",
+      "results" => [
+        { "name" => "p", "path" => "/tmp/p", "previous" => nil,
+          "current" => true, "config_yml" => "/tmp/p/.hive-state/config.yml" }
+      ]
+    }
+    errors = schemer.validate(legacy_payload).map { |e| e["error"] }
+    assert_empty errors, "PR #45's no-next_action envelope shape must still validate as v1 " \
+                         "(otherwise this PR is a silent breaking change)"
   end
 
   def test_hive_daemon_enroll_subcommand_enum_pinned

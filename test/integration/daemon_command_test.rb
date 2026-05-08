@@ -64,6 +64,28 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
+  # Malformed PID file (garbage content, not parseable as a PID): stop
+  # must still emit hive-daemon-stop envelope under --json with the
+  # `malformed_pid_file` reason, and clean up the bad file. Without
+  # the envelope path, agents could not distinguish this from "no PID
+  # file at all".
+  def test_stop_with_malformed_pid_file_emits_envelope_and_cleans_up
+    with_isolated_hive_home do |home, env|
+      File.write(File.join(home, ".daemon.pid"), "this is not a YAML PID payload\n")
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "stop", "--json")
+      assert_equal 0, status.exitstatus
+      doc = JSON.parse(out)
+      assert_equal "hive-daemon-stop", doc["schema"]
+      assert_equal true, doc["ok"]
+      assert_equal false, doc["running"]
+      assert_equal false, doc["was_running"]
+      assert_equal "malformed_pid_file", doc["reason"],
+                   "malformed PID file must surface the closed reason enum value"
+      refute File.exist?(File.join(home, ".daemon.pid")),
+             "malformed PID file must be cleaned up"
+    end
+  end
+
   def test_stop_with_yaml_pid_payload_for_dead_pid_cleans_up
     # PR-40 review P2 #3: new daemons write a YAML payload (pid +
     # process_start_time + started_at). A YAML payload pointing at a
@@ -938,6 +960,27 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_match(/2-space indentation/i, err)
       assert_equal original_text, File.read(cfg_path),
                    "config.yml must not have been touched on 4-space-indent rejection"
+    end
+  end
+
+  # UTF-8 BOM at the start of config.yml causes Psych to silently
+  # mis-parse the daemon block. Pre-fix, the surgical editor would
+  # append a fresh `daemon:` block past the BOM, producing a file the
+  # dispatcher (also reading via Psych) still cannot see. CLI reported
+  # success while the daemon never knew the project was enabled.
+  def test_enable_rejects_utf8_bom_prefixed_config_yml
+    bom = "\xEF\xBB\xBF".dup.force_encoding("UTF-8")
+    initial = "#{bom}default_branch: main\ndaemon:\n  enabled: false\n"
+    with_registered_project(initial_yaml: initial) do |env, cfg_path, _root|
+      original_text = File.read(cfg_path)
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "enable", "proj")
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus,
+                   "BOM-prefixed config.yml must exit 78 (CONFIG)"
+      assert_match(/UTF-8 BOM/i, err)
+      assert_match(/ef bb bf/, err, "error message should name the byte sequence")
+      assert_equal original_text, File.read(cfg_path),
+                   "config.yml must not have been touched on BOM rejection"
     end
   end
 

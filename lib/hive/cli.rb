@@ -405,7 +405,8 @@ module Hive
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
                                           --detach, runs in the foreground.
-        stop                              Send SIGTERM to the running daemon.
+        stop [--json]                     Send SIGTERM to the running daemon.
+                                          --json emits hive-daemon-stop.v1.
         status [--json]                   Show running / not-running.
         reload [--json]                   Send SIGHUP to reload config.
                                           --json emits hive-daemon-reload.v1.
@@ -443,18 +444,25 @@ module Hive
                  desc: "for enable/disable: apply to every registered project"
     def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
-      # Normalise positional argv up front so we route every shape
-      # (no subcommand, multi-positional, normal) through the same
-      # Hive::Commands::Daemon constructor + JSON envelope path.
+      # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
+      # call_with_envelope inside the command can't catch them. Emit
+      # the hive-daemon-enroll ErrorPayload inline under --json so
+      # agents get the same structured envelope as in-command failures.
       if subcommand.nil?
-        raise Hive::InvalidTaskPath,
-              "hive daemon: missing SUBCOMMAND " \
-              "(expected: #{Hive::Commands::Daemon::VALID_SUBCOMMANDS.join(', ')})"
+        emit_daemon_argv_error(
+          subcommand: nil,
+          message: "hive daemon: missing SUBCOMMAND " \
+                   "(expected: #{Hive::Commands::Daemon::VALID_SUBCOMMANDS.join(', ')})",
+          error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
+        )
       end
       if targets.length > 1
-        raise Hive::InvalidTaskPath,
-              "hive daemon #{subcommand}: too many positional arguments " \
-              "#{targets.inspect}; expected exactly one PROJECT (or --all)"
+        emit_daemon_argv_error(
+          subcommand: subcommand,
+          message: "hive daemon #{subcommand}: too many positional arguments " \
+                   "#{targets.inspect}; expected exactly one PROJECT (or --all)",
+          error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+        )
       end
       Hive::Commands::Daemon.new(
         subcommand, targets.first,
@@ -463,6 +471,34 @@ module Hive
         all: options[:all],
         json: options[:json]
       ).call
+    end
+
+    no_commands do
+      # Emit a hive-daemon-enroll ErrorPayload to stdout when --json is
+      # set, then raise so the bin/hive top-level rescue maps to the
+      # right exit code. UsageError carries the closed error_kind so
+      # the envelope matches every other --json failure on this surface.
+      def emit_daemon_argv_error(subcommand:, message:, error_kind:)
+        require "hive/commands/daemon"
+        require "json"
+        error = Hive::Commands::Daemon::UsageError.new(message, error_kind: error_kind)
+        if options[:json]
+          payload = Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-daemon-enroll",
+            error: error,
+            error_kind: error_kind
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE, JSON::GeneratorError
+            # caller went away or payload not serialisable — fall
+            # through to the bare-text rescue path below.
+          end
+        else
+          warn message
+        end
+        raise error
+      end
     end
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"

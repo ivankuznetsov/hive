@@ -30,13 +30,13 @@
           "description": "True if a live, ownership-verified daemon was actually signalled by this call."
         },
         "stale_pid": {
-          "type": ["integer", "null"],
+          "type": [ "integer", "null" ],
           "description": "PID found in the PID file when it was stale (dead, reused, or unverified). Optional; only present when stop encountered a stale entry."
         },
         "reason": {
           "type": "string",
-          "enum": ["pid_reused", "unverified"],
-          "description": "Why the PID file was treated as stale. `pid_reused` = recorded process_start_time differs from live; `unverified` = either side nil so ownership cannot be proved. Optional; absent on the simple stop / not-running path."
+          "enum": [ "pid_reused", "unverified", "malformed_pid_file" ],
+          "description": "Why the PID file was treated as stale. `pid_reused` = recorded process_start_time differs from live; `unverified` = either side nil so ownership cannot be proved; `malformed_pid_file` = PID file exists but cannot be parsed as a valid PID. Optional; absent on the simple stop / not-running path."
         }
       }
     }

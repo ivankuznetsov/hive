@@ -16,8 +16,7 @@
         "schema_version",
         "ok",
         "subcommand",
-        "results",
-        "next_action"
+        "results"
       ],
       "properties": {
         "schema": { "const": "hive-daemon-enroll" },
@@ -33,7 +32,10 @@
           "description": "One entry per affected project. With PROJECT, length is 1; with --all, length matches the registry size.",
           "items": { "$ref": "#/$defs/Result" }
         },
-        "next_action": { "$ref": "#/$defs/NextAction" }
+        "next_action": {
+          "$ref": "#/$defs/NextAction",
+          "description": "OPTIONAL in v1. Present in the current producer's emission; absent from the original PR #45 v1 producer (which shipped before this field was added). Consumers MUST tolerate its absence on this version. A future v2 may make it required."
+        }
       }
     },
     "NextAction": {

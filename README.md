@@ -62,7 +62,7 @@ The brainstorm, plan, and 5-review stages instruct their agents to invoke specif
 | `codex-ce-code-review` | `/ce-code-review` | n/a (this row uses codex) | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
 | `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude plugin install <pr-review-toolkit-marketplace>` | n/a (this row uses claude) |
 
-Pi has its own skill model with a different invocation form. Pi resolves skills as `/skill:<name>` (not bare `/<name>`); hive's pi profile sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches. Pi's discovery paths: `~/.pi/agent/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`, project-local `.pi/skills/` and `.agents/skills/`, plus pi packages installed via `pi install <source>`.
+Pi has its own skill model with a different invocation form. Pi resolves skills as `/skill:<name>` (not bare `/<name>`); hive's pi profile sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches. Pi's discovery paths: user-level `~/.pi/agent/skills/` (recursive, plus root-level `<name>.md`) and `~/.agents/skills/` (recursive, cross-agent); project-level `<project>/.pi/skills/` (recursive) plus every ancestor `<dir>/.agents/skills/` up to the nearest `.git` checkout; `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` (`skills` and `packages` entries, each jailed under the settings dir / `$HOME` / project root); pi packages installed via `pi install <source>` (`~/.pi/npm/node_modules/*/skills/`, `~/.pi/agent/git/<host>/<user>/<repo>/skills/`); plus any package whose `package.json` declares a `pi.skills` path (jailed under the package root). `hive doctor` walks all of these and reports per-row.
 
 To verify your install:
 
@@ -71,7 +71,7 @@ hive doctor              # tabular status of each (stage, agent, skill) triple P
 hive doctor --json       # machine-readable envelope (hive-doctor.v1; checks[].kind = "stage" | "reviewer")
 ```
 
-Exit codes: `0` all present (or N/A for pi); `65` at least one skill missing; `78` config error.
+Exit codes: `0` all present or not applicable; `65` at least one skill missing; `78` config error.
 
 `hive init` runs the same doctor as a non-fatal preflight at end-of-bootstrap. Any missing-skill warnings are emitted to **stderr** (so `hive init | …` pipelines stay clean) and init still exits `0` — install gaps surface but don't block bootstrap. Look for `hive: doctor pre-flight — found N issue(s):` after the initialized summary.
 

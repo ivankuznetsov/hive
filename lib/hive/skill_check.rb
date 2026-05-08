@@ -1,3 +1,4 @@
+require "json"
 require "pathname"
 
 module Hive
@@ -17,9 +18,8 @@ module Hive
   #       installed file matches it.
   #
   #   [:not_applicable, "<why>"]
-  #     — this agent has no slash-command-with-disk-resolution model
-  #       (e.g. pi, which sends the prompt verbatim and treats slash
-  #       text as ordinary characters in the user message).
+  #     — this invocation form cannot be checked for this agent
+  #       (e.g. pi only resolves skills as `/skill:<name>`).
   module SkillCheck
     # Parsed invocation. Either form is accepted:
     #   /name           -> Invocation.new(plugin: nil, name: "name")
@@ -105,14 +105,17 @@ module Hive
 
       def build_candidates(inv, home:, project_root:)
         if inv.plugin
+          plugin = Hive::SkillCheck.glob_escape(inv.plugin)
+          name = Hive::SkillCheck.glob_escape(inv.name)
           # Cache layout: <marketplace>/<plugin>/<version>/skills/<name>/SKILL.md
-          cache_skill_glob = File.join(home, ".claude/plugins/cache/*", inv.plugin, "*", "skills", inv.name, "SKILL.md")
-          cache_cmd_glob   = File.join(home, ".claude/plugins/cache/*", inv.plugin, "*", "commands", "#{inv.name}.md")
+          cache_skill_glob = File.join(home, ".claude/plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
+          cache_cmd_glob   = File.join(home, ".claude/plugins/cache/*", plugin, "*", "commands", "#{name}.md")
           # Marketplace source layout: <marketplace>/plugins/<plugin>/skills/<name>/SKILL.md
-          mp_skill_glob = File.join(home, ".claude/plugins/marketplaces/*/plugins", inv.plugin, "skills", inv.name, "SKILL.md")
-          mp_cmd_glob   = File.join(home, ".claude/plugins/marketplaces/*/plugins", inv.plugin, "commands", "#{inv.name}.md")
+          mp_skill_glob = File.join(home, ".claude/plugins/marketplaces/*/plugins", plugin, "skills", name, "SKILL.md")
+          mp_cmd_glob   = File.join(home, ".claude/plugins/marketplaces/*/plugins", plugin, "commands", "#{name}.md")
           (Dir[cache_skill_glob] + Dir[cache_cmd_glob] + Dir[mp_skill_glob] + Dir[mp_cmd_glob])
         else
+          name = Hive::SkillCheck.glob_escape(inv.name)
           paths = []
           if project_root
             paths << File.join(project_root, ".claude/commands/#{inv.name}.md")
@@ -123,10 +126,10 @@ module Hive
           # Plugin-fallback for bare invocations: claude's runtime
           # resolves `/foo` against any installed plugin's skill named
           # `foo` (in addition to user-level commands/skills).
-          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/skills/#{inv.name}/SKILL.md")])
-          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/commands/#{inv.name}.md")])
-          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/skills/#{inv.name}/SKILL.md")])
-          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/commands/#{inv.name}.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/skills", name, "SKILL.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/commands", "#{name}.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/skills", name, "SKILL.md")])
+          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/commands", "#{name}.md")])
           paths
         end
       end
@@ -174,11 +177,14 @@ module Hive
 
       def build_candidates(inv, home:, project_root:)
         if inv.plugin
+          plugin = Hive::SkillCheck.glob_escape(inv.plugin)
+          name = Hive::SkillCheck.glob_escape(inv.name)
           # Cache layout produced by `codex plugin install`:
           # ~/.codex/plugins/cache/<owner>-<marketplace>/<plugin>/<version>/skills/<name>/SKILL.md
-          glob = File.join(home, ".codex/plugins/cache/*", inv.plugin, "*", "skills", inv.name, "SKILL.md")
+          glob = File.join(home, ".codex/plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
           Dir[glob]
         else
+          name = Hive::SkillCheck.glob_escape(inv.name)
           paths = []
           if project_root
             paths << File.join(project_root, ".codex/skills/#{inv.name}/SKILL.md")
@@ -188,7 +194,7 @@ module Hive
           # Plugin fallback: codex resolves `/foo` against any installed
           # plugin's skill named `foo` in addition to user-level
           # ~/.codex/skills/. Mirrors claude's behaviour.
-          paths.concat(Dir[File.join(home, ".codex/plugins/cache/*/*/*/skills/#{inv.name}/SKILL.md")])
+          paths.concat(Dir[File.join(home, ".codex/plugins/cache/*/*/*/skills", name, "SKILL.md")])
           paths
         end
       end
@@ -212,18 +218,11 @@ module Hive
     module Pi
       module_function
 
-      # Pi has a real skill-discovery model — the earlier "no
-      # slash-command resolver" framing was wrong. Pi probes (per the
-      # `@mariozechner/pi-coding-agent` README "Skills" section and
-      # `dist/core/package-manager.js`):
-      #
-      #   1. ~/.pi/agent/skills/<name>/SKILL.md         (user)
-      #   2. ~/.agents/skills/<name>/SKILL.md           (cross-agent shared)
-      #   3. <project>/.pi/skills/<name>/SKILL.md       (project pi-only)
-      #   4. <project>/.agents/skills/<name>/SKILL.md   (project cross-agent)
-      #   5. Pi packages installed via `pi install` — npm/git roots
-      #      that contain a `skills/` dir; covered by globbing
-      #      common locations.
+      # Pi has a real skill-discovery model. It loads user skills,
+      # cross-agent skills, project skills, package resources, and
+      # explicit settings entries. Directories containing SKILL.md are
+      # discovered recursively; `.pi/skills` and `~/.pi/agent/skills`
+      # also accept root-level `<name>.md` skills.
       #
       # Skills are invoked at runtime as `/skill:<name>`. Hive's pi
       # profile sets `skill_syntax_format: "/skill:%{skill}"` so the
@@ -249,44 +248,319 @@ module Hive
         end
 
         home = ENV["HOME"] || Dir.home
-        candidates = build_candidates(inv, home: home, project_root: project_root)
+        parse_errors = []
+        candidates = build_candidates(inv, home: home, project_root: project_root, parse_errors: parse_errors)
         path = Hive::SkillCheck.first_existing(candidates)
         return [ :present, path ] if path
 
-        [ :missing, install_hint(inv) ]
+        [ :missing, install_hint(inv, parse_errors: parse_errors) ]
       rescue ArgumentError => e
         [ :missing, "pi: #{e.message}" ]
       end
 
-      def build_candidates(inv, home:, project_root:)
-        name = Hive::SkillCheck.glob_escape(inv.name)
+      def build_candidates(inv, home:, project_root:, parse_errors: [])
         paths = []
+        paths.concat(skill_location_candidates(File.join(home, ".pi/agent/skills"), inv.name, include_root_md: true))
+        paths.concat(skill_location_candidates(File.join(home, ".agents/skills"), inv.name, include_root_md: false))
+
         if project_root
-          paths << File.join(project_root, ".pi/skills/#{inv.name}/SKILL.md")
-          paths.concat(Dir[File.join(project_root, ".agents/skills/#{name}/SKILL.md")])
+          project = File.expand_path(project_root)
+          paths.concat(skill_location_candidates(File.join(project, ".pi/skills"), inv.name, include_root_md: true))
+          project_ancestors(project).each do |dir|
+            paths.concat(skill_location_candidates(File.join(dir, ".agents/skills"), inv.name, include_root_md: false))
+          end
         end
-        paths << File.join(home, ".pi/agent/skills/#{inv.name}/SKILL.md")
-        paths << File.join(home, ".agents/skills/#{inv.name}/SKILL.md")
-        # Pi packages installed via `pi install` — global npm root
-        # (`getGlobalNpmRoot` in pi's package-manager) and project
-        # pi-config (`<cwd>/.pi/npm/node_modules/<package>/skills/`).
-        # We glob common npm-root locations rather than inferring the
-        # exact one from pi's runtime; if a pi user uses a non-
-        # standard root, the skill is still findable via the project
-        # `.pi/npm/...` path.
-        paths.concat(Dir[File.join(home, ".pi/npm/node_modules/*/skills/#{name}/SKILL.md")])
+
+        settings_paths = [ File.join(home, ".pi/agent/settings.json") ]
         if project_root
-          paths.concat(Dir[File.join(project_root, ".pi/npm/node_modules/*/skills/#{name}/SKILL.md")])
+          settings_paths << File.join(File.expand_path(project_root), ".pi/settings.json")
+        end
+        settings_paths.each do |settings_path|
+          settings = read_json(settings_path, errors: parse_errors)
+          next unless settings
+
+          paths.concat(settings_skill_candidates(settings, settings_path, home, inv.name, project_root: project_root))
+        end
+
+        paths.concat(package_candidates(home: home, project_root: project_root, settings_paths: settings_paths, name: inv.name, parse_errors: parse_errors))
+        paths.compact.uniq
+      end
+
+      def install_hint(inv, parse_errors: [])
+        hint = "pi: /skill:#{inv.name} not found in pi skill locations " \
+          "(~/.pi/agent/skills, ~/.agents/skills, project .pi/skills, " \
+          "project/ancestor .agents/skills), settings skills, or installed " \
+          "pi packages' skills/ directories. Install via `pi install <package>` (npm, git, or " \
+          "local source), add a settings skill path, or drop a SKILL.md/.md " \
+          "skill in one of the discovery paths."
+        unless parse_errors.empty?
+          summary = parse_errors.first(3).join("; ")
+          suffix = parse_errors.size > 3 ? " (and #{parse_errors.size - 3} more)" : ""
+          hint += " Note: failed to parse #{parse_errors.size} settings/manifest file(s): #{summary}#{suffix}. Fix the malformed JSON to enable those discovery paths."
+        end
+        hint
+      end
+
+      def skill_location_candidates(root, name, include_root_md:)
+        escaped = Hive::SkillCheck.glob_escape(name)
+        paths = []
+        paths << File.join(root, name, "SKILL.md")
+        paths << File.join(root, "#{name}.md") if include_root_md
+        paths << File.join(root, "SKILL.md") if File.basename(root) == name
+        paths.concat(Dir[File.join(root, "**", escaped, "SKILL.md")])
+        paths.concat(Dir[File.join(root, "#{escaped}.md")]) if include_root_md
+        paths
+      end
+
+      def project_ancestors(project_root)
+        dirs = []
+        dir = File.expand_path(project_root)
+        loop do
+          dirs << dir
+          break if File.exist?(File.join(dir, ".git"))
+
+          parent = File.dirname(dir)
+          break if parent == dir
+
+          dir = parent
+        end
+        dirs
+      end
+
+      def package_candidates(home:, project_root:, settings_paths:, name:, parse_errors: [])
+        paths = []
+        node_roots = [
+          File.join(home, ".pi/npm/node_modules"),
+          File.join(home, ".pi/agent/npm/node_modules")
+        ]
+        if project_root
+          project = File.expand_path(project_root)
+          node_roots << File.join(project, ".pi/npm/node_modules")
+        end
+
+        node_roots.each do |node_root|
+          paths.concat(node_modules_skill_candidates(node_root, name))
+        end
+
+        git_roots = [ File.join(home, ".pi/agent/git") ]
+        git_roots << File.join(File.expand_path(project_root), ".pi/git") if project_root
+        git_roots.each do |git_root|
+          paths.concat(git_skill_candidates(git_root, name))
+        end
+
+        package_roots = node_roots.flat_map { |root| node_package_roots(root) }
+        package_roots.concat(git_roots.flat_map { |root| git_package_roots(root) })
+        package_roots.concat(settings_paths.flat_map { |path| settings_package_roots(path, home, parse_errors: parse_errors) })
+        package_roots.compact.uniq.each do |package_root|
+          paths.concat(package_root_candidates(package_root, name, parse_errors: parse_errors))
         end
         paths
       end
 
-      def install_hint(inv)
-        "pi: /skill:#{inv.name} not found under ~/.pi/agent/skills/#{inv.name}/SKILL.md, " \
-          "~/.agents/skills/#{inv.name}/SKILL.md, <project>/.pi/skills/#{inv.name}/SKILL.md, " \
-          "<project>/.agents/skills/#{inv.name}/SKILL.md, or any installed pi package's " \
-          "skills/ directory. Install via `pi install <package>` (npm or git source), or " \
-          "drop a SKILL.md in one of the discovery paths."
+      def package_root_candidates(package_root, name, parse_errors: [])
+        paths = skill_location_candidates(File.join(package_root, "skills"), name, include_root_md: true)
+        paths.concat(manifest_skill_candidates(package_root, name, parse_errors: parse_errors))
+        paths
+      end
+
+      def node_modules_skill_candidates(node_root, name)
+        escaped = Hive::SkillCheck.glob_escape(name)
+        paths = []
+        [ File.join(node_root, "*", "skills"), File.join(node_root, "@*", "*", "skills") ].each do |skills_root|
+          paths.concat(Dir[File.join(skills_root, "**", escaped, "SKILL.md")])
+          paths.concat(Dir[File.join(skills_root, "#{escaped}.md")])
+        end
+        paths
+      end
+
+      # Pi's git cache has a known bounded shape — `<git_root>/<host>/<repo>/`
+      # in flat layouts, `<git_root>/<host>/<user>/<repo>/` for github-style
+      # caches. We enumerate 1–4 fixed prefix levels so the upper search
+      # depth is O(1) regardless of how big any single repo's working tree
+      # is. The lower `**` under each candidate `skills/` is fine — pi
+      # skills nest arbitrarily deep beneath that anchor.
+      GIT_REPO_PREFIX_GLOBS = %w[
+        */
+        */*/
+        */*/*/
+        */*/*/*/
+      ].freeze
+
+      def git_skill_candidates(git_root, name)
+        escaped = Hive::SkillCheck.glob_escape(name)
+        paths = []
+        GIT_REPO_PREFIX_GLOBS.each do |prefix|
+          paths.concat(Dir[File.join(git_root, prefix, "skills", "**", escaped, "SKILL.md")])
+          paths.concat(Dir[File.join(git_root, prefix, "skills", "#{escaped}.md")])
+        end
+        paths.reject { |path| path.include?("/node_modules/") }
+      end
+
+      def node_package_roots(node_root)
+        package_jsons = Dir[File.join(node_root, "*", "package.json")]
+        package_jsons.concat(Dir[File.join(node_root, "@*", "*", "package.json")])
+        package_jsons.map { |path| File.dirname(path) }
+      end
+
+      def git_package_roots(git_root)
+        # Bounded prefix scan — see GIT_REPO_PREFIX_GLOBS rationale.
+        # package.json sits at a repo root, not deep in submodules, so we
+        # never recurse with `**`.
+        paths = GIT_REPO_PREFIX_GLOBS.flat_map do |prefix|
+          Dir[File.join(git_root, prefix, "package.json")]
+        end
+        paths.reject { |path| path.include?("/node_modules/") }
+          .map { |path| File.dirname(path) }
+      end
+
+      def settings_package_roots(settings_path, home, parse_errors: [])
+        settings = read_json(settings_path, errors: parse_errors)
+        return [] unless settings
+
+        settings_dir = File.dirname(settings_path)
+        Array(settings["packages"]).filter_map do |entry|
+          source = entry.is_a?(Hash) ? entry["source"] : entry
+          path = local_path(source, settings_dir, home)
+          next nil unless path
+
+          jail_path(path, settings_skill_jail_roots(settings_dir, home))
+        end
+      end
+
+      def settings_skill_candidates(settings, settings_path, home, name, project_root: nil)
+        settings_dir = File.dirname(settings_path)
+        jails = settings_skill_jail_roots(settings_dir, home, project_root: project_root)
+        Array(settings["skills"]).flat_map do |entry|
+          path = local_path(entry, settings_dir, home)
+          next [] unless path
+
+          jailed = jail_path(path, jails)
+          next [] unless jailed
+
+          path_candidates(jailed, name, include_root_md: true)
+        end
+      end
+
+      def manifest_skill_candidates(package_root, name, parse_errors: [])
+        package_json = File.join(package_root, "package.json")
+        data = read_json(package_json, errors: parse_errors)
+        skills = data&.dig("pi", "skills")
+        return [] unless skills
+
+        package_jail = File.expand_path(package_root)
+        Array(skills).flat_map do |entry|
+          next [] unless entry.is_a?(String)
+
+          trimmed = entry.strip
+          next [] if trimmed.empty? || trimmed.start_with?("!", "-")
+
+          trimmed = trimmed.delete_prefix("+")
+          pattern = absolute_or_relative_path(trimmed, package_root)
+          # Each pi.skills entry must resolve strictly under package_root.
+          # A literal-path entry that escapes (e.g., "../../../") is
+          # dropped entirely; a glob entry (e.g., "*-skills") is expanded
+          # then jailed per match.
+          if contains_glob?(pattern)
+            Dir[pattern].filter_map { |match| jail_path(match, package_jail) }
+                        .flat_map { |path| path_candidates(path, name, include_root_md: true) }
+          else
+            jailed = jail_path(pattern, package_jail)
+            jailed ? path_candidates(jailed, name, include_root_md: true) : []
+          end
+        end
+      end
+
+      # Allowed roots for paths read out of a settings.json `skills` /
+      # `packages` entry. Strict prefix containment — an entry that
+      # resolves to one of these roots exactly (e.g., `~/` or `./`) is
+      # rejected, because globbing recursively from `home` or the
+      # settings dir is a DoS in disguise.
+      def settings_skill_jail_roots(settings_dir, home, project_root: nil)
+        roots = [ settings_dir, home ]
+        roots << File.expand_path(project_root) if project_root
+        roots.compact.uniq
+      end
+
+      # Returns `path` (expanded) when it lies strictly inside any of
+      # `jail_roots`; otherwise nil. Strict means the resolved path must
+      # share a `<root>/` prefix — equality with a root is rejected so
+      # operator-supplied entries like `~/` cannot widen the scan to
+      # the whole home directory. Path segments containing `..` are
+      # collapsed by `File.expand_path`, so traversal entries are caught
+      # automatically.
+      def jail_path(path, jail_roots)
+        return nil unless path
+
+        resolved = File.expand_path(path.to_s)
+        Array(jail_roots).each do |root|
+          next unless root
+
+          expanded = File.expand_path(root.to_s)
+          return resolved if resolved.start_with?(expanded + File::SEPARATOR)
+        end
+        nil
+      end
+
+      def path_candidates(path, name, include_root_md:)
+        if path.end_with?(".md")
+          skill_file_matches?(path, name) ? [ path ] : []
+        else
+          skill_location_candidates(path, name, include_root_md: include_root_md)
+        end
+      end
+
+      def local_path(value, base_dir, home)
+        return nil unless value.is_a?(String)
+
+        trimmed = value.strip
+        return nil if trimmed.empty? || trimmed.start_with?("npm:", "git:", "http://", "https://", "ssh://", "git://")
+
+        absolute_or_relative_path(trimmed, base_dir, home: home)
+      end
+
+      def absolute_or_relative_path(path, base_dir, home: ENV["HOME"] || Dir.home)
+        if path == "~"
+          home
+        elsif path.start_with?("~/")
+          File.join(home, path.delete_prefix("~/"))
+        elsif Pathname.new(path).absolute?
+          path
+        else
+          File.expand_path(path, base_dir)
+        end
+      end
+
+      def skill_file_matches?(path, name)
+        return true if File.basename(path, ".md") == name
+        return false unless File.file?(path)
+
+        content = File.read(path, 4096)
+        frontmatter = content.match(/\A---\s*\n(.*?)\n---/m)&.[](1)
+        return false unless frontmatter
+
+        frontmatter.match?(/^\s*name:\s*["']?#{Regexp.escape(name)}["']?\s*$/)
+      rescue SystemCallError
+        false
+      end
+
+      def contains_glob?(path)
+        path.match?(/[{}\[\]*?]/)
+      end
+
+      # `errors` (when provided) collects "<path>: <message>" strings for
+      # JSON::ParserError so install_hint can surface the failed parses
+      # to the operator. SystemCallError still swallows silently —
+      # missing or unreadable files are not failures from doctor's
+      # perspective; only malformed-but-present JSON is.
+      def read_json(path, errors: nil)
+        return nil unless File.file?(path)
+
+        JSON.parse(File.read(path))
+      rescue JSON::ParserError => e
+        errors&.push("#{path}: #{e.message.lines.first&.strip}")
+        nil
+      rescue SystemCallError
+        nil
       end
     end
   end

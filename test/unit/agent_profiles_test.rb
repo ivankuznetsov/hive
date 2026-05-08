@@ -70,6 +70,21 @@ class AgentProfilesTest < Minitest::Test
     refute Hive::AgentProfiles.registered?(:nonexistent)
   end
 
+  def test_format_skill_invocation_preserves_claude_slash_invocations
+    profile = Hive::AgentProfiles.lookup(:claude)
+    assert_equal "/plan", profile.format_skill_invocation("/plan")
+    assert_equal "/compound-engineering:ce-plan", profile.format_skill_invocation("/compound-engineering:ce-plan")
+    assert_equal "/plan", profile.format_skill_invocation("plan")
+  end
+
+  def test_format_skill_invocation_normalizes_pi_skill_form
+    profile = Hive::AgentProfiles.lookup(:pi)
+    assert_equal "/skill:plan", profile.format_skill_invocation("/plan")
+    assert_equal "/skill:ce-brainstorm", profile.format_skill_invocation("/compound-engineering:ce-brainstorm")
+    assert_equal "/skill:plan", profile.format_skill_invocation("/skill:plan")
+    assert_equal "/skill:plan", profile.format_skill_invocation("plan")
+  end
+
   # --- agents.* config overrides --------------------------------------
 
   def test_lookup_with_cfg_applies_bin_override

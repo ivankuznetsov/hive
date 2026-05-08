@@ -71,7 +71,7 @@ module Hive
             default_branch: ctx.default_branch,
             pass: ctx.pass,
             output_path: output_path,
-            skill_invocation: format(profile.skill_syntax_format, skill: skill),
+            skill_invocation: profile.format_skill_invocation(skill),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )

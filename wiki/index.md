@@ -2,7 +2,7 @@
 title: Hive Wiki Index
 type: index
 created: 2026-04-25
-updated: 2026-05-06
+updated: 2026-05-07
 tags: [index]
 ---
 
@@ -12,7 +12,7 @@ tags: [index]
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
 
-**Pages**: 45 (excl. `index.md`/`log.md`) · **Date**: 2026-05-06
+**Pages**: 46 (excl. `index.md`/`log.md`) · **Date**: 2026-05-07
 
 ## Top level
 
@@ -42,6 +42,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[commands/forget]] — `hive forget NAME [--json]` drop one named entry from the global registry (inverse of `hive init`). `.hive-state` on disk is not touched.
 - [[commands/prune]] — `hive prune [--dry-run] [--json]` bulk-drop registry entries whose `path` is gone or whose row shape is invalid.
 - [[commands/daemon]] — `hive daemon start|stop|status|reload|tail|enable|disable` auto-advancing dispatcher (ADR-024). Polls `hive status --json` and fires workflow verbs on tasks ready to advance. Per-project enrollment via `hive daemon enable PROJECT` (or `--all`).
+- [[commands/doctor]] — `hive doctor [--json]` per-stage and per-reviewer skill-install preflight (also runs non-fatally at end of `hive init`). Emits `hive-doctor.v1` envelope with `configured_skill` + `skill` per row.
 - `hive metrics rollback-rate [--days N] [--project NAME] [--json]` — fraction of fix-agent commits later reverted, broken down by triage bias / fix phase. See [[cli]] and [[stages/review]].
 
 ## Stages

@@ -16,9 +16,9 @@ module Hive
     # profile to probe its filesystem, prints a status table, and exits
     # non-zero if any check is `:missing`.
     #
-    # Pi rows always come back `:not_applicable` — pi has no
-    # slash-command resolver. That's not a fail; the prompt text still
-    # gets sent to the model.
+    # Pi rows use pi's `/skill:<name>` form and real skill resolver.
+    # Non-skill-form invocations still come back `:not_applicable`
+    # because pi cannot resolve those as skills.
     #
     # Reviewer entries with `kind:` ≠ `"agent"` also surface as
     # `:not_applicable`. This is the **only load-time signal** for
@@ -78,14 +78,16 @@ module Hive
         agent_name = (@config.dig(stage, "agent") || "claude").to_s
         skill = @config.dig(stage, "skill") || Hive::Config::DEFAULTS.dig(stage, "skill")
         profile = Hive::AgentProfiles.lookup(agent_name.to_sym)
+        invocation = profile.format_skill_invocation(skill)
 
-        status, message = profile.verify_skill(skill, project_root: @project_root)
+        status, message = profile.verify_skill(invocation, project_root: @project_root)
         {
           kind: "stage",
           stage: stage,
           label: stage,
           agent: agent_name,
-          skill: skill,
+          configured_skill: skill.to_s,
+          skill: invocation,
           status: status.to_s,
           message: message
         }
@@ -113,6 +115,7 @@ module Hive
           return reviewer_row(
             name: name,
             agent: agent_name,
+            configured_skill: bare_skill,
             skill: bare_skill,
             status: "not_applicable",
             message: "kind '#{kind}' is not 'agent'; doctor only checks agent-kind reviewers"
@@ -120,35 +123,42 @@ module Hive
         end
 
         profile = Hive::AgentProfiles.lookup(agent_name.to_sym)
-        invocation = format(profile.skill_syntax_format, skill: bare_skill)
+        invocation = profile.format_skill_invocation(bare_skill)
         status, message = profile.verify_skill(invocation, project_root: @project_root)
         reviewer_row(
           name: name,
           agent: agent_name,
+          configured_skill: bare_skill,
           skill: invocation,
           status: status.to_s,
           message: message
         )
       end
 
-      def reviewer_row(name:, agent:, skill:, status:, message:)
+      def reviewer_row(name:, agent:, configured_skill:, skill:, status:, message:)
         {
           kind: "reviewer",
           stage: "5-review",
           name: name,
           label: "5-review/#{name}",
           agent: agent,
+          configured_skill: configured_skill,
           skill: skill,
           status: status,
           message: message
         }
       end
 
-      # The `hive-doctor.v1` envelope is additive: `kind`, `name`, and
-      # `label` are new fields on `checks[]` entries (added 2026-05-07).
-      # Schema name stays `v1` because the change is forward-compatible
-      # — consumers that ignore unknown fields continue to work; the
-      # `summary` aggregation is still keyed by `status`.
+      # The `hive-doctor.v1` envelope is additive: `kind`, `name`,
+      # `label`, and `configured_skill` are fields on `checks[]` entries
+      # added 2026-05-07. Schema name stays `v1` because every change
+      # is forward-compatible — consumers that ignore unknown fields
+      # continue to work; the `summary` aggregation is still keyed by
+      # `status`. `configured_skill` carries the raw config-supplied
+      # value (`/anything`), while `skill` carries the formatted
+      # profile-aware invocation (`/skill:anything` for pi). Diff them
+      # to detect when a profile's `format_skill_invocation` rewrote
+      # the operator's input.
       def envelope(rows)
         {
           "schema" => "hive-doctor.v1",

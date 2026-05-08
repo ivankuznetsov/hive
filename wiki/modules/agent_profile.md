@@ -37,6 +37,8 @@ Constructor kwargs (every profile freezes after init):
 | `bin` | Resolved binary path; env override > `bin_default`. |
 | `check_version!` | Runs `bin --version`, parses semver, compares against `min_version`. Cached per `(bin, min_version)` pair. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, or version below minimum. |
 | `preflight!` | Calls the user-supplied `preflight:` Proc (if any). May raise `Hive::AgentError`. |
+| `verify_skill(invocation, project_root: nil)` | Delegates to the profile's `Hive::SkillCheck::*` verifier. Returns `[:present, path] / [:missing, hint] / [:not_applicable, why]`. |
+| `format_skill_invocation(skill)` | Renders a configured skill name through the profile's `skill_syntax_format`. Accepts both the slash-prefixed stage form (`/plan`, `/plug:name`) and the bare reviewer form (`ce-code-review`). For profiles whose syntax is the default `"/%{skill}"` (claude/codex), slash-prefixed inputs round-trip unchanged; bare inputs are wrapped in `/`. For profiles with a non-default syntax (pi → `"/skill:%{skill}"`), the leading `/` and any `plug:` namespace are stripped before formatting, so `/compound-engineering:ce-plan` collapses to `/skill:ce-plan`. Used uniformly by `Stages::Brainstorm`, `Stages::Plan`, `Reviewers::Agent`, `Stages::Review::BrowserTest`, and `Hive::Commands::Doctor` so the slash invocation that reaches the agent CLI matches doctor's verification target. |
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
 

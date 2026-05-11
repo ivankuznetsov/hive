@@ -53,17 +53,15 @@ module Hive
 
       attr_reader :hive_model
 
-      # Exit codes that mean "the agent was killed by a signal", not
-      # "the agent ran and decided to fail". 130 = SIGINT (Ctrl-C);
-      # 137 = SIGKILL; 143 = SIGTERM (which fires when the user
-      # quits the TUI mid-takeover and the pgroup forwards the signal
-      # to in-flight children). Tasks left with `:error reason=exit_code
-      # exit_code=<one of these>` markers are interrupted, not broken —
-      # the file-system state is intact, just the marker says "stopped".
-      # The auto-healer in `auto_heal_kill_class_errors` clears these
-      # markers in the background so the TUI doesn't permanently
-      # display "Error" rows the user can resume by simply re-running.
-      KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
+      # Tasks left with `:error reason=exit_code exit_code=<kill-class>`
+      # markers are interrupted, not broken — the file-system state is
+      # intact, just the marker says "stopped". The auto-healer in
+      # `auto_heal_kill_class_errors` clears these markers in the
+      # background so the TUI doesn't permanently display "Error" rows
+      # the user can resume by simply re-running. The exact code list
+      # lives on `Hive::Markers::KILL_CLASS_EXIT_CODES` so KeyMap's
+      # Enter-routing predicate and this auto-healer never drift.
+      KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
       # Lowercase snapshot-row marker keys → uppercase CLI marker names
       # accepted by `hive markers clear --name`. Mirrors the upcase
       # convention in `Hive::Markers::KNOWN_NAMES`. A new recoverable
@@ -862,7 +860,24 @@ module Hive
 
       def spawn_error_recovery_thread(row)
         thread = Thread.new do
-          perform_error_recovery(row)
+          # Ruby's default `Thread.report_on_exception = true` would
+          # dump a programmer-error backtrace (NoMethodError, NameError)
+          # to stderr while the TUI's alt-screen is active, corrupting
+          # the visible frame. The narrow rescue below intentionally
+          # lets programmer errors escape so we don't silently swallow
+          # them — but they need to land in the debug log, not on the
+          # operator's screen. Per-thread override scopes this to the
+          # worker only; the rest of the process keeps Ruby's default.
+          Thread.current.report_on_exception = false
+          begin
+            perform_error_recovery(row)
+          rescue Exception => e # rubocop:disable Lint/RescueException
+            Hive::Tui::Debug.log(
+              "error_recovery",
+              "worker crash for #{row.slug}: #{e.class.name}: #{e.message}\n#{Array(e.backtrace).first(10).join("\n")}"
+            )
+            raise
+          end
         ensure
           evict_error_recovery_attempt(row.folder)
           @healed_folders_mutex.synchronize { @heal_threads.delete(Thread.current) }
@@ -886,7 +901,7 @@ module Hive
             "error_recovery",
             "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.to_s.lines.first&.chomp.to_s[0, 200]}"
           )
-          flash_async("error recovery failed: #{Hive::Tui::Text.sanitize(reason)[0, 120]}")
+          flash_async(error_recovery_failure_flash(row, exit_code, reason))
           return
         end
 
@@ -935,6 +950,24 @@ module Hive
         keys += (attrs.keys.map(&:to_s) - keys).sort
         attr_text = keys.map { |key| "#{key}=#{attrs[key]}" }.join(" ")
         attr_text.empty? ? "ERROR" : "ERROR #{attr_text}"
+      end
+
+      # Builds the operator-facing flash for a markers-clear failure.
+      # `hive markers clear` exits 124 when the markers-lock can't be
+      # acquired within the 30s cap — usually another writer (auto-heal,
+      # background `hive run`, daemon) is holding it; surfacing "exit
+      # 124" alone left the user with no actionable next step. Map the
+      # common exit codes to specific guidance; fall through to the
+      # short `reason` we already extracted from stderr for unknown
+      # failures.
+      def error_recovery_failure_flash(row, exit_code, reason)
+        sanitised_reason = Hive::Tui::Text.sanitize(reason)[0, 120]
+        case exit_code
+        when Hive::Tui::Subprocess::COMMAND_TIMEOUT_EXIT
+          "error recovery failed: markers-clear timed out after 30s (lock contention); retry shortly or `hive markers clear #{row.folder} --name ERROR` manually"
+        else
+          "error recovery failed: #{sanitised_reason}"
+        end
       end
 
       # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:

@@ -1515,6 +1515,70 @@ class HiveTuiBubbleModelTest < Minitest::Test
     refute_match(/\n/, final_flash, "embedded newlines must not appear in the async flash")
   end
 
+  # The recover_error handler has a defensive guard that refuses any
+  # caller whose `action_key` is not "error". KeyMap only routes
+  # `error`-keyed rows to RecoverError today, so the guard is dead in
+  # the field — but the distinct flash is a public contract for any
+  # future caller (LFG, direct dispatch in a test, programmer error
+  # at the orchestrator) and should not silently drift.
+  def test_recover_error_flashes_when_action_key_is_not_error
+    row = make_task_row(
+      action_key: "ready_to_develop", action_label: "Ready to develop",
+      slug: "wrong-key", stage: "3-plan", folder: "/tmp/hive/wrong-key",
+      marker: "complete", attrs: {}, suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_clear, "marker clear must not run for non-error action keys"
+    refute ran_dispatch, "hive run must not dispatch for non-error action keys"
+    flash = @model.hive_model.flash.to_s
+    assert_match(/error recovery unavailable/, flash)
+    assert_match(/action=ready_to_develop/, flash,
+                 "refusal flash must echo the actual action_key for debugging")
+  end
+
+  # The ERROR_RECOVERY_DETAIL_ATTRS list orders the well-known attrs
+  # (reason, exit_code, phase, elapsed); any other attrs are appended
+  # alphabetically after them. Tests cover the well-known path via the
+  # main recover_error tests but not the alphabetical append, which is
+  # the property other agents would step on if they invented new attr
+  # names. Mirrors `test_recover_review_detail_appends_unknown_attrs_sorted`.
+  def test_recover_error_detail_appends_unknown_attrs_sorted
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "extra-attrs", stage: "3-plan", folder: "/tmp/hive/extra-attrs",
+      marker: "error",
+      attrs: { "reason" => "exit_code", "exit_code" => "1",
+               "zebra" => "z", "apple" => "a" },
+      suggested_command: nil
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    flash = @model.hive_model.flash.to_s
+    reason_idx = flash.index("reason=exit_code")
+    apple_idx = flash.index("apple=a")
+    zebra_idx = flash.index("zebra=z")
+    refute_nil reason_idx, "flash must include the known reason attr"
+    refute_nil apple_idx
+    refute_nil zebra_idx
+    assert reason_idx < apple_idx, "known DETAIL_ATTRS keys must appear before extra keys"
+    assert apple_idx < zebra_idx, "extra keys must be appended in sorted order"
+  end
+
   # ---- OpenInputEditor → foreground editor takeover ----
 
   def test_open_input_editor_returns_sequence_command_and_dispatches_result

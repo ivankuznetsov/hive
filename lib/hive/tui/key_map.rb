@@ -1,4 +1,5 @@
 require "shellwords"
+require "hive/markers"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
 
@@ -47,22 +48,24 @@ module Hive
       # Row action_keys with no `suggested_command`, mapped to the
       # contextual flash message Enter (and verb keys) should surface.
       # `error` is intentionally absent — Enter on an error-state row
-      # opens the agent log instead (see `enter_message`) so the user
-      # can see WHY the agent failed without leaving the TUI.
+      # is routed by `error_message` (clear the ERROR marker + re-run
+      # for non-kill-class failures; OpenLogTail while a kill-class
+      # auto-heal is in flight). The dual routing lives in the
+      # `enter_message` -> `error_message` branch below.
       ENTER_FLASH_MESSAGES = {
         "archived" => "task is archived; no further action",
         "recover_execute" => "task needs recovery — open findings to re-prioritise"
       }.freeze
 
       # @api private
-      # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
-      # SIGKILL, 143 = SIGTERM). The TUI's auto-healer in
-      # `BubbleModel#auto_heal_kill_class_errors` already clears these
-      # markers in the background, so an Enter-driven recovery would
-      # race the auto-heal. KeyMap routes those rows to OpenLogTail
-      # instead so the user can read the kill context until the
-      # auto-heal lands.
-      KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
+      # The TUI's auto-healer in `BubbleModel#auto_heal_kill_class_errors`
+      # already clears these markers in the background, so an
+      # Enter-driven recovery would race the auto-heal. KeyMap routes
+      # those rows to OpenLogTail instead so the user can read the kill
+      # context until the auto-heal lands. The exact code list lives on
+      # `Hive::Markers::KILL_CLASS_EXIT_CODES` so this routing predicate
+      # and the auto-healer never drift.
+      KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
 
       # @api public
       # `pane_focus:` is the v2 two-pane layout's focus indicator. v1

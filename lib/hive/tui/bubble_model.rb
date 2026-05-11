@@ -91,7 +91,6 @@ module Hive
       REVIEW_RECOVERY_DETAIL_ATTRS = %w[
         phase reason pass attempts elapsed files matches exception_class
       ].freeze
-      REVIEW_ORCHESTRATOR_FILE_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail-].freeze
 
       def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
         @hive_model = hive_model
@@ -812,7 +811,8 @@ module Hive
       end
 
       def review_recovery_reviewer_file?(name)
-        REVIEW_ORCHESTRATOR_FILE_PREFIXES.none? { |prefix| name.start_with?(prefix) }
+        require "hive/stages/review"
+        Hive::Stages::Review.reviewer_file?(name)
       end
 
       # Workflow verbs route by `Hive::Workflows.interactive?(verb)`:

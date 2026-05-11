@@ -771,6 +771,39 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_fix_agent_creating_fix_success_sentinel_yields_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting,
+                          pass: 1, escalations: 1)
+
+        sentinel_path = File.join(folder, "reviews", "fix-success-01.md")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          printf 'forged sentinel\\n' > "#{sentinel_path}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "fix_tampered", marker.attrs["reason"]
+        assert_includes marker.attrs["files"], "reviews/fix-success-01.md"
+      end
+    end
+  end
+
   # --- T-002 (4): fix guardrail tripped → REVIEW_WAITING --------------
 
   def test_fix_guardrail_tripped_yields_review_waiting

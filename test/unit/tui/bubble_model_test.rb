@@ -968,6 +968,33 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_recover_review_stale_does_not_treat_fix_success_as_reviewer_file
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "fix-success-04.md"), "ok\n")
+
+      row = make_task_row(
+        action_key: "recover_review",
+        action_label: "Needs recovery",
+        slug: "stale-review",
+        stage: "5-review",
+        folder: dir,
+        marker: "review_stale",
+        attrs: { "pass" => "4" },
+        suggested_command: nil
+      )
+      ran_clear = false
+
+      with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+
+      refute ran_clear, "fix-success-NN.md is an orchestrator sentinel, not a retryable reviewer file"
+      assert_match(/manual pass cleanup/, @model.hive_model.flash.to_s)
+    end
+  end
+
   def test_recover_review_stale_wall_clock_clears_and_reruns_without_reviewer_files
     # REVIEW_STALE reason=wall_clock can be set by the runner BEFORE
     # any reviewer files exist (e.g. wall-clock fired during Phase 1

@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "open3"
+require "time"
 require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
@@ -74,7 +75,7 @@ module Hive
       end
 
       def fix_success_path(task_folder, pass)
-        File.join(task_folder, "reviews", "#{FIX_SUCCESS_FILENAME}-#{format('%02d', pass)}.md")
+        File.join(task_folder, fix_success_relative_path(pass))
       end
 
       def run!(task, cfg)
@@ -278,7 +279,10 @@ module Hive
           # escalations doc — only Triage may write that file, so a fix
           # agent rewriting it (e.g. flipping `[ ]` → `[x]` to short-
           # circuit human review) trips fix_tampered.
-          protected_set = FIX_PROTECTED_FILES + [ "reviews/escalations-#{format('%02d', pass)}.md" ]
+          protected_set = FIX_PROTECTED_FILES + [
+            "reviews/escalations-#{format('%02d', pass)}.md",
+            fix_success_relative_path(pass)
+          ]
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           before_fix_head = git_head(worktree_path)
 
@@ -708,6 +712,10 @@ module Hive
         body << "# Fix completed for pass #{format('%02d', ctx.pass)}\n\n"
         body << "Recorded at #{Time.now.utc.iso8601}.\n"
         File.write(path, body)
+      end
+
+      def fix_success_relative_path(pass)
+        File.join("reviews", "#{FIX_SUCCESS_FILENAME}-#{format('%02d', pass)}.md")
       end
 
       def git_head(worktree_path)

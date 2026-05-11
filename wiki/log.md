@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-11T15:22:00Z] review — Protect fix-success sentinel from fix agents
+
+**Action:** Hardened the fix-phase retry sentinel introduced in the previous review recovery follow-up. `reviews/fix-success-NN.md` is now part of the fix-agent protected snapshot for the current pass, so a fix agent cannot forge the sentinel and cause a later markerless run to treat a failed fix pass as complete. The TUI recovery path now reuses `Stages::Review.reviewer_file?` for reviewer-file classification, keeping `fix-success-` and future orchestrator-owned prefixes consistent across runner and TUI logic.
+
+**Refreshed pages:**
+- `wiki/stages/review.md`
+- `wiki/state-model.md`
+
 ## [2026-05-08T15:00:00Z] review — Detect mid-pass fix failures + retry wall-clock REVIEW_STALE from TUI
 
 **Action:** Self-review of the earlier review-recovery refinement found two scenarios still broken. Both fixed in this follow-up, with regression tests + sentinel introduction.

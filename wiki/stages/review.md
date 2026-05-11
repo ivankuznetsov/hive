@@ -111,11 +111,20 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 
 ## REVIEW_STALE recovery (max_passes / wall_clock)
 
-1. Inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count).
-2. Run `hive markers clear FOLDER --name REVIEW_STALE` to remove the `<!-- REVIEW_STALE … -->` marker (atomic write + hive_commit). See [[commands/markers]].
-3. `hive run` again — the loop picks up at `max_review_pass(reviews/) + 1` once the highest pass has `reviews/escalations-NN.md`.
+`Stages::Review#pass_completion_status(folder, N)` classifies the highest-pass on disk as one of:
 
-If the highest-NN per-reviewer files exist but `reviews/escalations-NN.md` is missing, that pass did not finish triage. After clearing the marker, `hive run` retries that same pass instead of treating the reviewer filenames as a completed pass.
+- **`:complete`** — `reviews/fix-success-NN.md` sentinel exists, OR pass `N+1` reviewer files exist. `next_pass_for` advances to `N+1`.
+- **`:triage_incomplete`** — reviewer files for pass N exist but `escalations-NN.md` is missing. `next_pass_for` returns N; the loop re-runs Phase 2/3 to re-derive escalations.
+- **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, but neither the sentinel nor pass `N+1` reviewer files exist. `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's existing `[x]` marks (mirrors a `REVIEW_WAITING` resume).
+
+The sentinel `reviews/fix-success-NN.md` is written by the runner at the two "pass N is done, advance" points: the Phase 2 zero-findings short-circuit to Phase 5, and post-guardrail-not-tripped continuation. `fix-success-` is in `ORCHESTRATOR_OWNED_PREFIXES` so it does not count as a reviewer file, and the current pass's sentinel path is protected during the fix-agent spawn so the agent cannot forge completion.
+
+Recovery flow:
+
+1. If the highest pass is `:fix_incomplete` (most common cause of `REVIEW_STALE` after a wall-clock or interrupted-fix exit): just `hive markers clear FOLDER --name REVIEW_STALE` and `hive run` — Phase 4 retries with the operator's already-applied `[x]` marks. The TUI's `recover_review` Enter binding does this automatically. No manual edit needed.
+2. If `:triage_incomplete`: same — clear and rerun; the loop re-derives escalations from existing reviewer files.
+3. If `:complete` (genuine `max_passes` exhaustion): inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count). Then clear and rerun.
+4. Wall-clock `REVIEW_STALE` (`reason=wall_clock`) can fire **before any reviewer files exist** (e.g. during Phase 1 CI-fix). The TUI treats this shape as auto-retryable regardless of disk state — give it more time via `review.max_wall_clock_sec` if it keeps timing out.
 
 For `REVIEW_CI_STALE` (Phase 1 CI never went green) the equivalent flow is: edit `reviews/ci-blocked.md`, fix the CI failures locally, run `hive markers clear FOLDER --name REVIEW_CI_STALE`, then `hive run`. For `REVIEW_ERROR` (any phase failure recorded with `phase=…` and `reason=…`) the same pattern: investigate, run `hive markers clear FOLDER --name REVIEW_ERROR`, then `hive run`. The runner's pre-flight `warn` text emits the exact command per stuck-state.
 

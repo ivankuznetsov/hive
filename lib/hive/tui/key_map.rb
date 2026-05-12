@@ -1,4 +1,5 @@
 require "shellwords"
+require "hive/markers"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
 
@@ -47,12 +48,24 @@ module Hive
       # Row action_keys with no `suggested_command`, mapped to the
       # contextual flash message Enter (and verb keys) should surface.
       # `error` is intentionally absent — Enter on an error-state row
-      # opens the agent log instead (see `enter_message`) so the user
-      # can see WHY the agent failed without leaving the TUI.
+      # is routed by `error_message` (clear the ERROR marker + re-run
+      # for non-kill-class failures; OpenLogTail while a kill-class
+      # auto-heal is in flight). The dual routing lives in the
+      # `enter_message` -> `error_message` branch below.
       ENTER_FLASH_MESSAGES = {
         "archived" => "task is archived; no further action",
         "recover_execute" => "task needs recovery — open findings to re-prioritise"
       }.freeze
+
+      # @api private
+      # The TUI's auto-healer in `BubbleModel#auto_heal_kill_class_errors`
+      # already clears these markers in the background, so an
+      # Enter-driven recovery would race the auto-heal. KeyMap routes
+      # those rows to OpenLogTail instead so the user can read the kill
+      # context until the auto-heal lands. The exact code list lives on
+      # `Hive::Markers::KILL_CLASS_EXIT_CODES` so this routing predicate
+      # and the auto-healer never drift.
+      KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
 
       # @api public
       # `pane_focus:` is the v2 two-pane layout's focus indicator. v1
@@ -149,11 +162,28 @@ module Hive
         case row.action_key
         when "review_findings" then Messages::OpenFindings.new(row: row)
         when "agent_running" then Messages::OpenLogTail.new(row: row)
-        when "error" then Messages::OpenLogTail.new(row: row)
+        when "error" then error_message(row)
         when "recover_review" then Messages::RecoverReview.new(row: row)
         when "needs_input" then needs_input_message(row)
         else enter_fallback_message(row)
         end
+      end
+
+      # Enter on an `error` row routes to `RecoverError` (clear ERROR
+      # marker + re-run) for non-kill-class failures — the case that
+      # previously had no in-TUI affordance and required a shell-level
+      # `hive markers clear`. Kill-class signal kills are auto-healed in
+      # the background by BubbleModel; while the heal is in flight, fall
+      # back to OpenLogTail so the user can still see the failure
+      # context. ERROR markers without an `exit_code` attr (legacy or
+      # hand-written) take the recovery path because there is no other
+      # gesture available, and `hive markers clear --name ERROR` accepts
+      # them.
+      def error_message(row)
+        attrs = row.attrs || {}
+        return Messages::OpenLogTail.new(row: row) if KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+
+        Messages::RecoverError.new(row: row)
       end
 
       # Enter on a `needs_input` row opens the row's input file in the

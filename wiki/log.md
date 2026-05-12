@@ -1207,3 +1207,10 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 
 **Refreshed pages:**
 - `wiki/commands/tui.md` — documented `Left` / `Right` arrow keys alongside `h` / `l` and noted that left-pane focus shortcuts pin focus to the tasks pane below the two-pane breakpoint.
+
+## [2026-05-11T00:00:00Z] tui — Enter-driven recovery for non-kill-class ERROR markers
+
+**Action:** Added a `Hive::Tui::Messages::RecoverError` message and a `BubbleModel#recover_error` worker that mirrors the existing `recover_review` family. Enter on `error` rows now routes through `KeyMap.error_message`: kill-class signal kills (`130` / `137` / `143`) keep the existing `OpenLogTail` so they don't race the background auto-healer; every other exit_code (real failures the auto-healer deliberately leaves alone) clears the `<!-- ERROR -->` marker via `hive markers clear --name ERROR --match-attr exit_code=N` and re-dispatches `hive run <folder>` from a background worker thread. Per-folder dedup tracks on `@error_recovery_inflight`; partial-failure and programmer-error contracts match `recover_review`. The tasks-pane status column gained an enriched `ERROR exit_code=N` (or `ERROR <reason>` fallback) so operators read failure context without leaving the grid. Single source of truth for the kill-class exit-code list lives on `Hive::Markers::KILL_CLASS_EXIT_CODES`; the TUI's auto-healer and KeyMap's routing predicate both alias it so they cannot drift. The worker thread sets `Thread.report_on_exception = false` and logs programmer-error backtraces to `Hive::Tui::Debug.log` instead of letting them paint to the alt-screen; markers-clear timeouts (exit `124`) flash a specific recovery instruction (`retry shortly or run hive markers clear ... manually`) rather than a bare exit code.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — Enter description updated for the dual error-row routing; new paragraph documenting the kill-class fallthrough, `--match-attr exit_code=N` discipline, status-column enrichment, and dedup behavior.

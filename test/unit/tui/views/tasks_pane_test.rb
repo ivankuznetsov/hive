@@ -135,25 +135,120 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                     "review recovery rows must fall back to action_label when both reason and marker are blank"
   end
 
-  def test_status_label_non_recover_review_ignores_reason_attr
+  def test_status_label_non_error_non_recover_review_ignores_reason_attr
+    # Status enrichment is opt-in per action_key — only `recover_review`
+    # and `error` rows surface marker attrs. Other action keys (here
+    # `agent_running`) must keep their plain action_label even if
+    # snapshot attrs would parse as something operator-readable.
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
-          slug: "broken-task",
-          stage: "5-review",
-          action: "error",
-          action_label: "Error",
-          marker: "review_error",
+          slug: "running-task",
+          stage: "3-plan",
+          action: "agent_running",
+          action_label: "Agent running",
+          marker: "agent_working",
           attrs: { "reason" => "should_not_appear" },
           suggested: nil
         )
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    assert_includes out, "Error",
-                    "non-recover_review rows must keep their action_label as status"
+    assert_includes out, "Agent running",
+                    "non-enriched rows must keep their action_label as status"
     refute_includes out, "should_not_appear",
-                     "non-recover_review rows must not surface attrs[reason] in the status column"
+                     "non-enriched rows must not surface attrs[reason] in the status column"
+  end
+
+  # `error` rows surface the failure context in the status column so
+  # the operator can read WHY a task failed without leaving the grid.
+  # Before this enrichment the column rendered a flat "Error" with no
+  # diagnostic, and the only way to see the exit code was to open the
+  # log tail.
+  def test_error_status_shows_exit_code_when_present
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "broken-task",
+          stage: "3-plan",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: { "reason" => "exit_code", "exit_code" => "1" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "ERROR exit_code=1",
+                    "error rows must surface the exit_code in the status column for diagnostic visibility"
+  end
+
+  def test_error_status_falls_back_to_reason_when_exit_code_missing
+    # `panic` keeps the status string under the 18-char column width so
+    # the assertion compares against unrenderered text. Longer reasons
+    # are truncated by the layout and a fragile substring assertion
+    # would couple this test to STATUS_WIDTH; the renderer guarantee
+    # we care about is the prefix shape, which short fixtures pin.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "broken-task",
+          stage: "3-plan",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: { "reason" => "panic" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "ERROR panic",
+                    "error rows must fall back to the reason attr when no exit_code is set"
+  end
+
+  def test_error_status_falls_back_to_action_label_when_attrs_blank
+    # Hand-written / legacy ERROR markers carry no attrs. The status
+    # column should keep the plain "Error" label rather than render an
+    # empty diagnostic suffix.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "legacy-error",
+          stage: "3-plan",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: {},
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "Error",
+                    "error rows with no attrs must fall back to the bare action_label"
+    refute_match(/ERROR\s+\|/, out,
+                 "error rows must not render an empty 'ERROR ' prefix when no attrs are present")
+  end
+
+  def test_error_status_strips_control_chars_and_ansi_escapes
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "tainted-error",
+          stage: "3-plan",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: { "reason" => "bad\x1b[31mansi\x1b[0m\nNL" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    refute_match(/\e\[/, out, "ANSI CSI escapes must be stripped from the error status column")
+    refute_match(/\nNL/, out, "embedded newlines must not bleed into the error status column")
   end
 
   def test_recover_review_status_strips_control_chars_and_ansi_escapes

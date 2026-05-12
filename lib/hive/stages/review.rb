@@ -568,8 +568,17 @@ module Hive
         specs = Array(cfg.dig("review", "reviewers"))
         return :ok if specs.empty?
 
+        # Delete any stale errors-NN.md left from a prior crashed or
+        # voluntary re-run of THIS pass before any reviewer runs. This
+        # guarantees the on-disk file always reflects the current
+        # invocation's failures (or its absence reflects all-success),
+        # not concatenated history. Originally we did this lazily on
+        # first failure, but that left stale files behind when a rerun
+        # had zero failures — observed by both the correctness and
+        # ce-code-review passes on PR-A.
+        clear_reviewer_infra_errors(ctx)
+
         statuses = []
-        errors_initialized_for_pass = false
         specs.each do |spec|
           adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
           # Wrap adapter.run! so a single reviewer raising (spawn-time
@@ -590,34 +599,39 @@ module Hive
             end
           statuses << result.status
 
-          if result.error?
-            record_reviewer_infra_error(
-              ctx, spec, result,
-              truncate: !errors_initialized_for_pass
-            )
-            errors_initialized_for_pass = true
-          end
+          record_reviewer_infra_error(ctx, spec, result) if result.error?
         end
 
         statuses.all?(:error) ? :all_failed : :ok
       end
 
-      # Append (or initialize-then-write) one infra-error line to
-      # reviews/errors-NN.md. The first failed reviewer of a pass
-      # within a single run_reviewers invocation truncates and writes
-      # the header; subsequent failures append. This intentionally
-      # discards any errors-NN.md left from a prior crashed run of the
-      # same pass — re-running after a marker-clear should show only
-      # the latest pass-NN failure set, not concatenated history (see
-      # ce-doc-review feedback #11).
-      def record_reviewer_infra_error(ctx, spec, result, truncate:)
+      # Remove any stale `reviews/errors-NN.md` from a prior
+      # invocation of this pass. Called once at the start of
+      # `run_reviewers` so the file's presence (or absence) always
+      # reflects the current invocation's reviewer-failure set, not
+      # accumulated history. Idempotent: missing file is fine.
+      def clear_reviewer_infra_errors(ctx)
+        path = File.join(
+          ctx.task_folder,
+          "reviews",
+          "errors-#{format('%02d', ctx.pass)}.md"
+        )
+        File.delete(path) if File.exist?(path)
+      end
+
+      # Append one infra-error line to reviews/errors-NN.md. The file
+      # is initialized with a header on first write per invocation;
+      # subsequent failures append. Per-invocation freshness is
+      # guaranteed by `clear_reviewer_infra_errors` at the top of
+      # `run_reviewers` — this helper itself is append-safe across
+      # multiple failed reviewers within the same invocation.
+      def record_reviewer_infra_error(ctx, spec, result)
         reviews_dir = File.join(ctx.task_folder, "reviews")
         FileUtils.mkdir_p(reviews_dir)
         errors_path = File.join(reviews_dir, "errors-#{format('%02d', ctx.pass)}.md")
-        File.open(errors_path, truncate ? "w" : "a") do |f|
-          if truncate
-            f.write("# Reviewer infra errors for pass #{format('%02d', ctx.pass)}\n\n")
-          end
+        write_header = !File.exist?(errors_path)
+        File.open(errors_path, "a") do |f|
+          f.write("# Reviewer infra errors for pass #{format('%02d', ctx.pass)}\n\n") if write_header
           f.write(
             "- [#{spec['output_basename']}] reviewer " \
               "#{spec['name'].inspect} failed: #{result.error_message}\n"

@@ -203,6 +203,41 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_errors_file_is_deleted_when_rerun_has_zero_failures
+    # Regression: ce-code-review and correctness reviewer both flagged
+    # that the original truncate-on-first-failure design left a stale
+    # errors-NN.md when a rerun had zero failures (lazy truncate never
+    # fired). After the fix, the file is unconditionally cleared at the
+    # start of every run_reviewers invocation.
+    with_tmp_dir do |dir|
+      reviews_dir = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      stale_path = File.join(reviews_dir, "errors-01.md")
+      File.write(stale_path,
+                 "# Reviewer infra errors for pass 01\n\n" \
+                 "- [rev-a] reviewer \"rev-a\" failed: STALE from previous crashed run\n")
+
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "ok", "output_basename" => "ok" }
+          ]
+        }
+      }
+      adapters = [ OkReviewer.new(cfg["review"]["reviewers"][0], make_ctx(dir)) ]
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        assert_equal :ok, result
+      end
+
+      refute File.exist?(stale_path),
+             "stale errors-NN.md from a prior crashed run must be removed when the rerun has zero failures"
+      assert File.exist?(File.join(dir, "reviews", "ok-01.md")),
+             "ok reviewer's per-pass file is still written"
+    end
+  end
+
   def test_errors_file_is_truncated_on_pass_re_entry_not_appended
     # Defensive: after a marker-clear-and-rerun on the same pass, the
     # second run_reviewers invocation should NOT see double-listed

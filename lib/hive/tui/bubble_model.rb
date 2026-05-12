@@ -1160,8 +1160,21 @@ module Hive
         return "" if folder.empty?
 
         reviews_dir = File.join(folder, "reviews")
+        pass = review_waiting_pass(row)
+        reason = review_waiting_reason(row)
 
-        if review_waiting_reason(row) != "fix_guardrail" && (pass = review_waiting_pass(row))
+        # U5+U6 fix-guardrail approval gate: open the focal file
+        # directly so (a) the user lands on the one file that controls
+        # the resume, and (b) `read_checkbox_state` in the editor
+        # callback receives a regular file rather than the reviews/
+        # directory (Errno::EISDIR rescue would otherwise mask the
+        # before/after delta and silently suppress :rerun_review).
+        if reason == "fix_guardrail" && pass
+          candidate = File.join(reviews_dir, "fix-guardrail-#{format('%02d', pass)}.md")
+          return candidate if File.exist?(candidate)
+        end
+
+        if reason != "fix_guardrail" && pass
           reviewer_files = review_waiting_reviewer_files(reviews_dir, pass)
           return reviewer_files.first if reviewer_files.size == 1
         end
@@ -1253,8 +1266,7 @@ module Hive
       def dispatch_rerun_review_for(row, exited)
         dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
         flash = Hive::Tui::Messages::Flash.new(
-          text: "approved — starting next review pass for #{row.slug}",
-          source: :input_editor
+          text: "approved — starting next review pass for #{row.slug}"
         )
         [ exited, flash, dispatch ]
       rescue ArgumentError => e

@@ -2331,12 +2331,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_open_input_editor_targets_reviews_dir_for_fix_guardrail_review_waiting
+  def test_open_input_editor_targets_fix_guardrail_file_for_fix_guardrail_review_waiting
+    # Regression: PR-A originally opened the reviews/ directory for
+    # `reason=fix_guardrail` rows. That broke U6's auto-continue
+    # because `read_checkbox_state` on a directory rescues
+    # `Errno::EISDIR` to `[]`, so the before/after delta was always
+    # empty → `:silent` outcome → no dispatch. Fix: route Enter to
+    # the focal file directly so the checkbox-set snapshot can
+    # observe the user's `[x]` ticks.
     Dir.mktmpdir("hive-review-waiting") do |folder|
       reviews = File.join(folder, "reviews")
       FileUtils.mkdir_p(reviews)
       File.write(File.join(reviews, "claude-03.md"), "## High\n- [x] original fix\n")
-      File.write(File.join(reviews, "fix-guardrail-03.md"), "- [ ] shell_pipe_to_interpreter\n")
+      guardrail_path = File.join(reviews, "fix-guardrail-03.md")
+      File.write(guardrail_path, "- [ ] shell_pipe_to_interpreter\n")
       row = make_task_row(
         stage: "5-review",
         folder: folder,
@@ -2347,7 +2355,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       seen_editor_invocation = capture_input_editor_invocation(row)
 
-      assert_equal [ [ "fake-editor" ], reviews ], seen_editor_invocation
+      assert_equal [ [ "fake-editor" ], guardrail_path ], seen_editor_invocation,
+                   "fix_guardrail row must open the focal fix-guardrail-NN.md file, NOT the reviews/ directory"
+    end
+  end
+
+  def test_open_input_editor_falls_back_to_reviews_dir_when_fix_guardrail_file_missing
+    # Defensive: if the file is missing (user deleted it, runner
+    # never wrote it, etc.) fall back to the reviews/ directory so
+    # the user can at least navigate to find the right state. The
+    # checkbox-set delta still returns false in this case so U6
+    # auto-continue won't fire — that's correct (no file to approve).
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "3", "reason" => "fix_guardrail" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], reviews ], seen_editor_invocation,
+                   "fix_guardrail row with no focal file falls back to reviews/"
     end
   end
 

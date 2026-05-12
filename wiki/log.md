@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-12T02:00:00Z] review — orchestrator-owned errors-NN.md failure sink (PR-A / U2)
+
+**Action:** Failed reviewer adapters no longer pollute `reviews/<output_basename>-NN.md` with stub `- [ ] reviewer "X" failed:` lines that triage promoted to escalations. The new failure sink is `reviews/errors-NN.md` — an orchestrator-owned file (added `"errors-"` to `ORCHESTRATOR_OWNED_PREFIXES` so `reviewer_file?`, `discover_reviewer_files`, `collect_accepted_findings`, and `pass_completion_status` all skip it consistently). One header + one line per failed reviewer per pass; multiple failures within a single `run_reviewers` invocation append to the same file with no duplicate header. The file is **truncated** at the first failure of each invocation (not appended-across-runs), so a marker-clear-and-rerun on the same pass produces clean errors-NN.md content rather than concatenated history. The all-failed safety net (`statuses.all?(:error) → :all_failed → REVIEW_ERROR phase=reviewers reason=all_failed`) is preserved unchanged. Together with U1 (adapter retry), this closes the upstream pollution where a single reviewer timeout produced 4 passes of carry-over `[ ]` stubs in `escalations-NN.md` the user had to manually distinguish from real architectural escalations.
+
+**Refreshed pages:**
+- `wiki/stages/review.md` — Phase 2 reviewers paragraph rewritten to describe the retry+sink behavior end-to-end (U1+U2 together) and to point at `errors-NN.md` as the failure-record file.
+
 ## [2026-05-12T01:00:00Z] review — reviewer adapter retry with exponential backoff (PR-A / U1)
 
 **Action:** Added an adapter-local retry loop to `Hive::Reviewers::Agent#run!` so a reviewer spawn that times out or fails transiently is retried up to `max_attempts` times (default 2; configurable per reviewer via the optional `max_attempts` spec field; `1` disables retry). Backoff between failed attempts is exponential — 1s, 2s, 4s, 8s, 8s — capped at `Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC` (8s) so a high `max_attempts` doesn't introduce minute-scale waits. Each retry gets a `-retry<N>` suffix on its `log_label` so the per-pass log directory shows the retry history. The final `error_message` carries `after N attempt(s)` when `max_attempts > 1` and the original error-message shape otherwise. Non-Integer values reaching the adapter (config-load path bypassing `Hive::Config.validate_reviewers!`) fall back to the default rather than crashing inside `spawn_agent`. Closes the upstream problem where a single reviewer timeout produced a `- [ ] reviewer "X" failed:` stub the user had to triage as if it were a real finding.

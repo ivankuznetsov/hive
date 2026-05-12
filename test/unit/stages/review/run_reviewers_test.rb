@@ -49,6 +49,23 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  # Shared test helper: stub Hive::Reviewers.dispatch to return a sequence
+  # of adapters, run the orchestrator, restore dispatch.
+  def with_stubbed_dispatch(adapters)
+    orig = Hive::Reviewers.method(:dispatch)
+    idx = 0
+    Hive::Reviewers.define_singleton_method(:dispatch) do |_spec, _ctx, **_kwargs|
+      a = adapters[idx]
+      idx += 1
+      a
+    end
+    begin
+      yield
+    ensure
+      Hive::Reviewers.define_singleton_method(:dispatch, orig)
+    end
+  end
+
   def test_first_reviewer_raise_does_not_abort_second
     with_tmp_dir do |dir|
       cfg = {
@@ -60,42 +77,198 @@ class RunReviewersTest < Minitest::Test
         }
       }
 
-      # Stub Hive::Reviewers.dispatch to return our two test doubles in
-      # order. Patches Hive::Reviewers (not the class) so the orchestrator
-      # picks them up unchanged.
-      orig = Hive::Reviewers.method(:dispatch)
-      idx = 0
       adapters = [
         RaisingReviewer.new(cfg["review"]["reviewers"][0], make_ctx(dir)),
         OkReviewer.new(cfg["review"]["reviewers"][1], make_ctx(dir))
       ]
-      Hive::Reviewers.define_singleton_method(:dispatch) do |_spec, _ctx, **_kwargs|
-        a = adapters[idx]
-        idx += 1
-        a
-      end
 
-      begin
+      with_stubbed_dispatch(adapters) do
         result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
-      ensure
-        Hive::Reviewers.define_singleton_method(:dispatch, orig)
+        assert_equal :ok, result, "rescue must let surviving reviewers run"
       end
 
-      # Orchestrator returns :ok because the second reviewer succeeded —
-      # not :all_failed. A single rescue does not poison the phase.
-      assert_equal :ok, result, "rescue must let surviving reviewers run"
-
-      # The raising reviewer's stub finding file landed (so triage has
-      # something to read for it at this pass).
-      raising_stub = File.join(dir, "reviews", "raises-01.md")
-      assert File.exist?(raising_stub),
-             "stub finding file must be written for the raising reviewer"
-      assert_includes File.read(raising_stub), "RuntimeError"
-      assert_includes File.read(raising_stub), "boom"
-
-      # The OK reviewer's findings landed too.
+      # The OK reviewer's findings landed.
       ok_findings = File.join(dir, "reviews", "ok-01.md")
       assert File.exist?(ok_findings), "second reviewer must have run"
+
+      # POST-U2: the raising reviewer's failure lands in
+      # `reviews/errors-01.md`, NOT in `reviews/raises-01.md`. The
+      # reviewer-named file stays absent so triage's
+      # discover_reviewer_files sees "this reviewer produced nothing
+      # this pass", not "this reviewer produced a finding".
+      raising_stub = File.join(dir, "reviews", "raises-01.md")
+      refute File.exist?(raising_stub),
+             "post-U2: reviewer's own output_basename file must NOT exist for failed adapter (use errors-NN.md instead)"
+
+      errors_path = File.join(dir, "reviews", "errors-01.md")
+      assert File.exist?(errors_path),
+             "post-U2: failed adapter must record into errors-NN.md"
+      contents = File.read(errors_path)
+      assert_includes contents, "# Reviewer infra errors for pass 01"
+      assert_includes contents, "[raises] reviewer \"raises\" failed"
+      assert_includes contents, "RuntimeError"
+      assert_includes contents, "boom"
+    end
+  end
+
+  # --- U2 errors-NN.md sink coverage ----------------------------------
+
+  # A reviewer whose run! returns :error without raising. Tests the
+  # non-raise error path (the common case: adapter loop exhausted
+  # retries, returns the :error envelope).
+  class ErroringReviewer < Hive::Reviewers::Base
+    def initialize(spec, ctx, error_message:)
+      super(spec, ctx)
+      @error_message = error_message
+    end
+
+    def run!
+      Hive::Reviewers::Result.new(
+        name: name,
+        output_path: output_path,
+        status: :error,
+        error_message: @error_message
+      )
+    end
+  end
+
+  def test_multiple_failures_concatenate_into_one_errors_file_with_one_header
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" },
+            { "name" => "rev-b", "output_basename" => "rev-b" },
+            { "name" => "rev-c", "output_basename" => "rev-c" }
+          ]
+        }
+      }
+
+      adapters = cfg["review"]["reviewers"].each_with_index.map do |spec, i|
+        ErroringReviewer.new(spec, make_ctx(dir),
+                             error_message: "agent exited with status=:timeout (#{i + 1})")
+      end
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        assert_equal :all_failed, result,
+                     "all reviewers failing must surface :all_failed"
+      end
+
+      errors_path = File.join(dir, "reviews", "errors-01.md")
+      assert File.exist?(errors_path)
+      contents = File.read(errors_path)
+      assert_equal 1, contents.scan(/^# Reviewer infra errors for pass 01$/).size,
+                   "exactly one header for the pass — subsequent failures append"
+      %w[rev-a rev-b rev-c].each do |basename|
+        assert_includes contents, "[#{basename}] reviewer #{basename.inspect} failed",
+                        "every failed reviewer must appear in errors-NN.md"
+      end
+    end
+  end
+
+  def test_mixed_success_and_failure_only_failures_land_in_errors_file
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "ok",       "output_basename" => "ok" },
+            { "name" => "broken",   "output_basename" => "broken" }
+          ]
+        }
+      }
+
+      adapters = [
+        OkReviewer.new(cfg["review"]["reviewers"][0], make_ctx(dir)),
+        ErroringReviewer.new(cfg["review"]["reviewers"][1], make_ctx(dir),
+                             error_message: "timeout after 2 attempt(s)")
+      ]
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        assert_equal :ok, result, "mixed result is :ok (at least one reviewer succeeded)"
+      end
+
+      assert File.exist?(File.join(dir, "reviews", "ok-01.md")),
+             "successful reviewer's per-pass file is written"
+      refute File.exist?(File.join(dir, "reviews", "broken-01.md")),
+             "failed reviewer's per-pass file is NOT written"
+
+      errors_path = File.join(dir, "reviews", "errors-01.md")
+      assert File.exist?(errors_path)
+      contents = File.read(errors_path)
+      assert_includes contents, "[broken] reviewer \"broken\" failed: timeout after 2 attempt(s)"
+      refute_includes contents, "[ok]",
+                      "ok reviewer must not appear in errors-NN.md"
+    end
+  end
+
+  def test_errors_file_is_truncated_on_pass_re_entry_not_appended
+    # Defensive: after a marker-clear-and-rerun on the same pass, the
+    # second run_reviewers invocation should NOT see double-listed
+    # failures (header + failures from prior crashed run + new header +
+    # new failures). Truncate-on-first-failure-per-invocation closes
+    # this; the test pins the contract.
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" }
+          ]
+        }
+      }
+
+      # Simulate a stale errors-01.md from a prior crashed run.
+      reviews_dir = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      stale_path = File.join(reviews_dir, "errors-01.md")
+      File.write(stale_path,
+                 "# Reviewer infra errors for pass 01\n\n" \
+                 "- [rev-a] reviewer \"rev-a\" failed: STALE entry from previous run\n")
+
+      adapters = [
+        ErroringReviewer.new(cfg["review"]["reviewers"][0], make_ctx(dir),
+                             error_message: "fresh failure")
+      ]
+
+      with_stubbed_dispatch(adapters) do
+        Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      end
+
+      contents = File.read(stale_path)
+      refute_includes contents, "STALE entry",
+                      "stale lines from prior run must be truncated, not preserved"
+      assert_includes contents, "fresh failure",
+                      "fresh failure from current run lands cleanly"
+      assert_equal 1, contents.scan(/^# Reviewer infra errors for pass 01$/).size,
+                   "exactly one header"
+    end
+  end
+
+  def test_errors_filename_is_orchestrator_owned_and_skipped_by_reviewer_file_predicate
+    refute Hive::Stages::Review.reviewer_file?("errors-01.md"),
+           "errors-NN.md must be classified as orchestrator-owned"
+    refute Hive::Stages::Review.reviewer_file?("errors-99.md")
+    # Sanity: a real reviewer file is still recognized.
+    assert Hive::Stages::Review.reviewer_file?("claude-ce-code-review-01.md")
+  end
+
+  def test_errors_file_is_not_picked_up_by_triage_discover_reviewer_files
+    require "hive/stages/review/triage"
+    with_tmp_dir do |dir|
+      reviews_dir = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(File.join(reviews_dir, "errors-01.md"),
+                 "# Reviewer infra errors for pass 01\n\n- [a] ...\n")
+      File.write(File.join(reviews_dir, "claude-ce-code-review-01.md"),
+                 "## High\n- [ ] real finding\n")
+
+      ctx = make_ctx(dir)
+      files = Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+      assert_equal 1, files.size, "exactly one reviewer file discovered for pass 1"
+      assert files.first.end_with?("claude-ce-code-review-01.md")
+      refute(files.any? { |f| f.end_with?("errors-01.md") },
+             "errors-NN.md must be excluded from triage's reviewer-file discovery")
     end
   end
 

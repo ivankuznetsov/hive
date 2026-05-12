@@ -54,7 +54,7 @@ module Hive
       # all need to skip these — otherwise a `fix-guardrail-NN.md` user
       # tick `[x]` would re-flow into the next pass's fix prompt and
       # over-amplify guardrail findings.
-      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success-].freeze
+      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success- errors-].freeze
 
       # Per-pass sentinel: `reviews/fix-success-NN.md` is written after
       # a pass's Phase 4 fix succeeds (or Phase 2 produced zero findings
@@ -523,18 +523,27 @@ module Hive
       # one succeeded; :ok also when specs is empty (no reviewers
       # configured = nothing to triage; loop proceeds to Phase 5 via
       # the all-clean branch).
+      #
+      # Per-reviewer failures land in `reviews/errors-NN.md` (a new
+      # orchestrator-owned sink — see ORCHESTRATOR_OWNED_PREFIXES)
+      # instead of being written to the reviewer's own per-pass output
+      # file. This keeps `reviewer_file?` truthful (if a reviewer file
+      # exists, it has real findings the triage agent should read) and
+      # gives the user a single grep-target for infra failures separate
+      # from real escalations.
       def run_reviewers(cfg, ctx, task)
         specs = Array(cfg.dig("review", "reviewers"))
         return :ok if specs.empty?
 
         statuses = []
+        errors_initialized_for_pass = false
         specs.each do |spec|
           adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
           # Wrap adapter.run! so a single reviewer raising (spawn-time
           # SystemCallError, network timeout in a custom adapter, …)
           # doesn't abort the whole reviewers phase. Treat as :error,
-          # write the stub finding (matches the result.error? path), and
-          # continue with the next reviewer.
+          # record the failure in errors-NN.md, and continue with the
+          # next reviewer.
           result =
             begin
               adapter.run!
@@ -549,18 +558,38 @@ module Hive
           statuses << result.status
 
           if result.error?
-            # Stub finding file so triage has SOMETHING to read for
-            # this reviewer at this pass; otherwise discover_reviewer_files
-            # would silently skip it.
-            FileUtils.mkdir_p(File.dirname(adapter.output_path))
-            File.write(
-              adapter.output_path,
-              "## High\n\n- [ ] reviewer #{spec['name'].inspect} failed: #{result.error_message}\n"
+            record_reviewer_infra_error(
+              ctx, spec, result,
+              truncate: !errors_initialized_for_pass
             )
+            errors_initialized_for_pass = true
           end
         end
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      # Append (or initialize-then-write) one infra-error line to
+      # reviews/errors-NN.md. The first failed reviewer of a pass
+      # within a single run_reviewers invocation truncates and writes
+      # the header; subsequent failures append. This intentionally
+      # discards any errors-NN.md left from a prior crashed run of the
+      # same pass — re-running after a marker-clear should show only
+      # the latest pass-NN failure set, not concatenated history (see
+      # ce-doc-review feedback #11).
+      def record_reviewer_infra_error(ctx, spec, result, truncate:)
+        reviews_dir = File.join(ctx.task_folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        errors_path = File.join(reviews_dir, "errors-#{format('%02d', ctx.pass)}.md")
+        File.open(errors_path, truncate ? "w" : "a") do |f|
+          if truncate
+            f.write("# Reviewer infra errors for pass #{format('%02d', ctx.pass)}\n\n")
+          end
+          f.write(
+            "- [#{spec['output_basename']}] reviewer " \
+              "#{spec['name'].inspect} failed: #{result.error_message}\n"
+          )
+        end
       end
 
       # All [x] lines across every per-reviewer file for the current

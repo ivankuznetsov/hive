@@ -2384,6 +2384,155 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  # --- U6 auto-continue unit coverage (ce-review P1 #9) ---------------
+  #
+  # The new TUI auto-continue path for 5-review needs_input rows
+  # gained four private methods that PR-A originally shipped without
+  # direct tests. The two P0 bugs caught in /ce-review (Flash kwarg
+  # crash + reviews-dir-as-editor-path silencing every dispatch) would
+  # have been caught instantly by happy-path coverage. These tests
+  # exercise each new method directly.
+
+  def make_review_waiting_row(folder, pass:, reason: "fix_guardrail")
+    attrs = { "pass" => pass.to_s }
+    attrs["reason"] = reason if reason
+    make_task_row(
+      stage: "5-review",
+      folder: folder,
+      state_file: File.join(folder, "task.md"),
+      marker: "review_waiting",
+      attrs: attrs,
+      suggested_command: "hive run --folder #{folder}"
+    )
+  end
+
+  def test_read_checkbox_state_returns_unchecked_checked_sequence
+    Dir.mktmpdir("u6-read-checkbox") do |dir|
+      path = File.join(dir, "fix-guardrail-04.md")
+      File.write(path, <<~MD)
+        # Fix-guardrail findings for pass 04
+
+        - [ ] dotenv_edit: .env.production
+        - [x] permission_change: bin/script
+        - [X] dependency_lockfile_change: Gemfile.lock
+      MD
+      states = @model.send(:read_checkbox_state, path)
+      assert_equal [ :unchecked, :checked, :checked ], states
+    end
+  end
+
+  def test_read_checkbox_state_returns_empty_for_directory
+    # The original PR-A bug: editor path was a directory; rescue
+    # Errno::EISDIR returns [] silently, which let :silent fire on
+    # every fix_guardrail edit. The behaviour is correct (no crash);
+    # the fix is to NOT pass a directory here in the first place
+    # (see input_editor_path tests above).
+    Dir.mktmpdir("u6-read-checkbox-dir") do |dir|
+      states = @model.send(:read_checkbox_state, dir)
+      assert_equal [], states
+    end
+  end
+
+  def test_read_checkbox_state_returns_empty_for_missing_file
+    states = @model.send(:read_checkbox_state, "/nonexistent/path/fix-guardrail-04.md")
+    assert_equal [], states
+  end
+
+  def test_review_outcome_silent_when_checkbox_set_unchanged
+    # Bare `:wq` ticks mtime but does not change the checkbox set —
+    # critical U6 invariant: avoid no-op runner round-trips.
+    Dir.mktmpdir("u6-review-outcome") do |folder|
+      row = make_review_waiting_row(folder, pass: 4)
+      outcome = @model.send(:review_outcome, row, false)
+      assert_equal :silent, outcome
+    end
+  end
+
+  def test_review_outcome_empty_command_when_suggested_command_blank
+    Dir.mktmpdir("u6-review-outcome") do |folder|
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "4", "reason" => "fix_guardrail" },
+        suggested_command: ""
+      )
+      outcome = @model.send(:review_outcome, row, true)
+      assert_equal :empty_command, outcome
+    end
+  end
+
+  def test_review_outcome_marker_changed_when_marker_drifted
+    # Race: editor open with marker :review_waiting; concurrent
+    # `hive run` advances marker to :agent_working. On save we must
+    # NOT re-dispatch — the second action is mid-flight.
+    Dir.mktmpdir("u6-review-outcome") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- AGENT_WORKING phase=fix pass=4 -->\n")
+      row = make_review_waiting_row(folder, pass: 4)
+      outcome = @model.send(:review_outcome, row, true)
+      assert_equal :marker_changed, outcome
+    end
+  end
+
+  def test_review_outcome_rerun_review_on_checkbox_change_and_marker_intact
+    Dir.mktmpdir("u6-review-outcome") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
+      row = make_review_waiting_row(folder, pass: 4)
+      outcome = @model.send(:review_outcome, row, true)
+      assert_equal :rerun_review, outcome
+    end
+  end
+
+  def test_review_marker_still_open_accepts_review_waiting
+    Dir.mktmpdir("u6-marker-check") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
+      assert @model.send(:review_marker_still_open?, task_md)
+    end
+  end
+
+  def test_review_marker_still_open_false_for_agent_working
+    Dir.mktmpdir("u6-marker-check") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- AGENT_WORKING phase=fix pass=4 -->\n")
+      refute @model.send(:review_marker_still_open?, task_md)
+    end
+  end
+
+  def test_dispatch_rerun_review_for_emits_exited_flash_dispatch_triple
+    # The original P0: Flash.new with unknown :source kwarg raised
+    # ArgumentError silently caught by the local rescue, routing to a
+    # 'malformed suggested command' flash instead of dispatching.
+    # This test pins the corrected message shape.
+    folder = "/tmp/hive/test-slug"
+    row = make_task_row(
+      stage: "5-review",
+      folder: folder,
+      state_file: File.join(folder, "task.md"),
+      marker: "review_waiting",
+      attrs: { "pass" => "4", "reason" => "fix_guardrail" },
+      slug: "test-slug",
+      suggested_command: "hive run --folder #{folder}"
+    )
+    exited = Hive::Tui::Messages::InputEditorExited.new(
+      slug: row.slug, exit_code: 0, changed: true
+    )
+
+    messages = @model.send(:dispatch_rerun_review_for, row, exited)
+
+    assert_equal 3, messages.size, "expected [exited, flash, dispatch]"
+    assert_same exited, messages[0]
+    assert_kind_of Hive::Tui::Messages::Flash, messages[1]
+    assert_match(/approved/, messages[1].text)
+    assert_match(/test-slug/, messages[1].text)
+    refute_match(/malformed/, messages[1].text,
+                 "the suppression-flash branch must NOT fire on the happy path")
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, messages[2]
+  end
+
   def capture_input_editor_invocation(row)
     seen_editor_invocation = nil
     @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }

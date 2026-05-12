@@ -195,21 +195,43 @@ module Hive
           # ticked [x] on every line of reviews/fix-guardrail-NN.md
           # AND the resume marker is REVIEW_WAITING reason=fix_guardrail
           # for THIS pass, treat the prior Phase 4's commits as
-          # user-approved: skip Phase 2/3/4 entirely (no new reviewers,
-          # no new fix agent, no guardrail re-check) and advance to the
-          # next pass. The approval is single-shot per pass: a future
-          # pass that re-trips the guardrail writes a fresh
-          # fix-guardrail-(NN+1).md with [ ] lines; pass-N approval
-          # does not transfer.
+          # user-approved: skip Phase 2/3 reviewers, do not re-spawn the
+          # fix agent, and advance. The approval is single-shot per
+          # pass: a future pass that re-trips the guardrail writes a
+          # fresh fix-guardrail-(NN+1).md with [ ] lines; pass-N
+          # approval does not transfer.
           #
           # MUST come BEFORE the resume_no_findings empty-guard so
           # approval doesn't require live reviewer files to land.
+          #
+          # Three additional safety checks before advancing (ce-review
+          # P1 #7, #11): worktree_dirty? catches manual edits the user
+          # made between the guardrail trip and the approval; the
+          # max_passes-boundary check breaks to Phase 5 instead of
+          # REVIEW_STALE-on-approved-pass; user-supplied marker pass
+          # mismatch is treated as a hand-edit and rejected.
           if resuming_from_waiting?(marker, pass) &&
              marker.attrs["reason"] == "fix_guardrail" &&
              fix_guardrail_approved?(ctx_pass)
+            if worktree_dirty?(worktree_path)
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :resume, reason: "approval_dirty_worktree", pass: pass)
+              return { commit: "approval_dirty_worktree_pass_#{format('%02d', pass)}",
+                       status: :review_error }
+            end
+
             write_fix_success(ctx_pass)
             marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
             fix_retry_pass = nil
+            # If we approved the very last pass-cap-N pass, advancing
+            # to pass N+1 would immediately hit the `pass > max_passes`
+            # guard above and write REVIEW_STALE — masking the
+            # approval. Break to Phase 5 (browser test) instead so the
+            # approved commits make it through to the terminal state.
+            if pass >= max_passes
+              break
+            end
+
             pass += 1
             next
           end
@@ -237,7 +259,13 @@ module Hive
           unless skip_review_and_triage
             @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
-            reviewers_result = run_reviewers(cfg, ctx_pass, task)
+            reviewers_result = run_reviewers(
+              cfg, ctx_pass, task,
+              started_at: started_at, max_wall_clock_sec: max_wall_clock
+            )
+            if reviewers_result == :wall_clock_exceeded
+              return finalize_wall_clock_stale(task, started_at, pass: pass)
+            end
             if reviewers_result == :all_failed
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :reviewers, reason: "all_failed", pass: pass)
@@ -564,7 +592,20 @@ module Hive
       # exists, it has real findings the triage agent should read) and
       # gives the user a single grep-target for infra failures separate
       # from real escalations.
-      def run_reviewers(cfg, ctx, task)
+      # Run every reviewer for the current pass. Returns one of:
+      #   :ok                  — at least one reviewer succeeded
+      #   :all_failed          — every reviewer returned :error
+      #   :wall_clock_exceeded — caller's wall-clock budget elapsed
+      #                          mid-loop; remaining reviewers skipped
+      #
+      # The wall-clock check is the U1+U2 reliability fix for ce-review
+      # P1 #8: adapter-local retry (max_attempts × timeout_sec ×
+      # reviewer count) can otherwise exhaust max_wall_clock_sec
+      # entirely inside this method before the outer phase-boundary
+      # check fires. With the budget threaded through, we short-circuit
+      # between reviewers as soon as the budget is gone — the partial
+      # results stay on disk for the next run to consume.
+      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
         specs = Array(cfg.dig("review", "reviewers"))
         return :ok if specs.empty?
 
@@ -572,14 +613,16 @@ module Hive
         # voluntary re-run of THIS pass before any reviewer runs. This
         # guarantees the on-disk file always reflects the current
         # invocation's failures (or its absence reflects all-success),
-        # not concatenated history. Originally we did this lazily on
-        # first failure, but that left stale files behind when a rerun
-        # had zero failures — observed by both the correctness and
-        # ce-code-review passes on PR-A.
+        # not concatenated history.
         clear_reviewer_infra_errors(ctx)
 
         statuses = []
         specs.each do |spec|
+          if started_at && max_wall_clock_sec &&
+             wall_clock_exceeded?(started_at, max_wall_clock_sec)
+            return :wall_clock_exceeded
+          end
+
           adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
           # Wrap adapter.run! so a single reviewer raising (spawn-time
           # SystemCallError, network timeout in a custom adapter, …)
@@ -768,8 +811,32 @@ module Hive
         )
         FileUtils.mkdir_p(File.dirname(path))
         body = +"# Fix-guardrail findings for pass #{format('%02d', ctx.pass)}\n\n"
-        matches.each do |m|
-          body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: #{m.snippet}\n"
+
+        # ce-review P1 #10 — group findings by severity so the user
+        # cannot accidentally approve a high-severity edit by reading
+        # only the medium/low ones. Each severity becomes a labelled
+        # ## section; approval semantic stays all-`[x]` per file but
+        # the layout forces explicit acknowledgement of each tier.
+        # Severity is `:high | :medium | :nit` per Patterns::DEFAULTS;
+        # render order high → medium → nit.
+        severity_order = %i[high medium nit]
+        section_labels = {
+          high: "## High — auto-fix forbidden; tick `[x]` only after inspecting the diff",
+          medium: "## Medium",
+          nit: "## Nit"
+        }
+        grouped = matches.group_by do |m|
+          severity_order.include?(m.severity) ? m.severity : :nit
+        end
+        severity_order.each do |severity|
+          entries = grouped[severity]
+          next if entries.nil? || entries.empty?
+
+          body << "#{section_labels[severity]}\n\n"
+          entries.each do |m|
+            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: #{m.snippet}\n"
+          end
+          body << "\n"
         end
         File.write(path, body)
       end

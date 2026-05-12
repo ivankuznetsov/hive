@@ -555,7 +555,7 @@ class RunReviewTest < Minitest::Test
           # we need the loop to reach Phase 5; pass-1 finds findings,
           # pass-2 finds zero so the all-clean break fires.
           Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers_p, :run_reviewers)
-          Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task|
+          Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task, **_kwargs|
             path = File.join(ctx.task_folder, "reviews", "stub-rev-#{format('%02d', ctx.pass)}.md")
             FileUtils.mkdir_p(File.dirname(path))
             content = ctx.pass == 1 ? "## High\n- [x] fix the thing\n" : ""
@@ -643,7 +643,7 @@ class RunReviewTest < Minitest::Test
         # Stubs: pass-1 review reports with one [x]; pass-2 reports clean.
         # Triage stub writes empty escalations for both passes.
         Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers, :run_reviewers)
-        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task|
+        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task, **_kwargs|
           path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
           File.write(path, ctx.pass == 1 ? "## High\n- [x] fix the thing\n" : "")
           :ok
@@ -703,7 +703,7 @@ class RunReviewTest < Minitest::Test
         FileUtils.mkdir_p(reviews)
 
         Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers, :run_reviewers)
-        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task|
+        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task, **_kwargs|
           path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
           File.write(path, "## High\n- [ ] human-review-only\n")
           :ok
@@ -876,7 +876,7 @@ class RunReviewTest < Minitest::Test
         # post-fix dirty check passes. Loop hits pass=2 and the
         # max_passes check trips review_stale.
         Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers, :run_reviewers)
-        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task|
+        Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task, **_kwargs|
           path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
           File.write(path, "## High\n- [x] still broken on pass #{ctx.pass}\n")
           :ok

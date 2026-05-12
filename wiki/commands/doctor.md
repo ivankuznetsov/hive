@@ -45,8 +45,8 @@ Encoded as the third return of `AgentProfile.new(skill_verifier:)`:
     2. `~/.agents/skills/` — recursive `**/<name>/SKILL.md` (no root `.md` — cross-agent dirs use SKILL.md only)
     3. `<project>/.pi/skills/` — recursive plus root `<name>.md`
     4. Every ancestor `<dir>/.agents/skills/` walking up from `project_root` until the nearest `.git/` (or filesystem root)
-    5. `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` `skills` entries — each entry is **jailed** to settings_dir / `$HOME` / project_root (a `~/` or `/` entry that resolves *exactly* to a jail root is rejected as a DoS-shaped scan request)
-    6. `~/.pi/npm/node_modules/*/skills/` and `<project>/.pi/npm/node_modules/*/skills/` — recursive
+    5. `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` `skills` / `packages` entries — each entry is **jailed** to settings_dir / `$HOME` / project_root (a `~/` or `/` entry that resolves *exactly* to a jail root is rejected as a DoS-shaped scan request)
+    6. `npm root -g`, `~/.pi/npm/node_modules/*/skills/`, and `<project>/.pi/npm/node_modules/*/skills/` — recursive
     7. `~/.pi/agent/git/` — bounded prefix scan over 1–4 path levels under the git root (so `<git>/<host>/<user>/<repo>/skills/` is reachable without an unbounded `**` walk)
     8. Every package whose `package.json#pi.skills` declares a path — each such path is jailed to the package root, so a malicious package cannot point `pi.skills` at `../..` or `/`
   

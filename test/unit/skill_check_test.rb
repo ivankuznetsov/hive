@@ -257,10 +257,25 @@ class HiveSkillCheckPiTest < Minitest::Test
   def with_fake_home
     with_tmp_dir do |dir|
       old = ENV["HOME"]
+      original_global_npm_root = Hive::SkillCheck::Pi.method(:global_npm_root)
       ENV["HOME"] = dir
+      Hive::SkillCheck::Pi.define_singleton_method(:global_npm_root) { nil }
       yield dir
     ensure
       old.nil? ? ENV.delete("HOME") : ENV["HOME"] = old
+      Hive::SkillCheck::Pi.define_singleton_method(:global_npm_root) do
+        original_global_npm_root.call
+      end
+    end
+  end
+
+  def with_pi_global_npm_root(root)
+    original = Hive::SkillCheck::Pi.method(:global_npm_root)
+    Hive::SkillCheck::Pi.define_singleton_method(:global_npm_root) { root }
+    yield
+  ensure
+    Hive::SkillCheck::Pi.define_singleton_method(:global_npm_root) do
+      original.call
     end
   end
 
@@ -361,6 +376,19 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_present_via_pi_package_npm_root_g
+    with_fake_home do |_home|
+      with_tmp_dir do |npm_root|
+        with_pi_global_npm_root(npm_root) do
+          write_file("#{npm_root}/some-package/skills/foo/SKILL.md")
+          status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
+          assert_equal :present, status
+          assert_equal "#{npm_root}/some-package/skills/foo/SKILL.md", msg
+        end
+      end
+    end
+  end
+
   def test_present_via_pi_package_git_root
     with_fake_home do |home|
       write_file("#{home}/.pi/agent/git/github.com/user/repo/skills/foo/SKILL.md")
@@ -388,6 +416,18 @@ class HiveSkillCheckPiTest < Minitest::Test
       status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
       assert_equal :present, status
       assert_match(%r{\.pi/agent/extra-skills/foo/SKILL.md\z}, msg)
+    end
+  end
+
+  def test_present_via_project_pi_settings_package_path
+    with_fake_home do |_home|
+      with_tmp_dir do |project|
+        write_file("#{project}/.pi/settings.json", '{"packages":["../local-package"]}')
+        write_file("#{project}/local-package/skills/foo/SKILL.md")
+        status, msg = Hive::SkillCheck::Pi.verify("/skill:foo", project_root: project)
+        assert_equal :present, status
+        assert_equal "#{project}/local-package/skills/foo/SKILL.md", msg
+      end
     end
   end
 

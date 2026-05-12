@@ -191,6 +191,29 @@ module Hive
 
           ctx_pass = ctx.with(pass: pass)
 
+          # U5 — fix-guardrail approval-on-resume. When the user has
+          # ticked [x] on every line of reviews/fix-guardrail-NN.md
+          # AND the resume marker is REVIEW_WAITING reason=fix_guardrail
+          # for THIS pass, treat the prior Phase 4's commits as
+          # user-approved: skip Phase 2/3/4 entirely (no new reviewers,
+          # no new fix agent, no guardrail re-check) and advance to the
+          # next pass. The approval is single-shot per pass: a future
+          # pass that re-trips the guardrail writes a fresh
+          # fix-guardrail-(NN+1).md with [ ] lines; pass-N approval
+          # does not transfer.
+          #
+          # MUST come BEFORE the resume_no_findings empty-guard so
+          # approval doesn't require live reviewer files to land.
+          if resuming_from_waiting?(marker, pass) &&
+             marker.attrs["reason"] == "fix_guardrail" &&
+             fix_guardrail_approved?(ctx_pass)
+            write_fix_success(ctx_pass)
+            marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+            fix_retry_pass = nil
+            pass += 1
+            next
+          end
+
           # Two paths skip Phase 2/3 and jump to Phase 4 on existing
           # reviewer artefacts: (a) REVIEW_WAITING resume (user edited
           # [x] marks), (b) fix-retry on an interrupted pass. Both
@@ -279,8 +302,18 @@ module Hive
           # escalations doc — only Triage may write that file, so a fix
           # agent rewriting it (e.g. flipping `[ ]` → `[x]` to short-
           # circuit human review) trips fix_tampered.
+          #
+          # U5 — also protect reviews/fix-guardrail-NN.md: it does not
+          # exist yet when this snapshot runs (the runner only writes
+          # it AFTER the fix-agent spawn if the guardrail trips). A
+          # compromised fix agent that pre-creates an all-`[x]` file
+          # to stage an approval token for the next resume would trip
+          # fix_tampered. The orchestrator's own legitimate write via
+          # write_fix_guardrail_findings happens AFTER after_fix_sha
+          # is captured, so it is unaffected.
           protected_set = FIX_PROTECTED_FILES + [
             "reviews/escalations-#{format('%02d', pass)}.md",
+            "reviews/fix-guardrail-#{format('%02d', pass)}.md",
             fix_success_relative_path(pass)
           ]
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
@@ -725,6 +758,37 @@ module Hive
           body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: #{m.snippet}\n"
         end
         File.write(path, body)
+      end
+
+      # U5 — check whether reviews/fix-guardrail-NN.md has been
+      # user-approved for the given pass. Approved = every checkbox
+      # line is `[x]`. Returns false for: file absent, header-only
+      # file (zero checkbox lines), or any `[ ]` remaining. The
+      # checkbox regex matches `- [ ]` and `- [x]` lines (case-
+      # insensitive on the `x`); other line shapes (the title, blank
+      # lines, any free-form prose under it) are ignored.
+      #
+      # Caller invariant: only consult this when the resume marker is
+      # `:review_waiting reason=fix_guardrail` for the same pass. The
+      # helper itself does not check the marker — it is a pure file
+      # inspector. The orchestrator guards the call site.
+      def fix_guardrail_approved?(ctx)
+        path = File.join(
+          ctx.task_folder,
+          "reviews",
+          "fix-guardrail-#{format('%02d', ctx.pass)}.md"
+        )
+        return false unless File.exist?(path)
+
+        checkbox_re = /^\s*-\s+\[([ xX])\]\s+/
+        any_checkbox = false
+        File.foreach(path) do |line|
+          next unless (m = line.match(checkbox_re))
+
+          any_checkbox = true
+          return false if m[1] == " "
+        end
+        any_checkbox
       end
 
       # Write the per-pass fix-success sentinel. Called from the two

@@ -444,4 +444,88 @@ class RunReviewersTest < Minitest::Test
       assert_equal 99, Hive::Stages::Review.max_review_pass(dir)
     end
   end
+
+  # --- U5 fix-guardrail approval-on-resume coverage --------------------
+
+  def write_guardrail_file(dir, pass:, body:)
+    reviews_dir = File.join(dir, "reviews")
+    FileUtils.mkdir_p(reviews_dir)
+    File.write(File.join(reviews_dir, "fix-guardrail-#{format('%02d', pass)}.md"), body)
+  end
+
+  def test_fix_guardrail_approved_true_when_all_lines_are_x
+    with_tmp_dir do |dir|
+      write_guardrail_file(dir, pass: 4, body: <<~MD)
+        # Fix-guardrail findings for pass 04
+
+        - [x] dotenv_edit: .env.example:?: .env.example
+        - [x] dotenv_edit: .env.example:?: .env.example
+      MD
+      ctx = make_ctx(dir).with(pass: 4)
+      assert Hive::Stages::Review.fix_guardrail_approved?(ctx),
+             "all-[x] file must be reported as approved"
+    end
+  end
+
+  def test_fix_guardrail_approved_false_when_any_unchecked_remains
+    with_tmp_dir do |dir|
+      write_guardrail_file(dir, pass: 4, body: <<~MD)
+        # Fix-guardrail findings for pass 04
+
+        - [x] dotenv_edit: .env.example:?: .env.example
+        - [ ] dotenv_edit: .env.production:?: .env.production
+      MD
+      ctx = make_ctx(dir).with(pass: 4)
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx),
+             "any remaining [ ] line means not approved"
+    end
+  end
+
+  def test_fix_guardrail_approved_false_when_file_absent
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir).with(pass: 4)
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx),
+             "absent file is not approved (defensive default)"
+    end
+  end
+
+  def test_fix_guardrail_approved_false_when_header_only
+    with_tmp_dir do |dir|
+      write_guardrail_file(dir, pass: 4, body: "# Fix-guardrail findings for pass 04\n\n")
+      ctx = make_ctx(dir).with(pass: 4)
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx),
+             "header-only file (no checkbox lines) is empty/corrupt, not approved"
+    end
+  end
+
+  def test_fix_guardrail_approved_uppercase_X_also_counts_as_approved
+    # Editors that auto-capitalize `[ ]` to `[X]` shouldn't cause a
+    # spurious approval rejection.
+    with_tmp_dir do |dir|
+      write_guardrail_file(dir, pass: 4, body: <<~MD)
+        # Fix-guardrail findings for pass 04
+
+        - [X] dotenv_edit: .env.example:?: .env.example
+        - [X] dotenv_edit: .env.example:?: .env.example
+      MD
+      ctx = make_ctx(dir).with(pass: 4)
+      assert Hive::Stages::Review.fix_guardrail_approved?(ctx)
+    end
+  end
+
+  def test_fix_guardrail_approved_per_pass_isolation
+    # An all-[x] file for pass 4 is approval for pass 4 only — it
+    # does not affect pass 5's approval state. R11 single-shot
+    # semantic.
+    with_tmp_dir do |dir|
+      write_guardrail_file(dir, pass: 4, body: <<~MD)
+        # Fix-guardrail findings for pass 04
+
+        - [x] dotenv_edit: .env.example:?: .env.example
+      MD
+      assert Hive::Stages::Review.fix_guardrail_approved?(make_ctx(dir).with(pass: 4))
+      refute Hive::Stages::Review.fix_guardrail_approved?(make_ctx(dir).with(pass: 5)),
+             "pass 5 has its own fix-guardrail-05.md state (absent here = not approved)"
+    end
+  end
 end

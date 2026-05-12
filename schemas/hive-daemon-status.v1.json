@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-daemon-status.v1.json",
+  "title": "hive daemon status output (v1)",
+  "description": "Stable contract emitted by `hive daemon status --json`. Reports whether the dispatcher daemon is running, its PID, and uptime. Exit code is 0 when running, 1 when not.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "running",
+        "pid",
+        "uptime_sec",
+        "pid_file",
+        "log_file"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "running": {
+          "type": "boolean",
+          "description": "Whether a live, ownership-verified daemon process holds the PID file."
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "description": "PID of the running daemon, or null when running=false."
+        },
+        "uptime_sec": {
+          "type": ["integer", "null"],
+          "description": "Seconds since the PID file was written (mtime), or null when running=false."
+        },
+        "pid_file": {
+          "type": "string",
+          "description": "Absolute path of the PID file the daemon writes to."
+        },
+        "log_file": {
+          "type": "string",
+          "description": "Absolute path of the daemon's JSON-line log file."
+        }
+      }
+    }
+  }
+}

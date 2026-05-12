@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-daemon-reload.v1.json",
+  "title": "hive daemon reload output (v1)",
+  "description": "Stable contract emitted by `hive daemon reload --json`. Sends SIGHUP to a live, ownership-verified daemon process. Reports ok=true when the signal was delivered; ok=false (with `reason`) when reload was refused (no PID file, dead PID, reused PID, or unverified ownership). Exit codes: 0 on ok=true, 1 on ok=false.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-reload" },
+        "schema_version": { "const": 1 },
+        "ok": {
+          "type": "boolean",
+          "description": "True only when SIGHUP was successfully delivered to the verified daemon process. False on any refusal path (with `reason` populated)."
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "description": "PID that was signalled (ok=true) or the stale/refused PID inspected (ok=false). Null when no PID file was present at all."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["not_running", "pid_dead", "pid_reused", "unverified"],
+          "description": "Why reload was refused. Present only when ok=false. not_running = no PID file at the expected path. pid_dead = PID file points at a process that no longer exists. pid_reused = process_start_time differs from recorded; the PID was reused by another process. unverified = recorded or live process_start_time is nil; ownership cannot be proved."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable explanation suitable for surfacing in operator-facing logs. Always present."
+        }
+      }
+    }
+  }
+}

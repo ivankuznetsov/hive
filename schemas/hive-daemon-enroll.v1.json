@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-daemon-enroll.v1.json",
+  "title": "hive daemon enable/disable output (v1)",
+  "description": "Stable contract emitted by `hive daemon enable PROJECT|--all --json` and `hive daemon disable PROJECT|--all --json`. Toggles `daemon.enabled` in each target's `<project>/.hive-state/config.yml` and reports per-project before/after values. The dispatcher picks the change up on its next poll (no SIGHUP required).",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "subcommand",
+        "results"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-enroll" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "subcommand": {
+          "type": "string",
+          "enum": ["enable", "disable"],
+          "description": "Which verb produced this envelope."
+        },
+        "results": {
+          "type": "array",
+          "description": "One entry per affected project. With PROJECT, length is 1; with --all, length matches the registry size.",
+          "items": { "$ref": "#/$defs/Result" }
+        },
+        "next_action": {
+          "$ref": "#/$defs/NextAction",
+          "description": "OPTIONAL in v1. Present in the current producer's emission; absent from the original PR #45 v1 producer (which shipped before this field was added). Consumers MUST tolerate its absence on this version. A future v2 may make it required."
+        }
+      }
+    },
+    "NextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["no_op", "reload"],
+          "description": "no_op = nothing changed (every result was already at the requested state). reload = at least one project flipped; reload is OPTIONAL because the dispatcher's per-tick cache invalidation picks up the change within poll_interval_sec."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable rationale for the kind."
+        },
+        "command": {
+          "type": "string",
+          "description": "Concrete shell command an agent can run for this next_action. Present only when kind=reload."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "True if the next_action MUST be executed for the change to take effect; false if it's a hint that speeds up convergence. Always false for kind=reload (per-tick cache picks up within poll_interval_sec). Present only when kind=reload."
+        }
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "path",
+        "previous",
+        "current",
+        "config_yml"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Registry name of the project."
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute path of the project root."
+        },
+        "previous": {
+          "type": ["boolean", "null"],
+          "description": "Prior value of daemon.enabled. null when the daemon block (or the enabled key) was absent before this call."
+        },
+        "current": {
+          "type": "boolean",
+          "description": "New value of daemon.enabled after the rewrite (true for enable, false for disable)."
+        },
+        "config_yml": {
+          "type": "string",
+          "description": "Absolute path of the per-project config.yml that was rewritten."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-enroll" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised. Matches every other hive-* error envelope."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "missing_project",
+            "unknown_project",
+            "project_and_all",
+            "not_initialised",
+            "no_projects",
+            "config",
+            "internal"
+          ],
+          "description": "missing_project = PROJECT positional missing without --all. unknown_project = PROJECT not in registry. project_and_all = both PROJECT and --all were passed. not_initialised = project registered but its .hive-state/config.yml is missing. no_projects = --all but registry empty. config = malformed config.yml (exit 78). internal = uncategorised crash (exit 70)."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 64, 70, 78],
+          "description": "Hive::ExitCodes. 1=GENERIC, 64=USAGE, 70=SOFTWARE, 78=CONFIG."
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,5 +1,7 @@
 require "json"
+require "open3"
 require "pathname"
+require "timeout"
 
 module Hive
   # Per-agent verification that a configured slash-command skill
@@ -218,6 +220,8 @@ module Hive
     module Pi
       module_function
 
+      NPM_ROOT_TIMEOUT_SEC = 2
+
       # Pi has a real skill-discovery model. It loads user skills,
       # cross-agent skills, project skills, package resources, and
       # explicit settings entries. Directories containing SKILL.md are
@@ -331,12 +335,14 @@ module Hive
         paths = []
         node_roots = [
           File.join(home, ".pi/npm/node_modules"),
-          File.join(home, ".pi/agent/npm/node_modules")
+          File.join(home, ".pi/agent/npm/node_modules"),
+          global_npm_root
         ]
         if project_root
           project = File.expand_path(project_root)
           node_roots << File.join(project, ".pi/npm/node_modules")
         end
+        node_roots = node_roots.compact.uniq
 
         node_roots.each do |node_root|
           paths.concat(node_modules_skill_candidates(node_root, name))
@@ -350,11 +356,25 @@ module Hive
 
         package_roots = node_roots.flat_map { |root| node_package_roots(root) }
         package_roots.concat(git_roots.flat_map { |root| git_package_roots(root) })
-        package_roots.concat(settings_paths.flat_map { |path| settings_package_roots(path, home, parse_errors: parse_errors) })
+        package_roots.concat(settings_paths.flat_map do |path|
+          settings_package_roots(path, home, project_root: project_root, parse_errors: parse_errors)
+        end)
         package_roots.compact.uniq.each do |package_root|
           paths.concat(package_root_candidates(package_root, name, parse_errors: parse_errors))
         end
         paths
+      end
+
+      def global_npm_root
+        out, _err, status = Timeout.timeout(NPM_ROOT_TIMEOUT_SEC) do
+          Open3.capture3("npm", "root", "-g")
+        end
+        return nil unless status.success?
+
+        root = out.lines.first&.strip
+        root unless root.nil? || root.empty?
+      rescue Errno::ENOENT, SystemCallError, Timeout::Error
+        nil
       end
 
       def package_root_candidates(package_root, name, parse_errors: [])
@@ -413,17 +433,18 @@ module Hive
           .map { |path| File.dirname(path) }
       end
 
-      def settings_package_roots(settings_path, home, parse_errors: [])
+      def settings_package_roots(settings_path, home, project_root: nil, parse_errors: [])
         settings = read_json(settings_path, errors: parse_errors)
         return [] unless settings
 
         settings_dir = File.dirname(settings_path)
+        jails = settings_skill_jail_roots(settings_dir, home, project_root: project_root)
         Array(settings["packages"]).filter_map do |entry|
           source = entry.is_a?(Hash) ? entry["source"] : entry
           path = local_path(source, settings_dir, home)
           next nil unless path
 
-          jail_path(path, settings_skill_jail_roots(settings_dir, home))
+          jail_path(path, jails)
         end
       end
 

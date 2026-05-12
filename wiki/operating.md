@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: lib/hive/commands/daemon.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-08
 tags: [operating, daemon, systemd, launchd, install]
 ---
 
@@ -116,6 +116,13 @@ foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
 the graceful drain (`daemon.shutdown_grace_sec`, default 600 s).
 
+The shipped unit hardcodes `TimeoutStopSec=900` (15 min — drain budget
+plus headroom). If you raise `daemon.shutdown_grace_sec` above 900,
+**also** raise `TimeoutStopSec=` in your installed unit to match
+(`shutdown_grace_sec + 300` is a reasonable cushion). Otherwise
+systemd will SIGKILL still-running stage children mid-`hive run`,
+losing in-flight work.
+
 If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user
 doesn't load your shell's rc files.
@@ -147,6 +154,16 @@ preferred for parsing — the launchd capture is mostly empty.
 `KeepAlive` with `SuccessfulExit: false` means launchd respawns on
 crash but not after a clean `hive daemon stop`. `ThrottleInterval: 30`
 is the floor between respawn attempts.
+
+The plist's `ProgramArguments` wraps the invocation in a tiny
+`/bin/sh -c '[ -x "$0" ] || exit 0; exec "$0" "$@"'` precheck —
+launchd has no native equivalent of systemd's `StartLimitBurst`, so
+without this wrapper a wrong binary path would respawn every 30 s
+forever (filling `hive-daemon.err.log` with `command not found`). The
+wrapper turns "binary missing or not executable" into a clean exit 0,
+which `KeepAlive { SuccessfulExit: false }` then respects (no respawn).
+A real daemon crash still exits non-zero through `exec` and respawns
+normally. If you customise `ProgramArguments`, keep the precheck.
 
 ## Day-2 operations
 

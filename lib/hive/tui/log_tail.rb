@@ -139,8 +139,13 @@ module Hive
         # back to grid with a flash message instead of opening an
         # empty viewer.
         def latest(log_dir)
-          candidates = Dir[File.join(log_dir, "*.log")]
-          raise Hive::NoLogFiles, "no log files in #{log_dir}" if candidates.empty?
+          latest_in_dirs([ log_dir ])
+        end
+
+        def latest_in_dirs(log_dirs)
+          dirs = Array(log_dirs)
+          candidates = dirs.flat_map { |log_dir| Dir[File.join(log_dir.to_s, "*.log")] }
+          raise Hive::NoLogFiles, "no log files in #{dirs.join(', ')}" if candidates.empty?
 
           # `File.mtime` can race with concurrent log rotation that removes a
           # path between glob and stat; skip the vanished entries rather than
@@ -150,7 +155,7 @@ module Hive
           rescue Errno::ENOENT
             nil
           end
-          raise Hive::NoLogFiles, "no log files in #{log_dir}" if with_mtimes.empty?
+          raise Hive::NoLogFiles, "no log files in #{dirs.join(', ')}" if with_mtimes.empty?
 
           with_mtimes.max_by(&:last).first
         end

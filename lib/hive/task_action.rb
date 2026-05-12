@@ -53,6 +53,11 @@ module Hive
         label: "Ready for review",
         command: "review"
       },
+      review_ready: {
+        key: Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
+        label: "Ready for review",
+        command: "review"
+      },
       execute_stale: {
         # Recovery path: the user must edit reviews/, lower task.md
         # frontmatter `pass:`, remove the EXECUTE_STALE marker, then
@@ -202,8 +207,10 @@ module Hive
         # `:agent_working`. The TUI's verb-refusal flash + log-tail-on-
         # Enter path then kicks in for review-stage rows too.
         ACTIONS.fetch(:agent_running)
-      else
+      when :review_waiting
         ACTIONS.fetch(:review_waiting)
+      else
+        ACTIONS.fetch(:review_ready)
       end
     end
 

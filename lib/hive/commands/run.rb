@@ -174,8 +174,9 @@ module Hive
             "rerun_with" => "hive run #{task.folder}" }
         when :review_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, " \
-                              "remove the REVIEW_STALE marker, then re-run",
+            "instructions" => "if highest-pass reviewer files lack escalations-NN.md, remove the REVIEW_STALE " \
+                              "marker and re-run to retry that pass; otherwise edit/rename highest-pass review " \
+                              "files, remove the marker, then re-run",
             "markers_to_clear" => [ "review_stale" ] }
         when :review_ci_stale
           { "kind" => kind::RECOVER_STALE,
@@ -242,8 +243,8 @@ module Hive
           puts "  next: toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, " \
                "then `hive run #{task.folder}`"
         when :review_stale
-          puts "  next: edit reviewer files / escalations.md, lower the highest-pass-N reviewer files, " \
-               "remove the REVIEW_STALE marker, then re-run"
+          puts "  next: if highest-pass reviewer files lack escalations-NN.md, remove REVIEW_STALE and re-run; " \
+               "otherwise edit/rename highest-pass review files, remove REVIEW_STALE, then re-run"
         when :review_ci_stale
           puts "  next: fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, then re-run"
         when :error, :review_error

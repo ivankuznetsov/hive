@@ -171,6 +171,7 @@ module Hive
 
         def status_label(row)
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
+          return error_status(row) if row.action_key.to_s == "error"
 
           row.action_label.to_s
         end
@@ -190,6 +191,24 @@ module Hive
 
           marker = Hive::Tui::Text.sanitize(row.marker)
           marker.empty? ? row.action_label.to_s : marker
+        end
+
+        # `error` action rows carry the failure context in `attrs`
+        # (`reason=exit_code exit_code=1` for typical agent failures);
+        # surfacing it in the status column tells the operator WHY a
+        # task failed without leaving the grid. Falls back to the bare
+        # "Error" label only when the marker has no exit_code or reason
+        # — the legacy hand-written ERROR shape. Same sanitise
+        # discipline as `review_recovery_status`: untrusted attr values
+        # can carry CSI escapes that would hijack the cursor.
+        def error_status(row)
+          attrs = row.attrs || {}
+          exit_code = Hive::Tui::Text.sanitize(attrs["exit_code"])
+          reason = Hive::Tui::Text.sanitize(attrs["reason"])
+          return "ERROR exit_code=#{exit_code}" unless exit_code.empty?
+          return "ERROR #{reason}" unless reason.empty?
+
+          row.action_label.to_s
         end
 
         # Local alias so call sites in this module keep their concise

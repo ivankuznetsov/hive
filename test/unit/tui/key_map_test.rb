@@ -15,12 +15,12 @@ class TuiKeyMapMessageForTest < Minitest::Test
   def make_row(action_key:, suggested_command: "hive brainstorm some-slug --from 1-inbox",
                claude_pid_alive: nil, action_label: "Ready to brainstorm",
                slug: "some-slug", project_name: "alpha", stage: "1-inbox",
-               folder: nil)
+               folder: nil, marker: "waiting", attrs: {})
     Hive::Tui::Snapshot::Row.new(
       project_name: project_name, stage: stage, slug: slug,
       folder: folder || "/tmp/hive/#{slug}",
       state_file: "/tmp/hive/#{slug}/idea.md",
-      marker: "waiting", attrs: {}, mtime: "2026-04-27T12:00:00Z", age_seconds: 1,
+      marker: marker, attrs: attrs, mtime: "2026-04-27T12:00:00Z", age_seconds: 1,
       claude_pid: claude_pid_alive ? 1234 : nil, claude_pid_alive: claude_pid_alive,
       action_key: action_key, action_label: action_label,
       suggested_command: suggested_command
@@ -353,17 +353,48 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
-  # Enter on an error-state row opens the agent log so the user can see
-  # WHY the agent failed without leaving the TUI. Replaces the earlier
-  # "inspect via $EDITOR" flash, which was stale after the `$EDITOR`
-  # integration was removed.
-  def test_enter_on_error_returns_open_log_tail_with_row
+  # Enter on an error-state row with a non-kill-class exit code routes
+  # to RecoverError (clear marker + re-run), which is the path the UI
+  # previously had no affordance for. Without this branch the row sat
+  # in "Error" forever and recovery required a shell-level `hive
+  # markers clear --name ERROR`.
+  def test_enter_on_error_with_real_failure_returns_recover_error
     row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
                    suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
-    assert_kind_of Hive::Tui::Messages::OpenLogTail, msg,
-      "Enter on error rows must open log tail (the user wants to see why it failed), " \
-      "not flash a stale `$EDITOR` hint"
+    assert_kind_of Hive::Tui::Messages::RecoverError, msg,
+      "Enter on a real-failure error row must route to RecoverError so the operator " \
+      "can retry from the TUI instead of falling out to a shell"
+    assert_same row, msg.row
+  end
+
+  # Kill-class signal kills (130/137/143) are auto-healed in the
+  # background by BubbleModel; while the heal is in flight, KeyMap falls
+  # back to OpenLogTail so the user can read the kill context. An
+  # Enter-driven RecoverError on those rows would race the auto-healer
+  # for the same markers-lock and is intentionally avoided.
+  def test_enter_on_error_with_kill_class_exit_code_returns_open_log_tail
+    %w[130 137 143].each do |code|
+      row = make_row(action_key: "error", action_label: "Error",
+                     marker: "error", attrs: { "reason" => "exit_code", "exit_code" => code },
+                     suggested_command: nil)
+      msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+      assert_kind_of Hive::Tui::Messages::OpenLogTail, msg,
+        "Enter on a kill-class (exit_code=#{code}) error row must defer to log tail; " \
+        "the auto-healer owns the markers-clear and Enter would race it"
+      assert_same row, msg.row
+    end
+  end
+
+  # ERROR markers without an `exit_code` attr (legacy or hand-written)
+  # take the recovery path because there is no other gesture available
+  # and `hive markers clear --name ERROR` accepts them.
+  def test_enter_on_error_without_exit_code_returns_recover_error
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::RecoverError, msg
     assert_same row, msg.row
   end
 

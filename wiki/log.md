@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-11T15:22:00Z] review — Protect fix-success sentinel from fix agents
+
+**Action:** Hardened the fix-phase retry sentinel introduced in the previous review recovery follow-up. `reviews/fix-success-NN.md` is now part of the fix-agent protected snapshot for the current pass, so a fix agent cannot forge the sentinel and cause a later markerless run to treat a failed fix pass as complete. The TUI recovery path now reuses `Stages::Review.reviewer_file?` for reviewer-file classification, keeping `fix-success-` and future orchestrator-owned prefixes consistent across runner and TUI logic.
+
+**Refreshed pages:**
+- `wiki/stages/review.md`
+- `wiki/state-model.md`
+
 ## [2026-05-08T21:02:58Z] doctor — pi package discovery follow-up: npm global root and project settings packages
 
 **Action:** Refined the Pi verifier docs after the PR #54 follow-up review.
@@ -13,6 +21,24 @@ Append-only log of all wiki operations.
 **Refreshed pages:** `README.md`, `lib/hive/cli.rb` long description, and `wiki/commands/doctor.md`.
 
 **Coverage:** added regression tests for `npm root -g` package discovery and project `.pi/settings.json` package paths outside `$HOME`.
+
+## [2026-05-08T15:00:00Z] review — Detect mid-pass fix failures + retry wall-clock REVIEW_STALE from TUI
+
+**Action:** Self-review of the earlier review-recovery refinement found two scenarios still broken. Both fixed in this follow-up, with regression tests + sentinel introduction.
+
+1. **Fix-failed pass was indistinguishable from completed pass.** `next_pass_for`'s `incomplete_triage_pass?` predicate only returned true when `escalations-NN.md` was missing. After triage wrote the escalations file but the fix phase failed (`REVIEW_ERROR phase=fix`) — or the runner was interrupted mid-fix — the predicate returned false and `next_pass_for` advanced to `NN+1`, abandoning the operator's `[x]` marks.
+
+   Replaced with `pass_completion_status(folder, N) → :complete | :triage_incomplete | :fix_incomplete`. The new `:fix_incomplete` case (escalations present, neither fix-success sentinel nor pass-`N+1` reviewer files present) makes `next_pass_for` retry pass N AND signals the runner to skip Phase 2/3 on the first iteration — exactly the same `[x]`-preserving short-circuit a `REVIEW_WAITING` resume uses.
+
+   Disambiguating signal: `Stages::Review` now writes `reviews/fix-success-NN.md` at the two "pass N is done, advance" decision points (post-guardrail-not-tripped, and the Phase 2 zero-findings short-circuit to Phase 5). `fix-success-` is added to `ORCHESTRATOR_OWNED_PREFIXES` so the new file is excluded from reviewer-file scanning. Pass-`N+1` reviewer files act as a back-compat fallback at non-topmost passes for legacy repos.
+
+2. **Wall-clock REVIEW_STALE was misclassified as needing manual cleanup.** `Stages::Review.finalize_wall_clock_stale` can fire BEFORE any reviewer files exist (e.g. during Phase 1 CI-fix); the TUI's `retryable_incomplete_triage_pass?` gate required reviewer files to be present, so wall-clock stale fell into the manual-cleanup flash that told the operator to "edit/rename highest-pass review files" — files that don't exist.
+
+   Added `wall_clock_stale?(row)` and a top-level `retryable_review_stale?` gate that ORs the two retryable shapes. Wall-clock REVIEW_STALE now clears + reruns regardless of reviewer-file presence; the operator's lever for "give it more time" is `review.max_wall_clock_sec`.
+
+**Refreshed pages:**
+- `wiki/state-model.md` — pass-derivation paragraph rewrites the completion classifier as a three-state (`:complete` / `:triage_incomplete` / `:fix_incomplete`) with the sentinel write points and the back-compat fallback.
+- `wiki/commands/tui.md` — `recover_review` paragraph splits `REVIEW_STALE` retry into two named cases (wall_clock + incomplete-triage) and notes the wall-clock-without-files exception explicitly.
 
 ## [2026-05-08T13:00:00Z] daemon — PR #55 review feedback: schemas, atomicity, envelopes
 
@@ -42,6 +68,26 @@ Append-only log of all wiki operations.
 - `wiki/index.md` — Pages count + `updated:` bumped.
 
 **Coverage:** new tests pin surgical-edit shape rejections (inline-flow / CRLF / 4-space / tab), preflight `--all` atomicity, idempotency-on-no-op (bare-text + envelope), real disk-failure injection (EACCES) for the `Errno::* → ConfigError` chain, internal-envelope chain via stubbed collaborators, every reason value in `hive-daemon-reload` round-tripped through JSONSchemer, `next_action` kind transitions on flip and no-op.
+
+## [2026-05-08T12:34:03Z] review — Retry incomplete triage passes instead of counting filenames as completion
+
+**Action:** Refined review recovery after dogfooding showed `REVIEW_STALE pass=4` can be caused by partial reviewer artifacts rather than four completed review cycles. `Stages::Review.next_pass_for` now treats the highest pass as incomplete when reviewer-authored `*-NN.md` files exist without the matching `reviews/escalations-NN.md`; a markerless rerun retries that same pass instead of advancing to `NN+1` and immediately hitting `max_passes`. The TUI now auto-clears/reruns `REVIEW_STALE` only for that incomplete-triage shape; completed stale passes still require manual pass cleanup before clearing.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+- `wiki/commands/run.md`
+- `wiki/commands/markers.md`
+- `wiki/modules/markers.md`
+- `wiki/stages/review.md`
+- `wiki/state-model.md`
+
+## [2026-05-08T12:20:00Z] tui — Review stale recovery loop and split log locations
+
+**Action:** Documented the dogfood fix for two related TUI recovery failures. Markerless `5-review` rows now classify as `Ready for review` instead of `Needs your input`, so a cleared recovery marker does not send Enter into the empty `task.md` editor path. `REVIEW_STALE` rows no longer auto-clear and rerun from the TUI because max-pass recovery requires manual pass cleanup first; Enter flashes that instruction and leaves the marker intact. Log-tail resolution now checks both canonical state logs (`.hive-state/logs/<slug>/`) and review-local task logs (`<task>/logs/`) so agent/error rows can tail the logs that actually exist for both stage families.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md`
+- `wiki/modules/task_action.md`
 
 ## [2026-05-07T23:30:00Z] doctor — pi verifier follow-ups (PR #54): discovery extensions, profile-aware skill formatting, glob-escape parity, path jailing
 
@@ -1202,3 +1248,10 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 
 **Refreshed pages:**
 - `wiki/commands/tui.md` — documented `Left` / `Right` arrow keys alongside `h` / `l` and noted that left-pane focus shortcuts pin focus to the tasks pane below the two-pane breakpoint.
+
+## [2026-05-11T00:00:00Z] tui — Enter-driven recovery for non-kill-class ERROR markers
+
+**Action:** Added a `Hive::Tui::Messages::RecoverError` message and a `BubbleModel#recover_error` worker that mirrors the existing `recover_review` family. Enter on `error` rows now routes through `KeyMap.error_message`: kill-class signal kills (`130` / `137` / `143`) keep the existing `OpenLogTail` so they don't race the background auto-healer; every other exit_code (real failures the auto-healer deliberately leaves alone) clears the `<!-- ERROR -->` marker via `hive markers clear --name ERROR --match-attr exit_code=N` and re-dispatches `hive run <folder>` from a background worker thread. Per-folder dedup tracks on `@error_recovery_inflight`; partial-failure and programmer-error contracts match `recover_review`. The tasks-pane status column gained an enriched `ERROR exit_code=N` (or `ERROR <reason>` fallback) so operators read failure context without leaving the grid. Single source of truth for the kill-class exit-code list lives on `Hive::Markers::KILL_CLASS_EXIT_CODES`; the TUI's auto-healer and KeyMap's routing predicate both alias it so they cannot drift. The worker thread sets `Thread.report_on_exception = false` and logs programmer-error backtraces to `Hive::Tui::Debug.log` instead of letting them paint to the alt-screen; markers-clear timeouts (exit `124`) flash a specific recovery instruction (`retry shortly or run hive markers clear ... manually`) rather than a bare exit code.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — Enter description updated for the dual error-row routing; new paragraph documenting the kill-class fallthrough, `--match-attr exit_code=N` discipline, status-column enrichment, and dedup behavior.

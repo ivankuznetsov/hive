@@ -64,6 +64,12 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_recover_error_carries_row
+    row = Object.new
+    msg = Hive::Tui::Messages::RecoverError.new(row: row)
+    assert_same row, msg.row
+  end
+
   def test_terminate_requested_singleton
     # Parameterless messages use a frozen singleton so callers don't
     # allocate per-trigger and so identity comparisons work.

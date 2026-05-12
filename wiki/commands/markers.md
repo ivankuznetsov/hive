@@ -24,7 +24,7 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 
 | Marker | When the runner sets it | What clearing it does |
 |--------|-------------------------|-----------------------|
-| `REVIEW_STALE`      | `Stages::Review` after `max_passes` or wall-clock cap                    | next `hive run` re-evaluates against the current `reviews/` files |
+| `REVIEW_STALE`      | `Stages::Review` after `max_passes` or wall-clock cap                    | next `hive run` retries the highest pass when `escalations-NN.md` is missing, otherwise re-evaluates against the cleaned `reviews/` files |
 | `REVIEW_CI_STALE`   | `Stages::Review::CiFix` after `review.ci.max_attempts` red runs          | next `hive run` re-runs Phase 1 against the current `bin/ci`      |
 | `REVIEW_ERROR`      | `Stages::Review` on triage / fix / browser / runner-exception failures   | next `hive run` re-evaluates from pre-flight                       |
 | `EXECUTE_STALE`     | `Stages::Execute` on stale interrupt                                     | next `hive run` re-evaluates the execute state machine             |

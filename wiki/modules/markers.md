@@ -40,7 +40,7 @@ Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`. Adding a marker name 
 | `REVIEW_WORKING` | `phase=ci\|reviewers\|triage\|fix\|browser`, `pass=NN` | Transient — set at phase entry, replaced at phase exit per ADR-005's last-marker-wins. |
 | `REVIEW_WAITING` | `escalations=N`, `pass=NN` | Terminal until next `hive run` (user inspects `reviews/escalations-NN.md` and edits). |
 | `REVIEW_CI_STALE` | `attempts=N` | Terminal — `cfg.review.ci.max_attempts` reached without green CI. Reviewers don't run on red CI. Recovery: edit `reviews/ci-blocked.md`, remove the marker, re-run. |
-| `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. Recovery: edit reviewer files / escalations.md, delete or rename the highest-NN reviewer files, remove the marker, re-run. |
+| `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. Recovery: if highest-NN reviewer files have no `escalations-NN.md`, remove the marker and re-run to retry that incomplete triage pass; otherwise edit reviewer files / escalations.md, delete or rename the highest-NN reviewer files, remove the marker, re-run. |
 | `REVIEW_COMPLETE` | `pass=NN`, `browser=passed\|warned\|skipped` | Terminal success — ready to `mv` to 6-pr. `browser=warned` means browser test failed twice but loop continued (soft-warn); 6-pr stage surfaces this in the PR body. |
 | `REVIEW_ERROR` | `phase=…`, `reason=…` | Terminal — agent-level error or protected-file tampering. Mirrors ADR-013's `:error` shape for `EXECUTE_*`. |
 

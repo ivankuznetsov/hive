@@ -21,24 +21,74 @@ module Hive
         profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
         skill = spec.fetch("skill")
         prompt = render_prompt(profile, skill)
+        max_attempts = max_attempts_from_spec
 
-        result = Hive::Stages::Base.spawn_agent(
-          synthetic_task,
-          prompt: prompt,
-          add_dirs: [ ctx.task_folder ],
-          cwd: ctx.worktree_path,
-          max_budget_usd: spec["budget_usd"] || 50,
-          timeout_sec: spec["timeout_sec"] || 600,
-          log_label: "review-#{name}-pass#{format('%02d', ctx.pass)}",
-          profile: profile,
-          expected_output: output_path,
-          # Reviewer spawns own a per-pass output file, not the task
-          # marker — the orchestrator's REVIEW_WORKING marker must
-          # persist across each reviewer's spawn.
-          status_mode: :output_file_exists
-        )
+        # Adapter-local retry loop. A reviewer that times out or fails
+        # transiently is retried up to max_attempts times before the
+        # final :error envelope is returned. This keeps infra flakes
+        # (CLI timeouts, momentary API blips) from polluting the
+        # orchestrator's escalations file with `reviewer "X" failed:`
+        # lines the user has to triage as if they were real findings.
+        attempts = 0
+        result = nil
+        loop do
+          attempts += 1
+          result = Hive::Stages::Base.spawn_agent(
+            synthetic_task,
+            prompt: prompt,
+            add_dirs: [ ctx.task_folder ],
+            cwd: ctx.worktree_path,
+            max_budget_usd: spec["budget_usd"] || 50,
+            timeout_sec: spec["timeout_sec"] || 600,
+            log_label: build_log_label(attempts),
+            profile: profile,
+            expected_output: output_path,
+            # Reviewer spawns own a per-pass output file, not the task
+            # marker — the orchestrator's REVIEW_WORKING marker must
+            # persist across each reviewer's spawn.
+            status_mode: :output_file_exists
+          )
+          break if result[:status] == :ok
+          break if attempts >= max_attempts
 
-        if result[:status] == :ok
+          backoff(backoff_seconds_for(attempts))
+        end
+
+        build_result(result, attempts, max_attempts)
+      end
+
+      private
+
+      def max_attempts_from_spec
+        value = spec["max_attempts"]
+        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
+
+        Integer(value)
+      rescue ArgumentError, TypeError
+        # Defensive fallback: if a config path bypasses
+        # Hive::Config.validate_reviewers! and passes a non-integer
+        # value through, default rather than crash mid-spawn. The
+        # adapter is the wrong place to surface a config-validation
+        # error.
+        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
+      end
+
+      def build_log_label(attempt)
+        base = "review-#{name}-pass#{format('%02d', ctx.pass)}"
+        attempt > 1 ? "#{base}-retry#{attempt - 1}" : base
+      end
+
+      def backoff_seconds_for(failed_attempt)
+        [ 2**(failed_attempt - 1), Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC ].min
+      end
+
+      # Indirected so tests can stub the wait without burning wall time.
+      def backoff(seconds)
+        sleep(seconds)
+      end
+
+      def build_result(spawn_result, attempts, max_attempts)
+        if spawn_result[:status] == :ok
           Result.new(
             name: name,
             output_path: output_path,
@@ -46,16 +96,21 @@ module Hive
             error_message: nil
           )
         else
+          base_msg = spawn_result[:error_message] ||
+                     "agent exited with status=#{spawn_result[:status]}"
+          # Suppress the "after N attempt(s)" suffix when max_attempts
+          # is 1 so single-attempt configurations get the original
+          # error_message shape (consumed by callers that hand-write
+          # the orchestrator-owned errors-NN.md line in U2).
+          msg = max_attempts > 1 ? "#{base_msg} after #{attempts} attempt(s)" : base_msg
           Result.new(
             name: name,
             output_path: output_path,
             status: :error,
-            error_message: result[:error_message] || "agent exited with status=#{result[:status]}"
+            error_message: msg
           )
         end
       end
-
-      private
 
       def render_prompt(profile, skill)
         template_path = Hive::Stages::Base.resolve_template_path(

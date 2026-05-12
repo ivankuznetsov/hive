@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-12T01:00:00Z] review — reviewer adapter retry with exponential backoff (PR-A / U1)
+
+**Action:** Added an adapter-local retry loop to `Hive::Reviewers::Agent#run!` so a reviewer spawn that times out or fails transiently is retried up to `max_attempts` times (default 2; configurable per reviewer via the optional `max_attempts` spec field; `1` disables retry). Backoff between failed attempts is exponential — 1s, 2s, 4s, 8s, 8s — capped at `Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC` (8s) so a high `max_attempts` doesn't introduce minute-scale waits. Each retry gets a `-retry<N>` suffix on its `log_label` so the per-pass log directory shows the retry history. The final `error_message` carries `after N attempt(s)` when `max_attempts > 1` and the original error-message shape otherwise. Non-Integer values reaching the adapter (config-load path bypassing `Hive::Config.validate_reviewers!`) fall back to the default rather than crashing inside `spawn_agent`. Closes the upstream problem where a single reviewer timeout produced a `- [ ] reviewer "X" failed:` stub the user had to triage as if it were a real finding.
+
+**Refreshed pages:**
+- None yet (`wiki/stages/review.md` Phase 2 paragraph will be updated together with U2 since the user-visible "what happens on persistent failure" story lands in `reviews/errors-NN.md`).
+
 ## [2026-05-12T00:00:00Z] review — dotenv_edit template-suffix exclusion (PR-A / U4)
 
 **Action:** Tightened the post-fix guardrail's `dotenv_edit` pattern in `lib/hive/stages/review/fix_guardrail/patterns.rb` so committed templates no longer trip the guardrail. The previous regex `\.env(?:\..+)?\z` matched every file whose name started with `.env`, including the canonical templates `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults` — files that exist by design to be committed and contain no real credentials (12-factor, Rails, Next.js, Laravel convention). The new regex uses a negative lookahead that excludes those exact suffixes while preserving matches on real per-env files (`.env`, `.env.local`, `.env.production`, `.env.test`, `.env.staging`, `.env.development`) and the boundary case `.env.example.bak` (not the canonical template — an editor backup or derived file). Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` with a custom `dotenv_template_edit` pattern. Originated from the xbookmark task `i-want-to-create-a-260504-1253` paused on `REVIEW_WAITING reason=fix_guardrail matches=2 pass=4` where both matches were `.env.example` edits.

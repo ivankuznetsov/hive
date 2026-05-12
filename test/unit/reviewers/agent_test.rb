@@ -128,6 +128,163 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # --- U1 retry coverage -----------------------------------------------
+  #
+  # The retry loop is exercised by replacing Hive::Stages::Base.spawn_agent
+  # with a singleton method on the module for the duration of the test so
+  # we don't depend on minitest/mock (not in the Gemfile) and don't burn
+  # fake-claude spawn time. backoff() is replaced on the adapter instance
+  # so sleeps are recorded without burning wall time.
+
+  def with_stubbed_adapter(dir, spec_overrides = {})
+    ctx = make_ctx(dir)
+    FileUtils.mkdir_p(ctx.task_folder)
+    reviewer = Hive::Reviewers::Agent.new(make_spec(spec_overrides), ctx)
+    sleeps = []
+    reviewer.define_singleton_method(:backoff) { |sec| sleeps << sec }
+    [ reviewer, sleeps ]
+  end
+
+  def with_spawn_stub(results)
+    call_count = 0
+    labels = []
+    original = Hive::Stages::Base.method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+      labels << kwargs[:log_label]
+      result = results[call_count] || results.last
+      call_count += 1
+      result
+    end
+    begin
+      yield(-> { call_count }, labels)
+    ensure
+      Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+    end
+  end
+
+  def ok_result
+    { status: :ok }
+  end
+
+  def error_result(message = "agent exited with status=:timeout")
+    { status: :error, error_message: message }
+  end
+
+  def test_run_does_not_retry_when_first_attempt_succeeds
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir)
+
+      with_spawn_stub([ ok_result ]) do |count_fn, labels|
+        result = reviewer.run!
+        assert result.ok?
+        assert_equal 1, count_fn.call,
+                     "spawn_agent should be called exactly once on first-attempt success"
+        assert_equal [ "review-claude-ce-code-review-pass01" ], labels,
+                     "first attempt's log_label has no -retry suffix"
+      end
+
+      assert_empty sleeps, "no backoff should occur on first-attempt success"
+    end
+  end
+
+  def test_run_retries_on_error_then_succeeds
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir)
+
+      with_spawn_stub([ error_result, ok_result ]) do |count_fn, labels|
+        result = reviewer.run!
+        assert result.ok?, "expected :ok after retry, got #{result.status}"
+        assert_equal 2, count_fn.call
+        assert_equal [
+          "review-claude-ce-code-review-pass01",
+          "review-claude-ce-code-review-pass01-retry1"
+        ], labels
+      end
+
+      assert_equal [ 1 ], sleeps, "exactly one 1s sleep between attempt 1 and attempt 2"
+    end
+  end
+
+  def test_run_exhausts_max_attempts_when_all_attempts_fail
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 3)
+
+      with_spawn_stub([ error_result, error_result, error_result ]) do |count_fn, _|
+        result = reviewer.run!
+        assert result.error?
+        assert_match(/after 3 attempt\(s\)/, result.error_message,
+                     "final error_message records the attempt count")
+        assert_equal 3, count_fn.call
+      end
+
+      assert_equal [ 1, 2 ], sleeps,
+                   "two backoff sleeps between three attempts: 1s, 2s"
+    end
+  end
+
+  def test_run_backoff_cap_capped_at_eight_seconds
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 6)
+
+      with_spawn_stub([ error_result ] * 6) do |_, _|
+        reviewer.run!
+      end
+
+      assert_equal [ 1, 2, 4, 8, 8 ], sleeps,
+                   "backoff caps at 8s — five sleeps for six attempts, capped from 16 → 8"
+    end
+  end
+
+  def test_run_max_attempts_one_short_circuits_no_sleep_no_retry_suffix
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 1)
+
+      with_spawn_stub([ error_result ]) do |count_fn, labels|
+        result = reviewer.run!
+        assert result.error?
+        refute_match(/after \d+ attempt/, result.error_message,
+                     "single-attempt configs preserve the original error_message shape")
+        assert_equal 1, count_fn.call
+        assert_equal [ "review-claude-ce-code-review-pass01" ], labels,
+                     "max_attempts: 1 means no -retry suffix is ever generated"
+      end
+
+      assert_empty sleeps
+    end
+  end
+
+  def test_run_falls_back_to_default_when_max_attempts_absent
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir) # no max_attempts override
+
+      with_spawn_stub([ error_result, error_result, error_result ]) do |count_fn, _|
+        reviewer.run!
+        assert_equal Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS,
+                     count_fn.call,
+                     "spec without max_attempts uses DEFAULT_REVIEWER_MAX_ATTEMPTS"
+      end
+    end
+  end
+
+  def test_run_recovers_from_non_integer_max_attempts_value
+    # Defensive: if validate_reviewers! is bypassed (test fixtures,
+    # ad-hoc cfg construction, future YAML path) a non-Integer value
+    # could reach the adapter. Fall back to the default rather than
+    # crashing inside spawn_agent.
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => "not-a-number")
+
+      with_spawn_stub([ error_result ] * 5) do |count_fn, _|
+        result = reviewer.run!
+        assert result.error?
+        assert_equal Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS,
+                     count_fn.call,
+                     "non-Integer max_attempts falls back to the default"
+      end
+    end
+  end
+
   def test_argv_invokes_claude_with_expected_skill_in_prompt
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)

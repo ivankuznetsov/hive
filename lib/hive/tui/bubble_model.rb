@@ -1098,9 +1098,17 @@ module Hive
         callable = lambda do
           before_mtime = file_mtime(path)
           before_hash = file_content_hash(path)
+          # U6 — capture pre-edit checkbox state for 5-review rows so
+          # `review_outcome` can distinguish "user actually ticked a
+          # box" from "user opened, looked, hit :wq with no edits".
+          # mtime alone is unreliable here: bare :wq ticks mtime
+          # without changing the [x] set, which would otherwise
+          # trigger a no-op re-dispatch of the multi-minute review verb.
+          before_checkboxes = read_checkbox_state(path)
           exit_code = run_editor(argv, path)
           after_mtime = file_mtime(path)
           after_hash = file_content_hash(path)
+          after_checkboxes = read_checkbox_state(path)
           # Wipe whatever the editor left on the main screen before
           # bubbletea re-enters alt-screen. Alt-screen *should* hide
           # the main buffer regardless, but on some terminals the
@@ -1117,7 +1125,8 @@ module Hive
           # produces a bogus `nil != Float` true.
           changed = !before_mtime.nil? && !after_mtime.nil? && before_mtime != after_mtime
           content_changed = !before_hash.nil? && !after_hash.nil? && before_hash != after_hash
-          input_editor_exit_messages(row, path, exit_code, changed, content_changed).each do |message|
+          checkboxes_changed = before_checkboxes != after_checkboxes
+          input_editor_exit_messages(row, path, exit_code, changed, content_changed, checkboxes_changed).each do |message|
             @dispatch.call(message)
           end
         end
@@ -1213,18 +1222,20 @@ module Hive
       # `ArgumentError` raised by `Shellwords.split` on a malformed
       # `suggested_command` without swallowing constructor errors from
       # `InputEditorExited.new` (which lives outside the begin/rescue).
-      def input_editor_exit_messages(row, path, exit_code, changed, content_changed)
+      def input_editor_exit_messages(row, path, exit_code, changed, content_changed, checkboxes_changed = false)
         exited = Hive::Tui::Messages::InputEditorExited.new(
           slug: row.slug,
           exit_code: exit_code,
           changed: changed
         )
 
-        case auto_continue_outcome(row, path, exit_code, changed, content_changed)
+        case auto_continue_outcome(row, path, exit_code, changed, content_changed, checkboxes_changed)
         when :proceed, :revise_plan
           dispatch_messages_for(row, exited)
         when :advance_to_develop
           dispatch_develop_for(row, exited)
+        when :rerun_review
+          dispatch_rerun_review_for(row, exited)
         when :empty_command
           [ exited, suppression_flash(row, "no suggested command on row") ]
         when :marker_changed
@@ -1232,6 +1243,23 @@ module Hive
         else # :silent — expected refusals (parser incomplete, exit nonzero, unchanged, off-stage)
           [ exited ]
         end
+      end
+
+      # U6 — dispatch the review verb (row.suggested_command) plus a
+      # confirming flash so the user sees immediate feedback that a
+      # multi-minute review pass has started. The flash also addresses
+      # the UX risk that a snappy save-and-continue gesture sets up
+      # the wrong expectation for a slow operation.
+      def dispatch_rerun_review_for(row, exited)
+        dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+        flash = Hive::Tui::Messages::Flash.new(
+          text: "approved — starting next review pass for #{row.slug}",
+          source: :input_editor
+        )
+        [ exited, flash, dispatch ]
+      rescue ArgumentError => e
+        Hive::Tui::Debug.log("input_editor", "rerun-review auto-continue skipped for #{row.slug}: #{e.message}")
+        [ exited, suppression_flash(row, "malformed suggested command") ]
       end
 
       def dispatch_messages_for(row, exited)
@@ -1281,7 +1309,7 @@ module Hive
       # `changed` (parser then decides). Plan needs `content_changed` to
       # distinguish "approved by saving without edits" (advance) from
       # "added feedback" (revise).
-      def auto_continue_outcome(row, path, exit_code, changed, content_changed)
+      def auto_continue_outcome(row, path, exit_code, changed, content_changed, checkboxes_changed = false)
         return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
 
@@ -1290,6 +1318,8 @@ module Hive
           brainstorm_outcome(row, path, changed)
         when "3-plan"
           plan_outcome(row, path, exit_code, changed, content_changed)
+        when "5-review"
+          review_outcome(row, checkboxes_changed)
         else
           :silent
         end
@@ -1320,6 +1350,59 @@ module Hive
         else
           :advance_to_develop
         end
+      end
+
+      # U6 — auto-continue for 5-review needs_input rows. Gated more
+      # tightly than plan_outcome because the dispatched verb (`hive
+      # run`) re-enters a multi-minute review pass: a bare `:wq` that
+      # changes mtime but not the [x] set must NOT trigger a re-run.
+      # The gate is the checkbox-set delta, NOT mtime — captured pre-
+      # and post-edit in open_input_editor. The marker must be re-
+      # read from row.state_file (NOT the editor path, which is
+      # reviews/fix-guardrail-NN.md or reviews/escalations-NN.md after
+      # input_editor_path resolution) because the marker lives in
+      # task.md, not in the file the user just edited.
+      def review_outcome(row, checkboxes_changed)
+        return :silent unless checkboxes_changed
+        return :empty_command if row.suggested_command.to_s.empty?
+        return :marker_changed unless review_marker_still_open?(row.state_file)
+
+        :rerun_review
+      end
+
+      # Mirror of marker_still_open_for_input? but accepts the
+      # :review_waiting marker name that 5-review uses (the
+      # brainstorm/plan helper only accepts :waiting / :none).
+      # Reads the freshly-saved marker from the task's state file so
+      # a concurrent `hive run` that advanced the marker to
+      # :agent_working / :review_complete during the long-lived
+      # editor session suppresses the auto-rerun.
+      def review_marker_still_open?(state_file)
+        marker = Hive::Markers.current(state_file)
+        marker.name == :review_waiting
+      rescue SystemCallError, IOError => e
+        Hive::Tui::Debug.log("input_editor", "review marker check failed: #{e.class}: #{e.message}")
+        false
+      end
+
+      # U6 — return the multiset of checkbox-line states in the file
+      # as a normalized array of `:checked` / `:unchecked` symbols.
+      # Used pre- and post-edit to detect whether the user actually
+      # ticked or cleared a box (vs. e.g. opening + bare :wq, or
+      # editing non-checkbox prose). Lines other than `- [ ]` / `- [x]`
+      # (title, prose, blank) are ignored — they cannot carry an
+      # approval signal. Returns [] on absent / unreadable files so a
+      # missing file pre- and post-edit compares equal (no dispatch).
+      def read_checkbox_state(path)
+        states = []
+        File.foreach(path) do |line|
+          if (m = line.match(/^\s*-\s+\[([ xX])\]\s+/))
+            states << (m[1] == " " ? :unchecked : :checked)
+          end
+        end
+        states
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR
+        []
       end
 
       # Re-reads the on-disk marker after the editor exits to defend

@@ -31,6 +31,8 @@ tags: [marker, protocol, flock]
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb` (twelve names total — six pre-U3, six REVIEW_* added in U3).
 
+`KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). When an `ERROR` marker's `exit_code` attr is in this list the task was interrupted, not broken. Single source of truth shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears them) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
+
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
 
 ### REVIEW_* attribute schemas

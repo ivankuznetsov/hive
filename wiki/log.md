@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-12T00:00:00Z] review — dotenv_edit template-suffix exclusion (PR-A / U4)
+
+**Action:** Tightened the post-fix guardrail's `dotenv_edit` pattern in `lib/hive/stages/review/fix_guardrail/patterns.rb` so committed templates no longer trip the guardrail. The previous regex `\.env(?:\..+)?\z` matched every file whose name started with `.env`, including the canonical templates `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults` — files that exist by design to be committed and contain no real credentials (12-factor, Rails, Next.js, Laravel convention). The new regex uses a negative lookahead that excludes those exact suffixes while preserving matches on real per-env files (`.env`, `.env.local`, `.env.production`, `.env.test`, `.env.staging`, `.env.development`) and the boundary case `.env.example.bak` (not the canonical template — an editor backup or derived file). Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` with a custom `dotenv_template_edit` pattern. Originated from the xbookmark task `i-want-to-create-a-260504-1253` paused on `REVIEW_WAITING reason=fix_guardrail matches=2 pass=4` where both matches were `.env.example` edits.
+
+**Refreshed pages:**
+- `wiki/stages/review.md` — Phase 4 guardrail pattern table updated for `dotenv_edit` with the explicit excluded-template-suffix list and the `patterns_override` escape hatch.
+
 ## [2026-05-11T15:22:00Z] review — Protect fix-success sentinel from fix agents
 
 **Action:** Hardened the fix-phase retry sentinel introduced in the previous review recovery follow-up. `reviews/fix-success-NN.md` is now part of the fix-agent protected snapshot for the current pass, so a fix agent cannot forge the sentinel and cause a later markerless run to treat a failed fix pass as complete. The TUI recovery path now reuses `Stages::Review.reviewer_file?` for reviewer-file classification, keeping `fix-success-` and future orchestrator-owned prefixes consistent across runner and TUI logic.

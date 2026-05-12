@@ -49,7 +49,27 @@ module Hive
               # `(?:\A|/)` so nested matches in monorepos / Rails apps
               # also trip — apps/web/.env, config/credentials.yml.enc,
               # packages/api/.npmrc — not just repo-root .env.
-              regex: %r{(?:\A|/)(?:\.env(?:\..+)?\z|secrets\.ya?ml\z|credentials\.ya?ml(?:\.enc)?\z|\.npmrc\z|\.pypirc\z)},
+              #
+              # Template suffixes (.env.example / .env.sample /
+              # .env.template / .env.dist / .env.tmpl /
+              # .env.default[s]) are deliberately EXCLUDED from the
+              # match: those files are by-design committed to the repo
+              # as templates with no real credentials (12-factor, Rails,
+              # Next.js, Laravel convention). Real per-env files
+              # (.env, .env.local, .env.production, .env.test,
+              # .env.staging, .env.development) still trip. Projects
+              # that genuinely keep secrets in .env.example can re-add
+              # strict matching via review.fix.guardrail.patterns_override.
+              regex: %r{
+                (?:\A|/)(?:
+                  \.env\z
+                  | \.env\.(?!(?:example|sample|template|dist|tmpl|defaults?)\z).+\z
+                  | secrets\.ya?ml\z
+                  | credentials\.ya?ml(?:\.enc)?\z
+                  | \.npmrc\z
+                  | \.pypirc\z
+                )
+              }x,
               severity: :high,
               targets: :file_path,
               description: ".env / secrets file edit: env/secret files often contain credentials and per-environment overrides; auto-fix shouldn't touch them."

@@ -344,6 +344,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
     refute_includes out, "[Enter] open",   "Enter is not only an open action"
   end
 
+  def test_default_footer_hint_omits_o_at_70_col_budget
+    # Plan R6: `[o] open` is included in the footer only if it fits
+    # the 70-col budget without wrapping or pushing primary actions
+    # onto a second line. At 70 cols the current hint string is
+    # already ~69 chars; adding ten more (separator + "[o] open")
+    # would exceed the budget. We rely on the `?` overlay for
+    # discoverability instead. This test pins that decision so a
+    # future contributor doesn't silently re-add the hint and break
+    # 70-col rendering.
+    assert_equal "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q] quit",
+                 @model.send(:footer_hint),
+                 "footer hint must remain the pre-`o` literal; `o` is documented in `?` only"
+    refute_includes @model.send(:footer_hint), "[o] open",
+                    "70-col budget can't absorb `[o] open` alongside primary hints"
+  end
+
   def test_grid_mode_collapses_to_single_pane_below_min_cols
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",
@@ -2074,6 +2090,82 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_kind_of Hive::Tui::Messages::InputEditorExited, @messages.first
       assert_empty mtimes
     end
+  end
+
+  # ---- OpenTaskFolder → foreground editor takeover (browse-only) ----
+
+  def test_open_task_folder_returns_sequence_command_and_opens_folder
+    # Happy path: a valid row produces the same SequenceCommand shape
+    # as OpenInputEditor (alt-screen exit → exec → alt-screen enter),
+    # the editor is invoked against `row.folder`, and the flash names
+    # the slug + editor binary. Critically, NO InputEditorExited or
+    # other follow-up message is dispatched — this is a pure browse
+    # gesture, the editor's exit is the user's last word.
+    row = make_task_row(folder: "/tmp/hive/some-slug")
+    seen_editor_invocation = nil
+    @model.define_singleton_method(:editor_argv) { [ "fake-editor", "--wait" ] }
+    @model.define_singleton_method(:run_editor) do |argv, path|
+      seen_editor_invocation = [ argv, path ]
+      0
+    end
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenTaskFolder.new(row: row))
+
+    assert_kind_of Bubbletea::SequenceCommand, cmd
+    classes = cmd.commands.map(&:class)
+    assert_equal(
+      [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+      classes
+    )
+    assert_match(/opening some-slug folder in fake-editor/, @model.hive_model.flash)
+
+    exec_cmd = cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }
+    exec_cmd.callable.call
+
+    assert_equal [ [ "fake-editor", "--wait" ], "/tmp/hive/some-slug" ], seen_editor_invocation
+    assert_empty @messages,
+      "OpenTaskFolder is a pure browse gesture — no follow-up messages should be dispatched"
+  end
+
+  def test_open_task_folder_flashes_refusal_when_folder_empty
+    # Defensive: R4 requires a flash + no spawn when row.folder is
+    # missing/empty. Should never happen for a well-formed row, but
+    # the handler-level guard catches it. NOOP would silently fail —
+    # the flash tells the user something is wrong.
+    row = make_task_row(folder: "")
+    _, cmd = @model.update(Hive::Tui::Messages::OpenTaskFolder.new(row: row))
+
+    assert_nil cmd, "no takeover command when folder is empty"
+    assert_match(/no task folder for some-slug/, @model.hive_model.flash)
+  end
+
+  def test_open_task_folder_flashes_refusal_when_editor_argv_invalid
+    # When $VISUAL/$EDITOR/vi all resolve to empty (e.g., user has
+    # VISUAL="" exported with no fallback chain), editor_argv raises
+    # ArgumentError. Same rescue shape as open_input_editor.
+    row = make_task_row(folder: "/tmp/hive/some-slug")
+    @model.define_singleton_method(:editor_argv) { raise ArgumentError, "empty $VISUAL/$EDITOR" }
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenTaskFolder.new(row: row))
+
+    assert_nil cmd
+    assert_match(/editor command invalid: empty \$VISUAL\/\$EDITOR/, @model.hive_model.flash)
+  end
+
+  def test_open_task_folder_does_not_dispatch_or_mutate_marker
+    # R3 by construction: the open_task_folder handler reads only
+    # `row.folder` and never touches Hive::Markers or dispatches a
+    # follow-up message. Pure browse gesture. The OpenInputEditor
+    # path, by contrast, dispatches InputEditorExited on completion.
+    row = make_task_row(folder: "/tmp/hive/some-slug")
+    @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+    @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenTaskFolder.new(row: row))
+    cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+    assert_empty @messages,
+      "OpenTaskFolder must not dispatch any follow-up message — no auto-continue, no InputEditorExited"
   end
 
   # ---- Plan-stage auto-continue (3-plan) ----

@@ -113,6 +113,7 @@ module Hive
 
         return Messages::NOOP if row.nil?
 
+        return Messages::OpenTaskFolder.new(row: row) if key == "o"
         return verb_message(row) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 

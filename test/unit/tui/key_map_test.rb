@@ -147,6 +147,41 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::CURSOR_JUMP_BOTTOM, msg
   end
 
+  # ---- `o` opens task folder (read-only browse, no workflow dispatch) ----
+
+  def test_grid_o_with_row_returns_open_task_folder
+    row = make_row(action_key: "ready_to_plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "o", row: row)
+    assert_kind_of Hive::Tui::Messages::OpenTaskFolder, msg
+    assert_equal row, msg.row
+  end
+
+  def test_grid_o_with_nil_row_is_noop
+    # The nil-row guard at line 114 of key_map.rb covers this case
+    # uniformly — `o` never tries to construct an OpenTaskFolder with
+    # a missing row. Empty-folder refusal lives at the BubbleModel
+    # handler level (U2) so it can flash, not silently NOOP.
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "o", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_new_idea_o_continues_to_emit_text_inserted
+    # Mode isolation R7: in :new_idea mode the `o` key still routes
+    # through new_idea_message as a printable character, not the new
+    # grid-only OpenTaskFolder branch.
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: "o", row: nil)
+    assert_kind_of Hive::Tui::Messages::NewIdeaTextInserted, msg
+    assert_equal "o", msg.text
+  end
+
+  def test_filter_o_continues_to_emit_char_appended
+    # Mode isolation R7: in :filter mode the `o` key still routes
+    # through filter_message as a printable character.
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: "o", row: nil)
+    assert_kind_of Hive::Tui::Messages::FilterCharAppended, msg
+    assert_equal "o", msg.char
+  end
+
   # ---- :new_idea mode keystroke routing ----
 
   def test_new_idea_esc_cancels

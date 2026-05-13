@@ -62,6 +62,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
 | `a` | run `hive archive` |
 | `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), recover + rerun on review-recovery and non-kill-class `error` rows; ready rows still dispatch the suggested command |
+| `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `7-done` (or any stage). |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -119,6 +120,8 @@ Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_co
 - Escalations-only `:review_waiting` rows (no `reason` attr) open the single unresolved reviewer-authored file when there is one, else fall back to the `reviews/` directory.
 
 The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash distinguishes a saved edit from a no-op cancel. It also samples the file's checkbox-count Hash (`{checked: N, unchecked: M}`) for `review_outcome`'s 5-review auto-continue gate — a separate signal from `changed:` because mtime-only is not strict enough to avoid no-op review re-runs.
+
+Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for read-only browsing — distinct from `Enter` (workflow-contextual: editor on `needs_input`, log tail on `agent_running`, recover+rerun on review/error recovery rows, etc.) and the verb keys (which dispatch a `hive <verb>` subprocess). `o` mutates no marker, dispatches no workflow, and emits no follow-up `Messages::InputEditorExited` — the editor's exit is the user's last word. Useful for revisiting investigation outputs in `7-done` (or any stage) without dropping to a shell. The handler reuses the same `foreground_takeover_command` machinery `Enter`-on-`needs_input` uses, so terminal handoff is identical; only the after-spawn plumbing differs.
 
 Three stages get an auto-continue convenience after the editor exits cleanly:
 

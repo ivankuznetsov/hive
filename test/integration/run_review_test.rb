@@ -155,6 +155,144 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # --- U5 approval-on-resume integration coverage ---------------------
+  #
+  # pr-review-toolkit round-4 P1: the five new safety branches at the
+  # top of the runner loop (HEAD verification, malformed-matches,
+  # dirty-worktree, partial-tick stay-paused, all-`[x]` approval +
+  # advance) were previously only unit-tested at the helper level.
+  # These tests drive `Hive::Commands::Run.new(folder).call` end-to-end
+  # so a regression in branch ordering or in any call-site detail
+  # surfaces here.
+
+  def setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true, include_head: true)
+    folder = setup_review_task(dir)
+    worktree_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+    head_sha = `git -C #{worktree_path} rev-parse HEAD`.strip
+
+    reviews_dir = File.join(folder, "reviews")
+    FileUtils.mkdir_p(reviews_dir)
+    fg_path = File.join(reviews_dir, "fix-guardrail-#{format('%02d', pass)}.md")
+    checkbox = all_checked ? "[x]" : "[ ]"
+    body = "# Fix-guardrail findings for pass #{format('%02d', pass)}\n\n"
+    matches.times { |i| body << "- #{checkbox} dotenv_edit: .env.production:#{i}\n" }
+    File.write(fg_path, body)
+
+    head_attr = include_head ? " head=#{head_sha}" : ""
+    File.write(
+      File.join(folder, "task.md"),
+      "<!-- REVIEW_WAITING reason=fix_guardrail matches=#{matches}#{head_attr} pass=#{pass} -->\n"
+    )
+
+    [ folder, worktree_path, head_sha ]
+  end
+
+  def test_resume_fix_guardrail_all_checked_advances_to_phase_5
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _wt, _head = setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true)
+        capture_io { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name,
+                     "all-[x] approval with matching count + HEAD + clean worktree must advance past Phase 4 to Phase 5"
+        assert File.exist?(File.join(folder, "reviews", "fix-success-01.md")),
+               "fix-success-01.md must be written on approval"
+      end
+    end
+  end
+
+  def test_resume_fix_guardrail_partial_tick_holds_pause
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _wt, _head = setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true)
+        fg_path = File.join(folder, "reviews", "fix-guardrail-01.md")
+        # Flip one `[x]` back to `[ ]` — simulating user partial approval.
+        File.write(fg_path, File.read(fg_path).sub(/- \[x\]/, "- [ ]"))
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name, "partial-tick must keep the pause, not advance"
+        assert_equal "fix_guardrail", marker.attrs["reason"],
+                     "marker reason preserved on partial-tick stay-paused"
+        refute File.exist?(File.join(folder, "reviews", "fix-success-01.md")),
+               "fix-success sentinel must NOT be written when approval is incomplete"
+      end
+    end
+  end
+
+  def test_resume_fix_guardrail_head_mismatch_lands_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _wt, _head = setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true)
+        # Replace the head= attribute with a synthetic stale SHA so the
+        # mismatch branch fires.
+        task_md = File.join(folder, "task.md")
+        File.write(task_md,
+                   File.read(task_md).sub(/head=[a-f0-9]+/, "head=#{"0" * 40}"))
+
+        with_captured_exit { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(task_md)
+        assert_equal :review_error, marker.name
+        assert_equal "resume", marker.attrs["phase"]
+        assert_equal "approval_head_mismatch", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_resume_fix_guardrail_dirty_worktree_lands_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, wt, _head = setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true)
+        # Make the worktree dirty between the trip and the approval.
+        File.write(File.join(wt, "dirty.txt"), "uncommitted edit\n")
+
+        with_captured_exit { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "resume", marker.attrs["phase"]
+        assert_equal "approval_dirty_worktree", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_resume_fix_guardrail_malformed_matches_lands_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _wt, head = setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true)
+        # Replace `matches=2` with `matches=abc` — non-Integer.
+        task_md = File.join(folder, "task.md")
+        File.write(task_md,
+                   "<!-- REVIEW_WAITING reason=fix_guardrail matches=abc head=#{head} pass=1 -->\n")
+
+        with_captured_exit { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(task_md)
+        assert_equal :review_error, marker.name
+        assert_equal "resume", marker.attrs["phase"]
+        assert_equal "malformed_marker_matches", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_resume_fix_guardrail_legacy_marker_without_head_skips_check
+    # pr-review-toolkit round-4 Critical #1: in-flight markers from
+    # hive ≤ PR-A round-2 lack `head=`. They must NOT auto-error on
+    # the first resume after upgrade — the user's xbookmark task
+    # depends on this.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _wt, _head = setup_fix_guardrail_pause(
+          dir, pass: 1, matches: 2, all_checked: true, include_head: false
+        )
+        capture_io { Hive::Commands::Run.new(folder).call }
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        # Other gates still pass (matches OK, all-[x], worktree clean),
+        # so the approval advances to Phase 5.
+        assert_equal :review_complete, marker.name,
+                     "legacy marker without head= must skip the HEAD check (with stderr notice) and proceed"
+      end
+    end
+  end
+
   def test_review_error_marker_json_emits_envelope_and_exits_task_in_error
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -567,29 +567,12 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
-  # ce-review round-3 P1 #4 — mixed reviewer success/failure must not
-  # silently auto-complete the pass. When errors-NN.md exists, the
-  # all-clean branch must pause for REVIEW_WAITING reason=
-  # reviewer_partial_failure instead of writing fix-success.
-  def test_run_partial_reviewer_failure_paused_when_errors_file_exists
-    # Direct unit on the predicate the runner uses, since wiring a
-    # full run! invocation through this test file would need the
-    # entire pre-flight + Phase 1 scaffolding. The runner's branch
-    # explicitly checks File.exist? on reviews/errors-NN.md inside
-    # the all-clean branch.
-    with_tmp_dir do |dir|
-      reviews = File.join(dir, "reviews")
-      FileUtils.mkdir_p(reviews)
-      errors_path = File.join(reviews, "errors-04.md")
-      assert_equal false, File.exist?(errors_path),
-                   "preconditions: errors-04.md absent initially"
-      File.write(errors_path,
-                 "# Reviewer infra errors for pass 04\n\n" \
-                 "- [rev-a] reviewer \"rev-a\" failed: agent exited with status=:timeout\n")
-      assert File.exist?(errors_path),
-             "errors-04.md is the signal the runner gates the auto-complete on"
-    end
-  end
+  # ce-review round-3 P1 #4 (reviewer_partial_failure pause) is now
+  # exercised end-to-end via the integration suite at
+  # test/integration/run_review_test.rb after pr-review-toolkit
+  # round-4 flagged the previous helper-only test as vacuous. The
+  # integration test drives the full Stages::Review.run! call path
+  # so a regression in branch ordering or call-site detail is caught.
 
   def test_fix_guardrail_approved_per_pass_isolation
     # An all-[x] file for pass 4 is approval for pass 4 only — it

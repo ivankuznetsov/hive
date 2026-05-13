@@ -234,13 +234,27 @@ module Hive
             # amended/rebased/squashed between trip and approval would
             # otherwise have their `[x]` ticks honoured against a diff
             # the guardrail never scanned.
-            current_head = git_head(worktree_path)
+            #
+            # Backward-compat (pr-review-toolkit round-4 Critical #1):
+            # legacy markers written by hive ≤ PR-A round-2 carry no
+            # `head=` attr. Treating that absence as "mismatch" would
+            # auto-error every in-flight REVIEW_WAITING reason=fix_guardrail
+            # task on first resume after upgrade — including the xbookmark
+            # task PR-A was authored to unblock. When the marker pre-dates
+            # the head-binding feature, skip the HEAD check with a stderr
+            # notice; the count + checkbox + worktree-clean gates still
+            # apply.
             guarded_head = marker.attrs["head"].to_s
-            head_check_ok = !guarded_head.empty? && current_head.to_s == guarded_head
-            unless head_check_ok
+            current_head = git_head(worktree_path).to_s
+            if guarded_head.empty?
+              warn "[hive.review] resume on legacy fix_guardrail marker without head= " \
+                   "(task #{File.basename(task.folder)} pass #{pass}); HEAD-binding " \
+                   "approval check skipped. Future trips on hive ≥ PR-A round-3 " \
+                   "record head= and enforce this check."
+            elsif current_head != guarded_head
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :resume, reason: "approval_head_mismatch",
-                                guarded_head: guarded_head, current_head: current_head.to_s,
+                                guarded_head: guarded_head, current_head: current_head,
                                 pass: pass)
               return { commit: "approval_head_mismatch_pass_#{format('%02d', pass)}",
                        status: :review_error }
@@ -736,15 +750,23 @@ module Hive
           # doesn't abort the whole reviewers phase. Treat as :error,
           # record the failure in errors-NN.md, and continue with the
           # next reviewer.
+          # pr-review-toolkit round-4 silent-failure-hunter C2 —
+          # feature-detect whether the adapter accepts a `deadline:`
+          # kwarg via Method#parameters so we don't have to discriminate
+          # ArgumentError-by-message at the rescue site. The previous
+          # form (`rescue ArgumentError; adapter.run!`) silently swallowed
+          # real adapter bugs that happened to raise ArgumentError from
+          # the body (config parsing, Integer() coercion, etc.).
+          accepts_deadline = adapter.method(:run!).parameters.any? do |type, name|
+            name == :deadline && %i[key keyreq keyrest].include?(type)
+          end
           result =
             begin
-              # Adapters that accept `deadline:` get it; older adapters
-              # ignore it via the rescue below. Custom adapters that
-              # raise ArgumentError on the unknown kwarg fall back to
-              # the no-deadline call rather than failing the spawn.
-              adapter.run!(deadline: deadline)
-            rescue ArgumentError
-              adapter.run!
+              if accepts_deadline
+                adapter.run!(deadline: deadline)
+              else
+                adapter.run!
+              end
             rescue StandardError => e
               Hive::Reviewers::Result.new(
                 name: spec["name"],
@@ -804,6 +826,20 @@ module Hive
               "#{spec['name'].inspect} failed: #{result.error_message}\n"
           )
         end
+      rescue SystemCallError => e
+        # pr-review-toolkit round-4 silent-failure-hunter C1: this file
+        # is load-bearing for the U2 contract and for the round-3
+        # reviewer_partial_failure pause path. If the write fails
+        # (ENOSPC, EROFS, EACCES on a shared mount, EDQUOT), the
+        # outer run! rescue would classify it as a generic
+        # `runner_exception` with no actionable context — and the
+        # all-clean branch's File.exist?(errors_path) check would
+        # silently auto-complete the pass via write_fix_success.
+        # Surface the disk problem explicitly with a named error so
+        # the user sees the root cause.
+        raise Hive::Error,
+              "failed to write reviews/errors-#{format('%02d', ctx.pass)}.md " \
+              "for reviewer #{spec['name'].inspect}: #{e.class}: #{e.message}"
       end
 
       # All [x] lines across every per-reviewer file for the current

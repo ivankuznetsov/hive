@@ -91,9 +91,18 @@ After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 
 - `dependency_lockfile_change` — Gemfile.lock, package-lock.json, pnpm-lock, yarn.lock, Cargo.lock, go.sum, poetry.lock, Pipfile.lock, composer.lock, uv.lock
 - `permission_change` — `new mode 100755` raw-diff-header
 
-Per-project override via `review.fix.guardrail.patterns_override`: `false` to disable a default; Hash to add a custom (must include `regex`). Tripped → `REVIEW_WAITING reason=fix_guardrail pass=NN` and `reviews/fix-guardrail-NN.md` written.
+Per-project override via `review.fix.guardrail.patterns_override`: `false` to disable a default; Hash to add a custom (must include `regex`). Tripped → `REVIEW_WAITING reason=fix_guardrail matches=N head=<sha> pass=NN` and `reviews/fix-guardrail-NN.md` written. The `head=` attribute records the worktree HEAD at the moment the guardrail tripped; the approval-on-resume path enforces it.
 
-**Approval-on-resume (U5).** A user who reviews the fix-guardrail trip and decides the changes are intentional can approve them by ticking `[x]` on every line of `reviews/fix-guardrail-NN.md` and re-running. The runner reads the file via `fix_guardrail_approved?(ctx)` on resume: if every checkbox line is `[x]`, the previous pass's commits are treated as approved — Phase 2/3/4 are all skipped for that pass, a `fix-success-NN.md` sentinel is written, and the loop advances to pass NN+1. Any remaining `[ ]` line keeps the pause. Approval is single-shot per pass: a future pass that re-trips the guardrail writes a fresh `fix-guardrail-(NN+1).md` with `[ ]` lines; pass-N approval does not transfer. The fix-guardrail file itself is included in `protected_set` during every Phase 4 spawn (alongside `reviews/escalations-NN.md` and the `fix-success-NN.md` sentinel) so a compromised fix agent cannot pre-write all-`[x]` lines to stage an approval token for the next resume.
+**Approval-on-resume (U5).** A user who reviews the fix-guardrail trip and decides the changes are intentional approves them by ticking `[x]` on every line of `reviews/fix-guardrail-NN.md` and re-running. The runner calls `fix_guardrail_approved?(ctx, expected_matches: marker.attrs["matches"].to_i)` and gates approval on **all four** of:
+
+1. **All checkbox lines are `[x]`** — partial ticks keep the pause (no fall-through to Phase 4 fix re-spawn).
+2. **Checkbox count matches `marker.attrs["matches"]`** — truncation-forged approval (user deletes the findings they didn't want to read) is rejected.
+3. **`marker.attrs["head"]` matches the current worktree HEAD** — amend/rebase/squash between trip and approval is rejected with `REVIEW_ERROR phase=resume reason=approval_head_mismatch` (legacy markers without `head=`, written by hive ≤ PR-A round-2, skip this check with a stderr notice so in-flight tasks aren't broken on upgrade).
+4. **Worktree is clean** — manual edits between trip and approval lead to `REVIEW_ERROR phase=resume reason=approval_dirty_worktree`.
+
+When all four hold, Phase 2/3/4 are skipped for that pass — the prior pass's commits stand, `fix-success-NN.md` is written, marker resets, and the loop advances. **Special-case** for `pass == max_passes`: the approval breaks directly to Phase 5 (browser test) instead of incrementing into `REVIEW_STALE`. Approval is single-shot per pass: a future pass that re-trips the guardrail writes a fresh `fix-guardrail-(NN+1).md` with `[ ]` lines; pass-N approval does not transfer. The `fix-guardrail-NN.md` file is included in `protected_set` during every Phase 4 spawn (alongside `reviews/escalations-NN.md`, `reviews/errors-NN.md`, and the `fix-success-NN.md` sentinel) so a compromised fix agent cannot pre-write all-`[x]` lines to stage an approval token for the next resume.
+
+If `marker.attrs["matches"]` is missing or malformed (not a positive Integer string) on a `fix_guardrail` marker, the runner refuses approval with `REVIEW_ERROR phase=resume reason=malformed_marker_matches` — disables a silent count-blind bypass.
 
 ## Phase 5 — browser test (`Hive::Stages::Review::BrowserTest`)
 

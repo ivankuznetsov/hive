@@ -28,3 +28,4 @@
 /.context/
 /test/e2e/runs/*
 !/test/e2e/runs/.gitkeep
+/.hive-state/

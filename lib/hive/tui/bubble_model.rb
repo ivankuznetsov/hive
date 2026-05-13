@@ -1304,11 +1304,35 @@ module Hive
       # `--project` / `--from` flags so the develop spawn keeps the
       # same idempotency lever the plan command had.
       def dispatch_develop_for(row, exited)
+        # The plan-stage `:waiting` marker is "agent finished, user
+        # reviewing". `:advance_to_develop` means "user reviewed and
+        # approved as-is" — that signal must be reflected on disk by
+        # flipping the marker to `:complete` before dispatching
+        # `hive develop`, because `hive develop --from 3-plan`
+        # refuses to advance while the marker is `:waiting`
+        # (`StageAction` requires `:complete` to mv the folder). The
+        # previous shape dispatched `hive develop` against a
+        # `:waiting` marker, the subprocess errored out in
+        # background, and the user saw the task stay paused with no
+        # surface explanation — diagnosed in the
+        # `i-want-to-be-able-260507-7682` / `now-we-run-claude-codex-260508-3b8f`
+        # bug report.
+        finalize_plan_marker(row)
         dispatch = develop_command_from_plan(row.suggested_command)
         [ exited, dispatch ]
       rescue ArgumentError => e
         Hive::Tui::Debug.log("input_editor", "advance-to-develop skipped for #{row.slug}: #{e.message}")
         [ exited, suppression_flash(row, "couldn't build develop command") ]
+      rescue SystemCallError, IOError => e
+        Hive::Tui::Debug.log(
+          "input_editor",
+          "advance-to-develop marker-finalize failed for #{row.slug}: #{e.class}: #{e.message}"
+        )
+        [ exited, suppression_flash(row, "couldn't finalize plan marker (#{e.class})") ]
+      end
+
+      def finalize_plan_marker(row)
+        Hive::Markers.set(row.state_file, :complete)
       end
 
       def develop_command_from_plan(suggested_command)

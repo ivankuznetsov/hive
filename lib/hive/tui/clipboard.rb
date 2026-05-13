@@ -18,10 +18,18 @@ module Hive
       # `success?`. Surfaced when the clipboard subprocess hits
       # `Timeout::Error` and the wait_thr never produced a real Status.
       # Callers must NOT rely on `exitstatus`, `signaled?`, or any other
-      # Process::Status method against this value — they all raise
-      # `NoMethodError`.
+      # Process::Status method against this value — the
+      # `method_missing` below raises a typed error that points at this
+      # comment so a future caller probing it gets a breadcrumb rather
+      # than a bare `NoMethodError`.
       TIMEOUT_STATUS = Object.new.tap do |o|
         o.define_singleton_method(:success?) { false }
+        o.define_singleton_method(:respond_to_missing?) { |_name, _priv = false| false }
+        o.define_singleton_method(:method_missing) do |name, *_args, &_block|
+          raise NoMethodError,
+            "Clipboard::TIMEOUT_STATUS only implements #success?; " \
+            "callers must not probe ##{name} (see TIMEOUT_STATUS comment in clipboard.rb)"
+        end
       end.freeze
 
       NONE = ProbeResult.new(kind: :none, bytes: nil, path: nil, ext: nil).freeze
@@ -225,11 +233,19 @@ module Hive
 
             buf << chunk.b
           end
-          # Drain any remaining bytes from the pipe so the child can
-          # close stdout and exit; we discard them. One extra byte
-          # read above lets the caller observe "cap exceeded".
+          # One extra byte beyond the cap lets the caller observe
+          # "cap exceeded" via `bytesize > max_bytes`.
           extra = io.read(1)
           buf << extra.b unless extra.nil?
+          # Drain the rest of stdout into a discard buffer so the
+          # child isn't blocked writing to a full pipe — without
+          # this, `wait_thr.value` deadlocks on oversize payloads
+          # until `Timeout` fires, and the caller mis-classifies an
+          # oversize clipboard as `:none` instead of `OVERSIZE_IMAGE`.
+          loop do
+            more = io.read(4096)
+            break if more.nil? || more.empty?
+          end
           buf
         end
 
@@ -241,6 +257,10 @@ module Hive
         rescue Timeout::Error
           Process.kill("KILL", pid)
           Process.wait(pid)
+          # Second clause catches re-raises from the SIGKILL+Process.wait
+          # path above — collapsing the two clauses into one would let
+          # an ESRCH/ECHILD from the kill path escape and re-surface as
+          # a clipboard probe failure. Keep them distinct.
         rescue Errno::ESRCH, Errno::ECHILD
           nil
         end

@@ -3,6 +3,7 @@ require "securerandom"
 require "tmpdir"
 
 require "hive"
+require "hive/tui/text"
 
 module Hive
   module Tui
@@ -90,7 +91,13 @@ module Hive
           # Refuse to clean if `path` IS the tmpdir root (would
           # rm_rf /tmp), or anywhere outside the tmpdir subtree.
           unless path != tmp && path.start_with?("#{tmp}#{File::SEPARATOR}")
-            raise ArgumentError, "refusing to clean staging dir outside tmpdir: #{staging_dir}"
+            # `staging_dir` lands in a `warn`-to-stderr path (see
+            # `BubbleModel#cleanup_new_idea_staging`); sanitize the
+            # interpolated value at this boundary so ANSI / control
+            # bytes can't escape into the operator's terminal —
+            # mirrors the boundary applied in `copy_attachments!`.
+            raise ArgumentError,
+              "refusing to clean staging dir outside tmpdir: #{Hive::Tui::Text.sanitize(staging_dir.to_s)}"
           end
 
           FileUtils.rm_rf(path)

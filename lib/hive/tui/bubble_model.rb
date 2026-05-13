@@ -1307,22 +1307,34 @@ module Hive
         # The plan-stage `:waiting` marker is "agent finished, user
         # reviewing". `:advance_to_develop` means "user reviewed and
         # approved as-is" — that signal must be reflected on disk by
-        # flipping the marker to `:complete` before dispatching
-        # `hive develop`, because `hive develop --from 3-plan`
-        # refuses to advance while the marker is `:waiting`
-        # (`StageAction` requires `:complete` to mv the folder). The
-        # previous shape dispatched `hive develop` against a
-        # `:waiting` marker, the subprocess errored out in
-        # background, and the user saw the task stay paused with no
-        # surface explanation — diagnosed in the
+        # flipping the marker to `:complete` before `hive develop`
+        # runs, because `hive develop --from 3-plan` refuses to
+        # advance while the marker is `:waiting`. Diagnosed in the
         # `i-want-to-be-able-260507-7682` / `now-we-run-claude-codex-260508-3b8f`
         # bug report.
-        finalize_plan_marker(row)
+        #
+        # Ordering rationale (post-review P2 #2): build and validate
+        # the DispatchCommand FIRST, flip the marker SECOND, return
+        # both together. The previous order flipped the marker
+        # eagerly and only then validated the command — a malformed
+        # `suggested_command` would leave the marker `:complete`
+        # with no dispatch, an even worse state than the original
+        # bug (the plan looked approved but the next stage never
+        # started). Now if `develop_command_from_plan` raises, the
+        # marker is still `:waiting` and the user can re-trigger
+        # after fixing the row.
         dispatch = develop_command_from_plan(row.suggested_command)
+        finalize_plan_marker(row)
         [ exited, dispatch ]
       rescue ArgumentError => e
         Hive::Tui::Debug.log("input_editor", "advance-to-develop skipped for #{row.slug}: #{e.message}")
         [ exited, suppression_flash(row, "couldn't build develop command") ]
+      rescue MarkerRaceError => e
+        Hive::Tui::Debug.log(
+          "input_editor",
+          "advance-to-develop marker-race for #{row.slug}: #{e.message}"
+        )
+        [ exited, suppression_flash(row, "plan marker changed during edit (#{e.observed})") ]
       rescue SystemCallError, IOError => e
         Hive::Tui::Debug.log(
           "input_editor",
@@ -1331,7 +1343,41 @@ module Hive
         [ exited, suppression_flash(row, "couldn't finalize plan marker (#{e.class})") ]
       end
 
+      # Raised by `finalize_plan_marker` when the marker on disk
+      # drifted between the editor session and the finalize step —
+      # e.g. a concurrent `hive run` advanced the marker. Surfaced
+      # to the user as a suppression flash; no dispatch.
+      class MarkerRaceError < StandardError
+        attr_reader :observed
+
+        def initialize(observed)
+          @observed = observed
+          super("expected :waiting, observed #{observed.inspect}")
+        end
+      end
+
+      # Compare-and-set on the marker: re-read right before flipping
+      # and refuse if the state drifted (post-review P2 #1). The
+      # `marker_still_open_for_input?` check earlier in `plan_outcome`
+      # ran when the editor closed; another actor (sibling `hive run`,
+      # background daemon, hand-edit on a sync mount) could have
+      # advanced the marker in the brief interval between that check
+      # and this write. `Hive::Markers.set` is an atomic-rename write
+      # and does NOT verify current state; without the CAS here we
+      # would silently overwrite a newer marker.
+      #
+      # There's still a sub-microsecond TOCTOU between this read and
+      # the subsequent write — closing that completely would need an
+      # advisory flock around both ops, which the rest of the
+      # codebase doesn't currently use for marker writes. The
+      # observable race window goes from "duration of editor session"
+      # down to "one read+rename" — orders of magnitude smaller.
       def finalize_plan_marker(row)
+        current = Hive::Markers.current(row.state_file)
+        unless current.name == :waiting
+          raise MarkerRaceError, current.name
+        end
+
         Hive::Markers.set(row.state_file, :complete)
       end
 

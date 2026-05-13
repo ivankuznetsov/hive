@@ -83,6 +83,12 @@ Append-only log of all wiki operations.
 
 ## [2026-05-13T17:45:00Z] tui+new — image paste for new-idea composer
 
+**Action:** Documented rich image input for `hive tui` new-idea capture. The composer now probes clipboard image bytes or drag-dropped image paths, stages each image as `[imageN]`, rewrites placeholders to `![](assets/image-N.<ext>)` on submit, and persists files under `1-inbox/<slug>/assets/` through `Hive::Commands::New#call!`. The CLI `hive new PROJECT TEXT...` argv surface remains text-only.
+
+**Refreshed pages:**
+- [[commands/tui]] — added the image-paste subsection, placeholder validation behavior, staging lifecycle, and the `.jpg`/`.webp` extension preservation note. macOS clipboard image paste is currently inert (`pbpaste` only returns text); a Linux Wayland/X11 host with `wl-clipboard` or `xclip` is required for clipboard-bytes paste.
+- [[commands/new]] — documented `call!`, `body_override:`, and `attachments:` for TUI-internal rich captures while noting that plain CLI captures still omit `assets/`. Attachment-filename failures now raise the dedicated `InvalidAttachmentError` instead of `InvalidSlugError`.
+
 **Action:** Documented rich image input for `hive tui` new-idea capture. The composer now probes clipboard image bytes or drag-dropped image paths, stages each image as `[imageN]`, rewrites placeholders to `![](assets/bug-N.<ext>)` on submit, and persists files under `1-inbox/<slug>/assets/` through `Hive::Commands::New#call!`. The CLI `hive new PROJECT TEXT...` argv surface remains text-only.
 
 **Refreshed pages:**

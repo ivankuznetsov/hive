@@ -348,6 +348,8 @@ module Hive
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
           open_task_folder(message.row)
+        when Hive::Tui::Messages::OpenSummary
+          open_summary(message.row)
         when Hive::Tui::Messages::LogTailPoll
           poll_log_tail
         when Hive::Tui::Messages::Back
@@ -1090,7 +1092,7 @@ module Hive
       # so the operator can answer inline questions. For brainstorm
       # rows, saving a completed answer round auto-runs the row's
       # suggested command; partial answers and non-brainstorm rows stay
-      # manual via the verb keys (b/p/d/r/P).
+      # manual via the verb keys (b/p/d/P/r/F).
       #
       # mtime is sampled before/after the spawn so InputEditorExited
       # carries a `changed:` flag, distinguishing a saved edit from a
@@ -1104,7 +1106,7 @@ module Hive
           before_mtime = file_mtime(path)
           before_hash = file_content_hash(path)
           # Capture the file's checkbox state pre-edit (and again
-          # post-edit below). Consumed by `review_outcome` for 5-review
+          # post-edit below). Consumed by `review_outcome` for 6-review
           # rows so that path can distinguish "user actually ticked a
           # box" from "opened, looked, hit :wq". Brainstorm and plan
           # outcomes ignore `checkboxes_changed`; the capture is
@@ -1178,6 +1180,39 @@ module Hive
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def open_summary(row)
+        path = summary_editor_path(row)
+        return [ flashed("no summary for #{row.slug}"), nil ] if path.empty?
+
+        argv = editor_argv
+        callable = lambda do
+          run_editor(argv, path)
+          clear_terminal_for_takeover
+        end
+
+        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
+        [
+          @hive_model.with(
+            flash: "opening summary for #{row.slug} in #{File.basename(argv.first)}",
+            flash_set_at: Time.now
+          ),
+          cmd
+        ]
+      rescue ArgumentError => e
+        [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def summary_editor_path(row)
+        folder = row.folder.to_s
+        return "" if folder.empty?
+
+        summary = File.join(folder, "summary.md")
+        return summary if File.exist?(summary)
+
+        pr_md = File.join(folder, "pr.md")
+        File.exist?(pr_md) ? pr_md : ""
       end
 
       # Browse-only handler for max_passes-hit REVIEW_STALE rows.
@@ -1551,7 +1586,7 @@ module Hive
       #   :proceed             — fire DispatchCommand for brainstorm re-run
       #   :revise_plan         — fire DispatchCommand for plan re-run (user added feedback)
       #   :advance_to_develop  — fire DispatchCommand for `hive develop` (plan approved as-is)
-      #   :rerun_review        — fire DispatchCommand for `hive run` on a 5-review row (U6 auto-continue)
+      #   :rerun_review        — fire DispatchCommand for `hive run` on a 6-review row (U6 auto-continue)
       #   :silent              — refuse, common-case (user can self-diagnose)
       #   :empty_command       — refuse, surface to user (data anomaly)
       #   :marker_changed      — refuse, surface to user (race with another actor)
@@ -1561,7 +1596,7 @@ module Hive
       # is hash-based ("did content actually differ"). Brainstorm gates on
       # `changed` (parser then decides). Plan needs `content_changed` to
       # distinguish "approved by saving without edits" (advance) from
-      # "added feedback" (revise). 5-review gates on `checkboxes_changed`
+      # "added feedback" (revise). 6-review gates on `checkboxes_changed`
       # (the file's `[x]/[ ]` counts shifted across the edit) so a bare
       # `:wq` with no checkbox flips doesn't dispatch a multi-minute
       # review pass; mtime / content alone would falsely fire.
@@ -1574,7 +1609,7 @@ module Hive
           brainstorm_outcome(row, path, changed)
         when "3-plan"
           plan_outcome(row, path, exit_code, changed, content_changed)
-        when "5-review"
+        when "6-review"
           review_outcome(row, checkboxes_changed)
         else
           :silent
@@ -1608,7 +1643,7 @@ module Hive
         end
       end
 
-      # U6 — auto-continue for 5-review needs_input rows. Gated more
+      # U6 — auto-continue for 6-review needs_input rows. Gated more
       # tightly than plan_outcome because the dispatched verb (`hive
       # run`) re-enters a multi-minute review pass: a bare `:wq` that
       # changes mtime but not the [x] set must NOT trigger a re-run.

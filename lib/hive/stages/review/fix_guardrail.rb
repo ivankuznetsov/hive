@@ -7,7 +7,7 @@ module Hive
     module Review
       # Post-fix diff guardrail (ADR-020).
       #
-      # After Phase 4 commits in the 5-review autonomous loop, scan the
+      # After Phase 4 commits in the 6-review autonomous loop, scan the
       # new commits' diff for high-risk patterns. A :tripped result
       # short-circuits the loop with REVIEW_WAITING reason=fix_guardrail
       # and writes reviews/fix-guardrail-NN.md so the user inspects

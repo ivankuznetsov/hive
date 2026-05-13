@@ -1,0 +1,16 @@
+## Summary
+<%= summary %>
+
+## PR
+<%= pr_url %>
+
+## Commits
+<%= commits %>
+
+## Review
+<%= review %>
+<% unless open_escalations.to_s.strip.empty? -%>
+
+## Open escalations
+<%= open_escalations %>
+<% end -%>

@@ -14,10 +14,11 @@ require "hive/stages/review/ci_fix"
 require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
 require "hive/stages/review/fix_guardrail"
+require "hive/stages/review/github_publisher"
 
 module Hive
   module Stages
-    # 5-review stage runner. Integrates U4 (reviewer adapter),
+    # 6-review stage runner. Integrates U4 (reviewer adapter),
     # U6 (triage), U7 (CI-fix), U8 (browser-test), and U13 (post-fix
     # guardrail) into the autonomous loop documented in the plan:
     #
@@ -89,7 +90,7 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          warn "hive: already complete; mv this folder to 6-pr/ to continue"
+          warn "hive: already complete; mv this folder to 7-finalize/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
           warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \
@@ -108,7 +109,7 @@ module Hive
 
         # Worktree pointer must exist (carried over from 4-execute).
         unless File.exist?(task.worktree_yml_path)
-          warn "hive: 5-review entered without a worktree.yml — this task did not pass through 4-execute. Move it back."
+          warn "hive: 6-review entered without a worktree.yml — this task did not pass through 4-execute. Move it back."
           exit 1
         end
 
@@ -362,6 +363,7 @@ module Hive
             else
               write_manual_escalations(ctx_pass)
             end
+            publish_escalations(task, cfg, pass)
           end
 
           # Branch on triage output. Read per-reviewer files for [x]
@@ -836,10 +838,43 @@ module Hive
             File.delete(output_path) if output_path && File.exist?(output_path)
 
             record_reviewer_infra_error(ctx, spec, result)
+          else
+            publish_review_file(task, cfg, ctx.pass, spec["name"] || result.name, result.output_path)
           end
         end
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def publish_review_file(task, cfg, pass, reviewer_name, body_path)
+        Hive::Stages::Review::GithubPublisher.publish!(
+          task,
+          pass: pass,
+          reviewer_name: reviewer_name,
+          body_path: body_path,
+          cfg: cfg
+        )
+      rescue StandardError => e
+        warn "hive: failed to post reviewer comment for pass=#{format('%02d', pass)} " \
+             "reviewer=#{reviewer_name}; local file at #{body_path} is authoritative (#{e.class}: #{e.message})"
+        :failed
+      end
+
+      def publish_escalations(task, cfg, pass)
+        path = File.join(task.reviews_dir, "escalations-#{format('%02d', pass)}.md")
+        return unless File.exist?(path)
+
+        Hive::Stages::Review::GithubPublisher.publish!(
+          task,
+          pass: pass,
+          reviewer_name: "escalations",
+          body_path: path,
+          cfg: cfg
+        )
+      rescue StandardError => e
+        warn "hive: failed to post escalations comment for pass=#{format('%02d', pass)}; " \
+             "local file at #{path} is authoritative (#{e.class}: #{e.message})"
+        :failed
       end
 
       # Remove any stale `reviews/errors-NN.md` from a prior
@@ -1012,7 +1047,7 @@ module Hive
         File.write(path, <<~MD)
           # CI blocked after #{ci_result.attempts} attempts
 
-          The 5-review CI-fix loop hit `review.ci.max_attempts` without a green CI.
+          The 6-review CI-fix loop hit `review.ci.max_attempts` without a green CI.
           Reviewers do NOT run on red CI. Read the failure below, fix manually,
           remove the `<!-- REVIEW_CI_STALE ... -->` marker from `task.md`, then
           re-run `hive run` to retry.

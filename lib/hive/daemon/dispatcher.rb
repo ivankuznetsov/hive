@@ -169,7 +169,7 @@ module Hive
       # The path was stashed on @running at dispatch time (passed
       # through from the status row) — PR-40 follow-up review C4.
       #
-      # Stage-advancing runs (4-execute → 5-review) move the task
+      # Stage-advancing runs (4-execute → 6-review) move the task
       # folder forward; the dispatched path no longer exists. We try
       # the at-dispatch path first (covers in-stage re-runs of
       # brainstorm/plan/review) and fall back to a slug-keyed search

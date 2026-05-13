@@ -225,7 +225,7 @@ module Hive
 
       # spawn_agent expects a task-shaped object with folder, state_file,
       # log_dir, and stage_name. Use the shared
-      # Hive::Reviewers.synthetic_task_for helper so every 5-review
+      # Hive::Reviewers.synthetic_task_for helper so every 6-review
       # sub-spawn agrees on the facade layout (M-04).
       def synthetic_task
         Hive::Reviewers.synthetic_task_for(ctx)

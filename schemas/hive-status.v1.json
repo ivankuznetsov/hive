@@ -104,7 +104,7 @@
       "properties": {
         "stage": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"]
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr", "6-review", "7-finalize", "8-done"]
         },
         "slug": { "type": "string" },
         "folder": { "type": "string" },
@@ -142,8 +142,9 @@
             "ready_to_brainstorm",
             "ready_to_plan",
             "ready_to_develop",
+            "ready_to_open_pr",
             "ready_for_review",
-            "ready_for_pr",
+            "ready_to_finalize",
             "ready_to_archive",
             "needs_input",
             "review_findings",

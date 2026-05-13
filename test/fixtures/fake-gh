@@ -25,7 +25,7 @@ case "${1:-}" in
     case "${2:-}" in
       list)
         if [[ -n "${HIVE_FAKE_GH_PR_EXISTS:-}" ]]; then
-          printf '[{"url":"https://example.com/pr/1","number":1}]\n'
+          printf '[{"url":"https://example.com/pr/1","number":1,"state":"OPEN","isDraft":true}]\n'
         else
           printf '[]\n'
         fi
@@ -34,6 +34,25 @@ case "${1:-}" in
       create)
         printf 'https://example.com/pr/2\n'
         exit "${HIVE_FAKE_GH_CREATE_EXIT:-0}"
+        ;;
+      view)
+        if [[ "${*: -1}" == ".comments[].body" ]]; then
+          printf '%s\n' "${HIVE_FAKE_GH_COMMENTS_BODY:-}"
+        elif [[ "${*: -1}" == ".body" ]]; then
+          printf '%s\n' "${HIVE_FAKE_GH_PR_BODY:-}"
+        else
+          printf '{"state":"%s","body":"%s"}\n' "${HIVE_FAKE_GH_STATE:-OPEN}" "${HIVE_FAKE_GH_PR_BODY:-}"
+        fi
+        exit "${HIVE_FAKE_GH_VIEW_EXIT:-0}"
+        ;;
+      comment)
+        exit "${HIVE_FAKE_GH_COMMENT_EXIT:-0}"
+        ;;
+      ready)
+        exit "${HIVE_FAKE_GH_READY_EXIT:-0}"
+        ;;
+      edit)
+        exit "${HIVE_FAKE_GH_EDIT_EXIT:-0}"
         ;;
       *) exit 0 ;;
     esac

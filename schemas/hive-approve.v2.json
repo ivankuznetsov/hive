@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-approve.v2.json",
   "title": "hive approve output (v2)",
-  "description": "Stable contract emitted by `hive approve --json`. v2 widens the stage-name enums to include the new 5-review stage and the renumbered 6-pr / 7-done. Successful invocations and every failure path produce a single-line JSON document on stdout.",
+  "description": "Stable contract emitted by `hive approve --json`. v2 widens the stage-name enums to include the new 6-review stage and the renumbered 7-finalize / 8-done. Successful invocations and every failure path produce a single-line JSON document on stdout.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -42,23 +42,23 @@
         "slug": { "type": "string" },
         "from_stage": {
           "type": "string",
-          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"],
+          "enum": ["inbox", "brainstorm", "plan", "execute", "open-pr", "review", "finalize", "done"],
           "description": "Bare stage name, mirrors hive-run.stage."
         },
-        "from_stage_index": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "from_stage_index": { "type": "integer", "minimum": 1, "maximum": 8 },
         "from_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"],
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr", "6-review", "7-finalize", "8-done"],
           "description": "Combined directory name (index + bare name) for path construction."
         },
         "to_stage": {
           "type": "string",
-          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"]
+          "enum": ["inbox", "brainstorm", "plan", "execute", "open-pr", "review", "finalize", "done"]
         },
-        "to_stage_index": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "to_stage_index": { "type": "integer", "minimum": 1, "maximum": 8 },
         "to_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"]
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr", "6-review", "7-finalize", "8-done"]
         },
         "direction": { "type": "string", "enum": ["forward", "backward", "same"] },
         "forced": {

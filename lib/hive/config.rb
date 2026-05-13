@@ -13,14 +13,15 @@ module Hive
       # not cost targets. Most tasks finish well within them; a stuck loop
       # still gets cut off. Bumped ~5x from the original conservative values
       # in plan 2026-05-04-001 (per ADR-023). The deprecated `execute_review`
-      # key was dropped here — 5-review owns reviewer budgets per ADR-014, so
+      # key was dropped here — 6-review owns reviewer budgets per ADR-014, so
       # nothing reads it. Existing project configs that still set it survive
       # via deep-merge but the key is no longer rendered for fresh projects.
       "budget_usd" => {
         "brainstorm" => 50,
         "plan" => 100,
         "execute_implementation" => 500,
-        "pr" => 50,
+        "open_pr" => 50,
+        "finalize" => 50,
         "review_ci" => 100,
         "review_triage" => 75,
         "review_fix" => 500,
@@ -30,13 +31,14 @@ module Hive
         "brainstorm" => 1800,
         "plan" => 3600,
         "execute_implementation" => 14400,
-        "pr" => 1800,
+        "open_pr" => 1800,
+        "finalize" => 1800,
         "review_ci" => 3600,
         "review_triage" => 1800,
         "review_fix" => 14400,
         "review_browser" => 3600
       },
-      # Stage-level agent for the three single-agent stages. The 5-review
+      # Stage-level agent for single-agent stages. The review
       # stage has its own per-role agent fields under "review.{ci,triage,
       # fix,browser_test}.agent". Runtime fallback in stage code stays
       # `cfg.dig("<stage>", "agent") || "claude"` so legacy configs without
@@ -63,6 +65,8 @@ module Hive
         "skill" => "/plan"
       },
       "execute" => { "agent" => "claude" },
+      "open_pr" => { "agent" => "claude" },
+      "finalize" => { "agent" => "claude" },
       # Per-CLI agent profiles. Each project may override `bin`,
       # `env_override`, or `min_version` to pin to a different binary or
       # version. Adding a new top-level profile is not yet supported here
@@ -84,7 +88,7 @@ module Hive
           "min_version" => "0.70.2"
         }
       },
-      # Configuration for the 5-review stage's autonomous loop. Each role
+      # Configuration for the 6-review stage's autonomous loop. Each role
       # (ci, reviewers, triage, fix, browser_test) takes an `agent` profile
       # name (must resolve via Hive::AgentProfiles.lookup) and an optional
       # `prompt_template` path under templates/.
@@ -117,6 +121,10 @@ module Hive
           "enabled" => false,
           "agent" => "claude",
           "prompt_template" => "browser_test_prompt.md.erb",
+          "max_attempts" => 2
+        },
+        "github_publish" => {
+          "enabled" => true,
           "max_attempts" => 2
         },
         "max_passes" => 2,
@@ -169,6 +177,8 @@ module Hive
       %w[brainstorm agent],
       %w[plan agent],
       %w[execute agent],
+      %w[open_pr agent],
+      %w[finalize agent],
       %w[review ci agent],
       %w[review triage agent],
       %w[review fix agent],

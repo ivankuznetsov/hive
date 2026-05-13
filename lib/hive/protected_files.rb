@@ -3,7 +3,7 @@ require "digest"
 module Hive
   # SHA-256 snapshot/diff helper for orchestrator-owned files.
   #
-  # Multiple stages (4-execute, 5-review's runner / triage / ci-fix) all
+  # Multiple stages (4-execute, 6-review's runner / triage / ci-fix) all
   # need the same primitive: snapshot a small set of files before
   # spawning a sub-agent, snapshot again after, and surface the names
   # that differ so a tampering attempt lands a structured error marker

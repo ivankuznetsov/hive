@@ -1,6 +1,6 @@
 module Hive
-  # Single source of truth for the six workflow verbs (brainstorm, plan,
-  # develop, review, pr, archive). Each verb advances a task from one
+  # Single source of truth for the workflow verbs (brainstorm, plan,
+  # develop, open-pr, review, finalize, archive). Each verb advances a task from one
   # stage to the next; `Hive::Commands::StageAction` consumes this map
   # directly, `Hive::TaskAction` uses it to label the "ready to <verb>"
   # status bucket per stage, and `Hive::Commands::Approve` /
@@ -20,7 +20,7 @@ module Hive
     # Default is non-interactive (omitting the key). No verb is flagged
     # interactive in v1 because every workflow agent currently runs
     # claude with captured stdio and `gh pr create` has been working
-    # non-interactively for `hive pr`. The flag is present so a future
+    # non-interactively for `hive open-pr`. The flag is present so a future
     # verb that DOES need stdin (e.g., a manual review prompt) can
     # opt in with one line — without re-introducing foreground
     # takeover for everything.
@@ -28,13 +28,14 @@ module Hive
       "brainstorm" => { source: "1-inbox", target: "2-brainstorm", force_source: true },
       "plan"       => { source: "2-brainstorm", target: "3-plan" },
       "develop"    => { source: "3-plan", target: "4-execute" },
-      "review"     => { source: "4-execute", target: "5-review" },
-      "pr"         => { source: "5-review", target: "6-pr" },
-      "archive"    => { source: "6-pr", target: "7-done" }
+      "open-pr"    => { source: "4-execute", target: "5-open-pr" },
+      "review"     => { source: "5-open-pr", target: "6-review" },
+      "finalize"   => { source: "6-review", target: "7-finalize" },
+      "archive"    => { source: "7-finalize", target: "8-done" }
     }.freeze
 
     # Reverse lookup by source: verb that advances OUT of stage_dir.
-    # nil for `6-done` (no further verb).
+    # nil for `8-done` (no further verb).
     VERB_BY_SOURCE = VERBS.each_with_object({}) { |(verb, cfg), h| h[cfg[:source]] = verb }.freeze
 
     # Reverse lookup by target: verb whose target IS stage_dir. Same

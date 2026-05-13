@@ -11,7 +11,7 @@ require "hive/markers"
 module Hive
   module Stages
     # 4-execute stage runner. Implementation-only since U9 split the
-    # review pass out into the new 5-review stage.
+    # review pass out into the new 6-review stage.
     #
     # Flow per `hive run` on a 4-execute task:
     #   1. Pre-flight: terminal markers, worktree pointer health.
@@ -22,7 +22,7 @@ module Hive
     #   4. Finalize: SHA-protect plan.md / worktree.yml around the spawn.
     #      On clean spawn → set EXECUTE_COMPLETE; on tamper → :error.
     #
-    # User then `mv`s the task folder to .hive-state/stages/5-review/
+    # User then `mv`s the task folder to .hive-state/stages/6-review/
     # to enter the autonomous review loop. There is no review pass
     # inside 4-execute anymore — the orchestrator-owned terminal
     # marker is EXECUTE_COMPLETE on success.
@@ -45,7 +45,7 @@ module Hive
 
         case task_state(task)
         when :complete
-          warn "hive: already complete; mv this folder to 5-review/ to continue"
+          warn "hive: already complete; mv this folder to 5-open-pr/ to continue"
           return { commit: nil, status: :execute_complete }
         when :worktree_missing
           warn "hive: worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"
@@ -60,7 +60,7 @@ module Hive
       end
 
       # Pre-flight state. EXECUTE_STALE is no longer a state 4-execute
-      # writes (the review pass moved to 5-review).
+      # writes (the review pass moved to 6-review).
       def task_state(task)
         marker = Hive::Markers.current(task.state_file)
         return :complete if marker.name == :execute_complete

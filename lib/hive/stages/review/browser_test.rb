@@ -7,7 +7,7 @@ require "hive/stages/base"
 module Hive
   module Stages
     module Review
-      # Browser-test phase of the 5-review autonomous loop.
+      # Browser-test phase of the 6-review autonomous loop.
       #
       # Optional. Skipped entirely when `review.browser_test.enabled` is
       # false (default). When enabled, runs after Phase 2 produced zero
@@ -20,7 +20,7 @@ module Hive
       # Soft-warn semantics (per the plan's R11): a persistent failure
       # does NOT hard-block the loop. After the cap, the runner writes
       # `reviews/browser-blocked-<pass>.md` and returns `:warned` so
-      # `REVIEW_COMPLETE browser=warned` lands; 6-pr surfaces the
+      # `REVIEW_COMPLETE browser=warned` lands; 7-finalize surfaces the
       # warning in the PR body. Browser flakiness is common; the user
       # decides whether to ship anyway.
       module BrowserTest
@@ -227,7 +227,7 @@ module Hive
         end
 
         # The blocked-finding file embeds every attempt's summary +
-        # details so the user (or 6-pr's PR body) sees the full
+        # details so the user (or 7-finalize's PR body) sees the full
         # progression, not just the last attempt.
         def render_blocked_md(ctx, attempts_data)
           out = +"# Browser test blocked for pass #{format('%02d', ctx.pass)}\n\n"

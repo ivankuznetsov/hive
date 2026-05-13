@@ -25,13 +25,14 @@ module Hive
       # @api private
       # Hand-written grid-mode key->verb map; static UI choice rather
       # than something derivable from `Hive::Workflows::VERBS`. Capital
-      # `P` distinguishes `pr` from `plan` since both start with `p`.
+      # `P` opens the PR; `F` finalizes it after review.
       VERB_KEYS = {
         "b" => "brainstorm",
         "p" => "plan",
         "d" => "develop",
+        "P" => "open-pr",
         "r" => "review",
-        "P" => "pr",
+        "F" => "finalize",
         "a" => "archive"
       }.freeze
 
@@ -173,6 +174,8 @@ module Hive
       end
 
       def enter_message(row)
+        return Messages::OpenSummary.new(row: row) if finalize_complete_row?(row)
+
         case row.action_key
         when "review_findings" then Messages::OpenFindings.new(row: row)
         when "agent_running" then Messages::OpenLogTail.new(row: row)
@@ -181,6 +184,10 @@ module Hive
         when "needs_input" then needs_input_message(row)
         else enter_fallback_message(row)
         end
+      end
+
+      def finalize_complete_row?(row)
+        row.stage == "7-finalize" && row.marker.to_s == "complete"
       end
 
       # Enter on an `error` row routes to `RecoverError` (clear ERROR

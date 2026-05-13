@@ -101,8 +101,9 @@ module Hive
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze
       READY_TO_DEVELOP    = "ready_to_develop".freeze
+      READY_TO_OPEN_PR    = "ready_to_open_pr".freeze
       READY_FOR_REVIEW    = "ready_for_review".freeze
-      READY_FOR_PR        = "ready_for_pr".freeze
+      READY_TO_FINALIZE   = "ready_to_finalize".freeze
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       NEEDS_INPUT         = "needs_input".freeze
       REVIEW_FINDINGS     = "review_findings".freeze

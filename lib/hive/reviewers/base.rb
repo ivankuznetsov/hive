@@ -6,7 +6,7 @@ module Hive
     # `Hive::Reviewers::Agent` adapter (the one true reviewer consumer)
     # and with any custom reviewer adapter built against the v1 API.
     # The canonical home is `Hive::Stages::Review::Context` — the
-    # 5-review stage owns this Data type because triage / ci_fix /
+    # 6-review stage owns this Data type because triage / ci_fix /
     # browser_test / fix_guardrail all consume it, none of which are
     # reviewers. New code SHOULD reference `Hive::Stages::Review::Context`
     # directly; this alias is preserved for backward compat.
@@ -25,7 +25,7 @@ module Hive
     end
 
     # Common interface for "anything that produces reviews/<name>-<pass>.md
-    # for the 5-review stage". Subclasses implement #run! and inherit the
+    # for the 6-review stage". Subclasses implement #run! and inherit the
     # spec/ctx/output_path conventions so the runner's per-reviewer loop
     # is shape-uniform across agent and linter reviewers.
     class Base
@@ -44,7 +44,7 @@ module Hive
         spec.fetch("output_basename")
       end
 
-      # Per-pass output path. The 5-review runner finalizes by reading
+      # Per-pass output path. The 6-review runner finalizes by reading
       # every `reviews/<*>-<pass>.md` for the current pass; output_path
       # must follow the same convention so dedup and triage work.
       def output_path

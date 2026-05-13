@@ -50,11 +50,16 @@ module Hive
         command: "develop"
       },
       execute_complete: {
-        key: Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
-        label: "Ready for review",
-        command: "review"
+        key: Hive::Schemas::TaskActionKind::READY_TO_OPEN_PR,
+        label: "Ready to open PR",
+        command: "open-pr"
       },
-      review_ready: {
+      open_pr_ready: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_OPEN_PR,
+        label: "Ready to open PR",
+        command: "open-pr"
+      },
+      open_pr_complete: {
         key: Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
         label: "Ready for review",
         command: "review"
@@ -74,22 +79,27 @@ module Hive
         label: "Needs your input",
         command: "review"
       },
+      review_ready: {
+        key: Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
+        label: "Ready for review",
+        command: "review"
+      },
       review_complete: {
-        key: Hive::Schemas::TaskActionKind::READY_FOR_PR,
-        label: "Ready for PR",
-        command: "pr"
+        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
+        label: "Ready to finalize",
+        command: "finalize"
       },
       review_stale: {
         key: Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
         label: "Needs recovery",
         command: nil
       },
-      pr_waiting: {
+      finalize_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
-        command: "pr"
+        command: "finalize"
       },
-      pr_complete: {
+      finalize_complete: {
         key: Hive::Schemas::TaskActionKind::READY_TO_ARCHIVE,
         label: "Ready to archive",
         command: "archive"
@@ -182,10 +192,12 @@ module Hive
         marker.name == :complete ? ACTIONS.fetch(:plan_complete) : ACTIONS.fetch(:plan_waiting)
       when "execute"
         execute_action
+      when "open-pr"
+        marker.name == :complete ? ACTIONS.fetch(:open_pr_complete) : ACTIONS.fetch(:open_pr_ready)
       when "review"
         review_action
-      when "pr"
-        marker.name == :complete ? ACTIONS.fetch(:pr_complete) : ACTIONS.fetch(:pr_waiting)
+      when "finalize"
+        marker.name == :complete ? ACTIONS.fetch(:finalize_complete) : ACTIONS.fetch(:finalize_waiting)
       when "done"
         ACTIONS.fetch(:done)
       else
@@ -202,7 +214,7 @@ module Hive
       when :review_working
         # The review stage's own in-flight marker. Without this branch
         # the row falls through to :review_waiting and emits a
-        # runnable `hive review … --from 5-review` command while review
+        # runnable `hive review … --from 6-review` command while review
         # is already active — running it would acquire-then-fail the
         # per-task lock with ConcurrentRunError. Treat it as in-flight
         # via the same :agent_running surface other stages use for

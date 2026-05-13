@@ -10,7 +10,7 @@ require "hive/stages/base"
 module Hive
   module Stages
     module Review
-      # CI-fix loop for the 5-review stage.
+      # CI-fix loop for the 6-review stage.
       #
       # Runs the project's local CI command (review.ci.command) and, on
       # failure, spawns a fix agent with the captured failure log so the

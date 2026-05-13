@@ -8,7 +8,7 @@ require "hive/stages/base"
 module Hive
   module Stages
     module Review
-      # Auto-triage step of the 5-review autonomous loop. Reads every
+      # Auto-triage step of the 6-review autonomous loop. Reads every
       # `reviews/<*>-<pass>.md` for the current pass, hands them to a
       # triage agent (configured via review.triage.agent), and expects
       # the agent to:
@@ -261,7 +261,7 @@ module Hive
         end
 
         # Triage shares the synthetic-task pattern with every other
-        # 5-review sub-spawn; delegate to the shared helper (M-04).
+        # 6-review sub-spawn; delegate to the shared helper (M-04).
         def synthetic_task(ctx)
           Hive::Reviewers.synthetic_task_for(ctx)
         end

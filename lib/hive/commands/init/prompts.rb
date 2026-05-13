@@ -38,8 +38,8 @@ module Hive
           pr-review-toolkit
         ].freeze
 
-        # The 8 effective budget/timeout keys after dropping the deprecated
-        # execute_review (5-review owns reviewer budgets per ADR-014).
+        # The effective budget/timeout keys after dropping the deprecated
+        # execute_review (review owns reviewer budgets per ADR-014).
         # Order is intentional: matches templates/project_config.yml.erb
         # render order, so a printed prompt list reads top-to-bottom in the
         # same shape as the resulting YAML.
@@ -47,7 +47,8 @@ module Hive
           brainstorm
           plan
           execute_implementation
-          pr
+          open_pr
+          finalize
           review_ci
           review_triage
           review_fix
@@ -300,8 +301,8 @@ module Hive
           @output.puts ""
           @output.puts "Hive daemon — auto-advance tasks through the pipeline."
           @output.puts "  When enabled, the daemon polls hive status and dispatches"
-          @output.puts "  workflow verbs (brainstorm/plan/develop/review/pr) on tasks"
-          @output.puts "  ready to advance, plus auto-archives 6-pr after PR merge."
+          @output.puts "  workflow verbs (brainstorm/plan/develop/open-pr/review/finalize) on tasks"
+          @output.puts "  ready to advance, plus auto-archives 7-finalize after PR merge."
           @output.puts "  It stops at human-input gates (brainstorm questions, review"
           @output.puts "  escalations, recovery markers). Disable later by setting"
           @output.puts "  daemon.enabled: false in .hive-state/config.yml."

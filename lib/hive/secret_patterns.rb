@@ -1,6 +1,6 @@
 module Hive
   # Shared regex set for credential/secret detection. Used by both:
-  # - lib/hive/stages/pr.rb's PR-body secret-scan (ADR-008)
+  # - PR-body/comment secret scans in OpenPr, Finalize, and GithubPublisher
   # - lib/hive/stages/review/fix_guardrail.rb's post-fix diff guardrail (ADR-020)
   #
   # New patterns must come with at least one test in

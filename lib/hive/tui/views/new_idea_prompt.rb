@@ -47,10 +47,12 @@ module Hive
           # chunk + cursor` always fits within `row_width`, keeping
           # continuation rows aligned to the same column as the first chunk.
           row_width = [ width - 2, 1 ].max
-          chunk_capacity = [ row_width - label.length - 1, 1 ].max
+          suffix = attachment_suffix(model, width: width)
+          suffix_width = suffix.to_s.length
+          chunk_capacity = [ row_width - label.length - 1 - suffix_width, 1 ].max
           chunks, cursor_chunk_idx, cursor_offset = chunk_buffer_with_cursor(buffer, cursor, chunk_capacity)
           visible, visible_cursor_idx = visible_chunks_for_cursor(chunks, cursor_chunk_idx)
-          render_rows(label, visible, visible_cursor_idx, cursor_offset)
+          render_rows(label, visible, visible_cursor_idx, cursor_offset, suffix: suffix)
         end
 
         # Split `buffer` into chunks of `capacity` chars each. Always
@@ -94,19 +96,28 @@ module Hive
         # Row 1: styled label + chunk
         # Row 2..N: spaces aligned to label width + chunk
         # Cursor block at the logical cursor position.
-        def render_rows(label, chunks, cursor_chunk_idx, cursor_offset, cursor: Styles::CURSOR_HIGHLIGHT.render(" "))
+        def render_rows(label, chunks, cursor_chunk_idx, cursor_offset, cursor: Styles::CURSOR_HIGHLIGHT.render(" "), suffix: nil)
           padding = " " * label.length
           rows = chunks.each_with_index.map do |chunk, idx|
             prefix = idx.zero? ? Styles::HINT.render(label) : padding
-            if idx == cursor_chunk_idx
+            row = if idx == cursor_chunk_idx
               before_cursor = chunk[0...cursor_offset].to_s
               after_cursor = chunk[cursor_offset..].to_s
               "#{prefix}#{before_cursor}#{cursor}#{after_cursor}"
             else
               "#{prefix}#{chunk}"
             end
+            idx == chunks.size - 1 && suffix ? "#{row}#{Styles::HINT.render(suffix)}" : row
           end
           rows.join("\n")
+        end
+
+        def attachment_suffix(model, width:)
+          count = model.new_idea_attachments.size
+          return nil if count.zero?
+          return nil if width.to_i < 30
+
+          " · 📎 #{count} #{count == 1 ? "image" : "images"}"
         end
 
         # Resolve which project an idea would land in. Pure read of the

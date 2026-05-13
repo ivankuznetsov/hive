@@ -68,6 +68,18 @@ class TuiHelpTest < Minitest::Test
     assert_empty extra, "unexpected modes in BINDINGS: #{extra.inspect}"
   end
 
+  def test_lowercase_o_opens_task_folder_in_grid_mode
+    # The `o` binding is the read-only browse gesture distinct from
+    # Enter (workflow-contextual) and the verb keys (subprocess
+    # dispatch). Assert on intent words rather than literal copy so a
+    # future polish pass on the description doesn't break the test.
+    entry = Hive::Tui::Help::BINDINGS.find { |b| b[:mode] == :grid && b[:key] == "o" }
+    refute_nil entry, "expected a grid-mode binding for `o`"
+    assert_equal :open_task_folder, entry[:action]
+    assert_match(/browse/i, entry[:description])
+    assert_match(/\$EDITOR|editor/i, entry[:description])
+  end
+
   def test_capital_p_is_pr_lowercase_p_is_plan
     grid = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid }
     by_key = grid.each_with_object({}) { |b, h| h[b[:key]] = b[:action] }
@@ -94,7 +106,7 @@ class TuiHelpTest < Minitest::Test
   def test_no_grid_mode_binding_references_a_nonexistent_verb
     known_non_verb_actions = %i[
       cursor_down cursor_up cursor_jump_top cursor_jump_bottom
-      open_contextual filter project_scope help quit
+      open_contextual open_task_folder filter project_scope help quit
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
       drop_missing
     ]

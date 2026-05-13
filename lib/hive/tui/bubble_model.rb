@@ -346,6 +346,8 @@ module Hive
           recover_error(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
+        when Hive::Tui::Messages::OpenTaskFolder
+          open_task_folder(message.row)
         when Hive::Tui::Messages::LogTailPoll
           poll_log_tail
         when Hive::Tui::Messages::Back
@@ -1136,6 +1138,37 @@ module Hive
         [
           @hive_model.with(
             flash: "editing #{row.slug} in #{File.basename(argv.first)}",
+            flash_set_at: Time.now
+          ),
+          cmd
+        ]
+      rescue ArgumentError => e
+        [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      # Pure browse gesture (R3 in the plan): open the task's hive-state
+      # folder in $EDITOR. No mtime/hash/checkbox capture, no auto-
+      # continue dispatch, no marker mutation. The editor's exit IS the
+      # user's gesture; nothing post-edit is read from disk. Mirrors the
+      # spawn/clear shape of `open_input_editor` so terminal handoff
+      # works identically; differs only in dropping the input-editor
+      # auto-continue plumbing.
+      def open_task_folder(row)
+        return [ flashed("no task folder for #{row.slug}"), nil ] if row.folder.to_s.empty?
+
+        argv = editor_argv
+        callable = lambda do
+          run_editor(argv, row.folder)
+          # Post-spawn clear: wipe whatever the editor left on the main
+          # screen before bubbletea re-enters alt-screen. Mirrors the
+          # tail end of `open_input_editor`'s callable.
+          clear_terminal_for_takeover
+        end
+
+        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
+        [
+          @hive_model.with(
+            flash: "opening #{row.slug} folder in #{File.basename(argv.first)}",
             flash_set_at: Time.now
           ),
           cmd

@@ -143,6 +143,13 @@ module Hive
       # revise inline questions before re-running the stage.
       OpenInputEditor = Data.define(:row)
 
+      # `o` in grid mode — suspend the TUI and open the focused row's
+      # hive-state task folder in the user's editor for read-only
+      # browsing. Pure browse gesture: no marker mutation, no workflow
+      # verb dispatch, no auto-continue. Distinct from `Enter`
+      # (workflow-contextual) and the verb keys (subprocess dispatch).
+      OpenTaskFolder = Data.define(:row)
+
       # Sent by the editor takeover callable after the editor exits.
       # `changed` is true when the input target's mtime changed during
       # the edit window, so the status flash can distinguish a saved

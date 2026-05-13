@@ -114,6 +114,69 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # --- Plan context embedded in reviewer prompt ----------------------
+
+  def test_render_prompt_embeds_plan_context_for_all_three_reviewer_templates
+    # The plan-context section is wired into TemplateBindings as
+    # `plan_context_section`; every reviewer ERB template inserts
+    # it between the "Pass:" header and the "Behavior:" block.
+    # Asserting against all three templates here pins the contract
+    # so a contributor who adds a new reviewer template knows it
+    # must include `<%= plan_context_section %>` to stay consistent.
+    %w[
+      reviewer_claude_ce_code_review.md.erb
+      reviewer_codex_ce_code_review.md.erb
+      reviewer_pr_review_toolkit.md.erb
+    ].each do |template|
+      with_tmp_dir do |dir|
+        ctx = make_ctx(dir)
+        FileUtils.mkdir_p(ctx.task_folder)
+        File.write(
+          File.join(ctx.task_folder, "plan.md"),
+          "# Plan\n\n## Goals\n- G1. Specific goal stays in this test.\n\n## Scope Boundaries\n- N1. The deferred thing.\n"
+        )
+
+        reviewer = Hive::Reviewers::Agent.new(make_spec("prompt_template" => template), ctx)
+        prompt = reviewer.send(:render_prompt,
+                                Hive::AgentProfiles.lookup("claude"),
+                                reviewer.spec.fetch("skill"))
+
+        assert_match(/Plan context \(authoritative on scope\)/, prompt,
+                     "#{template} must render the plan-context header")
+        assert_match(/BEGIN plan\.md/, prompt,
+                     "#{template} must wrap plan content with BEGIN marker")
+        assert_includes prompt, "G1. Specific goal stays in this test.",
+                        "#{template} must inline plan.md content (Goals section)"
+        assert_includes prompt, "N1. The deferred thing.",
+                        "#{template} must inline plan.md content (Scope Boundaries section)"
+        # Behavior section must still follow the plan section.
+        assert prompt.index("BEGIN plan.md") < prompt.index("Behavior:"),
+               "#{template} must put plan context BEFORE the Behavior: instructions"
+      end
+    end
+  end
+
+  def test_render_prompt_falls_back_to_absent_note_when_plan_missing
+    # Reviewer must still get a well-formed prompt when there's no
+    # plan.md. The absent-note keeps the layout consistent and tells
+    # the reviewer to mark missing-plan in its output header.
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      # Deliberately no plan.md written.
+
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+      prompt = reviewer.send(:render_prompt,
+                              Hive::AgentProfiles.lookup("claude"),
+                              reviewer.spec.fetch("skill"))
+
+      assert_match(/no plan\.md found/, prompt,
+                   "missing plan.md must surface the absent-note in the prompt")
+      refute_match(/BEGIN plan\.md/, prompt,
+                   "no BEGIN/END markers when plan.md is absent")
+    end
+  end
+
   # --- PE1: prompt_template path-escape is ConfigError -----------------
 
   def test_path_escape_in_reviewer_prompt_template_raises_config_error

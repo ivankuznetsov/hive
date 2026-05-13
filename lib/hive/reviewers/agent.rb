@@ -1,4 +1,5 @@
 require "hive/reviewers/base"
+require "hive/reviewers/plan_context"
 require "hive/agent_profiles"
 require "hive/stages/base"
 
@@ -209,7 +210,8 @@ module Hive
             pass: ctx.pass,
             output_path: output_path,
             skill_invocation: profile.format_skill_invocation(skill),
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder)
           )
         )
       end

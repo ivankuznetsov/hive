@@ -55,6 +55,8 @@ Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFA
 
 CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/compound-engineering:ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. `templates/reviewer_pr_review_toolkit.md.erb` is a stand-in for the `pr-review-toolkit:code-reviewer` agent.
 
+Every reviewer prompt embeds the task's `plan.md` inline through `Hive::Reviewers::PlanContext.render(task_folder)` — wired into `Agent#render_prompt` as the `plan_context_section` template binding and rendered between the `Pass:` header and the `Behavior:` block in all three reviewer templates. The section frames the plan as authoritative on scope and tells reviewers to drop candidate findings that flag deliberate plan-level scope boundaries (e.g. "feature X not implemented" when the plan defers X to a separate downstream task). Without this grounding, reviewers re-derive scope from the worktree alone and routinely escalate intentional gaps — driving the same task into REVIEW_STALE pass after pass because the fixer can't resolve a plan-by-design contradiction. If `plan.md` is missing or unreadable, the section degrades to a fixed absent-note so the prompt stays well-formed and the reviewer flags missing-plan in its output header.
+
 Reviewer kind `linter` is rejected with a helpful pointer to `review.ci.command` — linters belong in the project's CI driver, not in hive's reviewer adapter (see ADR-014).
 
 ## Phase 3 — triage (`Hive::Stages::Review::Triage`)

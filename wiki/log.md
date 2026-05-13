@@ -2,40 +2,48 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-13T00:00:00Z] review+tui — /ce-review round-2 hardening (PR-A polish)
+
+**Action:** Folded a second /ce-review pass into PR #62. Partial `[x]` ticks on `fix-guardrail-NN.md` now hold the pause instead of falling through to a fix-agent re-spawn (defends against laundering risky diffs past the guardrail via a clean retry). `Hive::Stages::Review.fix_guardrail_approved?` now accepts `expected_matches:` and rejects truncation-forged approvals where the user deletes findings they didn't want to read (count is compared against `marker.attrs["matches"]`). `Hive::Reviewers::Agent#run!` clears `output_path` before every retry AND on final failure so a partial file from a crashed attempt cannot satisfy the next attempt's `:output_file_exists` check, and so final failures never leave a stale reviewer file for triage to discover. `reviews/errors-NN.md` joined the Phase 4 `protected_set` (alongside `escalations-`, `fix-guardrail-`, `fix-success-`) so a fix agent cannot delete or rewrite the reviewer-failure record without tripping `fix_tampered`. `Hive::Config.validate_reviewers!` now rejects `output_basename` values that collide with the orchestrator's reserved prefixes (would otherwise be silently treated as orchestrator-owned and hidden from triage) and rejects non-positive-Integer / non-Integer `max_attempts` at config-load. [[commands/tui]] was updated to document the new focal-file open behaviour and the 5-review auto-continue gate (the earlier U6 log entry's "wiki/commands/tui.md update deferred" note is now resolved).
+
+**Refreshed pages:**
+- [[stages/review]] — Phase 4 `protected_set` list now includes `errors-NN.md`; partial-approval defense documented in the Approval-on-resume (U5) sub-paragraph.
+- [[commands/tui]] — `needs_input` paragraph rewritten to describe the focal-file open for `reason=fix_guardrail` and the 5-review `:rerun_review` auto-continue gate (checkbox-set delta, not mtime).
+
 ## [2026-05-12T04:00:00Z] tui — auto-continue for 5-review needs_input rows (PR-A / U6)
 
 **Action:** Extended `Hive::Tui::BubbleModel#auto_continue_outcome` to dispatch the `review` workflow verb automatically when the user saves a 5-review needs_input row — the same UX shape brainstorm (`:proceed`) and plan (`:revise_plan` / `:advance_to_develop`) already had. The new `review_outcome` is gated on the **checkbox-set delta** (captured pre-edit on Enter, compared post-edit) — NOT mtime-only. A bare `:wq` that ticks mtime without changing the `[x]/[ ]` set returns `:silent`, preventing the no-op runner round-trip where the user opens the file, hits `:wq` out of habit, and a multi-minute review verb dispatches with no useful work to do. The marker is re-read from `row.state_file` (NOT the editor path — post-U8 that will be `reviews/fix-guardrail-NN.md` or `escalations-NN.md`, neither of which carry the marker frontmatter) via a new `review_marker_still_open?` helper that accepts `:review_waiting`. On a clean `:rerun_review` outcome, a confirming flash (`"approved — starting next review pass for <slug>"`) accompanies the dispatch so the snappy save-and-continue gesture doesn't set up a wrong expectation for what is in fact a multi-minute job.
 
 **Refreshed pages:**
-- None for now (the keymap surface didn't change; existing Enter-on-needs_input documentation in `wiki/commands/tui.md` still describes the row's auto-routing behaviour generically).
+- [[commands/tui]] — see the 2026-05-13 polish entry; `needs_input` paragraph updated to document the 5-review auto-continue behaviour and focal-file open.
 
 ## [2026-05-12T03:00:00Z] review — fix-guardrail [x]-approval semantic on resume (PR-A / U5)
 
 **Action:** Gave `[x]` ticks in `reviews/fix-guardrail-NN.md` an actual runtime meaning. Previously the file was orchestrator-owned and inert — a user could tick all `[x]` and re-run, but the marker stayed `REVIEW_WAITING reason=fix_guardrail` and the loop never advanced. Added `Hive::Stages::Review.fix_guardrail_approved?(ctx)` which reads the file and returns `true` iff every checkbox line is `[x]` (case-insensitive on the `x`; header-only and absent both return false). The runner consults this on every loop iteration: when `resuming_from_waiting?(marker, pass)` AND `marker.attrs["reason"] == "fix_guardrail"` AND `fix_guardrail_approved?(ctx_pass)` all hold, Phase 2/3/4 are skipped for that pass — the prior pass's commits stand, `fix-success-NN.md` is written, marker resets to `:none`, and the loop advances. Approval is single-shot per pass (R11): a fresh `fix-guardrail-(NN+1).md` is written with `[ ]` lines if the next pass also trips. The new check fires BEFORE the `resume_no_findings` empty-reviewer-files guard so approval doesn't require live reviewer files. `reviews/fix-guardrail-NN.md` is also included in the Phase 4 `protected_set` (alongside escalations + fix-success) so a compromised fix agent cannot pre-write all-`[x]` lines to stage an approval token (the orchestrator's own legitimate write via `write_fix_guardrail_findings` runs AFTER the snapshot diff and is unaffected). Together with U6's TUI auto-continue (next), this closes the gap where ticking `[x]` did nothing and the TUI kept re-opening the same folder on every Enter.
 
 **Refreshed pages:**
-- `wiki/stages/review.md` — Phase 4 paragraph extended with a dedicated "Approval-on-resume (U5)" sub-paragraph documenting the `[x]` semantic, single-shot scope, and protected-files defence.
+- [[stages/review]] — Phase 4 paragraph extended with a dedicated "Approval-on-resume (U5)" sub-paragraph documenting the `[x]` semantic, single-shot scope, and protected-files defence.
 
 ## [2026-05-12T02:00:00Z] review — orchestrator-owned errors-NN.md failure sink (PR-A / U2)
 
 **Action:** Failed reviewer adapters no longer pollute `reviews/<output_basename>-NN.md` with stub `- [ ] reviewer "X" failed:` lines that triage promoted to escalations. The new failure sink is `reviews/errors-NN.md` — an orchestrator-owned file (added `"errors-"` to `ORCHESTRATOR_OWNED_PREFIXES` so `reviewer_file?`, `discover_reviewer_files`, `collect_accepted_findings`, and `pass_completion_status` all skip it consistently). One header + one line per failed reviewer per pass; multiple failures within a single `run_reviewers` invocation append to the same file with no duplicate header. The file is **truncated** at the first failure of each invocation (not appended-across-runs), so a marker-clear-and-rerun on the same pass produces clean errors-NN.md content rather than concatenated history. The all-failed safety net (`statuses.all?(:error) → :all_failed → REVIEW_ERROR phase=reviewers reason=all_failed`) is preserved unchanged. Together with U1 (adapter retry), this closes the upstream pollution where a single reviewer timeout produced 4 passes of carry-over `[ ]` stubs in `escalations-NN.md` the user had to manually distinguish from real architectural escalations.
 
 **Refreshed pages:**
-- `wiki/stages/review.md` — Phase 2 reviewers paragraph rewritten to describe the retry+sink behavior end-to-end (U1+U2 together) and to point at `errors-NN.md` as the failure-record file.
+- [[stages/review]] — Phase 2 reviewers paragraph rewritten to describe the retry+sink behavior end-to-end (U1+U2 together) and to point at `errors-NN.md` as the failure-record file.
 
 ## [2026-05-12T01:00:00Z] review — reviewer adapter retry with exponential backoff (PR-A / U1)
 
 **Action:** Added an adapter-local retry loop to `Hive::Reviewers::Agent#run!` so a reviewer spawn that times out or fails transiently is retried up to `max_attempts` times (default 2; configurable per reviewer via the optional `max_attempts` spec field; `1` disables retry). Backoff between failed attempts is exponential — 1s, 2s, 4s, 8s, 8s — capped at `Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC` (8s) so a high `max_attempts` doesn't introduce minute-scale waits. Each retry gets a `-retry<N>` suffix on its `log_label` so the per-pass log directory shows the retry history. The final `error_message` carries `after N attempt(s)` when `max_attempts > 1` and the original error-message shape otherwise. Non-Integer values reaching the adapter (config-load path bypassing `Hive::Config.validate_reviewers!`) fall back to the default rather than crashing inside `spawn_agent`. Closes the upstream problem where a single reviewer timeout produced a `- [ ] reviewer "X" failed:` stub the user had to triage as if it were a real finding.
 
 **Refreshed pages:**
-- None yet (`wiki/stages/review.md` Phase 2 paragraph will be updated together with U2 since the user-visible "what happens on persistent failure" story lands in `reviews/errors-NN.md`).
+- [[stages/review]] — Phase 2 paragraph updated together with the U2 entry; see that entry for the rewrite.
 
 ## [2026-05-12T00:00:00Z] review — dotenv_edit template-suffix exclusion (PR-A / U4)
 
 **Action:** Tightened the post-fix guardrail's `dotenv_edit` pattern in `lib/hive/stages/review/fix_guardrail/patterns.rb` so committed templates no longer trip the guardrail. The previous regex `\.env(?:\..+)?\z` matched every file whose name started with `.env`, including the canonical templates `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults` — files that exist by design to be committed and contain no real credentials (12-factor, Rails, Next.js, Laravel convention). The new regex uses a negative lookahead that excludes those exact suffixes while preserving matches on real per-env files (`.env`, `.env.local`, `.env.production`, `.env.test`, `.env.staging`, `.env.development`) and the boundary case `.env.example.bak` (not the canonical template — an editor backup or derived file). Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` with a custom `dotenv_template_edit` pattern. Originated from the xbookmark task `i-want-to-create-a-260504-1253` paused on `REVIEW_WAITING reason=fix_guardrail matches=2 pass=4` where both matches were `.env.example` edits.
 
 **Refreshed pages:**
-- `wiki/stages/review.md` — Phase 4 guardrail pattern table updated for `dotenv_edit` with the explicit excluded-template-suffix list and the `patterns_override` escape hatch.
+- [[stages/review]] — Phase 4 guardrail pattern table updated for `dotenv_edit` with the explicit excluded-template-suffix list and the `patterns_override` escape hatch.
 
 ## [2026-05-11T15:22:00Z] review — Protect fix-success sentinel from fix agents
 

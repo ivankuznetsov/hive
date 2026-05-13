@@ -267,6 +267,74 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_run_clears_stale_output_path_before_each_attempt
+    # ce-review P1 #3: a prior crashed attempt may have left a
+    # non-empty file at output_path. spawn_agent's
+    # :output_file_exists check only verifies file-exists + non-empty
+    # + exit-0, so a retry that exits 0 (even with no real findings)
+    # would be accepted on stale content. The adapter must clear
+    # output_path before each spawn attempt.
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir)
+      FileUtils.mkdir_p(File.dirname(reviewer.output_path))
+      File.write(reviewer.output_path, "STALE content from a prior crashed attempt\n")
+
+      cleared_observations = []
+      with_spawn_stub([ ok_result ]) do |count_fn, _labels|
+        # Observe the file state inside the stub. spawn_agent is
+        # replaced by the test stub, so we can inspect what's on disk
+        # at the moment the stub runs.
+        original = Hive::Stages::Base.method(:spawn_agent)
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+          cleared_observations << File.exist?(kwargs[:expected_output])
+          { status: :ok }
+        end
+        begin
+          reviewer.run!
+        ensure
+          Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+          Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+        end
+        _ = count_fn # silence unused-block-arg
+      end
+
+      refute_includes cleared_observations, true,
+                      "stale output_path must be deleted BEFORE spawn_agent runs"
+    end
+  end
+
+  def test_run_deletes_output_path_after_final_failure
+    # ce-review P1 #3: even after the retry loop exhausts, a partial
+    # file from the last attempt could be left at output_path. Triage's
+    # discover_reviewer_files would then mistake it for real reviewer
+    # output. Final failures must surface only through errors-NN.md.
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 1)
+      FileUtils.mkdir_p(File.dirname(reviewer.output_path))
+
+      # Stub spawn_agent to "fail" but leak a partial output file —
+      # simulating an agent that wrote a half-finished file then
+      # exited nonzero.
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        File.write(kwargs[:expected_output], "## High\n- [ ] partial output before crash\n")
+        { status: :error, error_message: "agent exited with status=:timeout" }
+      end
+      begin
+        result = reviewer.run!
+        assert result.error?
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+
+      refute File.exist?(reviewer.output_path),
+             "final-failure cleanup must delete output_path so triage doesn't see partial content"
+    end
+  end
+
   def test_run_recovers_from_non_integer_max_attempts_value
     # Defensive: if validate_reviewers! is bypassed (test fixtures,
     # ad-hoc cfg construction, future YAML path) a non-Integer value

@@ -211,29 +211,47 @@ module Hive
           # REVIEW_STALE-on-approved-pass; user-supplied marker pass
           # mismatch is treated as a hand-edit and rejected.
           if resuming_from_waiting?(marker, pass) &&
-             marker.attrs["reason"] == "fix_guardrail" &&
-             fix_guardrail_approved?(ctx_pass)
-            if worktree_dirty?(worktree_path)
-              Hive::Markers.set(task.state_file, :review_error,
-                                phase: :resume, reason: "approval_dirty_worktree", pass: pass)
-              return { commit: "approval_dirty_worktree_pass_#{format('%02d', pass)}",
-                       status: :review_error }
-            end
+             marker.attrs["reason"] == "fix_guardrail"
+            expected_matches = marker.attrs["matches"]&.to_s
+            expected_matches = expected_matches&.match?(/\A\d+\z/) ? expected_matches.to_i : nil
+            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
+              if worktree_dirty?(worktree_path)
+                Hive::Markers.set(task.state_file, :review_error,
+                                  phase: :resume, reason: "approval_dirty_worktree", pass: pass)
+                return { commit: "approval_dirty_worktree_pass_#{format('%02d', pass)}",
+                         status: :review_error }
+              end
 
-            write_fix_success(ctx_pass)
-            marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
-            fix_retry_pass = nil
-            # If we approved the very last pass-cap-N pass, advancing
-            # to pass N+1 would immediately hit the `pass > max_passes`
-            # guard above and write REVIEW_STALE — masking the
-            # approval. Break to Phase 5 (browser test) instead so the
-            # approved commits make it through to the terminal state.
-            if pass >= max_passes
-              break
-            end
+              write_fix_success(ctx_pass)
+              marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+              fix_retry_pass = nil
+              # If we approved the very last pass-cap-N pass, advancing
+              # to pass N+1 would immediately hit the `pass > max_passes`
+              # guard above and write REVIEW_STALE — masking the
+              # approval. Break to Phase 5 (browser test) instead so
+              # the approved commits make it through to the terminal
+              # state.
+              break if pass >= max_passes
 
-            pass += 1
-            next
+              pass += 1
+              next
+            else
+              # Partial-approval defense (ce-review P0 #1). When the
+              # user has ticked SOME `[x]` in fix-guardrail-NN.md but
+              # not all, the prior PR-A behaviour was to fall through
+              # to the generic REVIEW_WAITING resume path and re-spawn
+              # the fix agent against the previous-pass reviewer `[x]`
+              # marks. That violates the user's "I only approved some"
+              # mental model and can launder a risky diff past the
+              # guardrail when the fix agent's retry produces a clean
+              # diff. Instead, hold the pause: leave the marker
+              # untouched, return :review_waiting. Recovery options:
+              # (a) tick the rest of the boxes, (b) `hive markers
+              # clear FOLDER --name REVIEW_WAITING` and re-run, or
+              # (c) revert the offending commits in the worktree.
+              return { commit: "review_waiting_fix_guardrail_pending_pass_#{format('%02d', pass)}",
+                       status: :review_waiting }
+            end
           end
 
           # Two paths skip Phase 2/3 and jump to Phase 4 on existing
@@ -342,6 +360,11 @@ module Hive
           protected_set = FIX_PROTECTED_FILES + [
             "reviews/escalations-#{format('%02d', pass)}.md",
             "reviews/fix-guardrail-#{format('%02d', pass)}.md",
+            # ce-review P2 #4: reviews/errors-NN.md is the orchestrator-
+            # owned record of reviewer infra failures from this pass. A
+            # fix agent rewriting or deleting it would erase the failure
+            # provenance the user relies on for triage.
+            "reviews/errors-#{format('%02d', pass)}.md",
             fix_success_relative_path(pass)
           ]
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
@@ -843,17 +866,31 @@ module Hive
 
       # U5 — check whether reviews/fix-guardrail-NN.md has been
       # user-approved for the given pass. Approved = every checkbox
-      # line is `[x]`. Returns false for: file absent, header-only
-      # file (zero checkbox lines), or any `[ ]` remaining. The
-      # checkbox regex matches `- [ ]` and `- [x]` lines (case-
+      # line is `[x]` AND (when `expected_matches:` is supplied) the
+      # checkbox count matches what the runner originally wrote.
+      # Returns false for: file absent, header-only file (zero
+      # checkbox lines), any `[ ]` remaining, or count mismatch.
+      #
+      # The checkbox regex matches `- [ ]` and `- [x]` lines (case-
       # insensitive on the `x`); other line shapes (the title, blank
       # lines, any free-form prose under it) are ignored.
+      #
+      # `expected_matches:` (ce-review P1 #2): when the caller supplies
+      # the original match count from `marker.attrs["matches"]`, reject
+      # approval when the file's checkbox count differs — defends
+      # against a "truncation-forged" approval where the user deletes
+      # the findings they didn't want to read and ticks `[x]` only on
+      # the remaining one. Without this gate, the runner would honour
+      # an approval the user never actually granted for the deleted
+      # lines. nil expected_matches keeps the legacy behaviour
+      # (any-count, all-[x] = approved), preserving direct-test
+      # ergonomics that don't drive through the marker.
       #
       # Caller invariant: only consult this when the resume marker is
       # `:review_waiting reason=fix_guardrail` for the same pass. The
       # helper itself does not check the marker — it is a pure file
       # inspector. The orchestrator guards the call site.
-      def fix_guardrail_approved?(ctx)
+      def fix_guardrail_approved?(ctx, expected_matches: nil)
         path = File.join(
           ctx.task_folder,
           "reviews",
@@ -862,14 +899,17 @@ module Hive
         return false unless File.exist?(path)
 
         checkbox_re = /^\s*-\s+\[([ xX])\]\s+/
-        any_checkbox = false
+        checked_count = 0
         File.foreach(path) do |line|
           next unless (m = line.match(checkbox_re))
-
-          any_checkbox = true
           return false if m[1] == " "
+
+          checked_count += 1
         end
-        any_checkbox
+        return false if checked_count.zero?
+        return false if expected_matches && checked_count != expected_matches
+
+        true
       end
 
       # Write the per-pass fix-success sentinel. Called from the two

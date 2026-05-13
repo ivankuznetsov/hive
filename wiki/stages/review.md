@@ -39,7 +39,7 @@ branch on triage:
   all clean              → Phase 5 (browser test) → REVIEW_COMPLETE
 ```
 
-Pass cap (`review.max_passes`, default 4) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary; exceeding it sets `REVIEW_STALE reason=wall_clock`.
+Pass cap (`review.max_passes`, default 4) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary AND between reviewers inside `run_reviewers` (so the adapter-local retry budget cannot drain the whole 5400s window inside one Phase 2 invocation); exceeding it sets `REVIEW_STALE reason=wall_clock`.
 
 ## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)
 

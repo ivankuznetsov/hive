@@ -33,6 +33,14 @@ module Hive
         result = nil
         loop do
           attempts += 1
+          # ce-review P1 #3: clear any stale output_path before each
+          # spawn so a partial file written by a prior crashed attempt
+          # cannot satisfy the next attempt's :output_file_exists
+          # success check (which only verifies file-exists + non-empty
+          # + exit-0). Without this, a transient-failure → retry-success
+          # sequence could be accepted on stale content.
+          File.delete(output_path) if File.exist?(output_path)
+
           result = Hive::Stages::Base.spawn_agent(
             synthetic_task,
             prompt: prompt,
@@ -52,6 +60,17 @@ module Hive
           break if attempts >= max_attempts
 
           backoff(backoff_seconds_for(attempts))
+        end
+
+        # ce-review P1 #3 (final-failure cleanup): the last attempt may
+        # have left a partial output_path file behind. Triage's
+        # discover_reviewer_files would otherwise find it and treat it
+        # as real reviewer output. Final failures must surface only
+        # through reviews/errors-NN.md (written by the orchestrator's
+        # run_reviewers in lib/hive/stages/review.rb), not via a stale
+        # output_path file.
+        if result[:status] != :ok && File.exist?(output_path)
+          File.delete(output_path)
         end
 
         build_result(result, attempts, max_attempts)

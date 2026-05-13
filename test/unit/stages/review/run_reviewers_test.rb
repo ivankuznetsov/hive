@@ -548,6 +548,25 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_fix_guardrail_approved_rejects_truncated_file_with_count_mismatch
+    # ce-review P1 #2: a user who deletes the findings they didn't
+    # want to read and ticks `[x]` only on the survivor could
+    # otherwise forge approval. The runner threads marker.attrs["matches"]
+    # through as expected_matches: to reject the count mismatch.
+    with_tmp_dir do |dir|
+      write_guardrail_file(dir, pass: 4, body: <<~MD)
+        # Fix-guardrail findings for pass 04
+
+        - [x] dotenv_edit: .env.example:?: .env.example
+      MD
+      ctx = make_ctx(dir).with(pass: 4)
+      assert Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 1),
+             "count-matching all-[x] file remains approved"
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 2),
+             "all-[x] but with deleted findings (count mismatch) must NOT be approved"
+    end
+  end
+
   def test_fix_guardrail_approved_per_pass_isolation
     # An all-[x] file for pass 4 is approval for pass 4 only — it
     # does not affect pass 5's approval state. R11 single-shot

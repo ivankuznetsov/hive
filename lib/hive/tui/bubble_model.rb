@@ -3,6 +3,7 @@ require "digest"
 require "set"
 require "shellwords"
 require "hive"
+require "hive/commands/new"
 require "hive/markers"
 require "hive/task"
 require "hive/findings"
@@ -2014,7 +2015,12 @@ module Hive
       # title or no-projects-registered states flash an error and return
       # to :grid without spawning a child.
       def submit_new_idea
-        title = @hive_model.new_idea_buffer.to_s.strip
+        buffer = @hive_model.new_idea_buffer.to_s
+        if rich_new_idea_buffer?(buffer)
+          return submit_rich_new_idea(buffer)
+        end
+
+        title = buffer.strip
         # Empty submit is a likely fat-finger Enter; flash and stay in
         # the prompt so the operator can keep typing without re-opening
         # via `n`. The buffer is preserved so any leading whitespace
@@ -2067,6 +2073,106 @@ module Hive
         ]
       end
 
+      def rich_new_idea_buffer?(buffer)
+        @hive_model.new_idea_attachments.any? || extract_image_labels(buffer).any?
+      end
+
+      def submit_rich_new_idea(buffer)
+        if (reason = rich_new_idea_validation_error(buffer))
+          return [
+            @hive_model.with(flash: reason, flash_set_at: Time.now),
+            nil
+          ]
+        end
+
+        project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
+        if project.nil?
+          flash = new_idea_resolution_flash(@hive_model)
+          return [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
+        end
+
+        title = derive_rich_new_idea_title(buffer)
+        body = render_rich_new_idea_body(buffer)
+        tuples = rich_new_idea_attachment_tuples
+
+        Hive::Commands::New.new(
+          project,
+          title,
+          body_override: body,
+          attachments: tuples
+        ).call!
+        cleanup_new_idea_staging
+        count = @hive_model.new_idea_attachments.size
+        image_word = count == 1 ? "image" : "images"
+        [ reset_to_grid_with_flash("+ #{title.inspect} → #{project} (#{count} #{image_word})"), nil ]
+      rescue Hive::Commands::New::ProjectNotFound,
+             Hive::Commands::New::InvalidSlugError,
+             Hive::Commands::New::SlugCollisionError,
+             SystemCallError,
+             IOError,
+             Hive::Tui::ComposerStaging::WriteError => e
+        Hive::Tui::Debug.log("submit_new_idea", "rich submit failed #{e.class}: #{e.message}")
+        [
+          @hive_model.with(
+            flash: "new failed: #{Hive::Tui::Text.sanitize(e.message)[0, 160]}",
+            flash_set_at: Time.now
+          ),
+          nil
+        ]
+      end
+
+      def rich_new_idea_validation_error(buffer)
+        placeholder_labels = extract_image_labels(buffer).map { |n| "image#{n}" }.to_set
+        attachment_labels = @hive_model.new_idea_attachments.map(&:label).to_set
+
+        missing_attachment = (placeholder_labels - attachment_labels).first
+        return "broken image placeholder: #{missing_attachment}" if missing_attachment
+
+        orphan_attachment = (attachment_labels - placeholder_labels).first
+        return "broken image placeholder: #{orphan_attachment}" if orphan_attachment
+
+        @hive_model.new_idea_attachments.each do |attachment|
+          return "broken image placeholder: #{attachment.label}" unless File.exist?(attachment.staging_path)
+        end
+
+        nil
+      end
+
+      def extract_image_labels(buffer)
+        buffer.to_s.scan(/\[image(\d+)\]/).flatten.map(&:to_i)
+      end
+
+      def derive_rich_new_idea_title(buffer)
+        stripped = buffer.to_s.gsub(/\[image\d+\]/, " ").gsub(/\s+/, " ").strip
+        stripped.empty? ? "task" : stripped
+      end
+
+      def render_rich_new_idea_body(buffer)
+        attachments = attachments_by_label
+        buffer.to_s.gsub(/\[image(\d+)\]/) do
+          label = "image#{Regexp.last_match(1)}"
+          attachment = attachments.fetch(label)
+          ext = attachment_extension(attachment)
+          "![](assets/bug-#{Regexp.last_match(1)}.#{ext})"
+        end
+      end
+
+      def rich_new_idea_attachment_tuples
+        @hive_model.new_idea_attachments.map do |attachment|
+          number = attachment.label.to_s.delete_prefix("image")
+          [ attachment.staging_path, "bug-#{number}.#{attachment_extension(attachment)}" ]
+        end
+      end
+
+      def attachments_by_label
+        @hive_model.new_idea_attachments.to_h { |attachment| [ attachment.label, attachment ] }
+      end
+
+      def attachment_extension(attachment)
+        ext = File.extname(attachment.staging_path.to_s).delete_prefix(".").downcase
+        ext.empty? ? "png" : ext
+      end
+
       # Shared transition for every submit_new_idea exit path: clear the
       # buffer, return to :grid, set a flash. Three call sites in the
       # success/validation branches plus the rescue all funnel through
@@ -2076,6 +2182,8 @@ module Hive
           mode: :grid,
           new_idea_buffer: "",
           new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil,
           flash: text,
           flash_set_at: Time.now
         )

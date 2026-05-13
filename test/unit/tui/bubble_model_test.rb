@@ -901,6 +901,110 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :grid, @model.hive_model.mode, "failure still returns to :grid"
   end
 
+  def test_rich_new_idea_submit_blocks_placeholder_without_attachment
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-01",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: snap,
+        new_idea_buffer: "see [image1]",
+        new_idea_cursor: 12
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_equal "see [image1]", @model.hive_model.new_idea_buffer
+    assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_new_idea_submit_blocks_orphan_attachment
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1",
+      staging_path: "/tmp/hive-tui-composer/bug-1.png",
+      source_kind: :image_bytes
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        new_idea_buffer: "plain text",
+        new_idea_attachments: [ attachment ]
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_new_idea_submit_blocks_missing_staging_file
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1",
+      staging_path: "/tmp/hive-tui-composer/missing-bug-1.png",
+      source_kind: :image_bytes
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        new_idea_buffer: "see [image1]",
+        new_idea_attachments: [ attachment ]
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_new_idea_submit_project_not_found_preserves_buffer_and_attachments
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
+        staging_path = File.join(staging_dir, "bug-1.png")
+        File.binwrite(staging_path, "image".b)
+        attachment = Hive::Tui::Model::Attachment.new(
+          label: "image1",
+          staging_path: staging_path,
+          source_kind: :image_bytes
+        )
+        snap = Hive::Tui::Snapshot.from_payload(
+          "generated_at" => "2026-05-01",
+          "projects" => [ { "name" => "ghost", "tasks" => [] } ]
+        )
+        @model = Hive::Tui::BubbleModel.new(
+          hive_model: Hive::Tui::Model.initial.with(
+            mode: :new_idea,
+            snapshot: snap,
+            new_idea_buffer: "see [image1]",
+            new_idea_cursor: 12,
+            new_idea_attachments: [ attachment ],
+            new_idea_staging_dir: staging_dir
+          ),
+          dispatch: @dispatch
+        )
+
+        capture_io { @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+
+        assert_equal :new_idea, @model.hive_model.mode
+        assert_equal "see [image1]", @model.hive_model.new_idea_buffer
+        assert_equal [ attachment ], @model.hive_model.new_idea_attachments
+        assert File.exist?(staging_path)
+        assert_match(/project not initialized/, @model.hive_model.flash.to_s)
+      ensure
+        Hive::Tui::ComposerStaging.cleanup!(staging_dir) if staging_dir
+      end
+    end
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block

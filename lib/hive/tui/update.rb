@@ -417,7 +417,8 @@ module Hive
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
-          new_idea_staging_dir: nil
+          new_idea_staging_dir: nil,
+          new_idea_attachment_counter: 0
         )
       end
 
@@ -442,10 +443,17 @@ module Hive
           source_kind: msg.source_kind,
           ext: msg.ext
         )
+        # Bump the monotonic counter past `msg.label`'s numeric suffix
+        # so a future paste cannot re-use this label even if the next
+        # prune drops the attachment (label format is `imageN`; the
+        # composer's `stage_image` reads the counter to derive `N`).
+        label_number = msg.label.to_s.delete_prefix("image").to_i
+        next_counter = [ model.new_idea_attachment_counter.to_i, label_number ].max
         model.with(
           new_idea_buffer: prefix + placeholder + suffix,
           new_idea_cursor: cursor + placeholder.length,
-          new_idea_attachments: model.new_idea_attachments + [ attachment ]
+          new_idea_attachments: model.new_idea_attachments + [ attachment ],
+          new_idea_attachment_counter: next_counter
         )
       end
 
@@ -494,21 +502,11 @@ module Hive
       end
 
       # Backspacing through `[image1]` one character at a time leaves a
-      # partial placeholder (`[image`) in the buffer until the user
-      # finishes. Once a placeholder no longer fully matches, the
-      # corresponding attachment becomes an orphan that the submit
-      # validator would reject as "broken image placeholder". Detect
-      # the case here and drop the orphan so the user isn't trapped in
-      # a state that can only be unwound by Esc + retype.
-      #
-      # Side note for the operator-visible UX: a single backspace
-      # inside `[imageN]` is enough to silently drop the attachment
-      # from the model. The staging file is still on disk (cleaned on
-      # submit/cancel via `cleanup_new_idea_staging`), but the
-      # placeholder is gone — the user has to re-paste the image to
-      # restore it. We intentionally don't flash here because the
-      # behaviour is symmetric with "type any character to bury the
-      # placeholder"; surfacing it on every keystroke would be noisy.
+      # partial placeholder in the buffer; once it no longer fully
+      # matches, the attachment becomes an orphan that submit would
+      # reject. Drop the orphan so the user isn't trapped in a state
+      # that can only be unwound by Esc + retype. The on-disk file is
+      # cleaned with the rest of the staging dir on submit/cancel.
       def prune_orphan_attachments(model)
         labels_in_buffer = model.new_idea_buffer.to_s.scan(/\[image(\d+)\]/).flatten.map { |n| "image#{n}" }.to_set
         kept = model.new_idea_attachments.select { |att| labels_in_buffer.include?(att.label) }
@@ -523,7 +521,8 @@ module Hive
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
-          new_idea_staging_dir: nil
+          new_idea_staging_dir: nil,
+          new_idea_attachment_counter: 0
         )
       end
 

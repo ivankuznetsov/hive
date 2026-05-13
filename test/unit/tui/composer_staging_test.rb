@@ -6,35 +6,35 @@ class HiveTuiComposerStagingTest < Minitest::Test
   include HiveTestHelper
 
   def test_ensure_dir_creates_tmpdir_and_returns_updated_model
-    dir, new_model = Hive::Tui::ComposerStaging.ensure_dir!(Hive::Tui::Model.initial)
+    result = Hive::Tui::ComposerStaging.ensure_dir!(Hive::Tui::Model.initial)
 
-    assert File.directory?(dir)
-    assert_equal dir, new_model.new_idea_staging_dir
-    assert File.expand_path(dir).start_with?("#{File.expand_path(Dir.tmpdir)}#{File::SEPARATOR}")
+    assert File.directory?(result.dir)
+    assert_equal result.dir, result.model.new_idea_staging_dir
+    assert File.expand_path(result.dir).start_with?("#{File.expand_path(Dir.tmpdir)}#{File::SEPARATOR}")
   ensure
-    Hive::Tui::ComposerStaging.cleanup!(dir) if dir
+    Hive::Tui::ComposerStaging.cleanup!(result.dir) if result
   end
 
-  def test_ensure_dir_reuses_existing_dir_without_model_change
+  def test_ensure_dir_reuses_existing_dir_and_returns_input_model
     with_tmp_dir do |dir|
       model = Hive::Tui::Model.initial.with(new_idea_staging_dir: dir)
 
-      returned_dir, new_model = Hive::Tui::ComposerStaging.ensure_dir!(model)
+      result = Hive::Tui::ComposerStaging.ensure_dir!(model)
 
-      assert_equal dir, returned_dir
-      assert_nil new_model
+      assert_equal dir, result.dir
+      assert_same model, result.model
     end
   end
 
-  def test_next_label_and_path_uses_one_indexed_image_filename
-    label, path = Hive::Tui::ComposerStaging.next_label_and_path("/tmp/stage", 0)
+  def test_next_label_and_path_uses_provided_number_directly
+    label, path = Hive::Tui::ComposerStaging.next_label_and_path("/tmp/stage", 1)
 
     assert_equal "image1", label
     assert_equal "/tmp/stage/image-1.png", path
   end
 
-  def test_next_label_and_path_uses_count_and_extension
-    label, path = Hive::Tui::ComposerStaging.next_label_and_path("/tmp/stage", 2, ext: "jpg")
+  def test_next_label_and_path_uses_number_and_extension
+    label, path = Hive::Tui::ComposerStaging.next_label_and_path("/tmp/stage", 3, ext: "jpg")
 
     assert_equal "image3", label
     assert_equal "/tmp/stage/image-3.jpg", path
@@ -47,7 +47,7 @@ class HiveTuiComposerStagingTest < Minitest::Test
   end
 
   def test_write_bytes_and_cleanup
-    dir, = Hive::Tui::ComposerStaging.ensure_dir!(Hive::Tui::Model.initial)
+    dir = Hive::Tui::ComposerStaging.ensure_dir!(Hive::Tui::Model.initial).dir
     path = File.join(dir, "image-1.png")
 
     Hive::Tui::ComposerStaging.write_bytes!(path, "png bytes".b)
@@ -62,13 +62,16 @@ class HiveTuiComposerStagingTest < Minitest::Test
       Hive::Tui::ComposerStaging.write_bytes!("/no/such/dir/image-1.png", "x".b)
     end
 
-    assert err.cause_class, "WriteError must carry the original Errno class"
-    assert err.cause_class <= SystemCallError,
-      "cause_class must be a SystemCallError subclass (got #{err.cause_class})"
+    # The test path deterministically produces ENOENT (no/such/dir is
+    # absent). Pinning the specific Errno class catches a future
+    # rescue widening that swallows a class the operator-facing flash
+    # depends on naming.
+    assert_equal Errno::ENOENT, err.cause_class,
+      "WriteError must preserve the originating Errno class (got #{err.cause_class})"
   end
 
   def test_copy_file
-    dir, = Hive::Tui::ComposerStaging.ensure_dir!(Hive::Tui::Model.initial)
+    dir = Hive::Tui::ComposerStaging.ensure_dir!(Hive::Tui::Model.initial).dir
     with_tmp_dir do |src_dir|
       src = File.join(src_dir, "shot.png")
       dest = File.join(dir, "image-1.png")

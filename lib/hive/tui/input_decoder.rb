@@ -138,6 +138,12 @@ module Hive
 
       def finalize_paste_timeout(messages)
         text = normalize_paste(@paste_buffer)
+        # Asymmetry with `drain_paste`: the normal paste-end path
+        # always emits an empty-text RawTextInput so the composer can
+        # probe an image-only clipboard (U4). A timed-out paste does
+        # NOT — we already lost the `\e[201~` marker, so synthesising
+        # a clipboard probe on the way out would hit a foreign-mode
+        # message after the flash, with no operator-visible benefit.
         messages << Messages::RawTextInput.new(text: text, paste: true) unless text.empty?
         messages << Messages::Flash.new(text: "paste timed out")
         @paste_buffer.clear

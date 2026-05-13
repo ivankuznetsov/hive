@@ -1,6 +1,7 @@
 require "test_helper"
 require "pty"
 require "io/console"
+require "timeout"
 require "hive/commands/init"
 require "hive/commands/run"
 
@@ -44,14 +45,18 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
   end
 
   def wait_for_pid_exit(pid, deadline_seconds:)
-    deadline = Time.now + deadline_seconds
-    loop do
-      reaped, status = Process.waitpid2(pid, Process::WNOHANG)
-      return status if reaped
-      return nil if Time.now > deadline
-
-      sleep 0.05
+    # Block on `waitpid2` under Timeout instead of a poll+sleep loop.
+    # The project's E2E rule (CLAUDE.md) forbids hard-coded sleeps in
+    # integration tests; a blocking wait under Timeout is the
+    # canonical alternative — the child either exits before the
+    # deadline (Process.wait2 returns) or `Timeout::Error` fires and
+    # we return nil so the caller can decide.
+    Timeout.timeout(deadline_seconds) do
+      _pid, status = Process.waitpid2(pid)
+      status
     end
+  rescue Timeout::Error
+    nil
   end
 
   # Per project CLAUDE.md "NEVER skip tests conditionally based on
@@ -87,14 +92,23 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
           writer.write("\e[200~\e[201~")
           writer.write(" and desktop ")
           writer.write("\e[200~\e[201~")
-          writer.write("\r")
           writer.flush
 
+          # Pre-submit assertion: the composer's prompt badge must
+          # show "3 images" before Enter is pressed. Splitting from
+          # the post-submit grid check ensures both are observed —
+          # the previous "OR bug-here" form let a fast CI runner skip
+          # the badge entirely once the post-submit slug landed.
           begin
-            buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
-              buf.include?("3 images") || buf.include?("bug-here")
-            end
-            assert_match(/3 images|bug-here/, buffer)
+            badge_buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?("3 images") }
+            assert_includes badge_buffer, "3 images",
+              "composer prompt badge must show `[3 images]` before submit"
+
+            writer.write("\r")
+            writer.flush
+            grid_buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?("bug-here") }
+            assert_includes grid_buffer, "bug-here",
+              "post-submit grid must show the bug-here slug row"
 
             writer.write("q")
             writer.flush
@@ -120,6 +134,29 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
           assert_equal expected, File.binread(File.join(task, "assets", "image-#{i}.png"))
         end
 
+        # Plan / smoke-test contract pin: `git commit` must capture
+        # `idea.md` plus every `assets/image-N.png`, not just the
+        # markdown. The commit lands in the `.hive-state` git repo
+        # (separate worktree), so query that one, not the project
+        # root. A regression where the TUI rich-submit `git add`s
+        # only idea.md would silently break the multimodal handoff —
+        # the brainstorm subprocess gets the asset arguments but the
+        # commit history has nothing to back them up.
+        hive_state_dir = File.join(dir, ".hive-state")
+        git_files = `git -C #{hive_state_dir} log -1 --name-only --pretty=format: HEAD`
+          .lines.map(&:chomp).reject(&:empty?)
+        assert(
+          git_files.any? { |f| f.end_with?("idea.md") },
+          "TUI rich-submit commit must include idea.md (got: #{git_files.inspect})"
+        )
+        (1..3).each do |i|
+          assert(
+            git_files.any? { |f| f.end_with?("assets/image-#{i}.png") },
+            "TUI rich-submit commit must include assets/image-#{i}.png " \
+            "(got: #{git_files.inspect})"
+          )
+        end
+
         target = File.join(dir, ".hive-state", "stages", "2-brainstorm", File.basename(task))
         FileUtils.mv(task, target)
         brainstorm_md = File.join(target, "brainstorm.md")
@@ -133,9 +170,19 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
         argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
         assert_includes argv_log, "cwd=#{target}"
-        assert_includes argv_log, "assets/image-1.png"
-        assert_includes argv_log, "assets/image-2.png"
-        assert_includes argv_log, "assets/image-3.png"
+        # R10 multimodal handoff: assets must land somewhere inside
+        # an argv element, not just appear as a fake-claude header
+        # field (cwd=, date). Reject anything that surfaces only in
+        # the per-invocation header by splitting the log at the first
+        # `arg=` line and grepping only that tail.
+        argv_tail = argv_log.split(/^arg=/m, 2)[1].to_s
+        (1..3).each do |i|
+          assert_includes argv_tail, "assets/image-#{i}.png",
+            "fake-claude argv (after first `arg=` marker) must contain " \
+            "assets/image-#{i}.png; a regression that smuggles the path into " \
+            "the per-invocation header rather than an argv element would " \
+            "otherwise pass the bare substring check"
+        end
       ensure
         FileUtils.rm_rf(log_dir) if log_dir
       end

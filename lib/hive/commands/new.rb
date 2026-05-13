@@ -18,14 +18,27 @@ module Hive
       # (12 chars) under the 64-char SLUG_RE max.
       DERIVED_PREFIX_MAX = 51
 
-      class ProjectNotFound < Hive::Error; end
-      class InvalidSlugError < Hive::Error; end
-      class SlugCollisionError < Hive::Error; end
+      # Typed errors carry the offending value via `attr_reader :value`
+      # so TUI / agent callers can render a structured diagnosis
+      # instead of regex-parsing `message`. Mirrors the
+      # `ComposerStaging::WriteError#cause_class` pattern.
+      class TypedValueError < Hive::Error
+        attr_reader :value
+
+        def initialize(message, value: nil)
+          super(message)
+          @value = value
+        end
+      end
+
+      class ProjectNotFound < TypedValueError; end
+      class InvalidSlugError < TypedValueError; end
+      class SlugCollisionError < TypedValueError; end
       # Raised when an attachment's filename fails the basename/empty guard
       # in `copy_attachments!`. Distinct from `InvalidSlugError` so TUI
       # callers can distinguish "rephrase the title" feedback from
       # "attachment routing bug" feedback in their rescue lists.
-      class InvalidAttachmentError < Hive::Error; end
+      class InvalidAttachmentError < TypedValueError; end
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [])
         @project_name = project_name
@@ -53,8 +66,10 @@ module Hive
       def call!
         project = Hive::Config.find_project(@project_name)
         unless project
-          raise ProjectNotFound,
-            "project not initialized: #{@project_name} (run `hive init <path>` first)"
+          raise ProjectNotFound.new(
+            "project not initialized: #{@project_name} (run `hive init <path>` first)",
+            value: @project_name
+          )
         end
 
         slug = @slug_override || derive_slug(@text)
@@ -63,7 +78,10 @@ module Hive
         hive_state = project["hive_state_path"]
         task_dir = File.join(hive_state, "stages", "1-inbox", slug)
         if File.exist?(task_dir)
-          raise SlugCollisionError, "slug collision at #{task_dir} (rare; retry the command)"
+          raise SlugCollisionError.new(
+            "slug collision at #{task_dir} (rare; retry the command)",
+            value: slug
+          )
         end
         FileUtils.mkdir_p(task_dir)
 
@@ -109,12 +127,14 @@ module Hive
 
       def validate_slug!(slug)
         unless slug.is_a?(String) && SLUG_RE.match?(slug)
-          raise InvalidSlugError,
-            "invalid slug '#{slug}' (must match #{SLUG_RE.source}; rephrase the task text so its derived slug fits the pattern)"
+          raise InvalidSlugError.new(
+            "invalid slug '#{slug}' (must match #{SLUG_RE.source}; rephrase the task text so its derived slug fits the pattern)",
+            value: slug
+          )
         end
         return unless RESERVED_SLUGS.include?(slug.downcase) || slug.include?("..") || slug.include?("/") || slug.include?("@")
 
-        raise InvalidSlugError, "reserved or unsafe slug '#{slug}'"
+        raise InvalidSlugError.new("reserved or unsafe slug '#{slug}'", value: slug)
       end
 
       def render_idea(slug, text, body_override: nil)
@@ -146,6 +166,8 @@ module Hive
 
         assets_dir = File.join(task_dir, "assets")
         FileUtils.mkdir_p(assets_dir)
+        require "tmpdir"
+        tmproot = File.expand_path(Dir.tmpdir)
         @attachments.each do |src, dest_name|
           name = Hive::Tui::Text.sanitize(dest_name.to_s)
           # `name != File.basename(name)` rejects directory separators
@@ -154,10 +176,22 @@ module Hive
           # through and either overwrite `assets/` itself or escape it
           # via FileUtils.cp's path-join. Reject them explicitly.
           if name.empty? || name == "." || name == ".." || name != File.basename(name)
-            raise InvalidAttachmentError, "invalid attachment filename '#{name}'"
+            raise InvalidAttachmentError.new("invalid attachment filename '#{name}'", value: name)
           end
 
-          FileUtils.cp(src, File.join(assets_dir, name))
+          # Defense in depth: `src` originates in the TUI composer's
+          # staging tmpdir; reject anything outside the OS tmpdir
+          # root so a future caller (or a regression in the staging
+          # plumbing) cannot `FileUtils.cp` from an arbitrary path.
+          src_path = File.expand_path(src.to_s)
+          unless src_path.start_with?("#{tmproot}#{File::SEPARATOR}")
+            raise InvalidAttachmentError.new(
+              "attachment source not under tmpdir: #{Hive::Tui::Text.sanitize(src.to_s)[0, 80]}",
+              value: src.to_s
+            )
+          end
+
+          FileUtils.cp(src_path, File.join(assets_dir, name))
         end
       end
 

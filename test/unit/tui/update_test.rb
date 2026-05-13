@@ -734,6 +734,53 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal %w[image1 image2], second.new_idea_attachments.map(&:label)
   end
 
+  # R6: cursor in the middle of the buffer — the suffix branch of
+  # `prefix + placeholder + suffix` must keep typed text after the
+  # paste point intact and advance the cursor past the placeholder.
+  def test_new_idea_image_attached_inserts_mid_buffer
+    starting = model.with(
+      mode: :new_idea,
+      new_idea_buffer: "before after",
+      new_idea_cursor: 7
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NewIdeaImageAttached.new(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        source_kind: :image_bytes,
+        ext: "png"
+      )
+    )
+
+    assert_equal "before [image1]after", new_model.new_idea_buffer
+    assert_equal 7 + "[image1]".length, new_model.new_idea_cursor
+  end
+
+  # R5: three consecutive paste events must produce monotonic
+  # `image1 / image2 / image3` labels AND three distinct staging
+  # paths, regardless of how attachments.size moves.
+  def test_new_idea_image_attached_three_consecutive_pastes_label_monotonically
+    starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+    final = %w[image1 image2 image3].each_with_index.reduce(starting) do |state, (label, idx)|
+      next_model, _cmd = Hive::Tui::Update.apply(
+        state,
+        Hive::Tui::Messages::NewIdeaImageAttached.new(
+          label: label,
+          staging_path: "/tmp/hive-tui-composer/image-#{idx + 1}.png",
+          source_kind: :image_bytes,
+          ext: "png"
+        )
+      )
+      next_model
+    end
+
+    assert_equal %w[image1 image2 image3], final.new_idea_attachments.map(&:label)
+    paths = final.new_idea_attachments.map(&:staging_path)
+    assert_equal paths.uniq, paths, "three consecutive pastes must yield three distinct staging paths"
+    assert_equal 3, final.new_idea_attachment_counter
+  end
+
   # The Update-layer test for "at-cap insert is refused without a
   # partial token" used to live here. It was removed when the
   # buffer-overflow gate was consolidated into BubbleModel#stage_image

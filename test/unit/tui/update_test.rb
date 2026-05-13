@@ -747,18 +747,13 @@ class HiveTuiUpdateTest < Minitest::Test
     refute_nil new_model.flash_set_at
   end
 
-  def test_new_idea_submit_blocked_sets_flash_and_preserves_buffer
-    starting = model.with(mode: :new_idea, new_idea_buffer: "see [image1]", new_idea_cursor: 12)
-    new_model, _cmd = Hive::Tui::Update.apply(
-      starting,
-      Hive::Tui::Messages::NewIdeaSubmitBlocked.new(reason: "broken image placeholder: image1")
-    )
-
-    assert_equal :new_idea, new_model.mode
-    assert_equal "see [image1]", new_model.new_idea_buffer
-    assert_equal "broken image placeholder: image1", new_model.flash
-    refute_nil new_model.flash_set_at
-  end
+  # NewIdeaSubmitBlocked was removed in 2026-05-13: it was a dead
+  # Data type that was defined and tested but never dispatched (rich-
+  # submit failures set the flash directly via `model.with`). Test
+  # kept as a placeholder for the contract that submit failures still
+  # surface a flash without clobbering the buffer — see the
+  # `submit_rich_new_idea` tests in bubble_model_test.rb for the live
+  # path.
 
   def test_new_idea_over_limit_insert_partial_fits_and_flashes_truncation
     # 6 cells of remaining capacity, 10-char paste → fit 6, flash truncation.

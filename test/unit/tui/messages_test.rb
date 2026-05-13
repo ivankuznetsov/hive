@@ -171,11 +171,6 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal :image_bytes, a.source_kind
   end
 
-  def test_new_idea_submit_blocked_carries_reason
-    msg = Hive::Tui::Messages::NewIdeaSubmitBlocked.new(reason: "broken image placeholder: image1")
-    assert_equal "broken image placeholder: image1", msg.reason
-  end
-
   def test_new_idea_singletons_are_frozen
     assert Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CURSOR_RIGHT.frozen?

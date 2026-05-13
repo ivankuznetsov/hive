@@ -46,6 +46,24 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal true, messages.first.paste
   end
 
+  # Unit-level pin on the decoder → BubbleModel seam: an empty
+  # bracketed paste in :new_idea mode must translate to a
+  # NewIdeaPasteRequested with empty raw_text, not a NOOP or a
+  # NewIdeaTextInserted. Without this the only coverage is in the
+  # integration test, so a regression in `BubbleModel#translate_raw_text_input`
+  # routing lands silent.
+  def test_empty_bracketed_paste_routes_to_new_idea_paste_requested
+    require "hive/tui/bubble_model"
+    bubble = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: ->(_msg) {}
+    )
+    raw_text_input = Hive::Tui::Messages::RawTextInput.new(text: "", paste: true)
+    translated = bubble.send(:translate, raw_text_input)
+    assert_kind_of Hive::Tui::Messages::NewIdeaPasteRequested, translated
+    assert_equal "", translated.raw_text
+  end
+
   def test_bracketed_paste_start_marker_can_split_across_chunks
     assert_empty decoder.drain("\e[20")
     messages = decoder.drain("0~hello\e[201~")

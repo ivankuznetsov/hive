@@ -267,18 +267,19 @@ module Hive
       # was removed in PR #25.)
       NewIdeaTextInserted = Data.define(:text)
 
-      # Bracketed paste landed in :new_idea mode. BubbleModel handles
-      # the clipboard/file probe and staging side effects before Update
-      # sees a NewIdeaImageAttached or NewIdeaTextInserted fallback.
+      # Bracketed paste landed in :new_idea mode. BubbleModel's
+      # `handle_new_idea_paste` handles the clipboard/file probe and
+      # staging side effects before Update sees a NewIdeaImageAttached
+      # or NewIdeaTextInserted fallback. The side-effect handler can
+      # also return [model, nil] WITHOUT producing a downstream
+      # message — that path covers oversize-image flash, drag-drop-
+      # ignored flash, the missing-clipboard-tool hint, and the
+      # rescue branch for paste failures.
       NewIdeaPasteRequested = Data.define(:raw_text)
 
       # An image was staged for the in-progress composer. Update inserts
       # the textual placeholder and appends the attachment metadata.
       NewIdeaImageAttached = Data.define(:label, :staging_path, :source_kind)
-
-      # Rich submit validation refused the buffer. Update only needs the
-      # operator-facing reason; BubbleModel preserves the buffer.
-      NewIdeaSubmitBlocked = Data.define(:reason)
 
       # Cursor navigation within the new-idea prompt.
       NewIdeaCursorLeft = Class.new

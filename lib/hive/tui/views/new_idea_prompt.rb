@@ -112,12 +112,18 @@ module Hive
           rows.join("\n")
         end
 
+        # Trailing badge appended to the prompt's last visual row when
+        # at least one image is staged. Width threshold (30 cells)
+        # suppresses the badge on very narrow terminals where it would
+        # squeeze the prompt buffer below readable. The " · " separator
+        # mirrors the prompt label's ASCII-only style — emoji would
+        # split unpredictably across terminals and lipgloss column math.
         def attachment_suffix(model, width:)
           count = model.new_idea_attachments.size
           return nil if count.zero?
           return nil if width.to_i < 30
 
-          " · 📎 #{count} #{count == 1 ? "image" : "images"}"
+          " · [#{count} #{count == 1 ? "image" : "images"}]"
         end
 
         # Resolve which project an idea would land in. Pure read of the

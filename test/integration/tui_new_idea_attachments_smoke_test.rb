@@ -54,9 +54,11 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
     end
   end
 
+  # Per project CLAUDE.md "NEVER skip tests conditionally based on
+  # environment availability" — PTY is stdlib (Linux + macOS always
+  # provide it) and bin/hive is part of the repo. If those break the
+  # test should fail loudly, not silently skip.
   def test_paste_three_images_submit_and_brainstorm_sees_asset_refs
-    skip "set HIVE_E2E=1 to run PTY-driven rich composer smoke" unless ENV["HIVE_E2E"] == "1"
-
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
@@ -65,7 +67,8 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
         env = {
           "TERM" => "xterm-256color",
-          "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png,screenshot-2.png,screenshot-3.png"
+          "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png,screenshot-2.png,screenshot-3.png",
+          "HIVE_TUI_TEST_CLIPBOARD_BASE" => File.expand_path("../fixtures/composer", __dir__)
         }
         PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
           reader.winsize = [ 30, 120 ]
@@ -102,11 +105,11 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
         task = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "bug-here-*")].first
         refute_nil task, "rich TUI submit must create an inbox task"
         idea = File.read(File.join(task, "idea.md"))
-        assert_includes idea, "bug here ![](assets/bug-1.png), on mobile looks like ![](assets/bug-2.png) and desktop ![](assets/bug-3.png)"
+        assert_includes idea, "bug here ![](assets/image-1.png), on mobile looks like ![](assets/image-2.png) and desktop ![](assets/image-3.png)"
 
         (1..3).each do |i|
           expected = File.binread(File.join(__dir__, "..", "fixtures", "composer", "screenshot-#{i}.png"))
-          assert_equal expected, File.binread(File.join(task, "assets", "bug-#{i}.png"))
+          assert_equal expected, File.binread(File.join(task, "assets", "image-#{i}.png"))
         end
 
         target = File.join(dir, ".hive-state", "stages", "2-brainstorm", File.basename(task))
@@ -122,9 +125,9 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
         argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
         assert_includes argv_log, "cwd=#{target}"
-        assert_includes argv_log, "assets/bug-1.png"
-        assert_includes argv_log, "assets/bug-2.png"
-        assert_includes argv_log, "assets/bug-3.png"
+        assert_includes argv_log, "assets/image-1.png"
+        assert_includes argv_log, "assets/image-2.png"
+        assert_includes argv_log, "assets/image-3.png"
       ensure
         FileUtils.rm_rf(log_dir) if log_dir
       end

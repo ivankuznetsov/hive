@@ -89,8 +89,6 @@ module Hive
           [ apply_new_idea_text_inserted(model, message), nil ]
         when Messages::NewIdeaImageAttached
           [ apply_new_idea_image_attached(model, message), nil ]
-        when Messages::NewIdeaSubmitBlocked
-          [ apply_new_idea_submit_blocked(model, message), nil ]
         when Messages::NewIdeaCursorLeft
           [ apply_new_idea_cursor_left(model), nil ]
         when Messages::NewIdeaCursorRight
@@ -402,12 +400,16 @@ module Hive
       #
       # Submit (`Messages::NewIdeaSubmitted`) is intentionally NOT
       # handled here — it requires a subprocess call (`hive new …`)
-      # which lives in BubbleModel#handle_side_effect. That preserves
-      # Update's purity (no I/O, no Bubbletea coupling). On submit the
-      # BubbleModel reads `model.new_idea_buffer`, dispatches the child,
-      # and resets the model via `apply_new_idea_cancelled`-equivalent
-      # transition (mode → :grid, buffer cleared) on either success or
-      # validation failure.
+      # or an in-process `Hive::Commands::New#call!` (rich submit),
+      # both of which live in BubbleModel#handle_side_effect. That
+      # preserves Update's purity (no I/O, no Bubbletea coupling).
+      # `apply_open_new_idea_prompt` and `apply_new_idea_cancelled`
+      # both clear `new_idea_buffer`, `new_idea_cursor`,
+      # `new_idea_attachments`, AND `new_idea_staging_dir` so a fresh
+      # entry starts from a clean slate. The rich-submit success path
+      # does NOT go through `apply_new_idea_cancelled` — BubbleModel's
+      # `reset_to_grid_with_flash` carries the same clearing shape
+      # plus a flash payload.
 
       def apply_open_new_idea_prompt(model)
         model.with(
@@ -423,6 +425,14 @@ module Hive
         insert_new_idea_text(model, msg.text.to_s)
       end
 
+      # All-or-nothing on overflow: image attachments are atomic — a
+      # `[imageN]` placeholder is meaningless if only a prefix fits —
+      # so the entire placeholder is rejected on overflow rather than
+      # truncating mid-token. Distinct from `insert_new_idea_text`'s
+      # partial-fit policy where slicing characters off still produces
+      # a usable (if shortened) title. BubbleModel#stage_image now
+      # runs the overflow check BEFORE writing the staging file so a
+      # rejected paste does not leave an orphan tmp file.
       def apply_new_idea_image_attached(model, msg)
         placeholder = "[#{msg.label}]"
         buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
@@ -447,10 +457,6 @@ module Hive
           new_idea_cursor: cursor + placeholder.length,
           new_idea_attachments: model.new_idea_attachments + [ attachment ]
         )
-      end
-
-      def apply_new_idea_submit_blocked(model, msg)
-        model.with(flash: msg.reason.to_s, flash_set_at: Time.now)
       end
 
       def apply_new_idea_cursor_left(model)
@@ -479,7 +485,10 @@ module Hive
 
         prefix = buffer[0...(cursor - 1)].to_s
         suffix = buffer[cursor..].to_s
-        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor - 1)
+        new_buffer = prefix + suffix
+        prune_orphan_attachments(
+          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor - 1)
+        )
       end
 
       def apply_new_idea_char_deleted_forward(model)
@@ -488,7 +497,25 @@ module Hive
 
         prefix = buffer[0...cursor].to_s
         suffix = buffer[(cursor + 1)..].to_s
-        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor)
+        new_buffer = prefix + suffix
+        prune_orphan_attachments(
+          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor)
+        )
+      end
+
+      # Backspacing through `[image1]` one character at a time leaves a
+      # partial placeholder (`[image`) in the buffer until the user
+      # finishes. Once a placeholder no longer fully matches, the
+      # corresponding attachment becomes an orphan that the submit
+      # validator would reject as "broken image placeholder". Detect
+      # the case here and drop the orphan so the user isn't trapped in
+      # a state that can only be unwound by Esc + retype.
+      def prune_orphan_attachments(model)
+        labels_in_buffer = model.new_idea_buffer.to_s.scan(/\[image(\d+)\]/).flatten.map { |n| "image#{n}" }.to_set
+        kept = model.new_idea_attachments.select { |att| labels_in_buffer.include?(att.label) }
+        return model if kept.size == model.new_idea_attachments.size
+
+        model.with(new_idea_attachments: kept)
       end
 
       def apply_new_idea_cancelled(model)

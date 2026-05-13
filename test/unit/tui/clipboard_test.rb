@@ -26,8 +26,8 @@ class HiveTuiClipboardTest < Minitest::Test
       @commands.fetch(name, false)
     end
 
-    def capture3(argv, timeout:)
-      @captures << [ argv, timeout ]
+    def capture3(argv, timeout:, max_bytes: nil)
+      @captures << [ argv, timeout, max_bytes ]
       @capture_responses.fetch(argv.first) { [ +"".b, "", FakeStatus.new(false) ] }
     end
 
@@ -46,6 +46,10 @@ class HiveTuiClipboardTest < Minitest::Test
 
     def file_size(path)
       @files.fetch(File.expand_path(path)).fetch(:size)
+    end
+
+    def test_fixture_path(name)
+      File.expand_path("../../../test/fixtures/composer/#{name}", __dir__)
     end
   end
 
@@ -114,7 +118,7 @@ class HiveTuiClipboardTest < Minitest::Test
 
       result = Hive::Tui::Clipboard.probe(
         pasted_text: path,
-        env: { "PATH" => "/bin" },
+        env: { "PATH" => "/bin", "HIVE_TUI_FORCE_DARWIN" => "1" },
         kernel: kernel
       )
 
@@ -122,6 +126,24 @@ class HiveTuiClipboardTest < Minitest::Test
       assert_equal File.expand_path(path), result.path
       assert_equal "png", result.ext
     end
+  end
+
+  def test_pbpaste_is_guarded_to_darwin_only
+    # On a non-Darwin host that happens to ship a `pbpaste` polyglot
+    # script in PATH, the probe must NOT fire it. Without the darwin?
+    # guard, `clipboard_command` would return `["pbpaste"]` and the
+    # fake kernel would record a capture3 call — wasteful at best,
+    # source of confused fallbacks at worst.
+    kernel = FakeKernel.new(commands: { "pbpaste" => true })
+
+    Hive::Tui::Clipboard.probe(
+      pasted_text: "",
+      env: { "PATH" => "/bin" },
+      kernel: kernel
+    )
+
+    assert_empty kernel.captures,
+      "non-Darwin probe must skip pbpaste even when the binary is on PATH"
   end
 
   def test_existing_png_path_returns_image_file
@@ -165,7 +187,7 @@ class HiveTuiClipboardTest < Minitest::Test
     end
   end
 
-  def test_existing_image_over_size_cap_is_none
+  def test_existing_image_over_size_cap_surfaces_oversize_kind
     with_tmp_dir do |dir|
       path = File.join(dir, "huge.png")
       kernel = FakeKernel.new(
@@ -174,8 +196,26 @@ class HiveTuiClipboardTest < Minitest::Test
 
       result = Hive::Tui::Clipboard.probe(pasted_text: path, env: { "PATH" => "" }, kernel: kernel)
 
-      assert_equal :none, result.kind
+      assert_equal :oversize_image, result.kind,
+        "oversize image must surface as :oversize_image so callers can flash, " \
+        "instead of falling through to :none and dropping into text/path probe"
     end
+  end
+
+  def test_clipboard_image_over_size_cap_surfaces_oversize_kind
+    oversize = Hive::Tui::Clipboard::PNG_SIGNATURE + ("x".b * Hive::Tui::Clipboard::MAX_IMAGE_BYTES)
+    kernel = FakeKernel.new(
+      commands: { "wl-paste" => true },
+      captures: { "wl-paste" => [ oversize, "", FakeStatus.new(true) ] }
+    )
+
+    result = Hive::Tui::Clipboard.probe(
+      pasted_text: "",
+      env: { "XDG_SESSION_TYPE" => "wayland", "PATH" => "/bin" },
+      kernel: kernel
+    )
+
+    assert_equal :oversize_image, result.kind
   end
 
   def test_missing_clipboard_tools_and_missing_path_is_none
@@ -213,7 +253,7 @@ class HiveTuiClipboardTest < Minitest::Test
         File.expand_path("../../../test/fixtures/composer/screenshot-2.png", __dir__) => { size: 1, file: true }
       }
     )
-    Hive::Tui::Clipboard.instance_variable_set(:@test_clipboard_index, 0)
+    Hive::Tui::Clipboard.reset_test_clipboard!
     env = { "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png,screenshot-2.png", "PATH" => "" }
 
     first = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
@@ -224,6 +264,34 @@ class HiveTuiClipboardTest < Minitest::Test
     assert_equal :image_file, second.kind
     assert_match(/screenshot-2\.png\z/, second.path)
   ensure
-    Hive::Tui::Clipboard.instance_variable_set(:@test_clipboard_index, 0)
+    Hive::Tui::Clipboard.reset_test_clipboard!
+  end
+
+  # Path-traversal guard on the fixture-name parser must reject "/" and
+  # ".." so a malicious HIVE_TUI_TEST_CLIPBOARD value can't escape the
+  # test fixtures directory. The guard is defense-in-depth — the env
+  # var is test-only — but it must not regress.
+  def test_fixture_clipboard_rejects_path_traversal_names
+    kernel = FakeKernel.new(files: {})
+    Hive::Tui::Clipboard.reset_test_clipboard!
+    env = { "HIVE_TUI_TEST_CLIPBOARD" => "fixture://../escape.png", "PATH" => "" }
+
+    result = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
+
+    assert_equal :none, result.kind
+  ensure
+    Hive::Tui::Clipboard.reset_test_clipboard!
+  end
+
+  def test_fixture_clipboard_rejects_slash_in_names
+    kernel = FakeKernel.new(files: {})
+    Hive::Tui::Clipboard.reset_test_clipboard!
+    env = { "HIVE_TUI_TEST_CLIPBOARD" => "fixture://nested/dir.png", "PATH" => "" }
+
+    result = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
+
+    assert_equal :none, result.kind
+  ensure
+    Hive::Tui::Clipboard.reset_test_clipboard!
   end
 end

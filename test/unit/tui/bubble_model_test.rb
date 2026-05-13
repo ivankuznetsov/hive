@@ -565,8 +565,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       kind: :image_bytes,
       bytes: bytes,
       path: nil,
-      ext: ext,
-      reason: nil
+      ext: ext
     )
   end
 
@@ -575,8 +574,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       kind: :image_file,
       bytes: nil,
       path: path,
-      ext: ext,
-      reason: nil
+      ext: ext
     )
   end
 

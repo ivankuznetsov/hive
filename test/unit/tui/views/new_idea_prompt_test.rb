@@ -164,7 +164,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
 
-    assert_includes out, "📎 1 image"
+    assert_includes out, "[1 image]"
   end
 
   def test_render_shows_plural_staged_image_count
@@ -180,7 +180,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
 
-    assert_includes out, "📎 3 images"
+    assert_includes out, "[3 images]"
   end
 
   def test_render_suppresses_staged_image_count_on_narrow_terminal
@@ -196,7 +196,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
     out = Hive::Tui::Views::NewIdeaPrompt.render(model, width: 28)
 
-    refute_includes out, "📎"
+    refute_includes out, "[1 image"
     assert_includes out, "hi"
   end
 
@@ -212,7 +212,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
 
-    refute_includes out, "📎"
+    refute_includes out, "[1 image"
   end
 
   def test_explicit_width_kwarg_clamps_independently_of_cols

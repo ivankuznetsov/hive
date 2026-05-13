@@ -90,16 +90,24 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
           writer.write("\r")
           writer.flush
 
-          buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
-            buf.include?("3 images") || buf.include?("bug-here")
-          end
-          assert_match(/3 images|bug-here/, buffer)
+          begin
+            buffer = read_until(reader, deadline_seconds: 10.0) do |buf|
+              buf.include?("3 images") || buf.include?("bug-here")
+            end
+            assert_match(/3 images|bug-here/, buffer)
 
-          writer.write("q")
-          writer.flush
-          status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
-          refute_nil status
-          assert_equal 0, status.exitstatus
+            writer.write("q")
+            writer.flush
+            status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
+            refute_nil status
+            assert_equal 0, status.exitstatus
+          rescue Errno::EIO
+            # Linux PTY drain after the child exits and closes the slave
+            # end raises EIO from `read_nonblock`. Scope the rescue
+            # tightly so the post-block idea.md / asset / brainstorm
+            # assertions still run — a premature EIO at startup must
+            # NOT silently pass the test.
+          end
         end
 
         task = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "bug-here-*")].first
@@ -132,7 +140,5 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
         FileUtils.rm_rf(log_dir) if log_dir
       end
     end
-  rescue Errno::EIO
-    raise unless $!.message.include?("Input/output error")
   end
 end

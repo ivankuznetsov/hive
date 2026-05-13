@@ -20,7 +20,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
   def dispatch(c, pid, project, slug, mtime: T0 - 60, started_at: T0)
     c.record_dispatch(
       pid: pid, project: project, slug: slug,
-      stage: "5-review", command: "hive run #{slug}",
+      stage: "6-review", command: "hive run #{slug}",
       started_at: started_at, state_file_mtime: mtime
     )
   end
@@ -230,7 +230,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 1)
     # Force a follow-on dispatch with nil mtime
     c.record_dispatch(
-      pid: 101, project: "p1", slug: "s1", stage: "5-review",
+      pid: 101, project: "p1", slug: "s1", stage: "6-review",
       command: "hive run", started_at: T0 + 10_000, state_file_mtime: nil
     )
     # The prior recorded value should still be there.

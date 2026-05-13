@@ -7,7 +7,7 @@ class ReviewersTest < Minitest::Test
   def make_ctx(dir)
     Hive::Reviewers::Context.new(
       worktree_path: dir,
-      task_folder: File.join(dir, ".hive-state", "stages", "5-review", "test-task"),
+      task_folder: File.join(dir, ".hive-state", "stages", "6-review", "test-task"),
       default_branch: "main",
       pass: 1
     )
@@ -97,7 +97,7 @@ class ReviewersTest < Minitest::Test
   # ── Context alias coverage ─────────────────────────────────────────────
 
   # The canonical home of the per-spawn Context Data type is
-  # Hive::Stages::Review::Context (the 5-review stage owns the type
+  # Hive::Stages::Review::Context (the 6-review stage owns the type
   # because triage / ci_fix / browser_test / fix_guardrail all consume
   # it, none of which are reviewers). The legacy
   # Hive::Reviewers::Context alias must keep pointing at the same class

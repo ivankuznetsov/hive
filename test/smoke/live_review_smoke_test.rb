@@ -4,7 +4,7 @@ require "hive/commands/new"
 require "hive/commands/run"
 require "hive/agent_profiles"
 
-# Live-claude smoke for the 5-review stage. Exercises one full pass of the
+# Live-claude smoke for the 6-review stage. Exercises one full pass of the
 # autonomous loop against the real `claude` binary on a tiny tmp worktree:
 #   - CI phase (skipped — no review.ci.command in the smoke config)
 #   - Phase 2: one configured reviewer (claude /ce-code-review on the diff)
@@ -41,11 +41,11 @@ class LiveReviewSmokeTest < Minitest::Test
         project = File.basename(project_dir)
         capture_io { Hive::Commands::New.new(project, "smoke review trivial").call }
 
-        # Move the task into 5-review/ with a worktree.yml + a tiny diff
+        # Move the task into 6-review/ with a worktree.yml + a tiny diff
         # against the default branch, so the reviewer has SOMETHING to look
         # at without being so complex it generates findings.
         slug = File.basename(Dir[File.join(project_dir, ".hive-state", "stages", "1-inbox", "*")].first)
-        review_dir = File.join(project_dir, ".hive-state", "stages", "5-review", slug)
+        review_dir = File.join(project_dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(File.dirname(review_dir))
         FileUtils.mv(File.join(project_dir, ".hive-state", "stages", "1-inbox", slug), review_dir)
 

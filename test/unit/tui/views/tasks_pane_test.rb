@@ -81,7 +81,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "recover-me",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_error",
@@ -101,7 +101,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "recover-me",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_stale",
@@ -126,7 +126,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "stale-me",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_stale",
@@ -150,7 +150,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "wall-clocked",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_stale",
@@ -175,7 +175,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "ansi-pass",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_stale",
@@ -198,7 +198,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "legacy-stale",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_stale",
@@ -218,7 +218,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "recover-me",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "",
@@ -357,7 +357,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       { "name" => "hive", "tasks" => [
         make_task(
           slug: "tainted-task",
-          stage: "5-review",
+          stage: "6-review",
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_error",

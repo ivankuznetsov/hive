@@ -28,7 +28,7 @@ class CiFixTest < Minitest::Test
 
   def with_ci_dir
     with_tmp_dir do |dir|
-      task_folder = File.join(dir, ".hive-state", "stages", "5-review", "ci-test-task")
+      task_folder = File.join(dir, ".hive-state", "stages", "6-review", "ci-test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
       FileUtils.mkdir_p(File.join(task_folder, "logs"))
       yield(dir, task_folder)
@@ -152,7 +152,7 @@ class CiFixTest < Minitest::Test
   def test_returns_error_when_fix_agent_leaves_uncommitted_changes
     with_tmp_dir do |task_root|
       with_tmp_git_repo do |worktree|
-        task_folder = File.join(task_root, ".hive-state", "stages", "5-review", "ci-dirty")
+        task_folder = File.join(task_root, ".hive-state", "stages", "6-review", "ci-dirty")
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
         File.write(File.join(task_folder, "task.md"), "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")
@@ -177,7 +177,7 @@ class CiFixTest < Minitest::Test
   def test_returns_error_when_fix_agent_tampers_with_protected_task_files
     with_tmp_dir do |task_root|
       with_tmp_git_repo do |worktree|
-        task_folder = File.join(task_root, ".hive-state", "stages", "5-review", "ci-tamper")
+        task_folder = File.join(task_root, ".hive-state", "stages", "6-review", "ci-tamper")
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
         task_md = File.join(task_folder, "task.md")
         File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")

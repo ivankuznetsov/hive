@@ -211,8 +211,8 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal 0, exit_code
-      assert_match(%r{5-review/claude-ce-code-review.*✓ present}, out.string)
-      assert_match(%r{5-review/pr-review-toolkit.*✓ present}, out.string)
+      assert_match(%r{6-review/claude-ce-code-review.*✓ present}, out.string)
+      assert_match(%r{6-review/pr-review-toolkit.*✓ present}, out.string)
     end
   end
 
@@ -232,8 +232,8 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
-      assert_match(%r{5-review/pr-review-toolkit.*✗ missing}, out.string)
-      assert_match(%r{\[5-review/pr-review-toolkit/claude\]}, out.string,
+      assert_match(%r{6-review/pr-review-toolkit.*✗ missing}, out.string)
+      assert_match(%r{\[6-review/pr-review-toolkit/claude\]}, out.string,
         "install-hint footer must include the row label")
     end
   end
@@ -254,8 +254,8 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal 0, exit_code
-      assert_match(%r{5-review/claude-ce-code-review.*claude.*✓ present}, out.string)
-      assert_match(%r{5-review/codex-ce-code-review.*codex.*✓ present}, out.string)
+      assert_match(%r{6-review/claude-ce-code-review.*claude.*✓ present}, out.string)
+      assert_match(%r{6-review/codex-ce-code-review.*codex.*✓ present}, out.string)
     end
   end
 
@@ -272,7 +272,7 @@ class HiveCommandsDoctorTest < Minitest::Test
         exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
         assert_equal 0, exit_code,
           "empty/nil/absent reviewers must not fail (cfg shape: #{cfg.dig('review', 'reviewers').inspect})"
-        refute_match(%r{5-review/}, out.string,
+        refute_match(%r{6-review/}, out.string,
           "no reviewer rows should appear when reviewers list is empty/nil/absent")
       end
     end
@@ -289,7 +289,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal 0, exit_code, "non-agent kind must not fail doctor"
-      assert_match(%r{5-review/weird-linter.*— not_applicable}, out.string)
+      assert_match(%r{6-review/weird-linter.*— not_applicable}, out.string)
       assert_match(/kind 'linter' is not 'agent'/, out.string)
     end
   end
@@ -311,7 +311,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal 0, exit_code
-      assert_match(%r{5-review/pi-reviewer.*pi.*✓ present}, out.string)
+      assert_match(%r{6-review/pi-reviewer.*pi.*✓ present}, out.string)
     end
   end
 
@@ -326,7 +326,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
-      assert_match(%r{5-review/pi-reviewer.*pi.*✗ missing}, out.string)
+      assert_match(%r{6-review/pi-reviewer.*pi.*✗ missing}, out.string)
       assert_match(/pi install/, out.string)
     end
   end
@@ -357,8 +357,8 @@ class HiveCommandsDoctorTest < Minitest::Test
       end
 
       reviewer = reviewer_rows.first
-      assert_equal "5-review", reviewer[:stage]
-      assert_equal "5-review/claude-ce-code-review", reviewer[:label]
+      assert_equal "6-review", reviewer[:stage]
+      assert_equal "6-review/claude-ce-code-review", reviewer[:label]
       assert_equal "claude-ce-code-review", reviewer[:name]
       assert_equal "/ce-code-review", reviewer[:skill],
         "reviewer :skill must be the full invocation, not the bare config name"
@@ -391,7 +391,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       end
 
       reviewer = reviewer_entries.first
-      assert_equal "5-review/claude-ce-code-review", reviewer["label"]
+      assert_equal "6-review/claude-ce-code-review", reviewer["label"]
       assert_equal "claude-ce-code-review", reviewer["name"]
       assert_equal "/ce-code-review", reviewer["skill"]
     end
@@ -409,7 +409,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       ])
       Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
-      assert_match(%r{5-review/#{Regexp.escape(long_name)}}, out.string)
+      assert_match(%r{6-review/#{Regexp.escape(long_name)}}, out.string)
       # Header still aligns: separator dashes match the longest label width.
       header_line = out.string.lines[0]
       separator_line = out.string.lines[1]

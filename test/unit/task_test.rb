@@ -25,8 +25,10 @@ class TaskTest < Minitest::Test
         "2-brainstorm" => "brainstorm.md",
         "3-plan" => "plan.md",
         "4-execute" => "task.md",
-        "6-pr" => "pr.md",
-        "7-done" => "task.md"
+        "5-open-pr" => "pr.md",
+        "6-review" => "task.md",
+        "7-finalize" => "pr.md",
+        "8-done" => "task.md"
       }
       mappings.each do |stage_dir, state_file|
         folder = File.join(dir, ".hive-state", "stages", stage_dir, "x-260424-7a3b")

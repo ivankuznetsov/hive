@@ -30,7 +30,7 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::ALREADY_INITIALIZED, Hive::AlreadyInitialized.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::AmbiguousSlug.new("x", slug: "s", candidates: []).exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::DestinationCollision.new("x", path: "/p").exit_code
-    assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "7-done").exit_code
+    assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "8-done").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoReviewFile.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoLogFiles.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::UnknownFinding.new("x", id: 1).exit_code
@@ -68,7 +68,8 @@ class ExitCodesTest < Minitest::Test
 
   def test_task_action_kind_closed_enum_membership
     expected = %w[
-      ready_to_brainstorm ready_to_plan ready_to_develop ready_for_review ready_for_pr ready_to_archive
+      ready_to_brainstorm ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
+      ready_to_finalize ready_to_archive
       needs_input review_findings recover_execute recover_review agent_running archived error
     ].sort
     assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort

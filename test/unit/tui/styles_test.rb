@@ -80,8 +80,8 @@ class HiveTuiStylesTest < Minitest::Test
     assert_equal "4", style.get_foreground, "any ready_* action should be blue (ANSI index 4)"
   end
 
-  def test_for_action_key_ready_for_pr_is_blue
-    style = Hive::Tui::Styles.for_action_key("ready_for_pr")
+  def test_for_action_key_ready_to_finalize_is_blue
+    style = Hive::Tui::Styles.for_action_key("ready_to_finalize")
     assert_equal "4", style.get_foreground
   end
 
@@ -117,7 +117,7 @@ class HiveTuiStylesTest < Minitest::Test
 
   def test_for_action_key_ready_branches_share_one_green_instance
     a = Hive::Tui::Styles.for_action_key("ready_to_brainstorm")
-    b = Hive::Tui::Styles.for_action_key("ready_for_pr")
+    b = Hive::Tui::Styles.for_action_key("ready_to_finalize")
     assert_same a, b,
       "all ready_* keys hit the same READY_STYLE constant — one Style, one FFI cost"
   end

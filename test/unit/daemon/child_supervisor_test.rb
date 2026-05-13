@@ -30,7 +30,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       # double-quotes in the JSON literal.
       pid = sup.spawn(
         command_string: %q(hive run slug-a --json --exit-code 0 --stdout-text '{"ok":true,"slug":"a"}'),
-        project: "p1", slug: "slug-a", stage: "5-review"
+        project: "p1", slug: "slug-a", stage: "6-review"
       )
       assert pid > 0, "real spawn returns a positive PID"
 
@@ -56,7 +56,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       sup = make(log_dir: dir)
       sup.spawn(
         command_string: %(hive run slug-a --exit-code 0 --stdout-text this-is-not-json),
-        project: "p1", slug: "slug-a", stage: "5-review"
+        project: "p1", slug: "slug-a", stage: "6-review"
       )
       completed = wait_for_completion(sup, max_attempts: 50)
       assert_equal 1, completed.size
@@ -70,7 +70,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       sup = make(log_dir: dir)
       sup.spawn(
         command_string: "hive run slug-a --exit-code 75",
-        project: "p1", slug: "slug-a", stage: "5-review"
+        project: "p1", slug: "slug-a", stage: "6-review"
       )
       completed = wait_for_completion(sup, max_attempts: 50)
       assert_equal 1, completed.size
@@ -109,9 +109,9 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     with_tmp_dir do |dir|
       sup = make(log_dir: dir)
       sup.spawn(command_string: "hive run a --exit-code 0",
-                project: "p1", slug: "a", stage: "5-review")
+                project: "p1", slug: "a", stage: "6-review")
       sup.spawn(command_string: "hive run b --exit-code 0",
-                project: "p2", slug: "b", stage: "5-review")
+                project: "p2", slug: "b", stage: "6-review")
       completed = wait_for_completion(sup, expected: 2, max_attempts: 100)
       assert_equal 2, completed.size
       slugs = completed.map(&:slug).sort
@@ -125,7 +125,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     sup = make(dry_run: true)
     pid = sup.spawn(
       command_string: "hive run a --exit-code 0",
-      project: "p1", slug: "a", stage: "5-review"
+      project: "p1", slug: "a", stage: "6-review"
     )
     assert pid < 0, "dry-run returns a synthetic non-positive PID"
     assert_equal 1, sup.in_flight_count
@@ -143,7 +143,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     sup = make(dry_run: false)
     pid = sup.spawn(
       command_string: "hive run a --exit-code 0",
-      project: "p1", slug: "a", stage: "5-review", dry_run: true
+      project: "p1", slug: "a", stage: "6-review", dry_run: true
     )
     assert pid < 0
   end
@@ -154,7 +154,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     sup = make
     err = assert_raises(ArgumentError) do
       sup.spawn(command_string: "rm -rf / # gotcha",
-                project: "p1", slug: "x", stage: "5-review")
+                project: "p1", slug: "x", stage: "6-review")
     end
     assert_match(/refuses non-hive command/, err.message)
   end
@@ -206,7 +206,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       sup = make(log_dir: dir)
       # Child sleeps for 30s; we'll TERM it.
       sup.spawn(command_string: "hive run a --exit-code 0 --sleep 30",
-                project: "p1", slug: "a", stage: "5-review")
+                project: "p1", slug: "a", stage: "6-review")
       assert_equal 1, sup.in_flight_count
 
       sup.terminate_all(grace_sec: 2)

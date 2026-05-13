@@ -50,26 +50,37 @@ class TaskActionTest < Minitest::Test
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
-  def test_execute_complete_is_ready_for_review
+  def test_execute_complete_is_ready_to_open_pr
     task = fake_task(stage_name: "execute", stage_index: 4)
-    assert_equal "ready_for_review", Hive::TaskAction.for(task, marker(:execute_complete)).key
+    action = Hive::TaskAction.for(task, marker(:execute_complete))
+    assert_equal "ready_to_open_pr", action.key
+    assert_equal "hive open-pr demo-260426-aaaa --from 4-execute", action.command
   end
 
-  def test_review_complete_is_ready_for_pr
-    task = fake_task(stage_name: "review", stage_index: 5)
-    assert_equal "ready_for_pr", Hive::TaskAction.for(task, marker(:review_complete)).key
+  def test_open_pr_complete_is_ready_for_review
+    task = fake_task(stage_name: "open-pr", stage_index: 5)
+    action = Hive::TaskAction.for(task, marker(:complete))
+    assert_equal "ready_for_review", action.key
+    assert_equal "hive review demo-260426-aaaa --from 5-open-pr", action.command
+  end
+
+  def test_review_complete_is_ready_to_finalize
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(task, marker(:review_complete))
+    assert_equal "ready_to_finalize", action.key
+    assert_equal "hive finalize demo-260426-aaaa --from 6-review", action.command
   end
 
   def test_review_without_marker_is_ready_for_review
-    task = fake_task(stage_name: "review", stage_index: 5)
+    task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:none))
     assert_equal "ready_for_review", action.key
     assert_equal "Ready for review", action.label
-    assert_match(/\Ahive review demo-260426-aaaa --from 5-review\z/, action.command)
+    assert_match(/\Ahive review demo-260426-aaaa --from 6-review\z/, action.command)
   end
 
   def test_review_waiting_is_needs_input
-    task = fake_task(stage_name: "review", stage_index: 5)
+    task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:review_waiting, "pass" => "2"))
     assert_equal "needs_input", action.key
     assert_equal "Needs your input", action.label
@@ -77,12 +88,12 @@ class TaskActionTest < Minitest::Test
 
   # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
   # fell through to :review_waiting and emitted a runnable
-  # `hive review … --from 5-review` command while review was active —
+  # `hive review … --from 6-review` command while review was active —
   # running it would acquire-then-fail the per-task lock with
   # ConcurrentRunError. Treat as in-flight (agent_running) so the TUI's
   # verb-refusal flash + log-tail-on-Enter path covers review-stage rows.
   def test_review_working_is_agent_running_with_no_command
-    task = fake_task(stage_name: "review", stage_index: 5)
+    task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:review_working, "phase" => "reviewers"))
     assert_equal "agent_running", action.key,
       "REVIEW_WORKING must surface as agent_running so dispatch refuses while review is active"
@@ -116,13 +127,13 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive develop demo-260426-aaaa --from 4-execute", next_action["rerun_with"]
   end
 
-  def test_pr_complete_is_ready_to_archive
-    task = fake_task(stage_name: "pr", stage_index: 5)
+  def test_finalize_complete_is_ready_to_archive
+    task = fake_task(stage_name: "finalize", stage_index: 7)
     assert_equal "ready_to_archive", Hive::TaskAction.for(task, marker(:complete)).key
   end
 
   def test_done_is_archived_with_no_command
-    task = fake_task(stage_name: "done", stage_index: 6)
+    task = fake_task(stage_name: "done", stage_index: 8)
     action = Hive::TaskAction.for(task, marker(:complete))
     assert_equal "archived", action.key
     assert_nil action.command, "archived state has no runnable command"
@@ -133,8 +144,8 @@ class TaskActionTest < Minitest::Test
   def test_agent_working_marker_overrides_every_stage
     # Surfacing a workflow command for an in-flight agent would send
     # retry loops into ConcurrentRunError. Always agent_running, no command.
-    %w[brainstorm plan execute pr].each do |stage|
-      task = fake_task(stage_name: stage, stage_index: %w[inbox brainstorm plan execute pr done].index(stage) + 1)
+    %w[brainstorm plan execute open-pr review finalize].each do |stage|
+      task = fake_task(stage_name: stage, stage_index: Hive::Stages::NAMES.index(stage) + 1)
       action = Hive::TaskAction.for(task, marker(:agent_working, "pid" => "12345"))
       assert_equal "agent_running", action.key, "stage=#{stage} must short-circuit to agent_running"
       assert_equal "Agent running", action.label
@@ -143,7 +154,7 @@ class TaskActionTest < Minitest::Test
   end
 
   def test_error_marker_overrides_every_stage
-    %w[brainstorm plan execute pr].each do |stage|
+    %w[brainstorm plan execute open-pr review finalize].each do |stage|
       task = fake_task(stage_name: stage, stage_index: 2)
       action = Hive::TaskAction.for(task, marker(:error, "reason" => "agent_crashed"))
       assert_equal "error", action.key
@@ -228,7 +239,7 @@ class TaskActionTest < Minitest::Test
   # whitelist had a stale gap.
 
   ADVANCE_VERBS_TO_TERMINAL_MARKERS = {
-    # verb → marker that 5-review/etc. writes when the stage is done
+    # verb → marker that review/etc. writes when the stage is done
     # and the next workflow verb should accept the task. Each pair
     # comes directly from a TaskAction ACTIONS row that maps a marker
     # name to a `command:`. Adding a new advance pair anywhere must
@@ -236,9 +247,10 @@ class TaskActionTest < Minitest::Test
     # `Hive::Markers::TERMINAL_MARKER_NAMES`.
     "plan" => :complete,           # 2-brainstorm finishes with :complete
     "develop" => :complete,        # 3-plan finishes with :complete
-    "review" => :execute_complete, # 4-execute finishes with :execute_complete
-    "pr" => :review_complete,      # 5-review finishes with :review_complete
-    "archive" => :complete         # 6-pr finishes with :complete
+    "open-pr" => :execute_complete, # 4-execute finishes with :execute_complete
+    "review" => :complete,          # 5-open-pr finishes with :complete
+    "finalize" => :review_complete, # 6-review finishes with :review_complete
+    "archive" => :complete          # 7-finalize finishes with :complete
   }.freeze
 
   # Pin the constant <-> map relationship: every marker that a
@@ -259,7 +271,7 @@ class TaskActionTest < Minitest::Test
   # Pin: every workflow advance verb's `terminal_marker?` whitelist
   # accepts the corresponding stage-terminal marker. This is the test
   # that would have caught the U11 dogfood bug — `:review_complete`
-  # was missing from `terminal_marker?`, so `hive pr --from 5-review`
+  # was missing from `terminal_marker?`, so `hive finalize --from 6-review`
   # rejected its only valid pre-advance marker.
   def test_stage_action_terminal_marker_accepts_every_advance_marker
     require "hive/commands/stage_action"
@@ -304,7 +316,7 @@ class TaskActionTest < Minitest::Test
     require "hive/stages"
 
     expected_stage_names = Hive::Stages::DIRS.map { |d| d.split("-", 2).last }
-    classifier_stage_names = %w[inbox brainstorm plan execute review pr done]
+    classifier_stage_names = %w[inbox brainstorm plan execute open-pr review finalize done]
     missing = classifier_stage_names - expected_stage_names
     extra = expected_stage_names - classifier_stage_names
     assert_empty missing,

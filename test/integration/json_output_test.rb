@@ -190,7 +190,7 @@ class JsonOutputTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         slug = "review-complete-260426-aaaa"
-        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
         File.write(File.join(review_dir, "task.md"), "<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
 
@@ -201,9 +201,9 @@ class JsonOutputTest < Minitest::Test
         next_action = payload["next_action"]
         assert_equal Hive::Schemas::NextActionKind::APPROVE, next_action["kind"]
         assert_equal slug, next_action["slug"]
-        assert_equal "5-review", next_action["from_stage"]
-        assert_equal "6-pr", next_action["to_stage"]
-        assert_equal "hive pr #{slug} --from 5-review", next_action["command"]
+        assert_equal "6-review", next_action["from_stage"]
+        assert_equal "7-finalize", next_action["to_stage"]
+        assert_equal "hive finalize #{slug} --from 6-review", next_action["command"]
       end
     end
   end
@@ -227,8 +227,8 @@ class JsonOutputTest < Minitest::Test
         assert_equal Hive::Schemas::NextActionKind::APPROVE, next_action["kind"]
         assert_equal slug, next_action["slug"]
         assert_equal "4-execute", next_action["from_stage"]
-        assert_equal "5-review", next_action["to_stage"]
-        assert_equal "hive review #{slug} --from 4-execute", next_action["command"]
+        assert_equal "5-open-pr", next_action["to_stage"]
+        assert_equal "hive open-pr #{slug} --from 4-execute", next_action["command"]
       end
     end
   end
@@ -397,7 +397,7 @@ class JsonOutputTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         slug = "review-waiting-260426-aaaa"
-        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
         File.write(File.join(review_dir, "task.md"),
                    "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
@@ -432,7 +432,7 @@ class JsonOutputTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         slug = "review-stale-260426-aaaa"
-        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
         File.write(File.join(review_dir, "task.md"),
                    "<!-- REVIEW_STALE pass=4 -->\n")
@@ -454,7 +454,7 @@ class JsonOutputTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         slug = "review-ci-stale-260426-aaaa"
-        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
         File.write(File.join(review_dir, "task.md"),
                    "<!-- REVIEW_CI_STALE attempts=3 -->\n")

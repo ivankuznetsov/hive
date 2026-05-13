@@ -77,16 +77,33 @@ class FullFlowTest < Minitest::Test
         # (zero reviewers + nil ci + browser disabled). Driver should
         # never reach this branch from a hive run; placed here only so
         # the case-statement is exhaustive.
-      when "pr"
+      when "open-pr"
         File.write(File.join(folder, "pr.md"), <<~MD)
           ---
           pr_url: https://example.com/pr/42
+          pr_number: 42
           ---
 
           ## Summary
           stub
 
-          <!-- COMPLETE pr_url=https://example.com/pr/42 -->
+          <!-- COMPLETE pr_url=https://example.com/pr/42 is_draft=true -->
+        MD
+      when "finalize"
+        File.write(File.join(folder, "summary.md"), <<~MD)
+          ## Summary
+          Finalized flow fixture.
+        MD
+        File.write(File.join(folder, "pr.md"), <<~MD)
+          ---
+          pr_url: https://example.com/pr/42
+          pr_number: 42
+          ---
+
+          ## Summary
+          finalized
+
+          <!-- COMPLETE pr_url=https://example.com/pr/42 is_draft=false -->
         MD
       else
         abort "unknown phase #{phase}"
@@ -162,16 +179,33 @@ class FullFlowTest < Minitest::Test
         @spawned_worktrees << YAML.safe_load(File.read(File.join(execute_dir, "worktree.yml")))["path"]
         assert_equal :execute_complete, Hive::Markers.current(File.join(execute_dir, "task.md")).name
 
-        # 4-execute → 5-review (autonomous loop). Configure a minimal
-        # 5-review setup that exercises the runner's plumbing without
+        # 4-execute → 5-open-pr. PR stage pushes to origin; create a
+        # bare remote in the worktree before entering the stage.
+        open_pr_dir = File.join(dir, ".hive-state", "stages", "5-open-pr", slug)
+        FileUtils.mkdir_p(File.dirname(open_pr_dir))
+        FileUtils.mv(execute_dir, open_pr_dir)
+
+        worktree_path = YAML.safe_load(File.read(File.join(open_pr_dir, "worktree.yml")))["path"]
+        bare = "#{worktree_path}-remote.git"
+        @spawned_worktrees << bare
+        run!("git", "init", "--bare", bare, "--quiet")
+        run!("git", "-C", worktree_path, "remote", "add", "origin", bare)
+
+        ENV["HIVE_FLOW_FOLDER"] = open_pr_dir
+        ENV["HIVE_FLOW_PHASE"] = "open-pr"
+        capture_io { Hive::Commands::Run.new(open_pr_dir).call }
+        assert_equal :complete, Hive::Markers.current(File.join(open_pr_dir, "pr.md")).name
+
+        # 5-open-pr → 6-review (autonomous loop). Configure a minimal
+        # 6-review setup that exercises the runner's plumbing without
         # requiring real CI / reviewer / triage / browser infrastructure:
         #   - review.ci.command = nil → CI phase skipped
         #   - review.reviewers = []   → Phase 2 skipped (zero reviewers ≠ failure)
         #   - review.browser_test.enabled = false → Phase 5 skipped
         # Loop converges to REVIEW_COMPLETE browser=skipped on first pass.
-        review_dir = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(File.dirname(review_dir))
-        FileUtils.mv(execute_dir, review_dir)
+        FileUtils.mv(open_pr_dir, review_dir)
 
         cfg = YAML.safe_load(File.read(cfg_path))
         cfg["review"] ||= {}
@@ -189,27 +223,21 @@ class FullFlowTest < Minitest::Test
         assert_equal :review_complete, marker.name
         assert_equal "skipped", marker.attrs["browser"]
 
-        # 5-review → 6-pr
-        pr_dir = File.join(dir, ".hive-state", "stages", "6-pr", slug)
-        FileUtils.mkdir_p(File.dirname(pr_dir))
-        FileUtils.mv(review_dir, pr_dir)
+        # 6-review → 7-finalize
+        finalize_dir = File.join(dir, ".hive-state", "stages", "7-finalize", slug)
+        FileUtils.mkdir_p(File.dirname(finalize_dir))
+        FileUtils.mv(review_dir, finalize_dir)
 
-        # PR stage will git push to origin; create a bare remote in the worktree.
-        worktree_path = YAML.safe_load(File.read(File.join(pr_dir, "worktree.yml")))["path"]
-        bare = "#{worktree_path}-remote.git"
-        @spawned_worktrees << bare
-        run!("git", "init", "--bare", bare, "--quiet")
-        run!("git", "-C", worktree_path, "remote", "add", "origin", bare)
+        ENV["HIVE_FLOW_FOLDER"] = finalize_dir
+        ENV["HIVE_FLOW_PHASE"] = "finalize"
+        capture_io { Hive::Commands::Run.new(finalize_dir).call }
+        assert_equal :complete, Hive::Markers.current(File.join(finalize_dir, "pr.md")).name
+        assert File.exist?(File.join(finalize_dir, "summary.md"))
 
-        ENV["HIVE_FLOW_FOLDER"] = pr_dir
-        ENV["HIVE_FLOW_PHASE"] = "pr"
-        capture_io { Hive::Commands::Run.new(pr_dir).call }
-        assert_equal :complete, Hive::Markers.current(File.join(pr_dir, "pr.md")).name
-
-        # 6-pr → 7-done (no agent invoked)
-        done_dir = File.join(dir, ".hive-state", "stages", "7-done", slug)
+        # 7-finalize → 8-done (no agent invoked)
+        done_dir = File.join(dir, ".hive-state", "stages", "8-done", slug)
         FileUtils.mkdir_p(File.dirname(done_dir))
-        FileUtils.mv(pr_dir, done_dir)
+        FileUtils.mv(finalize_dir, done_dir)
         out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }
         assert_includes out, "git worktree remove"
         assert_equal :complete, Hive::Markers.current(File.join(done_dir, "task.md")).name

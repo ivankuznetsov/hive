@@ -32,7 +32,7 @@ class SchemaFilesTest < Minitest::Test
   end
 
   # v1 (the original 6-stage schema) is preserved for external validators
-  # pinned to the pre-5-review release. Loading by explicit version: must
+  # pinned to the pre-6-review release. Loading by explicit version: must
   # still resolve.
   def test_hive_approve_v1_schema_file_remains_for_back_compat
     path = Hive::Schemas.schema_path("hive-approve", version: 1)
@@ -46,16 +46,17 @@ class SchemaFilesTest < Minitest::Test
     v1_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
     assert_includes v1_dirs, "5-pr",
                     "v1 must keep its original enum (5-pr / 6-done) for pinned consumers"
-    refute_includes v1_dirs, "5-review",
-                    "v1 enum must NOT include the v2-introduced 5-review stage"
+    refute_includes v1_dirs, "6-review",
+                    "v1 enum must NOT include the v2-introduced 6-review stage"
   end
 
-  def test_hive_approve_v2_includes_review_stage
+  def test_hive_approve_v2_includes_current_stage_dirs
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
-    assert_includes v2_dirs, "5-review", "v2 introduces the 5-review stage"
-    assert_includes v2_dirs, "6-pr"
-    assert_includes v2_dirs, "7-done"
+    assert_includes v2_dirs, "5-open-pr"
+    assert_includes v2_dirs, "6-review"
+    assert_includes v2_dirs, "7-finalize"
+    assert_includes v2_dirs, "8-done"
     refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
   end
 

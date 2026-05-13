@@ -44,7 +44,7 @@ class InitTest < Minitest::Test
     # U2 closes doc-review C-3: hive init scaffolds a live review.reviewers
     # block (not commented). Verifies the YAML is parseable and lands the
     # 3-entry recommended set (claude-ce-code-review, codex-ce-code-review,
-    # pr-review-toolkit) so a fresh project can run 5-review without
+    # pr-review-toolkit) so a fresh project can run 6-review without
     # additional hand-edit.
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -209,10 +209,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect: planning, development, reviewers,
-    # 8 limit prompts, daemon-enable, confirm. Choose codex for both, only
+    # 9 limit prompts, daemon-enable, confirm. Choose codex for both, only
     # first + third reviewer, override `plan` budget/timeout, accept the rest
     # (daemon defaults to enabled on blank, confirm defaults to yes on blank).
-    inputs = "codex\n2\n1,3\n\n30,900\n\n\n\n\n\n\n\n\n"
+    inputs = "codex\n2\n1,3\n\n30,900\n\n\n\n\n\n\n\n\n\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -240,7 +240,7 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    inputs = "\n\n\n\n\n\n\n\n\n\n\nn\n\n"
+    inputs = "\n\n\n\n\n\n\n\n\n\n\n\nn\n\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -255,8 +255,8 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # 12 blanks: planning, dev, reviewers, 8 limits, daemon-enable.
-    inputs = ([ "" ] * 12).join("\n") + "\nn\n"
+    # 13 blanks: planning, dev, reviewers, 9 limits, daemon-enable.
+    inputs = ([ "" ] * 13).join("\n") + "\nn\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)

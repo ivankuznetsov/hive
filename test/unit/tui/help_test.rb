@@ -80,11 +80,12 @@ class TuiHelpTest < Minitest::Test
     assert_match(/\$EDITOR|editor/i, entry[:description])
   end
 
-  def test_capital_p_is_pr_lowercase_p_is_plan
+  def test_capital_p_is_open_pr_lowercase_p_is_plan
     grid = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid }
     by_key = grid.each_with_object({}) { |b, h| h[b[:key]] = b[:action] }
-    assert_equal :pr,    by_key["P"], "capital P must be pr (so it doesn't collide with plan)"
-    assert_equal :plan,  by_key["p"], "lowercase p must be plan"
+    assert_equal :"open-pr", by_key["P"], "capital P must be open-pr (so it doesn't collide with plan)"
+    assert_equal :finalize,  by_key["F"], "capital F must be finalize"
+    assert_equal :plan,      by_key["p"], "lowercase p must be plan"
   end
 
   def test_bindings_is_frozen

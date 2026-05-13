@@ -3,7 +3,8 @@ require "hive/stages/base"
 require "hive/stages/brainstorm"
 require "hive/stages/plan"
 require "hive/stages/execute"
-require "hive/stages/pr"
+require "hive/stages/open_pr"
+require "hive/stages/finalize"
 require "hive/task"
 require "hive/config"
 
@@ -42,7 +43,7 @@ class PromptInjectionTest < Minitest::Test
   # prompt's opening and closing tags match within ONE spawn, but two
   # consecutive spawns get distinct nonces. This is the SEC-1 fix that
   # closes the per-process-shared-nonce attack surface across multi-agent
-  # loops in 5-review.
+  # loops in 6-review.
   def test_user_supplied_tag_is_fresh_per_call
     a = Hive::Stages::Base.user_supplied_tag
     b = Hive::Stages::Base.user_supplied_tag
@@ -109,7 +110,7 @@ class PromptInjectionTest < Minitest::Test
 
   def test_execute_prompt_wraps_plan
     # 4-execute is impl-only since U9 — there's no accepted_findings
-    # binding anymore (moved to fix_prompt.md.erb in the 5-review stage).
+    # binding anymore (moved to fix_prompt.md.erb in the 6-review stage).
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
       tag = Hive::Stages::Base.user_supplied_tag
@@ -130,9 +131,9 @@ class PromptInjectionTest < Minitest::Test
   end
 
   def test_fix_prompt_wraps_accepted_findings
-    # The accepted_findings wrapping moved to the 5-review fix prompt.
+    # The accepted_findings wrapping moved to the 6-review fix prompt.
     with_tmp_dir do |dir|
-      task = make_task(dir, "5-review")
+      task = make_task(dir, "6-review")
       tag = Hive::Stages::Base.user_supplied_tag
       prompt = Hive::Stages::Base.render(
         "fix_prompt.md.erb",
@@ -164,7 +165,7 @@ class PromptInjectionTest < Minitest::Test
     # Hive-Fix-Pass (per attempt), Hive-Fix-Phase: ci. CI-fix doesn't
     # carry triage bias / reviewer sources (that's review-fix only).
     with_tmp_dir do |dir|
-      task = make_task(dir, "5-review")
+      task = make_task(dir, "6-review")
       tag = Hive::Stages::Base.user_supplied_tag
       prompt = Hive::Stages::Base.render(
         "ci_fix_prompt.md.erb",
@@ -186,17 +187,44 @@ class PromptInjectionTest < Minitest::Test
     end
   end
 
-  def test_pr_prompt_wraps_plan_and_reviews
+  def test_open_pr_prompt_wraps_plan_and_execute_output
     with_tmp_dir do |dir|
-      task = make_task(dir, "6-pr")
+      task = make_task(dir, "5-open-pr")
       tag = Hive::Stages::Base.user_supplied_tag
       prompt = Hive::Stages::Base.render(
-        "pr_prompt.md.erb",
+        "open_pr_prompt.md.erb",
         Hive::Stages::Base::TemplateBindings.new(
           project_name: File.basename(dir),
           task_folder: task.folder,
           worktree_path: "/tmp/wt",
           slug: "x-260424-aaaa",
+          branch: "x-260424-aaaa",
+          plan_text: HOSTILE_IDEA,
+          execute_output_text: HOSTILE_IDEA,
+          user_supplied_tag: tag
+        )
+      )
+      assert_includes prompt, "<#{tag} content_type=\"plan_md\">"
+      assert_includes prompt, "<#{tag} content_type=\"execute_output_md\">"
+      assert_includes prompt, "--draft"
+      assert_equal 2, prompt.scan("<#{tag} ").count
+      assert_equal 2, prompt.scan("</#{tag}>").count
+    end
+  end
+
+  def test_finalize_prompt_wraps_plan_and_reviews
+    with_tmp_dir do |dir|
+      task = make_task(dir, "7-finalize")
+      tag = Hive::Stages::Base.user_supplied_tag
+      prompt = Hive::Stages::Base.render(
+        "finalize_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          task_folder: task.folder,
+          worktree_path: "/tmp/wt",
+          slug: "x-260424-aaaa",
+          branch: "x-260424-aaaa",
+          pr_url: "https://example.com/pr/9",
           plan_text: HOSTILE_IDEA,
           reviews_summary: HOSTILE_IDEA,
           user_supplied_tag: tag
@@ -204,6 +232,7 @@ class PromptInjectionTest < Minitest::Test
       )
       assert_includes prompt, "<#{tag} content_type=\"plan_md\">"
       assert_includes prompt, "<#{tag} content_type=\"reviews_summary\">"
+      assert_includes prompt, "is_draft=false"
       assert_equal 2, prompt.scan("<#{tag} ").count
       assert_equal 2, prompt.scan("</#{tag}>").count
     end

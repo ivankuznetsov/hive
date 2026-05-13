@@ -77,7 +77,7 @@ class StatusTest < Minitest::Test
           "review-complete-260426-aaac" => "<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n"
         }
         markers.each do |slug, marker|
-          folder = File.join(dir, ".hive-state", "stages", "5-review", slug)
+          folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
           FileUtils.mkdir_p(folder)
           File.write(File.join(folder, "task.md"), marker)
         end

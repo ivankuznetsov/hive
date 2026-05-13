@@ -3,7 +3,7 @@ require "hive/reviewers"
 
 # Direct coverage for Hive::Reviewers::SyntheticTask and the
 # Hive::Reviewers.synthetic_task_for(ctx) factory. This struct is the
-# task-shaped facade every 5-review sub-spawn (reviewers, triage,
+# task-shaped facade every 6-review sub-spawn (reviewers, triage,
 # ci-fix, browser-test) hands to Hive::Stages::Base.spawn_agent — drift
 # in its shape would silently break four spawn sites at once.
 class ReviewersSyntheticTaskTest < Minitest::Test
@@ -12,7 +12,7 @@ class ReviewersSyntheticTaskTest < Minitest::Test
   def make_ctx(dir)
     Hive::Reviewers::Context.new(
       worktree_path: dir,
-      task_folder: File.join(dir, ".hive-state", "stages", "5-review", "synth-task"),
+      task_folder: File.join(dir, ".hive-state", "stages", "6-review", "synth-task"),
       default_branch: "main",
       pass: 1
     )
@@ -46,8 +46,8 @@ class ReviewersSyntheticTaskTest < Minitest::Test
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)
       task = Hive::Reviewers.synthetic_task_for(ctx)
-      assert_equal "5-review", task.stage_name,
-                   "every sub-spawn under the 5-review runner identifies as 5-review"
+      assert_equal "6-review", task.stage_name,
+                   "every sub-spawn under the 6-review runner identifies as 6-review"
     end
   end
 
@@ -74,7 +74,7 @@ class ReviewersSyntheticTaskTest < Minitest::Test
     # flag (which would silently accept positional args) fails this
     # test.
     assert_raises(ArgumentError) do
-      Hive::Reviewers::SyntheticTask.new("folder", "state", "log", "5-review", nil)
+      Hive::Reviewers::SyntheticTask.new("folder", "state", "log", "6-review", nil)
     end
   end
 end

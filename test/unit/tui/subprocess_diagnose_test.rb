@@ -71,7 +71,7 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
   def test_missing_origin_remote_pattern
     with_isolated_log do |path|
       write_section(path,
-        argv: %w[hive pr slug --project demo --from 5-review],
+        argv: %w[hive pr slug --project demo --from 6-review],
         stderr: "fatal: 'origin' does not appear to be a git repository",
         exit_code: 1)
       result = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
@@ -378,7 +378,7 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
   def test_extract_project_pulls_value_after_project_flag
     assert_equal "demo",
       Hive::Tui::Subprocess.send(:extract_project,
-        %w[hive pr slug --project demo --from 5-review])
+        %w[hive pr slug --project demo --from 6-review])
   end
 
   def test_extract_project_returns_nil_when_flag_absent

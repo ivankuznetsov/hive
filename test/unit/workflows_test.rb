@@ -7,55 +7,56 @@ require "hive/workflows"
 # or target stage. Pin every public surface so a future refactor /
 # rebase can't drift the contract without breaking this file.
 class WorkflowsTest < Minitest::Test
-  def test_verbs_has_exactly_six_keys_in_canonical_order
-    assert_equal %w[brainstorm plan develop review pr archive],
+  def test_verbs_has_canonical_keys_in_order
+    assert_equal %w[brainstorm plan develop open-pr review finalize archive],
                  Hive::Workflows::VERBS.keys,
-                 "VERBS must list the canonical six workflow verbs"
-    assert_equal 6, Hive::Workflows::VERBS.size
+                 "VERBS must list the canonical workflow verbs"
+    assert_equal 7, Hive::Workflows::VERBS.size
   end
 
-  def test_review_verb_post_rebase_source_and_target
+  def test_open_pr_verb_source_and_target
+    cfg = Hive::Workflows::VERBS.fetch("open-pr")
+    assert_equal "4-execute", cfg[:source]
+    assert_equal "5-open-pr", cfg[:target]
+  end
+
+  def test_review_verb_source_and_target
     cfg = Hive::Workflows::VERBS.fetch("review")
-    assert_equal "4-execute", cfg[:source],
-                 "review advances OUT of 4-execute"
-    assert_equal "5-review", cfg[:target],
-                 "review arrives AT 5-review (the new stage)"
+    assert_equal "5-open-pr", cfg[:source]
+    assert_equal "6-review", cfg[:target]
   end
 
-  def test_pr_verb_post_rebase_source_shifts_to_5_review
-    cfg = Hive::Workflows::VERBS.fetch("pr")
-    assert_equal "5-review", cfg[:source],
-                 "pr's source shifted from 4-execute to 5-review post-rebase"
-    assert_equal "6-pr", cfg[:target]
+  def test_finalize_verb_source_and_target
+    cfg = Hive::Workflows::VERBS.fetch("finalize")
+    assert_equal "6-review", cfg[:source]
+    assert_equal "7-finalize", cfg[:target]
   end
 
-  def test_archive_verb_post_rebase_source_and_target_shift
+  def test_archive_verb_source_and_target
     cfg = Hive::Workflows::VERBS.fetch("archive")
-    assert_equal "6-pr", cfg[:source],
-                 "archive's source shifted from 5-pr to 6-pr post-rebase"
-    assert_equal "7-done", cfg[:target],
-                 "archive's target shifted from 6-done to 7-done post-rebase"
+    assert_equal "7-finalize", cfg[:source]
+    assert_equal "8-done", cfg[:target]
   end
 
   # ── verb_advancing_from ───────────────────────────────────────────────
 
-  def test_verb_advancing_from_4_execute_is_review
-    assert_equal "review", Hive::Workflows.verb_advancing_from("4-execute")
+  def test_verb_advancing_from_4_execute_is_open_pr
+    assert_equal "open-pr", Hive::Workflows.verb_advancing_from("4-execute")
   end
 
-  def test_verb_advancing_from_5_review_is_pr
-    assert_equal "pr", Hive::Workflows.verb_advancing_from("5-review")
+  def test_verb_advancing_from_6_review_is_finalize
+    assert_equal "finalize", Hive::Workflows.verb_advancing_from("6-review")
   end
 
-  def test_verb_advancing_from_7_done_is_nil
-    assert_nil Hive::Workflows.verb_advancing_from("7-done"),
+  def test_verb_advancing_from_8_done_is_nil
+    assert_nil Hive::Workflows.verb_advancing_from("8-done"),
                "no verb advances out of the terminal stage"
   end
 
   # ── verb_arriving_at ──────────────────────────────────────────────────
 
-  def test_verb_arriving_at_5_review_is_review
-    assert_equal "review", Hive::Workflows.verb_arriving_at("5-review")
+  def test_verb_arriving_at_6_review_is_review
+    assert_equal "review", Hive::Workflows.verb_arriving_at("6-review")
   end
 
   def test_verb_arriving_at_1_inbox_is_nil
@@ -78,7 +79,7 @@ class WorkflowsTest < Minitest::Test
 
   def test_for_verb_review_returns_source_and_target
     cfg = Hive::Workflows.for_verb("review")
-    assert_equal "4-execute", cfg[:source]
-    assert_equal "5-review", cfg[:target]
+    assert_equal "5-open-pr", cfg[:source]
+    assert_equal "6-review", cfg[:target]
   end
 end

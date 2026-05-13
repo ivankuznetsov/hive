@@ -172,7 +172,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_recover_stale_action_is_skipped_with_log
-    rows = [ row(action: "recover_review", marker: "review_error", stage: "5-review",
+    rows = [ row(action: "recover_review", marker: "review_error", stage: "6-review",
                  command: nil) ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
     dispatcher.tick(now: T0)
@@ -182,8 +182,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_archive_action_routes_to_merge_watcher
-    rows = [ row(stage: "6-pr", action: "ready_to_archive",
-                 command: "hive archive s1 --from 6-pr") ]
+    rows = [ row(stage: "7-finalize", action: "ready_to_archive",
+                 command: "hive archive s1 --from 7-finalize") ]
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
     dispatcher.tick(now: T0)
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
@@ -197,13 +197,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # supervisor + caps just like a regular advance dispatch.
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "6-pr",
-      command: "hive archive s1 --from 6-pr --project p1 --json",
+      project: "p1", slug: "s1", stage: "7-finalize",
+      command: "hive archive s1 --from 7-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
     assert_equal 1, sup.spawned.size
-    assert_equal "hive archive s1 --from 6-pr --project p1 --json", sup.spawned.first[:command]
+    assert_equal "hive archive s1 --from 7-finalize --project p1 --json", sup.spawned.first[:command]
   end
 
   def test_merged_pr_archive_skips_when_project_disabled_after_enqueue
@@ -213,8 +213,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       rows: [], with_merge_watcher: true, project_enabled: false
     )
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "6-pr",
-      command: "hive archive s1 --from 6-pr --project p1 --json",
+      project: "p1", slug: "s1", stage: "7-finalize",
+      command: "hive archive s1 --from 7-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
@@ -234,13 +234,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ctrl.instance_variable_set(:@max_concurrent_runs, 1)
     ctrl.record_dispatch(
       pid: 999, project: "px", slug: "running",
-      stage: "5-review", command: "hive run", started_at: T0,
+      stage: "6-review", command: "hive run", started_at: T0,
       state_file_mtime: T0 - 60
     )
 
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "6-pr",
-      command: "hive archive s1 --from 6-pr --project p1 --json",
+      project: "p1", slug: "s1", stage: "7-finalize",
+      command: "hive archive s1 --from 7-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
@@ -419,7 +419,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       return [] if @reaped
       @reaped = true
       [ ChildExit.new(pid: 999, exit_code: 0, project: "p1", slug: "s1",
-                      stage: "5-review", command: "hive run s1",
+                      stage: "6-review", command: "hive run s1",
                       started_at: T0, finished_at: now, json_envelope: nil) ]
     end
     status = FakeStatusConsumer.new
@@ -427,7 +427,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     # Pre-record the dispatch so the controller has something to clear
     controller.record_dispatch(pid: 999, project: "p1", slug: "s1",
-                               stage: "5-review", command: "hive run s1",
+                               stage: "6-review", command: "hive run s1",
                                started_at: T0, state_file_mtime: T0 - 60)
 
     dispatcher = Hive::Daemon::Dispatcher.new(
@@ -450,11 +450,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
       return [] if @reaped
       @reaped = true
       [ ChildExit.new(pid: 999, exit_code: Hive::ExitCodes::CONFIG, project: "p1",
-                      slug: "s1", stage: "5-review", command: "hive run s1",
+                      slug: "s1", stage: "6-review", command: "hive run s1",
                       started_at: Time.now, finished_at: now, json_envelope: nil) ]
     end
     controller.record_dispatch(pid: 999, project: "p1", slug: "s1",
-                               stage: "5-review", command: "hive run s1",
+                               stage: "6-review", command: "hive run s1",
                                started_at: Time.now, state_file_mtime: Time.now - 60)
     status = FakeStatusConsumer.new
     logger = StubLogger.new

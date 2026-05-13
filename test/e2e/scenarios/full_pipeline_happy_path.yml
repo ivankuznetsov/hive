@@ -28,17 +28,17 @@ steps:
   - kind: cli
     args: [review, "{slug}", --from, 4-execute]
   - kind: state_assert
-    path: "{task_dir:5-review}/task.md"
+    path: "{task_dir:6-review}/task.md"
     marker: { current: REVIEW_COMPLETE }
   - kind: cli
-    args: [approve, "{slug}", --from, 5-review, --to, 6-pr]
+    args: [approve, "{slug}", --from, 6-review, --to, 7-finalize]
   - kind: write_file
-    path: "{task_dir:6-pr}/pr.md"
+    path: "{task_dir:7-finalize}/pr.md"
     content: "# PR\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 -->\n"
   - kind: cli
-    args: [archive, "{slug}", --from, 6-pr]
+    args: [archive, "{slug}", --from, 7-finalize]
   - kind: json_assert
     args: [status, --json]
     schema: hive-status
     pick: [projects, 0, tasks, 0, stage]
-    equals: 7-done
+    equals: 8-done

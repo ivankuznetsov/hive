@@ -24,7 +24,7 @@ class ReviewersAgentTest < Minitest::Test
   def make_ctx(dir)
     Hive::Reviewers::Context.new(
       worktree_path: dir,
-      task_folder: File.join(dir, ".hive-state", "stages", "5-review", "test"),
+      task_folder: File.join(dir, ".hive-state", "stages", "6-review", "test"),
       default_branch: "main",
       pass: 1
     )
@@ -90,7 +90,7 @@ class ReviewersAgentTest < Minitest::Test
   end
 
   def test_orchestrator_marker_is_not_clobbered_by_reviewer_spawn
-    # Crucial regression: the 5-review runner sets REVIEW_WORKING phase=reviewers
+    # Crucial regression: the 6-review runner sets REVIEW_WORKING phase=reviewers
     # before spawning each reviewer. The reviewer's spawn must not overwrite
     # that marker with :agent_working — that contract is gated by the
     # claude profile's :output_file_exists status_detection_mode (per U4).

@@ -4,7 +4,7 @@ require "hive/commands/init"
 require "hive/commands/run"
 
 # 4-execute is impl-only since U9. The review iteration moved to the new
-# 5-review stage; tests asserting EXECUTE_WAITING / EXECUTE_STALE / multi-
+# 6-review stage; tests asserting EXECUTE_WAITING / EXECUTE_STALE / multi-
 # pass / reviewer behavior moved to test/integration/run_review_test.rb.
 class RunExecuteTest < Minitest::Test
   include HiveTestHelper
@@ -133,10 +133,10 @@ class RunExecuteTest < Minitest::Test
         assert_empty marker.attrs
 
         # Critically: there must be NO review files written. Reviewers
-        # moved to 5-review.
+        # moved to 6-review.
         review_files = Dir[File.join(folder, "reviews", "*.md")]
         assert_empty review_files,
-                     "4-execute must not produce review files; reviewers moved to 5-review"
+                     "4-execute must not produce review files; reviewers moved to 6-review"
       ensure
         FileUtils.rm_rf(wt_yml["path"]) if defined?(wt_yml) && wt_yml
       end
@@ -326,7 +326,7 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
-  def test_re_run_after_complete_announces_next_step_review
+  def test_re_run_after_complete_announces_next_step_open_pr
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, _slug = setup_execute_task(dir)
@@ -335,7 +335,7 @@ class RunExecuteTest < Minitest::Test
         # Re-run; runner should detect EXECUTE_COMPLETE and short-circuit.
         out, err = capture_io { Hive::Commands::Run.new(folder).call }
         assert_match(/already complete/, err)
-        assert_match(/hive review/, out)
+        assert_match(/hive open-pr/, out)
       ensure
         wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
         FileUtils.rm_rf(wt_path) if wt_path

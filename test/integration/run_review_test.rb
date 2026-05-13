@@ -5,7 +5,7 @@ require "hive/commands/run"
 require "hive/markers"
 require "hive/stages/review"
 
-# Integration coverage for the 5-review runner. The unit-level tests for
+# Integration coverage for the 6-review runner. The unit-level tests for
 # CiFix, Triage, BrowserTest, Reviewers cover their internals; this file
 # focuses on the orchestrator's branching: pre-flight terminal markers,
 # wall-clock cap, pass cap, ci-stale path, clean run end-to-end.
@@ -51,7 +51,7 @@ class RunReviewTest < Minitest::Test
     File.write(cfg_path, cfg.to_yaml)
 
     slug = "feat-x-260424-aaaa"
-    folder = File.join(dir, ".hive-state", "stages", "5-review", slug)
+    folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
     FileUtils.mkdir_p(folder)
     File.write(File.join(folder, "plan.md"), "## Overview\nstub\n<!-- COMPLETE -->\n")
     File.write(File.join(folder, "task.md"), <<~MD)

@@ -41,6 +41,17 @@ module Hive
         test_result = probe_test_clipboard(env: env, kernel: kernel)
         return test_result if test_result.kind != :none
 
+        # Prefer the explicit pasted path over OS clipboard bytes: when
+        # the user drag-drops a file or pastes a literal path into the
+        # composer, that's the unambiguous intent — running `wl-paste`
+        # / `xclip` first risks staging a stale clipboard image they
+        # never asked for. Only fall back to clipboard bytes when the
+        # pasted text didn't resolve to a usable image file.
+        if !normalized_path(pasted_text).empty?
+          file_result = probe_image_file(pasted_text: pasted_text, kernel: kernel)
+          return file_result if file_result.kind != :none
+        end
+
         clipboard_result = probe_clipboard_image(env: env, kernel: kernel)
         return clipboard_result if clipboard_result.kind != :none
 
@@ -203,7 +214,10 @@ module Hive
         # buffer that stops growing once `max_bytes` is reached so a
         # huge clipboard payload cannot exhaust memory. Returns
         # `[out_bytes, err_bytes, status]`. On `Timeout::Error` returns
-        # `["".b, "timeout", TIMEOUT_STATUS]` after killing the child.
+        # `[+"".b, +"".b, TIMEOUT_STATUS]` after killing the child —
+        # both byte slots are typed as binary `String#b` so a future
+        # caller comparing/concatenating the `err` slot against another
+        # bytestring stays on the same encoding rail.
         def capture3(argv, timeout:, max_bytes: nil)
           Open3.popen3(*argv) do |stdin, stdout, stderr, wait_thr|
             stdin.close
@@ -218,7 +232,7 @@ module Hive
               [ out, err, status ]
             rescue Timeout::Error
               terminate(wait_thr.pid)
-              [ +"".b, "timeout", TIMEOUT_STATUS ]
+              [ +"".b, +"".b, TIMEOUT_STATUS ]
             end
           end
         end
@@ -256,7 +270,19 @@ module Hive
           nil
         rescue Timeout::Error
           Process.kill("KILL", pid)
-          Process.wait(pid)
+          # Outer 0.2s guard around the SIGKILL+wait pair: if the PID
+          # is wedged in `D`-state (uninterruptible sleep on e.g. a
+          # network mount) even SIGKILL won't make `Process.wait`
+          # return promptly, and without this guard the shim would
+          # wedge with no second timeout. We swallow the secondary
+          # Timeout::Error — the kernel will reap the zombie when
+          # the syscall eventually completes; what matters is that
+          # the clipboard probe path doesn't hang.
+          begin
+            Timeout.timeout(0.2) { Process.wait(pid) }
+          rescue Timeout::Error
+            nil
+          end
           # Second clause catches re-raises from the SIGKILL+Process.wait
           # path above — collapsing the two clauses into one would let
           # an ESRCH/ECHILD from the kill path escape and re-surface as

@@ -307,12 +307,19 @@ module Hive
       #      mis-interpret. Done AFTER the whitespace rewrite so legit
       #      \t and \n are already gone.
       #   4. Collapse runs of spaces.
+      #
+      # Trailing/leading whitespace is intentionally preserved at this
+      # layer: `:filter` mode and the new-idea composer route raw paste
+      # buffers through here, and a global `.strip` would silently
+      # discard user-intended boundary spaces in non-image pastes. The
+      # image-path probe path already strips via
+      # `Clipboard.normalized_path` before path resolution, so dropping
+      # the strip here doesn't change image-path detection.
       def normalize_paste(bytes)
         bytes.to_s.dup.force_encoding(Encoding::UTF_8).scrub
              .gsub(/[\r\n\t]+/, " ")
              .gsub(/[\x00-\x1f\x7f]/, "")
              .gsub(/ {2,}/, " ")
-             .strip
       end
 
       def key_message(key_type, runes: [])

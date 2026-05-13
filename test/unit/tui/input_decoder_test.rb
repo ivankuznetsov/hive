@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/tui/input_decoder"
+require "hive/tui/clipboard"
 
 class HiveTuiInputDecoderTest < Minitest::Test
   include HiveTestHelper
@@ -92,9 +93,18 @@ class HiveTuiInputDecoderTest < Minitest::Test
   end
 
   def test_bracketed_paste_file_path_normalizes_trailing_newline
+    # The decoder preserves whitespace at boundaries (so non-image
+    # pastes don't silently lose user-intended leading/trailing
+    # spaces). It only normalizes CR/LF/TAB to single spaces and
+    # collapses runs. The image-path probe layer
+    # (`Clipboard.normalized_path`) strips the result before
+    # path resolution, so the trailing space here doesn't break
+    # drag-drop image detection downstream.
     msg = decoder.drain("\e[200~/tmp/screenshot.png\n\e[201~").first
-    assert_equal "/tmp/screenshot.png", msg.text
+    assert_equal "/tmp/screenshot.png ", msg.text
     assert_equal true, msg.paste
+    assert_equal "/tmp/screenshot.png", Hive::Tui::Clipboard.normalized_path(msg.text),
+                 "downstream image-path probe must trim the boundary newline"
   end
 
   def test_arrow_home_end_delete_sequences_decode_to_key_messages

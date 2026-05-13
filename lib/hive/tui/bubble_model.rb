@@ -404,7 +404,12 @@ module Hive
           # Surface a flash for oversize PNG so the literal filesystem
           # path or clipboard byte string doesn't fall through into the
           # text-insertion path and corrupt the title buffer.
-          [ flashed("image too large (>#{Hive::Tui::Clipboard::MAX_IMAGE_BYTES / (1024 * 1024)} MiB) — not staged"), nil ]
+          # Ceil-divide the byte cap to MiB so a future tune of
+          # `MAX_IMAGE_BYTES` to a non-MiB-aligned value (e.g. 5.5 MiB)
+          # doesn't surface as ">5 MiB — not staged"; the displayed
+          # boundary should always be ≥ the actual cap, never below.
+          mib_cap = (Hive::Tui::Clipboard::MAX_IMAGE_BYTES.to_f / (1024 * 1024)).ceil
+          [ flashed("image too large (>#{mib_cap} MiB) — not staged"), nil ]
         else
           if Hive::Tui::Clipboard.non_image_file_path?(pasted_text: raw_text)
             [ flashed("drag-drop ignored (not an image)"), nil ]
@@ -527,7 +532,11 @@ module Hive
         # and cleanup. That's a correctness-bug indicator — the
         # composer should never produce such a path — and must
         # surface unconditionally to stderr, not stay hidden behind
-        # `HIVE_TUI_DEBUG=1`.
+        # `HIVE_TUI_DEBUG=1`. `e.message` is already
+        # `Hive::Tui::Text.sanitize`-d at the
+        # `ComposerStaging.cleanup!` boundary (the authoritative
+        # sanitisation site for the staging-path stderr surface), so
+        # we re-render it verbatim here.
         warn "hive tui: staging cleanup refused (#{e.class}: #{e.message})"
         Hive::Tui::Debug.log("new_idea_staging", "cleanup refused: #{e.class}: #{e.message}")
       rescue SystemCallError, IOError => e
@@ -2092,14 +2101,12 @@ module Hive
       # project). Empty title or no-projects-registered states flash an
       # error and return to :grid without spawning a child.
       #
-      # Staging cleanup paths across submit branches:
-      #   * legacy text success/failure → no staging dir to clean
-      #   * rich success → `cleanup_new_idea_staging` runs before flash
-      #   * rich validation error → staging PRESERVED so the operator
-      #     can fix the title and retry without re-pasting images
-      #   * rich exception → staging cleaned in `ensure` so a crashed
-      #     submit doesn't leak `/tmp/hive-tui-composer-*` per attempt
-      #   * Esc/cancel → `apply_new_idea_cancelled` triggers cleanup
+      # Staging cleanup policy: every exit path either runs
+      # `cleanup_new_idea_staging` before the model resets, or
+      # deliberately preserves staging so the operator can retry.
+      # See the `cleanup_new_idea_staging` / `apply_new_idea_cancelled`
+      # / `submit_rich_new_idea` (rescue + ensure) call-sites for the
+      # branch-by-branch contract.
       def submit_new_idea
         buffer = @hive_model.new_idea_buffer.to_s
         if rich_new_idea_buffer?(buffer)
@@ -2330,10 +2337,18 @@ module Hive
       def render_rich_new_idea_body(buffer)
         attachments = attachments_by_label
         buffer.to_s.gsub(/\[image(\d+)\]/) do
-          label = "image#{Regexp.last_match(1)}"
+          # Normalize the captured digits the same way
+          # `rich_new_idea_validation_error` does (via `.to_i`) so a
+          # manually edited zero-padded placeholder like `[image01]`
+          # resolves to the canonical `image1` attachment label
+          # instead of the literal `image01` (which would miss the
+          # attachment map and raise `KeyError` after validation
+          # already cleared the buffer for submit).
+          number = Regexp.last_match(1).to_i
+          label = "image#{number}"
           attachment = attachments.fetch(label)
           ext = attachment_extension(attachment)
-          "![](assets/image-#{Regexp.last_match(1)}.#{ext})"
+          "![](assets/image-#{number}.#{ext})"
         end
       end
 
@@ -2348,13 +2363,16 @@ module Hive
         @hive_model.new_idea_attachments.to_h { |attachment| [ attachment.label, attachment ] }
       end
 
-      # The canonical extension was captured on the Attachment record
-      # at staging time (via `ComposerStaging.normalized_extension`),
-      # so the body markdown and disk basename remain aligned even if
-      # `staging_path` is renamed or moved between staging and submit.
-      # `normalized_extension` runs again here only as a defence
-      # against a future caller constructing an Attachment with a
-      # raw/dirty `ext`.
+      # Single normalisation site for the per-Attachment extension —
+      # both `render_rich_new_idea_body` (body markdown) and
+      # `rich_new_idea_attachment_tuples` (disk basename) route through
+      # here, so the on-disk filename and the `assets/...` markdown
+      # reference can't drift even if `attachment.ext` was captured
+      # raw/dirty at staging time. We deliberately do NOT re-derive
+      # the extension from `staging_path` here: the staging directory
+      # is owned by the composer and may be renamed/moved between
+      # staging and submit, while `attachment.ext` is the
+      # captured-at-paste-time signal of what the user intended.
       def attachment_extension(attachment)
         Hive::Tui::ComposerStaging.normalized_extension(attachment.ext)
       end

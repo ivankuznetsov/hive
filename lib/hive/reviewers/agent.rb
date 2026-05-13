@@ -200,6 +200,13 @@ module Hive
           spec.fetch("prompt_template"),
           hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(ctx.task_folder)
         )
+        # Generate one nonce per spawn (ADR-019) and reuse it for
+        # both `user_supplied_tag` (the template's own bindings) and
+        # the plan_context_section's inner wrapper, so the reviewer
+        # sees a single consistent nonce across the whole prompt.
+        # Drift would let an attacker who controls one content source
+        # forge a wrapper that looks like another's.
+        tag = Hive::Stages::Base.user_supplied_tag
         Hive::Stages::Base.render_resolved_path(
           template_path,
           Hive::Stages::Base::TemplateBindings.new(
@@ -210,8 +217,8 @@ module Hive
             pass: ctx.pass,
             output_path: output_path,
             skill_invocation: profile.format_skill_invocation(skill),
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder)
+            user_supplied_tag: tag,
+            plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder, tag)
           )
         )
       end

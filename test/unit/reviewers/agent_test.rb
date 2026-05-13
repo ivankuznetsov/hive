@@ -143,16 +143,50 @@ class ReviewersAgentTest < Minitest::Test
 
         assert_match(/Plan context \(authoritative on scope\)/, prompt,
                      "#{template} must render the plan-context header")
-        assert_match(/BEGIN plan\.md/, prompt,
-                     "#{template} must wrap plan content with BEGIN marker")
+        assert_match(/<user_supplied_[a-f0-9]{16} content_type="plan_md">/, prompt,
+                     "#{template} must wrap plan content in the per-spawn user_supplied tag")
+        assert_match(/<\/user_supplied_[a-f0-9]{16}>/, prompt,
+                     "#{template} must close the user_supplied wrapper")
         assert_includes prompt, "G1. Specific goal stays in this test.",
                         "#{template} must inline plan.md content (Goals section)"
         assert_includes prompt, "N1. The deferred thing.",
                         "#{template} must inline plan.md content (Scope Boundaries section)"
-        # Behavior section must still follow the plan section.
-        assert prompt.index("BEGIN plan.md") < prompt.index("Behavior:"),
+
+        # Plan-context section must precede Behavior:. Guard against
+        # nil from `prompt.index` so a regression that drops either
+        # marker produces a clear assertion failure rather than a
+        # NoMethodError on nil.
+        wrapper_idx = prompt.index("content_type=\"plan_md\"")
+        refute_nil wrapper_idx, "#{template} must include the plan wrapper"
+        behavior_idx = prompt.index("Behavior:")
+        refute_nil behavior_idx, "#{template} must include the Behavior: section"
+        assert wrapper_idx < behavior_idx,
                "#{template} must put plan context BEFORE the Behavior: instructions"
       end
+    end
+  end
+
+  def test_render_prompt_uses_single_nonce_for_template_tag_and_plan_wrapper
+    # ADR-019: each spawn gets one fresh nonce shared across every
+    # user_supplied wrapper in its prompt. If render_prompt called
+    # `user_supplied_tag` twice (once for the template's own
+    # bindings, once for PlanContext.render), the two nonces would
+    # differ — letting an attacker who controls one content source
+    # forge a closing tag against another. This test pins the
+    # invariant that one prompt has at most one distinct nonce.
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      File.write(File.join(ctx.task_folder, "plan.md"), "# Plan\n")
+
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+      prompt = reviewer.send(:render_prompt,
+                              Hive::AgentProfiles.lookup("claude"),
+                              reviewer.spec.fetch("skill"))
+
+      nonces = prompt.scan(/user_supplied_[a-f0-9]{16}/).uniq
+      assert_equal 1, nonces.size,
+                   "expected a single user_supplied nonce shared across the prompt; got #{nonces.inspect}"
     end
   end
 
@@ -172,8 +206,17 @@ class ReviewersAgentTest < Minitest::Test
 
       assert_match(/no plan\.md found/, prompt,
                    "missing plan.md must surface the absent-note in the prompt")
-      refute_match(/BEGIN plan\.md/, prompt,
-                   "no BEGIN/END markers when plan.md is absent")
+      refute_match(/content_type="plan_md"/, prompt,
+                   "no plan wrapper when plan.md is absent")
+
+      # Absent-note must also precede Behavior: — symmetric with the
+      # present-case ordering assertion above.
+      note_idx = prompt.index("no plan.md found")
+      refute_nil note_idx, "absent-note text must appear in the prompt"
+      behavior_idx = prompt.index("Behavior:")
+      refute_nil behavior_idx
+      assert note_idx < behavior_idx,
+             "absent-note must precede Behavior: section just like the present case"
     end
   end
 

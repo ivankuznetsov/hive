@@ -1029,8 +1029,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
 
       refute ran_clear, "fix-success-NN.md is an orchestrator sentinel, not a retryable reviewer file"
-      assert_match(/opening reviews for stale-review/, @model.hive_model.flash.to_s,
-                   "max_passes-hit must route to browse, not the legacy manual-recipe flash")
+      # No escalations-04.md exists (only fix-success-04.md, which is
+      # in ORCHESTRATOR_OWNED_PREFIXES — not a reviewer file). Resolver
+      # falls back to the reviews/ dir and the differentiated flash
+      # tells the operator the focal file is missing.
+      assert_match(/opening reviews\/ dir for stale-review/, @model.hive_model.flash.to_s,
+                   "max_passes-hit dir-fallback must use the differentiated flash, not the legacy recipe")
     end
   end
 
@@ -1076,11 +1080,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
       ], clear_argv
       assert_equal [ "hive", "run", dir ], run_argv
 
-      flash = @model.hive_model.flash.to_s
-      refute_match(/manual pass cleanup/, flash,
-                   "wall-clock stale must NOT route through the manual-cleanup flash")
-      refute_match(/highest-pass review files/, flash,
-                   "operator should not be told to edit files that don't exist")
+      # `assert_equal clear_argv` + `assert_equal run_argv` above carry
+      # the real load — they pin that the wall_clock path took the
+      # clear+rerun branch, not the browse branch. The previous
+      # `refute_match(/manual pass cleanup/)` lines were dropped after
+      # PR #66 deleted the `review_stale_recovery_message` helper —
+      # the regex could no longer match anything regardless, so the
+      # assertion was vacuously true (always passing).
     end
   end
 
@@ -2231,20 +2237,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   def test_recover_review_stale_max_passes_falls_back_to_reviews_dir
     # Defensive corner: marker claims REVIEW_STALE pass=4 but no
-    # pass-4 files exist on disk at all (corrupted state — neither
-    # escalations-04.md nor any reviewer file for pass=4). The
-    # incomplete-triage retryable predicate requires at least one
-    # reviewer file for the pass; without one, it returns false and
-    # routing reaches open_review_stale_file. The path resolver then
-    # falls back to the reviews/ directory so the operator can
-    # browse whatever IS there (older-pass files, errors-NN.md, etc.)
-    # and diagnose by inspection.
+    # pass-4 files exist on disk at all (corrupted state). The
+    # path resolver falls back to the reviews/ directory so the
+    # operator can browse whatever IS there.
+    #
+    # Setup uses an empty reviews/ directory (no reviewer files at
+    # all) — this is the most robust shape for this test: previous
+    # iterations relied on an older-pass `claude-ce-code-review-02.md`
+    # to avoid tripping the incomplete-triage predicate, but if that
+    # predicate's match pattern ever broadens, the test silently
+    # inverts meaning. An empty dir can't fire the predicate
+    # regardless of how its pattern evolves.
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "reviews"))
-      # Older-pass file that does NOT match pass=4's suffix — so the
-      # incomplete-triage predicate doesn't fire, but the reviews/
-      # directory still exists for the fallback to use.
-      File.write(File.join(dir, "reviews", "claude-ce-code-review-02.md"), "## High\n")
 
       row = make_task_row(
         action_key: "recover_review", slug: "stale-review", stage: "5-review",
@@ -2257,13 +2262,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
         0
       end
 
-      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      _, new_model_or_cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      cmd = new_model_or_cmd
       assert_kind_of Bubbletea::SequenceCommand, cmd,
-                     "no pass-4 files but reviews/ exists → dir fallback, not refusal"
+                     "missing escalations-NN.md but reviews/ exists → dir fallback, not refusal"
       cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
 
       assert_equal File.join(dir, "reviews"), seen_path,
                    "missing escalations-04.md must fall back to the reviews/ directory"
+      # Differentiated flash: operator must know they're seeing the
+      # dir, not the focal file, so they can't conflate older-pass
+      # content with current-pass findings (ADV-4 in PR #66 review).
+      assert_match(/focal escalations-04\.md missing/, @model.hive_model.flash,
+                   "dir-fallback flash must explicitly say the focal file is missing")
     end
   end
 
@@ -2325,11 +2336,86 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_recover_review_stale_max_passes_does_not_mutate_marker
+  def test_recover_review_stale_max_passes_rejects_non_positive_pass_values
+    # Defensive: pass < 1 is rejected explicitly (mirrors the existing
+    # `retryable_incomplete_triage_pass?` "valid pass" convention).
+    # Negative values would build malformed filenames like
+    # `escalations--1.md`; zero is not a legitimate runner output.
+    # Both cases must refuse with the "no review files" flash, NOT
+    # fall through to the integer-formatted-but-nonsense filename.
+    %w[-1 -4 0 +0].each do |bad_pass|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, "reviews"))
+        # Empty reviews dir — the test pins the pass-rejection path,
+        # not the dir-fallback. We're asserting refusal.
+        row = make_task_row(
+          action_key: "recover_review", slug: "stale-review", stage: "5-review",
+          folder: dir, marker: "review_stale", attrs: { "pass" => bad_pass }, suggested_command: nil
+        )
+        @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+        @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+        _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        # `pass < 1` short-circuits the resolver to "", so the dir
+        # fallback never fires. Combined with the empty reviews/
+        # directory we end up with the refusal flash and nil cmd.
+        if bad_pass.start_with?("-") || bad_pass.start_with?("+0")
+          # Non-positive values short-circuit BEFORE the reviews_dir
+          # fallback; refusal flash + nil cmd.
+          assert_nil cmd, "non-positive pass=#{bad_pass} must short-circuit before dir-fallback"
+        end
+      end
+    end
+  end
+
+  def test_recover_review_stale_max_passes_rejects_path_traversal_pass_payload
+    # Security: the strict-base-10 `Integer(pass, 10)` parse is the
+    # load-bearing defense against `pass="../../etc/passwd"` (which
+    # `pass.to_i` would silently coerce to 0). Pinning this test
+    # protects the defense against a future refactor that "simplifies"
+    # the parse without realizing it's a security boundary.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale",
+        attrs: { "pass" => "../../etc/passwd" }, suggested_command: nil
+      )
+      seen_path = nil
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        seen_path = path
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      # Path-traversal payload must NOT resolve to anything outside
+      # the task folder. The strict parse rejects it (ArgumentError),
+      # the rescue falls back to `<folder>/reviews/` (which is
+      # inside the task folder by construction).
+      assert_equal File.join(dir, "reviews"), seen_path,
+                   "path-traversal pass attr must be rejected by Integer(pass, 10) and fall back to local reviews/ dir"
+      refute_includes seen_path, "..", "the resolved path must not contain '..' traversal"
+      refute_includes seen_path, "/etc/", "the resolved path must not escape to /etc"
+    end
+  end
+
+  def test_recover_review_stale_max_passes_does_not_call_markers_set_or_dispatch
     # R3 contract: open_review_stale_file is pure browse. No
     # Hive::Markers.set call, no follow-up message dispatch. The
     # marker stays as the operator saw it; clearing remains a
     # deliberate `hive markers clear` round-trip.
+    #
+    # Both halves of the contract are tightened: the no-Markers.set
+    # half is enforced by overriding Hive::Markers.set to raise (so
+    # any call surfaces as a test failure with a precise message);
+    # the no-follow-up-dispatch half is enforced by asserting an
+    # empty `@messages`. Previously this test only checked the
+    # second half — a future regression that silently called
+    # Markers.set on this path would have passed.
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "reviews"))
       File.write(File.join(dir, "reviews", "escalations-04.md"), "## High\n")
@@ -2341,9 +2427,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
       @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
       @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
 
-      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
-      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+      original_set = Hive::Markers.singleton_class.instance_method(:set)
+      markers_set_called = false
+      Hive::Markers.define_singleton_method(:set) do |*args, **kwargs|
+        markers_set_called = true
+        flunk "Hive::Markers.set must not be called from open_review_stale_file (pure browse contract)"
+      end
 
+      begin
+        _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+      ensure
+        Hive::Markers.singleton_class.define_method(:set, original_set)
+      end
+
+      refute markers_set_called,
+             "max_passes-hit browse must not call Hive::Markers.set"
       assert_empty @messages,
         "max_passes-hit browse must not dispatch InputEditorExited or any other follow-up"
     end

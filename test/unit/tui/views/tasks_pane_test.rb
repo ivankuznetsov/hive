@@ -165,6 +165,32 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     refute_includes out, "stale pass=2"
   end
 
+  def test_recover_review_status_strips_control_chars_in_pass_attr
+    # Defensive: a marker file whose `pass=` attr was corrupted (or
+    # injected) with ANSI escapes or control bytes must not corrupt
+    # lipgloss column alignment or hijack the cursor. Sanitize
+    # before rendering — mirrors the existing sanitize behavior on
+    # `reason` attrs (see test_recover_review_status_strips_control_chars_and_ansi_escapes).
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "ansi-pass",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: { "pass" => "4\e[31mansi\e[0m\nNL" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    refute_match(/\e\[/, out, "ANSI escape bytes must be stripped from pass attr")
+    refute_match(/\nNL/, out, "literal newlines must be stripped from pass attr")
+    assert_includes out, "stale pass=4",
+                    "sanitized pass value must still render the prefix correctly"
+  end
+
   def test_recover_review_status_falls_back_when_pass_attr_missing
     # Edge: legacy/malformed marker with REVIEW_STALE name but no
     # pass attribute falls back to the existing marker-name display.

@@ -1199,16 +1199,36 @@ module Hive
           clear_terminal_for_takeover
         end
 
+        # Differentiated flash: when we fell back to the reviews/
+        # directory (focal `escalations-NN.md` missing), say so
+        # explicitly. The operator's status row shows "stale pass=4"
+        # but the editor will open a directory that may contain
+        # files for OTHER passes — without this distinction the
+        # operator could resolve findings against pass-2 thinking
+        # they're pass-4's. Pinned by ADV-4 in PR #66's review.
+        flash_text = if File.directory?(path)
+          "opening reviews/ dir for #{row.slug} (focal escalations-#{format('%02d', pass_for_flash(row))}.md missing)"
+        else
+          "opening reviews for #{row.slug} in #{File.basename(argv.first)}"
+        end
+
         cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
         [
-          @hive_model.with(
-            flash: "opening reviews for #{row.slug} in #{File.basename(argv.first)}",
-            flash_set_at: Time.now
-          ),
+          @hive_model.with(flash: flash_text, flash_set_at: Time.now),
           cmd
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      # Helper for `open_review_stale_file`'s differentiated flash:
+      # returns the pass attr as a parsed integer for display, or 0
+      # when it's malformed/absent (the dir-fallback path).
+      def pass_for_flash(row)
+        attrs = row.attrs || {}
+        Integer(Hive::Tui::Text.sanitize(attrs["pass"]).strip, 10)
+      rescue ArgumentError
+        0
       end
 
       # Resolve the focal path for a max_passes-hit REVIEW_STALE row:
@@ -1224,24 +1244,38 @@ module Hive
         return "" if folder.empty?
 
         attrs = row.attrs || {}
-        pass = attrs["pass"].to_s
+        # Sanitize before parsing: stdout-tail or other operator-supplied
+        # bytes embedded in a marker reason could carry control sequences;
+        # the resolver doesn't render the value, but sanitizing first
+        # keeps the parse path symmetric with `tasks_pane.rb`'s status-
+        # column rendering (which always sanitizes) so a CSI-loaded
+        # `pass` attr resolves to the same outcome on both surfaces.
+        pass = Hive::Tui::Text.sanitize(attrs["pass"]).strip
         return "" if pass.empty?
 
-        reviews_dir = File.join(folder, "reviews")
-        # Pass attrs come straight from a Hive-controlled marker (the
-        # runner emits `pass=N` as a positive integer string); still
-        # convert via Integer() so a malformed marker doesn't crash
-        # the renderer and instead falls back to the reviews/ dir or
-        # the refusal flash.
+        # Strict-base-10 parse is the load-bearing path-traversal
+        # defense — `Integer(pass, 10)` rejects "../../etc/passwd"
+        # while `pass.to_i` would silently coerce to 0. Do NOT
+        # simplify to `.to_i`. Pass `< 1` is rejected explicitly to
+        # mirror `retryable_incomplete_triage_pass?`'s "valid pass"
+        # convention; negative/zero values are not legitimate runner
+        # output and would build malformed filenames like
+        # `escalations--1.md`.
         pass_int = Integer(pass, 10)
+        return "" if pass_int < 1
+
+        reviews_dir = File.join(folder, "reviews")
         candidate = File.join(reviews_dir, "escalations-#{format('%02d', pass_int)}.md")
         return candidate if File.exist?(candidate)
         return reviews_dir if File.directory?(reviews_dir)
 
         ""
       rescue ArgumentError
-        # Non-integer `pass` attr (legacy/malformed) — fall back to
-        # the reviews dir if it exists, else refuse.
+        # Non-integer `pass` attr (legacy/malformed / corrupted-by-
+        # injection-attempt) — fall back to the reviews dir if it
+        # exists, else refuse. The fallback is deliberate: gives the
+        # operator something to inspect when diagnosing why their row
+        # is in this state.
         reviews_dir = File.join(row.folder.to_s, "reviews")
         File.directory?(reviews_dir) ? reviews_dir : ""
       end

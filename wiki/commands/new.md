@@ -17,6 +17,14 @@ hive new PROJECT TEXT...
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into `idea.md`. Empty text raises `Hive::Error("missing task text")`.
 
+The CLI argv surface is unchanged. Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [])` also supports the TUI rich composer:
+
+- `call!` performs the capture without calling `exit`, raising typed `ProjectNotFound`, `InvalidSlugError`, or `SlugCollisionError` for TUI callers.
+- `body_override:` replaces the markdown body while frontmatter `original_text:` and slug derivation still use `text`.
+- `attachments:` is an array of `[src_abs_path, dest_filename]`; files copy into `<task>/assets/<dest_filename>` before `Hive::GitOps#hive_commit` recursively adds the task folder (see [[modules/git_ops]]).
+
+Normal `hive new PROJECT TEXT...` still creates no `assets/` directory.
+
 ## Slug derivation
 
 `Commands::New#derive_slug` (`lib/hive/commands/new.rb:51`):
@@ -46,13 +54,15 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
      <indented text>
    ---
    ```
-   Body is the original text plus a trailing `<!-- WAITING -->` (so `1-inbox` shows ⏸ in `hive status`, even though `hive run` there is inert).
-5. `Hive::GitOps#hive_commit(stage_name: "1-inbox", slug:, action: "captured")` on `hive/state`. Diff-empty commits are skipped silently.
-6. Print `hive: captured <path>` and the `mv ... && hive run ...` next-step hint.
+   Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing `<!-- WAITING -->` (so `1-inbox` shows ⏸ in `hive status`, even though `hive run` there is inert).
+5. If attachments were supplied, copy them into `assets/` beside `idea.md`.
+6. `Hive::GitOps#hive_commit(stage_name: "1-inbox", slug:, action: "captured")` on `hive/state`. Diff-empty commits are skipped silently.
+7. Print `hive: captured <path>` and the `mv ... && hive run ...` next-step hint.
 
 ## Tests
 
-- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, and the captured commit.
+- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, and the captured commit.
+- `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
 
 ## Backlinks
 

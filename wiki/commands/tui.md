@@ -79,6 +79,14 @@ In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (a
 
 The `n` prompt is a cursor-aware single-line title editor. Printable typing inserts at the cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
 
+### Image paste
+
+Image paste is only active in the `:new_idea` composer. On bracketed paste, BubbleModel first probes the OS clipboard for PNG bytes (`wl-paste` on Wayland, `xclip` on X11, `pbpaste` fallback), then falls back to treating the pasted text as a drag-dropped local image path (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, ≤10 MiB).
+
+Accepted images are staged in a per-composer temp directory and inserted into the prompt as `[imageN]`. The footer shows `📎 N image(s)` while attachments are staged. On submit, the TUI calls `Hive::Commands::New#call!` directly: `[imageN]` tokens become `![](assets/bug-N.<ext>)`, files are copied into `1-inbox/<slug>/assets/`, and the recursive commit in [[modules/git_ops]] captures `idea.md` plus assets together.
+
+Missing image files or unmatched placeholders block submit and keep the prompt open with `broken image placeholder: imageN`. Non-image drag-drop paths flash `drag-drop ignored (not an image)`. Clipboard/write failures flash inline and do not insert a placeholder. Drag-dropped `.jpg`/`.webp` files keep their extension (`bug-N.jpg`, not forced `.png`) so downstream Claude Code MIME inference stays correct. `1-inbox` remains inert; [[stages/inbox]] still documents the `hive run` refusal.
+
 Copy is still terminal/OS-owned. Hive does not implement an in-app clipboard and does not bind copy shortcuts; it only consumes bytes the terminal sends as paste input.
 
 ## Visual style

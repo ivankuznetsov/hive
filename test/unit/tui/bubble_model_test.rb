@@ -540,6 +540,46 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
   end
 
+  def with_clipboard_probe_stub(stub_proc)
+    sentinel = Hive::Tui::Clipboard.method(:probe)
+    Hive::Tui::Clipboard.define_singleton_method(:probe, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::Clipboard.define_singleton_method(:probe, sentinel) if sentinel
+  end
+
+  def with_composer_ensure_dir_stub(stub_proc)
+    sentinel = Hive::Tui::ComposerStaging.method(:ensure_dir!)
+    Hive::Tui::ComposerStaging.define_singleton_method(:ensure_dir!, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::ComposerStaging.define_singleton_method(:ensure_dir!, sentinel) if sentinel
+  end
+
+  def clipboard_none
+    Hive::Tui::Clipboard::NONE
+  end
+
+  def clipboard_image_bytes(bytes: "png".b, ext: "png")
+    Hive::Tui::Clipboard::ProbeResult.new(
+      kind: :image_bytes,
+      bytes: bytes,
+      path: nil,
+      ext: ext,
+      reason: nil
+    )
+  end
+
+  def clipboard_image_file(path, ext: File.extname(path).delete_prefix("."))
+    Hive::Tui::Clipboard::ProbeResult.new(
+      kind: :image_file,
+      bytes: nil,
+      path: path,
+      ext: ext,
+      reason: nil
+    )
+  end
+
   def test_new_idea_submission_dispatches_hive_new_with_resolved_project
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01",
@@ -560,6 +600,139 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "(argv[0] is the executable; Open3.popen3 execs literally)"
     assert_equal :grid, @model.hive_model.mode, "successful submit must return to :grid"
     assert_equal "", @model.hive_model.new_idea_buffer
+  end
+
+  def test_new_idea_empty_paste_with_clipboard_image_stages_file_and_inserts_placeholder
+    bytes = Hive::Tui::Clipboard::PNG_SIGNATURE + "payload".b
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    probe_result = clipboard_image_bytes(bytes: bytes)
+    assert_equal :new_idea, @model.hive_model.mode
+    captured_pasted_text = nil
+
+    with_clipboard_probe_stub(->(pasted_text:, **_kwargs) {
+      captured_pasted_text = pasted_text
+      probe_result
+    }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+    end
+
+    assert_equal "", captured_pasted_text
+    assert_equal "[image1]", @model.hive_model.new_idea_buffer
+    assert_equal 1, @model.hive_model.new_idea_attachments.size
+    attachment = @model.hive_model.new_idea_attachments.first
+    assert_equal "image1", attachment.label
+    assert_equal :image_bytes, attachment.source_kind
+    assert_equal bytes, File.binread(attachment.staging_path)
+    assert File.directory?(@model.hive_model.new_idea_staging_dir)
+  ensure
+    Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+  end
+
+  def test_new_idea_paste_with_image_file_copies_to_staging
+    with_tmp_dir do |dir|
+      src = File.join(dir, "shot.png")
+      File.binwrite(src, "fixture-image".b)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+        dispatch: @dispatch
+      )
+      probe_result = clipboard_image_file(src, ext: "png")
+
+      with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+        @model.update(Hive::Tui::Messages::RawTextInput.new(text: src, paste: true))
+      end
+
+      attachment = @model.hive_model.new_idea_attachments.first
+      assert_equal "[image1]", @model.hive_model.new_idea_buffer
+      assert_equal :image_file, attachment.source_kind
+      assert_equal "fixture-image", File.binread(attachment.staging_path)
+      refute_equal src, attachment.staging_path
+    ensure
+      Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+    end
+  end
+
+  def test_new_idea_paste_without_image_falls_back_to_text
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    probe_result = clipboard_none
+
+    with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "some words", paste: true))
+    end
+
+    assert_equal "some words", @model.hive_model.new_idea_buffer
+    assert_equal [], @model.hive_model.new_idea_attachments
+  end
+
+  def test_new_idea_image_paste_write_failure_flashes_without_placeholder
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    probe_result = clipboard_image_bytes
+
+    with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+      with_composer_ensure_dir_stub(->(_model) { raise Errno::ENOSPC, "No space left" }) do
+        @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+      end
+    end
+
+    assert_equal "", @model.hive_model.new_idea_buffer
+    assert_equal [], @model.hive_model.new_idea_attachments
+    assert_match(/image paste failed/i, @model.hive_model.flash.to_s)
+  end
+
+  def test_new_idea_drag_drop_non_image_file_flashes_without_placeholder
+    with_tmp_dir do |dir|
+      path = File.join(dir, "notes.txt")
+      File.write(path, "not an image")
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+        dispatch: @dispatch
+      )
+      probe_result = clipboard_none
+
+      with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+        @model.update(Hive::Tui::Messages::RawTextInput.new(text: path, paste: true))
+      end
+
+      assert_equal "", @model.hive_model.new_idea_buffer
+      assert_equal [], @model.hive_model.new_idea_attachments
+      assert_match(/not an image/i, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_new_idea_cancel_cleans_staging_dir_and_clears_attachment_state
+    dir = Dir.mktmpdir("hive-tui-composer-test-")
+    File.write(File.join(dir, "bug-1.png"), "image")
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1",
+      staging_path: File.join(dir, "bug-1.png"),
+      source_kind: :image_bytes
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        new_idea_buffer: "[image1]",
+        new_idea_cursor: 8,
+        new_idea_attachments: [ attachment ],
+        new_idea_staging_dir: dir
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_CANCELLED)
+
+    refute File.exist?(dir)
+    assert_equal :grid, @model.hive_model.mode
+    assert_equal [], @model.hive_model.new_idea_attachments
+    assert_nil @model.hive_model.new_idea_staging_dir
   end
 
   def test_new_idea_submission_with_empty_buffer_flashes_and_stays_in_new_idea

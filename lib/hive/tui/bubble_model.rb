@@ -16,6 +16,8 @@ require "hive/tui/text"
 require "hive/tui/triage_state"
 require "hive/tui/log_tail"
 require "hive/tui/brainstorm_answers"
+require "hive/tui/clipboard"
+require "hive/tui/composer_staging"
 require "hive/tui/subprocess"
 require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
@@ -257,12 +259,16 @@ module Hive
 
       def translate_raw_text_input(message)
         text = message.text.to_s
-        return Hive::Tui::Messages::NOOP if text.empty?
 
         case @hive_model.mode
         when :new_idea
+          return Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: text) if message.paste
+          return Hive::Tui::Messages::NOOP if text.empty?
+
           Hive::Tui::Messages::NewIdeaTextInserted.new(text: text)
         when :filter
+          return Hive::Tui::Messages::NOOP if text.empty?
+
           Hive::Tui::Messages::FilterTextInserted.new(text: text)
         else
           Hive::Tui::Messages::NOOP
@@ -369,9 +375,93 @@ module Hive
           triage_develop
         when Hive::Tui::Messages::NewIdeaSubmitted
           submit_new_idea
+        when Hive::Tui::Messages::NewIdeaPasteRequested
+          handle_new_idea_paste(message.raw_text)
+        when Hive::Tui::Messages::NewIdeaCancelled
+          cleanup_new_idea_staging
+          nil
         when Hive::Tui::Messages::DropScopedProjectIfMissing
           drop_scoped_project_if_missing
         end
+      end
+
+      def handle_new_idea_paste(raw_text)
+        result = Hive::Tui::Clipboard.probe(pasted_text: raw_text)
+        case result.kind
+        when :image_bytes
+          stage_image_bytes(result)
+        when :image_file
+          stage_image_file(result)
+        else
+          if Hive::Tui::Clipboard.non_image_file_path?(pasted_text: raw_text)
+            [ flashed("drag-drop ignored (not an image)"), nil ]
+          elsif raw_text.to_s.empty? && (hint = missing_clipboard_tool_hint)
+            [ flashed(hint), nil ]
+          else
+            apply_new_idea_text(raw_text)
+          end
+        end
+      rescue SystemCallError, IOError, Hive::Tui::ComposerStaging::WriteError => e
+        [ flashed("image paste failed: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      end
+
+      def stage_image_bytes(result)
+        stage_image(result.ext, :image_bytes) do |path|
+          Hive::Tui::ComposerStaging.write_bytes!(path, result.bytes)
+        end
+      end
+
+      def stage_image_file(result)
+        stage_image(result.ext, :image_file) do |path|
+          Hive::Tui::ComposerStaging.copy_file!(result.path, path)
+        end
+      end
+
+      def stage_image(ext, source_kind)
+        staging_dir, model_with_dir = Hive::Tui::ComposerStaging.ensure_dir!(@hive_model)
+        base_model = model_with_dir || @hive_model
+        label, path = Hive::Tui::ComposerStaging.next_label_and_path(
+          staging_dir,
+          base_model.new_idea_attachments.size,
+          ext: ext
+        )
+        yield path
+        message = Hive::Tui::Messages::NewIdeaImageAttached.new(
+          label: label,
+          staging_path: path,
+          source_kind: source_kind
+        )
+        new_model, _cmd = Hive::Tui::Update.apply(base_model, message)
+        [ new_model, nil ]
+      end
+
+      def apply_new_idea_text(raw_text)
+        new_model, _cmd = Hive::Tui::Update.apply(
+          @hive_model,
+          Hive::Tui::Messages::NewIdeaTextInserted.new(text: raw_text.to_s)
+        )
+        [ new_model, nil ]
+      end
+
+      def missing_clipboard_tool_hint
+        return nil if @clipboard_tool_hint_shown
+
+        env = ENV
+        if env.fetch("XDG_SESSION_TYPE", "").downcase == "wayland" &&
+           !Hive::Tui::Clipboard::DefaultShim.command_available?("wl-paste", env: env)
+          @clipboard_tool_hint_shown = true
+          "install `wl-clipboard` to paste images"
+        elsif !env.fetch("DISPLAY", "").empty? &&
+              !Hive::Tui::Clipboard::DefaultShim.command_available?("xclip", env: env)
+          @clipboard_tool_hint_shown = true
+          "install `xclip` to paste images"
+        end
+      end
+
+      def cleanup_new_idea_staging
+        Hive::Tui::ComposerStaging.cleanup!(@hive_model.new_idea_staging_dir)
+      rescue SystemCallError, IOError, ArgumentError => e
+        Hive::Tui::Debug.log("new_idea_staging", "cleanup failed: #{e.class}: #{e.message}")
       end
 
       # Handler for the grid-mode `X` keystroke. Resolves the target

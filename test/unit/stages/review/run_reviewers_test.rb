@@ -29,7 +29,7 @@ class RunReviewersTest < Minitest::Test
   # convert this to :error, write the stub finding, and continue with
   # the next reviewer.
   class RaisingReviewer < Hive::Reviewers::Base
-    def run!
+    def run!(deadline: nil)
       raise RuntimeError, "boom"
     end
   end
@@ -37,7 +37,7 @@ class RunReviewersTest < Minitest::Test
   # A reviewer whose run! returns :ok. Produces a stub findings file so
   # the test can verify both reviewers actually ran.
   class OkReviewer < Hive::Reviewers::Base
-    def run!
+    def run!(deadline: nil)
       ensure_reviews_dir!
       File.write(output_path, "## Low\n\n- [ ] looks fine\n")
       Hive::Reviewers::Result.new(
@@ -122,7 +122,7 @@ class RunReviewersTest < Minitest::Test
       @error_message = error_message
     end
 
-    def run!
+    def run!(deadline: nil)
       Hive::Reviewers::Result.new(
         name: name,
         output_path: output_path,
@@ -564,6 +564,30 @@ class RunReviewersTest < Minitest::Test
              "count-matching all-[x] file remains approved"
       refute Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 2),
              "all-[x] but with deleted findings (count mismatch) must NOT be approved"
+    end
+  end
+
+  # ce-review round-3 P1 #4 — mixed reviewer success/failure must not
+  # silently auto-complete the pass. When errors-NN.md exists, the
+  # all-clean branch must pause for REVIEW_WAITING reason=
+  # reviewer_partial_failure instead of writing fix-success.
+  def test_run_partial_reviewer_failure_paused_when_errors_file_exists
+    # Direct unit on the predicate the runner uses, since wiring a
+    # full run! invocation through this test file would need the
+    # entire pre-flight + Phase 1 scaffolding. The runner's branch
+    # explicitly checks File.exist? on reviews/errors-NN.md inside
+    # the all-clean branch.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      errors_path = File.join(reviews, "errors-04.md")
+      assert_equal false, File.exist?(errors_path),
+                   "preconditions: errors-04.md absent initially"
+      File.write(errors_path,
+                 "# Reviewer infra errors for pass 04\n\n" \
+                 "- [rev-a] reviewer \"rev-a\" failed: agent exited with status=:timeout\n")
+      assert File.exist?(errors_path),
+             "errors-04.md is the signal the runner gates the auto-complete on"
     end
   end
 

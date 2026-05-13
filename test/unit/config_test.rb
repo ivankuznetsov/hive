@@ -482,6 +482,33 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # ce-review round-3 P1 #2 — output_basename containing path
+  # separators or `.`/`..` flows into `reviews/<basename>-NN.md` and
+  # the retry-loop cleanup `File.delete(output_path)` could then
+  # delete files outside the reviews/ dir.
+  def test_load_raises_when_output_basename_contains_path_separator
+    %w[../escape foo/bar foo\\bar . .. \0nul].each do |bad|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          review:
+            reviewers:
+              - name: bad
+                kind: agent
+                agent: claude
+                skill: ce-code-review
+                output_basename: #{bad.inspect}
+                prompt_template: reviewer_claude_ce_code_review.md.erb
+        YAML
+        err = assert_raises(Hive::ConfigError, "output_basename #{bad.inspect} must be rejected") do
+          Hive::Config.load(dir)
+        end
+        assert_match(/single filename component|path separators|'\.\.'|'\.'/, err.message,
+                     "error message must explain why #{bad.inspect} was rejected")
+      end
+    end
+  end
+
   def test_load_accepts_max_attempts_one_and_three
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

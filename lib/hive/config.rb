@@ -592,6 +592,27 @@ module Hive
                 "(would produce reviews/-NN.md filenames)"
         end
 
+        # ce-review round-3 P1 #2 — reject path-traversal characters in
+        # output_basename. The basename interpolates directly into
+        # `reviews/<basename>-NN.md`; without this check, a value like
+        # `../escape` produces `reviews/../escape-NN.md`. The retry-
+        # loop cleanup in lib/hive/reviewers/agent.rb calls
+        # `File.delete(output_path)` on that resolved path, which could
+        # then delete files outside the task's `reviews/` directory.
+        # Reject `/`, `\`, ASCII NUL, and the path-segment tokens `.`
+        # and `..`. After rejection, the basename is guaranteed to be a
+        # single safe filename component.
+        if normalized_basename.is_a?(String)
+          if normalized_basename =~ %r{[/\\\0]} ||
+             normalized_basename == "." ||
+             normalized_basename == ".."
+            raise ConfigError,
+                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "must be a single filename component without path separators (/, \\, null) " \
+                  "and may not be '.' or '..'"
+          end
+        end
+
         if normalized_basename && (prev = seen_basenames[normalized_basename])
           raise ConfigError,
                 "review.reviewers in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \

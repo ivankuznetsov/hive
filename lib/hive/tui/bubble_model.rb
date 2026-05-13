@@ -1377,7 +1377,7 @@ module Hive
       def review_outcome(row, checkboxes_changed)
         return :silent unless checkboxes_changed
         return :empty_command if row.suggested_command.to_s.empty?
-        return :marker_changed unless review_marker_still_open?(row.state_file)
+        return :marker_changed unless review_marker_still_open?(row)
 
         :rerun_review
       end
@@ -1389,9 +1389,28 @@ module Hive
       # a concurrent `hive run` that advanced the marker to
       # :agent_working / :review_complete during the long-lived
       # editor session suppresses the auto-rerun.
-      def review_marker_still_open?(state_file)
+      #
+      # ce-review round-3 P2 #7 — the marker name alone is not enough:
+      # a stale editor session for pass 4 must NOT dispatch when
+      # another process has advanced the task to pass 5 (or to a
+      # different `reason` family, e.g. fix_guardrail → escalations).
+      # Compare `pass` and `reason` against the row snapshot taken
+      # when Enter was pressed.
+      def review_marker_still_open?(row)
+        state_file = row.respond_to?(:state_file) ? row.state_file : row
         marker = Hive::Markers.current(state_file)
-        marker.name == :review_waiting
+        return false unless marker.name == :review_waiting
+
+        # If we don't have a Row (legacy direct-call shape), keep the
+        # old name-only contract.
+        return true unless row.respond_to?(:attrs)
+
+        row_attrs = row.attrs || {}
+        marker_attrs = marker.attrs || {}
+        return false if row_attrs["pass"].to_s != marker_attrs["pass"].to_s
+        return false if row_attrs["reason"].to_s != marker_attrs["reason"].to_s
+
+        true
       rescue SystemCallError, IOError => e
         Hive::Tui::Debug.log("input_editor", "review marker check failed: #{e.class}: #{e.message}")
         false

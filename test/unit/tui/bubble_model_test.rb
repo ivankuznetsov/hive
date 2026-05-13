@@ -2490,7 +2490,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
-      assert @model.send(:review_marker_still_open?, task_md)
+      row = make_review_waiting_row(folder, pass: 4)
+      assert @model.send(:review_marker_still_open?, row)
     end
   end
 
@@ -2498,7 +2499,31 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- AGENT_WORKING phase=fix pass=4 -->\n")
-      refute @model.send(:review_marker_still_open?, task_md)
+      row = make_review_waiting_row(folder, pass: 4)
+      refute @model.send(:review_marker_still_open?, row)
+    end
+  end
+
+  # ce-review round-3 P2 #7 — a stale editor session for pass 4 must
+  # NOT dispatch when a concurrent process advanced the task to pass
+  # 5, or to a different REVIEW_WAITING reason family.
+  def test_review_marker_still_open_false_when_marker_pass_advanced
+    Dir.mktmpdir("u6-marker-check") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=5 matches=2 -->\n")
+      stale_row = make_review_waiting_row(folder, pass: 4) # editor opened on pass 4
+      refute @model.send(:review_marker_still_open?, stale_row),
+             "marker advanced to pass 5; stale pass-4 row must NOT dispatch"
+    end
+  end
+
+  def test_review_marker_still_open_false_when_marker_reason_drifted
+    Dir.mktmpdir("u6-marker-check") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING escalations=3 pass=4 -->\n")
+      stale_row = make_review_waiting_row(folder, pass: 4, reason: "fix_guardrail")
+      refute @model.send(:review_marker_still_open?, stale_row),
+             "row was for fix_guardrail; marker drifted to escalations — must NOT dispatch"
     end
   end
 

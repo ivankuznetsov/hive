@@ -212,8 +212,40 @@ module Hive
           # mismatch is treated as a hand-edit and rejected.
           if resuming_from_waiting?(marker, pass) &&
              marker.attrs["reason"] == "fix_guardrail"
-            expected_matches = marker.attrs["matches"]&.to_s
-            expected_matches = expected_matches&.match?(/\A\d+\z/) ? expected_matches.to_i : nil
+            # ce-review round-3 P2 #8 — missing or malformed `matches`
+            # on a fix_guardrail marker disables the truncation
+            # defense. Treat that as a malformed marker rather than
+            # silently degrading to count-blind approval. The marker
+            # is hand-edited rarely, but when it is (e.g. an operator
+            # debugging the stage), we want a hard error not a quiet
+            # bypass.
+            raw_matches = marker.attrs["matches"].to_s
+            unless raw_matches.match?(/\A[1-9]\d*\z/)
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :resume, reason: "malformed_marker_matches",
+                                pass: pass)
+              return { commit: "malformed_marker_matches_pass_#{format('%02d', pass)}",
+                       status: :review_error }
+            end
+            expected_matches = raw_matches.to_i
+
+            # ce-review round-3 P1 #1 — verify the worktree HEAD is
+            # still the commit the guardrail flagged. A user who
+            # amended/rebased/squashed between trip and approval would
+            # otherwise have their `[x]` ticks honoured against a diff
+            # the guardrail never scanned.
+            current_head = git_head(worktree_path)
+            guarded_head = marker.attrs["head"].to_s
+            head_check_ok = !guarded_head.empty? && current_head.to_s == guarded_head
+            unless head_check_ok
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :resume, reason: "approval_head_mismatch",
+                                guarded_head: guarded_head, current_head: current_head.to_s,
+                                pass: pass)
+              return { commit: "approval_head_mismatch_pass_#{format('%02d', pass)}",
+                       status: :review_error }
+            end
+
             if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
               if worktree_dirty?(worktree_path)
                 Hive::Markers.set(task.state_file, :review_error,
@@ -324,6 +356,29 @@ module Hive
           escalations_count = count_escalations(ctx_pass)
 
           if accepted.strip.empty? && escalations_count.zero?
+            # ce-review round-3 P1 #4 — mixed reviewer success/failure
+            # must not silently auto-complete. If errors-NN.md exists
+            # (at least one reviewer's adapter failed in this pass),
+            # the all-clean signal from the surviving reviewers is
+            # NOT proof that the worktree is clean — it only proves
+            # the reviewers that ran found nothing. Surface as a
+            # REVIEW_WAITING reason=reviewer_partial_failure so the
+            # user decides whether to (a) re-run hoping the failed
+            # reviewer recovers, (b) accept the partial coverage by
+            # clearing the marker, or (c) edit the reviewer config.
+            errors_path = File.join(
+              ctx_pass.task_folder,
+              "reviews",
+              "errors-#{format('%02d', pass)}.md"
+            )
+            if File.exist?(errors_path)
+              Hive::Markers.set(task.state_file, :review_waiting,
+                                reason: "reviewer_partial_failure",
+                                pass: pass)
+              return { commit: "review_waiting_reviewer_partial_failure_pass_#{format('%02d', pass)}",
+                       status: :review_waiting }
+            end
+
             # Phase 2 produced zero findings → skip Phase 4, jump to Phase 5.
             # Mark the pass complete so a subsequent run that re-enters this
             # task (e.g. wall-clock-stale fired before Phase 5 records
@@ -404,9 +459,18 @@ module Hive
           )
           if guardrail.status == :tripped
             write_fix_guardrail_findings(ctx_pass, guardrail.matches)
+            # ce-review round-3 P1 #1 — record the guarded HEAD SHA on
+            # the marker so the approval-on-resume path can verify the
+            # commits the user is approving still match the diff the
+            # guardrail flagged. Without this, a user (or an automated
+            # editor) who amends/squashes/rebases the worktree between
+            # the trip and the approval can launder a different diff
+            # past the guardrail using stale [x] ticks.
             Hive::Markers.set(task.state_file, :review_waiting,
                               reason: "fix_guardrail",
-                              matches: guardrail.matches.size, pass: pass)
+                              matches: guardrail.matches.size,
+                              head: after_fix_head,
+                              pass: pass)
             return { commit: "review_waiting_fix_guardrail_pass_#{format('%02d', pass)}",
                      status: :review_waiting }
           end
@@ -630,14 +694,34 @@ module Hive
       # results stay on disk for the next run to consume.
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
         specs = Array(cfg.dig("review", "reviewers"))
+
+        # ce-review round-3 P2 #9 — clear stale errors-NN.md BEFORE
+        # any early return. The docs promise "errors-NN.md reflects
+        # the current invocation's failures (or its absence reflects
+        # all-success)"; an empty-spec early return that skipped the
+        # cleanup violated that contract when a project removed all
+        # reviewers between runs.
+        clear_reviewer_infra_errors(ctx)
+
         return :ok if specs.empty?
 
-        # Delete any stale errors-NN.md left from a prior crashed or
-        # voluntary re-run of THIS pass before any reviewer runs. This
-        # guarantees the on-disk file always reflects the current
-        # invocation's failures (or its absence reflects all-success),
-        # not concatenated history.
-        clear_reviewer_infra_errors(ctx)
+        # ce-review round-3 P1 #3 — derive a monotonic deadline from
+        # the caller's wall-clock budget so each reviewer's adapter
+        # caps its own spawn/backoff at the remaining time. Without
+        # this, max_attempts × timeout_sec on a single reviewer can
+        # exhaust the outer review.max_wall_clock_sec before the
+        # between-reviewer check fires. We base the deadline on a
+        # monotonic clock relative to the wall-clock budget so a
+        # paused process clock doesn't move the deadline; subtract the
+        # consumed wall-clock to align.
+        deadline = nil
+        if started_at && max_wall_clock_sec
+          consumed = Time.now - started_at
+          remaining = max_wall_clock_sec - consumed
+          if remaining.positive?
+            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + remaining
+          end
+        end
 
         statuses = []
         specs.each do |spec|
@@ -654,6 +738,12 @@ module Hive
           # next reviewer.
           result =
             begin
+              # Adapters that accept `deadline:` get it; older adapters
+              # ignore it via the rescue below. Custom adapters that
+              # raise ArgumentError on the unknown kwarg fall back to
+              # the no-deadline call rather than failing the spawn.
+              adapter.run!(deadline: deadline)
+            rescue ArgumentError
               adapter.run!
             rescue StandardError => e
               Hive::Reviewers::Result.new(
@@ -665,7 +755,18 @@ module Hive
             end
           statuses << result.status
 
-          record_reviewer_infra_error(ctx, spec, result) if result.error?
+          if result.error?
+            # ce-review round-3 P2 #6 — guarantee the failed adapter
+            # leaves no reviewer file behind, even if the adapter
+            # raised (Agent#run!'s own final-failure cleanup doesn't
+            # run on the rescue path, and custom adapters may not
+            # implement it). Deleting unconditionally on the
+            # orchestrator side covers both paths uniformly.
+            output_path = result.output_path
+            File.delete(output_path) if output_path && File.exist?(output_path)
+
+            record_reviewer_infra_error(ctx, spec, result)
+          end
         end
 
         statuses.all?(:error) ? :all_failed : :ok

@@ -168,10 +168,46 @@ module Hive
           { "kind" => kind::RECOVER_STALE,
             "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }
         when :review_waiting
-          { "kind" => kind::EDIT,
-            "target" => task.folder,
-            "instructions" => "toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, then re-run",
-            "rerun_with" => "hive run #{task.folder}" }
+          # ce-review round-3 P2 #5 — branch the JSON envelope on
+          # marker.attrs["reason"] so agents reading the contract get
+          # a target+instructions pair specific to the resume gate:
+          # - reason=fix_guardrail: open reviews/fix-guardrail-NN.md;
+          #   approval requires every checkbox `[x]` AND the count
+          #   matches marker.matches AND the worktree HEAD still
+          #   matches marker.head.
+          # - reason=reviewer_partial_failure: read reviews/errors-NN.md;
+          #   either fix the reviewer config and re-run, or clear the
+          #   marker to accept partial coverage.
+          # - escalations-only (no reason or unknown reason): the
+          #   legacy reviewers/escalations file-set per pass.
+          reason = marker.attrs["reason"].to_s
+          pass = marker.attrs["pass"].to_s
+          pass_suffix = pass.match?(/\A\d+\z/) ? format("%02d", pass.to_i) : nil
+          case reason
+          when "fix_guardrail"
+            target = pass_suffix ? "#{task.folder}/reviews/fix-guardrail-#{pass_suffix}.md" : task.folder
+            { "kind" => kind::EDIT,
+              "target" => target,
+              "instructions" => "review every finding in #{File.basename(target)}; tick every `[ ]` " \
+                                "to `[x]` to approve the guarded commits and advance the pass " \
+                                "(partial ticks keep the pause), then re-run. " \
+                                "Approval is rejected if the file's checkbox count " \
+                                "differs from marker.matches or the worktree HEAD differs from marker.head.",
+              "rerun_with" => "hive run #{task.folder}" }
+          when "reviewer_partial_failure"
+            target = pass_suffix ? "#{task.folder}/reviews/errors-#{pass_suffix}.md" : task.folder
+            { "kind" => kind::EDIT,
+              "target" => target,
+              "instructions" => "one or more reviewers failed for this pass; either re-run hoping for " \
+                                "recovery or `hive markers clear #{task.folder} --name REVIEW_WAITING` " \
+                                "to accept the partial coverage, then re-run",
+              "rerun_with" => "hive run #{task.folder}" }
+          else
+            { "kind" => kind::EDIT,
+              "target" => task.folder,
+              "instructions" => "toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, then re-run",
+              "rerun_with" => "hive run #{task.folder}" }
+          end
         when :review_stale
           { "kind" => kind::RECOVER_STALE,
             "instructions" => "if highest-pass reviewer files lack escalations-NN.md, remove the REVIEW_STALE " \

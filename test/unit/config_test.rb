@@ -393,6 +393,148 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # ce-review P2 #6 — output_basename starting with a reserved
+  # orchestrator prefix would silently have its per-pass file (e.g.
+  # `errors-01.md`) classified as orchestrator-owned by
+  # `Hive::Stages::Review.reviewer_file?`, hidden from triage's
+  # `discover_reviewer_files`, and (for `output_basename: "errors"`
+  # specifically) overwritten by the U2 errors sink.
+  def test_load_raises_when_output_basename_collides_with_reserved_prefix
+    %w[errors escalations fix-guardrail fix-success browser ci-blocked].each do |reserved|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          review:
+            reviewers:
+              - name: bad
+                kind: agent
+                agent: claude
+                skill: ce-code-review
+                output_basename: #{reserved}
+                prompt_template: reviewer_claude_ce_code_review.md.erb
+        YAML
+        err = assert_raises(Hive::ConfigError, "output_basename #{reserved.inspect} must be rejected") do
+          Hive::Config.load(dir)
+        end
+        assert_match(/output_basename .* reserved orchestrator-owned prefix/, err.message,
+                     "error message must explain why #{reserved.inspect} was rejected")
+      end
+    end
+  end
+
+  # ce-review P3 #8 — max_attempts is parsed by the adapter at spawn
+  # time but should also fail loudly at config-load when malformed,
+  # so operators don't discover a typo deep in a 5-review pass.
+  def test_load_raises_when_max_attempts_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: bad
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: ok
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+              max_attempts: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/max_attempts .* positive Integer/, err.message)
+    end
+  end
+
+  def test_load_raises_when_max_attempts_is_negative
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: bad
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: ok
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+              max_attempts: -1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/max_attempts .* positive Integer/, err.message)
+    end
+  end
+
+  def test_load_raises_when_max_attempts_is_string
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: bad
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: ok
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+              max_attempts: "two"
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/max_attempts .* positive Integer/, err.message)
+    end
+  end
+
+  # ce-review round-3 P1 #2 — output_basename containing path
+  # separators or `.`/`..` flows into `reviews/<basename>-NN.md` and
+  # the retry-loop cleanup `File.delete(output_path)` could then
+  # delete files outside the reviews/ dir.
+  def test_load_raises_when_output_basename_contains_path_separator
+    %w[../escape foo/bar foo\\bar . .. \0nul].each do |bad|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          review:
+            reviewers:
+              - name: bad
+                kind: agent
+                agent: claude
+                skill: ce-code-review
+                output_basename: #{bad.inspect}
+                prompt_template: reviewer_claude_ce_code_review.md.erb
+        YAML
+        err = assert_raises(Hive::ConfigError, "output_basename #{bad.inspect} must be rejected") do
+          Hive::Config.load(dir)
+        end
+        assert_match(/single filename component|path separators|'\.\.'|'\.'/, err.message,
+                     "error message must explain why #{bad.inspect} was rejected")
+      end
+    end
+  end
+
+  def test_load_accepts_max_attempts_one_and_three
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - name: a
+              kind: agent
+              agent: claude
+              skill: ce-code-review
+              output_basename: a
+              prompt_template: reviewer_claude_ce_code_review.md.erb
+              max_attempts: 1
+            - name: b
+              kind: agent
+              agent: codex
+              skill: ce-code-review
+              output_basename: b
+              prompt_template: reviewer_codex_ce_code_review.md.erb
+              max_attempts: 3
+      YAML
+      assert Hive::Config.load(dir),
+             "positive Integer max_attempts (1, 3) must load cleanly"
+    end
+  end
+
   def test_load_raises_when_role_agent_is_unknown_profile
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

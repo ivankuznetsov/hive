@@ -31,6 +31,8 @@ tags: [marker, protocol, flock]
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb` (twelve names total — six pre-U3, six REVIEW_* added in U3).
 
+`KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). When an `ERROR` marker's `exit_code` attr is in this list the task was interrupted, not broken. Single source of truth shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears them) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
+
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
 
 ### REVIEW_* attribute schemas
@@ -38,11 +40,11 @@ Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`. Adding a marker name 
 | Marker | Attributes | Lifecycle |
 |--------|------------|-----------|
 | `REVIEW_WORKING` | `phase=ci\|reviewers\|triage\|fix\|browser`, `pass=NN` | Transient — set at phase entry, replaced at phase exit per ADR-005's last-marker-wins. |
-| `REVIEW_WAITING` | `escalations=N`, `pass=NN` | Terminal until next `hive run` (user inspects `reviews/escalations-NN.md` and edits). |
+| `REVIEW_WAITING` | Three shapes per `reason` attr: (1) **escalations-only** (no `reason`): `escalations=N`, `pass=NN` — user inspects `reviews/escalations-NN.md`. (2) **`reason=fix_guardrail`**: `matches=N`, `head=<sha>`, `pass=NN` — user inspects `reviews/fix-guardrail-NN.md` and ticks every `[x]` to approve; approval re-checks count + HEAD + worktree-clean. Legacy markers without `head=` (hive ≤ PR-A round-2) skip the HEAD check with a stderr notice. (3) **`reason=reviewer_partial_failure`**: `pass=NN` — at least one reviewer's adapter failed; user inspects `reviews/errors-NN.md` and either re-runs or clears the marker to accept partial coverage. | Terminal until next `hive run`. |
 | `REVIEW_CI_STALE` | `attempts=N` | Terminal — `cfg.review.ci.max_attempts` reached without green CI. Reviewers don't run on red CI. Recovery: edit `reviews/ci-blocked.md`, remove the marker, re-run. |
 | `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. Recovery: if highest-NN reviewer files have no `escalations-NN.md`, remove the marker and re-run to retry that incomplete triage pass; otherwise edit reviewer files / escalations.md, delete or rename the highest-NN reviewer files, remove the marker, re-run. |
 | `REVIEW_COMPLETE` | `pass=NN`, `browser=passed\|warned\|skipped` | Terminal success — ready to `mv` to 6-pr. `browser=warned` means browser test failed twice but loop continued (soft-warn); 6-pr stage surfaces this in the PR body. |
-| `REVIEW_ERROR` | `phase=…`, `reason=…` | Terminal — agent-level error or protected-file tampering. Mirrors ADR-013's `:error` shape for `EXECUTE_*`. |
+| `REVIEW_ERROR` | `phase=…`, `reason=…`. Known `phase=resume` `reason=` values (added in PR-A round-3): `approval_head_mismatch` (worktree HEAD differs from marker `head=`), `approval_dirty_worktree` (uncommitted edits in worktree at approval time), `malformed_marker_matches` (fix_guardrail marker has missing/non-Integer `matches`), `resume_no_findings` (legacy: reviewer files were deleted between trip and resume). Other phase/reason families (`phase=fix reason=fix_tampered`, `phase=triage reason=triage_failed`, etc.) per the runner's protected-files + agent-error contracts. | Terminal — agent-level error or protected-file tampering. Mirrors ADR-013's `:error` shape for `EXECUTE_*`. |
 
 ## `State` struct
 

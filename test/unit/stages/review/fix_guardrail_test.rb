@@ -235,6 +235,87 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  # --- dotenv template-suffix exclusion (U4) ---------------------------
+  #
+  # Template files like .env.example are by-design committed to the
+  # repo as documentation — they should NOT trip the guardrail even
+  # though they share the .env prefix. Tests pin both excluded
+  # (templates) and included (real per-env files) cases so future regex
+  # edits don't regress either side.
+
+  EXCLUDED_TEMPLATE_SUFFIXES = %w[example sample template dist tmpl default defaults].freeze
+
+  # Plain placeholder content — short, no `api_key`-shaped substring
+  # that would trip secrets_pattern_match. Each test asserts on the
+  # specific dotenv_edit pattern_name, not just `:tripped` overall.
+  def test_dotenv_template_suffixes_are_excluded
+    EXCLUDED_TEMPLATE_SUFFIXES.each do |suffix|
+      filename = ".env.#{suffix}"
+      with_two_commits(file: filename,
+                       content: "PORT=3000\n") do |dir, base, head|
+        result = Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg, ctx: make_ctx(dir),
+          base_sha: base, head_sha: head
+        )
+        refute(result.matches.any? { |m| m.pattern_name == "dotenv_edit" },
+               "#{filename} is a committed template — must NOT trip dotenv_edit")
+      end
+    end
+  end
+
+  def test_monorepo_dotenv_template_suffix_excluded
+    with_two_commits(file: "apps/web/.env.example",
+                     content: "PORT=3000\n") do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      refute(result.matches.any? { |m| m.pattern_name == "dotenv_edit" },
+             "monorepo apps/web/.env.example must NOT trip dotenv_edit")
+    end
+  end
+
+  def test_dotenv_per_env_files_still_trip
+    per_env_files = %w[
+      .env.local
+      .env.production
+      .env.test
+      .env.staging
+      .env.development
+    ]
+    per_env_files.each do |filename|
+      with_two_commits(file: filename,
+                       content: "PORT=3000\n") do |dir, base, head|
+        result = Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg, ctx: make_ctx(dir),
+          base_sha: base, head_sha: head
+        )
+        assert_equal :tripped, result.status,
+                     "#{filename} is a real per-env file — must trip dotenv_edit"
+        assert(result.matches.any? { |m| m.pattern_name == "dotenv_edit" },
+               "#{filename} must match the dotenv_edit pattern specifically")
+      end
+    end
+  end
+
+  def test_dotenv_boundary_example_with_extra_suffix_still_trips
+    # `.env.example.bak` is NOT the template itself (the canonical
+    # template name is `.env.example`); a fix that writes to it is
+    # likely modifying an editor backup or a derived file and should
+    # still trip. The negative-lookahead is anchored on the full
+    # suffix-after-`.env.` matching `\z`, so only exact template
+    # suffixes are excluded.
+    with_two_commits(file: ".env.example.bak",
+                     content: "PORT=3000\n") do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert(result.matches.any? { |m| m.pattern_name == "dotenv_edit" },
+             ".env.example.bak is not the canonical template — must still trip dotenv_edit")
+    end
+  end
+
   # --- dependency_lockfile_change ----------------------------------------
 
   def test_trips_on_gemfile_lock_change

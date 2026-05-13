@@ -39,7 +39,7 @@ branch on triage:
   all clean              → Phase 5 (browser test) → REVIEW_COMPLETE
 ```
 
-Pass cap (`review.max_passes`, default 4) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary; exceeding it sets `REVIEW_STALE reason=wall_clock`.
+Pass cap (`review.max_passes`, default 4) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary AND between reviewers inside `run_reviewers` (so the adapter-local retry budget cannot drain the whole 5400s window inside one Phase 2 invocation); exceeding it sets `REVIEW_STALE reason=wall_clock`.
 
 ## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)
 
@@ -49,7 +49,9 @@ Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is l
 
 ## Phase 2 — reviewers (`Hive::Reviewers::Agent`)
 
-For each spec in `cfg.review.reviewers`, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`. Per-reviewer failure → stub finding file (`- [ ] reviewer "name" failed: <error>`) so triage can still see it; the loop continues. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed`. Empty reviewer list → skip directly to the all-clean branch (Phase 5).
+For each spec in `cfg.review.reviewers`, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`.
+
+Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed` (the all-failed safety net is preserved). Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 
 CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/compound-engineering:ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. `templates/reviewer_pr_review_toolkit.md.erb` is a stand-in for the `pr-review-toolkit:code-reviewer` agent.
 
@@ -85,11 +87,22 @@ After the fix agent returns, `Hive::Stages::Review::FixGuardrail.run!` (ADR-020 
 - `shell_pipe_to_interpreter` — curl/wget pipe into sh/bash/python/ruby/node
 - `ci_workflow_edit` — `.github/workflows/`, gitlab-ci, circleci, Jenkinsfile, bitbucket-pipelines, azure-pipelines, travis
 - `secrets_pattern_match` — dispatches to `Hive::SecretPatterns.scan` (AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, JWT, PEM, generic api_key)
-- `dotenv_edit` — `.env*`, `secrets.yml`, `credentials.yml`, `.npmrc`, `.pypirc`
+- `dotenv_edit` — `.env`, `.env.<environment>` (e.g., `.env.local`, `.env.production`, `.env.test`, `.env.staging`), `secrets.yml`, `credentials.yml(.enc)`, `.npmrc`, `.pypirc`. Template suffixes are deliberately **excluded** so committed templates do not trip the guardrail: `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.tmpl`, `.env.default`, `.env.defaults`. Projects that genuinely keep secrets in `.env.example` can re-add strict matching via `review.fix.guardrail.patterns_override` (custom `dotenv_template_edit` pattern).
 - `dependency_lockfile_change` — Gemfile.lock, package-lock.json, pnpm-lock, yarn.lock, Cargo.lock, go.sum, poetry.lock, Pipfile.lock, composer.lock, uv.lock
 - `permission_change` — `new mode 100755` raw-diff-header
 
-Per-project override via `review.fix.guardrail.patterns_override`: `false` to disable a default; Hash to add a custom (must include `regex`). Tripped → `REVIEW_WAITING reason=fix_guardrail pass=NN` and `reviews/fix-guardrail-NN.md` written.
+Per-project override via `review.fix.guardrail.patterns_override`: `false` to disable a default; Hash to add a custom (must include `regex`). Tripped → `REVIEW_WAITING reason=fix_guardrail matches=N head=<sha> pass=NN` and `reviews/fix-guardrail-NN.md` written. The `head=` attribute records the worktree HEAD at the moment the guardrail tripped; the approval-on-resume path enforces it.
+
+**Approval-on-resume (U5).** A user who reviews the fix-guardrail trip and decides the changes are intentional approves them by ticking `[x]` on every line of `reviews/fix-guardrail-NN.md` and re-running. The runner calls `fix_guardrail_approved?(ctx, expected_matches: marker.attrs["matches"].to_i)` and gates approval on **all four** of:
+
+1. **All checkbox lines are `[x]`** — partial ticks keep the pause (no fall-through to Phase 4 fix re-spawn).
+2. **Checkbox count matches `marker.attrs["matches"]`** — truncation-forged approval (user deletes the findings they didn't want to read) is rejected.
+3. **`marker.attrs["head"]` matches the current worktree HEAD** — amend/rebase/squash between trip and approval is rejected with `REVIEW_ERROR phase=resume reason=approval_head_mismatch` (legacy markers without `head=`, written by hive ≤ PR-A round-2, skip this check with a stderr notice so in-flight tasks aren't broken on upgrade).
+4. **Worktree is clean** — manual edits between trip and approval lead to `REVIEW_ERROR phase=resume reason=approval_dirty_worktree`.
+
+When all four hold, Phase 2/3/4 are skipped for that pass — the prior pass's commits stand, `fix-success-NN.md` is written, marker resets, and the loop advances. **Special-case** for `pass == max_passes`: the approval breaks directly to Phase 5 (browser test) instead of incrementing into `REVIEW_STALE`. Approval is single-shot per pass: a future pass that re-trips the guardrail writes a fresh `fix-guardrail-(NN+1).md` with `[ ]` lines; pass-N approval does not transfer. The `fix-guardrail-NN.md` file is included in `protected_set` during every Phase 4 spawn (alongside `reviews/escalations-NN.md`, `reviews/errors-NN.md`, and the `fix-success-NN.md` sentinel) so a compromised fix agent cannot pre-write all-`[x]` lines to stage an approval token for the next resume.
+
+If `marker.attrs["matches"]` is missing or malformed (not a positive Integer string) on a `fix_guardrail` marker, the runner refuses approval with `REVIEW_ERROR phase=resume reason=malformed_marker_matches` — disables a silent count-blind bypass.
 
 ## Phase 5 — browser test (`Hive::Stages::Review::BrowserTest`)
 

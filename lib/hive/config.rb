@@ -592,12 +592,69 @@ module Hive
                 "(would produce reviews/-NN.md filenames)"
         end
 
+        # ce-review round-3 P1 #2 — reject path-traversal characters in
+        # output_basename. The basename interpolates directly into
+        # `reviews/<basename>-NN.md`; without this check, a value like
+        # `../escape` produces `reviews/../escape-NN.md`. The retry-
+        # loop cleanup in lib/hive/reviewers/agent.rb calls
+        # `File.delete(output_path)` on that resolved path, which could
+        # then delete files outside the task's `reviews/` directory.
+        # Reject `/`, `\`, ASCII NUL, and the path-segment tokens `.`
+        # and `..`. After rejection, the basename is guaranteed to be a
+        # single safe filename component.
+        if normalized_basename.is_a?(String)
+          if normalized_basename =~ %r{[/\\\0]} ||
+             normalized_basename == "." ||
+             normalized_basename == ".."
+            raise ConfigError,
+                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "must be a single filename component without path separators (/, \\, null) " \
+                  "and may not be '.' or '..'"
+          end
+        end
+
         if normalized_basename && (prev = seen_basenames[normalized_basename])
           raise ConfigError,
                 "review.reviewers in #{describe_source(source_path)} has duplicate output_basename #{basename.inspect} " \
                 "at indices [#{prev}, #{idx}] (would cause concurrent file-write collisions)"
         end
         seen_basenames[normalized_basename] = idx if normalized_basename
+
+        # ce-review P2 #6 — reject an output_basename whose per-pass
+        # file (`<basename>-NN.md`) would collide with the orchestrator's
+        # reserved-prefix namespace (`escalations-`, `ci-blocked`,
+        # `browser-`, `fix-guardrail-`, `fix-success-`, `errors-`).
+        # Without this check, a reviewer configured with
+        # `output_basename: "errors"` silently has its per-pass file
+        # classified as orchestrator-owned by `reviewer_file?`, hidden
+        # from triage's `discover_reviewer_files`, and overwritten by
+        # the U2 errors sink when other reviewers fail in the same pass.
+        if normalized_basename
+          require "hive/stages/review"
+          probe = "#{normalized_basename}-99.md"
+          if !Hive::Stages::Review.reviewer_file?(probe)
+            reserved = Hive::Stages::Review::ORCHESTRATOR_OWNED_PREFIXES
+                       .map { |p| p.chomp("-") }
+                       .join(", ")
+            raise ConfigError,
+                  "review.reviewers[#{idx}].output_basename #{basename.inspect} in #{describe_source(source_path)} " \
+                  "starts with a reserved orchestrator-owned prefix; choose a different name " \
+                  "(reserved prefixes: #{reserved})"
+          end
+        end
+
+        # ce-review P3 #8 — validate optional `max_attempts` at config
+        # load time. The adapter falls back to the default on coercion
+        # failure (defensive), but a load-time error catches typos
+        # before the loop spawns its first reviewer.
+        if entry.key?("max_attempts")
+          max = entry["max_attempts"]
+          unless max.is_a?(Integer) && max.positive?
+            raise ConfigError,
+                  "review.reviewers[#{idx}].max_attempts in #{describe_source(source_path)} " \
+                  "must be a positive Integer; got #{max.inspect}"
+          end
+        end
 
         validate_agent_name!(
           entry["agent"],

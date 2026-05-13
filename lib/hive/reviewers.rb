@@ -14,6 +14,14 @@ module Hive
   # hive would couple the orchestrator to one ecosystem (Ruby/Rails);
   # the per-project `bin/ci` pattern keeps hive ecosystem-agnostic.
   module Reviewers
+    # Default attempt budget for a reviewer adapter (Hive::Reviewers::Agent).
+    # A reviewer spec can override via the optional `max_attempts` field;
+    # `1` disables retry (single attempt). Backoff between failed attempts
+    # is exponential (1s, 2s, 4s, 8s, 8s, …) capped at REVIEWER_BACKOFF_CAP_SEC
+    # so a high max_attempts doesn't accidentally introduce minute-scale waits.
+    DEFAULT_REVIEWER_MAX_ATTEMPTS = 2
+    REVIEWER_BACKOFF_CAP_SEC = 8
+
     class UnknownKindError < Hive::Error
       def exit_code
         Hive::ExitCodes::CONFIG

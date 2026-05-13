@@ -37,9 +37,10 @@ module Hive
         # effective timeout is capped at `deadline - now`; backoff
         # sleeps are also clamped to that remaining budget. Without
         # this, a single reviewer could consume max_attempts ×
-        # timeout_sec + backoff (e.g. 3 × 600 + 7 = 1807s) and exhaust
-        # the outer review wall_clock budget before the
-        # between-reviewer check in run_reviewers fires.
+        # timeout_sec + backoff (defaults: 2 × 600 + 1 = 1201s; with
+        # max_attempts: 3 override: 3 × 600 + 3 = 1803s) and exhaust
+        # the outer review wall_clock budget (5400s default) before
+        # the between-reviewer check in run_reviewers fires.
         attempts = 0
         result = nil
         loop do
@@ -48,7 +49,7 @@ module Hive
           # every attempt so a partial file from a prior crashed
           # attempt cannot satisfy the next attempt's
           # :output_file_exists check.
-          File.delete(output_path) if File.exist?(output_path)
+          clear_partial_output!(:pre_attempt)
 
           spawn_timeout = effective_timeout(configured_timeout, deadline)
           if spawn_timeout && spawn_timeout <= 0
@@ -97,9 +98,7 @@ module Hive
         # through reviews/errors-NN.md (written by the orchestrator's
         # run_reviewers in lib/hive/stages/review.rb), not via a stale
         # output_path file.
-        if result[:status] != :ok && File.exist?(output_path)
-          File.delete(output_path)
-        end
+        clear_partial_output!(:final_failure) if result[:status] != :ok
 
         build_result(result, attempts, max_attempts)
       end
@@ -111,13 +110,34 @@ module Hive
         return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
 
         Integer(value)
-      rescue ArgumentError, TypeError
-        # Defensive fallback: if a config path bypasses
-        # Hive::Config.validate_reviewers! and passes a non-integer
-        # value through, default rather than crash mid-spawn. The
-        # adapter is the wrong place to surface a config-validation
-        # error.
+      rescue ArgumentError
+        # pr-review-toolkit round-5 H1 + M4: surface the defensive
+        # fallback to stderr so a programmatic / test-only path that
+        # bypassed Hive::Config.validate_reviewers! doesn't silently
+        # land on a default the caller didn't ask for. (TypeError is
+        # dead with the `value.nil?` short-circuit above — only
+        # ArgumentError is reachable here, from Integer("two") and
+        # friends.)
+        warn "[hive.reviewers] reviewer #{spec['name'].inspect}: invalid max_attempts " \
+             "#{value.inspect}; using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
         Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
+      end
+
+      # pr-review-toolkit round-5 M2: TOCTOU-safe wrapper for the two
+      # `File.delete(output_path)` sites in the retry loop. Distinguishes
+      # ENOENT (file may not exist on first attempt — normal) from
+      # other SystemCallError (perms / read-only mount — diagnostic).
+      # The `stage` label lets the resulting `errors-NN.md` line name
+      # which delete failed (pre-attempt clear vs. final-failure
+      # cleanup).
+      def clear_partial_output!(stage)
+        File.delete(output_path)
+      rescue Errno::ENOENT
+        nil
+      rescue SystemCallError => e
+        raise Hive::Error,
+              "reviewer #{name.inspect}: failed to clear partial output_path " \
+              "(#{stage}) #{output_path}: #{e.class}: #{e.message}"
       end
 
       def build_log_label(attempt)
@@ -145,7 +165,6 @@ module Hive
         [ configured_timeout, remaining.floor ].min
       end
 
-      # Indirected so tests can stub the wait without burning wall time.
       def backoff(seconds)
         sleep(seconds)
       end
@@ -161,10 +180,10 @@ module Hive
         else
           base_msg = spawn_result[:error_message] ||
                      "agent exited with status=#{spawn_result[:status]}"
-          # Suppress the "after N attempt(s)" suffix when max_attempts
-          # is 1 so single-attempt configurations get the original
-          # error_message shape (consumed by callers that hand-write
-          # the orchestrator-owned errors-NN.md line in U2).
+          # With max_attempts=1 retry is disabled by config; an
+          # "after 1 attempt(s)" suffix would be redundant and slightly
+          # misleading (it implies a retry policy that's been turned
+          # off). Keep the bare error message in that case.
           msg = max_attempts > 1 ? "#{base_msg} after #{attempts} attempt(s)" : base_msg
           Result.new(
             name: name,

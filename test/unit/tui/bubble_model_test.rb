@@ -2406,7 +2406,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
   end
 
-  def test_read_checkbox_state_returns_unchecked_checked_sequence
+  def test_read_checkbox_state_returns_checked_unchecked_counts
     Dir.mktmpdir("u6-read-checkbox") do |dir|
       path = File.join(dir, "fix-guardrail-04.md")
       File.write(path, <<~MD)
@@ -2416,26 +2416,43 @@ class HiveTuiBubbleModelTest < Minitest::Test
         - [x] permission_change: bin/script
         - [X] dependency_lockfile_change: Gemfile.lock
       MD
-      states = @model.send(:read_checkbox_state, path)
-      assert_equal [ :unchecked, :checked, :checked ], states
+      counts = @model.send(:read_checkbox_state, path)
+      assert_equal({ checked: 2, unchecked: 1 }, counts)
     end
   end
 
-  def test_read_checkbox_state_returns_empty_for_directory
+  def test_read_checkbox_state_set_equivalence_ignores_line_order
+    # pr-review-toolkit round-5 #5: a user who cuts a `[x]` line and
+    # pastes it elsewhere should not trigger :rerun_review — the
+    # `[x]` count is unchanged. The order-sensitive Array shape we
+    # had before tripped on this; the counts-Hash form is set-
+    # equivalent.
+    Dir.mktmpdir("u6-read-checkbox") do |dir|
+      a_path = File.join(dir, "a.md")
+      b_path = File.join(dir, "b.md")
+      File.write(a_path, "- [x] one\n- [ ] two\n- [x] three\n")
+      File.write(b_path, "- [ ] two\n- [x] three\n- [x] one\n")
+      assert_equal @model.send(:read_checkbox_state, a_path),
+                   @model.send(:read_checkbox_state, b_path),
+                   "checkbox-counts must be order-insensitive"
+    end
+  end
+
+  def test_read_checkbox_state_returns_zero_counts_for_directory
     # The original PR-A bug: editor path was a directory; rescue
-    # Errno::EISDIR returns [] silently, which let :silent fire on
-    # every fix_guardrail edit. The behaviour is correct (no crash);
-    # the fix is to NOT pass a directory here in the first place
-    # (see input_editor_path tests above).
+    # Errno::EISDIR returns zero counts silently, letting :silent
+    # fire on every fix_guardrail edit. The structural fix is to
+    # NOT pass a directory (see input_editor_path tests above);
+    # this rescue is defense in depth.
     Dir.mktmpdir("u6-read-checkbox-dir") do |dir|
-      states = @model.send(:read_checkbox_state, dir)
-      assert_equal [], states
+      counts = @model.send(:read_checkbox_state, dir)
+      assert_equal({ checked: 0, unchecked: 0 }, counts)
     end
   end
 
-  def test_read_checkbox_state_returns_empty_for_missing_file
-    states = @model.send(:read_checkbox_state, "/nonexistent/path/fix-guardrail-04.md")
-    assert_equal [], states
+  def test_read_checkbox_state_returns_zero_counts_for_missing_file
+    counts = @model.send(:read_checkbox_state, "/nonexistent/path/fix-guardrail-04.md")
+    assert_equal({ checked: 0, unchecked: 0 }, counts)
   end
 
   def test_review_outcome_silent_when_checkbox_set_unchanged
@@ -2486,44 +2503,164 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_review_marker_still_open_accepts_review_waiting
+  def test_review_marker_state_open_for_matching_review_waiting
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
       row = make_review_waiting_row(folder, pass: 4)
-      assert @model.send(:review_marker_still_open?, row)
+      assert_equal :open, @model.send(:review_marker_state, row)
     end
   end
 
-  def test_review_marker_still_open_false_for_agent_working
+  def test_review_marker_state_drifted_for_agent_working
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- AGENT_WORKING phase=fix pass=4 -->\n")
       row = make_review_waiting_row(folder, pass: 4)
-      refute @model.send(:review_marker_still_open?, row)
+      assert_equal :drifted, @model.send(:review_marker_state, row)
     end
   end
 
   # ce-review round-3 P2 #7 — a stale editor session for pass 4 must
   # NOT dispatch when a concurrent process advanced the task to pass
   # 5, or to a different REVIEW_WAITING reason family.
-  def test_review_marker_still_open_false_when_marker_pass_advanced
+  def test_review_marker_state_drifted_when_marker_pass_advanced
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=5 matches=2 -->\n")
       stale_row = make_review_waiting_row(folder, pass: 4) # editor opened on pass 4
-      refute @model.send(:review_marker_still_open?, stale_row),
-             "marker advanced to pass 5; stale pass-4 row must NOT dispatch"
+      assert_equal :drifted, @model.send(:review_marker_state, stale_row),
+                   "marker advanced to pass 5; stale pass-4 row must drift"
     end
   end
 
-  def test_review_marker_still_open_false_when_marker_reason_drifted
+  def test_review_marker_state_drifted_when_marker_reason_drifted
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING escalations=3 pass=4 -->\n")
       stale_row = make_review_waiting_row(folder, pass: 4, reason: "fix_guardrail")
-      refute @model.send(:review_marker_still_open?, stale_row),
-             "row was for fix_guardrail; marker drifted to escalations — must NOT dispatch"
+      assert_equal :drifted, @model.send(:review_marker_state, stale_row),
+                   "row was for fix_guardrail; marker drifted to escalations"
+    end
+  end
+
+  # pr-review-toolkit round-5 H3 + pr-test-analyzer #6: distinguish
+  # "marker drifted" from "couldn't read marker" so the user-facing
+  # flash matches the real cause.
+  def test_review_marker_state_unreadable_when_state_file_unreadable
+    Dir.mktmpdir("u6-marker-check") do |folder|
+      # Pass a directory where the state_file is expected — reading it
+      # raises Errno::EISDIR, which the rescue catches.
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: folder, # directory, not a file
+        marker: "review_waiting",
+        attrs: { "pass" => "4", "reason" => "fix_guardrail" }
+      )
+      assert_equal :unreadable, @model.send(:review_marker_state, row),
+                   "directory-as-state-file must return :unreadable, not :drifted"
+    end
+  end
+
+  # pr-review-toolkit round-5 pr-test-analyzer #5 — positive test for
+  # the rescue path in `dispatch_rerun_review_for`. A regression that
+  # widens the rescue scope or drops the suppression flash would not
+  # be caught without exercising the malformed-command branch.
+  def test_dispatch_rerun_review_for_malformed_command_emits_suppression_flash
+    folder = "/tmp/hive/test-malformed"
+    row = make_task_row(
+      stage: "5-review",
+      folder: folder,
+      state_file: File.join(folder, "task.md"),
+      marker: "review_waiting",
+      attrs: { "pass" => "4", "reason" => "fix_guardrail" },
+      slug: "test-malformed",
+      # Unmatched quote → Shellwords.split raises ArgumentError.
+      suggested_command: "hive run --folder #{folder} 'unterminated"
+    )
+    exited = Hive::Tui::Messages::InputEditorExited.new(
+      slug: row.slug, exit_code: 0, changed: true
+    )
+
+    messages = @model.send(:dispatch_rerun_review_for, row, exited)
+
+    assert_equal 2, messages.size, "rescue path emits [exited, suppression_flash] — no dispatch"
+    assert_same exited, messages[0]
+    assert_kind_of Hive::Tui::Messages::Flash, messages[1]
+    assert_match(/malformed suggested command/, messages[1].text)
+    assert(messages.none? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+           "no DispatchCommand may be emitted when the command can't be parsed")
+  end
+
+  # pr-review-toolkit round-5 pr-test-analyzer #7 — integration test
+  # through `input_editor_exit_messages` driving the full
+  # `auto_continue_outcome → review_outcome → dispatch_rerun_review_for`
+  # path for the happy 5-review case. A regression that adds a new
+  # `:silent` early-return in `auto_continue_outcome` before reaching
+  # `review_outcome` would not be caught by the unit tests above.
+  def test_input_editor_exit_messages_5_review_dispatches_review_verb_on_checkbox_change
+    Dir.mktmpdir("u6-exit-integration") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
+      row = make_review_waiting_row(folder, pass: 4)
+      messages = @model.send(
+        :input_editor_exit_messages,
+        row,
+        File.join(folder, "reviews/fix-guardrail-04.md"),
+        0,        # exit_code
+        true,     # changed (mtime)
+        false,    # content_changed (irrelevant for 5-review)
+        true      # checkboxes_changed — the load-bearing signal
+      )
+
+      assert_equal 3, messages.size, "happy path: [InputEditorExited, Flash, DispatchCommand]"
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, messages[0]
+      assert_kind_of Hive::Tui::Messages::Flash, messages[1]
+      assert_match(/approved/, messages[1].text)
+      assert_kind_of Hive::Tui::Messages::DispatchCommand, messages[2]
+    end
+  end
+
+  def test_input_editor_exit_messages_5_review_silent_on_no_checkbox_change
+    Dir.mktmpdir("u6-exit-integration") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
+      row = make_review_waiting_row(folder, pass: 4)
+      messages = @model.send(
+        :input_editor_exit_messages,
+        row, File.join(folder, "reviews/fix-guardrail-04.md"),
+        0, true, false,
+        false # checkboxes unchanged — bare :wq
+      )
+      assert_equal 1, messages.size, "bare :wq must emit only [InputEditorExited], no dispatch"
+      assert_kind_of Hive::Tui::Messages::InputEditorExited, messages[0]
+    end
+  end
+
+  def test_input_editor_exit_messages_5_review_marker_unreadable_surfaces_distinct_flash
+    Dir.mktmpdir("u6-exit-integration") do |folder|
+      # state_file points at the folder (a directory) — read fails
+      # with Errno::EISDIR → review_marker_state returns :unreadable
+      # → outcome is :marker_unreadable (distinct from :marker_changed).
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: folder,
+        marker: "review_waiting",
+        attrs: { "pass" => "4", "reason" => "fix_guardrail" },
+        suggested_command: "hive run --folder #{folder}"
+      )
+      messages = @model.send(
+        :input_editor_exit_messages,
+        row, File.join(folder, "reviews/fix-guardrail-04.md"),
+        0, true, false, true
+      )
+      assert_equal 2, messages.size, ":marker_unreadable emits [Exited, suppression_flash]"
+      assert_kind_of Hive::Tui::Messages::Flash, messages[1]
+      assert_match(/couldn't read marker/, messages[1].text,
+                   "flash must name the actual cause — marker unreadable, not just 'changed'")
+      refute_match(/marker changed/, messages[1].text)
     end
   end
 

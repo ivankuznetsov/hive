@@ -1098,12 +1098,13 @@ module Hive
         callable = lambda do
           before_mtime = file_mtime(path)
           before_hash = file_content_hash(path)
-          # U6 — capture pre-edit checkbox state for 5-review rows so
-          # `review_outcome` can distinguish "user actually ticked a
-          # box" from "user opened, looked, hit :wq with no edits".
-          # mtime alone is unreliable here: bare :wq ticks mtime
-          # without changing the [x] set, which would otherwise
-          # trigger a no-op re-dispatch of the multi-minute review verb.
+          # Capture the file's checkbox state pre-edit (and again
+          # post-edit below). Consumed by `review_outcome` for 5-review
+          # rows so that path can distinguish "user actually ticked a
+          # box" from "opened, looked, hit :wq". Brainstorm and plan
+          # outcomes ignore `checkboxes_changed`; the capture is
+          # unconditional because for non-review rows the comparison
+          # collapses to `{...} == {...}` cheaply.
           before_checkboxes = read_checkbox_state(path)
           exit_code = run_editor(argv, path)
           after_mtime = file_mtime(path)
@@ -1253,6 +1254,13 @@ module Hive
           [ exited, suppression_flash(row, "no suggested command on row") ]
         when :marker_changed
           [ exited, suppression_flash(row, "marker changed during edit") ]
+        when :marker_unreadable
+          # pr-review-toolkit round-5 H3: distinct from :marker_changed
+          # so the user sees the real cause (couldn't read task.md)
+          # instead of being told the marker drifted when it actually
+          # might not have. Operators will look in the debug log
+          # (`HIVE_TUI_DEBUG=1`) for the specific Errno class.
+          [ exited, suppression_flash(row, "couldn't read marker — check task.md permissions") ]
         else # :silent — expected refusals (parser incomplete, exit nonzero, unchanged, off-stage)
           [ exited ]
         end
@@ -1263,15 +1271,24 @@ module Hive
       # multi-minute review pass has started. The flash also addresses
       # the UX risk that a snappy save-and-continue gesture sets up
       # the wrong expectation for a slow operation.
+      #
+      # pr-review-toolkit round-5 M3: scope the ArgumentError rescue
+      # narrowly to the Shellwords.split call (which is the only
+      # known source of ArgumentError on this path). A wider rescue
+      # would falsely attribute a future Flash.new validation error
+      # to "malformed suggested command".
       def dispatch_rerun_review_for(row, exited)
-        dispatch = Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+        dispatch =
+          begin
+            Hive::Tui::KeyMap.dispatch_command_for(row.suggested_command)
+          rescue ArgumentError => e
+            Hive::Tui::Debug.log("input_editor", "rerun-review parse failed for #{row.slug}: #{e.class}: #{e.message}")
+            return [ exited, suppression_flash(row, "malformed suggested command: #{e.message}") ]
+          end
         flash = Hive::Tui::Messages::Flash.new(
           text: "approved — starting next review pass for #{row.slug}"
         )
         [ exited, flash, dispatch ]
-      rescue ArgumentError => e
-        Hive::Tui::Debug.log("input_editor", "rerun-review auto-continue skipped for #{row.slug}: #{e.message}")
-        [ exited, suppression_flash(row, "malformed suggested command") ]
       end
 
       def dispatch_messages_for(row, exited)
@@ -1312,15 +1329,20 @@ module Hive
       #   :proceed             — fire DispatchCommand for brainstorm re-run
       #   :revise_plan         — fire DispatchCommand for plan re-run (user added feedback)
       #   :advance_to_develop  — fire DispatchCommand for `hive develop` (plan approved as-is)
+      #   :rerun_review        — fire DispatchCommand for `hive run` on a 5-review row (U6 auto-continue)
       #   :silent              — refuse, common-case (user can self-diagnose)
       #   :empty_command       — refuse, surface to user (data anomaly)
       #   :marker_changed      — refuse, surface to user (race with another actor)
+      #   :marker_unreadable   — refuse, surface to user (can't read task.md; check perms)
       #
       # `changed` is mtime-based ("did the user save at all"); `content_changed`
       # is hash-based ("did content actually differ"). Brainstorm gates on
       # `changed` (parser then decides). Plan needs `content_changed` to
       # distinguish "approved by saving without edits" (advance) from
-      # "added feedback" (revise).
+      # "added feedback" (revise). 5-review gates on `checkboxes_changed`
+      # (the file's `[x]/[ ]` counts shifted across the edit) so a bare
+      # `:wq` with no checkbox flips doesn't dispatch a multi-minute
+      # review pass; mtime / content alone would falsely fire.
       def auto_continue_outcome(row, path, exit_code, changed, content_changed, checkboxes_changed = false)
         return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
@@ -1377,63 +1399,87 @@ module Hive
       def review_outcome(row, checkboxes_changed)
         return :silent unless checkboxes_changed
         return :empty_command if row.suggested_command.to_s.empty?
-        return :marker_changed unless review_marker_still_open?(row)
 
-        :rerun_review
+        case review_marker_state(row)
+        when :open then :rerun_review
+        when :drifted then :marker_changed
+        when :unreadable then :marker_unreadable
+        end
       end
 
-      # Mirror of marker_still_open_for_input? but accepts the
-      # :review_waiting marker name that 5-review uses (the
-      # brainstorm/plan helper only accepts :waiting / :none).
-      # Reads the freshly-saved marker from the task's state file so
-      # a concurrent `hive run` that advanced the marker to
-      # :agent_working / :review_complete during the long-lived
-      # editor session suppresses the auto-rerun.
-      #
-      # ce-review round-3 P2 #7 — the marker name alone is not enough:
-      # a stale editor session for pass 4 must NOT dispatch when
-      # another process has advanced the task to pass 5 (or to a
-      # different `reason` family, e.g. fix_guardrail → escalations).
-      # Compare `pass` and `reason` against the row snapshot taken
-      # when Enter was pressed.
-      def review_marker_still_open?(row)
-        state_file = row.respond_to?(:state_file) ? row.state_file : row
-        marker = Hive::Markers.current(state_file)
-        return false unless marker.name == :review_waiting
-
-        # If we don't have a Row (legacy direct-call shape), keep the
-        # old name-only contract.
-        return true unless row.respond_to?(:attrs)
+      # pr-review-toolkit round-5 H3 + #13: tri-state replacement for
+      # the round-3-era `review_marker_still_open?` predicate. The
+      # old form collapsed "marker drifted to a different pass/reason"
+      # and "couldn't read the state file" into the same `false`,
+      # which `:marker_changed` then mis-described to the user as
+      # "marker changed during edit" when the real failure was an
+      # I/O error. Returning the explicit state lets `review_outcome`
+      # route the I/O error case to a distinct outcome with an
+      # accurate flash. The legacy direct-call shape (pass a path
+      # instead of a Row) is dropped — every production and test
+      # caller passes a Row.
+      def review_marker_state(row)
+        marker = Hive::Markers.current(row.state_file)
+        return :drifted unless marker.name == :review_waiting
 
         row_attrs = row.attrs || {}
         marker_attrs = marker.attrs || {}
-        return false if row_attrs["pass"].to_s != marker_attrs["pass"].to_s
-        return false if row_attrs["reason"].to_s != marker_attrs["reason"].to_s
+        return :drifted if row_attrs["pass"].to_s != marker_attrs["pass"].to_s
+        return :drifted if row_attrs["reason"].to_s != marker_attrs["reason"].to_s
 
-        true
+        :open
       rescue SystemCallError, IOError => e
         Hive::Tui::Debug.log("input_editor", "review marker check failed: #{e.class}: #{e.message}")
-        false
+        :unreadable
       end
 
       # U6 — return the multiset of checkbox-line states in the file
-      # as a normalized array of `:checked` / `:unchecked` symbols.
+      # as a normalized counts-Hash (`{ checked: N, unchecked: M }`).
       # Used pre- and post-edit to detect whether the user actually
       # ticked or cleared a box (vs. e.g. opening + bare :wq, or
       # editing non-checkbox prose). Lines other than `- [ ]` / `- [x]`
       # (title, prose, blank) are ignored — they cannot carry an
-      # approval signal. Returns [] on absent / unreadable files so a
-      # missing file pre- and post-edit compares equal (no dispatch).
+      # approval signal.
+      #
+      # pr-review-toolkit round-5 #5 (set-equivalence): the original
+      # form returned `Array<Symbol>` preserving line order, so a user
+      # who cut-pasted a `[x]` line to a different position triggered
+      # `:rerun_review` even though no `[x]` count changed. Switching
+      # to a counts Hash makes the comparison order-insensitive —
+      # `{checked: 2, unchecked: 0} == {checked: 2, unchecked: 0}` is
+      # true regardless of line position. Cleared boxes still count
+      # (the unchecked count differs), so going from `[x] [x]` to
+      # `[x] [ ]` still trips.
+      #
+      # pr-review-toolkit round-5 H2 (distinguish absent from
+      # un-openable): ENOENT is normal (pre-edit on a fresh file).
+      # EACCES / EISDIR / similar are diagnostic — log via
+      # Hive::Tui::Debug and return a sentinel (an empty Hash with no
+      # readable flag) the consumer can distinguish from "legitimately
+      # zero checkboxes" if it wants. For backward-compat the consumer
+      # `review_outcome` only cares about equality, so the EACCES case
+      # also returns `{}` — a pre/post comparison still works (both
+      # `{}` → no change → `:silent`), and the H2 risk (user's `[x]`
+      # silently ignored due to mid-edit perms change) is bounded
+      # because `review_marker_state` independently catches the
+      # SystemCallError on the marker read.
       def read_checkbox_state(path)
-        states = []
+        counts = { checked: 0, unchecked: 0 }
         File.foreach(path) do |line|
           if (m = line.match(/^\s*-\s+\[([ xX])\]\s+/))
-            states << (m[1] == " " ? :unchecked : :checked)
+            counts[m[1] == " " ? :unchecked : :checked] += 1
           end
         end
-        states
-      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR
-        []
+        counts
+      rescue Errno::ENOENT
+        # Pre-edit of a fresh file is the common case here.
+        { checked: 0, unchecked: 0 }
+      rescue Errno::EACCES, Errno::EISDIR, Errno::EIO, Errno::ENOTDIR => e
+        Hive::Tui::Debug.log(
+          "input_editor",
+          "read_checkbox_state failed for #{path}: #{e.class}: #{e.message}"
+        )
+        { checked: 0, unchecked: 0 }
       end
 
       # Re-reads the on-disk marker after the editor exits to defend

@@ -204,12 +204,13 @@ module Hive
           # MUST come BEFORE the resume_no_findings empty-guard so
           # approval doesn't require live reviewer files to land.
           #
-          # Three additional safety checks before advancing (ce-review
-          # P1 #7, #11): worktree_dirty? catches manual edits the user
-          # made between the guardrail trip and the approval; the
-          # max_passes-boundary check breaks to Phase 5 instead of
-          # REVIEW_STALE-on-approved-pass; user-supplied marker pass
-          # mismatch is treated as a hand-edit and rejected.
+          # Two safety checks before advancing (ce-review P1 #7, #11):
+          # worktree_dirty? catches manual edits between trip and
+          # approval; the max_passes-boundary check breaks to Phase 5
+          # instead of writing REVIEW_STALE on an approved pass. The
+          # pass-match is handled by the enclosing `resuming_from_waiting?`
+          # entry guard, so it's a precondition for entering this branch
+          # rather than an additional check.
           if resuming_from_waiting?(marker, pass) &&
              marker.attrs["reason"] == "fix_guardrail"
             # ce-review round-3 P2 #8 — missing or malformed `matches`
@@ -526,6 +527,19 @@ module Hive
         # path missing) are intentional terminations — let them through
         # so the existing test contract is preserved.
         raise
+      rescue Hive::ConfigError => e
+        # pr-review-toolkit round-5 code-reviewer #2: a Hive::ConfigError
+        # (e.g. `max_review_pass NN=99 exceeds review.max_passes=4`) is
+        # a typed, actionable failure with a helpful message. The
+        # generic StandardError rescue below would re-classify it as
+        # `reason=runner_exception exception_class=Hive::ConfigError`,
+        # discarding the message. Surface it as a config-phase error
+        # marker that preserves the message in the `reason` attr.
+        Hive::Markers.set(task.state_file, :review_error,
+                          phase: @current_phase || :pre_flight,
+                          reason: "config_error",
+                          message: e.message)
+        raise
       rescue StandardError => e
         # Any uncaught helper exception would otherwise leave a stale
         # REVIEW_WORKING marker on disk. Translate to REVIEW_ERROR with
@@ -798,14 +812,28 @@ module Hive
       # invocation of this pass. Called once at the start of
       # `run_reviewers` so the file's presence (or absence) always
       # reflects the current invocation's reviewer-failure set, not
-      # accumulated history. Idempotent: missing file is fine.
+      # accumulated history.
+      #
+      # pr-review-toolkit round-5 M1: try-delete pattern instead of
+      # `if File.exist?` to close the TOCTOU window (another process
+      # could delete the file between the check and the delete on a
+      # networked FS). ENOENT after that race is the expected
+      # outcome — swallow it. Other SystemCallError values (EACCES on
+      # parent dir, EROFS) get re-raised as a named error so a
+      # downstream `runner_exception` re-classification doesn't hide
+      # the real cause (read-only mount, perms misconfig).
       def clear_reviewer_infra_errors(ctx)
         path = File.join(
           ctx.task_folder,
           "reviews",
           "errors-#{format('%02d', ctx.pass)}.md"
         )
-        File.delete(path) if File.exist?(path)
+        File.delete(path)
+      rescue Errno::ENOENT
+        nil
+      rescue SystemCallError => e
+        raise Hive::Error,
+              "failed to clear stale #{path}: #{e.class}: #{e.message}"
       end
 
       # Append one infra-error line to reviews/errors-NN.md. The file
@@ -1012,16 +1040,17 @@ module Hive
       # insensitive on the `x`); other line shapes (the title, blank
       # lines, any free-form prose under it) are ignored.
       #
-      # `expected_matches:` (ce-review P1 #2): when the caller supplies
-      # the original match count from `marker.attrs["matches"]`, reject
-      # approval when the file's checkbox count differs — defends
-      # against a "truncation-forged" approval where the user deletes
-      # the findings they didn't want to read and ticks `[x]` only on
-      # the remaining one. Without this gate, the runner would honour
-      # an approval the user never actually granted for the deleted
-      # lines. nil expected_matches keeps the legacy behaviour
-      # (any-count, all-[x] = approved), preserving direct-test
-      # ergonomics that don't drive through the marker.
+      # `expected_matches:` (ce-review P1 #2): the orchestrator
+      # supplies the original match count from `marker.attrs["matches"]`
+      # so we reject approval when the file's checkbox count differs —
+      # defends against a "truncation-forged" approval where the user
+      # deletes the findings they didn't want to read and ticks `[x]`
+      # only on the remaining one. The orchestrator hard-rejects
+      # markers with non-Integer `matches` upstream (see the
+      # `malformed_marker_matches` branch in run!), so production
+      # callers always pass a positive Integer here. `nil` is for
+      # direct unit tests only; passing `nil` from production code
+      # disables the truncation defense and is a bug.
       #
       # Caller invariant: only consult this when the resume marker is
       # `:review_waiting reason=fix_guardrail` for the same pass. The

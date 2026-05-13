@@ -254,6 +254,105 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # pr-review-toolkit round-5 pr-test-analyzer #3 — deadline propagation behavior.
+  def test_run_aborts_attempt_when_deadline_reached_before_spawn
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 3)
+      past_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) - 10
+      spawn_call_count = 0
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **_kwargs|
+        spawn_call_count += 1
+        { status: :ok }
+      end
+      begin
+        result = reviewer.run!(deadline: past_deadline)
+        assert result.error?
+        assert_match(/deadline reached before attempt/, result.error_message)
+        assert_equal 0, spawn_call_count, "spawn_agent must NOT be called when deadline is already past"
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+    end
+  end
+
+  def test_run_clamps_spawn_timeout_to_deadline_remaining
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir)
+      # configured spec timeout_sec=5 (from make_spec); deadline allows
+      # only 2 seconds of remaining budget. Effective timeout must be
+      # clamped to ~2, not 5.
+      tight_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      captured_timeouts = []
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured_timeouts << kwargs[:timeout_sec]
+        { status: :ok }
+      end
+      begin
+        reviewer.run!(deadline: tight_deadline)
+        assert_equal 1, captured_timeouts.size
+        assert captured_timeouts.first <= 2,
+               "effective timeout #{captured_timeouts.first} must be clamped to remaining budget (~2s)"
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+    end
+  end
+
+  def test_run_uses_full_configured_timeout_when_no_deadline_supplied
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir) # default spec timeout_sec=5
+      captured_timeouts = []
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured_timeouts << kwargs[:timeout_sec]
+        { status: :ok }
+      end
+      begin
+        reviewer.run! # no deadline kwarg
+        assert_equal [ 5 ], captured_timeouts,
+                     "without a deadline, the adapter uses the full configured timeout_sec"
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+    end
+  end
+
+  def test_run_clears_output_path_on_every_retry_attempt
+    # pr-review-toolkit round-5 pr-test-analyzer #9 — output_path must
+    # be cleared before EACH attempt, not just the first. A regression
+    # that hoists the clear out of the loop would let attempt 2's
+    # stale file from attempt 1 satisfy the :output_file_exists check.
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 3)
+      FileUtils.mkdir_p(File.dirname(reviewer.output_path))
+
+      observations = []
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        observations << File.exist?(kwargs[:expected_output])
+        # Simulate adapter writing a partial file before failing —
+        # the next attempt's pre-spawn clear must wipe it.
+        File.write(kwargs[:expected_output], "## High\n- [ ] partial\n")
+        { status: :error, error_message: "agent exited with status=:timeout" }
+      end
+      begin
+        reviewer.run!
+        assert_equal 3, observations.size,
+                     "expected 3 spawn attempts under max_attempts=3"
+        assert observations.none?(true),
+               "every attempt must see output_path absent at spawn-time, not just the first"
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+    end
+  end
+
   def test_run_falls_back_to_default_when_max_attempts_absent
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir) # no max_attempts override

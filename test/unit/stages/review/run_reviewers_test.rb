@@ -238,6 +238,29 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  # pr-review-toolkit round-5 pr-test-analyzer #10 — the round-3 P2 #9
+  # fix moved `clear_reviewer_infra_errors` BEFORE the empty-spec
+  # early return in `run_reviewers`. A regression that hoists it
+  # back below the return would leave stale errors-NN.md when a
+  # project removes all reviewers between runs.
+  def test_errors_file_is_cleared_even_when_spec_list_is_empty
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      stale_path = File.join(reviews, "errors-01.md")
+      File.write(stale_path,
+                 "# Reviewer infra errors for pass 01\n\n" \
+                 "- [old] reviewer \"old\" failed: leftover from a prior run with reviewers\n")
+
+      cfg = { "review" => { "reviewers" => [] } } # specs intentionally empty
+
+      result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      assert_equal :ok, result, "empty specs returns :ok"
+      refute File.exist?(stale_path),
+             "empty-specs invocation must STILL clear stale errors-NN.md (P2 #9)"
+    end
+  end
+
   def test_errors_file_is_truncated_on_pass_re_entry_not_appended
     # Defensive: after a marker-clear-and-rerun on the same pass, the
     # second run_reviewers invocation should NOT see double-listed

@@ -187,4 +187,51 @@ class NewTest < Minitest::Test
       end
     end
   end
+
+  # Defense-in-depth: copy_attachments! refuses dest_name values that
+  # contain a directory separator or `..` segment so a malformed TUI
+  # caller cannot escape `<task_dir>/assets/`. Raises the dedicated
+  # `InvalidAttachmentError` (separate from real slug failures).
+  def test_call_bang_rejects_dest_name_with_path_traversal
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        fixture = File.join(dir, "fixture.png")
+        File.binwrite(fixture, "png".b)
+        project = File.basename(dir)
+
+        err = assert_raises(Hive::Commands::New::InvalidAttachmentError) do
+          Hive::Commands::New.new(
+            project,
+            "title-traversal",
+            attachments: [ [ fixture, "../escape.png" ] ]
+          ).call!
+        end
+        assert_match(/invalid attachment filename/, err.message)
+        # Rollback should have removed the partial task dir on failure.
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "title-traversal-*")],
+          "attachment guard failure must roll back the partial task directory"
+      end
+    end
+  end
+
+  def test_call_bang_rejects_dest_name_with_slash
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        fixture = File.join(dir, "fixture.png")
+        File.binwrite(fixture, "png".b)
+        project = File.basename(dir)
+
+        err = assert_raises(Hive::Commands::New::InvalidAttachmentError) do
+          Hive::Commands::New.new(
+            project,
+            "title-slash",
+            attachments: [ [ fixture, "nested/file.png" ] ]
+          ).call!
+        end
+        assert_match(/invalid attachment filename/, err.message)
+      end
+    end
+  end
 end

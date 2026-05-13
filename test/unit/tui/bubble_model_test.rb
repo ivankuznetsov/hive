@@ -1085,6 +1085,15 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert flash.length <= 200, "truncated flash should not exceed 200 chars"
   end
 
+  # The renderer fetches attachments by label via `attachments.fetch(label)`
+  # which raises KeyError on a buffer/attachment desync. Validate that the
+  # rescue list catches it instead of crashing the bubbletea loop.
+  def test_rich_submit_rescues_key_error_from_renderer
+    rich_submit_with_raise(-> { raise KeyError, "key not found: \"image99\"" })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/key not found/, @model.hive_model.flash.to_s)
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block

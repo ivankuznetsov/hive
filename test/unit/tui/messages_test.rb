@@ -148,6 +148,34 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal "rss feeds", msg.text
   end
 
+  def test_new_idea_paste_requested_carries_raw_text
+    msg = Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: "/tmp/shot.png")
+    assert_equal "/tmp/shot.png", msg.raw_text
+  end
+
+  def test_new_idea_image_attached_has_data_equality
+    a = Hive::Tui::Messages::NewIdeaImageAttached.new(
+      label: "image1",
+      staging_path: "/tmp/bug-1.png",
+      source_kind: :image_bytes
+    )
+    b = Hive::Tui::Messages::NewIdeaImageAttached.new(
+      label: "image1",
+      staging_path: "/tmp/bug-1.png",
+      source_kind: :image_bytes
+    )
+
+    assert_equal a, b
+    assert_equal "image1", a.label
+    assert_equal "/tmp/bug-1.png", a.staging_path
+    assert_equal :image_bytes, a.source_kind
+  end
+
+  def test_new_idea_submit_blocked_carries_reason
+    msg = Hive::Tui::Messages::NewIdeaSubmitBlocked.new(reason: "broken image placeholder: image1")
+    assert_equal "broken image placeholder: image1", msg.reason
+  end
+
   def test_new_idea_singletons_are_frozen
     assert Hive::Tui::Messages::NEW_IDEA_CURSOR_LEFT.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CURSOR_RIGHT.frozen?

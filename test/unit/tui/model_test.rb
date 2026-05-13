@@ -20,6 +20,8 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal 0, model.scope
     assert_equal "", model.new_idea_buffer
     assert_equal 0, model.new_idea_cursor
+    assert_equal [], model.new_idea_attachments
+    assert_nil model.new_idea_staging_dir
     assert_nil model.flash
     assert_nil model.flash_set_at
     assert_nil model.triage_state
@@ -108,6 +110,7 @@ class HiveTuiModelTest < Minitest::Test
   def test_model_carries_all_documented_fields
     # Schema-pinning test: catch accidental field renames or removals.
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_buffer new_idea_cursor
+                  new_idea_attachments new_idea_staging_dir
                   flash flash_set_at triage_state tail_state cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end
@@ -132,5 +135,21 @@ class HiveTuiModelTest < Minitest::Test
     b = a.with(new_idea_buffer: "rss feeds", new_idea_cursor: 3)
     assert_equal 0, a.new_idea_cursor
     assert_equal 3, b.new_idea_cursor
+  end
+
+  def test_new_idea_attachments_can_be_overridden_via_with
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1",
+      staging_path: "/tmp/hive-tui-composer/bug-1.png",
+      source_kind: :image_bytes
+    )
+    a = Hive::Tui::Model.initial
+    b = a.with(new_idea_attachments: [ attachment ], new_idea_staging_dir: "/tmp/hive-tui-composer")
+
+    assert_equal [], a.new_idea_attachments
+    assert_nil a.new_idea_staging_dir
+    assert_equal [ attachment ], b.new_idea_attachments
+    assert_equal "/tmp/hive-tui-composer", b.new_idea_staging_dir
+    assert attachment.frozen?
   end
 end

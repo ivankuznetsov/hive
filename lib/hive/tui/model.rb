@@ -28,6 +28,8 @@ module Hive
       :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
       :new_idea_buffer,  # String — typed text in :new_idea mode
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
+      :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea
+      :new_idea_staging_dir, # String or nil — temp dir holding staged image files
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
       :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
@@ -47,6 +49,7 @@ module Hive
     # (Update#apply_pane_focus_*) from drifting out of sync.
     Model::TWO_PANE_MIN_COLS = 70
     Model::NEW_IDEA_BUFFER_MAX_CHARS = 4096
+    Model::Attachment = Data.define(:label, :staging_path, :source_kind)
 
     class Model
       # Boot state. App.run constructs the runner with this Model.
@@ -65,6 +68,8 @@ module Hive
           pane_focus: :right,
           new_idea_buffer: "",
           new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil,
           flash: nil,
           flash_set_at: nil,
           triage_state: nil,

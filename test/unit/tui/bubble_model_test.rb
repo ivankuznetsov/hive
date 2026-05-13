@@ -2260,6 +2260,168 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_input_editor_plan_advance_finalizes_marker_before_dispatching_develop
+    # Regression: `hive develop --from 3-plan` refuses to advance
+    # while the marker is `:waiting`. The TUI's `:advance_to_develop`
+    # outcome must flip the marker from `:waiting` to `:complete`
+    # BEFORE dispatching `hive develop`, otherwise the background
+    # subprocess fails silently and the task stays stuck. Diagnosed
+    # via the `i-want-to-be-able-260507-7682` /
+    # `now-we-run-claude-codex-260508-3b8f` bug report.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+      pre_marker = Hive::Markers.current(plan_md)
+      assert_equal :waiting, pre_marker.name, "preconditions: marker starts as :waiting"
+
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --project demo --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      # Marker must be `:complete` on disk after the auto-advance.
+      post_marker = Hive::Markers.current(plan_md)
+      assert_equal :complete, post_marker.name,
+                   "marker must be flipped to :complete before hive develop is dispatched"
+
+      # DispatchCommand for `hive develop` must be in the message
+      # stream (in addition to the InputEditorExited).
+      dispatch = @messages.find { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) }
+      refute_nil dispatch, "expected a DispatchCommand for hive develop"
+      assert_equal "develop", dispatch.verb
+      assert_includes dispatch.argv, "develop"
+      assert_includes dispatch.argv, "some-slug"
+    end
+  end
+
+  def test_open_input_editor_plan_advance_leaves_marker_waiting_when_command_is_malformed
+    # Post-review P2 #2: if the suggested_command can't be parsed
+    # into a `hive develop ...` argv, the marker MUST stay :waiting
+    # (no dispatch + no marker change). The previous order flipped
+    # the marker eagerly, which would leave the plan looking
+    # "approved" while no execute stage ever started.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive develop wrong-verb --from 3-plan" # not `hive plan ...`
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      flash = @messages.find { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+      refute_nil flash
+      assert_match(/couldn't build develop command/, flash.text)
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+             "no DispatchCommand on malformed command")
+
+      post_marker = Hive::Markers.current(plan_md)
+      assert_equal :waiting, post_marker.name,
+                   "marker must stay :waiting when the dispatch can't be built — " \
+                   "flipping to :complete with no dispatch would leave the plan " \
+                   "in a 'looks approved but execute never started' limbo"
+    end
+  end
+
+  def test_open_input_editor_plan_advance_refuses_when_marker_drifted_during_edit
+    # Post-review P2 #1: between `plan_outcome`'s
+    # `marker_still_open_for_input?` check (run when the editor
+    # closes) and the `finalize_plan_marker` write, a concurrent
+    # actor could have advanced the marker. Without the CAS in
+    # finalize_plan_marker, Hive::Markers.set would silently
+    # overwrite the newer marker. With the CAS, we raise
+    # MarkerRaceError and surface a suppression flash instead.
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --project demo --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        # Simulate a concurrent actor advancing the marker WHILE
+        # the editor was open. By the time the editor exits, the
+        # marker on disk is no longer :waiting.
+        Hive::Markers.set(path, :agent_working)
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      flash = @messages.find { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+      refute_nil flash, "expected a flash when marker drifted"
+      # The `marker_still_open_for_input?` early check fires first
+      # (`plan_outcome` returns :marker_changed before reaching
+      # `dispatch_develop_for`), so the surface message is the
+      # "marker changed during edit" flash — same observable
+      # outcome as the race-during-finalize would produce. Pin both
+      # — either is acceptable so long as no DispatchCommand fires
+      # and the marker is not forcibly overwritten back to :complete.
+      assert(flash.text =~ /marker changed during edit/ ||
+             flash.text =~ /plan marker changed during edit/,
+             "expected marker-race flash, got: #{flash.text.inspect}")
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+             "no DispatchCommand may be emitted on marker race")
+
+      post_marker = Hive::Markers.current(plan_md)
+      refute_equal :complete, post_marker.name,
+                   "marker must NOT be overwritten by the TUI's :complete write when the " \
+                   "marker had drifted to a different state during the edit (caught by " \
+                   "the compare-and-set in finalize_plan_marker)"
+    end
+  end
+
+  def test_open_input_editor_plan_advance_falls_back_when_marker_write_fails
+    # When the marker flip fails (e.g., parent dir gone, perms),
+    # surface a suppression flash and DO NOT dispatch hive develop —
+    # dispatching against a still-`:waiting` marker would just hit
+    # the StageAction refusal silently in the background. Drive the
+    # failure by stubbing `finalize_plan_marker` to raise, which is
+    # the same surface the rescue would see for any real
+    # SystemCallError/IOError (read-only dir, ENOSPC, ENOENT, etc.)
+    # without depending on the host's chmod semantics or atomic-
+    # rename behavior (Hive::Markers.set writes via temp+rename,
+    # which is robust to a read-only file).
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --project demo --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      @model.define_singleton_method(:finalize_plan_marker) do |_row|
+        raise Errno::EACCES, "Permission denied @ apply2files - #{plan_md}"
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      flash = @messages.find { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+      refute_nil flash, "expected a suppression flash on marker-write failure"
+      assert_match(/couldn't finalize plan marker/, flash.text)
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+             "no DispatchCommand may be emitted when the marker flip failed")
+    end
+  end
+
   def test_open_input_editor_with_missing_state_file_flashes_without_command
     row = make_task_row(state_file: nil)
     _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))

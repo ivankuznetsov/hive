@@ -555,11 +555,22 @@ class HiveTuiUpdateTest < Minitest::Test
   # ---- v2 new-idea mode lifecycle ----
 
   def test_open_new_idea_prompt_sets_mode_and_clears_buffer
-    starting = model.with(mode: :grid, new_idea_buffer: "leftover-text", new_idea_cursor: 4)
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1", staging_path: "/tmp/bug-1.png", source_kind: :image_bytes
+    )
+    starting = model.with(
+      mode: :grid,
+      new_idea_buffer: "leftover-text",
+      new_idea_cursor: 4,
+      new_idea_attachments: [ attachment ],
+      new_idea_staging_dir: "/tmp/hive-tui-composer"
+    )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
+    assert_equal [], new_model.new_idea_attachments
+    assert_nil new_model.new_idea_staging_dir
   end
 
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
@@ -662,6 +673,93 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "fix bug report now".length, new_model.new_idea_cursor
   end
 
+  def test_new_idea_image_attached_in_empty_buffer_inserts_placeholder
+    starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NewIdeaImageAttached.new(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/bug-1.png",
+        source_kind: :image_bytes
+      )
+    )
+
+    assert_equal "[image1]", new_model.new_idea_buffer
+    assert_equal 8, new_model.new_idea_cursor
+    assert_equal 1, new_model.new_idea_attachments.size
+    assert_equal "image1", new_model.new_idea_attachments.first.label
+    assert_equal "/tmp/hive-tui-composer/bug-1.png", new_model.new_idea_attachments.first.staging_path
+    assert_equal :image_bytes, new_model.new_idea_attachments.first.source_kind
+  end
+
+  def test_new_idea_image_attached_inserts_at_cursor
+    starting = model.with(mode: :new_idea, new_idea_buffer: "see ", new_idea_cursor: 4)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NewIdeaImageAttached.new(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/bug-1.png",
+        source_kind: :image_file
+      )
+    )
+
+    assert_equal "see [image1]", new_model.new_idea_buffer
+    assert_equal 12, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_image_attached_keeps_order_for_consecutive_images
+    first, _cmd = Hive::Tui::Update.apply(
+      model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0),
+      Hive::Tui::Messages::NewIdeaImageAttached.new(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/bug-1.png",
+        source_kind: :image_bytes
+      )
+    )
+    second, _cmd = Hive::Tui::Update.apply(
+      first,
+      Hive::Tui::Messages::NewIdeaImageAttached.new(
+        label: "image2",
+        staging_path: "/tmp/hive-tui-composer/bug-2.png",
+        source_kind: :image_bytes
+      )
+    )
+
+    assert_equal "[image1][image2]", second.new_idea_buffer
+    assert_equal %w[image1 image2], second.new_idea_attachments.map(&:label)
+  end
+
+  def test_new_idea_image_attached_at_cap_is_refused_without_partial_token
+    existing = "x" * Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS
+    starting = model.with(mode: :new_idea, new_idea_buffer: existing, new_idea_cursor: existing.length)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NewIdeaImageAttached.new(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/bug-1.png",
+        source_kind: :image_bytes
+      )
+    )
+
+    assert_equal existing, new_model.new_idea_buffer
+    assert_equal [], new_model.new_idea_attachments
+    assert_match(/buffer full/i, new_model.flash.to_s)
+    refute_nil new_model.flash_set_at
+  end
+
+  def test_new_idea_submit_blocked_sets_flash_and_preserves_buffer
+    starting = model.with(mode: :new_idea, new_idea_buffer: "see [image1]", new_idea_cursor: 12)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NewIdeaSubmitBlocked.new(reason: "broken image placeholder: image1")
+    )
+
+    assert_equal :new_idea, new_model.mode
+    assert_equal "see [image1]", new_model.new_idea_buffer
+    assert_equal "broken image placeholder: image1", new_model.flash
+    refute_nil new_model.flash_set_at
+  end
+
   def test_new_idea_over_limit_insert_partial_fits_and_flashes_truncation
     # 6 cells of remaining capacity, 10-char paste → fit 6, flash truncation.
     existing = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS - 6)
@@ -702,11 +800,22 @@ class HiveTuiUpdateTest < Minitest::Test
   end
 
   def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
-    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds", new_idea_cursor: 4)
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1", staging_path: "/tmp/bug-1.png", source_kind: :image_bytes
+    )
+    starting = model.with(
+      mode: :new_idea,
+      new_idea_buffer: "rss feeds",
+      new_idea_cursor: 4,
+      new_idea_attachments: [ attachment ],
+      new_idea_staging_dir: "/tmp/hive-tui-composer"
+    )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
     assert_equal :grid, new_model.mode
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
+    assert_equal [], new_model.new_idea_attachments
+    assert_nil new_model.new_idea_staging_dir
   end
 
   def test_cursor_down_under_right_focus_preserves_v1_behaviour

@@ -87,6 +87,10 @@ module Hive
           [ apply_open_new_idea_prompt(model), nil ]
         when Messages::NewIdeaTextInserted
           [ apply_new_idea_text_inserted(model, message), nil ]
+        when Messages::NewIdeaImageAttached
+          [ apply_new_idea_image_attached(model, message), nil ]
+        when Messages::NewIdeaSubmitBlocked
+          [ apply_new_idea_submit_blocked(model, message), nil ]
         when Messages::NewIdeaCursorLeft
           [ apply_new_idea_cursor_left(model), nil ]
         when Messages::NewIdeaCursorRight
@@ -406,11 +410,47 @@ module Hive
       # validation failure.
 
       def apply_open_new_idea_prompt(model)
-        model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+        model.with(
+          mode: :new_idea,
+          new_idea_buffer: "",
+          new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil
+        )
       end
 
       def apply_new_idea_text_inserted(model, msg)
         insert_new_idea_text(model, msg.text.to_s)
+      end
+
+      def apply_new_idea_image_attached(model, msg)
+        placeholder = "[#{msg.label}]"
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        if buffer.length + placeholder.length > Model::NEW_IDEA_BUFFER_MAX_CHARS
+          return model.with(
+            new_idea_buffer: buffer,
+            new_idea_cursor: cursor,
+            flash: "buffer full - submit or remove text before pasting more images",
+            flash_set_at: Time.now
+          )
+        end
+
+        prefix = buffer[0...cursor].to_s
+        suffix = buffer[cursor..].to_s
+        attachment = Model::Attachment.new(
+          label: msg.label,
+          staging_path: msg.staging_path,
+          source_kind: msg.source_kind
+        )
+        model.with(
+          new_idea_buffer: prefix + placeholder + suffix,
+          new_idea_cursor: cursor + placeholder.length,
+          new_idea_attachments: model.new_idea_attachments + [ attachment ]
+        )
+      end
+
+      def apply_new_idea_submit_blocked(model, msg)
+        model.with(flash: msg.reason.to_s, flash_set_at: Time.now)
       end
 
       def apply_new_idea_cursor_left(model)
@@ -452,7 +492,13 @@ module Hive
       end
 
       def apply_new_idea_cancelled(model)
-        model.with(mode: :grid, new_idea_buffer: "", new_idea_cursor: 0)
+        model.with(
+          mode: :grid,
+          new_idea_buffer: "",
+          new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil
+        )
       end
 
       # Partial-fit on overflow: a 4096-char paste against a buffer with

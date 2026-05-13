@@ -4,6 +4,7 @@ require "time"
 require "erb"
 require "hive/config"
 require "hive/git_ops"
+require "hive/tui/text"
 
 module Hive
   module Commands
@@ -20,6 +21,11 @@ module Hive
       class ProjectNotFound < Hive::Error; end
       class InvalidSlugError < Hive::Error; end
       class SlugCollisionError < Hive::Error; end
+      # Raised when an attachment's filename fails the basename/empty guard
+      # in `copy_attachments!`. Distinct from `InvalidSlugError` so TUI
+      # callers can distinguish "rephrase the title" feedback from
+      # "attachment routing bug" feedback in their rescue lists.
+      class InvalidAttachmentError < Hive::Error; end
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [])
         @project_name = project_name
@@ -29,9 +35,17 @@ module Hive
         @attachments = attachments
       end
 
+      # CLI entry point. Naming is inverted from Ruby convention here:
+      # `call` is the user-facing variant that prints to stderr and
+      # `exit 1`s on known failures, while `call!` is the pure raising
+      # variant intended for in-process callers (the TUI's rich-submit
+      # path). Don't "fix" this swap — TUI callers depend on `call!`
+      # raising so they can rescue typed errors without losing the alt
+      # screen.
       def call
         call!
-      rescue ProjectNotFound, InvalidSlugError, SlugCollisionError => e
+      rescue ProjectNotFound, InvalidSlugError, InvalidAttachmentError,
+             SlugCollisionError, SystemCallError, IOError => e
         warn "hive: #{e.message}"
         exit 1
       end
@@ -54,8 +68,18 @@ module Hive
         FileUtils.mkdir_p(task_dir)
 
         idea_path = File.join(task_dir, "idea.md")
-        File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
-        copy_attachments!(task_dir)
+        begin
+          File.write(idea_path, render_idea(slug, @text, body_override: @body_override))
+          copy_attachments!(task_dir)
+        rescue StandardError
+          # An idea.md or attachment write failure leaves an orphan
+          # uncommitted task on disk that the snapshot would surface as
+          # a broken `1-inbox/` entry. Roll the directory back so the
+          # capture is atomic — either the task is committed or it
+          # never existed.
+          FileUtils.rm_rf(task_dir)
+          raise
+        end
 
         ops = Hive::GitOps.new(project["path"])
         ops.hive_commit(stage_name: "1-inbox", slug: slug, action: "captured")
@@ -104,15 +128,28 @@ module Hive
         ERB.new(template, trim_mode: "-").result(bindings.binding_for_erb)
       end
 
+      # Copy each `[src, dest_name]` tuple into `<task_dir>/assets/`.
+      # Contract:
+      #   - `src` must be an absolute filesystem path to a readable file.
+      #   - `dest_name` must be a single path segment (basename only) —
+      #     no directory separators, no `..`, no empty string. The guard
+      #     defends against TUI callers that synthesize `dest_name` from
+      #     attachment metadata; an invalid value raises
+      #     `InvalidAttachmentError` so the caller's rescue list can
+      #     distinguish it from real slug-derivation failures.
+      # Returns nil. Raises `InvalidAttachmentError` on filename guard
+      # failure or `SystemCallError`/`IOError` on copy failure. Callers
+      # that need atomicity should wrap this in their own rollback (see
+      # `call!`).
       def copy_attachments!(task_dir)
         return if @attachments.empty?
 
         assets_dir = File.join(task_dir, "assets")
         FileUtils.mkdir_p(assets_dir)
         @attachments.each do |src, dest_name|
-          name = dest_name.to_s
+          name = Hive::Tui::Text.sanitize(dest_name.to_s)
           if name.empty? || name != File.basename(name)
-            raise InvalidSlugError, "invalid attachment filename '#{dest_name}'"
+            raise InvalidAttachmentError, "invalid attachment filename '#{name}'"
           end
 
           FileUtils.cp(src, File.join(assets_dir, name))

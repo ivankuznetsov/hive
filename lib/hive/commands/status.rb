@@ -107,7 +107,8 @@ module Hive
           "claude_pid_alive" => row[:claude_pid_alive],
           "action" => row[:action_key],
           "action_label" => row[:action_label],
-          "suggested_command" => row[:suggested_command]
+          "suggested_command" => row[:suggested_command],
+          "next_action" => row[:next_action]
         }
       end
 
@@ -222,7 +223,8 @@ module Hive
           row.merge(
             action_key: action.key,
             action_label: action.label,
-            suggested_command: action.command
+            suggested_command: action.command,
+            next_action: action.next_action
           )
         end
       end

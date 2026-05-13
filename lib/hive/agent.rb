@@ -7,6 +7,8 @@ require "hive/lock"
 
 module Hive
   class Agent
+    FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
+
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
                 :profile, :expected_output, :status_mode
 
@@ -99,6 +101,9 @@ module Hive
     def spawn_and_wait
       cmd = build_cmd
       log_file = log_path
+      final_message = nil
+      final_message_source = nil
+      plain_tail = +""
       File.open(log_file, "a") do |log|
         log.puts "[hive] #{Time.now.utc.iso8601} spawn cwd=#{@cwd} cmd=#{cmd.inspect}"
       end
@@ -122,6 +127,13 @@ module Hive
             log.write("[stream] #{Time.now.utc.iso8601} #{line}")
             log.write("\n") unless line.end_with?("\n")
             log.flush
+            if (message = extract_final_message(line))
+              final_message = message
+              final_message_source = :structured
+            elsif !json_line?(line)
+              plain_tail << line
+              plain_tail = plain_tail.byteslice(-FINAL_MESSAGE_TAIL_BYTES, FINAL_MESSAGE_TAIL_BYTES) || plain_tail
+            end
           end
         end
       ensure
@@ -176,12 +188,18 @@ module Hive
                     -status.termsig
       end
 
+      plain_message = plain_tail.strip
+      message = final_message || plain_message
+      message_source = final_message ? final_message_source : (plain_message.empty? ? nil : :plain)
+
       {
         pid: pid,
         pgid: pgid,
         exit_code: exit_code,
         timed_out: timed_out,
         log_file: log_file,
+        final_message: message,
+        final_message_source: message_source,
         status: nil
       }
     end
@@ -334,6 +352,55 @@ module Hive
       end
 
       result[:status] = :ok
+    end
+
+    def extract_final_message(line)
+      data = JSON.parse(line)
+      case data["type"]
+      when "result"
+        text_value(data["result"])
+      when "item.completed"
+        item = data["item"]
+        return nil unless item.is_a?(Hash)
+        return nil unless %w[agent_message message].include?(item["type"])
+
+        text_value(item["text"]) || text_value(item["message"]) || text_from_content(item["content"])
+      when "agent_message"
+        text_value(data["text"]) || text_value(data["message"]) || text_from_content(data["content"])
+      when "assistant"
+        message = data["message"]
+        return nil unless message.is_a?(Hash)
+
+        text_value(message["text"]) || text_from_content(message["content"])
+      else
+        nil
+      end
+    rescue JSON::ParserError
+      nil
+    end
+
+    def text_from_content(content)
+      return text_value(content) if content.is_a?(String)
+      return nil unless content.is_a?(Array)
+
+      text = content.filter_map do |item|
+        next unless item.is_a?(Hash)
+
+        text_value(item["text"]) if %w[text output_text].include?(item["type"])
+      end.join("\n\n")
+      text.empty? ? nil : text
+    end
+
+    def text_value(value)
+      text = value.to_s.strip
+      text.empty? ? nil : text
+    end
+
+    def json_line?(line)
+      JSON.parse(line)
+      true
+    rescue JSON::ParserError
+      false
     end
 
     def log_path

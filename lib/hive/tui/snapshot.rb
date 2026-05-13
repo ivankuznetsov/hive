@@ -35,7 +35,8 @@ module Hive
         :claude_pid_alive,
         :action_key,
         :action_label,
-        :suggested_command
+        :suggested_command,
+        :next_action
       )
 
       attr_reader :generated_at, :projects
@@ -97,7 +98,8 @@ module Hive
           claude_pid_alive: payload["claude_pid_alive"],
           action_key: payload["action"],
           action_label: payload["action_label"],
-          suggested_command: payload["suggested_command"]
+          suggested_command: payload["suggested_command"],
+          next_action: payload["next_action"]
         ).freeze
       end
 

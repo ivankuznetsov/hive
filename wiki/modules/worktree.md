@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-05-13
 tags: [worktree, git, pointer]
 ---
 
@@ -17,7 +17,7 @@ Hive::Worktree.new(project_root, slug, worktree_root: nil)
 #exists? → bool (sees both filesystem dir and `git worktree list`)
 #create!(branch_name, default_branch:) → :created
 #remove! → :removed
-#write_pointer!(task_folder, branch_name) → writes worktree.yml
+#write_pointer!(task_folder, branch_name, execute_base_head: nil) → writes worktree.yml
 ```
 
 Class methods:
@@ -62,9 +62,12 @@ Two checks: `File.directory?(path)` AND `path ∈ git worktree list --porcelain`
 path: /home/asterio/Dev/<project>.worktrees/<slug>
 branch: <slug>
 created_at: 2026-04-25T10:23:45Z
+execute_base_head: <sha>   # optional; set by 4-execute for commit-baseline checks
 ```
 
 `read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise.
+
+`execute_base_head` records the worktree HEAD immediately after 4-execute creates the task branch. Execute completion compares later HEADs against this baseline, not just against the current spawn's starting HEAD, so a dirty-worktree pause can be recovered by cleaning the worktree without requiring a second empty commit.
 
 ## Path-prefix validation
 

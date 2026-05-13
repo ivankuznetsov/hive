@@ -70,6 +70,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[modules/findings]] — parser + writer for `reviews/ce-review-NN.md`; CRLF-safe round-trip toggle.
 - [[modules/task_resolver]] — slug-or-folder TARGET resolution shared by every agent-callable command.
 - [[modules/task_action]] — `(task, marker) → action key/label/command` classifier driving `hive status` and `next_action` emission.
+- [[modules/execute_waiting_action]] — shared `EXECUTE_WAITING reason=...` recovery target builder for run/status/TUI.
 - [[modules/workflows]] — verb→stage SSOT (brainstorm/plan/develop/pr/archive) consumed by every workflow command.
 - [[modules/reviewers]] — Phase 2 reviewer adapter layer (dispatch, Context, Result, Agent, SyntheticTask).
 - [[modules/metrics]] — `hive metrics rollback-rate` library (trailer parsing, revert detection).

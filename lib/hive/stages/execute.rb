@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "date"
 require "yaml"
 require "hive/protected_files"
 require "hive/stages/base"
@@ -87,7 +88,7 @@ module Hive
         wt.create!(task.slug, default_branch: ops.default_branch)
 
         Hive::Worktree.validate_pointer_path(wt.path, worktree_root)
-        wt.write_pointer!(task.folder, task.slug)
+        wt.write_pointer!(task.folder, task.slug, execute_base_head: Hive::GitOps.new(wt.path).head_sha)
 
         write_initial_task_md(task)
         run_pass(task, cfg, wt.path)
@@ -111,9 +112,14 @@ module Hive
       # worktree.yml around it, finalize EXECUTE_COMPLETE on clean
       # spawn or :error on tamper / agent failure.
       def run_pass(task, cfg, worktree_path)
+        worktree_git = Hive::GitOps.new(worktree_path)
+        baseline_head = execute_baseline_head(task, worktree_git)
+        return worktree_git_failed(task) unless baseline_head
+
         before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         impl_result = spawn_implementation(task, cfg, worktree_path)
         after_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
+        append_implementation_output(task, impl_result)
 
         if (tampered = Hive::ProtectedFiles.diff(before_impl, after_impl)).any?
           return record_tamper(task, tampered, who: "implementer")
@@ -121,7 +127,53 @@ module Hive
 
         return { commit: "implementer_failed", status: impl_result[:status] } if agent_failed?(impl_result)
 
-        Hive::Markers.set(task.state_file, :execute_complete)
+        worktree_state = inspect_worktree_state(task, worktree_git)
+        return worktree_git_failed(task) unless worktree_state
+
+        head_after = worktree_state.fetch(:head)
+        current_branch = worktree_state.fetch(:branch)
+        dirty_worktree = worktree_state.fetch(:dirty)
+        expected_branch = expected_worktree_branch(task)
+        new_commit = head_after != baseline_head
+        structured_final_message_present = impl_result &&
+                                           impl_result[:final_message_source] == :structured &&
+                                           !impl_result[:final_message].to_s.strip.empty?
+
+        unless current_branch == expected_branch
+          Hive::Markers.set(task.state_file, :execute_waiting, reason: "branch_mismatch")
+          return { commit: "execute_waiting_branch_mismatch", status: :execute_waiting }
+        end
+
+        ancestor_ok = begin
+          !new_commit || worktree_git.ancestor?(baseline_head, head_after)
+        rescue Hive::GitError
+          return worktree_git_failed(task)
+        end
+
+        if new_commit && !ancestor_ok
+          Hive::Markers.set(task.state_file, :execute_waiting, reason: "head_not_descendant")
+          return { commit: "execute_waiting_head_not_descendant", status: :execute_waiting }
+        end
+
+        if dirty_worktree
+          Hive::Markers.set(task.state_file, :execute_waiting, reason: "dirty_worktree")
+          return { commit: "execute_waiting_dirty_worktree", status: :execute_waiting }
+        end
+
+        research_mode = research_execution?(task)
+
+        if research_mode && !new_commit && !structured_final_message_present
+          Hive::Markers.set(task.state_file, :execute_waiting, reason: "missing_research_output")
+          return { commit: "execute_waiting_missing_research_output", status: :execute_waiting }
+        end
+
+        unless new_commit || research_mode
+          Hive::Markers.set(task.state_file, :execute_waiting, reason: "no_worktree_changes")
+          return { commit: "execute_waiting_no_worktree_changes", status: :execute_waiting }
+        end
+
+        attrs = research_mode ? { mode: "research" } : {}
+        Hive::Markers.set(task.state_file, :execute_complete, attrs)
         { commit: "execute_complete", status: :execute_complete }
       end
 
@@ -186,6 +238,65 @@ module Hive
           <!-- AGENT_WORKING -->
         MD
         File.write(task.state_file, content)
+      end
+
+      def execute_baseline_head(task, worktree_git)
+        pointer = Hive::Worktree.read_pointer(task.folder) || {}
+        pointer["execute_base_head"] || worktree_git.head_sha
+      rescue Hive::GitError
+        nil
+      end
+
+      def expected_worktree_branch(task)
+        pointer = Hive::Worktree.read_pointer(task.folder) || {}
+        pointer["branch"]
+      end
+
+      def inspect_worktree_state(_task, worktree_git)
+        {
+          head: worktree_git.head_sha,
+          branch: worktree_git.current_branch,
+          dirty: !worktree_git.status_short.strip.empty?
+        }
+      rescue Hive::GitError
+        nil
+      end
+
+      def worktree_git_failed(task)
+        Hive::Markers.set(task.state_file, :error, reason: "worktree_git_failed")
+        { commit: "execute_worktree_git_failed", status: :error }
+      end
+
+      def append_implementation_output(task, result)
+        final_message = result && result[:final_message].to_s.strip
+        return if final_message.empty?
+
+        output = final_message.byteslice(0, 64 * 1024).scrub
+        Hive::Markers.with_markers_lock(task.state_file) do
+          content = File.exist?(task.state_file) ? File.read(task.state_file, encoding: "UTF-8") : ""
+          insertion = "\n\n## Execute Output\n\n#{output}\n"
+          marker_match = content.match(/\n<!-- [A-Z_]+(?: [^>]*)? -->\s*\z/)
+          body = if marker_match
+            content.sub(marker_match[0]) { "#{insertion}#{marker_match[0]}" }
+          else
+            "#{content.rstrip}#{insertion}"
+          end
+          Hive::Markers.write_atomic(task.state_file, body)
+        end
+      end
+
+      def research_execution?(task)
+        plan_path = File.join(task.folder, "plan.md")
+        text = File.read(plan_path)
+        match = text.match(/\A---\s*\n(.*?)\n---\s*\n/m)
+        return false unless match
+
+        data = YAML.safe_load(match[1], permitted_classes: [ Time, Date ], aliases: false) || {}
+        return false unless data.is_a?(Hash)
+
+        data["execution_mode"].to_s == "research"
+      rescue Psych::Exception
+        false
       end
     end
   end

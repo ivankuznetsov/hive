@@ -20,6 +20,31 @@ module Hive
       @default_branch ||= detect_default_branch
     end
 
+    def head_sha
+      run_git!("-C", @project_root, "rev-parse", "HEAD").strip
+    end
+
+    def status_short
+      out, err, status = Open3.capture3("git", "-C", @project_root, "status", "--short")
+      raise GitError, "git -C #{@project_root} status --short failed: #{err.strip.empty? ? out : err}" unless status.success?
+
+      out
+    end
+
+    def current_branch
+      branch = run_git!("-C", @project_root, "branch", "--show-current").strip
+      branch.empty? ? nil : branch
+    end
+
+    def ancestor?(ancestor, descendant)
+      _out, err, status = Open3.capture3("git", "-C", @project_root, "merge-base", "--is-ancestor",
+                                         ancestor, descendant)
+      return true if status.success?
+      return false if status.exitstatus == 1
+
+      raise GitError, "git -C #{@project_root} merge-base --is-ancestor failed: #{err}"
+    end
+
     def hive_state_branch_exists?
       out, _err, status = Open3.capture3("git", "-C", @project_root, "show-ref", "--verify",
                                          "refs/heads/#{HIVE_BRANCH}")

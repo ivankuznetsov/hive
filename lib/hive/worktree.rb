@@ -62,12 +62,13 @@ module Hive
       out.split("\n").select { |l| l.start_with?("worktree ") }.map { |l| l.sub(/\Aworktree /, "").strip }
     end
 
-    def write_pointer!(task_folder, branch_name)
+    def write_pointer!(task_folder, branch_name, execute_base_head: nil)
       data = {
         "path" => path,
         "branch" => branch_name,
         "created_at" => Time.now.utc.iso8601
       }
+      data["execute_base_head"] = execute_base_head if execute_base_head
       File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
     end
 

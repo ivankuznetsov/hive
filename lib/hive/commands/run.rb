@@ -6,6 +6,7 @@ require "hive/lock"
 require "hive/git_ops"
 require "hive/agent"
 require "hive/stages"
+require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
 
@@ -160,8 +161,10 @@ module Hive
       def json_next_action(task, marker)
         kind = Hive::Schemas::NextActionKind
         case marker.name
-        when :waiting, :execute_waiting
+        when :waiting
           { "kind" => kind::EDIT, "target" => task.state_file, "rerun_with" => friendly_command(task, marker) }
+        when :execute_waiting
+          execute_waiting_next_action(task, marker)
         when *Hive::Markers::TERMINAL_MARKER_NAMES
           approve_action(task, next_stage_dir(task))
         when :execute_stale
@@ -239,6 +242,10 @@ module Hive
         end
       end
 
+      def execute_waiting_next_action(task, marker)
+        Hive::ExecuteWaitingAction.build(task, marker, rerun_with: friendly_command(task, marker))
+      end
+
       # Emit an APPROVE action with `--from <stage>` so a retry after a
       # partial success fails with WRONG_STAGE (4) instead of advancing
       # twice. The `command` field is a copy-paste-executable shell line.
@@ -268,8 +275,11 @@ module Hive
         puts "hive: marker=#{marker.name}"
         puts "  state_file: #{task.state_file}"
         case marker.name
-        when :waiting, :execute_waiting
+        when :waiting
           puts "  next: edit the file, then `#{friendly_command(task, marker)}` again"
+        when :execute_waiting
+          puts "  next: #{execute_waiting_next_action(task, marker)["instructions"]}; " \
+               "then `#{friendly_command(task, marker)}`"
         when *Hive::Markers::TERMINAL_MARKER_NAMES
           command = friendly_command(task, marker)
           puts "  next: #{command}" if command

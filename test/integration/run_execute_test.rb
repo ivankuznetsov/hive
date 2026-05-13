@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/commands/init"
 require "hive/commands/run"
 
@@ -39,11 +40,21 @@ class RunExecuteTest < Minitest::Test
     ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
     FileUtils.rm_rf(@driver_path)
     FileUtils.rm_rf(@local_worktree_root) if @local_worktree_root
-    %w[HIVE_EXEC_DRIVER_TASK_DIR HIVE_EXEC_DRIVER_TAMPER].each { |k| ENV.delete(k) }
+    %w[
+      HIVE_EXEC_DRIVER_TASK_DIR
+      HIVE_EXEC_DRIVER_TAMPER
+      HIVE_EXEC_DRIVER_SKIP_COMMIT
+      HIVE_EXEC_DRIVER_OUTPUT
+      HIVE_EXEC_DRIVER_DIRTY
+      HIVE_EXEC_DRIVER_CLEAN_DIRTY
+      HIVE_EXEC_DRIVER_WRONG_BRANCH
+    ].each { |k| ENV.delete(k) }
   end
 
   # Driver: implementation agent. Edits task.md to confirm the spawn
-  # actually ran. Optional plan.md tampering toggled by env.
+  # actually ran, writes/commits worktree content by default, and can
+  # optionally simulate no-change research runs. Optional plan.md tampering
+  # toggled by env.
   def driver_script_body
     <<~RUBY
       #!/usr/bin/env ruby
@@ -59,11 +70,32 @@ class RunExecuteTest < Minitest::Test
       if ENV["HIVE_EXEC_DRIVER_TAMPER"]
         File.write(File.join(task_dir, "plan.md"), "TAMPERED CONTENT")
       end
+
+      if ENV["HIVE_EXEC_DRIVER_CLEAN_DIRTY"]
+        FileUtils.rm_f("dirty.txt")
+      end
+
+      if ENV["HIVE_EXEC_DRIVER_WRONG_BRANCH"]
+        system("git", "checkout", "-b", "wrong-execute-branch", "--quiet") || abort("git checkout failed")
+      end
+
+      unless ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"]
+        File.write("implementation.txt", "implemented\\n")
+        system("git", "add", "implementation.txt") || abort("git add failed")
+        system("git", "commit", "-m", "feat: implement test change", "--quiet") || abort("git commit failed")
+      end
+
+      if ENV["HIVE_EXEC_DRIVER_DIRTY"]
+        File.write("dirty.txt", "left behind\\n")
+      end
+
+      output = ENV["HIVE_EXEC_DRIVER_OUTPUT"].to_s
+      puts output unless output.empty?
       exit 0
     RUBY
   end
 
-  def setup_execute_task(dir)
+  def setup_execute_task(dir, plan_header: nil)
     capture_io { Hive::Commands::Init.new(dir).call }
     cfg_path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(cfg_path))
@@ -75,6 +107,7 @@ class RunExecuteTest < Minitest::Test
     folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
     File.write(File.join(folder, "plan.md"), <<~PLAN)
+      #{plan_header}
       # plan
       ## Overview
       stub
@@ -97,6 +130,7 @@ class RunExecuteTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :execute_complete, marker.name,
                      "4-execute is impl-only since U9; success → EXECUTE_COMPLETE"
+        assert_empty marker.attrs
 
         # Critically: there must be NO review files written. Reviewers
         # moved to 5-review.
@@ -105,6 +139,189 @@ class RunExecuteTest < Minitest::Test
                      "4-execute must not produce review files; reviewers moved to 5-review"
       ensure
         FileUtils.rm_rf(wt_yml["path"]) if defined?(wt_yml) && wt_yml
+      end
+    end
+  end
+
+  def test_clean_exit_without_worktree_changes_pauses_with_agent_output
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "Investigation complete; preserve \\1 and \\&."
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        task_md = File.read(File.join(folder, "task.md"))
+        assert_includes task_md, "## Execute Output"
+        assert_includes task_md, "Investigation complete; preserve \\1 and \\&."
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_waiting, marker.name
+        assert_equal "no_worktree_changes", marker.attrs["reason"]
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_research_mode_can_complete_without_worktree_commit_when_output_exists
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
+          ---
+          execution_mode: research
+          ---
+        YAML
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = JSON.generate(
+          "type" => "result",
+          "subtype" => "success",
+          "result" => "Research complete; use option B."
+        )
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        task_md = File.read(File.join(folder, "task.md"))
+        assert_includes task_md, "## Execute Output"
+        assert_includes task_md, "Research complete; use option B."
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_complete, marker.name
+        assert_equal "research", marker.attrs["mode"]
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_research_mode_ignores_plain_progress_output_for_completion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
+          ---
+          execution_mode: research
+          ---
+        YAML
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "warning: transient progress only"
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        task_md = File.read(File.join(folder, "task.md"))
+        assert_includes task_md, "warning: transient progress only"
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_waiting, marker.name
+        assert_equal "missing_research_output", marker.attrs["reason"]
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_research_mode_without_output_still_pauses
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
+          ---
+          execution_mode: research
+          ---
+        YAML
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_waiting, marker.name
+        assert_equal "missing_research_output", marker.attrs["reason"]
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_non_hash_research_frontmatter_fails_closed
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
+          ---
+          - execution_mode: research
+          ---
+        YAML
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = JSON.generate(
+          "type" => "result",
+          "subtype" => "success",
+          "result" => "Research-looking output"
+        )
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_waiting, marker.name
+        assert_equal "no_worktree_changes", marker.attrs["reason"]
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_dirty_worktree_pause_can_complete_after_cleanup_without_another_commit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_DIRTY"] = "1"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "Committed but left dirty file."
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_waiting, marker.name
+        assert_equal "dirty_worktree", marker.attrs["reason"]
+
+        ENV.delete("HIVE_EXEC_DRIVER_DIRTY")
+        ENV["HIVE_EXEC_DRIVER_SKIP_COMMIT"] = "1"
+        ENV["HIVE_EXEC_DRIVER_CLEAN_DIRTY"] = "1"
+        ENV["HIVE_EXEC_DRIVER_OUTPUT"] = "Cleaned up dirty file."
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_complete, marker.name
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
+      end
+    end
+  end
+
+  def test_wrong_worktree_branch_pauses_instead_of_completing
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _slug = setup_execute_task(dir)
+        ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
+        ENV["HIVE_EXEC_DRIVER_WRONG_BRANCH"] = "1"
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :execute_waiting, marker.name
+        assert_equal "branch_mismatch", marker.attrs["reason"]
+      ensure
+        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        FileUtils.rm_rf(wt_path) if wt_path
       end
     end
   end

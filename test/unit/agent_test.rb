@@ -140,6 +140,49 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_captures_final_message_from_result_json
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "subtype" => "success",
+        "result" => "Final implementation summary"
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "Final implementation summary", result[:final_message]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
+  def test_captures_final_message_from_codex_item_completed_json
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "item.completed",
+        "item" => {
+          "type" => "message",
+          "role" => "assistant",
+          "content" => [
+            { "type" => "output_text", "text" => "Codex implementation summary" }
+          ]
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "Codex implementation summary", result[:final_message]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
   # Regression: claude's Edit/Write tools rewrite atomically (write tempfile
   # then rename), changing the file's inode. The earlier inode-tracking
   # heuristic falsely flagged that as a "concurrent edit". Verify hive does

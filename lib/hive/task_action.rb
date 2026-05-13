@@ -1,4 +1,5 @@
 require "shellwords"
+require "hive/execute_waiting_action"
 require "hive/stages"
 require "hive/workflows"
 
@@ -158,7 +159,8 @@ module Hive
       {
         "key" => key,
         "label" => label,
-        "command" => command
+        "command" => command,
+        "next_action" => next_action
       }
     end
 
@@ -229,6 +231,22 @@ module Hive
       else
         ACTIONS.fetch(:execute_waiting)
       end
+    end
+
+    public
+
+    def next_action
+      return nil unless execute_waiting_input?
+
+      Hive::ExecuteWaitingAction.build(task, marker, rerun_with: command)
+    end
+
+    private
+
+    def execute_waiting_input?
+      task.stage_name == "execute" &&
+        marker.name == :execute_waiting &&
+        marker.attrs["findings_count"].to_i <= 0
     end
 
     # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for

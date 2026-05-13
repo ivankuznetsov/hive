@@ -580,4 +580,69 @@ class ReviewersAgentTest < Minitest::Test
       FileUtils.rm_rf(log_dir) if log_dir
     end
   end
+
+  # --- Plan-context flow through to spawned subprocess argv ---
+  #
+  # The render_prompt tests (above) verify the prompt STRING is built
+  # correctly. This test closes the integration gap: confirms the
+  # rendered string is actually piped through Agent.run!'s build_cmd
+  # (lib/hive/agent.rb:234 — prompt is the final argv arg) to the
+  # spawned reviewer subprocess. Without this, a refactor that
+  # accidentally dropped the binding from TemplateBindings would not
+  # be caught by the unit tests (which would still build a valid
+  # string in isolation).
+  def test_rendered_prompt_with_plan_context_reaches_spawned_subprocess
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      plan_marker = "ZB7K_PLAN_MARKER_DETECTABLE_STRING"
+      File.write(
+        File.join(ctx.task_folder, "plan.md"),
+        "# Plan\n\n## Goals\n- G1. #{plan_marker} — must reach the reviewer prompt.\n"
+      )
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
+
+      reviewer.run!
+
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, plan_marker,
+                      "plan.md content must flow through TemplateBindings → ERB → build_cmd → spawned subprocess argv"
+      assert_match(/<user_supplied_[a-f0-9]{16} content_type="plan_md">/, argv,
+                   "ADR-008/019 per-spawn nonce wrapper must reach the spawn — not just the unit-tested string")
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
+  def test_rendered_prompt_without_plan_context_still_reaches_spawned_subprocess
+    # Counterpart: when plan.md is absent, the absent-note must reach
+    # the spawn too — confirms the fallback path isn't accidentally
+    # bypassed by an empty-string-coalesce somewhere in the pipeline.
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      # Deliberately no plan.md.
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
+
+      reviewer.run!
+
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "no plan.md found",
+                      "absent-note fallback must also reach the spawned subprocess (not just the rendered string)"
+      refute_match(/<user_supplied_[a-f0-9]{16} content_type="plan_md">/, argv,
+                   "no wrapper tag in the spawn argv when plan.md is absent")
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
 end

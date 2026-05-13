@@ -29,3 +29,7 @@
 /test/e2e/runs/*
 !/test/e2e/runs/.gitkeep
 /.hive-state/
+# Local daemon runtime artifacts.
+/.daemon.pid
+/daemon.pid
+/logs/

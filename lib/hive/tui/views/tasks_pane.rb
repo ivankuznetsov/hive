@@ -189,6 +189,21 @@ module Hive
           reason = Hive::Tui::Text.sanitize(attrs["reason"])
           return reason unless reason.empty?
 
+          # max_passes-hit REVIEW_STALE has no `reason` attr but does
+          # carry `pass=N`. Surface the pass number so the operator
+          # sees WHY this row is stale (cap was reached) without
+          # opening the file. Retryable shapes (`wall_clock`,
+          # incomplete-triage) already returned above via the reason
+          # branch; this branch is reached only for the max_passes-hit
+          # shape that Enter now routes to OpenReviewStaleFile. Marker
+          # comparison is lowercase because `Hive::Markers.current`
+          # downcases the name to a symbol (`:review_stale`) and the
+          # status payload stringifies that to "review_stale".
+          pass = Hive::Tui::Text.sanitize(attrs["pass"])
+          if row.marker.to_s == "review_stale" && !pass.empty?
+            return "stale pass=#{pass}"
+          end
+
           marker = Hive::Tui::Text.sanitize(row.marker)
           marker.empty? ? row.action_label.to_s : marker
         end

@@ -643,8 +643,16 @@ module Hive
           marker = row.marker.to_s.empty? ? "none" : row.marker
           return [ flashed("review recovery unavailable: marker=#{marker}"), nil ]
         end
+        # max_passes-hit REVIEW_STALE: route to OpenReviewStaleFile
+        # browse instead of the old flash-refuse recipe. The operator
+        # reads the unresolved findings in $EDITOR; clearing the
+        # marker remains a deliberate `hive markers clear` round-trip
+        # (deferred to a future "act-from-TUI" gesture). Incomplete-
+        # triage and wall_clock shapes return true from
+        # `retryable_review_stale?` and continue down the clear+rerun
+        # path below.
         if marker_name == "REVIEW_STALE" && !retryable_review_stale?(row)
-          return [ flashed(review_stale_recovery_message(row, marker_name)), nil ]
+          return open_review_stale_file(row)
         end
 
         unless register_review_recovery_attempt(row.folder)
@@ -775,12 +783,6 @@ module Hive
         keys += (attrs.keys.map(&:to_s) - keys).sort
         attr_text = keys.map { |key| "#{key}=#{attrs[key]}" }.join(" ")
         attr_text.empty? ? marker_name : "#{marker_name} #{attr_text}"
-      end
-
-      def review_stale_recovery_message(row, marker_name)
-        detail = Hive::Tui::Text.sanitize(review_recovery_detail(row, marker_name))[0, 80]
-        "review recovery needs manual pass cleanup: #{detail}; " \
-          "edit/rename highest-pass review files, then clear REVIEW_STALE and run hive run"
       end
 
       # Top-level gate: a REVIEW_STALE row is retryable from the TUI
@@ -1175,6 +1177,107 @@ module Hive
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      # Browse-only handler for max_passes-hit REVIEW_STALE rows.
+      # Mirrors `open_task_folder` (PR #64) for the spawn/clear shape;
+      # differs only in the resolved path (focal escalations file
+      # instead of the task folder). Pure browse contract: no marker
+      # mutation, no auto-continue dispatch — the editor's `:wq` is
+      # the operator's last word, and clearing REVIEW_STALE remains
+      # a deliberate `hive markers clear` round-trip.
+      def open_review_stale_file(row)
+        path = review_stale_editor_path(row)
+        return [ flashed("no review files for #{row.slug}"), nil ] if path.empty?
+
+        argv = editor_argv
+        callable = lambda do
+          run_editor(argv, path)
+          # Post-spawn clear mirrors open_task_folder / open_input_editor:
+          # wipes whatever the editor left on the main screen before
+          # bubbletea re-enters alt-screen.
+          clear_terminal_for_takeover
+        end
+
+        # Differentiated flash: when we fell back to the reviews/
+        # directory (focal `escalations-NN.md` missing), say so
+        # explicitly. The operator's status row shows "stale pass=4"
+        # but the editor will open a directory that may contain
+        # files for OTHER passes — without this distinction the
+        # operator could resolve findings against pass-2 thinking
+        # they're pass-4's. Pinned by ADV-4 in PR #66's review.
+        flash_text = if File.directory?(path)
+          "opening reviews/ dir for #{row.slug} (focal escalations-#{format('%02d', pass_for_flash(row))}.md missing)"
+        else
+          "opening reviews for #{row.slug} in #{File.basename(argv.first)}"
+        end
+
+        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
+        [
+          @hive_model.with(flash: flash_text, flash_set_at: Time.now),
+          cmd
+        ]
+      rescue ArgumentError => e
+        [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      # Helper for `open_review_stale_file`'s differentiated flash:
+      # returns the pass attr as a parsed integer for display, or 0
+      # when it's malformed/absent (the dir-fallback path).
+      def pass_for_flash(row)
+        attrs = row.attrs || {}
+        Integer(Hive::Tui::Text.sanitize(attrs["pass"]).strip, 10)
+      rescue ArgumentError
+        0
+      end
+
+      # Resolve the focal path for a max_passes-hit REVIEW_STALE row:
+      # highest-pass `reviews/escalations-NN.md` (the runner's
+      # canonical aggregation of unresolved findings). Fall back to
+      # the `reviews/` directory when the file is missing — lets the
+      # operator browse the individual reviewer files (claude-…-NN.md,
+      # codex-…-NN.md, etc.) themselves. Returns "" only when both
+      # the file and the directory are absent (corrupted state); the
+      # caller flashes a refusal.
+      def review_stale_editor_path(row)
+        folder = row.folder.to_s
+        return "" if folder.empty?
+
+        attrs = row.attrs || {}
+        # Sanitize before parsing: stdout-tail or other operator-supplied
+        # bytes embedded in a marker reason could carry control sequences;
+        # the resolver doesn't render the value, but sanitizing first
+        # keeps the parse path symmetric with `tasks_pane.rb`'s status-
+        # column rendering (which always sanitizes) so a CSI-loaded
+        # `pass` attr resolves to the same outcome on both surfaces.
+        pass = Hive::Tui::Text.sanitize(attrs["pass"]).strip
+        return "" if pass.empty?
+
+        # Strict-base-10 parse is the load-bearing path-traversal
+        # defense — `Integer(pass, 10)` rejects "../../etc/passwd"
+        # while `pass.to_i` would silently coerce to 0. Do NOT
+        # simplify to `.to_i`. Pass `< 1` is rejected explicitly to
+        # mirror `retryable_incomplete_triage_pass?`'s "valid pass"
+        # convention; negative/zero values are not legitimate runner
+        # output and would build malformed filenames like
+        # `escalations--1.md`.
+        pass_int = Integer(pass, 10)
+        return "" if pass_int < 1
+
+        reviews_dir = File.join(folder, "reviews")
+        candidate = File.join(reviews_dir, "escalations-#{format('%02d', pass_int)}.md")
+        return candidate if File.exist?(candidate)
+        return reviews_dir if File.directory?(reviews_dir)
+
+        ""
+      rescue ArgumentError
+        # Non-integer `pass` attr (legacy/malformed / corrupted-by-
+        # injection-attempt) — fall back to the reviews dir if it
+        # exists, else refuse. The fallback is deliberate: gives the
+        # operator something to inspect when diagnosing why their row
+        # is in this state.
+        reviews_dir = File.join(row.folder.to_s, "reviews")
+        File.directory?(reviews_dir) ? reviews_dir : ""
       end
 
       # Resolve the path the editor should open for a given row.

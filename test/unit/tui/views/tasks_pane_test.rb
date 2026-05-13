@@ -116,6 +116,103 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     refute_includes out, "Needs recovery"
   end
 
+  def test_recover_review_status_surfaces_pass_for_max_passes_hit_stale
+    # max_passes-hit REVIEW_STALE markers carry `pass=N` but no
+    # `reason` attr. Operator needs to see the pass count to
+    # understand WHY this row is stuck (cap was reached) without
+    # opening the file. Mirrors the existing `wall_clock` /
+    # `triage_failed` inline-diagnostic pattern.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "stale-me",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: { "pass" => "4" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "stale pass=4",
+                    "max_passes-hit REVIEW_STALE rows must surface the pass number inline"
+    refute_includes out, "Needs recovery"
+  end
+
+  def test_recover_review_status_reason_wins_over_pass
+    # Regression: when both `reason` and `pass` are present (the
+    # retryable wall_clock / triage_failed shapes), `reason` wins.
+    # The pass-attr branch must never override the existing reason
+    # rendering, or `Enter` routing diverges from status display.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "wall-clocked",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: { "reason" => "wall_clock", "pass" => "2" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "wall_clock",
+                    "reason attr must take precedence over pass attr"
+    refute_includes out, "stale pass=2"
+  end
+
+  def test_recover_review_status_strips_control_chars_in_pass_attr
+    # Defensive: a marker file whose `pass=` attr was corrupted (or
+    # injected) with ANSI escapes or control bytes must not corrupt
+    # lipgloss column alignment or hijack the cursor. Sanitize
+    # before rendering — mirrors the existing sanitize behavior on
+    # `reason` attrs (see test_recover_review_status_strips_control_chars_and_ansi_escapes).
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "ansi-pass",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: { "pass" => "4\e[31mansi\e[0m\nNL" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    refute_match(/\e\[/, out, "ANSI escape bytes must be stripped from pass attr")
+    refute_match(/\nNL/, out, "literal newlines must be stripped from pass attr")
+    assert_includes out, "stale pass=4",
+                    "sanitized pass value must still render the prefix correctly"
+  end
+
+  def test_recover_review_status_falls_back_when_pass_attr_missing
+    # Edge: legacy/malformed marker with REVIEW_STALE name but no
+    # pass attribute falls back to the existing marker-name display.
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "legacy-stale",
+          stage: "5-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_stale",
+          attrs: { "other_attr" => "x" },
+          suggested: nil
+        )
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+    assert_includes out, "review_stale",
+                    "missing pass attr must fall back to the existing marker-name rendering"
+    refute_includes out, "stale pass="
+  end
+
   def test_recover_review_status_falls_back_to_action_label_when_marker_blank
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [

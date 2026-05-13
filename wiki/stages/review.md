@@ -3,7 +3,7 @@ title: 5-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-05-13T23:00:00Z
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -142,7 +142,7 @@ Recovery flow:
 
 1. If the highest pass is `:fix_incomplete` (most common cause of `REVIEW_STALE` after a wall-clock or interrupted-fix exit): just `hive markers clear FOLDER --name REVIEW_STALE` and `hive run` — Phase 4 retries with the operator's already-applied `[x]` marks. The TUI's `recover_review` Enter binding does this automatically. No manual edit needed.
 2. If `:triage_incomplete`: same — clear and rerun; the loop re-derives escalations from existing reviewer files.
-3. If `:complete` (genuine `max_passes` exhaustion): inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count). Then clear and rerun.
+3. If `:complete` (genuine `max_passes` exhaustion): inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count). Then clear and rerun. The TUI surfaces this row with the status `stale pass=N` (where N is `marker.attrs["pass"]`); pressing `Enter` opens the focal `reviews/escalations-NN.md` in `$EDITOR` via the same foreground-takeover machinery `o` and `Enter`-on-`needs_input` use. The browse handler reads `row.attrs["pass"]` to resolve the focal path, falls back to the `reviews/` directory if the focal file is missing, and refuses with `no review files for <slug>` if neither exists. No marker mutation, no auto-continue — clearing remains a deliberate `hive markers clear FOLDER --name REVIEW_STALE` round-trip so the operator owns the resolve decision after reading the findings.
 4. Wall-clock `REVIEW_STALE` (`reason=wall_clock`) can fire **before any reviewer files exist** (e.g. during Phase 1 CI-fix). The TUI treats this shape as auto-retryable regardless of disk state — give it more time via `review.max_wall_clock_sec` if it keeps timing out.
 
 For `REVIEW_CI_STALE` (Phase 1 CI never went green) the equivalent flow is: edit `reviews/ci-blocked.md`, fix the CI failures locally, run `hive markers clear FOLDER --name REVIEW_CI_STALE`, then `hive run`. For `REVIEW_ERROR` (any phase failure recorded with `phase=…` and `reason=…`) the same pattern: investigate, run `hive markers clear FOLDER --name REVIEW_ERROR`, then `hive run`. The runner's pre-flight `warn` text emits the exact command per stuck-state.

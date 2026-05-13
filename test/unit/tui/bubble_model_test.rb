@@ -2260,6 +2260,41 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_recover_review_stale_max_passes_picks_escalations_by_pass_attr_not_highest_nn_on_disk
+    # The resolver's contract is: open the focal file recorded in the
+    # marker's `pass=N` attr, NOT the highest-NN escalations file on
+    # disk. This matters for tasks that hit REVIEW_STALE at pass=2,
+    # got partially fixed (escalations-03.md, escalations-04.md
+    # leftover from an interrupted re-run), but the operator-visible
+    # marker still records pass=2. A future refactor that switched to
+    # `Dir.glob.max` would silently break this contract — the test
+    # locks it down.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "escalations-01.md"), "## pass-1 findings\n")
+      File.write(File.join(dir, "reviews", "escalations-02.md"), "## pass-2 findings (the recorded pass)\n")
+      File.write(File.join(dir, "reviews", "escalations-03.md"), "## pass-3 findings\n")
+      File.write(File.join(dir, "reviews", "escalations-04.md"), "## pass-4 findings\n")
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "2" }, suggested_command: nil
+      )
+      seen_path = nil
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        seen_path = path
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal File.join(dir, "reviews", "escalations-02.md"), seen_path,
+                   "resolver must select by attrs[\"pass\"], NOT by highest-NN escalations-*.md on disk"
+    end
+  end
+
   def test_recover_review_stale_max_passes_falls_back_to_reviews_dir
     # Defensive corner: marker claims REVIEW_STALE pass=4 but no
     # pass-4 files exist on disk at all (corrupted state). The

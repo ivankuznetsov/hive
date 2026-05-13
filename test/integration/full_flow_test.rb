@@ -69,6 +69,9 @@ class FullFlowTest < Minitest::Test
           c = File.read(task_md).sub(/<!-- AGENT_WORKING.*-->/, "## Implementation\nstub work")
           File.write(task_md, c)
         end
+        File.write("implementation.txt", "implemented\n")
+        system("git", "add", "implementation.txt") || abort("git add failed")
+        system("git", "commit", "-m", "feat: implement flow fixture", "--quiet") || abort("git commit failed")
       when "review"
         # Stage runner spawns no agents in this minimal review path
         # (zero reviewers + nil ci + browser disabled). Driver should

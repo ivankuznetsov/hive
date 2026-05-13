@@ -31,7 +31,8 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 
 | Marker | `report` output |
 |--------|-----------------|
-| `:waiting` / `:execute_waiting` | `next: edit the file, then `hive <stage-verb> <slug>` again` |
+| `:waiting` | `next: edit the file, then `hive <stage-verb> <slug>` again` |
+| `:execute_waiting` | `next: edit/recover the reason-specific target, then `hive develop <slug>` again`. JSON uses `Hive::ExecuteWaitingAction`: dirty worktrees and branch-integrity failures target the worktree, no-change exits target `plan.md`, and `missing_research_output` is `kind=run` because editing `task.md` cannot satisfy the structured final-message gate. |
 | `:complete` | `next: hive plan <slug>`, `hive develop <slug>`, or `hive archive <slug>` depending on current stage; JSON keeps path fields and uses the workflow command |
 | `:execute_complete` | `next: hive develop <slug>` (advances to 5-review); JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
 | `:review_complete` | `next: hive pr <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 5-review"` |

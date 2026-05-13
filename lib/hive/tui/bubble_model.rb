@@ -1282,14 +1282,29 @@ module Hive
 
       # Resolve the path the editor should open for a given row.
       # Default: the stage's state file (`brainstorm.md` / `plan.md` /
-      # `task.md` / `pr.md`). For `:review_waiting`, send the operator
+      # `task.md` / `pr.md`). For `:execute_waiting`, use Status's
+      # reason-specific action target when it is an edit target. For
+      # `:review_waiting`, send the operator
       # to files the resume path actually consumes: reviewer-authored
       # files for the pass, or the reviews directory when there are
       # multiple possible sources / a fix-guardrail inspection gate.
       def input_editor_path(row)
+        execute_target = execute_waiting_editor_path(row)
+        return execute_target if execute_target
         return review_waiting_editor_path(row) if row.marker.to_s == "review_waiting"
 
         row.state_file.to_s
+      end
+
+      def execute_waiting_editor_path(row)
+        return nil unless row.marker.to_s == "execute_waiting"
+
+        next_action = row.respond_to?(:next_action) ? row.next_action : nil
+        return nil unless next_action.is_a?(Hash)
+        return nil unless next_action["kind"] == Hive::Schemas::NextActionKind::EDIT
+
+        target = next_action["target"].to_s
+        target.empty? ? nil : target
       end
 
       def review_waiting_editor_path(row)

@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-05-13
 tags: [command, status, observability, json]
 ---
 
@@ -21,7 +21,7 @@ tags: [command, status, observability, json]
     🤖 add-cache-260424-9a8b          agent_working pid=1234   hive develop add-cache-260424-9a8b 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`.
+`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -49,7 +49,7 @@ tags: [command, status, observability, json]
 
 For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-review 6-pr 7-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`; mtime falls back to the directory mtime if the state file doesn't exist yet.
 
-Rows are then classified by `Hive::TaskAction`, which emits an action key, label, and suggested command such as `hive brainstorm <slug>`, `hive develop <slug>`, `hive findings <slug>`, or `hive pr <slug>`. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
+Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
 
 ## Read-only
 

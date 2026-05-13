@@ -54,7 +54,7 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "alpha", stage: "1-input", slug: "a1", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready", suggested_command: "hive brainstorm a1"
+        action_label: "ready", suggested_command: "hive brainstorm a1", next_action: nil
       ).freeze ].freeze
     ).freeze
     smaller_snap = Hive::Tui::Snapshot.new(generated_at: nil, projects: [ pa ])
@@ -366,7 +366,7 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "alpha", stage: "1-input", slug: "a#{i}", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}"
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}", next_action: nil
       ).freeze
     end
     rows_b = (1..3).map do |i|
@@ -374,7 +374,7 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "beta", stage: "1-input", slug: "b#{i}", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}"
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}", next_action: nil
       ).freeze
     end
     pa = Hive::Tui::Snapshot::ProjectView.new(name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: rows_a.freeze).freeze

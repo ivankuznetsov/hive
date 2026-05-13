@@ -191,10 +191,24 @@ module Hive
       # user's editor. Re-running the agent before edits would just
       # spawn against an unchanged state file — but the agent emitted
       # `<!-- WAITING -->` precisely because it wants human edits.
+      # Execute waiting rows can override this with a structured
+      # `next_action.kind=run` when editing cannot satisfy the gate
+      # (for example `missing_research_output`).
       # BubbleModel owns any post-edit auto-continue rules; the verb
       # keys (`b`/`p`/`d`/`r`/`P`) remain the explicit manual rerun path.
       def needs_input_message(row)
+        if run_next_action?(row)
+          return Messages::Flash.new(text: "no action available — task is #{row.action_label}") if row.suggested_command.nil?
+
+          return dispatch_command_for(row.suggested_command)
+        end
+
         Messages::OpenInputEditor.new(row: row)
+      end
+
+      def run_next_action?(row)
+        next_action = row.respond_to?(:next_action) ? row.next_action : nil
+        next_action.is_a?(Hash) && next_action["kind"] == Hive::Schemas::NextActionKind::RUN
       end
 
       def enter_fallback_message(row)

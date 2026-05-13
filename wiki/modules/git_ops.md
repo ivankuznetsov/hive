@@ -3,11 +3,11 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-05-13
 tags: [git, init, commit]
 ---
 
-**TLDR**: Project-scoped git operations: detect default branch, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, and run `git add && git commit` inside the hive-state worktree.
+**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, and run `git add && git commit` inside the hive-state worktree.
 
 ## Constants
 
@@ -65,6 +65,15 @@ Stage runners produce a `commit:` field; `Commands::Run` calls this method insid
 3. Otherwise commit with message `hive: <stage_name>/<slug> <action>` and return `:committed`.
 
 Empty diffs are silently skipped (e.g. an `inbox.run!` that deliberately does nothing).
+
+## Worktree Inspection Helpers
+
+- `head_sha` returns `git rev-parse HEAD` for the configured root.
+- `status_short` returns `git status --short` and raises `GitError` on failure.
+- `current_branch` returns `git branch --show-current`, or `nil` for detached HEAD.
+- `ancestor?(ancestor, descendant)` wraps `git merge-base --is-ancestor`, returning `true` / `false` for normal ancestry answers and raising `GitError` for command failures.
+
+4-execute uses these helpers after the implementation spawn to verify the worktree stayed on the expected task branch, still descends from the execute baseline, is clean, and has produced an implementation commit before writing `EXECUTE_COMPLETE`.
 
 ## `run_git!` / `run_git_quiet`
 

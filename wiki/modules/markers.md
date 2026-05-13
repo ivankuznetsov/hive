@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-05-13
 tags: [marker, protocol, flock]
 ---
 
@@ -16,9 +16,11 @@ tags: [marker, protocol, flock]
 <!-- COMPLETE -->
 <!-- AGENT_WORKING pid=12345 started=2026-04-25T10:23:45Z -->
 <!-- ERROR reason=timeout timeout_sec=300 -->
-<!-- EXECUTE_WAITING findings_count=3 pass=2 -->
-<!-- EXECUTE_COMPLETE pass=2 -->
-<!-- EXECUTE_STALE max_passes=4 pass=4 -->
+<!-- EXECUTE_WAITING reason=no_worktree_changes -->
+<!-- EXECUTE_WAITING reason=dirty_worktree -->
+<!-- EXECUTE_WAITING reason=branch_mismatch -->
+<!-- EXECUTE_COMPLETE -->
+<!-- EXECUTE_COMPLETE mode=research -->
 
 # 5-review stage markers (added in U3):
 <!-- REVIEW_WORKING phase=ci pass=1 -->                          # transient — replaced at phase exit
@@ -34,6 +36,14 @@ Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb` (twelve names total — si
 `KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). When an `ERROR` marker's `exit_code` attr is in this list the task was interrupted, not broken. Single source of truth shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears them) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
 
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
+
+### EXECUTE_* attribute schemas
+
+| Marker | Attributes | Lifecycle |
+|--------|------------|-----------|
+| `EXECUTE_WAITING` | Current 4-execute pause reasons: `reason=no_worktree_changes`, `dirty_worktree`, `missing_research_output`, `branch_mismatch`, or `head_not_descendant`. Legacy pre-U9 review markers may carry `findings_count=` / `pass=` and are still parsed for compatibility. | Terminal until the user/agent fixes the worktree, updates plan frontmatter, or reruns the implementer. |
+| `EXECUTE_COMPLETE` | No attrs for normal implementation commits. `mode=research` when `plan.md` explicitly declares `execution_mode: research` and a structured final agent message was captured. | Terminal success — ready to move to 5-review. |
+| `EXECUTE_STALE` | Legacy review-loop stale marker. | No longer written by current 4-execute; retained for historical recovery. |
 
 ### REVIEW_* attribute schemas
 
@@ -81,7 +91,7 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 
 - `Hive::Agent#run!` writes `AGENT_WORKING` pre-spawn and `ERROR` on failure.
 - Every `Stages::*.run!` reads the post-run marker to derive the run's status and commit action.
-- `Stages::Execute#finalize_review_state` writes `EXECUTE_WAITING` / `EXECUTE_COMPLETE`.
+- `Stages::Execute#run_pass` writes `EXECUTE_WAITING` / `EXECUTE_COMPLETE` after validating final output, branch ancestry, worktree cleanliness, and research-mode eligibility.
 - `Stages::Review.run!` (U9, future) writes `REVIEW_WORKING` at every phase entry; the orchestrator owns every terminal `REVIEW_*` marker per ADR-005's last-marker-wins rule.
 - `Hive::Commands::Status` reads markers to render the table.
 

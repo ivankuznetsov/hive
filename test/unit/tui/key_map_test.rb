@@ -15,7 +15,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
   def make_row(action_key:, suggested_command: "hive brainstorm some-slug --from 1-inbox",
                claude_pid_alive: nil, action_label: "Ready to brainstorm",
                slug: "some-slug", project_name: "alpha", stage: "1-inbox",
-               folder: nil, marker: "waiting", attrs: {})
+               folder: nil, marker: "waiting", attrs: {}, next_action: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: project_name, stage: stage, slug: slug,
       folder: folder || "/tmp/hive/#{slug}",
@@ -23,7 +23,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       marker: marker, attrs: attrs, mtime: "2026-04-27T12:00:00Z", age_seconds: 1,
       claude_pid: claude_pid_alive ? 1234 : nil, claude_pid_alive: claude_pid_alive,
       action_key: action_key, action_label: action_label,
-      suggested_command: suggested_command
+      suggested_command: suggested_command, next_action: next_action
     ).freeze
   end
 
@@ -294,7 +294,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       state_file: "/s.md", marker: "complete", attrs: {}, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: "ready_to_plan", action_label: "Ready to plan",
-      suggested_command: "hive plan s --from 2-brainstorm"
+      suggested_command: "hive plan s --from 2-brainstorm", next_action: nil
     )
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row, pane_focus: :right)
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
@@ -309,10 +309,30 @@ class TuiKeyMapMessageForTest < Minitest::Test
       state_file: "/s.md", marker: "complete", attrs: {}, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: "ready_to_plan", action_label: "Ready to plan",
-      suggested_command: "hive plan s --from 2-brainstorm"
+      suggested_command: "hive plan s --from 2-brainstorm", next_action: nil
     )
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+  end
+
+  def test_enter_on_execute_waiting_run_next_action_dispatches_rerun
+    row = make_row(
+      action_key: "needs_input",
+      action_label: "Needs your input",
+      stage: "4-execute",
+      marker: "execute_waiting",
+      attrs: { "reason" => "missing_research_output" },
+      suggested_command: "hive develop some-slug --from 4-execute",
+      next_action: {
+        "kind" => Hive::Schemas::NextActionKind::RUN,
+        "target" => "/tmp/hive/some-slug"
+      }
+    )
+
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+
+    assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
+    assert_equal [ "hive", "develop", "some-slug", "--from", "4-execute" ], msg.argv
   end
 
   # -------- Mode globals (work without a row) --------

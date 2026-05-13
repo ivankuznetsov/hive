@@ -26,13 +26,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
                     state_file: "/tmp/hive/some-slug/brainstorm.md",
                     suggested_command: "hive brainstorm some-slug --from 2-brainstorm",
                     marker: "waiting", attrs: {}, folder: nil,
-                    action_label: "Needs your input")
+                    action_label: "Needs your input", next_action: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: "demo", stage: stage, slug: slug, folder: folder || "/tmp/hive/#{slug}",
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: action_label,
-      suggested_command: suggested_command
+      suggested_command: suggested_command, next_action: next_action
     )
   end
 
@@ -1738,6 +1738,31 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal 2, mtime_reads
   end
 
+  def test_open_input_editor_for_execute_waiting_uses_next_action_target
+    row = make_task_row(
+      stage: "4-execute",
+      marker: "execute_waiting",
+      attrs: { "reason" => "dirty_worktree" },
+      state_file: "/tmp/hive/some-slug/task.md",
+      next_action: {
+        "kind" => Hive::Schemas::NextActionKind::EDIT,
+        "target" => "/tmp/hive/some-slug-worktree"
+      }
+    )
+    seen_editor_invocation = nil
+    @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+    @model.define_singleton_method(:file_mtime) { |_path| 1.0 }
+    @model.define_singleton_method(:run_editor) do |argv, path|
+      seen_editor_invocation = [ argv, path ]
+      0
+    end
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+    cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+    assert_equal [ [ "fake-editor" ], "/tmp/hive/some-slug-worktree" ], seen_editor_invocation
+  end
+
   def test_open_input_editor_dispatches_unchanged_when_mtime_is_same
     row = make_task_row(state_file: "/tmp/hive/some-slug/brainstorm.md")
     mtimes = [ 42.0, 42.0 ]
@@ -3285,7 +3310,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       project_name: "demo", stage: "5-review", slug: slug, folder: folder,
       state_file: nil, marker: "error", attrs: { "reason" => reason, "exit_code" => exit_code.to_s },
       mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error", suggested_command: nil
+      action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
     )
   end
 
@@ -3571,7 +3596,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "5-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "error", action_label: "Error", suggested_command: nil
+        action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
       )
 
       # Must not raise — must convert NoLogFiles into a flashed model
@@ -3601,7 +3626,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "5-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "agent_running", action_label: "Agent running", suggested_command: nil
+        action_key: "agent_running", action_label: "Agent running", suggested_command: nil, next_action: nil
       )
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))
@@ -3624,7 +3649,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "5-review", slug: slug,
         folder: task_folder, state_file: nil, marker: "review_stale", attrs: { "pass" => "4" },
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil
+        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil, next_action: nil
       )
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))

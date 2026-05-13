@@ -123,6 +123,8 @@ The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` 
 
 Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for read-only browsing — distinct from `Enter` (workflow-contextual: editor on `needs_input`, log tail on `agent_running`, recover+rerun on review/error recovery rows, etc.) and the verb keys (which dispatch a `hive <verb>` subprocess). `o` mutates no marker, dispatches no workflow, and emits no follow-up `Messages::InputEditorExited` — the editor's exit is the user's last word. Useful for revisiting investigation outputs in `7-done` (or any stage) without dropping to a shell. The handler reuses the same `foreground_takeover_command` machinery `Enter`-on-`needs_input` uses, so terminal handoff is identical; only the after-spawn plumbing differs.
 
+Execute-stage waiting rows read `row.next_action` from `hive status --json`: `kind=edit` opens the reason-specific target (`worktree`, `plan.md`, or `task.md`), while `kind=run` dispatches the suggested `hive develop ... --from 4-execute` command directly for recovery states like `missing_research_output` where editing a file cannot clear the gate.
+
 Three stages get an auto-continue convenience after the editor exits cleanly:
 
 - **2-brainstorm:** if the file changed, the current file marker is still `WAITING` / `none`, and the latest `## Round N` has every `### Qn` paired with a non-empty `### An`, the TUI dispatches the row's existing `hive brainstorm ... --from 2-brainstorm` suggested command automatically.

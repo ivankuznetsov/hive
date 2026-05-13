@@ -98,7 +98,8 @@
         "claude_pid_alive",
         "action",
         "action_label",
-        "suggested_command"
+        "suggested_command",
+        "next_action"
       ],
       "properties": {
         "stage": {
@@ -154,7 +155,18 @@
           ]
         },
         "action_label": { "type": "string" },
-        "suggested_command": { "type": ["string", "null"] }
+        "suggested_command": { "type": ["string", "null"] },
+        "next_action": {
+          "description": "Optional row-local structured recovery action. Present today for EXECUTE_WAITING reason states; null when the generic action/suggested_command fields are sufficient.",
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+            }
+          }
+        }
       }
     }
   }

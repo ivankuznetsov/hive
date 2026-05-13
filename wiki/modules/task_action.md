@@ -3,11 +3,11 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-05-08
+updated: 2026-05-13
 tags: [module, status, action, classifier]
 ---
 
-**TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, and a copy-paste-executable shell command for the next step. Used by `hive status` (action grouping + `tasks[].action` JSON field), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), and `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle).
+**TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, a copy-paste-executable shell command, and an optional structured `next_action` for row-specific recovery. Used by `hive status` (action grouping + `tasks[].action` JSON field), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), and `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle).
 
 ## Public surface
 
@@ -16,7 +16,8 @@ action = Hive::TaskAction.for(task, marker, project_name: nil, project_count: 1,
 action.key         # closed enum string per Hive::Schemas::TaskActionKind
 action.label       # human label, e.g. "Ready to plan"
 action.command     # copy-paste shell command, or nil
-action.payload     # { "key", "label", "command" } for JSON emission
+action.next_action # structured row-local recovery action, or nil
+action.payload     # { "key", "label", "command", "next_action" } for JSON emission
 ```
 
 ## Action map (`Hive::TaskAction::ACTIONS`)
@@ -65,11 +66,13 @@ Generic verbs (`findings`/`accept-finding`/`reject-finding`) include `--stage <s
 
 The slug is `Shellwords.shelljoin`-escaped so a slug containing shell metacharacters can't break the suggested command.
 
+`EXECUTE_WAITING` rows with no pending findings delegate their structured `next_action` to `Hive::ExecuteWaitingAction`. That keeps `hive status --json`, `hive run --json`, and TUI Enter behavior aligned for `dirty_worktree`, `branch_mismatch`, `head_not_descendant`, `no_worktree_changes`, and `missing_research_output`.
+
 ## Consumers
 
 | File | Use |
 |------|-----|
-| `lib/hive/commands/status.rb` | `annotate_actions` calls `TaskAction.for` per row and routes by `action_key` for grouping. JSON `tasks[].action`/`action_label`/`suggested_command` come from this. |
+| `lib/hive/commands/status.rb` | `annotate_actions` calls `TaskAction.for` per row and routes by `action_key` for grouping. JSON `tasks[].action`/`action_label`/`suggested_command`/`next_action` come from this. |
 | `lib/hive/commands/run.rb` | `friendly_command` and `approve_action` delegate; `next_action.command` and `rerun_with` use the workflow form. |
 | `lib/hive/commands/approve.rb` | `json_next_action` builds the post-advance command via `TaskAction.for(post_move_task)` so the user lands on a runnable form for the new stage. |
 | `lib/hive/commands/stage_action.rb` | `success_payload` includes a `next_action` block built from TaskAction. |

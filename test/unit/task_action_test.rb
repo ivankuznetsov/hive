@@ -8,11 +8,16 @@ require "hive/markers"
 # command, so a typo in ACTIONS would silently misroute agents.
 class TaskActionTest < Minitest::Test
   Marker = Hive::Markers::State
-  FakeTask = Struct.new(:stage_name, :stage_index, :slug, :project_root, :project_name, keyword_init: true)
+  FakeTask = Struct.new(
+    :stage_name, :stage_index, :slug, :project_root, :project_name, :folder, :state_file,
+    keyword_init: true
+  )
 
   def fake_task(stage_name:, stage_index:, slug: "demo-260426-aaaa", project_root: "/x")
+    folder = File.join(project_root, ".hive-state", "stages", "#{stage_index}-#{stage_name}", slug)
     FakeTask.new(stage_name: stage_name, stage_index: stage_index, slug: slug,
-                 project_root: project_root, project_name: File.basename(project_root))
+                 project_root: project_root, project_name: File.basename(project_root),
+                 folder: folder, state_file: File.join(folder, "task.md"))
   end
 
   def marker(name, attrs = {})
@@ -96,6 +101,19 @@ class TaskActionTest < Minitest::Test
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 0))
     assert_equal "needs_input", action.key
+  end
+
+  def test_execute_waiting_no_changes_exposes_structured_next_action
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(
+      task,
+      marker(:execute_waiting, "findings_count" => 0, "reason" => "no_worktree_changes")
+    )
+
+    next_action = action.next_action
+    assert_equal Hive::Schemas::NextActionKind::EDIT, next_action["kind"]
+    assert_equal File.join(task.folder, "plan.md"), next_action["target"]
+    assert_equal "hive develop demo-260426-aaaa --from 4-execute", next_action["rerun_with"]
   end
 
   def test_pr_complete_is_ready_to_archive
@@ -184,10 +202,10 @@ class TaskActionTest < Minitest::Test
 
   # ── payload shape ──────────────────────────────────────────────────────
 
-  def test_payload_has_three_keys
+  def test_payload_has_expected_keys
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
-    assert_equal %w[command key label].sort, payload.keys.sort
+    assert_equal %w[command key label next_action].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
   end
 

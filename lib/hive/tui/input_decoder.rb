@@ -172,7 +172,7 @@ module Hive
             @paste_started_at = nil
             text = normalize_paste(@paste_buffer)
             @paste_buffer.clear
-            messages << Messages::RawTextInput.new(text: text, paste: true) unless text.empty?
+            messages << Messages::RawTextInput.new(text: text, paste: true)
           end
           return true
         end
@@ -312,6 +312,7 @@ module Hive
              .gsub(/[\r\n\t]+/, " ")
              .gsub(/[\x00-\x1f\x7f]/, "")
              .gsub(/ {2,}/, " ")
+             .strip
       end
 
       def key_message(key_type, runes: [])

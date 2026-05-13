@@ -38,6 +38,14 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal true, messages.first.paste
   end
 
+  def test_empty_bracketed_paste_still_emits_paste_signal
+    messages = decoder.drain("\e[200~\e[201~")
+    assert_equal 1, messages.size
+    assert_kind_of Hive::Tui::Messages::RawTextInput, messages.first
+    assert_equal "", messages.first.text
+    assert_equal true, messages.first.paste
+  end
+
   def test_bracketed_paste_start_marker_can_split_across_chunks
     assert_empty decoder.drain("\e[20")
     messages = decoder.drain("0~hello\e[201~")
@@ -63,6 +71,12 @@ class HiveTuiInputDecoderTest < Minitest::Test
   def test_bracketed_paste_normalizes_newlines_and_tabs
     msg = decoder.drain("\e[200~hello\n\tworld\ragain\e[201~").first
     assert_equal "hello world again", msg.text
+  end
+
+  def test_bracketed_paste_file_path_normalizes_trailing_newline
+    msg = decoder.drain("\e[200~/tmp/screenshot.png\n\e[201~").first
+    assert_equal "/tmp/screenshot.png", msg.text
+    assert_equal true, msg.paste
   end
 
   def test_arrow_home_end_delete_sequences_decode_to_key_messages

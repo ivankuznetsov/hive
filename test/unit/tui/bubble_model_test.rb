@@ -1003,6 +1003,88 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  # ---- Rich-submit rescue branches ----
+  # Each named class in submit_rich_new_idea's rescue list deserves a
+  # direct test so a future narrowing of the list lands as a regression
+  # rather than a backtrace-on-submit when the user pastes images.
+  def rich_submit_with_raise(raise_proc)
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-13",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
+    staging_path = File.join(staging_dir, "image-1.png")
+    File.binwrite(staging_path, "x".b)
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1",
+      staging_path: staging_path,
+      source_kind: :image_bytes
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: snap,
+        new_idea_buffer: "title [image1]",
+        new_idea_cursor: 14,
+        new_idea_attachments: [ attachment ],
+        new_idea_staging_dir: staging_dir
+      ),
+      dispatch: @dispatch
+    )
+    sentinel = Hive::Commands::New.instance_method(:call!)
+    Hive::Commands::New.define_method(:call!, &raise_proc)
+    begin
+      capture_io { @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+    ensure
+      Hive::Commands::New.define_method(:call!, sentinel)
+      Hive::Tui::ComposerStaging.cleanup!(staging_dir) if File.exist?(staging_dir)
+    end
+  end
+
+  def test_rich_submit_rescues_invalid_slug_error_and_preserves_buffer
+    rich_submit_with_raise(-> { raise Hive::Commands::New::InvalidSlugError, "bad slug" })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/bad slug/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_rescues_invalid_attachment_error
+    rich_submit_with_raise(-> { raise Hive::Commands::New::InvalidAttachmentError, "bad attachment" })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/bad attachment/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_rescues_slug_collision_error
+    rich_submit_with_raise(-> { raise Hive::Commands::New::SlugCollisionError, "collision" })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/collision/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_rescues_system_call_error
+    rich_submit_with_raise(-> { raise Errno::ENOSPC, "No space left" })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/No space left/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_rescues_ioerror
+    rich_submit_with_raise(-> { raise IOError, "stream closed" })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/stream closed/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_rescues_write_error_from_staging
+    rich_submit_with_raise(-> { raise Hive::Tui::ComposerStaging::WriteError.new("write failed", cause_class: Errno::EACCES) })
+    assert_equal :new_idea, @model.hive_model.mode
+    assert_match(/write failed/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_truncates_long_flash_with_ellipsis
+    long_msg = "x" * 300
+    rich_submit_with_raise(-> { raise Hive::Commands::New::InvalidSlugError, long_msg })
+    flash = @model.hive_model.flash.to_s
+    assert_includes flash, "…", "long messages should be truncated with an ellipsis"
+    assert flash.length <= 200, "truncated flash should not exceed 200 chars"
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block
@@ -4281,5 +4363,114 @@ class HiveTuiBubbleModelTest < Minitest::Test
     yield
   ensure
     Hive::Config.singleton_class.send(:define_method, method, original) if original
+  end
+
+  def with_command_available_stub(callable)
+    sentinel = Hive::Tui::Clipboard::DefaultShim.method(:command_available?)
+    Hive::Tui::Clipboard::DefaultShim.define_singleton_method(:command_available?, &callable)
+    yield
+  ensure
+    Hive::Tui::Clipboard::DefaultShim.define_singleton_method(:command_available?, sentinel) if sentinel
+  end
+
+  def with_env_overrides(overrides)
+    originals = overrides.keys.each_with_object({}) { |k, h| h[k] = ENV[k] }
+    overrides.each { |k, v| ENV[k] = v }
+    yield
+  ensure
+    originals.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  end
+
+  # ---- missing-clipboard-tool hint coverage ----
+  def test_empty_paste_flashes_wayland_hint_when_wl_paste_absent
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    none = clipboard_none
+    with_clipboard_probe_stub(->(**_kwargs) { none }) do
+      with_command_available_stub(->(_name, **_kwargs) { false }) do
+        with_env_overrides("XDG_SESSION_TYPE" => "wayland", "DISPLAY" => "") do
+          @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+        end
+      end
+    end
+    assert_match(/wl-clipboard/, @model.hive_model.flash.to_s,
+      "Wayland session without wl-paste should hint about wl-clipboard")
+  end
+
+  def test_empty_paste_flashes_x11_hint_when_xclip_absent
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    none = clipboard_none
+    with_clipboard_probe_stub(->(**_kwargs) { none }) do
+      with_command_available_stub(->(_name, **_kwargs) { false }) do
+        with_env_overrides("XDG_SESSION_TYPE" => "x11", "DISPLAY" => ":0") do
+          @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+        end
+      end
+    end
+    assert_match(/xclip/, @model.hive_model.flash.to_s,
+      "X11 session without xclip should hint about xclip")
+  end
+
+  def test_empty_paste_silent_when_no_session_env_vars
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    none = clipboard_none
+    with_clipboard_probe_stub(->(**_kwargs) { none }) do
+      with_command_available_stub(->(_name, **_kwargs) { false }) do
+        with_env_overrides("XDG_SESSION_TYPE" => "", "DISPLAY" => "") do
+          @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+        end
+      end
+    end
+    refute_match(/wl-clipboard|xclip/, @model.hive_model.flash.to_s,
+      "no Wayland AND no X11 env => no missing-tool hint")
+  end
+
+  def test_clipboard_tool_hint_latch_resets_after_successful_image_paste
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    none = clipboard_none
+    # First paste fires the wayland hint and latches the flag.
+    with_clipboard_probe_stub(->(**_kwargs) { none }) do
+      with_command_available_stub(->(_name, **_kwargs) { false }) do
+        with_env_overrides("XDG_SESSION_TYPE" => "wayland", "DISPLAY" => "") do
+          @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+        end
+      end
+    end
+    assert @model.instance_variable_get(:@clipboard_tool_hint_shown),
+      "first hint must set the latch"
+    # Successful image paste should reset the latch.
+    probe_result = clipboard_image_bytes
+    with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+    end
+    refute @model.instance_variable_get(:@clipboard_tool_hint_shown),
+      "after a successful image paste the latch should release so a future install/uninstall is reflected"
+  ensure
+    Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+  end
+
+  def test_oversize_image_clipboard_surfaces_flash_without_corrupting_buffer
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea, new_idea_buffer: "title"),
+      dispatch: @dispatch
+    )
+    oversize = Hive::Tui::Clipboard::OVERSIZE_IMAGE
+    with_clipboard_probe_stub(->(**_kwargs) { oversize }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+    end
+    assert_equal "title", @model.hive_model.new_idea_buffer,
+      "buffer must NOT receive the oversize-image text"
+    assert_match(/too large/i, @model.hive_model.flash.to_s)
   end
 end

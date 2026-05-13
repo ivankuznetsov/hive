@@ -353,11 +353,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # discoverability instead. This test pins that decision so a
     # future contributor doesn't silently re-add the hint and break
     # 70-col rendering.
+    hint = @model.send(:footer_hint)
     assert_equal "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q] quit",
-                 @model.send(:footer_hint),
+                 hint,
                  "footer hint must remain the pre-`o` literal; `o` is documented in `?` only"
-    refute_includes @model.send(:footer_hint), "[o] open",
+    refute_includes hint, "[o] open",
                     "70-col budget can't absorb `[o] open` alongside primary hints"
+    # Width guard: pin the actual character count so a future contributor
+    # who adds a hint and (correctly) bumps the literal above also has to
+    # acknowledge they're spending bytes against the 70-col budget. If
+    # this assertion fires alongside an updated literal, the contributor
+    # MUST verify default_footer truncation behavior at cols == 70.
+    assert hint.length <= 70,
+           "footer hint must fit the 70-col budget without truncation; got #{hint.length} chars"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols

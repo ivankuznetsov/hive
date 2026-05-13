@@ -182,6 +182,24 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal "o", msg.char
   end
 
+  def test_triage_o_is_noop
+    # Mode isolation R7: in :triage mode the `o` key falls through
+    # to the case-else NOOP (only d/a/r/Space/j/k/arrows/Esc are bound).
+    # Pins the assumption that :triage doesn't accidentally inherit
+    # the grid-mode `o` branch.
+    row = make_row(action_key: "review_findings", suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "o", row: row)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_log_tail_o_is_noop
+    # Mode isolation R7: in :log_tail mode the `o` key falls through
+    # to NOOP (only q/Esc are bound — back to grid). Pins that
+    # :log_tail doesn't accidentally route `o` to grid-mode dispatch.
+    msg = Hive::Tui::KeyMap.message_for(mode: :log_tail, key: "o", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   # ---- :new_idea mode keystroke routing ----
 
   def test_new_idea_esc_cancels

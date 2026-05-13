@@ -925,7 +925,14 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/attr "pass" mismatch/, final_flash)
   end
 
-  def test_recover_review_stale_does_not_clear_or_rerun
+  def test_recover_review_stale_max_passes_hit_routes_to_browse_not_recover
+    # max_passes-hit REVIEW_STALE no longer flashes the manual recipe;
+    # it routes through open_review_stale_file (browse via foreground
+    # takeover). The clear+rerun path must NOT fire — that's the
+    # contract this test pins. Folder doesn't exist on disk here, so
+    # the path resolver returns "" and the handler emits the
+    # "no review files for <slug>" refusal flash (still no clear, no
+    # rerun — the invariant we care about).
     row = make_task_row(
       action_key: "recover_review",
       action_label: "Needs recovery",
@@ -946,12 +953,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
     end
 
-    refute ran_clear, "REVIEW_STALE recovery must not blindly clear the marker"
-    refute ran_dispatch, "REVIEW_STALE recovery must not rerun before manual pass cleanup"
-    flash = @model.hive_model.flash.to_s
-    assert_match(/manual pass cleanup/, flash)
-    assert_match(/REVIEW_STALE/, flash)
-    assert_match(/highest-pass review files/, flash)
+    refute ran_clear, "REVIEW_STALE max_passes-hit recovery must not clear the marker"
+    refute ran_dispatch, "REVIEW_STALE max_passes-hit recovery must not rerun"
+    assert_match(/no review files for stale-review/, @model.hive_model.flash.to_s,
+                 "missing folder must flash refusal, not the legacy manual-recipe text")
   end
 
   def test_recover_review_stale_with_incomplete_triage_pass_clears_and_reruns
@@ -993,6 +998,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_recover_review_stale_does_not_treat_fix_success_as_reviewer_file
+    # fix-success-NN.md is an orchestrator sentinel, not a reviewer
+    # file — its presence must not trip retryable_incomplete_triage_pass?
+    # into clearing+rerunning. With max_passes-hit now routing to
+    # open_review_stale_file, the path resolver falls back to the
+    # `reviews/` directory when escalations-NN.md is missing, so the
+    # handler returns a SequenceCommand (takeover) and the flash
+    # names the browse intent. Clear must still NOT fire.
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "reviews"))
       File.write(File.join(dir, "reviews", "fix-success-04.md"), "ok\n")
@@ -1008,6 +1020,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         suggested_command: nil
       )
       ran_clear = false
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
 
       with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
         @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
@@ -1015,7 +1029,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
 
       refute ran_clear, "fix-success-NN.md is an orchestrator sentinel, not a retryable reviewer file"
-      assert_match(/manual pass cleanup/, @model.hive_model.flash.to_s)
+      assert_match(/opening reviews for stale-review/, @model.hive_model.flash.to_s,
+                   "max_passes-hit must route to browse, not the legacy manual-recipe flash")
     end
   end
 
@@ -2174,6 +2189,164 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     assert_empty @messages,
       "OpenTaskFolder must not dispatch any follow-up message — no auto-continue, no InputEditorExited"
+  end
+
+  # ---- max_passes-hit REVIEW_STALE → open_review_stale_file ----
+
+  def test_recover_review_stale_max_passes_opens_focal_escalations_file
+    # Happy path: REVIEW_STALE pass=N (no reason attr), file exists.
+    # The handler resolves <folder>/reviews/escalations-NN.md and
+    # returns a SequenceCommand opening the editor against it.
+    # Pure browse: no clear, no rerun, no follow-up dispatch.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      escalations = File.join(dir, "reviews", "escalations-04.md")
+      File.write(escalations, "## High\n- [ ] real finding\n")
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
+      )
+      seen_editor_invocation = nil
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor", "--wait" ] }
+      @model.define_singleton_method(:run_editor) do |argv, path|
+        seen_editor_invocation = [ argv, path ]
+        0
+      end
+
+      ran_clear = false
+      with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+        _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        assert_kind_of Bubbletea::SequenceCommand, cmd
+        assert_match(/opening reviews for stale-review in fake-editor/, @model.hive_model.flash)
+
+        cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+      end
+
+      assert_equal [ [ "fake-editor", "--wait" ], escalations ], seen_editor_invocation
+      refute ran_clear, "max_passes-hit browse must not clear the marker"
+      assert_empty @messages, "browse must dispatch no follow-up message"
+    end
+  end
+
+  def test_recover_review_stale_max_passes_falls_back_to_reviews_dir
+    # Defensive corner: marker claims REVIEW_STALE pass=4 but no
+    # pass-4 files exist on disk at all (corrupted state — neither
+    # escalations-04.md nor any reviewer file for pass=4). The
+    # incomplete-triage retryable predicate requires at least one
+    # reviewer file for the pass; without one, it returns false and
+    # routing reaches open_review_stale_file. The path resolver then
+    # falls back to the reviews/ directory so the operator can
+    # browse whatever IS there (older-pass files, errors-NN.md, etc.)
+    # and diagnose by inspection.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      # Older-pass file that does NOT match pass=4's suffix — so the
+      # incomplete-triage predicate doesn't fire, but the reviews/
+      # directory still exists for the fallback to use.
+      File.write(File.join(dir, "reviews", "claude-ce-code-review-02.md"), "## High\n")
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
+      )
+      seen_path = nil
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        seen_path = path
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      assert_kind_of Bubbletea::SequenceCommand, cmd,
+                     "no pass-4 files but reviews/ exists → dir fallback, not refusal"
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal File.join(dir, "reviews"), seen_path,
+                   "missing escalations-04.md must fall back to the reviews/ directory"
+    end
+  end
+
+  def test_recover_review_stale_max_passes_refuses_when_neither_file_nor_dir_exists
+    # Defensive: folder exists but has no reviews subtree at all.
+    # Handler flashes refusal, returns no takeover command.
+    with_tmp_dir do |dir|
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
+      )
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      assert_nil cmd
+      assert_match(/no review files for stale-review/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_recover_review_stale_max_passes_refuses_when_pass_attr_missing
+    # Legacy/malformed marker: REVIEW_STALE with no `pass` attr.
+    # Path resolver returns "" because we can't build the focal path
+    # without a pass number; refusal flash fires.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: {}, suggested_command: nil
+      )
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      assert_nil cmd
+      assert_match(/no review files for stale-review/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_recover_review_stale_max_passes_with_malformed_pass_falls_back_to_dir
+    # Edge: `pass` is non-integer (legacy/corrupted). Integer() raises
+    # ArgumentError; rescue falls back to the reviews/ directory when
+    # it exists. Defensive: a bad marker can't crash the renderer.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "abc" }, suggested_command: nil
+      )
+      seen_path = nil
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) do |_argv, path|
+        seen_path = path
+        0
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_equal File.join(dir, "reviews"), seen_path
+    end
+  end
+
+  def test_recover_review_stale_max_passes_does_not_mutate_marker
+    # R3 contract: open_review_stale_file is pure browse. No
+    # Hive::Markers.set call, no follow-up message dispatch. The
+    # marker stays as the operator saw it; clearing remains a
+    # deliberate `hive markers clear` round-trip.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "escalations-04.md"), "## High\n")
+
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      assert_empty @messages,
+        "max_passes-hit browse must not dispatch InputEditorExited or any other follow-up"
+    end
   end
 
   # ---- Plan-stage auto-continue (3-plan) ----

@@ -148,7 +148,12 @@ module Hive
         FileUtils.mkdir_p(assets_dir)
         @attachments.each do |src, dest_name|
           name = Hive::Tui::Text.sanitize(dest_name.to_s)
-          if name.empty? || name != File.basename(name)
+          # `name != File.basename(name)` rejects directory separators
+          # and the like, but `File.basename(".") == "."` and
+          # `File.basename("..") == ".."` — both would otherwise slip
+          # through and either overwrite `assets/` itself or escape it
+          # via FileUtils.cp's path-join. Reject them explicitly.
+          if name.empty? || name == "." || name == ".." || name != File.basename(name)
             raise InvalidAttachmentError, "invalid attachment filename '#{name}'"
           end
 

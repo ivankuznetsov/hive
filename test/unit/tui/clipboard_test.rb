@@ -205,4 +205,25 @@ class HiveTuiClipboardTest < Minitest::Test
 
     assert_equal :none, result.kind
   end
+
+  def test_fixture_clipboard_env_can_serve_sequence_for_e2e
+    kernel = FakeKernel.new(
+      files: {
+        File.expand_path("../../../test/fixtures/composer/screenshot-1.png", __dir__) => { size: 1, file: true },
+        File.expand_path("../../../test/fixtures/composer/screenshot-2.png", __dir__) => { size: 1, file: true }
+      }
+    )
+    Hive::Tui::Clipboard.instance_variable_set(:@test_clipboard_index, 0)
+    env = { "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png,screenshot-2.png", "PATH" => "" }
+
+    first = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
+    second = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
+
+    assert_equal :image_file, first.kind
+    assert_match(/screenshot-1\.png\z/, first.path)
+    assert_equal :image_file, second.kind
+    assert_match(/screenshot-2\.png\z/, second.path)
+  ensure
+    Hive::Tui::Clipboard.instance_variable_set(:@test_clipboard_index, 0)
+  end
 end

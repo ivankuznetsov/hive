@@ -105,7 +105,10 @@ module Hive
         raw = env.fetch("HIVE_TUI_TEST_CLIPBOARD", nil).to_s
         return NONE unless raw.start_with?("fixture://")
 
-        name = raw.delete_prefix("fixture://")
+        names = raw.delete_prefix("fixture://").split(",")
+        index = @test_clipboard_index.to_i
+        @test_clipboard_index = index + 1
+        name = names[[ index, names.size - 1 ].min].to_s
         return NONE if name.empty? || name.include?("/") || name.include?("..")
 
         fixture = File.expand_path("../../../test/fixtures/composer/#{name}", __dir__)

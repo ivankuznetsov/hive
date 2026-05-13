@@ -99,5 +99,5 @@ The agent runs with `--dangerously-skip-permissions`. Three controls keep this s
 ## Backlinks
 
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]]
-- [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/pr]]
+- [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/finalize]]
 - [[architecture]]

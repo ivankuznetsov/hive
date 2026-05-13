@@ -1,5 +1,5 @@
 ---
-title: 5-review stage
+title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
@@ -7,19 +7,20 @@ updated: 2026-05-14T15:20:40Z
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
-**TLDR**: The autonomous review loop. After 4-execute commits the implementation, the user `mv`s the task to `5-review/`. `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. One `hive run` either lands a terminal marker (`REVIEW_COMPLETE`, `REVIEW_WAITING`, `REVIEW_CI_STALE`, `REVIEW_STALE`, `REVIEW_ERROR`) or exhausts per-spawn budgets — never an in-progress state the user has to reconcile.
+**TLDR**: The autonomous review loop. After 5-open-pr opens a draft PR, `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
 
 - **State file**: `task.md` with the same frontmatter that 4-execute wrote (`slug`, `started_at`). The runner does NOT track pass count in frontmatter — it derives the current pass by reading `reviews/<reviewer-name>-<NN>.md` filenames and taking the maximum NN.
-- **Worktree pointer**: `worktree.yml` (carried over from 4-execute; missing → exit 1 with "5-review entered without a worktree.yml").
+- **Worktree pointer**: `worktree.yml` (carried over from 4-execute; missing → exit 1 with "6-review entered without a worktree.yml").
+- **PR pointer**: `pr.md` (carried over from 5-open-pr). Missing PR metadata only disables GitHub comment mirroring; local review still runs.
 - **Reviews directory**: `reviews/` (carried over). New per-pass files written here: `<reviewer>-NN.md`, `escalations-NN.md`, `ci-blocked.md` (Phase 1 hard-block), `browser-blocked-NN.md` (Phase 5 warned), `fix-guardrail-NN.md` (post-fix tripped).
 
 ## Pre-flight (`Review.run!`)
 
 | Marker / State | Action |
 |----------------|--------|
-| `:review_complete` | print "already complete; mv this folder to 6-pr/", return |
+| `:review_complete` | print "already complete; mv this folder to 7-finalize/", return |
 | `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
 | `:review_stale` | warn; user clears/re-runs if highest pass lacks `escalations-NN.md`, otherwise trims `reviews/` then clears/re-runs |
 | `:review_error` | warn with attrs; user investigates then `hive markers clear FOLDER --name REVIEW_ERROR` and re-runs |
@@ -51,6 +52,8 @@ Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is l
 
 For each spec in `cfg.review.reviewers`, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`.
 
+After each reviewer file is written, `Review::GithubPublisher.publish!` posts a PR-level comment headed `### Reviewer: <name> - Pass NN` when `review.github_publish.enabled` is true. It reads `pr_url` from `pr.md`, skips duplicate headers on retry, scans for secrets before posting, and degrades to a stderr warning on GitHub failures so local files remain the source of truth.
+
 Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed` (the all-failed safety net is preserved). Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 
 CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/compound-engineering:ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. `templates/reviewer_pr_review_toolkit.md.erb` is a stand-in for the `pr-review-toolkit:code-reviewer` agent.
@@ -75,6 +78,8 @@ Spawns a triage agent with all per-reviewer files for the current pass concatena
 Plan / worktree.yml / task.md are SHA-256 protected around the triage spawn (ADR-013); tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
 
 Escalations land in `reviews/escalations-<NN>.md` — every line that triage left as `[ ]` gets copied here as a digest for the user.
+
+The escalations digest is mirrored to the PR with the same publisher path and duplicate-header guard.
 
 ## Branching after triage
 
@@ -160,6 +165,6 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 
 ## Backlinks
 
-- [[stages/execute]] · [[stages/pr]]
+- [[stages/open-pr]] · [[stages/finalize]]
 - [[modules/markers]] · [[modules/agent]] · [[modules/config]]
 - [[state-model]] · [[decisions]] · [[architecture]]

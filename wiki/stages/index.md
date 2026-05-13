@@ -3,11 +3,11 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-04-26
+updated: 2026-05-13
 tags: [stage, index]
 ---
 
-**TLDR**: Seven wired pipeline stages, no gaps. Two are inert (1-inbox, 7-done); five spawn agents today. Each has exactly one state file and one runner module. The 5-review stage is now first-class (U9 shipped 2026-04-26): orchestrator at `Hive::Stages::Review.run!` runs CI → reviewers → triage → fix loop → browser-test → REVIEW_COMPLETE; `4-execute` dropped its review pass and is impl-only since U9.
+**TLDR**: Eight wired pipeline stages, no gaps. PR creation now happens before review in `5-open-pr`; `7-finalize` is the post-review wrap-up that refreshes the PR and marks it ready.
 
 | Stage | Runner | State file | Spawns agent? | Page |
 |-------|--------|------------|----------------|------|
@@ -15,13 +15,14 @@ tags: [stage, index]
 | 2-brainstorm | `Hive::Stages::Brainstorm` | `brainstorm.md` | yes | [[stages/brainstorm]] |
 | 3-plan | `Hive::Stages::Plan` | `plan.md` | yes | [[stages/plan]] |
 | 4-execute | `Hive::Stages::Execute` | `task.md` (+ `worktree.yml`) | yes (impl-only since U9) | [[stages/execute]] |
-| 5-review | `Hive::Stages::Review` (orchestrator) + `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | `task.md` (+ `reviews/ce-review-*-NN.md`, `reviews/escalations-NN.md`, `reviews/ci-blocked.md`, `reviews/browser-test-NN.md`, `reviews/fix-guardrail-NN.md`) | yes (CI-fix + reviewers + triage + fix + browser) | [[stages/review]] |
-| 6-pr | `Hive::Stages::Pr` | `pr.md` | yes (unless idempotent) | [[stages/pr]] |
-| 7-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
+| 5-open-pr | `Hive::Stages::OpenPr` | `pr.md` | yes | [[stages/open-pr]] |
+| 6-review | `Hive::Stages::Review` (orchestrator) + `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | `task.md` (+ `reviews/ce-review-*-NN.md`, `reviews/escalations-NN.md`, `reviews/ci-blocked.md`, `reviews/browser-test-NN.md`, `reviews/fix-guardrail-NN.md`) | yes (CI-fix + reviewers + triage + fix + browser) | [[stages/review]] |
+| 7-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
+| 8-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
 
-All five active stages share `Hive::Stages::Base.spawn_agent` for agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.render(template_name, bindings)` for ERB prompt rendering. 5-review uses per-spawn `status_mode` overrides (U4) so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns.
+All active stages share `Hive::Stages::Base.spawn_agent` for agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.render(template_name, bindings)` for ERB prompt rendering. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns.
 
-## 5-review phase order
+## 6-review phase order
 
 1. **CI** (`Review::CiFix`, U7) — runs `review.ci.command` once on entry; on failure feeds log to fix agent up to `review.ci.max_attempts`. Hard-block → `REVIEW_CI_STALE` + `reviews/ci-blocked.md`.
 2. **Reviewers** (`Reviewers::Agent`, U4) — dispatches each configured reviewer via `Hive::Reviewers.dispatch(spec, ctx)`; writes `reviews/ce-review-<name>-<NN>.md`. All reviewers fail → `REVIEW_ERROR`. `kind: "linter"` is rejected (use `review.ci.command`).

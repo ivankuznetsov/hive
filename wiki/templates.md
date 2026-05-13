@@ -3,11 +3,11 @@ title: ERB Templates
 type: reference
 source: templates/
 created: 2026-04-25
-updated: 2026-04-26
+updated: 2026-05-13
 tags: [template, erb, prompt]
 ---
 
-**TLDR**: Seventeen ERB templates under `templates/` — two for config scaffolding (`hive_config.yml.erb`, `project_config.yml.erb`), one for task capture (`idea.md.erb`), four for stage prompts (`brainstorm_prompt`, `plan_prompt`, `execute_prompt`, `pr_prompt`), one legacy (`review_prompt`, no longer wired in), one for PR body (`pr_body.md.erb`), and **eight 5-review templates** added in U9–U13: `fix_prompt`, `ci_fix_prompt`, `browser_test_prompt`, two triage bias presets (`courageous`, `safetyist`), and three reviewer prompts (`reviewer_claude_ce_code_review`, `reviewer_codex_ce_code_review`, `reviewer_pr_review_toolkit`).
+**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, 6-review sub-prompts, and PR wrap-up. PR creation now uses `open_pr_prompt.md.erb`; final wrap-up uses `finalize_prompt.md.erb` and `finalize_summary.md.erb`.
 
 ## Rendering helper
 
@@ -27,7 +27,8 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `brainstorm_prompt.md.erb` | `Stages::Brainstorm.run!` | `project_name`, `task_folder`, `idea_text`, `user_supplied_tag` |
 | `plan_prompt.md.erb` | `Stages::Plan.run!` | `project_name`, `task_folder`, `brainstorm_text`, `user_supplied_tag` |
 | `execute_prompt.md.erb` | `Stages::Execute.run!` (impl-only since ADR-014) | `project_name`, `worktree_path`, `task_folder`, `plan_text`, `user_supplied_tag` |
-| `review_prompt.md.erb` | (legacy — was used by the U9-removed `Stages::Execute#run_review_pass`. Retained for backwards compat; the active 5-review prompts are the reviewer / triage / fix / ci_fix / browser_test ones below.) | n/a |
+| `open_pr_prompt.md.erb` | `Stages::OpenPr.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `branch`, `plan_text`, `execute_output_text`, `user_supplied_tag` |
+| `review_prompt.md.erb` | (legacy — was used by the U9-removed `Stages::Execute#run_review_pass`. Retained for backwards compat; the active 6-review prompts are the reviewer / triage / fix / ci_fix / browser_test ones below.) | n/a |
 | `fix_prompt.md.erb` | `Stages::Review#spawn_fix_agent` (Phase 4) | `project_name`, `worktree_path`, `task_folder`, `pass`, `accepted_findings`, `task_slug`, `triage_bias`, `reviewer_sources`, `user_supplied_tag` |
 | `ci_fix_prompt.md.erb` | `Stages::Review::CiFix#spawn_fix_agent` (Phase 1) | `project_name`, `worktree_path`, `task_folder`, `task_slug`, `command`, `attempt`, `max_attempts`, `captured_output`, `user_supplied_tag` |
 | `browser_test_prompt.md.erb` | `Stages::Review::BrowserTest#run_attempt` (Phase 5) | `project_name`, `worktree_path`, `task_folder`, `pass`, `attempt`, `max_attempts`, `result_path`, `skill_invocation`, `user_supplied_tag` |
@@ -36,8 +37,9 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
 | `reviewer_codex_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
 | `reviewer_pr_review_toolkit.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
-| `pr_prompt.md.erb` | `Stages::Pr.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `plan_text`, `reviews_summary`, `user_supplied_tag` |
-| `pr_body.md.erb` | (referenced by the pr_prompt body template — agent generates the body, this is example shape) | `summary`, `test_plan`, `task_folder` |
+| `finalize_prompt.md.erb` | `Stages::Finalize.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `pr_url`, `plan_text`, `reviews_summary`, `user_supplied_tag` |
+| `finalize_summary.md.erb` | `Stages::Finalize.run!` fallback summary renderer | `summary`, `pr_url`, `commits`, `review`, `open_escalations` |
+| `pr_body.md.erb` | legacy body-shape helper retained for compatibility | `summary`, `test_plan`, `task_folder` |
 
 ## Prompt-injection boundary policy
 
@@ -59,7 +61,7 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 
 ## Backlinks
 
-- [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/review]] · [[stages/pr]]
+- [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/finalize]]
 - [[commands/init]] · [[commands/new]]
 - [[architecture]]
 

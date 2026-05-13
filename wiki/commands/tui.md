@@ -25,7 +25,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │                 │                                                        │
 │  ★ All projects │  ▶  fix-cache-…   2-brainstorm  Ready to plan      2h │
 │  hive           │  🤖 metrics-…     4-execute     Agent running       1m │
-│  myapp          │  ⚠  oauth-…       5-review      Review findings     1h │
+│  myapp          │  ⚠  oauth-…       6-review      Review findings     1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
 │ Footer: [Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q]│
@@ -59,10 +59,11 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `p` | run `hive plan` |
 | `d` | run `hive develop` |
 | `r` | run `hive review` |
-| `P` | run `hive pr` (capital so it doesn't collide with `plan`) |
+| `P` | run `hive open-pr` (capital so it doesn't collide with `plan`) |
+| `F` | run `hive finalize` |
 | `a` | run `hive archive` |
 | `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), recover + rerun on review-recovery and non-kill-class `error` rows; ready rows still dispatch the suggested command |
-| `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `7-done` (or any stage). |
+| `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `8-done` (or any stage). |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
@@ -119,9 +120,9 @@ Interactive-flagged verbs would route through `Hive::Tui::Subprocess.takeover_co
 - `reason=fix_guardrail` rows open `reviews/fix-guardrail-NN.md` directly so a `[x]` tick of every line drives the U5 approval-on-resume in [[stages/review]] (Phase 4). Missing focal file falls back to the `reviews/` directory.
 - Escalations-only `:review_waiting` rows (no `reason` attr) open the single unresolved reviewer-authored file when there is one, else fall back to the `reviews/` directory.
 
-The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash distinguishes a saved edit from a no-op cancel. It also samples the file's checkbox-count Hash (`{checked: N, unchecked: M}`) for `review_outcome`'s 5-review auto-continue gate — a separate signal from `changed:` because mtime-only is not strict enough to avoid no-op review re-runs.
+The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` and samples mtime before/after the spawn so the post-edit `Messages::InputEditorExited(slug:, exit_code:, changed:)` flash distinguishes a saved edit from a no-op cancel. It also samples the file's checkbox-count Hash (`{checked: N, unchecked: M}`) for `review_outcome`'s 6-review auto-continue gate — a separate signal from `changed:` because mtime-only is not strict enough to avoid no-op review re-runs.
 
-Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for read-only browsing — distinct from `Enter` (workflow-contextual: editor on `needs_input`, log tail on `agent_running`, recover+rerun on review/error recovery rows, etc.) and the verb keys (which dispatch a `hive <verb>` subprocess). `o` mutates no marker, dispatches no workflow, and emits no follow-up `Messages::InputEditorExited` — the editor's exit is the user's last word. Useful for revisiting investigation outputs in `7-done` (or any stage) without dropping to a shell. The handler reuses the same `foreground_takeover_command` machinery `Enter`-on-`needs_input` uses, so terminal handoff is identical; only the after-spawn plumbing differs.
+Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for read-only browsing — distinct from `Enter` (workflow-contextual: editor on `needs_input`, log tail on `agent_running`, recover+rerun on review/error recovery rows, etc.) and the verb keys (which dispatch a `hive <verb>` subprocess). `o` mutates no marker, dispatches no workflow, and emits no follow-up `Messages::InputEditorExited` — the editor's exit is the user's last word. Useful for revisiting investigation outputs in `8-done` (or any stage) without dropping to a shell. The handler reuses the same `foreground_takeover_command` machinery `Enter`-on-`needs_input` uses, so terminal handoff is identical; only the after-spawn plumbing differs.
 
 Execute-stage waiting rows read `row.next_action` from `hive status --json`: `kind=edit` opens the reason-specific target (`worktree`, `plan.md`, or `task.md`), while `kind=run` dispatches the suggested `hive develop ... --from 4-execute` command directly for recovery states like `missing_research_output` where editing a file cannot clear the gate.
 
@@ -129,7 +130,7 @@ Three stages get an auto-continue convenience after the editor exits cleanly:
 
 - **2-brainstorm:** if the file changed, the current file marker is still `WAITING` / `none`, and the latest `## Round N` has every `### Qn` paired with a non-empty `### An`, the TUI dispatches the row's existing `hive brainstorm ... --from 2-brainstorm` suggested command automatically.
 - **3-plan:** if the editor exits `0`, the marker is still `:waiting`, and `row.suggested_command` is parseable as `hive plan ...`, the TUI builds a swapped-verb `hive develop ... --from 3-plan` dispatch, then flips the plan-stage marker `:waiting → :complete` (atomic-rename via `Hive::Markers.set`, guarded by a compare-and-set re-read that raises `MarkerRaceError` if the marker drifted to a different state during the edit). The marker flip is the "user approved the plan as-is" signal made explicit on disk — `hive develop --from 3-plan` requires `:complete` on the source stage and would otherwise fail silently in background. The build-then-flip order is load-bearing: a malformed `suggested_command` raises before the marker write, leaving `:waiting` intact so the user can re-trigger after fixing the row. Editing the plan and saving with changes routes to `:revise_plan` instead (re-runs `hive plan` with the user's edits as feedback); the marker is NOT flipped on that path.
-- **5-review (U6):** if the file's `[x] / [ ]` checkbox set actually changed (a bare `:wq` with no checkbox flips returns `:silent` and skips dispatch — protects against no-op runner round-trips), the marker is still `:review_waiting`, and `row.suggested_command` is non-empty, the TUI dispatches `hive run` automatically and surfaces a confirming flash (`approved — starting next review pass for <slug>`).
+- **6-review (U6):** if the file's `[x] / [ ]` checkbox set actually changed (a bare `:wq` with no checkbox flips returns `:silent` and skips dispatch — protects against no-op runner round-trips), the marker is still `:review_waiting`, and `row.suggested_command` is non-empty, the TUI dispatches `hive run` automatically and surfaces a confirming flash (`approved — starting next review pass for <slug>`).
 
 Partial brainstorm answers, stale rows whose marker changed while the editor was open, and any other stage's `:waiting` state stay manual; workflow verb keys (`b` / `p` / `d` / `r` / `P`) remain the explicit rerun path. Note: partial `[x]` ticks on `fix-guardrail-NN.md` and edits that truncate findings (changing the marker's `matches` count) are rejected by [[stages/review]]'s `fix_guardrail_approved?` and keep the pause — the TUI may still dispatch, but the runner re-fires the same `:review_waiting reason=fix_guardrail` marker.
 

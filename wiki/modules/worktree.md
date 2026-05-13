@@ -95,7 +95,8 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 - `Stages::Execute#run_init_pass` — creates the worktree, writes the pointer, validates the prefix.
 - `Stages::Execute#run_iteration_pass` — re-reads the pointer, re-validates.
-- `Stages::Pr#run!` — reads pointer for the worktree path; `git push` runs there.
+- `Stages::OpenPr#run!` — reads pointer for the worktree path; `git push` runs there.
+- `Stages::Finalize#run!` — reads pointer to verify the final branch state before wrapping up the PR.
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
 
 ## Tests
@@ -105,5 +106,5 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 ## Backlinks
 
 - [[modules/git_ops]]
-- [[stages/execute]] · [[stages/pr]] · [[stages/done]]
+- [[stages/execute]] · [[stages/open-pr]] · [[stages/finalize]] · [[stages/done]]
 - [[state-model]]

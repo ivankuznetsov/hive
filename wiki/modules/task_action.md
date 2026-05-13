@@ -33,14 +33,15 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `plan_complete` | `READY_TO_DEVELOP` | "Ready to develop" | develop |
 | `execute_findings` | `REVIEW_FINDINGS` | "Review findings" | findings |
 | `execute_waiting` | `NEEDS_INPUT` | "Needs your input" | develop |
-| `execute_complete` | `READY_FOR_REVIEW` | "Ready for review" | review |
+| `execute_complete` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
+| `open_pr_complete` | `READY_FOR_REVIEW` | "Ready for review" | review |
 | `execute_stale` | `RECOVER_EXECUTE` | "Needs recovery" | findings |
 | `review_ready` | `READY_FOR_REVIEW` | "Ready for review" | review |
 | `review_waiting` | `NEEDS_INPUT` | "Needs your input" | review |
-| `review_complete` | `READY_FOR_PR` | "Ready for PR" | pr |
+| `review_complete` | `READY_TO_FINALIZE` | "Ready to finalize" | finalize |
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
-| `pr_waiting` | `NEEDS_INPUT` | "Needs your input" | pr |
-| `pr_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
+| `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
+| `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
@@ -54,11 +55,11 @@ Two markers short-circuit the per-stage dispatch:
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug> --pass <N>` rather than a workflow verb. Running `hive develop <slug>` on a stale task would refuse on the non-terminal marker; pointing the user at `findings` opens the recovery loop instead of a verb-rejection loop.
 
-Markerless `5-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This matters after a recovery marker is cleared: the next useful action is to run the review stage, while only an explicit `REVIEW_WAITING` marker should open the input-editor path.
+Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This matters after a recovery marker is cleared: the next useful action is to run the review stage, while only an explicit `REVIEW_WAITING` marker should open the input-editor path.
 
 ## Command emission
 
-Workflow verbs (`brainstorm`/`plan`/`develop`/`pr`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
+Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
 
 Generic verbs (`findings`/`accept-finding`/`reject-finding`) include `--stage <stage>` only when slug-stage ambiguity actually exists (`stage_collision: true`).
 

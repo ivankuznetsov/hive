@@ -7,7 +7,7 @@ updated: 2026-04-26
 tags: [security, sha256, integrity, orchestrator]
 ---
 
-**TLDR**: SHA-256 snapshot/diff helper for orchestrator-owned files. Multiple stages (4-execute, 5-review's runner / triage / ci-fix) all need the same primitive: snapshot a small set of files before spawning a sub-agent, snapshot again after, surface the names that differ. Tampering attempts land structured error markers (`REVIEW_ERROR phase=X reason=*_tampered`). One Array constant, two functions. Centralises the "what counts as orchestrator-owned" answer so a future addition to the protected set lands in one place. References ADR-013.
+**TLDR**: SHA-256 snapshot/diff helper for orchestrator-owned files. Multiple stages (4-execute, 6-review's runner / triage / ci-fix) all need the same primitive: snapshot a small set of files before spawning a sub-agent, snapshot again after, surface the names that differ. Tampering attempts land structured error markers (`REVIEW_ERROR phase=X reason=*_tampered`). One Array constant, two functions. Centralises the "what counts as orchestrator-owned" answer so a future addition to the protected set lands in one place. References ADR-013.
 
 ## API
 

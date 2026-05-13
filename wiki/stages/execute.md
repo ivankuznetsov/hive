@@ -7,7 +7,7 @@ updated: 2026-05-13
 tags: [stage, execute, worktree]
 ---
 
-**TLDR**: Implementation-only since U9 (ADR-014). First entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. The user `mv`s completed tasks to `5-review/` to enter the autonomous review loop. No review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
+**TLDR**: Implementation-only since U9 (ADR-014). First entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
 
 ## Setup
 
@@ -19,14 +19,14 @@ tags: [stage, execute, worktree]
 
 | Marker / State | Action |
 |----------------|--------|
-| `:execute_complete` | print `"already complete; mv this folder to 5-review/"`, return |
+| `:execute_complete` | print `"already complete; mv this folder to 6-review/"`, return |
 | `:execute_waiting` | re-run the implementation pass after the user reviews the captured `## Execute Output` and decides whether to revise the plan, add `execution_mode: research`, or retry |
 | `:error` | warn with attrs; user investigates, clears marker |
 | `worktree.yml` exists but path missing | warn `"worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"`, exit 1 |
 | no `worktree.yml` | run **init pass** |
-| `worktree.yml` exists, healthy | re-running on a complete task says "already complete; mv to 5-review/" |
+| `worktree.yml` exists, healthy | re-running on a complete task says "already complete; mv to 6-review/" |
 
-`EXECUTE_WAITING` is still written by 4-execute for implementation-output pauses: `reason=no_worktree_changes` when the agent exits cleanly without a baseline-descendant commit, `reason=dirty_worktree` when it leaves uncommitted work behind, `reason=missing_research_output` when a research-mode plan has no structured final message, `reason=branch_mismatch` when the worktree is detached or on the wrong branch, and `reason=head_not_descendant` when HEAD no longer descends from the execute baseline. `EXECUTE_STALE` review-iteration state moved to `REVIEW_STALE` in 5-review.
+`EXECUTE_WAITING` is still written by 4-execute for implementation-output pauses: `reason=no_worktree_changes` when the agent exits cleanly without a baseline-descendant commit, `reason=dirty_worktree` when it leaves uncommitted work behind, `reason=missing_research_output` when a research-mode plan has no structured final message, `reason=branch_mismatch` when the worktree is detached or on the wrong branch, and `reason=head_not_descendant` when HEAD no longer descends from the execute baseline. `EXECUTE_STALE` review-iteration state moved to `REVIEW_STALE` in 6-review.
 
 ## Init pass (`run_init_pass`)
 
@@ -40,7 +40,7 @@ tags: [stage, execute, worktree]
 8. Verify the worktree is on the expected task branch, descends from `execute_base_head`, is clean, and either has a new baseline-descendant commit or is an explicit `execution_mode: research` plan with a structured final agent message.
 9. `EXECUTE_COMPLETE` or `EXECUTE_WAITING reason=...`.
 
-Re-running with `worktree.yml` already present and a `:execute_complete` marker is a no-op announcing 5-review.
+Re-running with `worktree.yml` already present and a `:execute_complete` marker is a no-op announcing 6-review.
 
 ## Implementation sub-agent (`spawn_implementation`)
 
@@ -57,11 +57,11 @@ Re-running with `worktree.yml` already present and a `:execute_complete` marker 
 ## Tests
 
 - `test/unit/agent_test.rb` — captures final messages from stream-json result lines.
-- `test/integration/run_execute_test.rb` — init pass produces `EXECUTE_COMPLETE`; no-change exits preserve `## Execute Output` and pause; research-mode no-change runs can complete with output; research-mode without output pauses; re-run announces 5-review; tampering → `:error`; impl failure → `:error`; missing plan.md exits 1; no review files written.
+- `test/integration/run_execute_test.rb` — init pass produces `EXECUTE_COMPLETE`; no-change exits preserve `## Execute Output` and pause; research-mode no-change runs can complete with output; research-mode without output pauses; re-run announces 5-open-pr; tampering → `:error`; impl failure → `:error`; missing plan.md exits 1; no review files written.
 
 ## Backlinks
 
-- [[stages/plan]] · [[stages/review]] · [[stages/pr]]
+- [[stages/plan]] · [[stages/open-pr]] · [[stages/review]]
 - [[modules/worktree]] · [[modules/agent]] · [[modules/markers]] · [[modules/git_ops]] · [[modules/findings]]
 - [[commands/findings]] — list and toggle the `[x]` accepted-flag on findings this stage produces
 - [[state-model]] · [[decisions]]

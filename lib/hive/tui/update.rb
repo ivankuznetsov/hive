@@ -425,32 +425,22 @@ module Hive
         insert_new_idea_text(model, msg.text.to_s)
       end
 
-      # All-or-nothing on overflow: image attachments are atomic — a
-      # `[imageN]` placeholder is meaningless if only a prefix fits —
-      # so the entire placeholder is rejected on overflow rather than
-      # truncating mid-token. Distinct from `insert_new_idea_text`'s
-      # partial-fit policy where slicing characters off still produces
-      # a usable (if shortened) title. BubbleModel#stage_image now
-      # runs the overflow check BEFORE writing the staging file so a
-      # rejected paste does not leave an orphan tmp file.
+      # Image attachments are atomic — a `[imageN]` placeholder is
+      # meaningless if only a prefix fits. The buffer-overflow gate
+      # lives upstream in `BubbleModel#stage_image` (so a rejected
+      # paste doesn't leave an orphan staging file). By the time we
+      # reach this handler the gate has already passed, so we just
+      # splice the placeholder + attachment into the model.
       def apply_new_idea_image_attached(model, msg)
         placeholder = "[#{msg.label}]"
         buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
-        if buffer.length + placeholder.length > Model::NEW_IDEA_BUFFER_MAX_CHARS
-          return model.with(
-            new_idea_buffer: buffer,
-            new_idea_cursor: cursor,
-            flash: "buffer full - submit or remove text before pasting more images",
-            flash_set_at: Time.now
-          )
-        end
-
         prefix = buffer[0...cursor].to_s
         suffix = buffer[cursor..].to_s
         attachment = Model::Attachment.new(
           label: msg.label,
           staging_path: msg.staging_path,
-          source_kind: msg.source_kind
+          source_kind: msg.source_kind,
+          ext: msg.ext
         )
         model.with(
           new_idea_buffer: prefix + placeholder + suffix,
@@ -510,6 +500,15 @@ module Hive
       # validator would reject as "broken image placeholder". Detect
       # the case here and drop the orphan so the user isn't trapped in
       # a state that can only be unwound by Esc + retype.
+      #
+      # Side note for the operator-visible UX: a single backspace
+      # inside `[imageN]` is enough to silently drop the attachment
+      # from the model. The staging file is still on disk (cleaned on
+      # submit/cancel via `cleanup_new_idea_staging`), but the
+      # placeholder is gone — the user has to re-paste the image to
+      # restore it. We intentionally don't flash here because the
+      # behaviour is symmetric with "type any character to bury the
+      # placeholder"; surfacing it on every keystroke would be noisy.
       def prune_orphan_attachments(model)
         labels_in_buffer = model.new_idea_buffer.to_s.scan(/\[image(\d+)\]/).flatten.map { |n| "image#{n}" }.to_set
         kept = model.new_idea_attachments.select { |att| labels_in_buffer.include?(att.label) }

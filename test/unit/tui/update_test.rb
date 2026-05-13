@@ -556,7 +556,7 @@ class HiveTuiUpdateTest < Minitest::Test
 
   def test_open_new_idea_prompt_sets_mode_and_clears_buffer
     attachment = Hive::Tui::Model::Attachment.new(
-      label: "image1", staging_path: "/tmp/bug-1.png", source_kind: :image_bytes
+      label: "image1", staging_path: "/tmp/image-1.png", source_kind: :image_bytes, ext: "png"
     )
     starting = model.with(
       mode: :grid,
@@ -679,8 +679,9 @@ class HiveTuiUpdateTest < Minitest::Test
       starting,
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
-        staging_path: "/tmp/hive-tui-composer/bug-1.png",
-        source_kind: :image_bytes
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        source_kind: :image_bytes,
+        ext: "png"
       )
     )
 
@@ -688,8 +689,9 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 8, new_model.new_idea_cursor
     assert_equal 1, new_model.new_idea_attachments.size
     assert_equal "image1", new_model.new_idea_attachments.first.label
-    assert_equal "/tmp/hive-tui-composer/bug-1.png", new_model.new_idea_attachments.first.staging_path
+    assert_equal "/tmp/hive-tui-composer/image-1.png", new_model.new_idea_attachments.first.staging_path
     assert_equal :image_bytes, new_model.new_idea_attachments.first.source_kind
+    assert_equal "png", new_model.new_idea_attachments.first.ext
   end
 
   def test_new_idea_image_attached_inserts_at_cursor
@@ -698,8 +700,9 @@ class HiveTuiUpdateTest < Minitest::Test
       starting,
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
-        staging_path: "/tmp/hive-tui-composer/bug-1.png",
-        source_kind: :image_file
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        source_kind: :image_file,
+        ext: "png"
       )
     )
 
@@ -712,16 +715,18 @@ class HiveTuiUpdateTest < Minitest::Test
       model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0),
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
-        staging_path: "/tmp/hive-tui-composer/bug-1.png",
-        source_kind: :image_bytes
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        source_kind: :image_bytes,
+        ext: "png"
       )
     )
     second, _cmd = Hive::Tui::Update.apply(
       first,
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image2",
-        staging_path: "/tmp/hive-tui-composer/bug-2.png",
-        source_kind: :image_bytes
+        staging_path: "/tmp/hive-tui-composer/image-2.png",
+        source_kind: :image_bytes,
+        ext: "png"
       )
     )
 
@@ -729,23 +734,14 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal %w[image1 image2], second.new_idea_attachments.map(&:label)
   end
 
-  def test_new_idea_image_attached_at_cap_is_refused_without_partial_token
-    existing = "x" * Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS
-    starting = model.with(mode: :new_idea, new_idea_buffer: existing, new_idea_cursor: existing.length)
-    new_model, _cmd = Hive::Tui::Update.apply(
-      starting,
-      Hive::Tui::Messages::NewIdeaImageAttached.new(
-        label: "image1",
-        staging_path: "/tmp/hive-tui-composer/bug-1.png",
-        source_kind: :image_bytes
-      )
-    )
-
-    assert_equal existing, new_model.new_idea_buffer
-    assert_equal [], new_model.new_idea_attachments
-    assert_match(/buffer full/i, new_model.flash.to_s)
-    refute_nil new_model.flash_set_at
-  end
+  # The Update-layer test for "at-cap insert is refused without a
+  # partial token" used to live here. It was removed when the
+  # buffer-overflow gate was consolidated into BubbleModel#stage_image
+  # (the only caller path that produces a NewIdeaImageAttached
+  # message) so two duplicate gates against
+  # NEW_IDEA_BUFFER_MAX_CHARS could not drift. The behaviour is
+  # covered at the BubbleModel layer in
+  # test_new_idea_image_paste_at_buffer_cap_is_refused_without_orphan_file.
 
   # NewIdeaSubmitBlocked was removed in 2026-05-13: it was a dead
   # Data type that was defined and tested but never dispatched (rich-
@@ -796,7 +792,7 @@ class HiveTuiUpdateTest < Minitest::Test
 
   def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
     attachment = Hive::Tui::Model::Attachment.new(
-      label: "image1", staging_path: "/tmp/bug-1.png", source_kind: :image_bytes
+      label: "image1", staging_path: "/tmp/image-1.png", source_kind: :image_bytes, ext: "png"
     )
     starting = model.with(
       mode: :new_idea,

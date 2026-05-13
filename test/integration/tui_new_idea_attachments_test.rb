@@ -37,13 +37,13 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         initialize_project(dir)
         project = File.basename(dir)
         staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
-        first = File.join(staging_dir, "bug-1.png")
-        second = File.join(staging_dir, "bug-2.png")
+        first = File.join(staging_dir, "image-1.png")
+        second = File.join(staging_dir, "image-2.png")
         File.binwrite(first, "one".b)
         File.binwrite(second, "two".b)
         attachments = [
-          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: first, source_kind: :image_bytes),
-          Hive::Tui::Model::Attachment.new(label: "image2", staging_path: second, source_kind: :image_bytes)
+          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: first, source_kind: :image_bytes, ext: "png"),
+          Hive::Tui::Model::Attachment.new(label: "image2", staging_path: second, source_kind: :image_bytes, ext: "png")
         ]
         bubble = model_for(
           project: project,
@@ -77,10 +77,10 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         initialize_project(dir)
         project = File.basename(dir)
         staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
-        path = File.join(staging_dir, "bug-1.png")
+        path = File.join(staging_dir, "image-1.png")
         File.binwrite(path, "image".b)
         attachments = [
-          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: path, source_kind: :image_bytes)
+          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: path, source_kind: :image_bytes, ext: "png")
         ]
         bubble = model_for(project: project, buffer: "[image1]", attachments: attachments, staging_dir: staging_dir)
 

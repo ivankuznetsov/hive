@@ -140,8 +140,9 @@ class HiveTuiModelTest < Minitest::Test
   def test_new_idea_attachments_can_be_overridden_via_with
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
-      staging_path: "/tmp/hive-tui-composer/bug-1.png",
-      source_kind: :image_bytes
+      staging_path: "/tmp/hive-tui-composer/image-1.png",
+      source_kind: :image_bytes,
+      ext: "png"
     )
     a = Hive::Tui::Model.initial
     b = a.with(new_idea_attachments: [ attachment ], new_idea_staging_dir: "/tmp/hive-tui-composer")

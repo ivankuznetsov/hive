@@ -279,7 +279,10 @@ module Hive
 
       # An image was staged for the in-progress composer. Update inserts
       # the textual placeholder and appends the attachment metadata.
-      NewIdeaImageAttached = Data.define(:label, :staging_path, :source_kind)
+      # `:ext` carries the canonical (normalized) extension chosen at
+      # staging time so the downstream `Attachment` record never has
+      # to re-derive it from `staging_path`.
+      NewIdeaImageAttached = Data.define(:label, :staging_path, :source_kind, :ext)
 
       # Cursor navigation within the new-idea prompt.
       NewIdeaCursorLeft = Class.new

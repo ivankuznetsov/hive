@@ -49,7 +49,14 @@ module Hive
     # (Update#apply_pane_focus_*) from drifting out of sync.
     Model::TWO_PANE_MIN_COLS = 70
     Model::NEW_IDEA_BUFFER_MAX_CHARS = 4096
-    Model::Attachment = Data.define(:label, :staging_path, :source_kind)
+    # `:ext` is the canonical, lowercased + leading-dot-stripped
+    # extension chosen at staging time (via
+    # `Hive::Tui::ComposerStaging.normalized_extension`). It is
+    # authoritative for the body-markdown extension and the on-disk
+    # asset basename — derivation from `staging_path` is intentionally
+    # avoided so a future rename/move of the staging file cannot let
+    # the body markdown extension drift away from the on-disk copy.
+    Model::Attachment = Data.define(:label, :staging_path, :source_kind, :ext)
 
     class Model
       # Boot state. App.run constructs the runner with this Model.

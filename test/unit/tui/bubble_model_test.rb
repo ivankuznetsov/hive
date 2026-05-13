@@ -668,6 +668,41 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal [], @model.hive_model.new_idea_attachments
   end
 
+  def test_new_idea_image_paste_at_buffer_cap_is_refused_without_orphan_file
+    bytes = Hive::Tui::Clipboard::PNG_SIGNATURE + "payload".b
+    existing = "x" * Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        new_idea_buffer: existing,
+        new_idea_cursor: existing.length
+      ),
+      dispatch: @dispatch
+    )
+    probe_result = clipboard_image_bytes(bytes: bytes)
+    write_called = false
+
+    with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+      orig = Hive::Tui::ComposerStaging.method(:write_bytes!)
+      Hive::Tui::ComposerStaging.singleton_class.define_method(:write_bytes!) do |*args|
+        write_called = true
+        orig.call(*args)
+      end
+      begin
+        @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+      ensure
+        Hive::Tui::ComposerStaging.singleton_class.define_method(:write_bytes!, orig)
+      end
+    end
+
+    assert_equal existing, @model.hive_model.new_idea_buffer
+    assert_equal [], @model.hive_model.new_idea_attachments
+    assert_match(/buffer full/i, @model.hive_model.flash.to_s)
+    refute write_called, "BubbleModel#stage_image must gate BEFORE writing the staging file"
+  ensure
+    Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+  end
+
   def test_new_idea_image_paste_write_failure_flashes_without_placeholder
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
@@ -708,11 +743,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   def test_new_idea_cancel_cleans_staging_dir_and_clears_attachment_state
     dir = Dir.mktmpdir("hive-tui-composer-test-")
-    File.write(File.join(dir, "bug-1.png"), "image")
+    File.write(File.join(dir, "image-1.png"), "image")
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
-      staging_path: File.join(dir, "bug-1.png"),
-      source_kind: :image_bytes
+      staging_path: File.join(dir, "image-1.png"),
+      source_kind: :image_bytes,
+      ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
@@ -924,8 +960,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_rich_new_idea_submit_blocks_orphan_attachment
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
-      staging_path: "/tmp/hive-tui-composer/bug-1.png",
-      source_kind: :image_bytes
+      staging_path: "/tmp/hive-tui-composer/image-1.png",
+      source_kind: :image_bytes,
+      ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
@@ -945,8 +982,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_rich_new_idea_submit_blocks_missing_staging_file
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
-      staging_path: "/tmp/hive-tui-composer/missing-bug-1.png",
-      source_kind: :image_bytes
+      staging_path: "/tmp/hive-tui-composer/missing-image-1.png",
+      source_kind: :image_bytes,
+      ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
@@ -967,12 +1005,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_dir do |dir|
         staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
-        staging_path = File.join(staging_dir, "bug-1.png")
+        staging_path = File.join(staging_dir, "image-1.png")
         File.binwrite(staging_path, "image".b)
         attachment = Hive::Tui::Model::Attachment.new(
           label: "image1",
           staging_path: staging_path,
-          source_kind: :image_bytes
+          source_kind: :image_bytes,
+          ext: "png"
         )
         snap = Hive::Tui::Snapshot.from_payload(
           "generated_at" => "2026-05-01",
@@ -1018,7 +1057,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: staging_path,
-      source_kind: :image_bytes
+      source_kind: :image_bytes,
+      ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(

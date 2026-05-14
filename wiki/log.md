@@ -1410,3 +1410,10 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 
 **Refreshed pages:**
 - `wiki/stages/review.md` — updated the `pass_completion_status` classification list to document the operator-edit detection branch and added a paragraph explaining how it composes with the TUI's `r` gesture (PR #72).
+
+## [2026-05-14T15:00:00Z] worktree — new branches always start from origin/<default> after a quick fetch
+
+**Action:** Closed the gap exposed by the agent-plugins-was-7-commits-behind incident. `Worktree#create!`'s new-branch path previously ran `git worktree add <path> -b <slug> <local_default>` — the new branch started wherever local `<default>` happened to be, which on a stale checkout was N commits behind `origin/<default>`. Reviewers in 5-review then surfaced every missing upstream commit as a phantom deletion (same failure mode as the i-want-to-be-able-260507-7682 incident PR #69 was built to handle, just at a different point in the pipeline). PR #69's auto-rebase pre-step keeps drift fresh in *existing* worktrees; this commit handles drift at *creation*. New private helper `freshest_base(default_branch)` returns `"origin/<default>"` after a successful `git fetch origin <default>` (non-interactive env, same shape as `GitOps#fetch_default_branch`); falls back to `default_branch` with a stderr warning when there is no `origin` remote or the fetch fails. Local `<default>` is never touched — any unpushed commits there are preserved. Tests: +3 in `worktree_test.rb` (origin-ahead-of-local case verifies worktree HEAD matches `origin/master` not local `master`; no-origin fallback still works; fetch-failure fallback emits a stderr warning AND still creates the worktree so offline operators are not blocked).
+
+**Refreshed pages:**
+- `wiki/modules/worktree.md` — added the `freshest_base` subsection under `create!`, naming the incident, citing PR #69 (drift in existing vs. new worktrees), and documenting the fetch env + fail-soft fallback.

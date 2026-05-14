@@ -35,10 +35,21 @@ module Hive
 
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
-      args = if exists.success?
-               [ "worktree", "add", path, branch_name ]
+      if exists.success?
+        args = [ "worktree", "add", path, branch_name ]
       else
-               [ "worktree", "add", path, "-b", branch_name, default_branch ]
+        # Branch new worktrees from `origin/<default>` (after a quick
+        # fetch) instead of local `<default>` so a stale or
+        # behind-origin local default doesn't silently produce a
+        # worktree missing the latest upstream commits. Auto-rebase
+        # (PR #69) handles drift in long-running worktrees; this
+        # handles drift at creation time. Fail-soft: if there is no
+        # `origin` remote, or the fetch fails (network down, auth),
+        # fall back to the local default with a stderr warning.
+        # Never touches local `<default>` — preserves any unpushed
+        # commits the user has there.
+        base = freshest_base(default_branch)
+        args = [ "worktree", "add", path, "-b", branch_name, base ]
       end
       out, err, status = Open3.capture3("git", "-C", @project_root, *args)
       unless status.success?
@@ -53,6 +64,35 @@ module Hive
       raise WorktreeError, "git worktree remove failed: #{err.strip.empty? ? out : err}" unless status.success?
 
       :removed
+    end
+
+    # Decide what to base a new worktree branch on. Prefer
+    # `origin/<default>` after a quick fetch so the worktree starts
+    # at upstream's current tip. Fall back to local `<default>` on:
+    #   - no `origin` remote configured (early-stage repos, forks
+    #     without an upstream)
+    #   - fetch failure (network down, auth missing, dead remote)
+    # The fetch uses the same non-interactive env as
+    # `GitOps#fetch_default_branch` (PR #69) so credential prompts
+    # cannot hang the worktree-creation path.
+    def freshest_base(default_branch)
+      _, _, has_origin = Open3.capture3("git", "-C", @project_root,
+                                        "config", "remote.origin.url")
+      return default_branch unless has_origin.success?
+
+      env = {
+        "GIT_TERMINAL_PROMPT" => "0",
+        "GIT_SSH_COMMAND" => "ssh -oBatchMode=yes -oConnectTimeout=10"
+      }
+      _, err, status = Open3.capture3(env, "git", "-C", @project_root,
+                                      "fetch", "origin", default_branch)
+      unless status.success?
+        warn "[hive] worktree base: fetch origin #{default_branch} failed " \
+             "(#{err.strip[0, 200]}); branching from local #{default_branch}"
+        return default_branch
+      end
+
+      "origin/#{default_branch}"
     end
 
     def list_worktree_paths

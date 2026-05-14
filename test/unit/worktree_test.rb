@@ -71,6 +71,85 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Set up `origin` as a bare clone of the dev repo, push master to it,
+  # then advance origin by one commit so local master is one commit
+  # behind origin/master. Returns [dev_dir, worktree_root, origin_dir,
+  # origin_advance_sha] for the test body to assert against.
+  def with_origin_ahead_of_local
+    with_initialized_project do |dir, root|
+      origin_dir = "#{dir}.origin.git"
+      run!("git", "clone", "--bare", dir, origin_dir)
+      run!("git", "-C", dir, "remote", "add", "origin", origin_dir)
+      run!("git", "-C", dir, "fetch", "origin")
+      # Advance origin: clone the bare into a scratch worktree, add a
+      # commit, push back. This simulates someone else pushing to
+      # origin while local master sits still.
+      scratch = Dir.mktmpdir("origin-pusher")
+      begin
+        run!("git", "clone", origin_dir, scratch)
+        # CI runners don't have global git identity; configure
+        # locally so the commit lands without prompting.
+        run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+        run!("git", "-C", scratch, "config", "user.name", "Test")
+        File.write(File.join(scratch, "from-origin.txt"), "advanced\n")
+        run!("git", "-C", scratch, "add", ".")
+        run!("git", "-C", scratch, "commit", "-m", "origin-advance", "--quiet")
+        run!("git", "-C", scratch, "push", "origin", "master:master")
+      ensure
+        FileUtils.rm_rf(scratch)
+      end
+      origin_sha = `git -C #{origin_dir} rev-parse master`.strip
+      yield(dir, root, origin_dir, origin_sha)
+    end
+  end
+
+  def test_create_branches_from_origin_default_when_origin_ahead_of_local
+    # Regression for the agent-plugins-was-7-commits-behind incident:
+    # creating a worktree must branch from origin/<default>'s current
+    # tip, not from local <default>. Without the fetch+origin/ base
+    # the new worktree silently misses upstream commits and reviewers
+    # surface them as phantom deletions.
+    with_origin_ahead_of_local do |dir, root, _origin_dir, origin_sha|
+      wt = Hive::Worktree.new(dir, "feat-fresh", worktree_root: root)
+      wt.create!("feat-fresh", default_branch: "master")
+
+      worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+      assert_equal origin_sha, worktree_sha,
+                   "new worktree's HEAD must match origin/master, not stale local master"
+    end
+  end
+
+  def test_create_falls_back_to_local_default_when_no_origin_remote
+    # No `origin` configured — the existing behavior (branch from
+    # local default) is the correct fallback. Must not raise.
+    with_initialized_project do |dir, root|
+      local_sha = `git -C #{dir} rev-parse master`.strip
+      wt = Hive::Worktree.new(dir, "feat-no-remote", worktree_root: root)
+      wt.create!("feat-no-remote", default_branch: "master")
+      worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+      assert_equal local_sha, worktree_sha,
+                   "no-origin fallback: worktree HEAD matches local master"
+    end
+  end
+
+  def test_create_falls_back_to_local_when_fetch_fails
+    # Origin remote configured but unreachable — fetch fails, fallback
+    # to local <default> with a stderr warning. The worktree must
+    # still be created (no raise) so the operator can still work
+    # offline.
+    with_initialized_project do |dir, root|
+      run!("git", "-C", dir, "remote", "add", "origin", "https://nonexistent.invalid/repo.git")
+      local_sha = `git -C #{dir} rev-parse master`.strip
+      wt = Hive::Worktree.new(dir, "feat-no-net", worktree_root: root)
+      _, err = capture_io { wt.create!("feat-no-net", default_branch: "master") }
+      worktree_sha = `git -C #{wt.path} rev-parse HEAD`.strip
+      assert_equal local_sha, worktree_sha,
+                   "fetch-failure fallback: worktree HEAD matches local master"
+      assert_match(/worktree base: fetch origin master failed/, err,
+                   "fetch failure must surface a stderr warning so the operator knows")
+    end
+  end
+
   def test_master_log_clean_after_feature_commits
     with_initialized_project do |dir, root|
       wt = Hive::Worktree.new(dir, "feat-q", worktree_root: root)

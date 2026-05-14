@@ -181,14 +181,10 @@ module Hive
       end
 
       # @api private (test-only)
-      # When `HIVE_TUI_TEST_CLIPBOARD=fixture://a.png,b.png,c.png` is
-      # set, successive calls to `probe` serve fixture files in order.
-      # The advance counter is process-global module state; it clamps
-      # at the last fixture (intentional — see comment in
-      # `probe_test_clipboard`) unless `HIVE_TUI_TEST_CLIPBOARD_STRICT=1`
-      # forces a NONE return on overflow so a smoke test that drifts to
-      # needing more fixtures fails loudly instead of reusing stale
-      # data. No thread safety; callers coordinate externally.
+      # `HIVE_TUI_TEST_CLIPBOARD=fixture://a.png,b.png,c.png` makes
+      # successive `probe` calls serve fixture files in order. Index
+      # advance is process-global module state; no thread safety —
+      # callers coordinate externally.
       def probe_test_clipboard(env:, kernel:)
         raw = env.fetch("HIVE_TUI_TEST_CLIPBOARD", nil).to_s
         return NONE unless raw.start_with?("fixture://")

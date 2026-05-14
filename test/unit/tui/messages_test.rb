@@ -157,20 +157,17 @@ class HiveTuiMessagesTest < Minitest::Test
     a = Hive::Tui::Messages::NewIdeaImageAttached.new(
       label: "image1",
       staging_path: "/tmp/image-1.png",
-      source_kind: :image_bytes,
       ext: "png"
     )
     b = Hive::Tui::Messages::NewIdeaImageAttached.new(
       label: "image1",
       staging_path: "/tmp/image-1.png",
-      source_kind: :image_bytes,
       ext: "png"
     )
 
     assert_equal a, b
     assert_equal "image1", a.label
     assert_equal "/tmp/image-1.png", a.staging_path
-    assert_equal :image_bytes, a.source_kind
     assert_equal "png", a.ext
   end
 

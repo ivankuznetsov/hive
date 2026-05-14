@@ -556,7 +556,7 @@ class HiveTuiUpdateTest < Minitest::Test
 
   def test_open_new_idea_prompt_sets_mode_and_clears_buffer
     attachment = Hive::Tui::Model::Attachment.new(
-      label: "image1", staging_path: "/tmp/image-1.png", source_kind: :image_bytes, ext: "png"
+      label: "image1", staging_path: "/tmp/image-1.png", ext: "png"
     )
     starting = model.with(
       mode: :grid,
@@ -680,7 +680,6 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
-        source_kind: :image_bytes,
         ext: "png"
       )
     )
@@ -690,7 +689,6 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 1, new_model.new_idea_attachments.size
     assert_equal "image1", new_model.new_idea_attachments.first.label
     assert_equal "/tmp/hive-tui-composer/image-1.png", new_model.new_idea_attachments.first.staging_path
-    assert_equal :image_bytes, new_model.new_idea_attachments.first.source_kind
     assert_equal "png", new_model.new_idea_attachments.first.ext
   end
 
@@ -701,7 +699,6 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
-        source_kind: :image_file,
         ext: "png"
       )
     )
@@ -716,7 +713,6 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
-        source_kind: :image_bytes,
         ext: "png"
       )
     )
@@ -725,7 +721,6 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image2",
         staging_path: "/tmp/hive-tui-composer/image-2.png",
-        source_kind: :image_bytes,
         ext: "png"
       )
     )
@@ -748,7 +743,6 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Messages::NewIdeaImageAttached.new(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
-        source_kind: :image_bytes,
         ext: "png"
       )
     )
@@ -768,7 +762,6 @@ class HiveTuiUpdateTest < Minitest::Test
         Hive::Tui::Messages::NewIdeaImageAttached.new(
           label: label,
           staging_path: "/tmp/hive-tui-composer/image-#{idx + 1}.png",
-          source_kind: :image_bytes,
           ext: "png"
         )
       )
@@ -839,7 +832,7 @@ class HiveTuiUpdateTest < Minitest::Test
 
   def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
     attachment = Hive::Tui::Model::Attachment.new(
-      label: "image1", staging_path: "/tmp/image-1.png", source_kind: :image_bytes, ext: "png"
+      label: "image1", staging_path: "/tmp/image-1.png", ext: "png"
     )
     starting = model.with(
       mode: :new_idea,

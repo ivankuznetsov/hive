@@ -21,7 +21,6 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     Hive::Tui::Model::Attachment.new(
       label: label,
       staging_path: "/tmp/hive-tui-composer/#{label}.png",
-      source_kind: :image_bytes,
       ext: "png"
     )
   end

@@ -67,15 +67,14 @@ module Hive
     # asset basename — derivation from `staging_path` is intentionally
     # avoided so a future rename/move of the staging file cannot let
     # the body markdown extension drift away from the on-disk copy.
-    Model::Attachment = Data.define(:label, :staging_path, :source_kind, :ext) do
+    Model::Attachment = Data.define(:label, :staging_path, :ext) do
       # Canonicalize `ext` once at construction so callers can trust the
       # field's documented invariant ("lowercased, leading-dot stripped,
       # `png` fallback") instead of every reader re-normalizing.
-      def initialize(label:, staging_path:, source_kind:, ext:)
+      def initialize(label:, staging_path:, ext:)
         super(
           label: label,
           staging_path: staging_path,
-          source_kind: source_kind,
           ext: Hive::Tui::ComposerStaging.normalized_extension(ext)
         )
       end

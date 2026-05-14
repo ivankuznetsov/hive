@@ -141,7 +141,6 @@ class HiveTuiModelTest < Minitest::Test
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: "/tmp/hive-tui-composer/image-1.png",
-      source_kind: :image_bytes,
       ext: "png"
     )
     a = Hive::Tui::Model.initial

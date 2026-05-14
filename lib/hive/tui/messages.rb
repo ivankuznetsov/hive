@@ -282,7 +282,7 @@ module Hive
       # `:ext` carries the canonical (normalized) extension chosen at
       # staging time so the downstream `Attachment` record never has
       # to re-derive it from `staging_path`.
-      NewIdeaImageAttached = Data.define(:label, :staging_path, :source_kind, :ext)
+      NewIdeaImageAttached = Data.define(:label, :staging_path, :ext)
 
       # Cursor navigation within the new-idea prompt.
       NewIdeaCursorLeft = Class.new

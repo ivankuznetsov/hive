@@ -456,13 +456,13 @@ module Hive
       end
 
       def stage_image_bytes(result)
-        stage_image(result.ext, :image_bytes) do |path|
+        stage_image(result.ext) do |path|
           Hive::Tui::ComposerStaging.write_bytes!(path, result.bytes)
         end
       end
 
       def stage_image_file(result)
-        stage_image(result.ext, :image_file) do |path|
+        stage_image(result.ext) do |path|
           Hive::Tui::ComposerStaging.copy_file!(result.path, path)
         end
       end
@@ -480,7 +480,7 @@ module Hive
       # model that never decrements on prune — `attachments.size + 1`
       # would re-use a label after a prune-then-paste cycle and silently
       # overwrite the previously staged asset.
-      def stage_image(ext, source_kind)
+      def stage_image(ext)
         normalized_ext = Hive::Tui::ComposerStaging.normalized_extension(ext)
         number = @hive_model.new_idea_attachment_counter.to_i + 1
         placeholder = "[image#{number}]"
@@ -514,7 +514,6 @@ module Hive
         message = Hive::Tui::Messages::NewIdeaImageAttached.new(
           label: label,
           staging_path: path,
-          source_kind: source_kind,
           ext: normalized_ext
         )
         new_model, _cmd = Hive::Tui::Update.apply(@hive_model, message)

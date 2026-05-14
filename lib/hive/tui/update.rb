@@ -440,7 +440,6 @@ module Hive
         attachment = Model::Attachment.new(
           label: msg.label,
           staging_path: msg.staging_path,
-          source_kind: msg.source_kind,
           ext: msg.ext
         )
         # Bump the monotonic counter past `msg.label`'s numeric suffix

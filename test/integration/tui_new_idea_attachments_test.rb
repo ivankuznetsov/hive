@@ -42,8 +42,8 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         File.binwrite(first, "one".b)
         File.binwrite(second, "two".b)
         attachments = [
-          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: first, source_kind: :image_bytes, ext: "png"),
-          Hive::Tui::Model::Attachment.new(label: "image2", staging_path: second, source_kind: :image_bytes, ext: "png")
+          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: first, ext: "png"),
+          Hive::Tui::Model::Attachment.new(label: "image2", staging_path: second, ext: "png")
         ]
         bubble = model_for(
           project: project,
@@ -80,7 +80,7 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         path = File.join(staging_dir, "image-1.png")
         File.binwrite(path, "image".b)
         attachments = [
-          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: path, source_kind: :image_bytes, ext: "png")
+          Hive::Tui::Model::Attachment.new(label: "image1", staging_path: path, ext: "png")
         ]
         bubble = model_for(project: project, buffer: "[image1]", attachments: attachments, staging_dir: staging_dir)
 

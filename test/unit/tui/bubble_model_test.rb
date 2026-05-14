@@ -622,7 +622,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal 1, @model.hive_model.new_idea_attachments.size
     attachment = @model.hive_model.new_idea_attachments.first
     assert_equal "image1", attachment.label
-    assert_equal :image_bytes, attachment.source_kind
     assert_equal bytes, File.binread(attachment.staging_path)
     assert File.directory?(@model.hive_model.new_idea_staging_dir)
   ensure
@@ -673,7 +672,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       attachment = @model.hive_model.new_idea_attachments.first
       assert_equal "[image1]", @model.hive_model.new_idea_buffer
-      assert_equal :image_file, attachment.source_kind
       assert_equal "fixture-image", File.binread(attachment.staging_path)
       refute_equal src, attachment.staging_path
     ensure
@@ -807,7 +805,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: File.join(dir, "image-1.png"),
-      source_kind: :image_bytes,
       ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
@@ -1021,7 +1018,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: "/tmp/hive-tui-composer/image-1.png",
-      source_kind: :image_bytes,
       ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
@@ -1043,7 +1039,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: "/tmp/hive-tui-composer/missing-image-1.png",
-      source_kind: :image_bytes,
       ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
@@ -1070,7 +1065,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
         attachment = Hive::Tui::Model::Attachment.new(
           label: "image1",
           staging_path: staging_path,
-          source_kind: :image_bytes,
           ext: "png"
         )
         snap = Hive::Tui::Snapshot.from_payload(
@@ -1117,7 +1111,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: staging_path,
-      source_kind: :image_bytes,
       ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(

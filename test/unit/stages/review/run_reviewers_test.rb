@@ -722,4 +722,64 @@ class RunReviewersTest < Minitest::Test
              "pass 5 has its own fix-guardrail-05.md state (absent here = not approved)"
     end
   end
+
+  # plan U4 AC3 (round-1 finding): the orchestrator MUST call
+  # GithubPublisher.publish! once per successful reviewer. A regression
+  # that drops the `publish_review_file(...)` call inside
+  # `run_reviewers` would otherwise be invisible — every other test
+  # either runs with no pr.md (publisher short-circuits :missing_pr) or
+  # stubs `run_reviewers` whole. This test wires a real pr.md +
+  # fake-gh in PATH and asserts `gh pr comment` is invoked once per
+  # reviewer.
+  def test_run_reviewers_publishes_each_successful_reviewer_to_github
+    prev_path = ENV["PATH"]
+    gh_dir = Dir.mktmpdir("fake-gh-bin")
+    File.symlink(FAKE_GH_FIXTURE, File.join(gh_dir, "gh"))
+    ENV["PATH"] = "#{gh_dir}:#{prev_path}"
+    log_dir = Dir.mktmpdir("fake-gh-log")
+    ENV["HIVE_FAKE_GH_LOG_DIR"] = log_dir
+
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "pr.md"), <<~MD)
+        ---
+        pr_url: https://example.com/pr/77
+        pr_number: 77
+        ---
+
+        <!-- COMPLETE pr_url=https://example.com/pr/77 is_draft=true -->
+      MD
+
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" },
+            { "name" => "rev-b", "output_basename" => "rev-b" }
+          ],
+          "github_publish" => { "enabled" => true, "max_attempts" => 1 }
+        }
+      }
+      adapters = [
+        OkReviewer.new(cfg["review"]["reviewers"][0], make_ctx(dir)),
+        OkReviewer.new(cfg["review"]["reviewers"][1], make_ctx(dir))
+      ]
+
+      with_stubbed_dispatch(adapters) do
+        Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      end
+
+      log_path = File.join(log_dir, "fake-gh-argv.log")
+      log = File.exist?(log_path) ? File.read(log_path) : ""
+      comment_invocations = log.scan(/^cmd=gh\b.*\narg=pr\narg=comment\n/m).size
+      # Some fake-gh argv-log formats split per arg per line; fall
+      # back to counting `arg=comment` occurrences.
+      comment_invocations = log.scan(/^arg=comment$/).size if comment_invocations.zero?
+      assert_equal 2, comment_invocations,
+                   "publisher must be invoked once per successful reviewer (got log=#{log.inspect})"
+    end
+  ensure
+    ENV["PATH"] = prev_path
+    FileUtils.rm_rf(gh_dir) if gh_dir
+    FileUtils.rm_rf(log_dir) if log_dir
+    ENV.delete("HIVE_FAKE_GH_LOG_DIR")
+  end
 end

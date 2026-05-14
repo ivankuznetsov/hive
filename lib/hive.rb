@@ -336,6 +336,9 @@ module Hive
     end
   end
 
+  class TmuxError < AgentError
+  end
+
   class ConfigError < Error
     def exit_code
       ExitCodes::CONFIG

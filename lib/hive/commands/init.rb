@@ -221,7 +221,7 @@ module Hive
       # the per-project scaffolding values (project name, default branch,
       # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / development_agent /
-      # enabled_reviewers / budgets / timeouts). The single source of
+      # enabled_reviewers / triage_bias / budgets / timeouts). The single source of
       # truth for the answers hash is `Prompts#collect`; this binding
       # never invents defaults of its own — callers always supply
       # `answers:` (production: from Prompts; tests: explicit hashes).
@@ -233,6 +233,7 @@ module Hive
           @planning_agent = answers.fetch("planning_agent")
           @development_agent = answers.fetch("development_agent")
           @enabled_reviewers = answers.fetch("enabled_reviewers")
+          @triage_bias = answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS)
           @budgets = answers.fetch("budgets")
           @timeouts = answers.fetch("timeouts")
           # Default to true for legacy answer hashes that don't carry the
@@ -243,7 +244,7 @@ module Hive
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :planning_agent, :development_agent,
-                    :enabled_reviewers, :budgets, :timeouts, :daemon_enabled
+                    :enabled_reviewers, :triage_bias, :budgets, :timeouts, :daemon_enabled
 
         def binding_for_erb
           binding

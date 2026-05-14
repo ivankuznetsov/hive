@@ -56,6 +56,8 @@ module Hive
       # tick `[x]` would re-flow into the next pass's fix prompt and
       # over-amplify guardrail findings.
       ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success- errors-].freeze
+      ESCALATION_Q_RE = /^\s*###\s+Q(\d+)\.\s*(.*?)\s*$/.freeze
+      ESCALATION_A_RE = /^\s*###\s+A(\d+)\.\s*$/.freeze
 
       # Per-pass sentinel: `reviews/fix-success-NN.md` is written after
       # a pass's Phase 4 fix succeeds (or Phase 2 produced zero findings
@@ -925,17 +927,83 @@ module Hive
           next unless reviewer_file?(name)
 
           File.readlines(path).each do |line|
-            out << "[#{name}] #{line}" if line =~ /^\s*-\s+\[x\]\s+/
+            out << "[#{name}] #{line}" if auto_fix_finding_line?(line)
           end
         end
+        out << collect_answered_escalation_findings(ctx)
         out
+      end
+
+      def auto_fix_finding_line?(line)
+        return false unless line =~ /^\s*-\s+\[x\]\s+/
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX)\b/i
+
+        true
+      end
+
+      def collect_answered_escalation_findings(ctx)
+        path = Hive::Stages::Review::Triage.escalations_path(ctx)
+        questions = parse_escalation_questions(path)
+        return "" if questions.empty?
+
+        answered = questions.select { |q| q[:answer].strip != "" }
+        return "" if answered.empty?
+
+        name = File.basename(path)
+        out = +"\n# User answers from #{name}\n"
+        answered.each do |q|
+          out << "[#{name}] USER-ANSWERED ESCALATION Q#{q[:number]}: #{q[:question]}\n"
+          body = q[:body].strip
+          out << prefixed_block(name, body) unless body.empty?
+          out << "[#{name}] Answer:\n"
+          out << prefixed_block(name, q[:answer].strip)
+          out << "\n"
+        end
+        out
+      end
+
+      def prefixed_block(name, text)
+        text.lines(chomp: true).map { |line| "[#{name}] #{line}\n" }.join
       end
 
       def count_escalations(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         return 0 unless File.exist?(path)
 
+        questions = parse_escalation_questions(path)
+        return questions.count { |q| q[:answer].strip.empty? } unless questions.empty?
+
         File.readlines(path).count { |l| l =~ /^\s*-\s+\[\s*\]\s+/ }
+      end
+
+      def parse_escalation_questions(path)
+        return [] unless File.exist?(path)
+
+        questions = []
+        current = nil
+        mode = nil
+
+        File.readlines(path).each do |line|
+          if (match = ESCALATION_Q_RE.match(line))
+            questions << current if current
+            current = {
+              number: match[1].to_i,
+              question: match[2].strip,
+              body: +"",
+              answer: +""
+            }
+            mode = :body
+          elsif current && (match = ESCALATION_A_RE.match(line)) && match[1].to_i == current[:number]
+            mode = :answer
+          elsif current && mode
+            current[mode] << line
+          end
+        end
+
+        questions << current if current
+        questions
+      rescue SystemCallError, IOError
+        []
       end
 
       def write_manual_escalations(ctx)
@@ -944,16 +1012,28 @@ module Hive
         FileUtils.mkdir_p(File.dirname(path))
 
         body = +"# Escalations for pass #{format('%02d', ctx.pass)}\n\n"
-        body << "_Triage disabled; all unchecked reviewer findings require user review._\n\n"
+        body << "_Triage disabled; answer the questions below or edit reviewer files directly._\n\n"
+        body << "## Round 1\n\n"
+
+        question = 0
 
         reviewer_files.each do |reviewer_file|
           findings = File.readlines(reviewer_file).select { |line| line =~ /^\s*-\s+\[\s*\]\s+/ }
           next if findings.empty?
 
-          body << "## #{File.basename(reviewer_file)}\n\n"
-          findings.each { |line| body << line }
-          body << "\n"
+          findings.each do |line|
+            question += 1
+            body << "### Q#{question}. What should hive do with this reviewer finding?\n"
+            body << "Source: #{File.basename(reviewer_file)}\n"
+            body << "Finding: #{line.sub(/^\s*-\s+\[\s*\]\s+/, '').strip}\n"
+            body << "Context checked: triage disabled\n"
+            body << "Why not auto-fixable: triage did not classify this pass\n"
+            body << "Suggested default: answer with the desired fix, or say skip/no-fix\n"
+            body << "### A#{question}.\n\n"
+          end
         end
+
+        body << "_No unchecked reviewer findings found._\n" if question.zero?
 
         File.write(path, body)
       end

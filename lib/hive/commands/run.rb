@@ -264,8 +264,9 @@ module Hive
           # - reason=reviewer_partial_failure: read reviews/errors-NN.md;
           #   either fix the reviewer config and re-run, or clear the
           #   marker to accept partial coverage.
-          # - escalations-only (no reason or unknown reason): the
-          #   legacy reviewers/escalations file-set per pass.
+          # - escalations-only (no reason or unknown reason): open the
+          #   Q&A-style escalations file for the pass; answered Q/A
+          #   blocks are consumed by the next fix pass.
           reason = marker.attrs["reason"].to_s
           pass = marker.attrs["pass"].to_s
           pass_suffix = pass.match?(/\A\d+\z/) ? format("%02d", pass.to_i) : nil
@@ -289,9 +290,12 @@ module Hive
                                 "to accept the partial coverage, then re-run",
               "rerun_with" => "hive run #{task.folder}" }
           else
+            target = pass_suffix ? "#{task.folder}/reviews/escalations-#{pass_suffix}.md" : task.folder
             { "kind" => kind::EDIT,
-              "target" => task.folder,
-              "instructions" => "toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, then re-run",
+              "target" => target,
+              "instructions" => "answer the open ### A1./A2. questions in #{File.basename(target)}; " \
+                                "answered escalations are consumed by the next fix pass. " \
+                                "For legacy reviewer files, `[x]` still marks an accepted auto-fix. Then re-run.",
               "rerun_with" => "hive run #{task.folder}" }
           end
         when :review_stale
@@ -369,7 +373,7 @@ module Hive
         when :execute_stale
           puts "  next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run"
         when :review_waiting
-          puts "  next: toggle [x] on findings in reviews/*-NN.md or reviews/escalations-NN.md, " \
+          puts "  next: answer open questions in reviews/escalations-NN.md; legacy reviewer files still accept [x], " \
                "then `hive run #{task.folder}`"
         when :review_stale
           puts "  next: if highest-pass reviewer files lack escalations-NN.md, remove REVIEW_STALE and re-run; " \

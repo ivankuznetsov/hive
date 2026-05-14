@@ -94,9 +94,14 @@ module Hive
         phase reason pass attempts elapsed files matches exception_class
       ].freeze
 
-      def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
+      def initialize(
+        hive_model: Hive::Tui::Model.initial,
+        dispatch: ->(_msg) { },
+        clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) }
+      )
         @hive_model = hive_model
         @dispatch = dispatch
+        @clipboard_probe = clipboard_probe
         # `@healed_folders` is touched from the main runner thread
         # (`auto_heal_kill_class_errors` registers folders before
         # spawning heals) AND from heal Threads (which evict on
@@ -402,7 +407,7 @@ module Hive
           return [ @hive_model, nil ]
         end
 
-        result = Hive::Tui::Clipboard.probe(pasted_text: raw_text)
+        result = @clipboard_probe.call(pasted_text: raw_text)
         # Reset the consecutive-timeout latch on any non-timeout
         # probe outcome so a recovered compositor immediately rearms
         # the flash for the next wedge cycle.

@@ -541,11 +541,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def with_clipboard_probe_stub(stub_proc)
-    sentinel = Hive::Tui::Clipboard.method(:probe)
-    Hive::Tui::Clipboard.define_singleton_method(:probe, &stub_proc)
+    sentinel = @model.instance_variable_get(:@clipboard_probe)
+    @model.instance_variable_set(:@clipboard_probe, stub_proc)
     yield
   ensure
-    Hive::Tui::Clipboard.define_singleton_method(:probe, sentinel) if sentinel
+    @model.instance_variable_set(:@clipboard_probe, sentinel) if @model
   end
 
   def with_composer_ensure_dir_stub(stub_proc)

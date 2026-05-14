@@ -1,81 +1,79 @@
 ---
-title: Hive Wiki Index
+title: hive Wiki
 type: index
-created: 2026-04-25
+source: wiki/**/*.md
+created: 2026-05-14
 updated: 2026-05-14
-tags: [index]
+tags: [index, wiki]
 ---
 
-# hive — Wiki Index
 
-*Auto-generated. Do not edit manually.*
+**TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
+Page count: 56
+Updated: 2026-05-14
 
-**Pages**: 51 (excl. `index.md`/`log.md`) · **Date**: 2026-05-14
+## Pages
 
-## Top level
+- [[active-areas]] — `wiki/active-areas.md`
+- [[architecture]] — `wiki/architecture.md`
+- [[cli]] — `wiki/cli.md`
+- [[commands]] — `wiki/commands.md`
+- [[commands/approve]] — `wiki/commands/approve.md`
+- [[commands/daemon]] — `wiki/commands/daemon.md`
+- [[commands/doctor]] — `wiki/commands/doctor.md`
+- [[commands/findings]] — `wiki/commands/findings.md`
+- [[commands/forget]] — `wiki/commands/forget.md`
+- [[commands/init]] — `wiki/commands/init.md`
+- [[commands/markers]] — `wiki/commands/markers.md`
+- [[commands/new]] — `wiki/commands/new.md`
+- [[commands/prune]] — `wiki/commands/prune.md`
+- [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
+- [[commands/run]] — `wiki/commands/run.md`
+- [[commands/stage_action]] — `wiki/commands/stage_action.md`
+- [[commands/status]] — `wiki/commands/status.md`
+- [[commands/tui]] — `wiki/commands/tui.md`
+- [[decisions]] — `wiki/decisions.md`
+- [[dependencies]] — `wiki/dependencies.md`
+- [[e2e]] — `wiki/e2e.md`
+- [[gaps]] — `wiki/gaps.md`
+- [[index]] — `wiki/index.md`
+- [[log]] — `wiki/log.md`
+- [[modules/agent]] — `wiki/modules/agent.md`
+- [[modules/agent_profile]] — `wiki/modules/agent_profile.md`
+- [[modules/config]] — `wiki/modules/config.md`
+- [[modules/daemon]] — `wiki/modules/daemon.md`
+- [[modules/execute_waiting_action]] — `wiki/modules/execute_waiting_action.md`
+- [[modules/findings]] — `wiki/modules/findings.md`
+- [[modules/git_ops]] — `wiki/modules/git_ops.md`
+- [[modules/lock]] — `wiki/modules/lock.md`
+- [[modules/markers]] — `wiki/modules/markers.md`
+- [[modules/metrics]] — `wiki/modules/metrics.md`
+- [[modules/protected_files]] — `wiki/modules/protected_files.md`
+- [[modules/rebase]] — `wiki/modules/rebase.md`
+- [[modules/reviewers]] — `wiki/modules/reviewers.md`
+- [[modules/secret_patterns]] — `wiki/modules/secret_patterns.md`
+- [[modules/stages]] — `wiki/modules/stages.md`
+- [[modules/task]] — `wiki/modules/task.md`
+- [[modules/task_action]] — `wiki/modules/task_action.md`
+- [[modules/task_resolver]] — `wiki/modules/task_resolver.md`
+- [[modules/workflows]] — `wiki/modules/workflows.md`
+- [[modules/worktree]] — `wiki/modules/worktree.md`
+- [[operating]] — `wiki/operating.md`
+- [[stages/brainstorm]] — `wiki/stages/brainstorm.md`
+- [[stages/done]] — `wiki/stages/done.md`
+- [[stages/execute]] — `wiki/stages/execute.md`
+- [[stages/inbox]] — `wiki/stages/inbox.md`
+- [[stages/index]] — `wiki/stages/index.md`
+- [[stages/plan]] — `wiki/stages/plan.md`
+- [[stages/pr]] — `wiki/stages/pr.md`
+- [[stages/review]] — `wiki/stages/review.md`
+- [[state-model]] — `wiki/state-model.md`
+- [[templates]] — `wiki/templates.md`
+- [[testing]] — `wiki/testing.md`
 
-- [[architecture]] — layer cake, process model, two filesystem trees, agent invocation contract, conventions.
-- [[state-model]] — directory layout, marker grammar, state files, slug rules, configs, frontmatter, lock files, worktree pointer.
-- [[cli]] — top-level CLI surface (entry point, command table, error conventions).
-- [[dependencies]] — runtime gems, dev gems, external CLI deps, Ruby version, stdlib reliance.
-- [[decisions]] — 25 ADRs (ADR-024 covers daemon-mode autonomy; ADR-025 covers the additive-required JSON-envelope policy).
-- [[active-areas]] — what's currently in flight and what's deferred.
-- [[gaps]] — coverage table, open questions, patterns not yet documented.
-- [[templates]] — ERB template catalogue and prompt-injection boundary policy.
-- [[testing]] — minitest layout, fixtures, lint policy.
-- [[e2e]] — outer real-subprocess CLI/TUI e2e suite, scenario DSL, artifact contract.
-- [[operating]] — daemon install + autostart guide for Linux (systemd-user) and macOS (launchd), dry-run shakedown, per-project enrollment, troubleshooting.
+## Maintenance
 
-## Commands
-
-- [[commands/init]] — bootstrap orphan branch, attach worktree, register globally.
-- [[commands/new]] — capture an idea, derive a slug, scaffold `idea.md`.
-- [[commands/run]] — dispatcher: lock → auto-rebase pre-step → stage runner → commit → report (`--json` and `--no-rebase` supported).
-- [[commands/rebase-status]] — read-only inspector reporting whether the next `hive run` would attempt an auto-rebase, and how far behind `origin/<default>` the worktree is. Never mutates; never fetches.
-- [[commands/status]] — read-only table of every active task across registered projects (`--json` supported).
-- [[commands/tui]] — live, keystroke-driven curses dashboard over `hive status` (human-only; no JSON).
-- [[commands/approve]] — agent-callable `mv <task> <next-stage>/` with marker validation, ambiguity resolution, and a hive/state commit per move.
-- [[commands/findings]] — `hive findings` / `accept-finding` / `reject-finding`: list and toggle GFM-checkbox findings in `reviews/ce-review-NN.md`.
-- [[commands/stage_action]] — `hive brainstorm` / `plan` / `develop` / `pr` / `archive` workflow verbs (promote-or-run).
-- [[commands/markers]] — `hive markers clear FOLDER --name <NAME>` removes a recovery marker (`REVIEW_STALE` etc.) from `task.md` so an agent can recover from `REVIEW_*_STALE` / `REVIEW_ERROR` without hand-editing.
-- [[commands/forget]] — `hive forget NAME [--json]` drop one named entry from the global registry (inverse of `hive init`). `.hive-state` on disk is not touched.
-- [[commands/prune]] — `hive prune [--dry-run] [--json]` bulk-drop registry entries whose `path` is gone or whose row shape is invalid.
-- [[commands/daemon]] — `hive daemon start|stop|status|reload|tail|enable|disable` auto-advancing dispatcher (ADR-024). Polls `hive status --json` and fires workflow verbs on tasks ready to advance. Per-project enrollment via `hive daemon enable PROJECT` (or `--all`).
-- [[commands/doctor]] — `hive doctor [--json]` per-stage and per-reviewer skill-install preflight (also runs non-fatally at end of `hive init`). Emits `hive-doctor.v1` envelope with `configured_skill` + `skill` per row.
-- `hive metrics rollback-rate [--days N] [--project NAME] [--json]` — fraction of fix-agent commits later reverted, broken down by triage bias / fix phase. See [[cli]] and [[stages/review]].
-
-## Stages
-
-- [[stages/index]] — seven-stage overview.
-- [[stages/inbox]] — inert capture zone.
-- [[stages/brainstorm]] — Q&A round-by-round.
-- [[stages/plan]] — `/compound-engineering:ce-plan` driven plan.
-- [[stages/execute]] — worktree + implementation (impl-only since ADR-014).
-- [[stages/review]] — autonomous review loop: CI-fix → reviewers → triage → fix → guardrail → browser-test.
-- [[stages/pr]] — push branch + `gh pr create` (idempotent).
-- [[stages/done]] — print cleanup commands, stamp COMPLETE.
-
-## Modules
-
-- [[modules/task]] — path parser & value object.
-- [[modules/markers]] — locked HTML-comment marker protocol.
-- [[modules/lock]] — per-task `.lock` + per-project `.commit-lock`.
-- [[modules/worktree]] — git worktree wrapper + path-prefix validation.
-- [[modules/git_ops]] — default-branch detection, hive-state bootstrap, `hive_commit`.
-- [[modules/agent]] — agent CLI subprocess wrapper with timeout/budget/atomic exit-status capture.
-- [[modules/agent_profile]] — per-CLI invocation contract value-object + registry (claude / codex / pi).
-- [[modules/config]] — global + per-project YAML configs with deep-merge defaults.
-- [[modules/stages]] — seven-stage list + helpers; single source of truth for `DIRS` / `NAMES` / `SHORT_TO_FULL`.
-- [[modules/findings]] — parser + writer for `reviews/ce-review-NN.md`; CRLF-safe round-trip toggle.
-- [[modules/task_resolver]] — slug-or-folder TARGET resolution shared by every agent-callable command.
-- [[modules/task_action]] — `(task, marker) → action key/label/command` classifier driving `hive status` and `next_action` emission.
-- [[modules/execute_waiting_action]] — shared `EXECUTE_WAITING reason=...` recovery target builder for run/status/TUI.
-- [[modules/workflows]] — verb→stage SSOT (brainstorm/plan/develop/pr/archive) consumed by every workflow command.
-- [[modules/reviewers]] — Phase 2 reviewer adapter layer (dispatch, Context, Result, Agent, SyntheticTask).
-- [[modules/metrics]] — `hive metrics rollback-rate` library (trailer parsing, revert detection).
-- [[modules/secret_patterns]] — shared regex set for credential/secret detection.
-- [[modules/protected_files]] — SHA-256 snapshot/diff helper for orchestrator-owned files.
-- [[modules/daemon]] — auto-advancing dispatcher (ADR-024): Policy + ConcurrencyController + ChildSupervisor + StatusConsumer + Dispatcher + Logger + PrMergeWatcher.
-- [[modules/rebase]] — auto-rebase orchestrator (`Hive::Rebase.perform`): pre-run guards, fetch with timeout, conflict-resolution agent dispatch (bounded to 5), fail-soft abort, post-rebase `execute_base_head` rewrite. Fail-soft: never raises; returns `Result` with closed-enum `reason`.
+- Managed config: `.llm-wiki/config.json`
+- Headless refresh: `.llm-wiki/refresh-wiki.sh`
+- Post-commit refresh: `.llm-wiki/post-commit-refresh.sh`

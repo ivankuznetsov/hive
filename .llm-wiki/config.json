@@ -1,0 +1,10 @@
+{
+  "headless_agent": "codex",
+  "context_agents": [
+    "claude",
+    "codex",
+    "pi"
+  ],
+  "main_wiki_path": "/home/asterio/wikis/master/wiki",
+  "created_by": "codex"
+}

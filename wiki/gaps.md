@@ -66,3 +66,9 @@ tags: [gap, todo]
 - [[active-areas]]
 - [[index]]
 - [[e2e]]
+
+## Resolved Bootstrap Validation
+
+- 2026-05-14: Managed llm-wiki config, agent context, post-commit hook, and daily systemd timer were validated for `hive`.
+- 2026-05-14: `qmd update`, `qmd embed`, and collection-scoped `qmd search` passed for `hive`. QMD tries GPU first and falls back to CPU on this host because Vulkan headers are missing.
+- 2026-05-14: `qmd query` can still be slow under the sandboxed local-model path; use `qmd search` for maintenance checks and fall back to `rg` when semantic generation is too slow.

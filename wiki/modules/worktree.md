@@ -41,10 +41,22 @@ If passed explicitly, that's used. Otherwise:
 1. `mkdir -p` the parent of `path`.
 2. Probe `git show-ref --verify refs/heads/<branch_name>`:
    - If it exists, run `git worktree add <path> <branch_name>` (attach to existing branch).
-   - If not, run `git worktree add <path> -b <branch_name> <default_branch>` (create new branch off default).
+   - If not, **resolve the freshest base** via `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
 3. On non-zero exit, raise `Hive::WorktreeError` with the captured stderr.
 
 This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history.
+
+### `freshest_base(default_branch)` — origin-first base resolution
+
+New branches always start at `origin/<default>` (after a quick fetch) rather than local `<default>`. The reason is concrete: a contributor who hasn't pulled in a while has a stale local default — `git worktree add -b <slug> <local_default>` would silently produce a worktree missing every upstream commit, and reviewers in 5-review would surface those missing commits as phantom deletions (this was the agent-plugins-was-7-commits-behind incident). Auto-rebase (PR #69) handles drift in long-running worktrees; this handles drift at *creation* time.
+
+The helper:
+1. Checks `git config remote.origin.url` — if no `origin` is configured (early-stage repos, internal forks without upstream), return `default_branch` (local fallback). No fetch attempted.
+2. Runs `git fetch origin <default_branch>` with non-interactive env (`GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` — same shape as `GitOps#fetch_default_branch`) so credential prompts cannot hang worktree creation.
+3. On fetch failure (network down, auth missing, dead remote), warn to stderr (`[hive] worktree base: fetch origin <default> failed (<err>); branching from local <default>`) and return `default_branch` (fall back). The worktree is still created so the operator can keep working offline.
+4. On fetch success, return `"origin/#{default_branch}"`.
+
+Local `<default>` is never modified — any unpushed commits there are preserved. Only the new feature branch's starting point is affected.
 
 ## `remove!`
 

@@ -71,3 +71,27 @@ Claude to write a terminal marker to `brainstorm.md`.
 the per-task `.claude/settings.json`, deletes stale `.done`, and runs a
 narrow `pkill -f` sweep scoped to the task folder's `--add-dir` argument.
 The sweep is defensive; normal cleanup is tmux session termination.
+
+## Runtime Tunables
+
+The integration tests pin these to short intervals; operators debugging
+the runtime can override them in the calling shell:
+
+- `HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC` (default `0.5`) — how often the
+  `.done` watchdog wakes to re-read the marker.
+- `HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC` (default `5`) — how often
+  Hive captures the pane tail as a fallback when the Stop hook does not
+  fire.
+- `HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC` (default `5`) — shared
+  default for the two ready-waits below. Override one of them directly
+  to tune that wait without affecting the other.
+- `HIVE_BRAINSTORM_TMUX_SESSION_READY_WAIT_TIMEOUT_SEC` (defaults to the
+  shared `READY_WAIT_TIMEOUT_SEC`) — budget for tmux session creation
+  after `new-session -d`.
+- `HIVE_BRAINSTORM_TMUX_PID_READY_WAIT_TIMEOUT_SEC` (defaults to the
+  shared `READY_WAIT_TIMEOUT_SEC`) — budget for the claude PID to appear
+  in the pane after the wrapper execs.
+- `HIVE_TMUX_BIN` (default `tmux`) — override the tmux executable path,
+  e.g., to point at a homebrew-installed binary on macOS.
+- `HIVE_TMUX_SOCKET` — optional `-L` socket name, used by integration
+  tests to keep their sessions off the operator's default tmux server.

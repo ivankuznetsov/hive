@@ -149,6 +149,12 @@ class HiveTuiStylesTest < Minitest::Test
     assert Hive::Tui::Styles::FLASH.bold?
   end
 
+  def test_broken_placeholder_style_is_red_bold_and_reversed
+    assert_equal "1", Hive::Tui::Styles::BROKEN_PLACEHOLDER.get_foreground
+    assert Hive::Tui::Styles::BROKEN_PLACEHOLDER.bold?
+    assert Hive::Tui::Styles::BROKEN_PLACEHOLDER.reverse?
+  end
+
   def test_stalled_banner_is_yellow_and_reversed
     assert_equal "3", Hive::Tui::Styles::STALLED.get_foreground
     assert Hive::Tui::Styles::STALLED.reverse?

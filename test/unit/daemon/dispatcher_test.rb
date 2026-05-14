@@ -315,7 +315,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_status_active_agent_row_counts_toward_project_cap
     rows = [
-      row(slug: "running", stage: "5-review", marker: "review_working",
+      row(slug: "running", stage: "6-review", marker: "review_working",
           action: "agent_running", command: nil, claude_pid_alive: true),
       row(slug: "ready", action: "ready_to_plan",
           command: "hive plan ready --from 2-brainstorm")
@@ -329,6 +329,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
     blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
     refute_nil blocked, "ready row must block while an active agent is already running"
     assert_equal "project_cap", blocked[1][:reason]
+  end
+
+  def test_agent_running_rows_from_prior_daemon_count_toward_global_cap
+    rows = [
+      row(slug: "already-running", action: "agent_running", command: nil, mtime: T0 - 60),
+      row(slug: "ready", action: "ready_to_plan", command: "hive plan ready --from 2-brainstorm")
+    ]
+    rows.first.claude_pid_alive = true
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    ctrl.instance_variable_set(:@max_concurrent_runs, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
+    refute_nil blocked, "visible running agents must consume capacity after daemon restart"
+    assert_equal "global_cap", blocked[1][:reason]
   end
 
   def test_needs_input_rows_do_not_count_toward_project_cap
@@ -350,7 +367,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_status_agent_row_for_daemon_child_is_not_double_counted
     rows = [
-      row(slug: "running", stage: "5-review", marker: "review_working",
+      row(slug: "running", stage: "6-review", marker: "review_working",
           action: "agent_running", command: nil, claude_pid_alive: true),
       row(slug: "ready", action: "ready_to_plan",
           command: "hive plan ready --from 2-brainstorm")
@@ -359,7 +376,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.controller.instance_variable_set(:@max_concurrent_runs, 2)
     ctrl.record_dispatch(
       pid: 999, project: "p1", slug: "running",
-      stage: "5-review", command: "hive review running",
+      stage: "6-review", command: "hive review running",
       started_at: T0, state_file_mtime: T0 - 60
     )
 
@@ -367,6 +384,21 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal 1, sup.spawned.size,
                  "the status row for a daemon-owned child must not consume a second slot"
+    assert_equal "ready", sup.spawned.first[:slug]
+  end
+
+  def test_stale_agent_running_row_does_not_consume_capacity
+    rows = [
+      row(slug: "stale", action: "agent_running", command: nil, mtime: T0 - 60),
+      row(slug: "ready", action: "ready_to_plan", command: "hive plan ready --from 2-brainstorm")
+    ]
+    rows.first.claude_pid_alive = false
+    dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: rows)
+    ctrl.instance_variable_set(:@max_concurrent_runs, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size
     assert_equal "ready", sup.spawned.first[:slug]
   end
 

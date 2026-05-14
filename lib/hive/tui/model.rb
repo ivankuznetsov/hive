@@ -37,6 +37,7 @@ module Hive
       # cycle cannot re-use a label and overwrite a previously staged
       # asset. Resets only on open / cancel / submit.
       :new_idea_attachment_counter,
+      :new_idea_broken_labels, # Array<String> — labels highlighted after rich-submit validation fails
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
       :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
@@ -102,6 +103,7 @@ module Hive
           new_idea_staging_dir: nil,
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
+          new_idea_broken_labels: [],
           flash: nil,
           flash_set_at: nil,
           triage_state: nil,

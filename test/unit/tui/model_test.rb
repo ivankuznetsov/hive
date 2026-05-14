@@ -23,6 +23,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal [], model.new_idea_attachments
     assert_nil model.new_idea_staging_dir
     assert_nil model.new_idea_staging_tmp_root
+    assert_equal [], model.new_idea_broken_labels
     assert_nil model.flash
     assert_nil model.flash_set_at
     assert_nil model.triage_state
@@ -112,7 +113,7 @@ class HiveTuiModelTest < Minitest::Test
     # Schema-pinning test: catch accidental field renames or removals.
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
-                  flash flash_set_at triage_state tail_state cols rows last_error]
+                  new_idea_broken_labels flash flash_set_at triage_state tail_state cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end
 

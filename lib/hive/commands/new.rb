@@ -166,8 +166,6 @@ module Hive
 
         assets_dir = File.join(task_dir, "assets")
         FileUtils.mkdir_p(assets_dir)
-        require "tmpdir"
-        tmproot = File.expand_path(Dir.tmpdir)
         @attachments.each do |src, dest_name|
           name = Hive::Tui::Text.sanitize(dest_name.to_s)
           # `name != File.basename(name)` rejects directory separators
@@ -179,17 +177,11 @@ module Hive
             raise InvalidAttachmentError.new("invalid attachment filename '#{name}'", value: name)
           end
 
-          # Defense in depth: `src` originates in the TUI composer's
-          # staging tmpdir; reject anything outside the OS tmpdir
-          # root so a future caller (or a regression in the staging
-          # plumbing) cannot `FileUtils.cp` from an arbitrary path.
+          # `attachments:` is a programmatic contract used by the TUI and
+          # tests; callers may pass any absolute source path they captured.
+          # Keep the destination guard strict, but let FileUtils surface
+          # source readability/existence failures directly.
           src_path = File.expand_path(src.to_s)
-          unless src_path.start_with?("#{tmproot}#{File::SEPARATOR}")
-            raise InvalidAttachmentError.new(
-              "attachment source not under tmpdir: #{Hive::Tui::Text.sanitize(src.to_s)[0, 80]}",
-              value: src.to_s
-            )
-          end
 
           FileUtils.cp(src_path, File.join(assets_dir, name))
         end

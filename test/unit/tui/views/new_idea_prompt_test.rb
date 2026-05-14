@@ -215,6 +215,32 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     refute_includes out, "[1 image"
   end
 
+  def test_broken_placeholder_ranges_normalizes_zero_padded_labels
+    ranges = Hive::Tui::Views::NewIdeaPrompt.broken_placeholder_ranges(
+      "before [image01] after [image2]",
+      [ "image1" ]
+    )
+
+    start_pos = "before ".length
+    assert_equal [ [ start_pos, start_pos + "[image01]".length ] ], ranges
+  end
+
+  def test_render_preserves_broken_placeholder_text
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_buffer: "see [image1]",
+      new_idea_cursor: "see [image1]".length,
+      new_idea_broken_labels: [ "image1" ],
+      cols: 100
+    )
+
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+
+    assert_includes out.gsub(/\e\[[\d;]*m/, ""), "see [image1]"
+  end
+
   def test_explicit_width_kwarg_clamps_independently_of_cols
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),

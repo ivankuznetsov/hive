@@ -1001,6 +1001,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     assert_equal :new_idea, @model.hive_model.mode
     assert_equal "see [image1]", @model.hive_model.new_idea_buffer
+    assert_equal [ "image1" ], @model.hive_model.new_idea_broken_labels
     assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
   end
 
@@ -1022,6 +1023,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
 
     assert_equal :new_idea, @model.hive_model.mode
+    assert_equal [ "image1" ], @model.hive_model.new_idea_broken_labels
     assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
   end
 
@@ -1043,7 +1045,24 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
 
     assert_equal :new_idea, @model.hive_model.mode
+    assert_equal [ "image1" ], @model.hive_model.new_idea_broken_labels
     assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
+  end
+
+  def test_new_idea_text_edit_clears_broken_placeholder_highlight
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        new_idea_buffer: "see [image1]",
+        new_idea_cursor: "see [image1]".length,
+        new_idea_broken_labels: [ "image1" ]
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::RawTextInput.new(text: "!", paste: false))
+
+    assert_equal [], @model.hive_model.new_idea_broken_labels
   end
 
   def test_rich_new_idea_submit_project_not_found_preserves_buffer_and_attachments

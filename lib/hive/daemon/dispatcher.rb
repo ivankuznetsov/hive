@@ -87,6 +87,8 @@ module Hive
         end
         refresh_active_agent_snapshot(result.rows)
 
+        observe_external_running_rows(result.rows)
+
         # 3. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +
         # cap checks that advance dispatches use, so a project disabled
@@ -294,6 +296,18 @@ module Hive
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: gate.to_s)
         end
+      end
+
+      def observe_external_running_rows(rows)
+        per_project = Hash.new(0)
+        rows.each do |row|
+          next unless row.action == "agent_running"
+          next if row.claude_pid_alive == false
+          next if @controller.running_task?(project: row.project, slug: row.slug)
+
+          per_project[row.project] += 1
+        end
+        @controller.set_external_running_counts(per_project: per_project)
       end
 
       # PR-40 review P2 #4: archive dispatches must respect both

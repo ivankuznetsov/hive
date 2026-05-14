@@ -2172,6 +2172,7 @@ module Hive
             nil
           ]
         end
+        @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
 
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
         if project.nil?
@@ -2244,10 +2245,15 @@ module Hive
         if (reason = rich_new_idea_validation_error(buffer))
           preserve_staging = true
           return [
-            @hive_model.with(flash: reason, flash_set_at: Time.now),
+            @hive_model.with(
+              flash: reason,
+              flash_set_at: Time.now,
+              new_idea_broken_labels: rich_new_idea_broken_labels(buffer)
+            ),
             nil
           ]
         end
+        @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
 
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
         if project.nil?
@@ -2368,6 +2374,15 @@ module Hive
       end
 
       def rich_new_idea_validation_error(buffer)
+        labels = rich_new_idea_broken_labels(buffer)
+        return nil if labels.empty?
+
+        return "broken image placeholders: #{labels.join(', ')}" if labels.size > 1
+
+        "broken image placeholder: #{labels.first}"
+      end
+
+      def rich_new_idea_broken_labels(buffer)
         placeholder_labels = extract_image_labels(buffer).map { |n| "image#{n}" }.to_set
         attachment_labels = @hive_model.new_idea_attachments.map(&:label).to_set
 
@@ -2383,13 +2398,7 @@ module Hive
             attachment.label
           end
         end
-
-        return nil if broken.empty?
-
-        labels = broken.uniq
-        return "broken image placeholders: #{labels.join(', ')}" if labels.size > 1
-
-        "broken image placeholder: #{labels.first}"
+        broken.uniq
       end
 
       def extract_image_labels(buffer)
@@ -2475,6 +2484,7 @@ module Hive
           new_idea_staging_dir: nil,
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
+          new_idea_broken_labels: [],
           flash: text,
           flash_set_at: Time.now
         )

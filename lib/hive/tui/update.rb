@@ -420,7 +420,8 @@ module Hive
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
           new_idea_staging_tmp_root: nil,
-          new_idea_attachment_counter: 0
+          new_idea_attachment_counter: 0,
+          new_idea_broken_labels: []
         )
       end
 
@@ -450,7 +451,8 @@ module Hive
           new_idea_buffer: prefix + placeholder + suffix,
           new_idea_cursor: cursor + placeholder.length,
           new_idea_attachments: model.new_idea_attachments + [ attachment ],
-          new_idea_attachment_counter: next_counter
+          new_idea_attachment_counter: next_counter,
+          new_idea_broken_labels: []
         )
       end
 
@@ -482,7 +484,7 @@ module Hive
         suffix = buffer[cursor..].to_s
         new_buffer = prefix + suffix
         prune_orphan_attachments(
-          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor - 1)
+          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor - 1, new_idea_broken_labels: [])
         )
       end
 
@@ -494,7 +496,7 @@ module Hive
         suffix = buffer[(cursor + 1)..].to_s
         new_buffer = prefix + suffix
         prune_orphan_attachments(
-          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor)
+          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor, new_idea_broken_labels: [])
         )
       end
 
@@ -520,7 +522,8 @@ module Hive
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
           new_idea_staging_tmp_root: nil,
-          new_idea_attachment_counter: 0
+          new_idea_attachment_counter: 0,
+          new_idea_broken_labels: []
         )
       end
 
@@ -540,6 +543,7 @@ module Hive
           return model.with(
             new_idea_buffer: buffer,
             new_idea_cursor: cursor,
+            new_idea_broken_labels: [],
             flash: "title too long",
             flash_set_at: Time.now
           )
@@ -555,7 +559,8 @@ module Hive
         suffix = buffer[cursor..].to_s
         new_model = model.with(
           new_idea_buffer: prefix + text + suffix,
-          new_idea_cursor: cursor + text.length
+          new_idea_cursor: cursor + text.length,
+          new_idea_broken_labels: []
         )
         return new_model unless flash_text
 

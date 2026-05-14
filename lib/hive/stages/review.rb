@@ -643,27 +643,13 @@ module Hive
         return :complete if reviewer_files.empty?
 
         escalations_path = File.join(reviews_dir, "escalations-#{pass_suffix}.md")
-        return :triage_incomplete unless File.exist?(escalations_path)
-
-        # Triage produced escalations. Was the fix completed AND not
-        # superseded by an operator edit?
-        fix_success = fix_success_path(task_folder, pass)
-        if File.exist?(fix_success)
-          # Operator-edit detection: an `escalations-NN.md` mtime strictly
-          # newer than the corresponding `fix-success-NN.md` means the
-          # operator (or a tool acting on their behalf) edited the file
-          # after the fix completed. Treat as :fix_incomplete so the
-          # next `hive run` re-enters Phase 4 with the new edits as
-          # authoritative input. The semantic matches the operator's
-          # mental model: "I edited my answers, re-fix with them."
-          # A `>` (not `>=`) comparison avoids spurious retries from
-          # back-to-back writes inside the same second.
-          if operator_edited_escalations_after_fix?(escalations_path, fix_success)
-            return :fix_incomplete
-          end
-
-          return :complete
+        unless File.exist?(escalations_path)
+          return :triage_incomplete
         end
+
+        # Triage produced escalations. Was the fix completed?
+        fix_success = fix_success_path(task_folder, pass)
+        return :complete if fix_success_fresh?(fix_success, escalations_path)
 
         next_pass_suffix = format("%02d", pass + 1)
         next_pass_started = Dir[File.join(reviews_dir, "*-#{next_pass_suffix}.md")].any? do |path|
@@ -674,16 +660,10 @@ module Hive
         :fix_incomplete
       end
 
-      # Operator-edit detection helper. Returns true when the
-      # escalations file has been modified strictly after the
-      # fix-success sentinel was written. Conservative on I/O errors:
-      # treats unreadable mtimes as "no edit" so a transient stat
-      # failure cannot trigger a surprise fix retry. PR follow-up to
-      # PR #72's TUI `r` gesture (in-TUI force-retry).
-      def operator_edited_escalations_after_fix?(escalations_path, fix_success_path)
-        escalations_mtime = File.mtime(escalations_path)
-        fix_mtime = File.mtime(fix_success_path)
-        escalations_mtime > fix_mtime
+      def fix_success_fresh?(fix_success_path, escalations_path)
+        return false unless File.exist?(fix_success_path)
+
+        File.mtime(fix_success_path) >= File.mtime(escalations_path)
       rescue SystemCallError, IOError
         false
       end

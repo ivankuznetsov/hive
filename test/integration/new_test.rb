@@ -188,6 +188,37 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_attachments_accept_absolute_sources_outside_tmpdir
+    source_dir = Dir.mktmpdir("hive-new-src-", Dir.home)
+    begin
+      fixture = File.join(source_dir, "fixture.png")
+      File.binwrite(fixture, "outside-tmp".b)
+      refute File.expand_path(fixture).start_with?("#{File.expand_path(Dir.tmpdir)}#{File::SEPARATOR}")
+
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          capture_io do
+            Hive::Commands::New.new(
+              project,
+              "outside attachment",
+              body_override: "see ![](assets/bug-1.png)",
+              attachments: [ [ fixture, "bug-1.png" ] ]
+            ).call!
+          end
+
+          glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "outside-attachment-*")]
+          assert_equal 1, glob.size
+          assert_equal "outside-tmp", File.binread(File.join(glob.first, "assets", "bug-1.png"))
+        end
+      end
+    ensure
+      FileUtils.rm_rf(source_dir) if source_dir
+    end
+  end
+
   # Defense-in-depth: copy_attachments! refuses dest_name values that
   # contain a directory separator or `..` segment so a malformed TUI
   # caller cannot escape `<task_dir>/assets/`. Raises the dedicated

@@ -132,9 +132,11 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 
 `Stages::Review#pass_completion_status(folder, N)` classifies the highest-pass on disk as one of:
 
-- **`:complete`** — `reviews/fix-success-NN.md` sentinel exists, OR pass `N+1` reviewer files exist. `next_pass_for` advances to `N+1`.
+- **`:complete`** — `reviews/fix-success-NN.md` sentinel exists AND its mtime is ≥ `escalations-NN.md`'s mtime, OR pass `N+1` reviewer files exist. `next_pass_for` advances to `N+1`.
 - **`:triage_incomplete`** — reviewer files for pass N exist but `escalations-NN.md` is missing. `next_pass_for` returns N; the loop re-runs Phase 2/3 to re-derive escalations.
-- **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, but neither the sentinel nor pass `N+1` reviewer files exist. `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's existing `[x]` marks (mirrors a `REVIEW_WAITING` resume).
+- **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, AND one of: (a) neither the sentinel nor pass `N+1` reviewer files exist (fix never finished), OR (b) the sentinel exists but the operator edited `escalations-NN.md` strictly after the sentinel was written (`escalations.mtime > fix-success.mtime`). `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's current `[x]` marks (mirrors a `REVIEW_WAITING` resume).
+
+The operator-edit detection (branch b above) is what makes the TUI's `r` gesture useful on max_passes-hit `REVIEW_STALE` rows: pressing Enter opens `escalations-NN.md` in `$EDITOR`, the operator edits + saves (which bumps the file's mtime past `fix-success-NN.md`'s), then pressing `r` clears the marker + dispatches `hive run`; the runner sees the edited mtime, treats the pass as `:fix_incomplete` instead of advancing to N+1 (which would hit the `max_passes` cap and re-write `REVIEW_STALE` immediately), and re-runs Phase 4 with the operator's edits as authoritative input. Comparison is strict `>` (not `>=`) so back-to-back same-second writes don't spuriously trigger retries; `File.mtime` errors fail-closed (return false) so a transient stat failure cannot surprise-retry the fix phase.
 
 The sentinel `reviews/fix-success-NN.md` is written by the runner at the two "pass N is done, advance" points: the Phase 2 zero-findings short-circuit to Phase 5, and post-guardrail-not-tripped continuation. `fix-success-` is in `ORCHESTRATOR_OWNED_PREFIXES` so it does not count as a reviewer file, and the current pass's sentinel path is protected during the fix-agent spawn so the agent cannot forge completion.
 

@@ -457,8 +457,118 @@ class RunReviewersTest < Minitest::Test
                    "escalations present, no fix-success / no pass-5 → :fix_incomplete"
 
       File.write(File.join(reviews, "fix-success-04.md"), "ok\n")
+      # Touch fix-success to be the most recent file, then sanity-check
+      # the :complete classification — the operator-edit detection arm
+      # is exercised by the dedicated test below.
+      fix_success = File.join(reviews, "fix-success-04.md")
+      escalations = File.join(reviews, "escalations-04.md")
+      File.utime(Time.now, Time.now, fix_success)
+      File.utime(Time.now - 60, Time.now - 60, escalations)
       assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
-                   "fix-success sentinel → :complete"
+                   "fix-success newer than escalations → :complete"
+    end
+  end
+
+  def test_pass_completion_status_detects_operator_edit_to_escalations_after_fix
+    # Operator-edit detection: when the user edits escalations-NN.md
+    # after fix-success-NN.md was written, the next `hive run` should
+    # re-enter Phase 4 with the new edits as authoritative input. The
+    # mtime comparison drives this — escalations.mtime > fix.mtime
+    # flips :complete → :fix_incomplete so next_pass_for stays on
+    # pass N instead of advancing to pass N+1 (which would trip the
+    # max_passes guard for tasks at the cap).
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-ce-code-review-04.md"), "## High\n- [ ] x\n")
+      escalations = File.join(reviews, "escalations-04.md")
+      fix_success = File.join(reviews, "fix-success-04.md")
+      File.write(escalations, "# Escalations pass 04\n- [ ] open question\n")
+      File.write(fix_success, "ok\n")
+
+      # Baseline: fix-success is newer (typical post-fix state) → :complete.
+      File.utime(Time.now - 60, Time.now - 60, escalations)
+      File.utime(Time.now,      Time.now,      fix_success)
+      assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "post-fix state (fix-success newer than escalations) → :complete"
+
+      # Operator edits escalations → its mtime is now newer than fix-success.
+      File.utime(Time.now + 10, Time.now + 10, escalations)
+      assert_equal :fix_incomplete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "operator-edit detection: escalations newer than fix-success → :fix_incomplete"
+    end
+  end
+
+  def test_pass_completion_status_equal_mtimes_stay_complete
+    # Edge case: same-second writes (rare but possible — e.g., a tool
+    # that touches both files in one tick). A `>` comparison (not `>=`)
+    # avoids spurious retries when escalations.mtime == fix.mtime.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-ce-code-review-04.md"), "## High\n- [ ] x\n")
+      escalations = File.join(reviews, "escalations-04.md")
+      fix_success = File.join(reviews, "fix-success-04.md")
+      File.write(escalations, "# Escalations\n")
+      File.write(fix_success, "ok\n")
+      t = Time.now
+      File.utime(t, t, escalations)
+      File.utime(t, t, fix_success)
+
+      assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                   "equal mtimes must not trip the operator-edit detection"
+    end
+  end
+
+  def test_pass_completion_status_swallows_stat_errors_conservatively
+    # If File.mtime raises (transient I/O, stat race), the detection
+    # helper must return false so the classifier stays at :complete.
+    # Treating an unreadable mtime as "edit detected" would cause
+    # surprise fix retries on transient errors.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-ce-code-review-04.md"), "## High\n- [ ] x\n")
+      File.write(File.join(reviews, "escalations-04.md"), "# Escalations\n")
+      File.write(File.join(reviews, "fix-success-04.md"), "ok\n")
+
+      original_mtime = File.method(:mtime)
+      File.singleton_class.define_method(:mtime) { |_path| raise Errno::EIO, "synthetic" }
+      begin
+        assert_equal :complete, Hive::Stages::Review.pass_completion_status(dir, 4),
+                     "stat failure must NOT trigger a retry — conservative on I/O error"
+      ensure
+        File.singleton_class.define_method(:mtime, original_mtime)
+      end
+    end
+  end
+
+  FakeTaskForNextPass = Struct.new(:folder, :state_file)
+  FakeMarkerForNextPass = Struct.new(:name, :attrs)
+
+  def test_next_pass_for_retries_pass_n_when_operator_edited_escalations
+    # End-to-end: operator edits escalations-04.md after fix-success-04.md
+    # was written → pass_completion_status(4) returns :fix_incomplete →
+    # next_pass_for(marker_without_pass_attr) returns 4 (retry current
+    # pass), NOT 5 (which would advance past the cap for max_passes=4).
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-ce-code-review-04.md"), "## High\n- [ ] x\n")
+      File.write(File.join(reviews, "codex-ce-code-review-04.md"), "## High\n- [ ] y\n")
+      escalations = File.join(reviews, "escalations-04.md")
+      fix_success = File.join(reviews, "fix-success-04.md")
+      File.write(escalations, "# Escalations\n")
+      File.write(fix_success, "ok\n")
+      File.utime(Time.now - 60, Time.now - 60, fix_success)
+      File.utime(Time.now,      Time.now,      escalations)
+
+      task = FakeTaskForNextPass.new(dir, File.join(dir, "task.md"))
+      marker = FakeMarkerForNextPass.new(:none, {})
+      pass = Hive::Stages::Review.next_pass_for(task, marker)
+      assert_equal 4, pass,
+                   "operator edit must retry pass 4, not advance to pass 5 " \
+                   "(would otherwise hit the max_passes cap)"
     end
   end
 

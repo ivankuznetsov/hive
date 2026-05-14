@@ -611,8 +611,9 @@ module Hive
       #
       # Returns one of:
       #   :complete           — reviewer files for pass N+1 exist OR a
-      #                         `fix-success-NN.md` sentinel exists; the
-      #                         runner moved past pass N cleanly.
+      #                         `fix-success-NN.md` sentinel exists AND
+      #                         the operator has not edited escalations
+      #                         since; the runner moved past pass N cleanly.
       #   :triage_incomplete  — reviewer files for pass N exist but no
       #                         `escalations-NN.md`. Triage never ran.
       #                         Retry runs Phase 2/3 to re-derive
@@ -620,11 +621,14 @@ module Hive
       #   :fix_incomplete     — reviewer files AND escalations-NN.md
       #                         exist, but neither the fix-success
       #                         sentinel nor any pass-N+1 reviewer file
-      #                         exists. Fix-phase failed (REVIEW_ERROR
-      #                         phase=fix) or the runner was interrupted
-      #                         mid-fix. Retry skips Phase 2/3 and
-      #                         re-runs Phase 4 on the operator's
-      #                         existing [x] marks.
+      #                         exists, OR the operator edited
+      #                         escalations-NN.md after fix-success-NN.md
+      #                         was written. Fix-phase failed
+      #                         (REVIEW_ERROR phase=fix), was interrupted
+      #                         mid-fix, or the operator's edits supersede
+      #                         the previous fix. Retry skips Phase 2/3
+      #                         and re-runs Phase 4 on the operator's
+      #                         current [x] marks.
       #
       # Pass < 1 or an empty reviews/ dir → :complete (nothing to retry).
       def pass_completion_status(task_folder, pass)
@@ -636,12 +640,28 @@ module Hive
                           .select { |path| reviewer_file?(File.basename(path)) }
         return :complete if reviewer_files.empty?
 
-        unless File.exist?(File.join(reviews_dir, "escalations-#{pass_suffix}.md"))
-          return :triage_incomplete
-        end
+        escalations_path = File.join(reviews_dir, "escalations-#{pass_suffix}.md")
+        return :triage_incomplete unless File.exist?(escalations_path)
 
-        # Triage produced escalations. Was the fix completed?
-        return :complete if File.exist?(fix_success_path(task_folder, pass))
+        # Triage produced escalations. Was the fix completed AND not
+        # superseded by an operator edit?
+        fix_success = fix_success_path(task_folder, pass)
+        if File.exist?(fix_success)
+          # Operator-edit detection: an `escalations-NN.md` mtime strictly
+          # newer than the corresponding `fix-success-NN.md` means the
+          # operator (or a tool acting on their behalf) edited the file
+          # after the fix completed. Treat as :fix_incomplete so the
+          # next `hive run` re-enters Phase 4 with the new edits as
+          # authoritative input. The semantic matches the operator's
+          # mental model: "I edited my answers, re-fix with them."
+          # A `>` (not `>=`) comparison avoids spurious retries from
+          # back-to-back writes inside the same second.
+          if operator_edited_escalations_after_fix?(escalations_path, fix_success)
+            return :fix_incomplete
+          end
+
+          return :complete
+        end
 
         next_pass_suffix = format("%02d", pass + 1)
         next_pass_started = Dir[File.join(reviews_dir, "*-#{next_pass_suffix}.md")].any? do |path|
@@ -650,6 +670,20 @@ module Hive
         return :complete if next_pass_started
 
         :fix_incomplete
+      end
+
+      # Operator-edit detection helper. Returns true when the
+      # escalations file has been modified strictly after the
+      # fix-success sentinel was written. Conservative on I/O errors:
+      # treats unreadable mtimes as "no edit" so a transient stat
+      # failure cannot trigger a surprise fix retry. PR follow-up to
+      # PR #72's TUI `r` gesture (in-TUI force-retry).
+      def operator_edited_escalations_after_fix?(escalations_path, fix_success_path)
+        escalations_mtime = File.mtime(escalations_path)
+        fix_mtime = File.mtime(fix_success_path)
+        escalations_mtime > fix_mtime
+      rescue SystemCallError, IOError
+        false
       end
 
       # Back-compat shim: PR #56 named the narrower predicate this. Now

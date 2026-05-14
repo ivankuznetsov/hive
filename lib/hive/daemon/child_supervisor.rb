@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "shellwords"
 require "time"
+require "tmpdir"
 
 module Hive
   module Daemon

@@ -959,6 +959,70 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "missing folder must flash refusal, not the legacy manual-recipe text")
   end
 
+  def test_recover_review_stale_max_passes_hit_force_clears_and_reruns
+    # `r` verb-key path on a max_passes-hit REVIEW_STALE row emits
+    # `RecoverReview.new(row:, force: true)`. The bypass skips the
+    # `retryable_review_stale?` gate (which would otherwise route to
+    # OpenReviewStaleFile browse) and falls through to clear+rerun.
+    # The operator's `r` press declares "edits are done, retry now."
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "force-retry-slug",
+      stage: "5-review",
+      folder: "/tmp/hive/force-retry-slug",
+      marker: "review_stale",
+      attrs: { "pass" => "4" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+    clear_argv = nil
+    dispatch_argv = nil
+
+    with_run_quiet_stub(->(argv) { ran_clear = true; clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { ran_dispatch = true; dispatch_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row, force: true))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert ran_clear, "force-retry must clear the REVIEW_STALE marker"
+    assert ran_dispatch, "force-retry must dispatch hive run after the clear"
+    assert_includes clear_argv, "REVIEW_STALE",
+                    "clear must target the REVIEW_STALE marker (got #{clear_argv.inspect})"
+    assert_equal [ "hive", "run", "/tmp/hive/force-retry-slug" ], dispatch_argv,
+                 "rerun must invoke `hive run <folder>` (got #{dispatch_argv.inspect})"
+  end
+
+  def test_recover_review_stale_force_false_still_routes_to_browse
+    # Default `force: false` (Enter-driven, not `r`-driven) preserves
+    # the existing browse-not-retry behavior. This guards against an
+    # accidental flip of the default value.
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "browse-not-retry",
+      stage: "5-review",
+      folder: "/tmp/hive/browse-not-retry",
+      marker: "review_stale",
+      attrs: { "pass" => "4" },
+      suggested_command: nil
+    )
+    ran_clear = false
+    ran_dispatch = false
+
+    with_run_quiet_stub(->(_argv) { ran_clear = true; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { ran_dispatch = true; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row, force: false))
+        @model.wait_for_background_threads
+      end
+    end
+
+    refute ran_clear, "Enter-driven recovery (force: false) must NOT clear the marker"
+    refute ran_dispatch, "Enter-driven recovery (force: false) must NOT dispatch hive run"
+  end
+
   def test_recover_review_stale_with_incomplete_triage_pass_clears_and_reruns
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "reviews"))

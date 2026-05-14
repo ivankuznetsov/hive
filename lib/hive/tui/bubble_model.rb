@@ -341,7 +341,7 @@ module Hive
         when Hive::Tui::Messages::OpenLogTail
           open_log_tail(message.row)
         when Hive::Tui::Messages::RecoverReview
-          recover_review(message.row)
+          recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
           recover_error(message.row)
         when Hive::Tui::Messages::OpenInputEditor
@@ -633,7 +633,7 @@ module Hive
       # shape so the bubbletea thread returns immediately with a
       # "clearing…" status flash; the worker thread dispatches a
       # follow-up `Messages::Flash` via `@dispatch` on completion.
-      def recover_review(row)
+      def recover_review(row, force: false)
         if row.folder.to_s.strip.empty?
           return [ flashed("review recovery unavailable: task folder missing"), nil ]
         end
@@ -643,15 +643,16 @@ module Hive
           marker = row.marker.to_s.empty? ? "none" : row.marker
           return [ flashed("review recovery unavailable: marker=#{marker}"), nil ]
         end
-        # max_passes-hit REVIEW_STALE: route to OpenReviewStaleFile
-        # browse instead of the old flash-refuse recipe. The operator
-        # reads the unresolved findings in $EDITOR; clearing the
-        # marker remains a deliberate `hive markers clear` round-trip
-        # (deferred to a future "act-from-TUI" gesture). Incomplete-
-        # triage and wall_clock shapes return true from
-        # `retryable_review_stale?` and continue down the clear+rerun
-        # path below.
-        if marker_name == "REVIEW_STALE" && !retryable_review_stale?(row)
+        # max_passes-hit REVIEW_STALE: Enter routes to OpenReviewStaleFile
+        # (browse the focal escalations file) so the operator can answer
+        # the questions in $EDITOR; clearing the marker without edits
+        # would just produce the same findings on the next pass. The
+        # `r` verb-key path sets `force: true` to declare "edits are
+        # done, retry now" — that bypasses the gate below and falls
+        # through to the clear+rerun path. Incomplete-triage and
+        # wall_clock shapes return true from `retryable_review_stale?`
+        # and need no force flag.
+        if marker_name == "REVIEW_STALE" && !retryable_review_stale?(row) && !force
           return open_review_stale_file(row)
         end
 

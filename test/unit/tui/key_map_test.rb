@@ -477,6 +477,56 @@ class TuiKeyMapMessageForTest < Minitest::Test
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
     assert_kind_of Hive::Tui::Messages::RecoverReview, msg
     assert_same row, msg.row
+    refute msg.force,
+           "Enter on recover_review keeps default force=false so BubbleModel can route" \
+           " max_passes-hit REVIEW_STALE rows to OpenReviewStaleFile browse mode"
+  end
+
+  def test_r_verb_on_max_passes_hit_review_stale_force_retries
+    # `r` (review verb) on a max_passes-hit REVIEW_STALE row is the
+    # explicit "I edited the escalations file, retry now" gesture.
+    # `suggested_command` is nil for this row state (Hive::TaskAction
+    # returns no command for review_stale max_passes-hit), so the
+    # previous behavior was a "no action available" flash. The new
+    # path emits RecoverReview with force=true so BubbleModel bypasses
+    # the retryable_review_stale? gate.
+    row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                   stage: "5-review", marker: "review_stale",
+                   attrs: { "pass" => "4" }, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
+    assert_kind_of Hive::Tui::Messages::RecoverReview, msg
+    assert_same row, msg.row
+    assert msg.force, "`r` on max_passes-hit REVIEW_STALE sets force=true"
+  end
+
+  def test_other_verbs_on_max_passes_hit_review_stale_still_flash_no_action
+    # Only `r` (semantically a retry of the review stage) takes the
+    # force-retry path. Other verbs on the same row keep flashing
+    # "no action available" because dispatching brainstorm/plan/develop/pr
+    # on a stale review row would be wrong.
+    row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                   stage: "5-review", marker: "review_stale",
+                   attrs: { "pass" => "4" }, suggested_command: nil)
+    [ "b", "p", "d", "P" ].each do |key|
+      msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: key, row: row)
+      assert_kind_of Hive::Tui::Messages::Flash, msg,
+                     "verb `#{key}` on max_passes-hit REVIEW_STALE must flash, not force-retry (got #{msg.class})"
+      assert_match(/no action available/, msg.text)
+    end
+  end
+
+  def test_r_verb_on_non_review_stale_recover_row_keeps_flash
+    # `r` on a recover_review row whose marker is NOT review_stale
+    # (e.g., review_error from a programmer-error escape) should NOT
+    # force-retry — review_error has its own routing via Enter →
+    # RecoverError. The force-retry path is REVIEW_STALE-specific.
+    row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                   stage: "5-review", marker: "review_error",
+                   attrs: { "phase" => "fix", "reason" => "fix_failed" },
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_match(/no action available/, msg.text)
   end
 
   def test_enter_on_needs_input_opens_input_editor_when_command_present

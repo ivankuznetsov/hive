@@ -125,8 +125,20 @@ module Hive
       # Enter on a `recover_review` row. REVIEW_ERROR / REVIEW_CI_STALE
       # clear the observed marker and re-run. REVIEW_STALE does the same
       # only for incomplete triage artifacts; completed stale passes
-      # report the manual pass-cleanup step and leave the marker intact.
-      RecoverReview = Data.define(:row)
+      # report the manual pass-cleanup step (or open the focal escalations
+      # file in browse mode) and leave the marker intact.
+      #
+      # `force: true` is set by the `r` verb-key path in key_map.rb. It
+      # is the operator's explicit "I edited the file, retry now"
+      # gesture and bypasses BubbleModel#recover_review's
+      # `retryable_review_stale?` gate so max_passes-hit REVIEW_STALE
+      # rows are re-runnable from the TUI. The default `force: false`
+      # preserves Enter's existing browse-not-retry behavior.
+      RecoverReview = Data.define(:row, :force) do
+        def initialize(row:, force: false)
+          super
+        end
+      end
 
       # Enter on an `error` row whose marker is a non-kill-class ERROR.
       # Kill-class signal kills (130/137/143) are auto-healed elsewhere;

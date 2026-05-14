@@ -15,7 +15,6 @@ tags: [config, yaml, validation]
 {
   "hive_state_path"   => ".hive-state",
   "worktree_root"     => nil,
-  "max_review_passes" => 2,
   "default_branch"    => nil,
   "project_name"      => nil,
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
@@ -120,7 +119,6 @@ cfg.dig("timeout_sec", "execute_implementation")
 cfg.dig("review", "ci", "agent")
 cfg.dig("review", "reviewers")
 cfg["worktree_root"]
-cfg["max_review_passes"]
 ```
 
 ## `HIVE_HOME` override

@@ -7,7 +7,6 @@ module Hive
     DEFAULTS = {
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
-      "max_review_passes" => 2,
       "default_branch" => nil,
       "project_name" => nil,
       # Budget and timeout caps are GENEROUS sanity caps for runaway agents,

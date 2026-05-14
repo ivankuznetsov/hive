@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-05-08
+updated: 2026-05-14
 tags: [command, daemon, automation, json]
 ---
 
@@ -87,7 +87,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
 | `max_concurrent_runs` | 5 | Global cap. ADR-023 per-task cap × this = ~$7375 worst-case in-flight. |
-| `max_concurrent_per_project` | 5 | Fairness across projects; active agents count, human-input rows do not. |
+| `max_concurrent_per_project` | 5 | Per-project burst cap; set below the global cap to enforce cross-project fairness. Active agents count, human-input rows do not. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
 | `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |

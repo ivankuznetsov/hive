@@ -7,7 +7,8 @@ class ConfigTest < Minitest::Test
   def test_load_returns_defaults_when_no_config_file
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
-      assert_equal 2, cfg["max_review_passes"]
+      refute cfg.key?("max_review_passes"),
+             "review.max_passes is the live review loop cap"
       # Generous defaults bumped ~5x in plan 2026-05-04-001 / ADR-023.
       assert_equal 50, cfg["budget_usd"]["brainstorm"]
       assert_equal 500, cfg["budget_usd"]["execute_implementation"]
@@ -22,13 +23,11 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         default_branch: main
-        max_review_passes: 6
         budget_usd:
           brainstorm: 20
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
-      assert_equal 6, cfg["max_review_passes"]
       assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
       assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
     end

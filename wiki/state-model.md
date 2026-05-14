@@ -158,7 +158,6 @@ project_name: <name>
 default_branch: master              # detected by GitOps#detect_default_branch
 worktree_root: /home/.../<name>.worktrees
 hive_state_path: .hive-state
-max_review_passes: 2
 # Budgets and timeouts are GENEROUS sanity caps for runaway agents — not
 # cost targets. Bumped ~5× from pre-2026-05-04 values (ADR-023). The
 # `execute_review` key was DROPPED from DEFAULTS in plan 2026-05-04-001:

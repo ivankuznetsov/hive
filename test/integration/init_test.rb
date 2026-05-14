@@ -63,6 +63,8 @@ class InitTest < Minitest::Test
         end
 
         # Other defaults present.
+        refute cfg.key?("max_review_passes"),
+               "fresh configs should expose only review.max_passes as the live cap"
         assert_equal "courageous", cfg.dig("review", "triage", "bias")
         assert_equal 2,            cfg.dig("review", "max_passes")
       end

@@ -2,13 +2,21 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-14T17:17:00Z] review — clarify live review-pass config and stale recovery docs
+
+**Action:** Follow-up from code review on the review/daemon default PR. Removed the stale top-level `max_review_passes` key from `Config::DEFAULTS`, the project config template, README, and wiki examples so `review.max_passes` is the only documented live review-loop cap. Replaced the README troubleshooting row that still described max review pass exhaustion as `EXECUTE_STALE` with the current `REVIEW_STALE` / `hive markers clear ... --name REVIEW_STALE` recovery flow. Clarified daemon docs that `max_concurrent_per_project` is a per-project burst cap; setting it below the global cap is what enforces cross-project fairness.
+
+**Refreshed pages:**
+- [[commands/daemon]] — concurrency table wording now matches the 5/5 default.
+- [[modules/config]] and [[state-model]] — config examples only expose `review.max_passes`.
+
 ## [2026-05-14T15:20:40Z] review — lower default review loop cap to 2 passes
 
-**Action:** Changed the review loop defaults from four passes to two passes (`Config::DEFAULTS["max_review_passes"]` and `Config::DEFAULTS["review"]["max_passes"]`). The first pass still runs the configured reviewer set and triage; if triage marks auto-fixable findings, the fix phase runs and the second pass verifies the result. Additional review rounds remain available through per-project config overrides, but fresh projects now default to one fix+verify cycle instead of repeated reviewer loops that often re-surface plan-answered or human-decision escalations. Updated the project config template, README config example, and review/state/config wiki references.
+**Action:** Changed the review loop default from four passes to two passes (`Config::DEFAULTS["review"]["max_passes"]`). The first pass still runs the configured reviewer set and triage; if triage marks auto-fixable findings, the fix phase runs and the second pass verifies the result. Additional review rounds remain available through per-project `review.max_passes` overrides, but fresh projects now default to one fix+verify cycle instead of repeated reviewer loops that often re-surface plan-answered or human-decision escalations. Updated the project config template, README config example, and review/state/config wiki references.
 
 **Refreshed pages:**
 - [[stages/review]] — pass-cap default now documents 2.
-- [[state-model]] and [[modules/config]] — default config examples now show `max_review_passes: 2` / `review.max_passes: 2`.
+- [[state-model]] and [[modules/config]] — default config examples now show `review.max_passes: 2`.
 
 ## [2026-05-14T00:30:00Z] run — auto-rebase pre-step (`Hive::Rebase`) closes the long-running-task drift loop
 

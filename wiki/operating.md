@@ -58,7 +58,7 @@ For new projects, `hive init` asks at the TTY prompt and defaults to Y
 
 The daemon's worst-case in-flight cost ceiling is
 `max_concurrent_runs × per-task budget cap` from ADR-023, which works
-out to ~$7375 at default caps. Before letting it spawn real children,
+out to ~$4425 at default caps. Before letting it spawn real children,
 run it in dry-run for ~24 hours:
 
 ```bash
@@ -189,7 +189,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | Knob                            | Default | Notes                                                       |
 |---------------------------------|---------|-------------------------------------------------------------|
 | `max_concurrent_runs`           | 5       | Global cap. Raise carefully — multiplies cost ceiling.      |
-| `max_concurrent_per_project`    | 5       | Per-project active-agent cap; input-waiting rows do not count. |
+| `max_concurrent_per_project`    | 5       | Per-project burst cap. Lower it below the global cap to force cross-project sharing. |
 | `max_runs_per_day_per_project`  | 50      | Circuit-breaker. Raise if a project legitimately needs it.  |
 | `poll_interval_sec`             | 30      | Tick cadence. ≥ 5 enforced.                                 |
 | `edit_debounce_sec`             | 30      | Mid-save grace for `needs_input` rows. 0 disables.          |
@@ -206,8 +206,8 @@ registered_projects:
   # ... existing entries ...
 
 daemon:
-  max_concurrent_runs: 8
-  max_concurrent_per_project: 5
+  max_concurrent_runs: 5
+  max_concurrent_per_project: 2
   poll_interval_sec: 60
 ```
 

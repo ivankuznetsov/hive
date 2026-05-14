@@ -167,7 +167,7 @@ module Hive
 
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
         pass = next_pass_for(task, marker, cfg)
-        max_passes = cfg.dig("review", "max_passes") || 2
+        max_passes = cfg.dig("review", "max_passes") || 4
 
         # When the runner is re-entering a pass whose Phase 4 fix did
         # not finish (REVIEW_ERROR phase=fix, or interrupted
@@ -531,7 +531,7 @@ module Hive
         raise
       rescue Hive::ConfigError => e
         # pr-review-toolkit round-5 code-reviewer #2: a Hive::ConfigError
-        # (e.g. `max_review_pass NN=99 exceeds review.max_passes=2`) is
+        # (e.g. `max_review_pass NN=99 exceeds review.max_passes=4`) is
         # a typed, actionable failure with a helpful message. The
         # generic StandardError rescue below would re-classify it as
         # `reason=runner_exception exception_class=Hive::ConfigError`,
@@ -721,7 +721,7 @@ module Hive
         # max_passes + 1. A user manually editing a reviewer file with
         # a wildly higher NN would otherwise drive the loop past
         # `review.max_passes` and overwrite real findings.
-        max_passes = cfg ? (cfg.dig("review", "max_passes") || 2) : nil
+        max_passes = cfg ? (cfg.dig("review", "max_passes") || 4) : nil
         if max_passes && max > max_passes + 1
           raise Hive::ConfigError,
                 "review pass NN=#{max} exceeds review.max_passes=#{max_passes}; remove or rename #{offending}"

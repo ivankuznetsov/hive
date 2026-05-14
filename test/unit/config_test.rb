@@ -7,8 +7,8 @@ class ConfigTest < Minitest::Test
   def test_load_returns_defaults_when_no_config_file
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
-      refute cfg.key?("max_review_passes"),
-             "review.max_passes is the live review loop cap"
+      assert_nil cfg["max_review_passes"],
+                 "deprecated max_review_passes key must be absent from DEFAULTS"
       # Generous defaults bumped ~5x in plan 2026-05-04-001 / ADR-023.
       assert_equal 50, cfg["budget_usd"]["brainstorm"]
       assert_equal 500, cfg["budget_usd"]["execute_implementation"]
@@ -23,11 +23,13 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         default_branch: main
+        max_review_passes: 6
         budget_usd:
           brainstorm: 20
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
+      assert_equal 6, cfg["max_review_passes"]
       assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
       assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
     end
@@ -1253,12 +1255,12 @@ class ConfigTest < Minitest::Test
         daemon:
           enabled: true
           poll_interval_sec: 15
-          max_concurrent_runs: 8
+          max_concurrent_runs: 5
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal true, cfg.dig("daemon", "enabled")
       assert_equal 15,   cfg.dig("daemon", "poll_interval_sec")
-      assert_equal 8,    cfg.dig("daemon", "max_concurrent_runs")
+      assert_equal 5,    cfg.dig("daemon", "max_concurrent_runs")
       # Unspecified keys still fall back to defaults via deep-merge.
       assert_equal 50,   cfg.dig("daemon", "max_runs_per_day_per_project")
     end
@@ -1361,8 +1363,7 @@ class ConfigTest < Minitest::Test
       File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
       cfg = Hive::Config.load_global_daemon
       assert_equal 30, cfg["poll_interval_sec"]
-      assert_equal 5, cfg["max_concurrent_runs"]
-      assert_equal 5, cfg["max_concurrent_per_project"]
+      assert_equal 3, cfg["max_concurrent_runs"]
       assert_equal 50, cfg["max_runs_per_day_per_project"]
     end
   end
@@ -1382,7 +1383,7 @@ class ConfigTest < Minitest::Test
       assert_equal 524_288, cfg["log_max_bytes"]
       # Unspecified keys still pull from defaults
       assert_equal 50, cfg["max_runs_per_day_per_project"]
-      assert_equal 5,  cfg["max_concurrent_per_project"]
+      assert_equal 1,  cfg["max_concurrent_per_project"]
     end
   end
 

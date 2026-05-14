@@ -22,7 +22,7 @@ Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
 | Code | Meaning |
 |------|---------|
 | 0 | All probed skills `:present` or `:not_applicable` |
-| 65 | At least one row is `:missing` |
+| 65 | At least one row is `:missing` or `:version_too_old` |
 | 78 | `Hive::ConfigError` / `KeyError` / `ArgumentError` while loading config |
 
 ## Row kinds

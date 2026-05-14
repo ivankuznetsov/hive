@@ -6,6 +6,8 @@ require "hive/agent_profiles"
 require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
+require "hive/stages/brainstorm"
+require "hive/stages/brainstorm_tmux"
 
 module Hive
   module Commands
@@ -51,7 +53,7 @@ module Hive
       end
 
       def call
-        @rows = check_stages + check_reviewers
+        @rows = check_tmux + check_stages + check_reviewers
         if @json
           @output.puts JSON.generate(envelope(@rows))
         else
@@ -72,6 +74,24 @@ module Hive
 
       def check_stages
         STAGES.map { |stage| check_stage(stage) }
+      end
+
+      def check_tmux
+        return [] unless Hive::Stages::Brainstorm.runtime_for(@config) == :tmux_interactive
+
+        status, message = Hive::Stages::BrainstormTmux.tmux_status
+        [
+          {
+            kind: "dependency",
+            stage: "2-brainstorm",
+            label: "2-brainstorm/tmux",
+            agent: "tmux",
+            configured_skill: "tmux >= #{Hive::Stages::BrainstormTmux::MIN_TMUX_VERSION}",
+            skill: "tmux",
+            status: status.to_s,
+            message: message
+          }
+        ]
       end
 
       def check_stage(stage)

@@ -15,6 +15,7 @@ module Hive
       DONE_POLL_INTERVAL_SEC = 0.5
       SENTINEL_POLL_INTERVAL_SEC = 5
       SENTINEL_CAPTURE_BYTES = 8192
+      MIN_TMUX_VERSION = "3.0"
       TERMINAL_MARKERS = %i[waiting complete error].freeze
 
       module_function
@@ -22,12 +23,14 @@ module Hive
       def run!(task, cfg)
         reset_signal_files(task)
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        runner = build_runner(task)
+        preflight!(profile, runner)
+
         prompt = Hive::Stages::Brainstorm.render_prompt(task, cfg, profile: profile)
         Hive::Markers.set(task.state_file, :agent_working,
                           pid: Process.pid,
                           started: Time.now.utc.iso8601)
 
-        runner = build_runner(task)
         settings_path = nil
         begin
           settings_path = Hive::StopHookInstaller.install(stage_dir: task.folder)
@@ -38,6 +41,7 @@ module Hive
           { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
         ensure
           runner.kill_session if runner
+          sweep_orphan_processes(task)
           cleanup_scratch(settings_path)
           cleanup_done(task)
         end
@@ -56,8 +60,58 @@ module Hive
             "CLAUDE_API_KEY" => "",
             "HIVE_TASK_STAGE_DIR" => task.folder
           },
+          tmux_bin: tmux_bin,
           socket_name: ENV["HIVE_TMUX_SOCKET"]
         )
+      end
+
+      def preflight!(profile, runner)
+        preflight_tmux!
+        profile.check_version!
+        if runner.session_exists?
+          raise Hive::AgentError,
+                "tmux session #{runner.name} already exists; attach with `tmux attach -t #{runner.name}` " \
+                "or kill it before retrying"
+        end
+      end
+
+      def preflight_tmux!(tmux_bin: self.tmux_bin)
+        out, err, status = Open3.capture3(tmux_bin, "-V")
+        unless status.success?
+          raise Hive::AgentError, "tmux not runnable: #{tmux_bin} #{err.strip}"
+        end
+
+        version = parse_tmux_version(out)
+        unless version
+          raise Hive::AgentError, "could not parse tmux -V output: #{out.inspect}"
+        end
+
+        if (version_tuple(version) <=> version_tuple(MIN_TMUX_VERSION)).negative?
+          raise Hive::AgentError, "tmux #{version} below minimum #{MIN_TMUX_VERSION}"
+        end
+
+        version
+      rescue Errno::ENOENT, Errno::EACCES => e
+        raise Hive::AgentError, "tmux binary not runnable: #{tmux_bin} (#{e.class.name.split('::').last}: #{e.message})"
+      end
+
+      def tmux_status(tmux_bin: self.tmux_bin)
+        version = preflight_tmux!(tmux_bin: tmux_bin)
+        [ :present, "tmux #{version} found" ]
+      rescue Hive::AgentError => e
+        [ :missing, e.message ]
+      end
+
+      def parse_tmux_version(output)
+        output[/tmux\s+(\d+(?:\.\d+)?)/, 1]
+      end
+
+      def version_tuple(version)
+        version.split(".").map(&:to_i)
+      end
+
+      def tmux_bin
+        ENV.fetch("HIVE_TMUX_BIN", "tmux")
       end
 
       def wrapper_command(task, profile)
@@ -141,6 +195,13 @@ module Hive
         cleanup_done(task)
         result = result_path(task)
         File.delete(result) if File.exist?(result)
+      end
+
+      def sweep_orphan_processes(task)
+        pattern = "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}"
+        Open3.capture3("pkill", "-f", pattern)
+      rescue Errno::ENOENT
+        nil
       end
 
       def cleanup_done(task)

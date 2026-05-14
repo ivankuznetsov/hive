@@ -14,6 +14,7 @@ class RunBrainstormTmuxTest < Minitest::Test
     @old_bin = ENV["HIVE_CLAUDE_BIN"]
     @old_poll = ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"]
     @old_sentinel = ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"]
+    @old_tmux_bin = ENV["HIVE_TMUX_BIN"]
     ENV["HIVE_TMUX_SOCKET"] = @socket
     ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"] = "0.1"
     ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"] = "0.1"
@@ -25,6 +26,7 @@ class RunBrainstormTmuxTest < Minitest::Test
     ENV["HIVE_CLAUDE_BIN"] = @old_bin
     ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"] = @old_poll
     ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"] = @old_sentinel
+    ENV["HIVE_TMUX_BIN"] = @old_tmux_bin
     ENV.delete("HIVE_FAKE_INTERACTIVE_SCENARIO")
   end
 
@@ -139,6 +141,69 @@ class RunBrainstormTmuxTest < Minitest::Test
     end
   end
 
+  def test_preexisting_session_rejects_double_spawn
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        fake = write_fake_interactive_claude(dir)
+        ENV["HIVE_CLAUDE_BIN"] = fake
+        ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "waiting"
+        folder = make_task_at_brainstorm(dir, timeout: 3)
+        task = Hive::Task.new(folder)
+        name = Hive::Stages::BrainstormTmux.session_name_for(task)
+        system("tmux", "-L", @socket, "new-session", "-d", "-s", name, "sleep 10")
+
+        _out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+
+        assert_equal Hive::ExitCodes::SOFTWARE, status
+        assert_match(/already exists/, err)
+        assert_includes tmux_sessions, name
+      end
+    end
+  end
+
+  def test_pane_crash_times_out_and_tears_down
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        fake = write_fake_interactive_claude(dir)
+        ENV["HIVE_CLAUDE_BIN"] = fake
+        ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "crash"
+        folder = make_task_at_brainstorm(dir, timeout: 1)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        assert_equal :error, Hive::Markers.current(File.join(folder, "brainstorm.md")).name
+        assert_empty tmux_sessions
+      end
+    end
+  end
+
+  def test_midrun_exception_still_tears_down_session
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        fake = write_fake_interactive_claude(dir)
+        ENV["HIVE_CLAUDE_BIN"] = fake
+        ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "hang"
+        folder = make_task_at_brainstorm(dir, timeout: 5)
+        task = Hive::Task.new(folder)
+        cfg = Hive::Config.load(dir)
+        original = Hive::Stages::BrainstormTmux.method(:wait_for_terminal_marker)
+        Hive::Stages::BrainstormTmux.define_singleton_method(:wait_for_terminal_marker) do |_task, _runner, _timeout|
+          raise "forced midrun failure"
+        end
+
+        assert_raises(RuntimeError) { Hive::Stages::BrainstormTmux.run!(task, cfg) }
+        assert_empty tmux_sessions
+      ensure
+        if original
+          Hive::Stages::BrainstormTmux.define_singleton_method(:wait_for_terminal_marker) do |*args|
+            original.call(*args)
+          end
+        end
+      end
+    end
+  end
+
   private
 
   def make_task_at_brainstorm(dir, timeout:)
@@ -201,6 +266,8 @@ class RunBrainstormTmuxTest < Minitest::Test
         fire_hook("second")
       when "hang"
         sleep 10
+      when "crash"
+        exit 1
       when "sentinel_complete"
         File.write(state_file, "## Requirements\\n- Done via sentinel\\n<!-- COMPLETE -->\\n")
         puts "<!-- COMPLETE -->"

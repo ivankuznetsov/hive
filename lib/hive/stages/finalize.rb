@@ -2,6 +2,7 @@ require "fileutils"
 require "open3"
 require "hive/gh"
 require "hive/markers"
+require "hive/protected_files"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/worktree"
@@ -12,9 +13,14 @@ module Hive
       module_function
 
       def run!(task, cfg)
-        marker = Hive::Markers.current(task.state_file)
-        if marker.name == :complete && marker.attrs["is_draft"].to_s == "false"
-          warn "hive: already complete; mv this folder to 8-done/ to continue"
+        # Idempotency: summary.md is the terminal artifact. Using it
+        # as the gate (rather than `is_draft=false` in the marker)
+        # makes a partial completion that ran `gh pr ready` but
+        # crashed before write_summary recoverable via `hive run`.
+        if File.exist?(File.join(task.folder, "summary.md"))
+          marker = Hive::Markers.current(task.state_file)
+          warn "hive: already complete (#{marker.attrs['pr_url'] || '(no url)'}); " \
+               "mv this folder to 8-done/ to continue"
           return { commit: nil, status: :complete }
         end
 
@@ -23,33 +29,58 @@ module Hive
         branch = pointer["branch"] || task.slug
         pr_url = pr_url_or_exit(task)
 
+        # Authenticate first so an auth-related push failure surfaces
+        # as a clear "gh not authenticated" hard-fail (Plan R5)
+        # instead of a generic git push error.
+        Hive::Gh.ensure_authenticated!
         state_result = verify_state!(task, worktree_path, branch)
         return state_result if state_result.is_a?(Hash)
-        Hive::Gh.ensure_authenticated!
 
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
+        before_sha = Hive::ProtectedFiles.snapshot(task.folder)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
           add_dirs: [ task.folder ],
           cwd: worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "finalize") || cfg.dig("budget_usd", "pr") || 50,
-          timeout_sec: cfg.dig("timeout_sec", "finalize") || cfg.dig("timeout_sec", "pr") || 1800,
+          max_budget_usd: finalize_budget(cfg),
+          timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile
         )
+        after_sha = Hive::ProtectedFiles.snapshot(task.folder)
+        if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "finalize_tampered", files: tampered.join(","))
+          return { commit: "finalize_tampered", status: :error }
+        end
 
         marker = Hive::Markers.current(task.state_file)
         return { commit: nil, status: marker.name } unless marker.name == :complete
 
-        if (hits = scan_for_secrets(task, marker)).any?
-          undo_ready(pr_url)
+        # Scan-before-ready: the runner OWNS the `gh pr ready` call so
+        # the secret scan can gate it. The agent prompt now explicitly
+        # forbids the agent from running `gh pr ready` (templates/
+        # finalize_prompt.md.erb).
+        scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
+                                            pr_url: pr_url)
+        if scan.fetch_failed
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "secret_scan_fetch_failed",
+                            detail: scan.fetch_error.to_s[0, 200])
+          return { commit: "finalize_secret_scan_failed", status: :error }
+        end
+        if scan.hits.any?
+          redact_pr_body!(pr_url)
           Hive::Markers.set(task.state_file, :error,
                             reason: "secret_in_pr_body",
-                            patterns: hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
+                            patterns: scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
           return { commit: "finalize_secret_blocked", status: :error }
         end
+
+        ready_result = mark_pr_ready(task, pr_url)
+        return ready_result if ready_result
 
         write_summary(task, worktree_path, branch, pr_url)
         { commit: "pr_finalized", status: :complete }
@@ -83,18 +114,26 @@ module Hive
       end
 
       def verify_state!(task, worktree_path, branch)
-        out, _err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
-        if !status.success? || !out.empty?
+        out, err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
+        unless status.success?
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "git_status_failed",
+                            detail: err.to_s.strip[0, 200])
+          return { commit: "finalize_git_status_failed", status: :error }
+        end
+        unless out.empty?
           Hive::Markers.set(task.state_file, :error, reason: "dirty_worktree")
           return { commit: "finalize_dirty_worktree", status: :error }
         end
 
         return true if pushed?(worktree_path, branch)
 
-        Hive::Gh.push_branch!(worktree_path, branch)
-        return true if pushed?(worktree_path, branch)
+        push_result = Hive::Gh.push_branch(worktree_path, branch)
+        return true if push_result.success? && pushed?(worktree_path, branch)
 
-        Hive::Markers.set(task.state_file, :error, reason: "unpushed_commits")
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "unpushed_commits",
+                          detail: push_result.stderr.to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
       end
 
@@ -126,21 +165,46 @@ module Hive
         )
       end
 
-      def scan_for_secrets(task, marker)
-        sources = [ File.read(task.state_file) ]
-        if (url = marker.attrs["pr_url"]) && !url.empty?
-          out, _err, status = Open3.capture3("gh", "pr", "view", url, "--json", "body", "-q", ".body")
-          sources << out if status.success? && !out.empty?
+      # Runner-owned `gh pr ready` call. Runs only after secret scan
+      # clears. Returns a stage result hash on failure, nil on success.
+      def mark_pr_ready(task, pr_url)
+        _out, err, status = Hive::Gh.with_network_timeout do
+          Open3.capture3("gh", "pr", "ready", pr_url)
         end
-        sources.flat_map { |s| Hive::SecretPatterns.scan(s) }
-      rescue StandardError
-        []
+        return nil if status.success?
+
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "gh_pr_ready_failed",
+                          detail: err.to_s.strip[0, 200])
+        { commit: "finalize_pr_ready_failed", status: :error }
       end
 
-      def undo_ready(pr_url)
-        Open3.capture3("gh", "pr", "ready", "--undo", pr_url)
-      rescue StandardError
-        nil
+      # On secret hit, both revert ready AND scrub the body. Fail-loud
+      # on revert failure so the operator sees the secret-bearing PR
+      # is still public.
+      def redact_pr_body!(pr_url)
+        return if pr_url.to_s.empty?
+
+        _out, err, status = Hive::Gh.with_network_timeout do
+          Open3.capture3("gh", "pr", "edit", pr_url, "--body",
+                         "[redacted: hive detected a credential pattern]")
+        end
+        warn "hive: failed to redact PR body for #{pr_url}: #{err.strip}" unless status.success?
+      rescue StandardError => e
+        warn "hive: redact_pr_body raised #{e.class}: #{e.message}; PR body may still contain the secret"
+      end
+
+      # Migration shim: read `budget_usd.pr` / `timeout_sec.pr` for one
+      # version. `hive migrate` (Hive::Commands::Migrate::CONFIG_KEY_RENAMES)
+      # rewrites these onto the canonical `.finalize` keys so the
+      # fallback has a removal path. Slated for removal one version
+      # after migrate ships.
+      def finalize_budget(cfg)
+        cfg.dig("budget_usd", "finalize") || cfg.dig("budget_usd", "pr") || 50
+      end
+
+      def finalize_timeout(cfg)
+        cfg.dig("timeout_sec", "finalize") || cfg.dig("timeout_sec", "pr") || 1800
       end
 
       def write_summary(task, worktree_path, branch, pr_url)
@@ -183,7 +247,13 @@ module Hive
           File.basename(path).match(/-(\d{2})\.md\z/)&.[](1)&.to_i
         end
         max_pass = passes.max || 0
-        "Review passes: #{max_pass}"
+        bias = nil
+        triage_path = Dir[File.join(task.reviews_dir, "triage-*.md")].sort.last
+        if triage_path
+          File.read(triage_path) =~ /^bias:\s*(\S+)/i and bias = Regexp.last_match(1)
+        end
+        bias_line = bias ? "Triage bias: #{bias}" : "Triage bias: (unknown)"
+        "Review passes: #{max_pass}\n#{bias_line}"
       end
 
       def open_escalations(task)
@@ -191,6 +261,7 @@ module Hive
         unchecked = paths.flat_map do |path|
           File.readlines(path).grep(/^\s*-\s+\[\s*\]\s+/).map { |line| "#{File.basename(path)}: #{line.strip}" }
         rescue Errno::ENOENT
+          warn "hive: escalations file #{path} disappeared mid-read; skipping"
           []
         end
         unchecked.join("\n")

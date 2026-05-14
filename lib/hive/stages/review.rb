@@ -846,6 +846,10 @@ module Hive
         statuses.all?(:error) ? :all_failed : :ok
       end
 
+      # NOTE: no outer rescue here — `GithubPublisher.publish!` has
+      # its own narrow rescue and returns `:failed` for the categories
+      # we want to swallow; a wider rescue here masked NoMethodError
+      # / NameError bugs as benign post-failures.
       def publish_review_file(task, cfg, pass, reviewer_name, body_path)
         Hive::Stages::Review::GithubPublisher.publish!(
           task,
@@ -854,10 +858,6 @@ module Hive
           body_path: body_path,
           cfg: cfg
         )
-      rescue StandardError => e
-        warn "hive: failed to post reviewer comment for pass=#{format('%02d', pass)} " \
-             "reviewer=#{reviewer_name}; local file at #{body_path} is authoritative (#{e.class}: #{e.message})"
-        :failed
       end
 
       def publish_escalations(task, cfg, pass)
@@ -871,10 +871,6 @@ module Hive
           body_path: path,
           cfg: cfg
         )
-      rescue StandardError => e
-        warn "hive: failed to post escalations comment for pass=#{format('%02d', pass)}; " \
-             "local file at #{path} is authoritative (#{e.class}: #{e.message})"
-        :failed
       end
 
       # Remove any stale `reviews/errors-NN.md` from a prior

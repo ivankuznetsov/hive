@@ -30,15 +30,15 @@ Behavior:
 
   <!-- COMPLETE pr_url=<%= pr_url %> is_draft=false -->
 
-- Write `summary.md` in the task folder with the final task summary.
-- Run this as the last external action, after all file writes and PR body edits:
-
-  gh pr ready <%= pr_url %>
-
 Constraints:
 
+- DO NOT run `gh pr ready` — the hive runner owns that call and runs it only
+  AFTER a credential-pattern secret-scan of the refreshed PR body passes.
+  Running it from the agent would let a secret-bearing body go public for
+  the window between your `gh pr edit` and the runner's revert.
 - Do not push; hive verified the branch is clean and pushed before this prompt.
-- Do not write any file other than `pr.md`, `summary.md`, and temporary files
-  needed for `gh pr edit --body-file`.
+- Do not write any file other than `pr.md` and temporary files needed for
+  `gh pr edit --body-file`. The runner writes `summary.md` after the secret
+  scan and `gh pr ready` both succeed.
 - Do not include `.env`, secrets, tokens, or unrelated file contents in the PR
   body.

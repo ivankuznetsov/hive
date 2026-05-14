@@ -1,5 +1,7 @@
+require "open3"
 require "hive/gh"
 require "hive/markers"
+require "hive/protected_files"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/worktree"
@@ -26,6 +28,7 @@ module Hive
 
         prompt = render_prompt(task, worktree_path, branch)
         profile = Hive::Stages::Base.stage_profile(cfg, "open_pr")
+        before_sha = Hive::ProtectedFiles.snapshot(task.folder)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -36,14 +39,32 @@ module Hive
           log_label: "open-pr",
           profile: profile
         )
+        after_sha = Hive::ProtectedFiles.snapshot(task.folder)
+        if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "open_pr_tampered", files: tampered.join(","))
+          return { commit: "open_pr_tampered", status: :error }
+        end
 
         marker = Hive::Markers.current(task.state_file)
         return { commit: nil, status: marker.name } unless marker.name == :complete
 
-        if (hits = scan_for_secrets(task, marker)).any?
+        validation = validate_complete_marker(task, marker, worktree_path, branch)
+        return validation if validation
+
+        scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
+                                            pr_url: marker.attrs["pr_url"])
+        if scan.fetch_failed
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "secret_scan_fetch_failed",
+                            detail: scan.fetch_error.to_s[0, 200])
+          return { commit: "open_pr_secret_scan_failed", status: :error }
+        end
+        if scan.hits.any?
+          remediate_secret_leak!(marker.attrs["pr_url"])
           Hive::Markers.set(task.state_file, :error,
                             reason: "secret_in_pr_body",
-                            patterns: hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
+                            patterns: scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
           return { commit: "open_pr_secret_blocked", status: :error }
         end
 
@@ -79,20 +100,56 @@ module Hive
         )
       end
 
-      def scan_for_secrets(task, marker)
-        sources = [ File.read(task.state_file) ]
-        if (url = marker.attrs["pr_url"]) && !url.empty?
-          out, _err, status = Open3.capture3("gh", "pr", "view", url, "--json", "body", "-q", ".body")
-          sources << out if status.success? && !out.empty?
+      # Validate the agent-written COMPLETE marker against GitHub. An
+      # agent that never called `gh pr create` but emitted a marker
+      # with a fake URL would otherwise advance into 6-review and
+      # surface only when `gh pr comment` hits a non-existent PR.
+      # Returns a stage result hash on failure, nil when valid.
+      def validate_complete_marker(task, marker, worktree_path, branch)
+        marker_url = marker.attrs["pr_url"].to_s
+        if marker_url.empty?
+          Hive::Markers.set(task.state_file, :error, reason: "open_pr_marker_missing_url")
+          return { commit: "open_pr_marker_missing_url", status: :error }
         end
-        sources.flat_map { |s| Hive::SecretPatterns.scan(s) }
-      rescue StandardError
-        []
+        unless marker.attrs["is_draft"] == "true"
+          Hive::Markers.set(task.state_file, :error, reason: "open_pr_not_draft")
+          return { commit: "open_pr_not_draft", status: :error }
+        end
+
+        real = Hive::Gh.lookup_existing_pr(worktree_path, branch)
+        unless real && real["url"] == marker_url
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "open_pr_url_mismatch",
+                            marker_url: marker_url,
+                            real_url: real ? real["url"] : "(none)")
+          return { commit: "open_pr_url_mismatch", status: :error }
+        end
+
+        nil
+      end
+
+      # On secret hit in the open PR body, scrub the body and close
+      # the draft. Leaving a publicly-visible PR with the secret
+      # negates the gate.
+      def remediate_secret_leak!(pr_url)
+        return if pr_url.to_s.empty?
+
+        Open3.capture3("gh", "pr", "edit", pr_url, "--body",
+                       "[redacted: hive detected a credential pattern]")
+        Open3.capture3("gh", "pr", "close", pr_url)
+      rescue StandardError => e
+        warn "hive: failed to scrub leaked PR #{pr_url}: #{e.class}: #{e.message}; " \
+             "manually edit and close it before resuming"
       end
 
       def write_pr_md(task, existing, idempotent: false)
-        pr_url = existing["url"]
+        pr_url = existing["url"].to_s
         pr_number = existing["number"]
+        if pr_url.empty?
+          warn "hive: `gh pr list` returned a PR with an empty url; refusing to write pr.md"
+          exit 1
+        end
+        is_draft = existing["isDraft"] == false ? "false" : "true"
         suffix = idempotent ? " idempotent=true" : ""
         File.write(task.state_file, <<~MD)
           ---
@@ -106,7 +163,7 @@ module Hive
           ## Linked task
           #{task.folder}
 
-          <!-- COMPLETE pr_url=#{pr_url} is_draft=true#{suffix} -->
+          <!-- COMPLETE pr_url=#{pr_url} is_draft=#{is_draft}#{suffix} -->
         MD
       end
 

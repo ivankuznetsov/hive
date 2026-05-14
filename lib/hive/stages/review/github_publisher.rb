@@ -1,3 +1,4 @@
+require "json"
 require "open3"
 require "tempfile"
 require "hive/gh"
@@ -31,18 +32,25 @@ module Hive
           return :already_posted if already_posted?(pr_url, header)
 
           with_body_file(body) do |file|
+            failures = []
             attempts(cfg).times do |idx|
               _out, err, status = Open3.capture3("gh", "pr", "comment", pr_url, "--body-file", file.path)
               return :posted if status.success?
 
+              failures << err.to_s.strip
               if idx + 1 >= attempts(cfg)
-                warn_failure(pass, reviewer_name, body_path, err)
+                warn_failure(pass, reviewer_name, body_path, failures)
                 return :failed
               end
               sleep([ 2**idx, Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC ].min)
             end
           end
-        rescue StandardError => e
+        # Narrow rescue: only the categories we can't surface as a
+        # structured :secret / :missing_body / :failed return. A
+        # broad StandardError rescue would mask programming bugs
+        # (NoMethodError on a nil arg, future helper rename) as a
+        # "failed to post" warning.
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOSPC, JSON::ParserError => e
           warn "hive: failed to post reviewer comment for pass=#{format('%02d', pass)} reviewer=#{reviewer_name}; " \
                "local file at #{relative_body_path(task, body_path)} is authoritative (#{e.class}: #{e.message})"
           :failed
@@ -57,11 +65,35 @@ module Hive
           value.positive? ? value : 2
         end
 
+        # Per-comment line-anchored match, NOT a substring scan over
+        # the joined corpus — quoting the bot header in any unrelated
+        # comment yields a false positive there.
+        #
+        # Uses `gh pr view --json comments` and parses the JSON so we
+        # can iterate comment-by-comment. `gh pr view` caps the
+        # `comments` array at GitHub's default (≈100). When that cap is
+        # hit we cannot prove no earlier match exists; fail-closed (treat
+        # as "already posted, do not duplicate") so a long-tailed PR
+        # does not silently accumulate repeated posts each pass.
+        COMMENT_PAGE_CAP = 100
+
         def already_posted?(pr_url, header)
           out, _err, status = Open3.capture3(
-            "gh", "pr", "view", pr_url, "--json", "comments", "-q", ".comments[].body"
+            "gh", "pr", "view", pr_url, "--json", "comments"
           )
-          status.success? && out.include?(header)
+          return false unless status.success?
+
+          parsed = JSON.parse(out)
+          comments = parsed.is_a?(Hash) ? Array(parsed["comments"]) : []
+          if comments.size >= COMMENT_PAGE_CAP
+            warn "hive: review GitHub publish: comment list hit page cap " \
+                 "(#{COMMENT_PAGE_CAP}); fail-closed (treating as already-posted) to avoid duplicate post"
+            return true
+          end
+
+          comments.any? { |c| c.is_a?(Hash) && c["body"].to_s.lines.first.to_s.chomp == header }
+        rescue JSON::ParserError
+          false
         end
 
         def with_body_file(body)
@@ -73,10 +105,16 @@ module Hive
           file&.close!
         end
 
-        def warn_failure(pass, reviewer_name, body_path, err)
+        # Surface all attempt-stderrs joined with `; ` so a flaky
+        # transient pattern (e.g. one HTTP 502 followed by one auth
+        # error) survives the warn — earlier passes used to drop all
+        # but the last stderr. The separator before `: <err>` is `:`
+        # only when there is at least one non-empty stderr.
+        def warn_failure(pass, reviewer_name, body_path, failures)
+          stderr_blob = Array(failures).map(&:to_s).reject(&:empty?).join("; ")
+          suffix = stderr_blob.empty? ? "" : ": #{stderr_blob}"
           warn "hive: failed to post reviewer comment for pass=#{format('%02d', pass)} " \
-               "reviewer=#{reviewer_name}; local file at #{body_path} is authoritative" \
-               "#{err.to_s.strip.empty? ? '' : ": #{err.strip}"}"
+               "reviewer=#{reviewer_name}; local file at #{body_path} is authoritative#{suffix}"
         end
 
         def relative_body_path(task, body_path)

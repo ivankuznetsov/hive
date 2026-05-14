@@ -93,6 +93,7 @@ class TriageTest < Minitest::Test
                  "## Nit\n- [ ] naming: prefer snake_case\n")
 
       escalations = File.join(reviews_dir, "escalations-01.md")
+      File.write(escalations, "# Existing escalations\n\nUser ruling: keep the README scope.\n")
       ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = escalations
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Escalations for pass 01\n\n_All clean._\n"
 
@@ -109,6 +110,7 @@ class TriageTest < Minitest::Test
       assert_includes argv, "Context for resolving findings before user escalation"
       assert_includes argv, "Requirements Trace: fix the README."
       assert_includes argv, "User wants fewer escalations."
+      assert_includes argv, "User ruling: keep the README scope."
       assert_includes argv, "### Q1. <specific decision needed>"
       assert_includes argv, "claude-ce-code-review-01.md"
       assert_includes argv, "codex-ce-code-review-01.md"

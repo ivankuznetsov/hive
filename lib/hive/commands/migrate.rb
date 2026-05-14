@@ -47,7 +47,7 @@ module Hive
           if plan.empty?
             ensure_current_stage_dirs(stages)
             if config_changed
-              commit_migration(hive_state, moved)
+              commit_migration(hive_state, moved, config_only: true)
               puts "hive: migrate rewrote legacy config keys (no task folders to move)"
             elsif already_migrated?(stages)
               puts "hive: migrate found nothing to move (target stage directories look already-migrated)"
@@ -64,7 +64,7 @@ module Hive
           plan.each { |op| FileUtils.mv(op[:src], op[:dst]) }
           moved.concat(plan.map { |op| [ op[:old_stage], op[:new_stage], op[:entry] ] })
           ensure_current_stage_dirs(stages)
-          commit_migration(hive_state, moved)
+          commit_migration(hive_state, moved, config_only: false)
         end
 
         puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved)"
@@ -119,13 +119,18 @@ module Hive
         end
       end
 
-      def commit_migration(hive_state, moved)
+      def commit_migration(hive_state, moved, config_only: false)
         ops = Hive::GitOps.new(@project_path)
         ops.run_git!("-C", hive_state, "add", "-A")
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
         return if status.success?
 
-        ops.run_git!("-C", hive_state, "commit", "-m", "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})")
+        message = if config_only && moved.empty?
+                    "hive: migrate config keys (no tasks moved)"
+                  else
+                    "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
+                  end
+        ops.run_git!("-C", hive_state, "commit", "-m", message)
       end
 
       # Rewrite legacy `pr` budget/timeout keys onto the canonical
@@ -136,22 +141,49 @@ module Hive
         path = File.join(hive_state, "config.yml")
         return false unless File.exist?(path)
 
-        cfg = YAML.safe_load(File.read(path), permitted_classes: [ Symbol ])
-        return false unless cfg.is_a?(Hash)
-
+        content = File.read(path)
         changed = false
         CONFIG_KEY_RENAMES.each do |from, to|
           section, key = from
-          next unless cfg.is_a?(Hash) && cfg[section].is_a?(Hash) && cfg[section].key?(key)
-
-          legacy_value = cfg[section].delete(key)
           dst_section, dst_key = to
-          cfg[dst_section] ||= {}
-          cfg[dst_section][dst_key] ||= legacy_value
-          changed = true
+          next unless section == dst_section
+
+          content, rewritten = rewrite_section_key(content, section, key, dst_key)
+          changed ||= rewritten
         end
-        File.write(path, cfg.to_yaml) if changed
+        File.write(path, content) if changed
         changed
+      end
+
+      def rewrite_section_key(content, section, legacy_key, canonical_key)
+        lines = content.lines
+        section_idx = lines.index { |line| line =~ /^(\s*)#{Regexp.escape(section)}:\s*(?:#.*)?$/ }
+        return [ content, false ] unless section_idx
+
+        section_indent = Regexp.last_match(1).length
+        end_idx = lines.length
+        ((section_idx + 1)...lines.length).each do |idx|
+          line = lines[idx]
+          next if line.strip.empty? || line.lstrip.start_with?("#")
+
+          indent = line[/\A */].length
+          if indent <= section_indent
+            end_idx = idx
+            break
+          end
+        end
+
+        range = ((section_idx + 1)...end_idx)
+        legacy_idx = range.find { |idx| lines[idx] =~ /^(\s*)#{Regexp.escape(legacy_key)}:(.*)$/ }
+        return [ content, false ] unless legacy_idx
+
+        canonical_exists = range.any? { |idx| lines[idx] =~ /^\s*#{Regexp.escape(canonical_key)}:/ }
+        if canonical_exists
+          lines.delete_at(legacy_idx)
+        else
+          lines[legacy_idx] = lines[legacy_idx].sub(/^(\s*)#{Regexp.escape(legacy_key)}:/, "\\1#{canonical_key}:")
+        end
+        [ lines.join, true ]
       end
 
       # True when every legacy stage dir is absent and every target

@@ -863,6 +863,7 @@ module Hive
       def publish_escalations(task, cfg, pass)
         path = File.join(task.reviews_dir, "escalations-#{format('%02d', pass)}.md")
         return unless File.exist?(path)
+        return unless File.readlines(path).any? { |line| line =~ /^\s*-\s+\[\s*\]\s+/ }
 
         Hive::Stages::Review::GithubPublisher.publish!(
           task,

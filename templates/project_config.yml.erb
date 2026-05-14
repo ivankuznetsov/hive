@@ -44,6 +44,15 @@ timeout_sec:
   <%= key %>: <%= timeouts[key] %>
 <% end -%>
 
+gh:
+  # Deadline for GitHub CLI network calls (`gh auth`, `gh pr view`,
+  # `gh pr edit`, `gh pr ready`, etc.).
+  network_timeout_sec: 60
+
+rebase:
+  enabled: true
+  conflict_resolution_timeout_sec: 2700
+
 # 6-review stage configuration. Each role takes an `agent` (one of the
 # names registered in Hive::AgentProfiles — claude, codex, pi by default)
 # and an optional `prompt_template` path under templates/.

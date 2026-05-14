@@ -24,24 +24,22 @@ class GhUnitTest < Minitest::Test
     FileUtils.rm_rf(@gh_dir)
     FileUtils.rm_rf(@log_dir)
     %w[
-      HIVE_FAKE_GH_LOG_DIR
-      HIVE_FAKE_GH_PR_BODY
-      HIVE_FAKE_GH_VIEW_EXIT
-    ].each { |k| ENV.delete(k) }
+	      HIVE_FAKE_GH_LOG_DIR
+	      HIVE_FAKE_GH_PR_BODY
+	      HIVE_FAKE_GH_VIEW_EXIT
+	      HIVE_FAKE_GH_LIST_JSON
+	    ].each { |k| ENV.delete(k) }
   end
 
   # --- with_network_timeout --------------------------------------------
 
-  def test_with_network_timeout_exits_on_timeout
-    # Trigger a Timeout::Error from inside the block; the helper's
-    # rescue catches it and exits 1 with a clear message.
-    out, err, status = with_captured_exit do
+  def test_with_network_timeout_raises_typed_error_on_timeout
+    err = assert_raises(Hive::GhError) do
       Hive::Gh.with_network_timeout do
         Timeout.timeout(0.01) { sleep 0.5 }
       end
     end
-    assert_equal 1, status, "Timeout in network helper must hard-exit 1 (out=#{out.inspect} err=#{err.inspect})"
-    assert_match(/network operation exceeded/, err)
+    assert_match(/network operation exceeded/, err.message)
   end
 
   # --- pr_frontmatter ---------------------------------------------------
@@ -109,7 +107,20 @@ class GhUnitTest < Minitest::Test
 
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed, "gh pr view non-zero must set fetch_failed=true"
+      refute_empty result.fetch_error.to_s, "fetch_error must preserve the gh failure detail"
       refute result.clean?, "fetch_failed must NOT be reported as clean"
+    end
+  end
+
+  def test_scan_pr_for_secrets_preserves_local_hits_on_fetch_failure
+    with_tmp_dir do |dir|
+      state = File.join(dir, "pr.md")
+      File.write(state, "key: sk-ant-#{'a' * 30}\n")
+      ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
+
+      result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
+      assert result.fetch_failed
+      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
     end
   end
 
@@ -134,13 +145,24 @@ class GhUnitTest < Minitest::Test
     # transient error as "no PR exists" and open a second one.
     with_tmp_git_repo do |dir|
       ENV["HIVE_FAKE_GH_LIST_EXIT"] = "1"
-      _out, err, status = with_captured_exit do
+      err = assert_raises(Hive::GhError) do
         Hive::Gh.lookup_existing_pr(dir, "feat-x-260424-aaaa")
       end
-      assert_equal 1, status, "gh pr list failure must exit 1, got status=#{status.inspect}"
-      assert_match(/gh pr list.*failed/, err)
+      assert_match(/gh pr list.*failed/, err.message)
     ensure
       ENV.delete("HIVE_FAKE_GH_LIST_EXIT")
+    end
+  end
+
+  def test_lookup_existing_pr_rejects_non_array_json
+    with_tmp_git_repo do |dir|
+      ENV["HIVE_FAKE_GH_LIST_JSON"] = '{"error":"wrapped"}'
+      err = assert_raises(Hive::GhError) do
+        Hive::Gh.lookup_existing_pr(dir, "feat-x-260424-aaaa")
+      end
+      assert_match(/expected Array/, err.message)
+    ensure
+      ENV.delete("HIVE_FAKE_GH_LIST_JSON")
     end
   end
 
@@ -172,11 +194,8 @@ class GhUnitTest < Minitest::Test
 
   def test_push_branch_bang_exits_one_on_failure
     with_tmp_git_repo do |dir|
-      _out, err, status = with_captured_exit do
-        Hive::Gh.push_branch!(dir, "no-such-branch")
-      end
-      assert_equal 1, status
-      assert_match(/git push failed/, err)
+      err = assert_raises(Hive::GhError) { Hive::Gh.push_branch!(dir, "no-such-branch") }
+      assert_match(/git push failed/, err.message)
     end
   end
 end

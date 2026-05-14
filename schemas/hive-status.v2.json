@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:status:v1",
-  "title": "hive status output (v1)",
+  "$id": "urn:hive:schema:status:v2",
+  "title": "hive status output (v2)",
   "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
   "oneOf": [
     {
@@ -27,7 +27,7 @@
           "const": "hive-status"
         },
         "schema_version": {
-          "const": 1
+          "const": 2
         },
         "ok": {
           "const": true
@@ -62,7 +62,7 @@
           "const": "hive-status"
         },
         "schema_version": {
-          "const": 1
+          "const": 2
         },
         "ok": {
           "const": false
@@ -178,9 +178,10 @@
             "2-brainstorm",
             "3-plan",
             "4-execute",
-            "5-review",
-            "6-pr",
-            "7-done"
+            "5-open-pr",
+            "6-review",
+            "7-finalize",
+            "8-done"
           ]
         },
         "slug": {
@@ -242,8 +243,9 @@
             "ready_to_brainstorm",
             "ready_to_plan",
             "ready_to_develop",
+            "ready_to_open_pr",
             "ready_for_review",
-            "ready_for_pr",
+            "ready_to_finalize",
             "ready_to_archive",
             "needs_input",
             "review_findings",

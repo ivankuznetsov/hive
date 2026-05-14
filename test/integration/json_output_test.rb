@@ -55,7 +55,7 @@ class JsonOutputTest < Minitest::Test
       assert_equal 1, out.lines.count, "JSON output must be a single line on stdout (no stray puts)"
       payload = JSON.parse(out)
       assert_equal "hive-status", payload["schema"]
-      assert_equal 1, payload["schema_version"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"), payload["schema_version"]
       assert_equal [], payload["projects"], "empty registry must surface as projects:[]"
       assert payload["generated_at"].match?(/\A\d{4}-\d{2}-\d{2}T/), "generated_at must be ISO-8601"
     end
@@ -138,7 +138,7 @@ class JsonOutputTest < Minitest::Test
         assert_equal 1, out.lines.count, "JSON output must be a single line on stdout (no stray puts)"
         payload = JSON.parse(out)
         assert_equal "hive-run", payload["schema"]
-        assert_equal 1, payload["schema_version"]
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"), payload["schema_version"]
         assert_equal "brainstorm", payload["stage"]
         assert_equal 2, payload["stage_index"]
         assert_equal slug, payload["slug"]

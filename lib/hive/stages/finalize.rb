@@ -1,6 +1,7 @@
 require "fileutils"
 require "open3"
 require "hive/gh"
+require "hive/git_ops"
 require "hive/markers"
 require "hive/protected_files"
 require "hive/secret_patterns"
@@ -32,9 +33,9 @@ module Hive
         # Authenticate first so an auth-related push failure surfaces
         # as a clear "gh not authenticated" hard-fail (Plan R5)
         # instead of a generic git push error.
-        Hive::Gh.ensure_authenticated!
-        state_result = verify_state!(task, worktree_path, branch)
-        return state_result if state_result.is_a?(Hash)
+        Hive::Gh.ensure_authenticated!(cfg)
+        state_result = verify_state!(task, worktree_path, branch, cfg)
+        return state_result if state_result
 
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
@@ -59,27 +60,33 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         return { commit: nil, status: marker.name } unless marker.name == :complete
 
+        validation = validate_complete_marker(task, marker, pr_url)
+        return validation if validation
+
         # Scan-before-ready: the runner OWNS the `gh pr ready` call so
         # the secret scan can gate it. The agent prompt now explicitly
         # forbids the agent from running `gh pr ready` (templates/
         # finalize_prompt.md.erb).
         scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
-                                            pr_url: pr_url)
+                                            pr_url: pr_url,
+                                            cfg: cfg)
         if scan.fetch_failed
           Hive::Markers.set(task.state_file, :error,
                             reason: "secret_scan_fetch_failed",
-                            detail: scan.fetch_error.to_s[0, 200])
+                            detail: scan.fetch_error.to_s[0, 200],
+                            patterns: scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
           return { commit: "finalize_secret_scan_failed", status: :error }
         end
         if scan.hits.any?
-          redact_pr_body!(pr_url)
+          redact_status = redact_pr_body!(pr_url, cfg)
           Hive::Markers.set(task.state_file, :error,
                             reason: "secret_in_pr_body",
-                            patterns: scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","))
+                            patterns: scan.hits.map { |h| h[:name].to_s }.uniq.first(3).join(","),
+                            redact_status: redact_status.to_s)
           return { commit: "finalize_secret_blocked", status: :error }
         end
 
-        ready_result = mark_pr_ready(task, pr_url)
+        ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
 
         write_summary(task, worktree_path, branch, pr_url)
@@ -113,7 +120,7 @@ module Hive
         exit 1
       end
 
-      def verify_state!(task, worktree_path, branch)
+      def verify_state!(task, worktree_path, branch, cfg)
         out, err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
         unless status.success?
           Hive::Markers.set(task.state_file, :error,
@@ -126,15 +133,42 @@ module Hive
           return { commit: "finalize_dirty_worktree", status: :error }
         end
 
-        return true if pushed?(worktree_path, branch)
+        return nil if pushed?(worktree_path, branch)
 
-        push_result = Hive::Gh.push_branch(worktree_path, branch)
-        return true if push_result.success? && pushed?(worktree_path, branch)
+        push_result = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg)
+        return nil if push_result.success? && pushed?(worktree_path, branch)
 
         Hive::Markers.set(task.state_file, :error,
                           reason: "unpushed_commits",
                           detail: push_result.stderr.to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      def validate_complete_marker(task, marker, expected_pr_url)
+        frontmatter_url = Hive::Gh.pr_frontmatter(task.state_file)["pr_url"].to_s
+        if frontmatter_url != expected_pr_url.to_s
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "finalize_pr_url_tampered",
+                            expected_pr_url: expected_pr_url,
+                            actual_pr_url: frontmatter_url)
+          return { commit: "finalize_pr_url_tampered", status: :error }
+        end
+
+        marker_url = marker.attrs["pr_url"].to_s
+        if marker_url != expected_pr_url.to_s
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "finalize_pr_url_tampered",
+                            expected_pr_url: expected_pr_url,
+                            actual_pr_url: marker_url)
+          return { commit: "finalize_pr_url_tampered", status: :error }
+        end
+        unless marker.attrs["is_draft"] == "false"
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "finalize_marker_not_ready")
+          return { commit: "finalize_marker_not_ready", status: :error }
+        end
+
+        nil
       end
 
       def pushed?(worktree_path, branch)
@@ -167,31 +201,42 @@ module Hive
 
       # Runner-owned `gh pr ready` call. Runs only after secret scan
       # clears. Returns a stage result hash on failure, nil on success.
-      def mark_pr_ready(task, pr_url)
-        _out, err, status = Hive::Gh.with_network_timeout do
-          Open3.capture3("gh", "pr", "ready", pr_url)
-        end
+      def mark_pr_ready(task, pr_url, cfg)
+        out, _err, status = Hive::Gh.capture3("gh", "pr", "view", pr_url, "--json", "isDraft", "-q", ".isDraft", cfg: cfg)
+        return nil if status.success? && out.strip == "false"
+
+        _out, err, status = Hive::Gh.capture3("gh", "pr", "ready", pr_url, cfg: cfg)
         return nil if status.success?
+        return nil if err.to_s.include?("already") && err.to_s.include?("ready for review")
 
         Hive::Markers.set(task.state_file, :error,
                           reason: "gh_pr_ready_failed",
                           detail: err.to_s.strip[0, 200])
+        { commit: "finalize_pr_ready_failed", status: :error }
+      rescue Hive::GhError => e
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "gh_pr_ready_failed",
+                          detail: e.message.to_s[0, 200])
         { commit: "finalize_pr_ready_failed", status: :error }
       end
 
       # On secret hit, both revert ready AND scrub the body. Fail-loud
       # on revert failure so the operator sees the secret-bearing PR
       # is still public.
-      def redact_pr_body!(pr_url)
-        return if pr_url.to_s.empty?
+      def redact_pr_body!(pr_url, cfg)
+        return :skipped if pr_url.to_s.empty?
 
-        _out, err, status = Hive::Gh.with_network_timeout do
-          Open3.capture3("gh", "pr", "edit", pr_url, "--body",
-                         "[redacted: hive detected a credential pattern]")
+        _out, err, status = Hive::Gh.capture3("gh", "pr", "edit", pr_url, "--body",
+                                              "[redacted: hive detected a credential pattern]",
+                                              cfg: cfg)
+        unless status.success?
+          warn "hive: failed to redact PR body for #{pr_url}: #{err.strip}"
+          return :failed
         end
-        warn "hive: failed to redact PR body for #{pr_url}: #{err.strip}" unless status.success?
+        :redacted
       rescue StandardError => e
         warn "hive: redact_pr_body raised #{e.class}: #{e.message}; PR body may still contain the secret"
+        :failed
       end
 
       # Migration shim: read `budget_usd.pr` / `timeout_sec.pr` for one
@@ -216,7 +261,8 @@ module Hive
             pr_url: pr_url,
             commits: final_commits(worktree_path, branch),
             review: review_summary(task),
-            open_escalations: open_escalations(task)
+            open_escalations: open_escalations(task),
+            slug: task.slug
           )
         )
         File.write(path, body)
@@ -226,7 +272,7 @@ module Hive
         return "Final PR description refreshed." unless File.exist?(pr_md)
 
         body = File.read(pr_md)
-        if body =~ /^## Summary\s*\n(.*?)(?:\n## |\n<!-- COMPLETE|\z)/m
+        if body =~ /^\#{1,3}\s+Summary\s*\n(.*?)(?:\n\#{1,3}\s+|\n<!-- COMPLETE|\z)/m
           Regexp.last_match(1).strip
         else
           "Final PR description refreshed."
@@ -234,9 +280,12 @@ module Hive
       end
 
       def final_commits(worktree_path, branch)
-        out, _err, status = Open3.capture3("git", "-C", worktree_path, "log", "--oneline", "#{branch}@{u}..HEAD")
-        return "(branch is pushed; no unpushed commits)" if status.success? && out.strip.empty?
-        return out.strip if status.success?
+        default_branch = Hive::GitOps.new(worktree_path).default_branch
+        base, = capture_git(worktree_path, "merge-base", "HEAD", "origin/#{default_branch}") if default_branch
+        if base
+          out, _err, status = Open3.capture3("git", "-C", worktree_path, "log", "--oneline", "#{base}..HEAD")
+          return out.strip if status.success? && !out.strip.empty?
+        end
 
         out, _err, status = Open3.capture3("git", "-C", worktree_path, "log", "--oneline", "-10")
         status.success? ? out.strip : "(unable to read commits)"

@@ -33,12 +33,13 @@ module Hive
 
           with_body_file(body) do |file|
             failures = []
-            attempts(cfg).times do |idx|
-              _out, err, status = Open3.capture3("gh", "pr", "comment", pr_url, "--body-file", file.path)
+            max_attempts = attempts(cfg)
+            max_attempts.times do |idx|
+              _out, err, status = Hive::Gh.capture3("gh", "pr", "comment", pr_url, "--body-file", file.path, cfg: cfg)
               return :posted if status.success?
 
               failures << err.to_s.strip
-              if idx + 1 >= attempts(cfg)
+              if idx + 1 >= max_attempts
                 warn_failure(pass, reviewer_name, body_path, failures)
                 return :failed
               end
@@ -78,9 +79,7 @@ module Hive
         COMMENT_PAGE_CAP = 100
 
         def already_posted?(pr_url, header)
-          out, _err, status = Open3.capture3(
-            "gh", "pr", "view", pr_url, "--json", "comments"
-          )
+          out, _err, status = Hive::Gh.capture3("gh", "pr", "view", pr_url, "--json", "comments")
           return false unless status.success?
 
           parsed = JSON.parse(out)
@@ -92,7 +91,7 @@ module Hive
           end
 
           comments.any? { |c| c.is_a?(Hash) && c["body"].to_s.lines.first.to_s.chomp == header }
-        rescue JSON::ParserError
+        rescue JSON::ParserError, Hive::GhError
           false
         end
 

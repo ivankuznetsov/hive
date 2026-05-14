@@ -196,7 +196,7 @@ class RunStageActionTest < Minitest::Test
 
         payload = JSON.parse(out)
         assert_equal "hive-stage-action", payload["schema"]
-        assert_equal 1, payload["schema_version"]
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-stage-action"), payload["schema_version"]
         assert_equal false, payload["ok"]
         assert_equal "plan", payload["verb"]
         assert_equal "wrong_stage", payload["error_kind"]

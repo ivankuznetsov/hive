@@ -87,6 +87,10 @@ class WorktreeTest < Minitest::Test
       scratch = Dir.mktmpdir("origin-pusher")
       begin
         run!("git", "clone", origin_dir, scratch)
+        # CI runners don't have global git identity; configure
+        # locally so the commit lands without prompting.
+        run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+        run!("git", "-C", scratch, "config", "user.name", "Test")
         File.write(File.join(scratch, "from-origin.txt"), "advanced\n")
         run!("git", "-C", scratch, "add", ".")
         run!("git", "-C", scratch, "commit", "-m", "origin-advance", "--quiet")

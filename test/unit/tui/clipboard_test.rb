@@ -389,9 +389,7 @@ class HiveTuiClipboardTest < Minitest::Test
     assert_raises(NoMethodError) { status.signaled? }
   end
 
-  def test_drag_drop_non_image_short_circuits_clipboard_probe
-    # R13: pasted_text resolves to a non-image file; the OS clipboard
-    # branch must not stage a stale image bytes payload behind it.
+  def test_clipboard_image_bytes_take_precedence_over_pasted_text_path
     with_tmp_dir do |dir|
       path = File.join(dir, "notes.txt")
       kernel = FakeKernel.new(
@@ -406,10 +404,10 @@ class HiveTuiClipboardTest < Minitest::Test
         kernel: kernel
       )
 
-      assert_equal :none, result.kind,
-        "non-image drag-drop path must NOT fall through to OS clipboard"
-      assert_empty kernel.captures,
-        "non-image drag-drop path must NOT spawn wl-paste"
+      assert_equal :image_bytes, result.kind,
+        "OS clipboard image bytes are the primary paste source; pasted text paths are fallback"
+      assert_equal PNG_BYTES, result.bytes
+      refute_empty kernel.captures
     end
   end
 

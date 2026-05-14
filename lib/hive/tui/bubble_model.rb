@@ -2424,14 +2424,14 @@ module Hive
           label = "image#{number}"
           attachment = attachments.fetch(label)
           ext = attachment_extension(attachment)
-          "![](assets/image-#{number}.#{ext})"
+          "![](assets/bug-#{number}.#{ext})"
         end
       end
 
       def rich_new_idea_attachment_tuples
         @hive_model.new_idea_attachments.map do |attachment|
           number = attachment.label.to_s.delete_prefix("image")
-          [ attachment.staging_path, "image-#{number}.#{attachment_extension(attachment)}" ]
+          [ attachment.staging_path, "bug-#{number}.#{attachment_extension(attachment)}" ]
         end
       end
 

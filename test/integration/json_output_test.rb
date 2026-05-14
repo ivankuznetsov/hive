@@ -357,6 +357,130 @@ class JsonOutputTest < Minitest::Test
     end
   end
 
+  def test_run_json_on_execute_waiting_dirty_worktree_targets_worktree
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "execute-dirty-260426-aaaa"
+        execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        worktree_path = File.join(dir, "worktree")
+        FileUtils.mkdir_p(execute_dir)
+        FileUtils.mkdir_p(worktree_path)
+        File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=dirty_worktree -->\n")
+        File.write(File.join(execute_dir, "worktree.yml"), {
+          "path" => worktree_path,
+          "branch" => slug
+        }.to_yaml)
+
+        require "hive/stages/execute"
+        Hive::Stages::Execute.singleton_class.alias_method(:__orig_run!, :run!)
+        Hive::Stages::Execute.define_singleton_method(:run!) { |_task, _cfg| { commit: nil, status: :execute_waiting } }
+
+        begin
+          out, _err, status = with_captured_exit { Hive::Commands::Run.new(execute_dir, json: true).call }
+          assert_equal Hive::ExitCodes::SUCCESS, status
+
+          payload = JSON.parse(out)
+          assert_equal "execute_waiting", payload["marker"]
+          next_action = payload["next_action"]
+          assert_equal Hive::Schemas::NextActionKind::EDIT, next_action["kind"]
+          assert_equal worktree_path, next_action["target"]
+          assert_match(/uncommitted work/, next_action["instructions"])
+        ensure
+          Hive::Stages::Execute.singleton_class.alias_method(:run!, :__orig_run!)
+          Hive::Stages::Execute.singleton_class.send(:remove_method, :__orig_run!)
+        end
+      end
+    end
+  end
+
+  def test_run_json_on_execute_waiting_branch_integrity_targets_worktree
+    %w[branch_mismatch head_not_descendant].each do |reason|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          slug = "execute-#{reason.tr('_', '-')}-260426-aaaa"
+          worktree_path = File.join(dir, "worktree-#{reason}")
+          FileUtils.mkdir_p(worktree_path)
+          execute_dir = seed_execute_waiting_task(
+            dir,
+            slug: slug,
+            reason: reason,
+            worktree_path: worktree_path
+          )
+
+          with_execute_waiting_runner_stub do
+            out, _err, status = with_captured_exit { Hive::Commands::Run.new(execute_dir, json: true).call }
+            assert_equal Hive::ExitCodes::SUCCESS, status
+
+            next_action = JSON.parse(out)["next_action"]
+            assert_equal Hive::Schemas::NextActionKind::EDIT, next_action["kind"]
+            assert_equal worktree_path, next_action["target"]
+            assert_match(/expected task branch/, next_action["instructions"])
+          end
+        end
+      end
+    end
+  end
+
+  def test_run_json_on_execute_waiting_no_changes_points_to_plan
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "execute-no-change-260426-aaaa"
+        execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        FileUtils.mkdir_p(execute_dir)
+        File.write(File.join(execute_dir, "task.md"), "<!-- EXECUTE_WAITING reason=no_worktree_changes -->\n")
+        File.write(File.join(execute_dir, "plan.md"), "# Plan\n")
+        File.write(File.join(execute_dir, "worktree.yml"), {
+          "path" => dir,
+          "branch" => slug
+        }.to_yaml)
+
+        require "hive/stages/execute"
+        Hive::Stages::Execute.singleton_class.alias_method(:__orig_run!, :run!)
+        Hive::Stages::Execute.define_singleton_method(:run!) { |_task, _cfg| { commit: nil, status: :execute_waiting } }
+
+        begin
+          out, _err, status = with_captured_exit { Hive::Commands::Run.new(execute_dir, json: true).call }
+          assert_equal Hive::ExitCodes::SUCCESS, status
+
+          next_action = JSON.parse(out)["next_action"]
+          assert_equal File.join(execute_dir, "plan.md"), next_action["target"]
+          assert_match(/execution_mode: research/, next_action["instructions"])
+        ensure
+          Hive::Stages::Execute.singleton_class.alias_method(:run!, :__orig_run!)
+          Hive::Stages::Execute.singleton_class.send(:remove_method, :__orig_run!)
+        end
+      end
+    end
+  end
+
+  def test_run_json_on_execute_waiting_missing_research_output_reruns_agent
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "execute-missing-research-260426-aaaa"
+        execute_dir = seed_execute_waiting_task(
+          dir,
+          slug: slug,
+          reason: "missing_research_output"
+        )
+
+        with_execute_waiting_runner_stub do
+          out, _err, status = with_captured_exit { Hive::Commands::Run.new(execute_dir, json: true).call }
+          assert_equal Hive::ExitCodes::SUCCESS, status
+
+          next_action = JSON.parse(out)["next_action"]
+          assert_equal Hive::Schemas::NextActionKind::RUN, next_action["kind"]
+          assert_equal execute_dir, next_action["target"]
+          assert_match(/structured final agent message/, next_action["instructions"])
+          assert_equal "hive develop #{slug} --from 4-execute", next_action["rerun_with"]
+        end
+      end
+    end
+  end
+
   # Pin the JSON-mode :error contract: a dual signal where the JSON document
   # carries the marker + attrs AND the process exits with TASK_IN_ERROR (3).
   # A future refactor that drops the post-puts raise (or wraps it in a

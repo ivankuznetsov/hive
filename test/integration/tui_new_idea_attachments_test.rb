@@ -62,9 +62,9 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "first-middle-*")]
         assert_equal 1, glob.size
         idea = File.read(File.join(glob.first, "idea.md"))
-        assert_includes idea, "first ![](assets/image-1.png) middle ![](assets/image-2.png)"
-        assert_equal "one", File.binread(File.join(glob.first, "assets", "image-1.png"))
-        assert_equal "two", File.binread(File.join(glob.first, "assets", "image-2.png"))
+        assert_includes idea, "first ![](assets/bug-1.png) middle ![](assets/bug-2.png)"
+        assert_equal "one", File.binread(File.join(glob.first, "assets", "bug-1.png"))
+        assert_equal "two", File.binread(File.join(glob.first, "assets", "bug-2.png"))
       ensure
         Hive::Tui::ComposerStaging.cleanup!(staging_dir) if staging_dir && File.exist?(staging_dir)
       end
@@ -89,7 +89,7 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "task-*")]
         assert_equal 1, glob.size
         idea = File.read(File.join(glob.first, "idea.md"))
-        assert_includes idea, "![](assets/image-1.png)"
+        assert_includes idea, "![](assets/bug-1.png)"
       ensure
         Hive::Tui::ComposerStaging.cleanup!(staging_dir) if staging_dir && File.exist?(staging_dir)
       end

@@ -127,15 +127,15 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
         task = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "bug-here-*")].first
         refute_nil task, "rich TUI submit must create an inbox task"
         idea = File.read(File.join(task, "idea.md"))
-        assert_includes idea, "bug here ![](assets/image-1.png), on mobile looks like ![](assets/image-2.png) and desktop ![](assets/image-3.png)"
+        assert_includes idea, "bug here ![](assets/bug-1.png), on mobile looks like ![](assets/bug-2.png) and desktop ![](assets/bug-3.png)"
 
         (1..3).each do |i|
           expected = File.binread(File.join(__dir__, "..", "fixtures", "composer", "screenshot-#{i}.png"))
-          assert_equal expected, File.binread(File.join(task, "assets", "image-#{i}.png"))
+          assert_equal expected, File.binread(File.join(task, "assets", "bug-#{i}.png"))
         end
 
         # Plan / smoke-test contract pin: `git commit` must capture
-        # `idea.md` plus every `assets/image-N.png`, not just the
+        # `idea.md` plus every `assets/bug-N.png`, not just the
         # markdown. The commit lands in the `.hive-state` git repo
         # (separate worktree), so query that one, not the project
         # root. A regression where the TUI rich-submit `git add`s
@@ -151,8 +151,8 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
         )
         (1..3).each do |i|
           assert(
-            git_files.any? { |f| f.end_with?("assets/image-#{i}.png") },
-            "TUI rich-submit commit must include assets/image-#{i}.png " \
+            git_files.any? { |f| f.end_with?("assets/bug-#{i}.png") },
+            "TUI rich-submit commit must include assets/bug-#{i}.png " \
             "(got: #{git_files.inspect})"
           )
         end
@@ -177,9 +177,9 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
         # `arg=` line and grepping only that tail.
         argv_tail = argv_log.split(/^arg=/m, 2)[1].to_s
         (1..3).each do |i|
-          assert_includes argv_tail, "assets/image-#{i}.png",
+          assert_includes argv_tail, "assets/bug-#{i}.png",
             "fake-claude argv (after first `arg=` marker) must contain " \
-            "assets/image-#{i}.png; a regression that smuggles the path into " \
+            "assets/bug-#{i}.png; a regression that smuggles the path into " \
             "the per-invocation header rather than an argv element would " \
             "otherwise pass the bare substring check"
         end

@@ -109,26 +109,18 @@ module Hive
         test_result = probe_test_clipboard(env: env, kernel: kernel)
         return test_result if test_result.kind != :none
 
-        # Prefer the explicit pasted path over OS clipboard bytes: when
-        # the user drag-drops a file or pastes a literal path into the
-        # composer, that's the unambiguous intent — running `wl-paste`
-        # / `xclip` first risks staging a stale clipboard image they
-        # never asked for. Only fall back to clipboard bytes when the
-        # pasted text didn't resolve to a usable image file.
+        clipboard_result = probe_clipboard_image(env: env, kernel: kernel)
+        return clipboard_result if clipboard_result.kind != :none
+
+        # Primary image MIME clipboard probes run first. A filesystem path
+        # in the pasted text is the drag/drop fallback for environments
+        # that expose file paths rather than image bytes.
         if !normalized_path(pasted_text).empty?
           file_result = probe_image_file(pasted_text: pasted_text, kernel: kernel)
           return file_result if file_result.kind != :none
-          # R13: pasted path points at an existing non-image file (or
-          # a misnamed image with no valid signature / empty bytes).
-          # Stop here so the caller's drag-drop / empty-file branches
-          # can flash; falling through would stage stale clipboard
-          # bytes the user didn't ask for.
           return NONE if non_image_file_path?(pasted_text: pasted_text, kernel: kernel)
           return EMPTY_IMAGE if empty_image_file?(pasted_text: pasted_text, kernel: kernel)
         end
-
-        clipboard_result = probe_clipboard_image(env: env, kernel: kernel)
-        return clipboard_result if clipboard_result.kind != :none
 
         probe_image_file(pasted_text: pasted_text, kernel: kernel)
       end

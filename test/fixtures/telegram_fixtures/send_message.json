@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "result": {
+    "message_id": 42,
+    "chat": { "id": 12345, "type": "private" },
+    "date": 1778750002,
+    "text": "sent"
+  }
+}

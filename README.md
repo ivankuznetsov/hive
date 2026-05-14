@@ -177,7 +177,7 @@ project_name: your-project
 default_branch: master            # detected at init
 worktree_root: /home/you/Dev/your-project.worktrees
 hive_state_path: .hive-state
-max_review_passes: 4
+max_review_passes: 2
 
 # Stage-level agents — each value must be one of: claude, codex, pi.
 # Hand-edit any of these later to override what you picked at init.
@@ -222,7 +222,7 @@ Override individual keys; deep-merge keeps the rest at defaults. The deprecated 
 - **`no finding with id=...`** — run `hive findings <slug>` again and use the IDs from the current review file. IDs are assigned by document order.
 - **`no findings selected`** — `accept-finding` / `reject-finding` need at least one selector: explicit IDs, `--severity <name>`, or `--all`.
 - **Stale `.lock`** — auto-cleared on next `hive run` when the recorded PID is dead. PID-reuse false positives are defended against by cross-checking `/proc/<pid>/stat` start time (Linux only).
-- **`EXECUTE_STALE`** in `task.md` — max review passes (default 4) hit. Edit `reviews/*.md` manually, decrement `pass:` in `task.md` frontmatter, remove the `<!-- EXECUTE_STALE … -->` marker, then `hive run` again.
+- **`EXECUTE_STALE`** in `task.md` — max review passes (default 2) hit. Edit `reviews/*.md` manually, decrement `pass:` in `task.md` frontmatter, remove the `<!-- EXECUTE_STALE … -->` marker, then `hive run` again.
 - **`reviewer_tampered`** in `task.md` — the reviewer agent edited `plan.md` or `worktree.yml` (it shouldn't). SHA-256 mismatch detected. Inspect the worktree, restore from git, re-run.
 - **Concurrent `hive run`** — `ConcurrentRunError`. Per-task `.lock` is held for the entire run. Wait or kill the other process first.
 

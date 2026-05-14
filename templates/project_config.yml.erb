@@ -3,7 +3,7 @@ project_name: <%= project_name %>
 default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
-max_review_passes: 4
+max_review_passes: 2
 
 # Stage-level agent for the three single-agent stages. (5-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
@@ -75,7 +75,7 @@ review:
     agent: claude
     prompt_template: browser_test_prompt.md.erb
     max_attempts: 2
-  max_passes: 4
+  max_passes: 2
   # Aggregate wall-clock cap across all phases of one `hive run` on a
   # 5-review folder. 5400s = 90 min.
   max_wall_clock_sec: 5400
@@ -148,4 +148,3 @@ daemon:
 rebase:
   enabled: true
   conflict_resolution_timeout_sec: 2700
-

@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-05-04
+updated: 2026-05-14
 tags: [config, yaml, validation]
 ---
 
@@ -15,7 +15,7 @@ tags: [config, yaml, validation]
 {
   "hive_state_path"   => ".hive-state",
   "worktree_root"     => nil,
-  "max_review_passes" => 4,
+  "max_review_passes" => 2,
   "default_branch"    => nil,
   "project_name"      => nil,
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
@@ -57,7 +57,7 @@ tags: [config, yaml, validation]
     "fix"          => { "agent" => "claude", "prompt_template" => "fix_prompt.md.erb" },
     "browser_test" => { "enabled" => false, "agent" => "claude",
                         "prompt_template" => "browser_test_prompt.md.erb", "max_attempts" => 2 },
-    "max_passes"        => 4,
+    "max_passes"        => 2,
     "max_wall_clock_sec" => 5400
   }
 }

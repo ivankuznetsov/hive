@@ -86,8 +86,8 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `poll_interval_sec` | 30 | Tick cadence for status polling. Min 5. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
-| `max_concurrent_runs` | 3 | Global cap. ADR-023 per-task cap × this = ~$4425 worst-case in-flight. |
-| `max_concurrent_per_project` | 1 | Fairness across projects. |
+| `max_concurrent_runs` | 5 | Global cap. ADR-023 per-task cap × this = ~$7375 worst-case in-flight. |
+| `max_concurrent_per_project` | 5 | Fairness across projects; active agents count, human-input rows do not. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
 | `transient_retry_backoff_sec` | 60 | Base of `60 → 120 → 300 s` backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |

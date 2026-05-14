@@ -150,7 +150,7 @@ tags: [decisions, adr]
 **Status:** Active (supersedes ADR-008's per-process nonce)
 **Context:** ADR-008 set the `<user_supplied>` wrapper nonce once per Ruby process. The 5-review pass spawns multiple agents (CI-fix, several reviewers, triage, fix, browser) in a single run; if every spawn shares the nonce, a hostile reviewer output saved verbatim into `accepted_findings` could escape its wrapper in the *next* spawn. The nonce must be fresh per spawn.
 **Decision:** `Hive::Stages::Base.user_supplied_tag` returns a fresh `<user_supplied_<hex>>` value on every call. `Stages::Base.spawn_agent` calls it once per spawn and threads the value into the rendered template. The runner never memoizes the tag at the stage level.
-**Consequences:** Nonce collision risk is now per-spawn (negligible). One `Stages::Review.run!` invocation that runs 4 passes with 3 reviewers, 1 triage, 1 fix, 1 guardrail-pass, 1 browser-test produces ~24 distinct nonces — all isolated.
+**Consequences:** Nonce collision risk is now per-spawn (negligible). One `Stages::Review.run!` invocation that runs 2 passes with 3 reviewers, 1 triage, 1 fix, 1 guardrail-pass, 1 browser-test produces ~12 distinct nonces — all isolated.
 
 ## ADR-020: Post-fix diff guardrail (extends ADR-008's secret-scan to fix-time diffs)
 
@@ -208,7 +208,7 @@ The human approval gesture for the daemon is **enabling it at `hive init`** (TTY
   - Origin's "next morning" success criterion becomes achievable end-to-end: idea → brainstorm answers (human) → plan → execute → review → PR opened → PR merged on GitHub (human) → auto-archived. Human touchpoints reduce to: `hive new`, brainstorm Q&A, optional review-escalation triage, GitHub merge button.
   - Trust boundary unchanged from ADR-008/018: daemon spawns the same `hive run` / workflow verbs the user already runs. No new permission grants.
   - ADR-020 (fix-guardrail) and ADR-021 (orchestrator-owned markers) invariants preserved automatically — both manifest as `kind: edit` or `agent_running` rows the daemon never advances past.
-  - Cost ceiling under daemon load: `max_concurrent_runs × per-task-budget-cap` (ADR-023) ≈ ~$4425 worst-case in-flight at default `max_concurrent_runs=3`. First per-project rollout requires `--dry-run` validation.
+  - Cost ceiling under daemon load: `max_concurrent_runs × per-task-budget-cap` (ADR-023) ≈ ~$7375 worst-case in-flight at default `max_concurrent_runs=5`. First per-project rollout requires `--dry-run` validation.
   - For operators who want the prototype-era manual-`mv` model, the answer is `daemon.enabled: false` (or no daemon running). The CLI surface is unchanged; the daemon is purely additive.
 
 ## ADR-025: JSON envelope additions are required, not optional; closed-enum reasons

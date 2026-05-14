@@ -3,7 +3,7 @@ title: 5-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-05-13T23:00:00Z
+updated: 2026-05-14T15:20:40Z
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -39,7 +39,7 @@ branch on triage:
   all clean              → Phase 5 (browser test) → REVIEW_COMPLETE
 ```
 
-Pass cap (`review.max_passes`, default 4) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary AND between reviewers inside `run_reviewers` (so the adapter-local retry budget cannot drain the whole 5400s window inside one Phase 2 invocation); exceeding it sets `REVIEW_STALE reason=wall_clock`.
+Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary AND between reviewers inside `run_reviewers` (so the adapter-local retry budget cannot drain the whole 5400s window inside one Phase 2 invocation); exceeding it sets `REVIEW_STALE reason=wall_clock`.
 
 ## Phase 1 — CI fix (`Hive::Stages::Review::CiFix`)
 

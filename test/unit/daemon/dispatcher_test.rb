@@ -122,13 +122,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
-          mtime: T0 - 600)
+          mtime: T0 - 600, claude_pid_alive: nil)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
       folder: "/tmp/#{project}/#{stage}/#{slug}",
       state_file: "/tmp/#{project}/#{stage}/#{slug}/idea.md",
       state_file_mtime: mtime, action: action,
-      suggested_command: command, claude_pid_alive: nil
+      suggested_command: command, claude_pid_alive: claude_pid_alive
     )
   end
 
@@ -311,6 +311,63 @@ class HiveDaemonDispatcherTest < Minitest::Test
     blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "s3" }
     refute_nil blocked, "third dispatch must be :blocked when global cap = 2"
     assert_equal "global_cap", blocked[1][:reason]
+  end
+
+  def test_status_active_agent_row_counts_toward_project_cap
+    rows = [
+      row(slug: "running", stage: "5-review", marker: "review_working",
+          action: "agent_running", command: nil, claude_pid_alive: true),
+      row(slug: "ready", action: "ready_to_plan",
+          command: "hive plan ready --from 2-brainstorm")
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.controller.instance_variable_set(:@max_concurrent_per_project, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
+    refute_nil blocked, "ready row must block while an active agent is already running"
+    assert_equal "project_cap", blocked[1][:reason]
+  end
+
+  def test_needs_input_rows_do_not_count_toward_project_cap
+    rows = [
+      row(slug: "waiting", stage: "2-brainstorm", action: "needs_input",
+          command: "hive brainstorm waiting --from 2-brainstorm"),
+      row(slug: "ready", action: "ready_to_plan",
+          command: "hive plan ready --from 2-brainstorm")
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.controller.instance_variable_set(:@max_concurrent_per_project, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size
+    assert_equal "ready", sup.spawned.first[:slug]
+    refute logger.events.any? { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
+  end
+
+  def test_status_agent_row_for_daemon_child_is_not_double_counted
+    rows = [
+      row(slug: "running", stage: "5-review", marker: "review_working",
+          action: "agent_running", command: nil, claude_pid_alive: true),
+      row(slug: "ready", action: "ready_to_plan",
+          command: "hive plan ready --from 2-brainstorm")
+    ]
+    dispatcher, sup, ctrl, _logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.controller.instance_variable_set(:@max_concurrent_runs, 2)
+    ctrl.record_dispatch(
+      pid: 999, project: "p1", slug: "running",
+      stage: "5-review", command: "hive review running",
+      started_at: T0, state_file_mtime: T0 - 60
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size,
+                 "the status row for a daemon-owned child must not consume a second slot"
+    assert_equal "ready", sup.spawned.first[:slug]
   end
 
   # ── status failure ────────────────────────────────────────────────────

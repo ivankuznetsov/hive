@@ -6,6 +6,29 @@ module Hive
       module_function
 
       def run!(task, cfg)
+        case runtime_for(cfg)
+        when :headless
+          run_headless!(task, cfg)
+        when :tmux_interactive
+          require "hive/stages/brainstorm_tmux"
+          Hive::Stages::BrainstormTmux.run!(task, cfg)
+        end
+      end
+
+      def runtime_for(cfg)
+        runtime = cfg.dig("brainstorm", "runtime") ||
+          Hive::Config::DEFAULTS.dig("brainstorm", "runtime")
+        case runtime
+        when "headless" then :headless
+        when "tmux_interactive" then :tmux_interactive
+        else
+          raise Hive::ConfigError,
+                "brainstorm.runtime must be one of #{Hive::Config::BRAINSTORM_RUNTIMES.inspect}; " \
+                "got #{runtime.inspect}"
+        end
+      end
+
+      def run_headless!(task, cfg)
         idea_path = File.join(task.folder, "idea.md")
         idea_text = File.exist?(idea_path) ? File.read(idea_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")

@@ -58,6 +58,7 @@ class ConfigTest < Minitest::Test
       assert_equal "claude", cfg.dig("brainstorm", "agent"), "brainstorm agent must default to claude"
       assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
       assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
+      assert_equal "headless", cfg.dig("brainstorm", "runtime"), "brainstorm runtime must default to headless"
     end
   end
 
@@ -73,8 +74,35 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "codex", cfg.dig("brainstorm", "agent")
       assert_equal "pi",    cfg.dig("plan", "agent")
+      assert_equal "headless", cfg.dig("brainstorm", "runtime")
       assert_equal "claude", cfg.dig("execute", "agent"),
                    "execute agent must fall back to default when not overridden"
+    end
+  end
+
+  def test_load_honors_brainstorm_tmux_runtime_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm:
+          runtime: tmux_interactive
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "tmux_interactive", cfg.dig("brainstorm", "runtime")
+    end
+  end
+
+  def test_load_raises_when_brainstorm_runtime_is_unknown
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm:
+          runtime: warm_pool
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/brainstorm\.runtime/, err.message)
+      assert_match(/headless/, err.message)
+      assert_match(/tmux_interactive/, err.message)
     end
   end
 

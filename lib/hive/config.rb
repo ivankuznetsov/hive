@@ -58,7 +58,8 @@ module Hive
       # different skill without touching templates/.
       "brainstorm" => {
         "agent" => "claude",
-        "skill" => "/compound-engineering:ce-brainstorm"
+        "skill" => "/compound-engineering:ce-brainstorm",
+        "runtime" => "headless"
       },
       "plan" => {
         "agent" => "claude",
@@ -494,6 +495,7 @@ module Hive
       validate_hash_shaped_keys!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
+      validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_rebase!(cfg, source_path)
@@ -694,6 +696,18 @@ module Hive
         agent = cfg.dig(*path)
         validate_agent_name!(agent, path.join("."), source_path)
       end
+    end
+
+    BRAINSTORM_RUNTIMES = %w[headless tmux_interactive].freeze
+
+    def validate_brainstorm_runtime!(cfg, source_path)
+      runtime = cfg.dig("brainstorm", "runtime")
+      return if runtime.nil?
+      return if BRAINSTORM_RUNTIMES.include?(runtime)
+
+      raise ConfigError,
+            "brainstorm.runtime in #{describe_source(source_path)} must be one of " \
+            "#{BRAINSTORM_RUNTIMES.inspect}; got #{runtime.inspect} (#{runtime.class})"
     end
 
     # Shared check used by both validate_reviewers! and

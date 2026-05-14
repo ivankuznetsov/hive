@@ -53,17 +53,27 @@ module Hive
       end
 
       # Predicate: can the daemon spawn a child for (project, slug) now?
+      #
+      # `external_*_count` is the dispatcher's per-tick snapshot of
+      # active agent rows already visible in `hive status --json` but not
+      # owned by this controller. That lets a daemon restart respect
+      # work already in flight while keeping waiting rows (`needs_input`,
+      # `review_findings`, recovery states, etc.) out of the cap.
       # Returns one of :ok | :global_cap | :project_cap | :daily_cap |
       #   :cooldown | :quarantined | :project_dropped
-      def can_dispatch?(project:, slug:, now: Time.now)
+      def can_dispatch?(project:, slug:, now: Time.now,
+                        external_global_count: 0, external_project_count: 0)
         return :project_dropped if @dropped_projects.include?(project)
         return :quarantined     if @quarantine.include?([ project, slug ])
 
         cooldown_expiry = @cooldown_until[[ project, slug ]]
         return :cooldown if cooldown_expiry && cooldown_expiry > now
 
-        return :global_cap  if @running.size >= @max_concurrent_runs
-        return :project_cap if running_count_for(project) >= @max_concurrent_per_project
+        active_global_count = @running.size + external_global_count
+        active_project_count = running_count_for(project) + external_project_count
+
+        return :global_cap  if active_global_count >= @max_concurrent_runs
+        return :project_cap if active_project_count >= @max_concurrent_per_project
         return :daily_cap   if daily_count_for(project, now) >= @max_runs_per_day_per_project
 
         :ok
@@ -171,6 +181,12 @@ module Hive
 
       def running_pids
         @running.keys
+      end
+
+      def running_task?(project:, slug:)
+        @running.any? do |_pid, entry|
+          entry[:project] == project && entry[:slug] == slug
+        end
       end
 
       def in_flight_count

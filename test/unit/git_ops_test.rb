@@ -288,4 +288,64 @@ class GitOpsTest < Minitest::Test
       assert_equal [], ops.staged_unmerged_files
     end
   end
+
+  # ---- PR #69 review B1 + B2 fixes ----
+
+  def test_rebase_merge_message_path_returns_nil_when_no_rebase
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      assert_nil ops.rebase_merge_message_path
+    end
+  end
+
+  def test_rebase_merge_message_path_resolves_via_rev_parse_git_dir
+    # B1: previously the path was hardcoded as
+    # `<project_root>/.git/rebase-merge/message`. That breaks in
+    # linked worktrees where `.git` is a FILE pointing at the real
+    # gitdir. The new helper uses `git rev-parse --git-dir` so it
+    # works in both regular repos and linked worktrees. This test
+    # forces the conflict state with a real conflict so the path
+    # actually exists.
+    with_tmp_git_repo do |dir|
+      File.write(File.join(dir, "shared.txt"), "v0\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "baseline", "--quiet")
+
+      run!("git", "-C", dir, "checkout", "-b", "feature")
+      File.write(File.join(dir, "shared.txt"), "feature\n")
+      run!("git", "-C", dir, "commit", "-am", "feature", "--quiet")
+
+      run!("git", "-C", dir, "checkout", "master")
+      File.write(File.join(dir, "shared.txt"), "master\n")
+      run!("git", "-C", dir, "commit", "-am", "master", "--quiet")
+
+      run!("git", "-C", dir, "checkout", "feature")
+      ops = Hive::GitOps.new(dir)
+      assert_raises(Hive::RebaseConflict) { ops.rebase_onto("master") }
+
+      msg_path = ops.rebase_merge_message_path
+      refute_nil msg_path, "rebase_merge_message_path returns a path when rebase is in progress"
+      assert File.file?(msg_path), "the resolved path must exist as a regular file"
+      content = File.read(msg_path)
+      refute_empty content.strip, "commit message file is non-empty"
+    end
+  end
+
+  def test_reset_hard_orig_head_also_runs_git_clean
+    # B2: reset --hard ORIG_HEAD does NOT remove untracked files;
+    # the cleanup combo IS reset + clean -fd. This test pins that
+    # `reset_hard_orig_head` actually cleans untracked artifacts
+    # (which the wiki/plan claim earlier was wrong about).
+    with_tmp_git_repo do |dir|
+      run!("git", "-C", dir, "update-ref", "ORIG_HEAD", "HEAD")
+      untracked = File.join(dir, "agent_artifact.txt")
+      File.write(untracked, "agent-created\n")
+      assert File.exist?(untracked), "fixture set up correctly"
+
+      ops = Hive::GitOps.new(dir)
+      assert ops.reset_hard_orig_head, "reset_hard_orig_head returns true on success"
+      refute File.exist?(untracked),
+             "untracked agent-created file must be removed by reset_hard_orig_head + git clean -fd"
+    end
+  end
 end

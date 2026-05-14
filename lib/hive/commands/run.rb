@@ -81,12 +81,27 @@ module Hive
 
         if result.succeeded
           if result.commits_behind && result.commits_behind > 0
-            warn "[hive] rebased #{result.commits_behind} commits from origin onto #{task.slug} branch" \
-                 "#{result.agent_resolutions > 0 ? " (#{result.agent_resolutions} conflict#{'s' if result.agent_resolutions != 1} resolved by agent)" : ''}"
+            agent_part =
+              if result.agent_resolutions > 0
+                " (#{result.agent_resolutions} conflict#{'s' if result.agent_resolutions != 1} resolved by agent)"
+              else
+                ""
+              end
+            warn "[hive] rebased #{result.commits_behind} commits from origin onto #{task.slug} branch#{agent_part}"
           end
+          # Always surface post-rebase warnings — these mean the
+          # rebase itself succeeded but a follow-up step (e.g.,
+          # worktree.yml write) failed, so the operator needs to know.
+          (result.post_rebase_warnings || []).each do |w|
+            warn "[hive] post-rebase warning: #{w}"
+          end
+        elsif result.reason == :pre_existing_rebase
+          # Louder warning for the half-rebase state — explicit
+          # recovery command names the worktree path.
+          warn "[hive] rebase skipped (pre_existing_rebase): #{task.worktree_path} has a mid-rebase state on disk. " \
+               "Run `git -C #{task.worktree_path} rebase --abort` to clean up, then re-run."
         else
-          reason = result.reason
-          warn "[hive] rebase attempt failed (#{reason}); continuing with stale base. Manual rebase recommended: " \
+          warn "[hive] rebase attempt failed (#{result.reason}); continuing with stale base. Manual rebase recommended: " \
                "cd #{task.worktree_path} && git rebase origin/<default-branch>"
         end
       end
@@ -203,7 +218,8 @@ module Hive
             "succeeded" => false,
             "agent_resolutions" => 0,
             "resolved_files" => [],
-            "reason" => "disabled"
+            "reason" => "disabled",
+            "post_rebase_warnings" => []
           }
         end
       end

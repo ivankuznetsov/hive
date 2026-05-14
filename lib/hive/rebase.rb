@@ -24,12 +24,20 @@ module Hive
     # investigate the underlying drift, not raise the cap.
     MAX_CONFLICT_RESOLUTIONS = 5
 
-    # Hive's per-task-folder protected files (basename match) that
-    # the rebase must abort on if they appear in the conflict set.
-    # Mirrors `Hive::ProtectedFiles::ORCHESTRATOR_OWNED` deliberately
-    # — `task.md` is included so the conflict-resolution agent can't
-    # accidentally commit operator-facing prose conflicts.
-    PROTECTED_BASENAMES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED.dup.freeze
+    # Hive's per-task-folder protected files live in `task.folder`,
+    # NOT in the worktree's git history. A `git rebase` against
+    # `origin/<default>` operates on the worktree's tracked files,
+    # so `plan.md`/`worktree.yml`/`task.md` cannot appear in
+    # `staged_unmerged_files` by construction — the conflict check
+    # against this constant was belt-and-suspenders that produced
+    # false-positives on legitimate project files named `plan.md`
+    # at the worktree root (PR #69 review B8). The real isolation
+    # boundary is `add_dirs: []` on the conflict-resolution spawn,
+    # which physically prevents the agent from reaching
+    # `task.folder`. Kept as a frozen empty list rather than removed
+    # so downstream callers that imported the constant don't break;
+    # the actual check is gone from `resolve_conflicts`.
+    PROTECTED_BASENAMES = [].freeze
 
     # Result of a single `perform` call. Consumed by JSON envelope
     # (U6) and stderr logging (U4). `reason` is nil on success; a
@@ -43,7 +51,8 @@ module Hive
       :succeeded,
       :agent_resolutions,
       :resolved_files,
-      :reason
+      :reason,
+      :post_rebase_warnings
     ) do
       def to_h_for_envelope
         {
@@ -52,35 +61,39 @@ module Hive
           succeeded: succeeded,
           agent_resolutions: agent_resolutions,
           resolved_files: resolved_files,
-          reason: reason && reason.to_s
+          reason: reason && reason.to_s,
+          post_rebase_warnings: post_rebase_warnings
         }
       end
 
       def self.disabled
         new(attempted: false, commits_behind: nil, succeeded: false,
-            agent_resolutions: 0, resolved_files: [], reason: :disabled)
+            agent_resolutions: 0, resolved_files: [], reason: :disabled,
+            post_rebase_warnings: [])
       end
 
       def self.skipped(reason)
         new(attempted: false, commits_behind: nil, succeeded: false,
-            agent_resolutions: 0, resolved_files: [], reason: reason)
+            agent_resolutions: 0, resolved_files: [], reason: reason,
+            post_rebase_warnings: [])
       end
 
       def self.no_op
         new(attempted: true, commits_behind: 0, succeeded: true,
-            agent_resolutions: 0, resolved_files: [], reason: nil)
+            agent_resolutions: 0, resolved_files: [], reason: nil,
+            post_rebase_warnings: [])
       end
 
-      def self.succeeded(commits_behind:, agent_resolutions:, resolved_files:)
+      def self.succeeded(commits_behind:, agent_resolutions:, resolved_files:, post_rebase_warnings: [])
         new(attempted: true, commits_behind: commits_behind, succeeded: true,
             agent_resolutions: agent_resolutions, resolved_files: resolved_files,
-            reason: nil)
+            reason: nil, post_rebase_warnings: post_rebase_warnings)
       end
 
       def self.failed(reason:, commits_behind:, agent_resolutions:, resolved_files:)
         new(attempted: true, commits_behind: commits_behind, succeeded: false,
             agent_resolutions: agent_resolutions, resolved_files: resolved_files,
-            reason: reason)
+            reason: reason, post_rebase_warnings: [])
       end
     end
 
@@ -114,10 +127,13 @@ module Hive
       return Result.no_op if commits_behind.zero?
 
       run_rebase(task, cfg, git, ref, commits_behind)
-    rescue StandardError => e
-      # Last-resort safety net. Any unexpected exception inside the
-      # rebase machinery converts to a failure Result so the caller's
-      # fail-soft contract holds. The stage runner still proceeds.
+    rescue Hive::GitError, SystemCallError, IOError => e
+      # Narrow rescue: only catch I/O-class and git-class failures.
+      # Programmer errors (NoMethodError, NameError, ArgumentError,
+      # TypeError) deliberately escape so logic bugs surface in
+      # operator logs instead of being misattributed to a generic
+      # `unexpected_error` rebase failure. Mirrors the recover_review
+      # rescue pattern pinned in PR #56 (review-stale recovery).
       Result.failed(reason: :"unexpected_error:#{e.class}",
                     commits_behind: nil,
                     agent_resolutions: 0,
@@ -133,10 +149,12 @@ module Hive
 
       begin
         git.rebase_onto(ref)
-        update_execute_base_head!(task, git)
+        warnings = []
+        update_execute_base_head!(task, git, warnings)
         return Result.succeeded(commits_behind: commits_behind,
                                 agent_resolutions: 0,
-                                resolved_files: resolved_files)
+                                resolved_files: resolved_files,
+                                post_rebase_warnings: warnings)
       rescue Hive::RebaseConflict
         # Fall through to the conflict-resolution loop below.
       rescue Hive::GitError => e
@@ -172,36 +190,53 @@ module Hive
           begin
             git.rebase_continue
             next
-          rescue StandardError
+          rescue Hive::RebaseConflict
+            # Next replay produced conflicts; loop back.
+            next
+          rescue Hive::GitError, SystemCallError, IOError
             return abort_with(git, :rebase_continue_failed,
                               commits_behind, attempts - 1, resolved_files)
           end
         end
 
-        if unmerged.any? { |path| PROTECTED_BASENAMES.include?(File.basename(path)) }
-          return abort_with(git, :protected_files_in_conflict,
-                            commits_behind, attempts - 1, resolved_files)
-        end
+        # Note: the `PROTECTED_BASENAMES` check that previously fired
+        # here was removed in PR #69 review B8. The protected files
+        # (plan.md / worktree.yml / task.md) live in `task.folder`,
+        # NOT in the worktree's git tree — they cannot appear in
+        # `staged_unmerged_files` by construction. The real isolation
+        # boundary is `add_dirs: []` on the conflict-resolution spawn
+        # (set in `dispatch_conflict_agent`), which physically
+        # prevents the agent from reaching `task.folder`.
 
         result = dispatch_conflict_agent(task, cfg, profile, git, unmerged)
         unless result[:status] == :ok
           return abort_with(git, :agent_failed,
-                            commits_behind, attempts, resolved_files)
+                            commits_behind, attempts - 1, resolved_files)
         end
 
         unless git.rebase_in_progress?
-          # Agent ran `git rebase --continue` itself against the prompt
-          # directive. The rebase may have completed accidentally, but
-          # we can't trust the result — abort and let the operator
-          # rebase manually.
+          # Agent ran `git rebase --continue` itself against the
+          # prompt directive (or git's auto-commit picked up the
+          # resolved files). If `staged_unmerged_files` is empty AND
+          # no conflict markers remain in the worktree, the rebase
+          # actually completed successfully — accept the work
+          # rather than throwing it away. PR #69 review B9.
+          remaining = git.staged_unmerged_files
+          worktree_clean = !git.dirty?
+          if remaining.empty? && worktree_clean
+            resolved_files.concat(unmerged)
+            warn "[hive] conflict-resolution agent ran `git rebase --continue` itself; rebase completed cleanly so accepting the result"
+            break
+          end
+
           return abort_with(git, :agent_called_continue_itself,
-                            commits_behind, attempts, resolved_files)
+                            commits_behind, attempts - 1, resolved_files)
         end
 
         remaining = git.staged_unmerged_files
         if remaining.any? { |path| has_conflict_markers?(File.join(task.worktree_path, path)) }
           return abort_with(git, :markers_remaining,
-                            commits_behind, attempts, resolved_files)
+                            commits_behind, attempts - 1, resolved_files)
         end
 
         resolved_files.concat(unmerged)
@@ -211,16 +246,18 @@ module Hive
         rescue Hive::RebaseConflict
           # Next commit in the replay also has conflicts; loop back.
           next
-        rescue StandardError
+        rescue Hive::GitError, SystemCallError, IOError
           return abort_with(git, :rebase_continue_failed,
-                            commits_behind, attempts, resolved_files)
+                            commits_behind, attempts - 1, resolved_files)
         end
       end
 
-      update_execute_base_head!(task, git)
+      warnings = []
+      update_execute_base_head!(task, git, warnings)
       Result.succeeded(commits_behind: commits_behind,
                        agent_resolutions: attempts,
-                       resolved_files: resolved_files.uniq)
+                       resolved_files: resolved_files.uniq,
+                       post_rebase_warnings: warnings)
     end
 
     def dispatch_conflict_agent(task, cfg, profile, git, conflict_files)
@@ -229,7 +266,7 @@ module Hive
 
       Hive::Stages::Base.spawn_agent(
         task,
-        prompt: render_conflict_prompt(task, git, conflict_files),
+        prompt: render_conflict_prompt(task, cfg, git, conflict_files),
         max_budget_usd: budget,
         timeout_sec: timeout,
         add_dirs: [],
@@ -239,42 +276,57 @@ module Hive
       )
     end
 
-    def render_conflict_prompt(task, git, conflict_files)
+    def render_conflict_prompt(task, cfg, git, conflict_files)
       tag = Hive::Stages::Base.user_supplied_tag
       template_path = Hive::Stages::Base.resolve_template_path(
         "rebase_conflict_resolution.md.erb",
         hive_state_dir: Hive::Stages::Base.hive_state_dir_for_task_folder(task.folder)
       )
 
+      # PR #69 review B1: use the GitOps helper that resolves
+      # `.git` correctly in linked worktrees (where it's a file,
+      # not a directory). Previous hardcoded path silently fell
+      # into the rescue on every production run.
       current_commit_msg = begin
-        File.read(File.join(git.project_root, ".git", "rebase-merge", "message")).strip
-      rescue StandardError
+        msg_path = git.rebase_merge_message_path
+        msg_path ? File.read(msg_path).strip : "(commit message unavailable — rebase state file missing)"
+      rescue SystemCallError, IOError
         "(commit message unavailable — rebase state file missing)"
       end
+
+      # PR #69 review B10: use the cfg-resolved default branch so
+      # the agent prompt's rebase-target name matches what hive
+      # actually rebased against. Falls back to git's detection
+      # only when cfg has no override.
+      default_branch = cfg["default_branch"] || git.default_branch
 
       Hive::Stages::Base.render_resolved_path(
         template_path,
         Hive::Stages::Base::TemplateBindings.new(
           worktree_path: task.worktree_path,
           task_folder: task.folder,
-          default_branch: git.default_branch,
+          default_branch: default_branch,
           current_commit_msg: current_commit_msg,
           conflict_files: conflict_files,
-          protected_files: PROTECTED_BASENAMES,
           user_supplied_tag: tag
         )
       )
     end
 
+    # Conflict-marker detector. Fails CLOSED (returns true) on read
+    # errors so the safety gate around the conflict-resolution agent
+    # defaults to "refuse to continue with unverified resolution"
+    # rather than "trust the agent." PR #69 review B5 — silent
+    # false-on-read-error was the wrong fail-soft direction here.
     def has_conflict_markers?(absolute_path)
-      return false unless File.file?(absolute_path)
+      return true unless File.file?(absolute_path)  # unreadable / non-regular → assume conflict
 
       File.foreach(absolute_path) do |line|
         return true if line.start_with?("<<<<<<<", "=======", ">>>>>>>")
       end
       false
-    rescue StandardError
-      false
+    rescue SystemCallError, IOError
+      true  # fail-closed
     end
 
     def abort_with(git, reason, commits_behind, attempts, resolved_files)
@@ -294,7 +346,7 @@ module Hive
     # (e.g., task hasn't entered 4-execute yet). Failure of the
     # rewrite itself emits a stderr warning but does NOT fail the
     # rebase — the downstream stage will catch any inconsistency.
-    def update_execute_base_head!(task, git)
+    def update_execute_base_head!(task, git, warnings = [])
       worktree_yml = File.join(task.folder, "worktree.yml")
       return unless File.exist?(worktree_yml)
 
@@ -307,10 +359,30 @@ module Hive
 
       data["execute_base_head"] = new_sha
       tmp = "#{worktree_yml}.tmp.#{Process.pid}.#{Time.now.to_i}"
-      File.write(tmp, YAML.dump(data))
-      File.rename(tmp, worktree_yml)
-    rescue StandardError => e
-      warn "[hive] failed to update worktree.yml execute_base_head after rebase: #{e.class}: #{e.message}; the next execute pass may trip head_not_descendant — investigate manually"
+      begin
+        File.write(tmp, YAML.dump(data))
+        File.rename(tmp, worktree_yml)
+      rescue StandardError
+        # Clean up the temp file on rename failure so it doesn't
+        # accumulate as orphaned state.
+        begin
+          File.delete(tmp) if File.exist?(tmp)
+        rescue StandardError
+          # best-effort cleanup; nothing else to do
+        end
+        raise
+      end
+    rescue SystemCallError, IOError, Psych::Exception => e
+      # Surface the failure both as a stderr warning (operator
+      # sees it immediately) AND as a structured entry in
+      # `post_rebase_warnings` (JSON envelope consumers + agents
+      # can act on it). The rebase has SUCCEEDED at the git level;
+      # only the worktree.yml rewrite failed. The next 4-execute
+      # continuation pass may trip `head_not_descendant` until the
+      # operator manually updates `execute_base_head`. PR #69 B6.
+      msg = "execute_base_head not updated in worktree.yml: #{e.class}: #{e.message}"
+      warn "[hive] #{msg}; the next execute pass may trip head_not_descendant — investigate manually"
+      warnings << msg if warnings
     end
   end
 end

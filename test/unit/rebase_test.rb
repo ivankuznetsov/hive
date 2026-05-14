@@ -118,6 +118,15 @@ class HiveRebaseTest < Minitest::Test
     def staged_unmerged_files
       @unmerged_files_sequence.shift || []
     end
+
+    # Stub for the linked-worktree-aware commit-message lookup
+    # added in PR #69 review B1. Tests don't exercise the actual
+    # commit-message read (they stub spawn_agent), so returning nil
+    # produces the "(commit message unavailable)" fallback the
+    # template handles.
+    def rebase_merge_message_path
+      nil
+    end
   end
 
   # Minitest::Mock.stub isn't bundled — patch singleton methods directly
@@ -312,32 +321,47 @@ class HiveRebaseTest < Minitest::Test
     teardown_dirs(worktree, folder)
   end
 
-  def test_protected_files_in_conflict_aborts_without_dispatching
+  def test_plan_md_in_conflict_no_longer_aborts_after_b8
+    # PR #69 review B8: the PROTECTED_BASENAMES basename-match check
+    # was removed because (a) the orchestrator-owned files
+    # (plan.md/worktree.yml/task.md) live in task.folder, NOT in
+    # the worktree's git tree — they can't appear in
+    # `staged_unmerged_files` by construction; and (b) the check
+    # produced false-positives on legitimate project files named
+    # `plan.md` at the worktree root. The real isolation boundary
+    # is `add_dirs: []` on the conflict-resolution spawn. This test
+    # pins the new contract: a `plan.md` in the conflict set
+    # dispatches the agent normally and does NOT short-circuit.
     worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    File.write(File.join(worktree, "plan.md"), "resolved\n")
+    File.write(File.join(worktree, "a.txt"), "resolved\n")
+
     task = make_task(worktree: worktree, folder: folder)
     git = FakeGitOps.new(worktree)
     git.commits_behind_value = 1
     git.rebase_onto_outcome = :conflict
-    git.unmerged_files_sequence = [ [ "plan.md", "a.txt" ] ]
+    git.unmerged_files_sequence = [ [ "plan.md", "a.txt" ], [] ]
+    git.rebase_continue_outcomes = [ :ok ]
 
-    dispatched = false
+    dispatched_with = nil
     original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
-    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*_args, **_kwargs|
-      dispatched = true
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+      dispatched_with = kwargs
       { status: :ok }
     end
     begin
       stub_gitops!(git) do
         result = Hive::Rebase.perform(task, base_cfg)
-        assert_equal :protected_files_in_conflict, result.reason
-        refute result.succeeded
-        refute dispatched, "agent must NOT be dispatched when protected files are in conflict"
-        assert git.rebase_abort_called
-        assert git.reset_hard_called
+        assert result.succeeded, "plan.md in conflict set should not abort the rebase"
       end
     ensure
       Hive::Stages::Base.singleton_class.define_method(:spawn_agent, original)
     end
+
+    refute_nil dispatched_with, "agent must be dispatched (B8 removed the basename-match abort)"
+    assert_equal [], dispatched_with[:add_dirs],
+                 "agent isolation MUST still be add_dirs: [] — the security boundary moved here"
   ensure
     teardown_dirs(worktree, folder)
   end
@@ -471,6 +495,124 @@ class HiveRebaseTest < Minitest::Test
 
     data = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))
     assert_equal "oldsha", data["execute_base_head"], "skip path must NOT touch worktree.yml"
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  # ---- PR #69 review fixes ----
+
+  def test_has_conflict_markers_fails_closed_on_unreadable_file
+    # B5: when File.foreach raises (permission, EISDIR, encoding),
+    # the safety-check returns true so the loop aborts rather than
+    # trusts the agent's resolution.
+    nonexistent = "/tmp/hive-rebase-test-nonexistent-#{$$}.txt"
+    refute File.exist?(nonexistent)
+    assert Hive::Rebase.send(:has_conflict_markers?, nonexistent),
+           "unreadable / non-existent path must fail CLOSED (return true)"
+  end
+
+  def test_has_conflict_markers_fails_closed_on_directory_path
+    # B5: a path that's a directory raises EISDIR from File.foreach.
+    # The fail-closed default is true.
+    with_tmp_dir do |dir|
+      assert Hive::Rebase.send(:has_conflict_markers?, dir),
+             "directory path must fail CLOSED (return true)"
+    end
+  end
+
+  def test_unexpected_programmer_error_escapes_rebase_perform
+    # B3: narrow rescue list — NoMethodError must propagate so logic
+    # bugs surface in operator logs instead of being misattributed
+    # to a generic 'unexpected_error' rebase failure.
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+
+    # Override Hive::GitOps.new to raise NoMethodError mid-perform.
+    original = Hive::GitOps.singleton_class.instance_method(:new)
+    Hive::GitOps.define_singleton_method(:new) do |_path|
+      raise NoMethodError, "synthetic programmer error"
+    end
+    begin
+      assert_raises(NoMethodError) { Hive::Rebase.perform(task, base_cfg) }
+    ensure
+      Hive::GitOps.singleton_class.define_method(:new, original)
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_agent_called_continue_accepts_when_rebase_completed_cleanly
+    # B9: if the agent ignores the "don't run --continue" directive
+    # AND the rebase actually completed cleanly (no markers left,
+    # worktree clean), accept the work rather than throwing it away
+    # with reset --hard ORIG_HEAD. Simulate the agent's behavior by
+    # flipping `rebase_in_progress_value` to false from inside the
+    # stubbed spawn_agent — this models the agent running
+    # `git rebase --continue` itself and the rebase completing.
+    worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    File.write(File.join(worktree, "a.txt"), "resolved\n")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.rebase_onto_outcome = :conflict
+    # Top-of-loop sees one unmerged file. After agent flips rip=false,
+    # the post-spawn `staged_unmerged_files` (called from the
+    # accept-clean branch) returns [].
+    git.unmerged_files_sequence = [ [ "a.txt" ], [] ]
+    git.dirty_value = false
+
+    original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*_args, **_kwargs|
+      git.rebase_in_progress_value = false  # simulate agent ran --continue
+      { status: :ok }
+    end
+
+    begin
+      stub_gitops!(git) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert result.succeeded, "rebase completed cleanly should be accepted"
+        refute git.rebase_abort_called, "successful agent-completion path must NOT abort"
+      end
+    ensure
+      Hive::Stages::Base.singleton_class.define_method(:spawn_agent, original)
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_protected_basenames_is_empty_after_b8
+    # B8 documentation: the constant exists as a frozen empty list
+    # so downstream importers don't break, but the check itself was
+    # removed from resolve_conflicts. The real isolation is
+    # `add_dirs: []` on the spawn.
+    assert_equal [], Hive::Rebase::PROTECTED_BASENAMES
+    assert Hive::Rebase::PROTECTED_BASENAMES.frozen?
+  end
+
+  def test_post_rebase_warnings_surfaces_worktree_yml_failure
+    # B6: when update_execute_base_head! fails (e.g., malformed YAML
+    # or I/O error), the warning lands in Result.post_rebase_warnings
+    # AND on stderr — the JSON envelope consumer can see what went
+    # wrong without parsing stderr.
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(folder, "worktree.yml"), ":::not-yaml:::malformed: [")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :ok
+    git.head_sha_value = "newsha"
+
+    stub_gitops!(git) do
+      result = Hive::Rebase.perform(task, base_cfg)
+      assert result.succeeded, "rebase success despite worktree.yml write failure"
+      refute_empty result.post_rebase_warnings,
+                   "malformed worktree.yml must surface as a post-rebase warning"
+      assert(result.post_rebase_warnings.any? { |w| w.include?("execute_base_head") },
+             "warning text must name the field that failed to update")
+    end
   ensure
     teardown_dirs(worktree, folder)
   end

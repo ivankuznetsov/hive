@@ -187,18 +187,39 @@ module Hive
       0
     end
 
-    # `git fetch origin <ref>` with non-interactive env. Returns true on
-    # success, false on ANY failure (network, auth prompt, unknown ref).
-    # The fail-soft path in Hive::Rebase treats false as "skip rebase",
-    # so this method must NEVER raise.
-    def fetch_default_branch(ref)
+    # `git fetch origin <ref>` with non-interactive env + a wall-clock
+    # timeout (default 60s) so HTTPS network hangs don't block the
+    # `Hive::Lock.with_task_lock` window. SSH credential / host-key
+    # prompts are blocked by BatchMode + GIT_TERMINAL_PROMPT=0; the
+    # process-level timeout catches the remaining network-stall
+    # failure modes. Returns true on success, false on ANY failure
+    # (network, auth prompt, timeout, unknown ref). NEVER raises —
+    # the fail-soft path in Hive::Rebase treats false as "skip rebase".
+    FETCH_TIMEOUT_SEC = 60
+    def fetch_default_branch(ref, timeout_sec: FETCH_TIMEOUT_SEC)
       env = {
         "GIT_TERMINAL_PROMPT" => "0",
         "GIT_SSH_COMMAND"     => "ssh -oBatchMode=yes -oConnectTimeout=10"
       }
-      _out, _err, status = Open3.capture3(env, "git", "-C", @project_root,
-                                          "fetch", "origin", ref)
-      status.success?
+      pid = Process.spawn(env, "git", "-C", @project_root, "fetch", "origin", ref,
+                          in: :close, out: "/dev/null", err: "/dev/null")
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_sec
+      loop do
+        _, status = Process.waitpid2(pid, Process::WNOHANG)
+        return status.success? if status
+        if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+          Process.kill("TERM", pid)
+          sleep 0.5
+          begin
+            Process.kill("KILL", pid)
+          rescue Errno::ESRCH
+            # already gone
+          end
+          Process.waitpid(pid)
+          return false
+        end
+        sleep 0.1
+      end
     rescue StandardError
       false
     end
@@ -285,16 +306,45 @@ module Hive
       false
     end
 
-    # `git reset --hard ORIG_HEAD`. Used after `rebase_abort` to clean
-    # any agent-created untracked files (which `--abort` doesn't
-    # remove). ORIG_HEAD is set by git at the start of every rebase
-    # and points at the pre-rebase HEAD. Returns true on success.
+    # `git reset --hard ORIG_HEAD` followed by `git clean -fd`.
+    # Used after `rebase_abort` to restore tracked files AND clean
+    # any agent-created untracked files. `--hard` alone does NOT
+    # remove untracked files (this was a wiki/plan misconception
+    # caught in PR #69 review); `git clean -fd` is the actual
+    # primitive for that. ORIG_HEAD is set by git at the start of
+    # every rebase and points at the pre-rebase HEAD. Returns true
+    # only when both operations succeed.
     def reset_hard_orig_head
-      _out, _err, status = Open3.capture3("git", "-C", @project_root,
-                                          "reset", "--hard", "ORIG_HEAD")
-      status.success?
+      _out, _err, reset_status = Open3.capture3("git", "-C", @project_root,
+                                                "reset", "--hard", "ORIG_HEAD")
+      return false unless reset_status.success?
+
+      _out, _err, clean_status = Open3.capture3("git", "-C", @project_root,
+                                                "clean", "-fd")
+      clean_status.success?
     rescue StandardError
       false
+    end
+
+    # Path to the in-flight rebase's commit message file. Honors
+    # linked worktrees correctly: `<worktree>/.git` may be a regular
+    # file containing `gitdir: <path>`, so we resolve via
+    # `git rev-parse --git-dir` rather than hardcoding `.git/`.
+    # Returns the path string when a rebase is in progress, nil
+    # otherwise. Never raises — best-effort lookup for prompt
+    # rendering.
+    def rebase_merge_message_path
+      git_dir = run_git!("-C", @project_root, "rev-parse", "--git-dir").strip
+      git_dir = File.expand_path(git_dir, @project_root)
+      candidate = File.join(git_dir, "rebase-merge", "message")
+      return candidate if File.file?(candidate)
+
+      apply_msg = File.join(git_dir, "rebase-apply", "msg-clean")
+      return apply_msg if File.file?(apply_msg)
+
+      nil
+    rescue StandardError
+      nil
     end
   end
 end

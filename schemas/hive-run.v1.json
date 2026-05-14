@@ -83,17 +83,18 @@
           "items": { "type": "string" }
         },
         "rebase": {
-          "description": "Outcome of the auto-rebase pre-step (Hive::Rebase). Always present. `attempted` is true only when the rebase machinery ran past the disabled/no-worktree guards. `succeeded` is true on clean rebase (or no-op when commits_behind==0). `reason` is null on success and a string (snake_case) naming the skip-or-failure cause otherwise.",
+          "description": "Outcome of the auto-rebase pre-step (Hive::Rebase). Always present. `attempted` is true only when the rebase machinery ran past the disabled/no-worktree guards. `succeeded` is true on clean rebase (or no-op when commits_behind==0). `reason` is null on success and a string (snake_case) naming the skip-or-failure cause otherwise. `post_rebase_warnings` carries non-fatal warnings produced after a successful rebase (e.g., `worktree.yml` execute_base_head write failure); always an array, empty when none.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["attempted", "commits_behind", "succeeded", "agent_resolutions", "resolved_files", "reason"],
+          "required": ["attempted", "commits_behind", "succeeded", "agent_resolutions", "resolved_files", "reason", "post_rebase_warnings"],
           "properties": {
             "attempted": { "type": "boolean" },
             "commits_behind": { "type": ["integer", "null"], "minimum": 0 },
             "succeeded": { "type": "boolean" },
             "agent_resolutions": { "type": "integer", "minimum": 0 },
             "resolved_files": { "type": "array", "items": { "type": "string" } },
-            "reason": { "type": ["string", "null"] }
+            "reason": { "type": ["string", "null"] },
+            "post_rebase_warnings": { "type": "array", "items": { "type": "string" } }
           }
         }
       }

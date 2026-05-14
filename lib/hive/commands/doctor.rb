@@ -60,7 +60,7 @@ module Hive
           render_table(@rows)
         end
 
-        @rows.any? { |r| r[:status] == "missing" } ? EXIT_MISSING_SKILL : EXIT_SUCCESS
+        @rows.any? { |r| failing_status?(r[:status]) } ? EXIT_MISSING_SKILL : EXIT_SUCCESS
       rescue Hive::ConfigError, KeyError, ArgumentError => e
         if @json
           @output.puts JSON.generate(error: e.message)
@@ -71,6 +71,10 @@ module Hive
       end
 
       private
+
+      def failing_status?(status)
+        status == "missing" || status == "version_too_old"
+      end
 
       def check_stages
         STAGES.map { |stage| check_stage(stage) }
@@ -127,9 +131,13 @@ module Hive
 
         leaked = %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].select { |k| ENV[k] && !ENV[k].empty? }
         unless leaked.empty?
+          # `agent: "claude"` because the API keys named here are
+          # claude/anthropic billing inputs — the warning is about the
+          # billing-auth boundary, not tmux itself. Labelling this as a
+          # "tmux warning" misreads the actual subject.
           warnings << warning_row(
             label: "2-brainstorm/tmux",
-            agent: "tmux",
+            agent: "claude",
             configured_skill: "billing-auth",
             skill: leaked.join(","),
             message: "#{leaked.join(' and ')} is exported in this shell; the tmux wrapper unsets it before exec, " \
@@ -244,6 +252,7 @@ module Hive
           "checks" => rows,
           "summary" => {
             "missing" => rows.count { |r| r[:status] == "missing" },
+            "version_too_old" => rows.count { |r| r[:status] == "version_too_old" },
             "present" => rows.count { |r| r[:status] == "present" },
             "not_applicable" => rows.count { |r| r[:status] == "not_applicable" },
             "warning" => rows.count { |r| r[:status] == "warning" }
@@ -291,6 +300,7 @@ module Hive
         marker = case row[:status]
         when "present" then "✓"
         when "missing" then "✗"
+        when "version_too_old" then "✗"
         when "not_applicable" then "—"
         when "warning" then "!"
         else "?"

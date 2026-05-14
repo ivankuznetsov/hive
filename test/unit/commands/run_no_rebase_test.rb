@@ -39,6 +39,32 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     end
   end
 
+  def test_pre_existing_rebase_warning_fires_despite_attempted_false
+    # P2: pre_existing_rebase is a skip-state (attempted=false) but
+    # one operators MUST see: a stale rebase-merge directory means a
+    # prior run aborted mid-flight and the worktree needs `git rebase
+    # --abort`. The original log_rebase_outcome returned early on
+    # `return unless result.attempted`, making the recovery warning
+    # unreachable.
+    cmd = Hive::Commands::Run.new("demo-260514-bbbb")
+    result = Hive::Rebase::Result.skipped(:pre_existing_rebase)
+    _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }
+    assert_match(/pre_existing_rebase/, err)
+    assert_match(/rebase --abort/, err)
+  end
+
+  def test_other_skipped_states_stay_quiet
+    # Disabled / no_worktree / cli_override are intentionally silent
+    # — they are expected operating modes, not failures. P2 fix
+    # mustn't make every skip state spammy.
+    cmd = Hive::Commands::Run.new("demo-260514-bbbb")
+    [ :disabled, :no_worktree, :cli_override, :dirty_worktree, :detached_head ].each do |reason|
+      result = Hive::Rebase::Result.skipped(reason)
+      _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }
+      assert_equal "", err, "reason=#{reason} must stay silent (still skip-state, attempted=false)"
+    end
+  end
+
   def test_no_rebase_default_runs_rebase_perform
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")  # no_rebase: false default
     captured_call = false

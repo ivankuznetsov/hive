@@ -582,6 +582,115 @@ class HiveRebaseTest < Minitest::Test
     teardown_dirs(worktree, folder)
   end
 
+  # ---- P1: marker-bypass via `git add` (review of PR #69 deferred-items push) ----
+
+  def test_markers_remaining_when_agent_git_adds_file_still_containing_markers
+    # P1: the agent could `git add` a file with <<<<<<< markers left
+    # in it. `staged_unmerged_files` then returns [] (file is now
+    # "resolved" to git), but the bytes on disk still contain
+    # markers. The fix scans the ORIGINALLY-unmerged paths, not
+    # just what's currently unmerged. Without the fix, the next
+    # rebase_continue would commit the markers into history.
+    worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    # File has markers in it — agent's "resolution" was to git add
+    # without actually merging.
+    File.write(File.join(worktree, "a.txt"),
+               "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> branch\n")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    # Sequence: [top-of-loop sees a.txt unmerged], [post-spawn sees []
+    # because the agent did git add]. The fix scans `unmerged` (captured
+    # before dispatch), so the marker check still fires.
+    git.unmerged_files_sequence = [ [ "a.txt" ], [] ]
+
+    stub_gitops!(git) do
+      stub_spawn_agent(result_status: :ok) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert_equal :markers_remaining, result.reason,
+                     "git-added markers must NOT bypass the marker scan"
+        assert git.rebase_abort_called, "marker-bypass path must abort the rebase"
+      end
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_markers_remaining_when_agent_continued_with_markers_committed
+    # P1, second arm: if the agent runs `git rebase --continue` itself
+    # with markers already committed, `staged_unmerged_files` is empty
+    # AND `dirty?` is false (clean working tree, markers are in HEAD).
+    # The fix scans the originally-unmerged paths against the worktree;
+    # since the rebased commit contains the markers, the scan sees them
+    # and the result is `markers_remaining` (NOT `agent_called_continue_itself`,
+    # because the latter implies "didn't finish" — here the agent
+    # finished but with bad output).
+    worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    File.write(File.join(worktree, "a.txt"),
+               "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> branch\n")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    # Top-of-loop sees one unmerged file. The agent then commits with
+    # markers AND runs --continue itself: rip=false, dirty?=false.
+    git.unmerged_files_sequence = [ [ "a.txt" ], [] ]
+    git.dirty_value = false
+
+    original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*_args, **_kwargs|
+      git.rebase_in_progress_value = false  # agent ran --continue
+      { status: :ok }
+    end
+
+    begin
+      stub_gitops!(git) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert_equal :markers_remaining, result.reason,
+                     "markers committed by agent-continued path must surface as markers_remaining"
+        assert git.rebase_abort_called
+      end
+    ensure
+      Hive::Stages::Base.singleton_class.define_method(:spawn_agent, original)
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_markers_check_tolerates_files_resolved_by_deletion
+    # If the agent's chosen resolution for a conflict is to DELETE the
+    # file (a valid outcome), `unmerged` still lists the path but
+    # the file no longer exists. The scan must not crash and must
+    # not produce a false `markers_remaining`.
+    worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    # No file on disk for "deleted.txt" — the agent deleted it as the resolution.
+    # File "kept.txt" survives without markers.
+    File.write(File.join(worktree, "kept.txt"), "all good\n")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [ "deleted.txt", "kept.txt" ], [] ]
+    git.rebase_continue_outcomes = [ :ok ]
+
+    stub_gitops!(git) do
+      stub_spawn_agent(result_status: :ok) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert result.succeeded,
+               "deletion-as-resolution must not be miscategorised as markers_remaining (got #{result.reason})"
+      end
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   def test_protected_basenames_is_empty_after_b8
     # B8 documentation: the constant exists as a frozen empty list
     # so downstream importers don't break, but the check itself was

@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-05-06
+updated: 2026-05-14
 tags: [cli, api]
 ---
 
@@ -27,7 +27,8 @@ tags: [cli, api]
 | `hive develop TARGET [--from STAGE]` | Promote completed plan to execute, or re-run execute | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive pr TARGET [--from STAGE]` | Promote completed execute to PR, or re-run PR | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive archive TARGET [--from STAGE]` | Promote completed PR to done, or re-run done | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
-| `hive run TARGET` | Lower-level dispatcher for a slug or task folder | `Hive::Commands::Run` → stage runner | [[commands/run]] |
+| `hive run TARGET [--no-rebase]` | Lower-level dispatcher for a slug or task folder. `--no-rebase` skips the auto-rebase pre-step for one invocation (one-off override of `cfg.rebase.enabled`). | `Hive::Commands::Run` → stage runner | [[commands/run]] |
+| `hive rebase-status TARGET` | Read-only inspector: reports whether the next `hive run` would attempt an auto-rebase, how many commits behind `origin/<default>` the worktree is, and which guard (if any) would short-circuit. Never mutates; never calls `git fetch`. | `Hive::Commands::RebaseStatus` | [[commands/rebase-status]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
 | `hive findings TARGET [--pass N] [--stage STAGE]` | List GFM-checkbox findings in `reviews/ce-review-NN.md` (latest by default) | `Hive::Commands::Findings` | [[commands/findings]] |
 | `hive accept-finding TARGET [ID...] [--severity S] [--all] [--stage STAGE]` | Tick `[x]` on review findings; selectors are unioned | `Hive::Commands::FindingToggle` (accept) | [[commands/findings]] |
@@ -44,7 +45,7 @@ tags: [cli, api]
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force` (skip clean-tree check).
-- `--json` is a `class_option` honoured by `status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, the five workflow verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, and the `daemon` subcommands (`status`, `stop`, `reload`, `enable`, `disable` — published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-enroll.v1`; `enroll` covers both `enable` and `disable`). Each emits a typed JSON document on success AND a structured error envelope on every failure path (with `error_class` carrying the exception's short name). Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission).
+- `--json` is a `class_option` honoured by `status`, `run`, `rebase-status`, `approve`, `findings`, `accept-finding`, `reject-finding`, the five workflow verbs (`brainstorm`, `plan`, `develop`, `pr`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, and the `daemon` subcommands (`status`, `stop`, `reload`, `enable`, `disable` — published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-enroll.v1`; `enroll` covers both `enable` and `disable`). Each emits a typed JSON document on success AND a structured error envelope on every failure path (with `error_class` carrying the exception's short name). Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` into `help <cmd>` before Thor dispatch, so the convention agents try first works (without the rewrite, Thor would consume `--help` as the next positional argument).
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
 
@@ -97,5 +98,5 @@ A few stage runners still call `warn`/`exit N` directly for non-bug user errors 
 ## Backlinks
 
 - [[architecture]]
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/approve]] · [[commands/findings]] · [[commands/stage_action]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/approve]] · [[commands/findings]] · [[commands/stage_action]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/review]] · [[stages/pr]] · [[stages/done]]

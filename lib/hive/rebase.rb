@@ -222,23 +222,48 @@ module Hive
           # Agent ran `git rebase --continue` itself against the
           # prompt directive (or git's auto-commit picked up the
           # resolved files). If `staged_unmerged_files` is empty AND
-          # no conflict markers remain in the worktree, the rebase
-          # actually completed successfully — accept the work
-          # rather than throwing it away. PR #69 review B9.
+          # no conflict markers remain in the originally-unmerged
+          # files, the rebase actually completed successfully —
+          # accept the work rather than throwing it away. PR #69
+          # review B9. The marker-scan iterates `unmerged` (the
+          # paths git reported as conflicted BEFORE the agent ran),
+          # NOT `staged_unmerged_files` (which is now empty by
+          # definition since the rebase finished), so an agent that
+          # `git add`ed files with markers still in them cannot
+          # bypass the check. PR #69 review P1.
           remaining = git.staged_unmerged_files
           worktree_clean = !git.dirty?
-          if remaining.empty? && worktree_clean
+          markers_in_resolved = unmerged.any? do |path|
+            full = File.join(task.worktree_path, path)
+            File.file?(full) && has_conflict_markers?(full)
+          end
+          if remaining.empty? && worktree_clean && !markers_in_resolved
             resolved_files.concat(unmerged)
             warn "[hive] conflict-resolution agent ran `git rebase --continue` itself; rebase completed cleanly so accepting the result"
             break
           end
 
-          return abort_with(git, :agent_called_continue_itself,
+          # Distinguish marker-bypass from a partial commit: markers
+          # in the rebased history are a stronger signal than a
+          # generic "agent continued without finishing."
+          reason = markers_in_resolved ? :markers_remaining : :agent_called_continue_itself
+          return abort_with(git, reason,
                             commits_behind, attempts - 1, resolved_files)
         end
 
-        remaining = git.staged_unmerged_files
-        if remaining.any? { |path| has_conflict_markers?(File.join(task.worktree_path, path)) }
+        # Scan the originally-unmerged paths (captured into `unmerged`
+        # before the agent ran), not just paths git still reports as
+        # unmerged. The agent could `git add` a file with `<<<<<<<`
+        # markers still in it — that file is "resolved" to git but
+        # would commit markers into the rebased history. Iterating
+        # over `unmerged` catches that bypass. Files the agent
+        # legitimately resolved by deletion drop out via the
+        # `File.file?` guard (no file, no markers). PR #69 review P1.
+        markers_remaining = unmerged.any? do |path|
+          full = File.join(task.worktree_path, path)
+          File.file?(full) && has_conflict_markers?(full)
+        end
+        if markers_remaining
           return abort_with(git, :markers_remaining,
                             commits_behind, attempts - 1, resolved_files)
         end

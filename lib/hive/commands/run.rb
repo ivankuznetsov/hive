@@ -85,6 +85,17 @@ module Hive
       end
 
       def log_rebase_outcome(task, result)
+        # `pre_existing_rebase` is a skip-state (attempted=false) but is
+        # the ONE skip-state operators need to see explicitly: a stale
+        # rebase-merge directory means a prior run aborted mid-flight
+        # and the worktree needs manual cleanup. Surface this BEFORE
+        # the attempted-guard. PR #69 review P2.
+        if result.reason == :pre_existing_rebase
+          warn "[hive] rebase skipped (pre_existing_rebase): #{task.worktree_path} has a mid-rebase state on disk. " \
+               "Run `git -C #{task.worktree_path} rebase --abort` to clean up, then re-run."
+          return
+        end
+
         return unless result.attempted
 
         if result.succeeded
@@ -103,11 +114,6 @@ module Hive
           (result.post_rebase_warnings || []).each do |w|
             warn "[hive] post-rebase warning: #{w}"
           end
-        elsif result.reason == :pre_existing_rebase
-          # Louder warning for the half-rebase state — explicit
-          # recovery command names the worktree path.
-          warn "[hive] rebase skipped (pre_existing_rebase): #{task.worktree_path} has a mid-rebase state on disk. " \
-               "Run `git -C #{task.worktree_path} rebase --abort` to clean up, then re-run."
         else
           warn "[hive] rebase attempt failed (#{result.reason}); continuing with stale base. Manual rebase recommended: " \
                "cd #{task.worktree_path} && git rebase origin/<default-branch>"

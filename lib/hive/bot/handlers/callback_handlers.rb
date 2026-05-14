@@ -2,9 +2,10 @@ module Hive
   module Bot
     module Handlers
       class CallbackHandlers
-        def initialize(pending_ideas:, set_last_project:, result_class:)
+        def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:)
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
+          @conversation_store = conversation_store
           @result_class = result_class
         end
 
@@ -16,6 +17,7 @@ module Hive
           when :callback_clear_and_retry then clear_and_retry(data)
           when :callback_open_laptop then @result_class.new(action: :reply, text: "Open laptop for this one.")
           when :callback_show_details then @result_class.new(action: :reply, text: "Details are available from /queue.")
+          when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
           when :callback_path_a_yes then path_a(data)
           when :callback_path_a_just_type then path_b(data)
@@ -50,6 +52,11 @@ module Hive
           ]
           commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ] if verb
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands)
+        end
+
+        def answer(data)
+          _prefix, project, slug = split_callback(data, 3)
+          @result_class.new(action: :start_answer, project: project, slug: slug, mode: :path_b)
         end
 
         def idea_project(data)

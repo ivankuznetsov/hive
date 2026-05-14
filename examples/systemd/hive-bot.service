@@ -1,0 +1,17 @@
+[Unit]
+Description=Hive Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Dev/hive
+Environment=HIVE_HOME=%h/Dev/hive
+Environment=HIVE_TELEGRAM_BOT_TOKEN=replace-with-botfather-token
+ExecStart=%h/Dev/hive/bin/hive bot start
+ExecStop=%h/Dev/hive/bin/hive bot stop
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

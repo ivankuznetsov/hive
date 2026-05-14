@@ -20,6 +20,7 @@ module Hive
         callback_clear_and_retry
         callback_open_laptop
         callback_show_details
+        callback_answer
         callback_idea_project_pick
         callback_path_a_yes
         callback_path_a_just_type
@@ -56,6 +57,7 @@ module Hive
         @callback_handlers = Handlers::CallbackHandlers.new(
           pending_ideas: @pending_ideas,
           set_last_project: ->(project) { @last_project = project },
+          conversation_store: @conversation_store,
           result_class: Result
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
@@ -115,6 +117,7 @@ module Hive
         when /\Aclear_retry:/ then :callback_clear_and_retry
         when /\Aopen_laptop:/ then :callback_open_laptop
         when /\Adetails:/ then :callback_show_details
+        when /\Aanswer:/ then :callback_answer
         when /\Aidea_project:/ then :callback_idea_project_pick
         when /\Apath_a_yes:/ then :callback_path_a_yes
         when /\Apath_a_type:/ then :callback_path_a_just_type

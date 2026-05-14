@@ -20,7 +20,10 @@ module Hive
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
-      "hive-daemon-reload" => 1
+      "hive-daemon-reload" => 1,
+      "hive-bot-status" => 1,
+      "hive-bot-stop" => 1,
+      "hive-bot-reload" => 1
     }.freeze
 
     # Absolute path to the published JSON Schema files. Use

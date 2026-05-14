@@ -33,3 +33,5 @@
 /.daemon.pid
 /daemon.pid
 /logs/
+.qmd/
+/.llm-wiki/qmd-cache/

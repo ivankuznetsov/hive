@@ -1,13 +1,13 @@
 ---
 title: 2-brainstorm stage
 type: stage
-source: lib/hive/stages/brainstorm.rb, templates/brainstorm_prompt.md.erb
+source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-04-25
-tags: [stage, brainstorm, qa]
+updated: 2026-05-14
+tags: [stage, brainstorm, qa, tmux]
 ---
 
-**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`.
+**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Two runtimes are selectable via `brainstorm.runtime` in project config: `headless` (default; non-interactive agent spawn) and `tmux_interactive` (claude runs inside a managed tmux session via `Hive::TmuxRunner` + `Hive::Stages::BrainstormTmux`, allowing live user typing). Runtime is validated by `Hive::Config.validate_brainstorm_runtime!` against `BRAINSTORM_RUNTIMES = %w[headless tmux_interactive]`. `hive doctor` adds a `kind: "dependency"` row checking tmux availability and minimum version when the project is on `tmux_interactive`.
 
 ## Setup
 

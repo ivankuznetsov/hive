@@ -93,12 +93,13 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
 
   def test_success_triggers_cooldown_for_same_slug
     c = make
+    cd = Hive::Daemon::ConcurrencyController::SUCCESS_COOLDOWN_SEC
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SUCCESS, completed_at: T0 + 5)
-    assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 100)
-    # After cooldown elapses
-    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1",
-                                      now: T0 + Hive::Daemon::ConcurrencyController::SUCCESS_COOLDOWN_SEC + 100)
+    # Mid-cooldown: still blocked.
+    assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 5 + (cd / 2))
+    # After cooldown elapses.
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 5 + cd + 1)
   end
 
   # ── transient retry → quarantine after schedule exhausted ──────────────

@@ -12,11 +12,13 @@ tags: [command, dispatcher, stages, json, rebase]
 ## Usage
 
 ```
-hive run <slug> [--project NAME] [--stage STAGE] [--json]
-hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
+hive run <slug> [--project NAME] [--stage STAGE] [--json] [--no-rebase]
+hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 ```
 
 `TARGET` is resolved by `Hive::TaskResolver`. Bare slugs search registered projects; `--project` scopes cross-project collisions; `--stage` scopes same-slug stage collisions. Folder paths remain exact and authoritative.
+
+`--no-rebase` is a one-off override that skips the auto-rebase pre-step for this run only — useful when a long-running rebase is undesirable for an unblock or when troubleshooting the rebase machinery itself. The persistent off-switch lives in config (`rebase.enabled: false`). When `--no-rebase` is set, the JSON envelope's `rebase.reason` is `"cli_override"` (distinct from the config-driven `"disabled"`).
 
 ## Steps performed (`Commands::Run#call`)
 
@@ -41,7 +43,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 4. Worktree dirty → `Result.skipped(:dirty_worktree)`.
 5. Detached HEAD → `Result.skipped(:detached_head)`.
 
-**Fetch:** `git fetch origin <default_branch>` runs with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` set in the spawn environment, so credential/host-key prompts fail immediately rather than hanging. Failure → `Result.skipped(:fetch_failed)`.
+**Fetch:** `git fetch origin <default_branch>` runs with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` set in the spawn environment, plus a Ruby-side wall-clock budget (`FETCH_TIMEOUT_SEC = 60`) enforced via `Process.spawn` + `Process.waitpid2` polling with SIGTERM→SIGKILL escalation. So both credential/host-key prompts and HTTPS network hangs fail immediately rather than blocking the run. Failure → `Result.skipped(:fetch_failed)`.
 
 **Conflict-resolution agent:** when `git rebase` halts with conflicts, `Hive::Rebase` dispatches the project's `cfg.execute.agent` profile via `Hive::Stages::Base.spawn_agent` with:
 - `cwd: task.worktree_path` (the rebase state lives in the worktree)
@@ -50,15 +52,21 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 - prompt rendered from `templates/rebase_conflict_resolution.md.erb` with the conflict files wrapped in a per-spawn `<user_supplied_<hex>>` nonce block (ADR-008/019)
 - bounded by `Hive::Rebase::MAX_CONFLICT_RESOLUTIONS = 5` agent dispatches per rebase invocation (not configurable; projects with persistent high-conflict branches should investigate the drift, not raise the cap)
 
-Before each dispatch, `Hive::Rebase` checks `staged_unmerged_files` against `Hive::ProtectedFiles::ORCHESTRATOR_OWNED` (`plan.md`, `worktree.yml`, `task.md`). If any protected file is in the conflict set, the rebase aborts without dispatching — the operator resolves manually.
+Protected-file basename guard (originally present pre-merge) was **removed** during the PR-#69 review. The `add_dirs: []` isolation makes `task.folder`'s protected files (`plan.md`, `worktree.yml`, `task.md`) physically unreachable to the agent — they cannot appear in `staged_unmerged_files` by construction. The basename check was unreachable AND a false-positive generator (any project file genuinely named `plan.md` at the worktree root would have aborted the rebase needlessly). The constant `Hive::ProtectedFiles::ORCHESTRATOR_OWNED` is kept as a frozen empty list for backward source-compat.
 
-**Fail-soft contract.** Any failure (agent non-zero exit, agent leaves conflict markers, agent runs `git rebase --continue` itself against the prompt directive, max attempts exceeded, fetch failure, protected-files conflict) triggers `git rebase --abort` followed by `git reset --hard ORIG_HEAD` (which removes agent-created untracked files that `--abort` doesn't clean). The worktree returns to its pre-rebase HEAD. The stage runner then proceeds against the (stale) base.
+**Fail-soft contract.** Any failure (agent non-zero exit, agent leaves conflict markers, agent runs `git rebase --continue` itself without completing the rebase, max attempts exceeded, fetch failure, unexpected I/O error) triggers `git rebase --abort` followed by `git reset --hard ORIG_HEAD && git clean -fd` (which removes agent-created untracked files that `--abort` doesn't clean). The worktree returns to its pre-rebase HEAD. The stage runner then proceeds against the (stale) base. **Agent-completed-the-rebase exception** (B9 fix): if the agent runs `git rebase --continue` itself and the rebase finishes cleanly (no in-progress state, no conflict markers in resolved files, worktree clean), the work is accepted instead of being thrown away.
 
-**Successful-rebase post-step (U8).** When the rebase completes cleanly, `Hive::Rebase` rewrites `worktree.yml`'s `execute_base_head` to the post-rebase HEAD SHA. Without this, 4-execute continuation passes would trip `EXECUTE_WAITING(reason=head_not_descendant)` because the stored pre-rebase SHA is no longer reachable in the rebased commit graph.
+**Successful-rebase post-step (U8).** When the rebase completes cleanly, `Hive::Rebase` rewrites `worktree.yml`'s `execute_base_head` to the post-rebase HEAD SHA. Without this, 4-execute continuation passes would trip `EXECUTE_WAITING(reason=head_not_descendant)` because the stored pre-rebase SHA is no longer reachable in the rebased commit graph. If this rewrite fails (malformed YAML, I/O error, rename failure), the failure is surfaced in `Result.post_rebase_warnings` AND on stderr — the rebase still counts as a success, but the JSON envelope tells consumers exactly which post-success step broke.
+
+**Per-op timeouts.** Both `git rebase <ref>` and `git rebase --continue` are wrapped by `GitOps#run_git_with_timeout` with a 5-minute budget (`REBASE_OP_TIMEOUT_SEC = 300`). On timeout the child gets SIGTERM, then SIGKILL after a 0.5s grace, and is reaped. A stalled commit-hook can no longer extend the worst-case latency window indefinitely. Captured stderr is bounded by `GIT_CAPTURE_MAX_BYTES = 1 << 20` (1 MiB) so a runaway hook can't blow up the runner's memory either.
+
+**Lock-window trade-off (accepted v1).** `Hive::Rebase.perform` runs entirely inside `Hive::Lock.with_task_lock`. The worst-case latency is `MAX_CONFLICT_RESOLUTIONS × cfg.rebase.conflict_resolution_timeout_sec` = `5 × 2700s` ≈ `3.75 hours` of lock occupation. `Hive::Lock` is fail-fast — concurrent `hive run` invocations against the same task hard-error with `ConcurrentRunError` (exit 75) during this entire window; the daemon honors that and skips. Acknowledged trade-off: the alternative (rebasing outside the lock) introduces races where two runs against the same task could both win the rebase and stomp on each other. The per-op `REBASE_OP_TIMEOUT_SEC` keeps any single git call bounded so a single bad hook cannot extend the window further. The `--no-rebase` flag gives operators an explicit escape hatch when they don't want the auto-rebase ceremony for a given run.
 
 **Operator-visible signals.** Successful rebase emits `[hive] rebased N commits from origin onto <slug> branch [(K conflicts resolved by agent)]` to stderr. Any failure emits `[hive] rebase attempt failed (<reason>); continuing with stale base. Manual rebase recommended: cd <worktree_path> && git rebase origin/<default-branch>`.
 
 **Per-project disable.** Set `rebase.enabled: false` in `<project>/.hive-state/config.yml` to opt out. The trigger becomes a silent no-op (`Result.disabled`).
+
+**Read-only inspector.** `hive rebase-status TARGET` reports the same guard ladder without mutating anything (no `git fetch` even). See [[commands/rebase-status]].
 
 **JSON envelope (`hive run --json`).** The `SuccessPayload` always includes a `rebase` block:
 
@@ -70,12 +78,34 @@ Before each dispatch, `Hive::Rebase` checks `staged_unmerged_files` against `Hiv
     "succeeded": true,
     "agent_resolutions": 1,
     "resolved_files": ["src/foo.rb"],
-    "reason": null
+    "reason": null,
+    "post_rebase_warnings": []
   }
 }
 ```
 
-`reason` is `null` on success and a snake-case string (`disabled`, `no_worktree`, `dirty_worktree`, `pre_existing_rebase`, `detached_head`, `fetch_failed`, `agent_failed`, `markers_remaining`, `protected_files_in_conflict`, `max_attempts_exceeded`, `agent_called_continue_itself`, `rebase_failed`, `rebase_continue_failed`, `no_conflict_agent_configured`) otherwise.
+`reason` is `null` on success and a snake-case string (closed enum, validated by `schemas/hive-run.v1.json`) otherwise. The full set:
+
+| Reason | Meaning |
+|--------|---------|
+| `disabled` | `cfg.rebase.enabled = false` in this project |
+| `cli_override` | `--no-rebase` was passed for this run |
+| `no_worktree` | Stage has no worktree (brainstorm/plan) or worktree directory missing |
+| `pre_existing_rebase` | `.git/rebase-merge/` or `.git/rebase-apply/` already exists; operator cleanup required |
+| `dirty_worktree` | Uncommitted changes; rebase requires a clean tree |
+| `detached_head` | Worktree HEAD is detached; nothing to rebase |
+| `no_default_branch` | Default branch couldn't be resolved from cfg or git |
+| `fetch_failed` | `git fetch origin <default>` failed (network/auth/timeout) |
+| `no_conflict_agent_configured` | `cfg.execute.agent` is missing (sanity guard) |
+| `agent_failed` | Conflict-resolution agent returned non-OK status |
+| `markers_remaining` | Agent finished but left conflict markers in a resolved file (also: read error reading the file — fails closed) |
+| `agent_called_continue_itself` | Agent ran `git rebase --continue` itself and the rebase did NOT complete cleanly |
+| `max_attempts_exceeded` | More than `MAX_CONFLICT_RESOLUTIONS = 5` conflict batches |
+| `rebase_failed` | `git rebase` returned a non-conflict failure |
+| `rebase_continue_failed` | `git rebase --continue` raised a non-conflict failure |
+| `unexpected_io_error` | A `Hive::GitError` / `SystemCallError` / `IOError` escaped the narrow rescue (programmer-error class) |
+
+`post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
 
 ## next: hints (by marker)
 

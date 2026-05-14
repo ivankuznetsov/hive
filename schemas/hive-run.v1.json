@@ -93,7 +93,29 @@
             "succeeded": { "type": "boolean" },
             "agent_resolutions": { "type": "integer", "minimum": 0 },
             "resolved_files": { "type": "array", "items": { "type": "string" } },
-            "reason": { "type": ["string", "null"] },
+            "reason": {
+              "description": "Snake-case enum naming the skip-or-failure cause. null on success. The set is closed; producer adding a new reason MUST update this enum.",
+              "type": ["string", "null"],
+              "enum": [
+                null,
+                "disabled",
+                "cli_override",
+                "no_worktree",
+                "pre_existing_rebase",
+                "dirty_worktree",
+                "detached_head",
+                "no_default_branch",
+                "fetch_failed",
+                "no_conflict_agent_configured",
+                "agent_failed",
+                "markers_remaining",
+                "agent_called_continue_itself",
+                "max_attempts_exceeded",
+                "rebase_failed",
+                "rebase_continue_failed",
+                "unexpected_io_error"
+              ]
+            },
             "post_rebase_warnings": { "type": "array", "items": { "type": "string" } }
           }
         }

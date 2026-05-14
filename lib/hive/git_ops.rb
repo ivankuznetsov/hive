@@ -264,35 +264,147 @@ module Hive
       out.split("\n").map(&:strip).reject(&:empty?)
     end
 
+    # Wall-clock budget for `git rebase` / `git rebase --continue`
+    # operations. Hooks (pre-commit, post-rewrite, post-commit) can
+    # stall for arbitrary time; the orchestrator's task-lock is
+    # held during the whole rebase, so without a cap a slow hook
+    # could block concurrent invocations for hours. PR #69 review
+    # reliability #4.
+    REBASE_OP_TIMEOUT_SEC = 300
+
+    # Stdout/stderr cap for captured git operations to prevent
+    # unbounded memory growth from a runaway hook or pathological
+    # rebase. 1 MiB is generous for git's typical output (usually
+    # <10 KiB). PR #69 review reliability #11.
+    GIT_CAPTURE_MAX_BYTES = 1 << 20
+
     # `git rebase <ref>`. Returns true on clean rebase (fast-forward or
     # successful replay with no conflicts). Raises Hive::RebaseConflict
     # if git exits non-zero AND a rebase is mid-flight on disk (the
     # canonical conflict signal). Raises GitError for any other
-    # non-zero exit (invalid ref, hook failure, etc.).
+    # non-zero exit (invalid ref, hook failure, etc.) including
+    # timeout.
     def rebase_onto(ref)
-      _out, err, status = Open3.capture3("git", "-C", @project_root, "rebase", ref)
-      return true if status.success?
+      success, err, timed_out = run_git_with_timeout([ "git", "-C", @project_root, "rebase", ref ])
+      return true if success
 
       if rebase_in_progress?
         raise RebaseConflict, "git rebase #{ref} halted with conflicts"
       end
 
-      raise GitError, "git rebase #{ref} failed: #{err.strip.empty? ? '(no stderr)' : err.strip}"
+      detail = if timed_out
+        "timed out after #{REBASE_OP_TIMEOUT_SEC}s (hook stall?)"
+      elsif err.strip.empty?
+        "(no stderr)"
+      else
+        err.strip
+      end
+      raise GitError, "git rebase #{ref} failed: #{detail}"
     end
 
     # `git rebase --continue`. Returns true on clean continue (rebase
     # advances or completes). Raises RebaseConflict if more conflicts
-    # surface on the next commit. Raises GitError otherwise.
+    # surface on the next commit. Raises GitError otherwise (including
+    # timeout).
     def rebase_continue
       env = { "GIT_EDITOR" => "true" }  # accept default commit message; never open an editor
-      _out, err, status = Open3.capture3(env, "git", "-C", @project_root, "rebase", "--continue")
-      return true if status.success?
+      success, err, timed_out = run_git_with_timeout(
+        [ "git", "-C", @project_root, "rebase", "--continue" ],
+        env: env
+      )
+      return true if success
 
       if rebase_in_progress?
         raise RebaseConflict, "git rebase --continue halted with conflicts"
       end
 
-      raise GitError, "git rebase --continue failed: #{err.strip.empty? ? '(no stderr)' : err.strip}"
+      detail = if timed_out
+        "timed out after #{REBASE_OP_TIMEOUT_SEC}s (hook stall?)"
+      elsif err.strip.empty?
+        "(no stderr)"
+      else
+        err.strip
+      end
+      raise GitError, "git rebase --continue failed: #{detail}"
+    end
+
+    # Run a git command with a wall-clock timeout (`REBASE_OP_TIMEOUT_SEC`)
+    # and a stdout/stderr byte cap (`GIT_CAPTURE_MAX_BYTES`). Returns
+    # `[success_bool, stderr_string, timed_out_bool]`. On timeout:
+    # SIGTERM → 0.5s grace → SIGKILL → reap. Excess output beyond the
+    # cap is dropped (the typical git op produces <10 KiB so this is
+    # only relevant for runaway hooks).
+    def run_git_with_timeout(cmd, env: {}, timeout_sec: REBASE_OP_TIMEOUT_SEC,
+                             max_bytes: GIT_CAPTURE_MAX_BYTES)
+      out_r, out_w = IO.pipe
+      err_r, err_w = IO.pipe
+      pid = Process.spawn(env, *cmd, in: :close, out: out_w, err: err_w)
+      out_w.close
+      err_w.close
+
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_sec
+      out_buf = +""
+      err_buf = +""
+      readers = [ out_r, err_r ]
+      timed_out = false
+
+      loop do
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        if remaining <= 0
+          timed_out = true
+          break
+        end
+        ready, = IO.select(readers, [], [], [ remaining, 0.1 ].min)
+        (ready || []).each do |r|
+          begin
+            chunk = r.read_nonblock(4096)
+            if r == out_r && out_buf.bytesize < max_bytes
+              out_buf << chunk[0, max_bytes - out_buf.bytesize]
+            elsif r == err_r && err_buf.bytesize < max_bytes
+              err_buf << chunk[0, max_bytes - err_buf.bytesize]
+            end
+          rescue IO::WaitReadable
+            # spurious wakeup; loop
+          rescue EOFError
+            readers.delete(r)
+            r.close
+          end
+        end
+        _, status = Process.waitpid2(pid, Process::WNOHANG)
+        next unless status
+
+        # Drain remaining bytes from the pipes before returning.
+        readers.each do |r|
+          begin
+            loop do
+              chunk = r.read_nonblock(4096)
+              if r == out_r && out_buf.bytesize < max_bytes
+                out_buf << chunk[0, max_bytes - out_buf.bytesize]
+              elsif r == err_r && err_buf.bytesize < max_bytes
+                err_buf << chunk[0, max_bytes - err_buf.bytesize]
+              end
+            end
+          rescue IO::WaitReadable, EOFError
+            # done draining
+          end
+          r.close unless r.closed?
+        end
+        return [ status.success?, err_buf, false ]
+      end
+
+      # Timeout path: SIGTERM, brief grace, SIGKILL.
+      begin
+        Process.kill("TERM", pid)
+        sleep 0.5
+        Process.kill("KILL", pid)
+      rescue Errno::ESRCH
+        # already gone
+      end
+      Process.waitpid(pid)
+      [ out_r, err_r ].each { |r| r.close unless r.closed? }
+      [ false, err_buf, true ]
+    rescue StandardError => e
+      [ false, e.message, false ]
     end
 
     # `git rebase --abort`. Returns true on success, false on failure

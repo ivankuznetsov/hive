@@ -132,9 +132,13 @@ module Hive
       # Programmer errors (NoMethodError, NameError, ArgumentError,
       # TypeError) deliberately escape so logic bugs surface in
       # operator logs instead of being misattributed to a generic
-      # `unexpected_error` rebase failure. Mirrors the recover_review
-      # rescue pattern pinned in PR #56 (review-stale recovery).
-      Result.failed(reason: :"unexpected_error:#{e.class}",
+      # `unexpected_io_error` rebase failure. Mirrors the
+      # recover_review rescue pattern pinned in PR #56.
+      # Fixed reason (not class-name interpolated) so it fits the
+      # closed schema enum — exception class is in stderr for
+      # debugging, but not in the structured envelope.
+      warn "[hive] rebase unexpected I/O error: #{e.class}: #{e.message}"
+      Result.failed(reason: :unexpected_io_error,
                     commits_behind: nil,
                     agent_resolutions: 0,
                     resolved_files: [])

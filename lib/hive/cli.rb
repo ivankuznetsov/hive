@@ -184,16 +184,34 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string, enum: APPROVE_TO_ENUM,
                    desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    option :no_rebase, type: :boolean, default: false,
+                       desc: "skip the auto-rebase pre-step for this run only (one-off override of cfg.rebase.enabled)"
     def run_task(target)
       require "hive/commands/run"
       Hive::Commands::Run.new(
         target,
         project: options[:project],
         stage: options[:stage],
-        json: options[:json]
+        json: options[:json],
+        no_rebase: options[:no_rebase]
       ).call
     end
     map "run" => :run_task
+
+    desc "rebase-status TARGET", "Print the auto-rebase status for TARGET without running anything (read-only)"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    def rebase_status(target)
+      require "hive/commands/rebase_status"
+      Hive::Commands::RebaseStatus.new(
+        target,
+        project: options[:project],
+        stage: options[:stage],
+        json: options[:json]
+      ).call
+    end
+    map "rebase-status" => :rebase_status
 
     desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
     option :from, type: :string, enum: APPROVE_TO_ENUM,

@@ -331,6 +331,68 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  # ---- run_git_with_timeout (PR #69 reliability #4 + #11) ----
+
+  def test_run_git_with_timeout_returns_success_on_clean_exit
+    # `git --version` is a fast, side-effect-free command. Verifies
+    # the happy path: success=true, timed_out=false.
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      success, _err, timed_out = ops.run_git_with_timeout([ "git", "--version" ])
+      assert success, "git --version exits 0"
+      refute timed_out, "timed_out must be false on clean exit"
+    end
+  end
+
+  def test_run_git_with_timeout_captures_nonzero_exit
+    # An invalid git subcommand exits non-zero. Should return
+    # success=false, no timeout flag.
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      success, err, timed_out = ops.run_git_with_timeout(
+        [ "git", "-C", dir, "nope-not-a-real-subcommand" ]
+      )
+      refute success, "invalid subcommand returns success=false"
+      refute timed_out, "timed_out=false when the process exits on its own"
+      refute_empty err, "stderr should be captured"
+    end
+  end
+
+  def test_run_git_with_timeout_fires_on_slow_subprocess
+    # Use `sleep` (not git) — same code path, deterministic stall.
+    # 1-second deadline against a 30-second sleep proves the
+    # SIGTERM→SIGKILL escalation reaps the child.
+    skip "/bin/sleep unavailable" unless File.executable?("/bin/sleep") || File.executable?("/usr/bin/sleep")
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      t_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      success, _err, timed_out = ops.run_git_with_timeout([ "sleep", "30" ], timeout_sec: 1)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_start
+      refute success, "timed-out command must report success=false"
+      assert timed_out, "timed_out must be true when wall-clock budget elapses"
+      assert elapsed < 5, "must reap the child quickly (< 5s); took #{elapsed}s — escalation path broken"
+    end
+  end
+
+  def test_run_git_with_timeout_caps_captured_output
+    # A subprocess that floods stderr should be capped at max_bytes
+    # rather than buffered without bound. Use a tiny inline ruby
+    # writer for portability (no /bin/yes assumption).
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      # Write ~64 KiB to stderr fast then exit 1. Capture is bounded
+      # to 1 KiB; the cap must hold even though the producer emits
+      # 64x more.
+      success, err, _timed_out = ops.run_git_with_timeout(
+        [ "ruby", "-e", "STDERR.write('x' * 65536); exit 1" ],
+        max_bytes: 1024
+      )
+      refute success
+      assert err.bytesize <= 1024,
+             "stderr capture must be capped at max_bytes (got #{err.bytesize} bytes)"
+    end
+  end
+
   def test_reset_hard_orig_head_also_runs_git_clean
     # B2: reset --hard ORIG_HEAD does NOT remove untracked files;
     # the cleanup combo IS reset + clean -fd. This test pins that

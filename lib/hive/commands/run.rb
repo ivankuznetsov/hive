@@ -28,12 +28,13 @@ module Hive
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
-      def initialize(target, project: nil, stage: nil, json: false, quiet: false)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false)
         @target = target
         @project_filter = project
         @stage_filter = stage
         @json = json
         @quiet = quiet
+        @no_rebase = no_rebase
       end
 
       def call
@@ -71,7 +72,14 @@ module Hive
       # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md.
       def perform_rebase(task, cfg)
         require "hive/rebase"
-        result = Hive::Rebase.perform(task, cfg)
+        # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
+        # Use the same shape as the cfg-disabled path so JSON consumers
+        # see the disabled result; distinguish by reason for ops debugging.
+        if @no_rebase
+          result = Hive::Rebase::Result.skipped(:cli_override)
+        else
+          result = Hive::Rebase.perform(task, cfg)
+        end
         log_rebase_outcome(task, result)
         result
       end

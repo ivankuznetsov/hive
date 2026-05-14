@@ -1385,3 +1385,14 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 
 **Refreshed pages:**
 - `wiki/commands/tui.md` — Enter description updated for the dual error-row routing; new paragraph documenting the kill-class fallthrough, `--match-attr exit_code=N` discipline, status-column enrichment, and dedup behavior.
+
+## [2026-05-14T12:00:00Z] rebase — PR #69 deferred-items follow-up + module/ADR docs
+
+**Action:** Closed the deferred items from PR #69's `/ce-code-review` synthesis. Wrote `wiki/modules/rebase.md` (Public API, Result struct, internals, conflict-resolution loop, abort/cleanup, security boundaries, latency budget). Wrote `wiki/commands/rebase-status.md` documenting the read-only inspector verb (eight states, JSON envelope shape, why-no-fetch rationale). Updated `wiki/commands/run.md`: documented `--no-rebase` flag with `cli_override` reason; expanded the `rebase.reason` enum into a full table; documented `post_rebase_warnings`; added per-op timeout (`REBASE_OP_TIMEOUT_SEC = 300`) + bounded stderr capture (`GIT_CAPTURE_MAX_BYTES = 1 MiB`); added an explicit "Lock-window trade-off (accepted v1)" subsection covering the `MAX_CONFLICT_RESOLUTIONS × conflict_resolution_timeout_sec` worst case and the `--no-rebase` escape hatch; documented the B8 removal of the basename-match protected-files guard and replacement with `add_dirs: []` physical isolation; documented the B9 "agent-completed-the-rebase" exception that accepts the agent's work when the rebase finishes cleanly. Added ADR-025 to `wiki/decisions.md` ratifying the "additions are required and enums are closed" policy for `hive-run.v1` envelopes, with a comparison table justifying the choice against Hive's single-binary-no-third-party-consumer deployment model.
+
+**Refreshed pages:**
+- `wiki/modules/rebase.md` (new) — orchestrator module page.
+- `wiki/commands/rebase-status.md` (new) — read-only inspector verb.
+- `wiki/commands/run.md` — `--no-rebase` flag, expanded reason enum table, `post_rebase_warnings`, per-op timeouts, lock-window trade-off, basename-guard removal note, B9 exception.
+- `wiki/decisions.md` — ADR-025 (additive-required + closed-enum JSON-envelope policy).
+- `wiki/index.md` — registered `[[modules/rebase]]` and `[[commands/rebase-status]]`; bumped page count to 51 and ADR count to 25.

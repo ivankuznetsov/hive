@@ -21,7 +21,11 @@ module Hive
     class ConcurrencyController
       # Default cooldown after a SUCCESS exit. Prevents a happy task
       # from re-firing on the next tick before the user sees the result.
-      SUCCESS_COOLDOWN_SEC = 300
+      # 60s gives the operator one full TUI polling cycle to notice the
+      # transition before the daemon advances to the next stage. The
+      # original value (300s) felt too long when watching live — see
+      # commit message for the brainstorm-→-plan handoff incident.
+      SUCCESS_COOLDOWN_SEC = 60
 
       # Transient-failure backoff schedule (seconds). After the Nth
       # consecutive transient failure on the same (project, slug),
@@ -127,9 +131,9 @@ module Hive
       # Record a child completion. Side-effects on cooldown / quarantine
       # / daily-counter depend on exit_code per Hive::ExitCodes:
       #
-      #   0  SUCCESS              → 5 min cooldown
+      #   0  SUCCESS              → 1 min cooldown
       #   3  TASK_IN_ERROR        → no cooldown (marker handles re-entry policy via Policy)
-      #   4  WRONG_STAGE          → 5 min cooldown (race or classifier bug; back off)
+      #   4  WRONG_STAGE          → 1 min cooldown (race or classifier bug; back off)
       #   64 USAGE                → quarantine for daemon lifetime
       #   75 TEMPFAIL             → no cooldown, refund daily-rate slot, allow retry
       #   78 CONFIG               → drop the entire project

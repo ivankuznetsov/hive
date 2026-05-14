@@ -629,6 +629,34 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
   end
 
+  # R16: pasting the same image bytes twice in a row must produce
+  # two distinct staged files (no dedup). The composer is intentionally
+  # additive — a user pasting the same screenshot twice has signalled
+  # they want both placeholders in the body, and silently collapsing
+  # them would lose buffer-cursor positioning the user typed around.
+  def test_new_idea_same_image_bytes_pasted_twice_yields_two_distinct_files
+    bytes = Hive::Tui::Clipboard::PNG_SIGNATURE + "payload".b
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    probe_result = clipboard_image_bytes(bytes: bytes)
+
+    with_clipboard_probe_stub(->(**_kwargs) { probe_result }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+    end
+
+    attachments = @model.hive_model.new_idea_attachments
+    assert_equal 2, attachments.size, "same bytes pasted twice must NOT dedup"
+    assert_equal %w[image1 image2], attachments.map(&:label)
+    paths = attachments.map(&:staging_path)
+    assert_equal paths.uniq, paths, "two paste events must yield two distinct staging paths"
+    paths.each { |p| assert_equal bytes, File.binread(p) }
+  ensure
+    Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+  end
+
   def test_new_idea_paste_with_image_file_copies_to_staging
     with_tmp_dir do |dir|
       src = File.join(dir, "shot.png")
@@ -648,6 +676,38 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal :image_file, attachment.source_kind
       assert_equal "fixture-image", File.binread(attachment.staging_path)
       refute_equal src, attachment.staging_path
+    ensure
+      Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+    end
+  end
+
+  # R4: drag-drop from a file manager often delivers the path
+  # wrapped in double quotes and trailing newline (`"<path>"\n`). The
+  # clipboard-layer probe strips both via `normalized_path`; the
+  # BubbleModel layer must thread the raw payload through without
+  # mutation so a future `translate_raw_text_input` regression that
+  # trims the payload before delivery would fail here.
+  def test_new_idea_paste_with_quoted_path_threads_raw_text_to_clipboard_probe
+    with_tmp_dir do |dir|
+      src = File.join(dir, "shot.png")
+      File.binwrite(src, "fixture-image".b)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+        dispatch: @dispatch
+      )
+      probe_result = clipboard_image_file(src, ext: "png")
+      captured_pasted_text = nil
+
+      with_clipboard_probe_stub(->(pasted_text:, **_kwargs) {
+        captured_pasted_text = pasted_text
+        probe_result
+      }) do
+        @model.update(Hive::Tui::Messages::RawTextInput.new(text: "\"#{src}\"\n", paste: true))
+      end
+
+      assert_equal "\"#{src}\"\n", captured_pasted_text,
+        "quoted + trailing-newline payload must reach Clipboard.probe verbatim"
+      assert_equal "[image1]", @model.hive_model.new_idea_buffer
     ensure
       Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
     end
@@ -1132,6 +1192,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
     rich_submit_with_raise(-> { raise KeyError, "key not found: \"image99\"" })
     assert_equal :new_idea, @model.hive_model.mode
     assert_match(/key not found/, @model.hive_model.flash.to_s)
+  end
+
+  # Programmer-error path (NoMethodError, etc.) bypasses the typed
+  # rescue list inside `submit_rich_new_idea`, fires the `ensure`
+  # cleanup, then propagates to the outer `BubbleModel#update` rescue.
+  # That outer rescue preserves model state apart from the flash, so
+  # without an explicit `new_idea_staging_dir` reset the next paste
+  # would short-circuit through `ensure_dir!` to the now-deleted dir
+  # and ENOENT on the first write. Pin the reset here so a future
+  # ensure-block edit can't silently regress it.
+  def test_rich_submit_programmer_error_clears_model_staging_dir
+    rich_submit_with_raise(-> { raise NoMethodError, "undefined method `foo'" })
+    assert_nil @model.hive_model.new_idea_staging_dir,
+      "programmer-error path must clear the model's staging_dir " \
+      "after the ensure-block cleanup removes the disk tmpdir"
+    assert_match(/internal error/, @model.hive_model.flash.to_s)
   end
 
   # ---- DispatchCommand → background spawn ----

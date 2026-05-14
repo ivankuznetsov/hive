@@ -2300,18 +2300,20 @@ module Hive
           nil
         ]
       ensure
-        # Programmer-error path: `preserve_staging` stays false so
-        # cleanup runs before the exception re-propagates to the outer
-        # `BubbleModel#update` rescue. Cleanup targets the dir
-        # captured at method entry so a later refactor that mutates
-        # `@hive_model.new_idea_staging_dir` mid-body cannot cause
-        # cleanup to miss the dir it should be removing.
+        # Programmer-error path: cleanup the disk dir AND clear the
+        # model field. Without the model reset, the outer
+        # `BubbleModel#update` rescue preserves `new_idea_staging_dir`,
+        # so the next paste calls `ensure_dir!` which short-circuits to
+        # the now-deleted path and ENOENTs on the first write.
         unless preserve_staging
           if staging_dir_at_entry && !staging_dir_at_entry.empty?
             begin
               Hive::Tui::ComposerStaging.cleanup!(staging_dir_at_entry)
             rescue ArgumentError, SystemCallError, IOError => e
               Hive::Tui::Debug.log("new_idea_staging", "ensure cleanup: #{e.class}: #{e.message}")
+            end
+            if @hive_model.new_idea_staging_dir == staging_dir_at_entry
+              @hive_model = @hive_model.with(new_idea_staging_dir: nil)
             end
           end
         end

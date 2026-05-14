@@ -418,6 +418,30 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  # Plan U8: Enter on a completed 7-finalize row routes to `OpenSummary`
+  # so the operator can browse `summary.md` from the TUI without falling
+  # out to a shell. The branch in KeyMap#enter_message gates on
+  # `stage == "7-finalize" && marker == "complete"`; any other stage or
+  # marker falls through to the existing dispatch table.
+  def test_enter_on_finalize_complete_row_returns_open_summary
+    row = make_row(action_key: "ready_to_archive", action_label: "Ready to archive",
+                   stage: "7-finalize", marker: "complete", suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenSummary, msg
+    assert_same row, msg.row
+  end
+
+  def test_enter_on_finalize_non_complete_row_does_not_return_open_summary
+    # Sibling guard: only the marker=="complete" branch routes to
+    # OpenSummary. A row mid-finalize (e.g. agent_running) must still
+    # take the agent_running branch, not the summary viewer.
+    row = make_row(action_key: "agent_running", action_label: "Agent running",
+                   stage: "7-finalize", marker: "agent_working",
+                   claude_pid_alive: true, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    refute_kind_of Hive::Tui::Messages::OpenSummary, msg
+  end
+
   def test_enter_on_agent_running_returns_open_log_tail_with_row
     row = make_row(action_key: "agent_running", action_label: "Agent running",
                    claude_pid_alive: true, suggested_command: nil)

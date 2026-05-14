@@ -178,6 +178,16 @@ class RunFinalizeTest < Minitest::Test
         refute_match(/arg=ready\n/, log, "ready must NOT fire when secret detected")
         assert_match(/arg=edit\n.*arg=https:\/\/example\.com\/pr\/9/m, log,
                      "finalize must redact the secret-bearing PR body")
+        # The argv log carries `arg=<value>` one line per gh argv; the
+        # redact payload's `--body` argument is the literal placeholder.
+        # Without this assertion, a regression that passed the
+        # secret-laden agent body to `gh pr edit --body ...` (instead of
+        # the placeholder) would pass: the URL + `arg=edit` pair only
+        # proves edit was *called*, not that the body was redacted.
+        assert_match(/arg=\[redacted: hive detected a credential pattern\]/, log,
+                     "gh pr edit --body must carry the redacted placeholder, not the secret-laden agent body")
+        refute_match(/arg=.*sk-ant-aaaaaa/, log,
+                     "the agent-supplied secret must NOT appear in any gh argv")
         refute File.exist?(File.join(task_dir, "summary.md")),
                "summary.md must not be written when secret blocks finalize"
       end

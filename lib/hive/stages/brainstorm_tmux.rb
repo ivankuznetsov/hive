@@ -13,6 +13,8 @@ module Hive
     module BrainstormTmux
       READY_WAIT_TIMEOUT_SEC = 5
       DONE_POLL_INTERVAL_SEC = 0.5
+      SENTINEL_POLL_INTERVAL_SEC = 5
+      SENTINEL_CAPTURE_BYTES = 8192
       TERMINAL_MARKERS = %i[waiting complete error].freeze
 
       module_function
@@ -77,14 +79,21 @@ module Hive
         end
       end
 
-      def wait_for_terminal_marker(task, _runner, timeout)
+      def wait_for_terminal_marker(task, runner, timeout)
         deadline = Time.now + timeout
+        last_sentinel_check = Time.at(0)
         loop do
           if File.exist?(done_path(task))
             marker = Hive::Markers.current(task.state_file)
             return marker if terminal_marker?(marker)
 
             cleanup_done(task)
+          end
+
+          if Time.now - last_sentinel_check >= sentinel_poll_interval
+            last_sentinel_check = Time.now
+            marker = marker_from_sentinel_tail(task, runner)
+            return marker if marker
           end
 
           if Time.now >= deadline
@@ -100,12 +109,32 @@ module Hive
         TERMINAL_MARKERS.include?(marker.name)
       end
 
+      def marker_from_sentinel_tail(task, runner)
+        marker = Hive::Markers.current(task.state_file)
+        return nil unless terminal_marker?(marker)
+
+        pane = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
+        pane_marker_names(pane).include?(marker.name) ? marker : nil
+      rescue Hive::TmuxError
+        nil
+      end
+
+      def pane_marker_names(text)
+        text.scan(Hive::Markers::MARKER_RE).map do
+          Regexp.last_match[:name].downcase.to_sym
+        end
+      end
+
       def timeout_sec(cfg)
         Integer(cfg.dig("timeout_sec", "brainstorm"))
       end
 
       def poll_interval
         Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC", DONE_POLL_INTERVAL_SEC.to_s))
+      end
+
+      def sentinel_poll_interval
+        Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC", SENTINEL_POLL_INTERVAL_SEC.to_s))
       end
 
       def reset_signal_files(task)

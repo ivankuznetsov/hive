@@ -13,8 +13,10 @@ class RunBrainstormTmuxTest < Minitest::Test
     @old_socket = ENV["HIVE_TMUX_SOCKET"]
     @old_bin = ENV["HIVE_CLAUDE_BIN"]
     @old_poll = ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"]
+    @old_sentinel = ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"]
     ENV["HIVE_TMUX_SOCKET"] = @socket
     ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"] = "0.1"
+    ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"] = "0.1"
   end
 
   def teardown
@@ -22,6 +24,7 @@ class RunBrainstormTmuxTest < Minitest::Test
     ENV["HIVE_TMUX_SOCKET"] = @old_socket
     ENV["HIVE_CLAUDE_BIN"] = @old_bin
     ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"] = @old_poll
+    ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"] = @old_sentinel
     ENV.delete("HIVE_FAKE_INTERACTIVE_SCENARIO")
   end
 
@@ -101,6 +104,41 @@ class RunBrainstormTmuxTest < Minitest::Test
     end
   end
 
+  def test_sentinel_fallback_completes_when_done_hook_never_fires
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        fake = write_fake_interactive_claude(dir)
+        ENV["HIVE_CLAUDE_BIN"] = fake
+        ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "sentinel_complete"
+        folder = make_task_at_brainstorm(dir, timeout: 3)
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        assert_equal :complete, Hive::Markers.current(File.join(folder, "brainstorm.md")).name
+        assert_empty tmux_sessions
+      end
+    end
+  end
+
+  def test_sentinel_fallback_does_not_trust_pane_without_file_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        fake = write_fake_interactive_claude(dir)
+        ENV["HIVE_CLAUDE_BIN"] = fake
+        ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "sentinel_echo_only"
+        folder = make_task_at_brainstorm(dir, timeout: 1)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "brainstorm.md"))
+        assert_equal :error, marker.name
+        assert_equal "timeout", marker.attrs["reason"]
+        assert_empty tmux_sessions
+      end
+    end
+  end
+
   private
 
   def make_task_at_brainstorm(dir, timeout:)
@@ -162,6 +200,13 @@ class RunBrainstormTmuxTest < Minitest::Test
         puts "<!-- COMPLETE -->"
         fire_hook("second")
       when "hang"
+        sleep 10
+      when "sentinel_complete"
+        File.write(state_file, "## Requirements\\n- Done via sentinel\\n<!-- COMPLETE -->\\n")
+        puts "<!-- COMPLETE -->"
+        sleep 10
+      when "sentinel_echo_only"
+        puts "<!-- COMPLETE -->"
         sleep 10
       else
         abort("unknown scenario: \#{scenario}")

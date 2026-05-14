@@ -60,9 +60,24 @@ module Hive
         f.flush
         run_tmux("load-buffer", "-b", buffer_name, f.path)
       end
-      run_tmux("paste-buffer", "-d", "-b", buffer_name, "-t", target_pane)
-      run_tmux("send-keys", "-t", target_pane, "Enter")
+      begin
+        # `paste-buffer -d` deletes the named buffer on success, but a
+        # transient server stall or a pane killed mid-call can leave the
+        # buffer loaded — accumulating against tmux's default 50-buffer
+        # cap on long-lived daemons. Explicitly delete the buffer in
+        # `ensure` so a failed paste does not leak it.
+        run_tmux("paste-buffer", "-d", "-b", buffer_name, "-t", target_pane)
+        run_tmux("send-keys", "-t", target_pane, "Enter")
+      ensure
+        delete_buffer(buffer_name)
+      end
       true
+    end
+
+    def delete_buffer(buffer_name)
+      run_tmux("delete-buffer", "-b", buffer_name)
+    rescue Hive::TmuxError
+      nil
     end
 
     def capture_pane_tail(bytes:)
@@ -117,10 +132,18 @@ module Hive
       argv
     end
 
+    # Widen these substrings deliberately: any "session is gone" / "no
+    # server" rephrasing tmux ships in a future release must classify as
+    # `NoServerRunning` so `kill_session`'s idempotent teardown keeps
+    # working. If you see a new tmux phrasing in the wild, add it here.
     def tmux_server_unavailable?(err)
       err.include?("can't find session") ||
+        err.include?("session not found") ||
         err.include?("no server running") ||
-        err.include?("server exited unexpectedly")
+        err.include?("no current server") ||
+        err.include?("server exited unexpectedly") ||
+        err.include?("server not found") ||
+        err.include?("lost server")
     end
   end
 end

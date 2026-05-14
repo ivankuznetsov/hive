@@ -22,10 +22,27 @@ module Hive
       module_function
 
       def run!(task, cfg)
-        reset_signal_files(task)
+        # `brainstorm.runtime=tmux_interactive` hardcodes the claude
+        # binary (the wrapper script execs `claude` regardless), so
+        # configuring `brainstorm.agent=codex|pi` is silently incoherent.
+        # `hive doctor` warns about this, but doctor is advisory — flip
+        # the config after doctor passes and the tmux spawn fails with
+        # a confusing "claude not found". Surface the mismatch up-front.
+        configured_agent = (cfg.dig("brainstorm", "agent") || "claude").to_s
+        if configured_agent != "claude"
+          raise Hive::AgentError,
+                "brainstorm.runtime=tmux_interactive requires brainstorm.agent=claude, " \
+                "got=#{configured_agent}"
+        end
+
         profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
         runner = build_runner(task)
         preflight!(profile, runner)
+        # `reset_signal_files` deletes the previous run's `result.json`
+        # forensic file, so it must run AFTER `preflight!` — a preflight
+        # failure (missing tmux, name collision) destroys the prior
+        # turn's forensic payload otherwise.
+        reset_signal_files(task)
 
         prompt = Hive::Stages::Brainstorm.render_prompt(task, cfg, profile: profile)
         Hive::Markers.set(task.state_file, :agent_working,
@@ -42,11 +59,24 @@ module Hive
           marker = wait_for_terminal_marker(task, runner, timeout_sec(cfg))
           { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
         ensure
-          runner.kill_session if runner
-          sweep_orphan_processes(task)
-          cleanup_scratch(settings_path)
-          cleanup_done(task)
+          # Each teardown step is wrapped in `safe { ... }` so a
+          # transient failure in one (e.g. `CommandFailed` from
+          # `kill_session`) does not skip the remaining steps and leak
+          # the per-task `.claude/settings.json` or `.done`.
+          safe { runner.kill_session if runner }
+          safe { sweep_orphan_processes(task) }
+          safe { cleanup_scratch(settings_path) }
+          safe { cleanup_done(task) }
         end
+      end
+
+      # Run a teardown step, swallowing any exception so the next step
+      # still runs. Used to guarantee that every step of the `ensure`
+      # chain in `run!` executes regardless of which one raises.
+      def safe
+        yield
+      rescue StandardError
+        nil
       end
 
       def session_name_for(task)
@@ -73,7 +103,7 @@ module Hive
         if runner.session_exists?
           raise Hive::AgentError,
                 "tmux session #{runner.name} already exists; attach with `tmux attach -t #{runner.name}` " \
-                "or kill it before retrying"
+                "or run `tmux kill-session -t #{runner.name}` to clear it before retrying"
         end
       end
 
@@ -97,11 +127,17 @@ module Hive
         raise Hive::AgentError, "tmux binary not runnable: #{tmux_bin} (#{e.class.name.split('::').last}: #{e.message})"
       end
 
+      # Distinguish "no tmux installed" from "tmux installed but below
+      # the minimum supported version" so the operator can see at a
+      # glance whether to install or upgrade. `:version_too_old` is a
+      # separate status row but still contributes to doctor's exit code
+      # (treated as missing by the renderer's missing-skill check).
       def tmux_status(tmux_bin: self.tmux_bin)
         version = preflight_tmux!(tmux_bin: tmux_bin)
         [ :present, "tmux #{version} found" ]
       rescue Hive::AgentError => e
-        [ :missing, e.message ]
+        status = e.message.include?("below minimum") ? :version_too_old : :missing
+        [ status, e.message ]
       end
 
       def parse_tmux_version(output)
@@ -127,7 +163,7 @@ module Hive
       end
 
       def wait_until_session_exists!(runner)
-        deadline = Time.now + ready_wait_timeout
+        deadline = Time.now + session_ready_wait_timeout
         until runner.session_exists?
           raise Hive::AgentError, "tmux session #{runner.name} did not start" if Time.now >= deadline
 
@@ -138,13 +174,22 @@ module Hive
       # Mirror the headless path's PID-into-task-lock contract so
       # `hive status`, signal routing, and observability tooling that
       # reads `claude_pid` find a value during an active brainstorm.
-      # The wrapper execs into claude (`exec "$@"`), so the pane PID is
-      # the claude PID after the exec lands. We retry briefly because
-      # `display-message` can race the very first pane process showing
-      # up.
+      #
+      # The wrapper script execs into claude (`exec "$@"`), and `exec`
+      # preserves the process's PID — so a pane PID captured while bash
+      # is still running pre-exec is identical to the PID claude will
+      # have after the exec lands. That's why we don't need a post-exec
+      # re-read: there is no race, the same numeric PID denotes the
+      # bash-pre-exec and the claude-post-exec process. A future reader
+      # might be tempted to "fix" this by polling for a non-bash comm,
+      # but that's unnecessary — the contract is PID identity, not
+      # process-name freshness.
+      #
+      # We retry briefly because `display-message` can race the very
+      # first pane process showing up at all.
       def record_claude_pid(task, runner)
         pid = nil
-        deadline = Time.now + ready_wait_timeout
+        deadline = Time.now + pid_ready_wait_timeout
         while pid.nil? && Time.now < deadline
           pid = runner.pane_pid
           break if pid
@@ -211,8 +256,24 @@ module Hive
         Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC", SENTINEL_POLL_INTERVAL_SEC.to_s))
       end
 
+      # `session_ready_wait_timeout` and `pid_ready_wait_timeout` measure
+      # unrelated things — tmux session creation vs. the claude PID
+      # emerging in the pane after the wrapper execs. They share the
+      # legacy `HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC` default so
+      # the old single-knob tuning still works, but operators tuning one
+      # condition can override it without silently affecting the other.
       def ready_wait_timeout
         Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", READY_WAIT_TIMEOUT_SEC.to_s))
+      end
+
+      def session_ready_wait_timeout
+        Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_SESSION_READY_WAIT_TIMEOUT_SEC",
+                        ENV.fetch("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", READY_WAIT_TIMEOUT_SEC.to_s)))
+      end
+
+      def pid_ready_wait_timeout
+        Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_PID_READY_WAIT_TIMEOUT_SEC",
+                        ENV.fetch("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", READY_WAIT_TIMEOUT_SEC.to_s)))
       end
 
       def reset_signal_files(task)
@@ -221,15 +282,30 @@ module Hive
         File.delete(result) if File.exist?(result)
       end
 
+      ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
+
       # Best-effort defensive sweep. tmux kill-session already terminates
       # the pane's descendents; this only catches orphans whose ancestry
       # is detached from the pane (rare). We log the pgrep match list and
       # the pkill exit status so silent kills surface in the orchestrator
       # log instead of getting swallowed when, e.g., task.folder is a
       # substring of another concurrent task's folder.
+      #
+      # The regex anchors the trailing edge with `(?:[[:space:]]|$)` so
+      # a prefix sibling (task-a-extra vs. task-a) cannot match a longer
+      # concurrent task's `--add-dir` value and get pkill'd. Without
+      # the anchor the substring match would silently kill the sibling.
       def sweep_orphan_processes(task)
-        pattern = "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}"
-        matches, _err, _status = Open3.capture3("pgrep", "-fa", pattern)
+        pattern = "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}(?:[[:space:]]|$)"
+        matches, pgrep_err, pgrep_status = Open3.capture3("pgrep", "-fa", pattern)
+        # `pgrep -fa` exit 1 with empty stdout means "no matches" — the
+        # happy path. Any other non-zero (e.g. procps without `-a` on
+        # minimal Alpine images) is a real failure: log a warning so it
+        # doesn't get swallowed before pkill.
+        if !pgrep_status.success? && pgrep_status.exitstatus != 1
+          log_orphan_sweep_warning(task, "pgrep failed: exit=#{pgrep_status.exitstatus} err=#{pgrep_err.strip.inspect}")
+          return
+        end
         return if matches.strip.empty?
 
         out, err, status = Open3.capture3("pkill", "-f", pattern)
@@ -239,8 +315,8 @@ module Hive
       end
 
       def log_orphan_sweep(task, matches, out, err, status)
-        log_dir = File.join(task.folder)
-        log_path = File.join(log_dir, "brainstorm-tmux-orphan-sweep.log")
+        log_path = orphan_sweep_log_path(task)
+        rotate_orphan_sweep_log(log_path)
         File.open(log_path, "a") do |f|
           f.puts "[#{Time.now.utc.iso8601}] pgrep matches:"
           f.puts matches
@@ -250,18 +326,49 @@ module Hive
         nil
       end
 
+      def log_orphan_sweep_warning(task, message)
+        log_path = orphan_sweep_log_path(task)
+        rotate_orphan_sweep_log(log_path)
+        File.open(log_path, "a") { |f| f.puts "[#{Time.now.utc.iso8601}] WARN: #{message}" }
+      rescue StandardError
+        nil
+      end
+
+      def orphan_sweep_log_path(task)
+        File.join(task.folder, "brainstorm-tmux-orphan-sweep.log")
+      end
+
+      # Cap the log file at `ORPHAN_SWEEP_LOG_MAX_BYTES`. The stage
+      # folder is meant to be ephemeral, but repeated reruns of the same
+      # slug accumulate this log indefinitely otherwise. On overflow we
+      # truncate rather than rotate — the file is forensic, and the most
+      # recent sweep is what matters.
+      def rotate_orphan_sweep_log(log_path)
+        return unless File.exist?(log_path)
+        return if File.size(log_path) < ORPHAN_SWEEP_LOG_MAX_BYTES
+
+        File.write(log_path, "[#{Time.now.utc.iso8601}] (log truncated, prior contents exceeded #{ORPHAN_SWEEP_LOG_MAX_BYTES} bytes)\n")
+      rescue StandardError
+        nil
+      end
+
       def cleanup_done(task)
         path = done_path(task)
         File.delete(path) if File.exist?(path)
       end
 
+      # Idempotent teardown of the per-task scratch settings. Rescue
+      # widened to cover read-only/perms-locked mounts (`EACCES`/`EROFS`)
+      # so a failure here can't bubble up after `kill_session` has run
+      # and leave the scratch behind — `cleanup_scratch` is defensive
+      # cleanup, never a hard requirement.
       def cleanup_scratch(settings_path)
         return unless settings_path
 
         File.delete(settings_path) if File.exist?(settings_path)
         dir = File.dirname(settings_path)
         Dir.rmdir(dir) if Dir.exist?(dir) && Dir.empty?(dir)
-      rescue Errno::ENOENT, Errno::ENOTEMPTY
+      rescue Errno::ENOENT, Errno::ENOTEMPTY, Errno::EACCES, Errno::EROFS, Errno::EPERM
         nil
       end
 

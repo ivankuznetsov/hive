@@ -187,7 +187,14 @@ class RunBrainstormTmuxTest < Minitest::Test
         folder = make_task_at_brainstorm(dir, timeout: 5)
         task = Hive::Task.new(folder)
         cfg = Hive::Config.load(dir)
-        original = Hive::Stages::BrainstormTmux.method(:wait_for_terminal_marker)
+        # Capture the original `module_function`-installed singleton
+        # method as an `UnboundMethod` so we can rebind it verbatim in
+        # `ensure`. Wrapping the original via `Method#call` in a new
+        # `define_singleton_method` (the prior approach) would compound
+        # wrappers across test runs and across any second monkey-patch
+        # in the same process. Using `define_method` with the captured
+        # `UnboundMethod` restores the module to its untouched state.
+        original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:wait_for_terminal_marker)
         Hive::Stages::BrainstormTmux.define_singleton_method(:wait_for_terminal_marker) do |_task, _runner, _timeout|
           raise "forced midrun failure"
         end
@@ -196,9 +203,7 @@ class RunBrainstormTmuxTest < Minitest::Test
         assert_empty tmux_sessions
       ensure
         if original
-          Hive::Stages::BrainstormTmux.define_singleton_method(:wait_for_terminal_marker) do |*args|
-            original.call(*args)
-          end
+          Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :wait_for_terminal_marker, original)
         end
       end
     end

@@ -3,17 +3,18 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-04-29
+updated: 2026-05-14
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Three runtime gems (`thor`, `bubbletea`, `lipgloss`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `gh`, and `git`; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
+**TLDR**: Four runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, and `git`; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
 
 ## Runtime gems
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
+| `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
 

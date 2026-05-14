@@ -3,6 +3,7 @@ source "https://rubygems.org"
 ruby "~> 3.4"
 
 gem "thor", "~> 1.3"
+gem "telegram-bot-ruby", "~> 2.7"
 # Charm Ruby bindings — the only TUI backend after U11 of plan #003
 # (`docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md`).
 # Bubble Tea drives the MVU loop in `Hive::Tui::App.run_charm`; lipgloss

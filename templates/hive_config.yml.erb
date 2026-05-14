@@ -5,3 +5,23 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
     path: <%= p["path"] %>
     hive_state_path: <%= p["hive_state_path"] %>
 <% end %>
+
+# Telegram bot global surface. The token is intentionally not stored here:
+# set HIVE_TELEGRAM_BOT_TOKEN in the environment before `hive bot start`.
+# Uncomment and fill chat_id_allowlist to opt in.
+#
+# bot:
+#   enabled: false
+#   chat_id_allowlist: []   # integers only, e.g. [123456789]
+#   poll_interval_sec: 30
+#   long_poll_timeout_sec: 25
+#   notification_dedupe_window_sec: 300
+#   conversation_ttl_sec: 3600
+#   codex_budget_usd: 1
+#   codex_timeout_sec: 120
+#   shutdown_grace_sec: 60
+#   pid_file: ~/Dev/hive/.bot.pid
+#   log_file: ~/Dev/hive/logs/bot.log
+#   log_max_bytes: 10485760
+#   log_max_files: 5
+#   last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id

@@ -156,6 +156,26 @@ module Hive
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
+      # Global Telegram bot settings. The bot is an operator surface
+      # across every registered project, so runtime code loads these
+      # from ~/Dev/hive/config.yml via load_global_bot. The token lives
+      # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
+      "bot" => {
+        "enabled" => false,
+        "chat_id_allowlist" => [],
+        "poll_interval_sec" => 30,
+        "long_poll_timeout_sec" => 25,
+        "notification_dedupe_window_sec" => 300,
+        "conversation_ttl_sec" => 3600,
+        "codex_budget_usd" => 1,
+        "codex_timeout_sec" => 120,
+        "shutdown_grace_sec" => 60,
+        "pid_file" => "~/Dev/hive/.bot.pid",
+        "log_file" => "~/Dev/hive/logs/bot.log",
+        "log_max_bytes" => 10_485_760,
+        "log_max_files" => 5,
+        "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"
+      },
       # Auto-rebase pre-step for `hive run` (plan
       # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).
       # Detects drift behind origin/<default_branch>, fetches, attempts
@@ -335,6 +355,43 @@ module Hive
       merged
     end
 
+    # Load and validate the global `bot` block from ~/Dev/hive/config.yml.
+    # `require_runtime: true` is used by `hive bot start` so the opt-in
+    # credentials fail loudly there without making read-only commands like
+    # `hive status` require a Telegram token.
+    def load_global_bot(require_runtime: false)
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["bot"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "bot in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(global_bot_defaults, override)
+      validate_bot_config!({ "bot" => merged }, path)
+      validate_bot_runtime!(merged, path) if require_runtime
+      merged
+    end
+
+    def telegram_bot_token!
+      token = ENV["HIVE_TELEGRAM_BOT_TOKEN"].to_s
+      return token unless token.strip.empty?
+
+      raise ConfigError, "HIVE_TELEGRAM_BOT_TOKEN must be set to start hive bot"
+    end
+
+    def global_bot_defaults
+      defaults = deep_dup(DEFAULTS["bot"])
+      defaults["pid_file"] = File.join(hive_home, ".bot.pid")
+      defaults["log_file"] = File.join(hive_home, "logs", "bot.log")
+      defaults["last_seen_state_file"] = File.join(hive_home, ".bot.last_seen_update_id")
+      defaults
+    end
+
     def register_project(name:, path:)
       FileUtils.mkdir_p(hive_home)
       data = if File.exist?(global_config_path)
@@ -498,6 +555,7 @@ module Hive
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
+      validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
 
@@ -517,6 +575,7 @@ module Hive
       review
       agents
       daemon
+      bot
       rebase
     ].freeze
 
@@ -795,6 +854,104 @@ module Hive
                 ">= #{min}; got #{value.inspect} (#{value.class})"
         end
       end
+    end
+
+    BOT_NUMERIC_BOUNDS = [
+      [ "poll_interval_sec", 5, nil ],
+      [ "long_poll_timeout_sec", 5, 50 ],
+      [ "notification_dedupe_window_sec", 0, nil ],
+      [ "conversation_ttl_sec", 60, nil ],
+      [ "codex_budget_usd", 0, nil ],
+      [ "codex_timeout_sec", 10, nil ],
+      [ "shutdown_grace_sec", 0, nil ],
+      [ "log_max_bytes", 1024, nil ],
+      [ "log_max_files", 1, nil ]
+    ].freeze
+
+    BOT_PATH_KEYS = %w[
+      pid_file
+      log_file
+      last_seen_state_file
+    ].freeze
+
+    def validate_bot_config!(cfg, source_path)
+      bot = cfg["bot"]
+      return if bot.nil?
+
+      enabled = bot["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "bot.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      validate_bot_allowlist!(bot, source_path)
+      validate_bot_numbers!(bot, source_path)
+      validate_bot_paths!(bot, source_path)
+    end
+
+    def validate_bot_runtime!(bot, source_path)
+      telegram_bot_token!
+      allowlist = bot["chat_id_allowlist"]
+      return if allowlist.is_a?(Array) && !allowlist.empty?
+
+      raise ConfigError,
+            "bot.chat_id_allowlist in #{describe_source(source_path)} must contain at least one chat_id " \
+            "before hive bot can start"
+    end
+
+    def validate_bot_allowlist!(bot, source_path)
+      allowlist = bot["chat_id_allowlist"]
+      unless allowlist.is_a?(Array)
+        raise ConfigError,
+              "bot.chat_id_allowlist in #{describe_source(source_path)} must be an Array of Integers; " \
+              "got #{allowlist.inspect} (#{allowlist.class})"
+      end
+
+      allowlist.each_with_index do |entry, idx|
+        next if entry.is_a?(Integer)
+
+        raise ConfigError,
+              "bot.chat_id_allowlist[#{idx}] in #{describe_source(source_path)} must be an Integer; " \
+              "got #{entry.inspect} (#{entry.class})"
+      end
+    end
+
+    def validate_bot_numbers!(bot, source_path)
+      BOT_NUMERIC_BOUNDS.each do |key, min, max|
+        value = bot[key]
+        next if value.nil?
+
+        unless value.is_a?(Integer) && value >= min && (max.nil? || value <= max)
+          bound = max ? "between #{min} and #{max}" : ">= #{min}"
+          raise ConfigError,
+                "bot.#{key} in #{describe_source(source_path)} must be an integer #{bound}; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+    end
+
+    def validate_bot_paths!(bot, source_path)
+      BOT_PATH_KEYS.each do |key|
+        value = bot[key]
+        next if value.nil?
+
+        unless value.is_a?(String) && !value.strip.empty?
+          raise ConfigError,
+                "bot.#{key} in #{describe_source(source_path)} must be a non-empty String path; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+        if unsafe_path_segment?(value)
+          raise ConfigError,
+                "bot.#{key} in #{describe_source(source_path)} must not contain '..' path segments; " \
+                "got #{value.inspect}"
+        end
+      end
+    end
+
+    def unsafe_path_segment?(value)
+      File.expand_path(value).split(File::SEPARATOR).include?("..") ||
+        value.split(/[\\\/]/).include?("..")
     end
 
     # Validate `rebase:` block from auto-rebase plan

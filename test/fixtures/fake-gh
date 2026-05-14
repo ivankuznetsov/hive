@@ -14,6 +14,22 @@ ARGV_LOG="${LOG_DIR}/fake-gh-argv.log"
   done
 } >> "$ARGV_LOG"
 
+# When `--body-file <path>` appears, snapshot the file's content into
+# the log right now (before the production code's Tempfile is closed
+# in its own `ensure`). Tests rely on `body_content=` lines to assert
+# the body content actually posted.
+prev=""
+for a in "$@"; do
+  if [[ "$prev" == "--body-file" && -f "$a" ]]; then
+    {
+      printf 'body_content<<EOF\n'
+      cat -- "$a"
+      printf '\nEOF\n'
+    } >> "$ARGV_LOG"
+  fi
+  prev="$a"
+done
+
 case "${1:-}" in
   auth)
     case "${2:-}" in
@@ -24,22 +40,72 @@ case "${1:-}" in
   pr)
     case "${2:-}" in
       list)
-        if [[ -n "${HIVE_FAKE_GH_PR_EXISTS:-}" ]]; then
-          printf '[{"url":"https://example.com/pr/1","number":1,"state":"OPEN","isDraft":true}]\n'
+        # HIVE_FAKE_GH_PR_EXISTS_FILE points at a file that fake-claude
+        # creates on first invocation; when present we report the PR at
+        # the URL HIVE_FAKE_GH_PR_EXISTS_URL (default
+        # https://example.com/pr/9). Tests use this to simulate the
+        # post-agent state: before the agent runs the file does not
+        # exist and `pr list` reports `[]`; after the agent runs (the
+        # agent supposedly invoked `gh pr create`) the file exists and
+        # `pr list` reports the PR — letting validate_complete_marker's
+        # post-spawn lookup succeed.
+        if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" && -f "${HIVE_FAKE_GH_PR_EXISTS_FILE}" ]]; then
+          state="${HIVE_FAKE_GH_PR_STATE:-OPEN}"
+          isdraft="${HIVE_FAKE_GH_PR_ISDRAFT:-true}"
+          url="${HIVE_FAKE_GH_PR_EXISTS_URL:-https://example.com/pr/9}"
+          num="${HIVE_FAKE_GH_PR_EXISTS_NUMBER:-9}"
+          printf '[{"url":"%s","number":%s,"state":"%s","isDraft":%s}]\n' "$url" "$num" "$state" "$isdraft"
+        elif [[ -n "${HIVE_FAKE_GH_PR_EXISTS:-}" ]]; then
+          state="${HIVE_FAKE_GH_PR_STATE:-OPEN}"
+          isdraft="${HIVE_FAKE_GH_PR_ISDRAFT:-true}"
+          printf '[{"url":"https://example.com/pr/1","number":1,"state":"%s","isDraft":%s}]\n' "$state" "$isdraft"
         else
           printf '[]\n'
         fi
-        exit 0
+        exit "${HIVE_FAKE_GH_LIST_EXIT:-0}"
         ;;
       create)
         printf 'https://example.com/pr/2\n'
         exit "${HIVE_FAKE_GH_CREATE_EXIT:-0}"
         ;;
       view)
+        # Detect --json comments (no -q) → emit {"comments": [...]}.
+        # The publisher's already_posted? parses this and matches
+        # per-comment line-anchored, not on the raw blob.
+        wants_comments=0
+        for a in "$@"; do
+          [[ "$a" == "comments" ]] && wants_comments=1
+        done
+        # `-q .comments[].body` short-circuits to legacy raw-body
+        # output (kept for compatibility with older test paths).
         if [[ "${*: -1}" == ".comments[].body" ]]; then
-          printf '%s\n' "${HIVE_FAKE_GH_COMMENTS_BODY:-}"
-        elif [[ "${*: -1}" == ".body" ]]; then
+          wants_comments=0
+        fi
+        if [[ "${*: -1}" == ".body" ]]; then
           printf '%s\n' "${HIVE_FAKE_GH_PR_BODY:-}"
+        elif [[ "${*: -1}" == ".comments[].body" ]]; then
+          printf '%s\n' "${HIVE_FAKE_GH_COMMENTS_BODY:-}"
+        elif [[ "$wants_comments" == 1 ]]; then
+          # JSON array of comment objects. HIVE_FAKE_GH_COMMENTS_BODY,
+          # when set, is rendered as a single comment with that body
+          # (newlines escaped). HIVE_FAKE_GH_COMMENT_COUNT, when set,
+          # overrides count to test the page-cap fail-closed branch
+          # without constructing 100 actual bodies.
+          if [[ -n "${HIVE_FAKE_GH_COMMENT_COUNT:-}" ]]; then
+            printf '{"comments":['
+            i=0
+            while (( i < HIVE_FAKE_GH_COMMENT_COUNT )); do
+              if (( i > 0 )); then printf ','; fi
+              printf '{"body":"filler %d"}' "$i"
+              i=$((i+1))
+            done
+            printf ']}\n'
+          elif [[ -n "${HIVE_FAKE_GH_COMMENTS_BODY:-}" ]]; then
+            esc="$(printf '%s' "${HIVE_FAKE_GH_COMMENTS_BODY}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a;N;$!ba;s/\n/\\n/g')"
+            printf '{"comments":[{"body":"%s"}]}\n' "$esc"
+          else
+            printf '{"comments":[]}\n'
+          fi
         else
           printf '{"state":"%s","body":"%s"}\n' "${HIVE_FAKE_GH_STATE:-OPEN}" "${HIVE_FAKE_GH_PR_BODY:-}"
         fi

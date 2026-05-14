@@ -206,7 +206,10 @@ class PromptInjectionTest < Minitest::Test
       )
       assert_includes prompt, "<#{tag} content_type=\"plan_md\">"
       assert_includes prompt, "<#{tag} content_type=\"execute_output_md\">"
-      assert_includes prompt, "--draft"
+      # Tightened (round-1 finding): word-boundary on `--draft` so a
+      # future `--draft=false` (or any longer prefix-shared flag) does
+      # not silently pass this assertion.
+      assert_match(/gh pr create.*--draft\b/, prompt, "open-pr prompt must instruct draft PR creation")
       assert_equal 2, prompt.scan("<#{tag} ").count
       assert_equal 2, prompt.scan("</#{tag}>").count
     end

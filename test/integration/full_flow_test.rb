@@ -33,8 +33,11 @@ class FullFlowTest < Minitest::Test
     ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
     FileUtils.rm_rf(@driver_dir) if @driver_dir
     FileUtils.rm_rf(@gh_dir) if @gh_dir
-    %w[HIVE_FLOW_FOLDER HIVE_FLOW_PHASE HIVE_FLOW_FINDINGS HIVE_FLOW_PASS
-       HIVE_FLOW_DRIVER_LOG HIVE_FAKE_GH_PR_EXISTS].each { |k| ENV.delete(k) }
+    %w[
+      HIVE_FLOW_FOLDER HIVE_FLOW_PHASE HIVE_FLOW_FINDINGS HIVE_FLOW_PASS
+      HIVE_FLOW_DRIVER_LOG HIVE_FAKE_GH_PR_EXISTS
+      HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
+    ].each { |k| ENV.delete(k) }
     Array(@spawned_worktrees).each { |p| FileUtils.rm_rf(p) }
   end
 
@@ -89,6 +92,14 @@ class FullFlowTest < Minitest::Test
 
           <!-- COMPLETE pr_url=https://example.com/pr/42 is_draft=true -->
         MD
+        # validate_complete_marker (open-pr stage) re-runs `gh pr list`
+        # post-spawn and requires the URL to match. Touch the flag
+        # file so fake-gh starts reporting the PR exists for the
+        # subsequent lookup.
+        if (flag = ENV["HIVE_FAKE_GH_PR_EXISTS_FILE"])
+          FileUtils.mkdir_p(File.dirname(flag))
+          File.write(flag, "")
+        end
       when "finalize"
         File.write(File.join(folder, "summary.md"), <<~MD)
           ## Summary
@@ -128,6 +139,17 @@ class FullFlowTest < Minitest::Test
     File.chmod(0o755, bin)
   end
 
+  # AC1 + AC2 + AC5 (PR-first pipeline e2e coverage):
+  #   AC1 — open-pr runs BEFORE review in the new 8-stage layout
+  #         (1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr
+  #          → 6-review → 7-finalize → 8-done).
+  #   AC2 — the branch is pushed to origin during 5-open-pr (verified
+  #         indirectly: 6-review opens against a real PR URL).
+  #   AC5 — the full flow advances from inbox to done with no manual
+  #         intervention beyond the explicit verbs.
+  # Plan U10 originally named test/integration/full_pipeline_pr_before_review_test.rb
+  # as the deliverable; coverage landed here instead. Search for
+  # "AC1 + AC2 + AC5" to find this test from the plan.
   def test_full_idea_to_pr_to_done_flow
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -193,6 +215,13 @@ class FullFlowTest < Minitest::Test
 
         ENV["HIVE_FLOW_FOLDER"] = open_pr_dir
         ENV["HIVE_FLOW_PHASE"] = "open-pr"
+        # validate_complete_marker re-runs `gh pr list` post-spawn;
+        # fake-gh reports the PR exists only when this flag file is
+        # present, and the driver writes it during the open-pr phase.
+        flag_file = File.join(@driver_dir, "pr-exists.flag")
+        ENV["HIVE_FAKE_GH_PR_EXISTS_FILE"] = flag_file
+        ENV["HIVE_FAKE_GH_PR_EXISTS_URL"] = "https://example.com/pr/42"
+        ENV["HIVE_FAKE_GH_PR_EXISTS_NUMBER"] = "42"
         capture_io { Hive::Commands::Run.new(open_pr_dir).call }
         assert_equal :complete, Hive::Markers.current(File.join(open_pr_dir, "pr.md")).name
 

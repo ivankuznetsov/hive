@@ -25,8 +25,18 @@ steps:
   - kind: state_assert
     path: "{task_dir:4-execute}/task.md"
     marker: { current: EXECUTE_COMPLETE }
+  # AC1: PR-first pipeline routes through 5-open-pr BEFORE 6-review.
+  # This scenario stays network-free (no fake-gh in PATH), so it seeds
+  # 5-open-pr's pr.md directly instead of running `hive open-pr` (which
+  # would call `gh auth status` / `gh pr create`). The seed proves the
+  # stage transition contract; run_open_pr_test.rb covers the runner.
   - kind: cli
-    args: [review, "{slug}", --from, 4-execute]
+    args: [approve, "{slug}", --from, 4-execute, --to, 5-open-pr]
+  - kind: write_file
+    path: "{task_dir:5-open-pr}/pr.md"
+    content: "---\npr_url: https://example.com/pr/1\npr_number: 1\n---\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=true -->\n"
+  - kind: cli
+    args: [review, "{slug}", --from, 5-open-pr]
   - kind: state_assert
     path: "{task_dir:6-review}/task.md"
     marker: { current: REVIEW_COMPLETE }

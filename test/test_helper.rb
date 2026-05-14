@@ -28,6 +28,12 @@ end
 
 Minitest::Test.include(HiveTestStdinIsolation)
 
+# Shared fixture paths for tests. Constants here so a future move of
+# test/fixtures lands in one place instead of every test that needs
+# fake-gh / fake-claude. Use as `FAKE_GH_FIXTURE` / `FAKE_CLAUDE_FIXTURE`.
+FAKE_GH_FIXTURE = File.expand_path("fixtures/fake-gh", __dir__).freeze
+FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
+
 module HiveTestHelper
   def with_tmp_dir(&block)
     Dir.mktmpdir("hive-test", &block)

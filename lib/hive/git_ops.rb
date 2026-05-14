@@ -169,5 +169,132 @@ module Hive
     def run_git_quiet(*args)
       Open3.capture3("git", *args)
     end
+
+    # ---- Rebase plumbing (for Hive::Rebase orchestrator) -------------
+
+    # Returns the integer count of commits in `ref` that are NOT in the
+    # current branch (HEAD). `commits_behind("origin/main") == 3` means
+    # main has 3 commits HEAD hasn't seen yet. Returns 0 when ref is
+    # unknown to git (caller handles the no-ref-no-rebase case via the
+    # fetch step's success signal).
+    def commits_behind(ref)
+      out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                         "rev-list", "--count", "HEAD..#{ref}")
+      return 0 unless status.success?
+
+      Integer(out.strip, 10)
+    rescue ArgumentError
+      0
+    end
+
+    # `git fetch origin <ref>` with non-interactive env. Returns true on
+    # success, false on ANY failure (network, auth prompt, unknown ref).
+    # The fail-soft path in Hive::Rebase treats false as "skip rebase",
+    # so this method must NEVER raise.
+    def fetch_default_branch(ref)
+      env = {
+        "GIT_TERMINAL_PROMPT" => "0",
+        "GIT_SSH_COMMAND"     => "ssh -oBatchMode=yes -oConnectTimeout=10"
+      }
+      _out, _err, status = Open3.capture3(env, "git", "-C", @project_root,
+                                          "fetch", "origin", ref)
+      status.success?
+    rescue StandardError
+      false
+    end
+
+    # True when `git status --porcelain` returns any output. Unmerged
+    # (UU/AA/DU) files count as dirty too — rebase-in-progress states
+    # would also trip this, but `rebase_in_progress?` should be checked
+    # FIRST so its more-specific signal wins.
+    def dirty?
+      !status_short.strip.empty?
+    end
+
+    # True when HEAD is detached (no symbolic ref). Rebase against a
+    # detached HEAD would discard the worktree's commits; refuse instead.
+    def detached_head?
+      _out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                          "symbolic-ref", "-q", "HEAD")
+      !status.success?
+    end
+
+    # True when a rebase is mid-flight. Git records this state on disk
+    # in either `.git/rebase-merge/` (interactive / default rebase) or
+    # `.git/rebase-apply/` (legacy apply-based rebase). Either being
+    # present is the canonical "rebase in progress" indicator.
+    def rebase_in_progress?
+      git_dir = run_git!("-C", @project_root, "rev-parse", "--git-dir").strip
+      git_dir = File.expand_path(git_dir, @project_root)
+      File.directory?(File.join(git_dir, "rebase-merge")) ||
+        File.directory?(File.join(git_dir, "rebase-apply"))
+    rescue GitError
+      false
+    end
+
+    # Returns the array of unmerged (conflicting) paths from a rebase
+    # mid-flight, relative to the project root. Empty when no rebase is
+    # in progress or all conflicts are resolved + staged.
+    def staged_unmerged_files
+      out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                         "diff", "--name-only", "--diff-filter=U")
+      return [] unless status.success?
+
+      out.split("\n").map(&:strip).reject(&:empty?)
+    end
+
+    # `git rebase <ref>`. Returns true on clean rebase (fast-forward or
+    # successful replay with no conflicts). Raises Hive::RebaseConflict
+    # if git exits non-zero AND a rebase is mid-flight on disk (the
+    # canonical conflict signal). Raises GitError for any other
+    # non-zero exit (invalid ref, hook failure, etc.).
+    def rebase_onto(ref)
+      _out, err, status = Open3.capture3("git", "-C", @project_root, "rebase", ref)
+      return true if status.success?
+
+      if rebase_in_progress?
+        raise RebaseConflict, "git rebase #{ref} halted with conflicts"
+      end
+
+      raise GitError, "git rebase #{ref} failed: #{err.strip.empty? ? '(no stderr)' : err.strip}"
+    end
+
+    # `git rebase --continue`. Returns true on clean continue (rebase
+    # advances or completes). Raises RebaseConflict if more conflicts
+    # surface on the next commit. Raises GitError otherwise.
+    def rebase_continue
+      env = { "GIT_EDITOR" => "true" }  # accept default commit message; never open an editor
+      _out, err, status = Open3.capture3(env, "git", "-C", @project_root, "rebase", "--continue")
+      return true if status.success?
+
+      if rebase_in_progress?
+        raise RebaseConflict, "git rebase --continue halted with conflicts"
+      end
+
+      raise GitError, "git rebase --continue failed: #{err.strip.empty? ? '(no stderr)' : err.strip}"
+    end
+
+    # `git rebase --abort`. Returns true on success, false on failure
+    # (rare — typically only if no rebase was in progress). Never
+    # raises — abort is a recovery path and the caller has already
+    # decided to give up.
+    def rebase_abort
+      _out, _err, status = Open3.capture3("git", "-C", @project_root, "rebase", "--abort")
+      status.success?
+    rescue StandardError
+      false
+    end
+
+    # `git reset --hard ORIG_HEAD`. Used after `rebase_abort` to clean
+    # any agent-created untracked files (which `--abort` doesn't
+    # remove). ORIG_HEAD is set by git at the start of every rebase
+    # and points at the pre-rebase HEAD. Returns true on success.
+    def reset_hard_orig_head
+      _out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                          "reset", "--hard", "ORIG_HEAD")
+      status.success?
+    rescue StandardError
+      false
+    end
   end
 end

@@ -128,3 +128,24 @@ review:
 daemon:
   enabled: <%= daemon_enabled %>
 
+# Auto-rebase pre-step for `hive run` (plan
+# docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).
+# Before dispatching the stage runner, `hive run` detects whether the
+# task's worktree branch is behind `origin/<default_branch>` and, if so,
+# fetches, attempts `git rebase`, and dispatches the project's
+# execute-stage agent (`cfg.execute.agent`, isolated to the worktree)
+# to resolve any conflicts. Fail-soft: any failure aborts the rebase,
+# cleans agent-created untracked files, and proceeds with the stale
+# base. Originally added to close the REVIEW_STALE drift loop where
+# long-running tasks accumulated phantom-deletion escalations after
+# main moved forward.
+#
+# - `enabled` (default true): set false to opt out per-project.
+# - `conflict_resolution_timeout_sec` (default 2700, min 60): per-spawn
+#   timeout for the conflict-resolution agent. The `MAX_CONFLICT_RESOLUTIONS = 5`
+#   cap on total agent dispatches per rebase is a Ruby constant; not
+#   configurable.
+rebase:
+  enabled: true
+  conflict_resolution_timeout_sec: 2700
+

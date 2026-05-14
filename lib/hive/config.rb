@@ -147,6 +147,20 @@ module Hive
         "shutdown_grace_sec" => 600,
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
+      },
+      # Auto-rebase pre-step for `hive run` (plan
+      # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).
+      # Detects drift behind origin/<default_branch>, fetches, attempts
+      # rebase, dispatches the project's execute-stage agent to resolve
+      # conflicts. Fail-soft: any failure aborts the rebase and the
+      # stage runner proceeds against the (stale) base. The hardcoded
+      # max-conflict-resolutions cap (5) lives on
+      # `Hive::Rebase::MAX_CONFLICT_RESOLUTIONS`, not config — projects
+      # with persistently high-conflict branches should investigate the
+      # underlying drift, not raise the cap.
+      "rebase" => {
+        "enabled" => true,
+        "conflict_resolution_timeout_sec" => 2700
       }
     }.freeze
 
@@ -473,6 +487,7 @@ module Hive
       validate_role_agent_names!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
+      validate_rebase!(cfg, source_path)
     end
 
     # Top-level keys that MUST be Hashes when present. A scalar override
@@ -491,6 +506,7 @@ module Hive
       review
       agents
       daemon
+      rebase
     ].freeze
 
     def validate_hash_shaped_keys!(cfg, source_path)
@@ -755,6 +771,32 @@ module Hive
                 "daemon.#{key} in #{describe_source(source_path)} must be an integer " \
                 ">= #{min}; got #{value.inspect} (#{value.class})"
         end
+      end
+    end
+
+    # Validate `rebase:` block from auto-rebase plan
+    # (docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md U5).
+    # Two keys today: `enabled` (boolean) and `conflict_resolution_timeout_sec`
+    # (integer >= 60 — lower bound prevents operationally-useless tiny
+    # timeouts that would mark every conflict-resolution as failed).
+    def validate_rebase!(cfg, source_path)
+      rebase = cfg["rebase"]
+      return if rebase.nil?
+
+      enabled = rebase["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "rebase.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      timeout = rebase["conflict_resolution_timeout_sec"]
+      return if timeout.nil?
+
+      unless timeout.is_a?(Integer) && timeout >= 60
+        raise ConfigError,
+              "rebase.conflict_resolution_timeout_sec in #{describe_source(source_path)} " \
+              "must be an integer >= 60; got #{timeout.inspect} (#{timeout.class})"
       end
     end
   end

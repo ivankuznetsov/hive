@@ -1577,6 +1577,11 @@ module Hive
           return candidate if File.exist?(candidate)
         end
 
+        if reason == "reviewer_partial_failure" && pass
+          candidate = File.join(reviews_dir, "errors-#{format('%02d', pass)}.md")
+          return candidate if File.exist?(candidate)
+        end
+
         if reason != "fix_guardrail" && pass
           escalations = File.join(reviews_dir, "escalations-#{format('%02d', pass)}.md")
           return escalations if File.exist?(escalations)

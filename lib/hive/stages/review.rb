@@ -944,7 +944,7 @@ module Hive
       def collect_answered_escalation_findings(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
-        return "" if questions.empty?
+        return collect_legacy_checked_escalations(path) if questions.empty?
 
         answered = questions.select { |q| q[:answer].strip != "" }
         return "" if answered.empty?
@@ -960,6 +960,20 @@ module Hive
           out << "\n"
         end
         out
+      end
+
+      def collect_legacy_checked_escalations(path)
+        return "" unless File.exist?(path)
+
+        name = File.basename(path)
+        lines = File.readlines(path).select { |line| auto_fix_finding_line?(line) }
+        return "" if lines.empty?
+
+        out = +"\n# Accepted legacy escalations from #{name}\n"
+        lines.each { |line| out << "[#{name}] #{line}" }
+        out
+      rescue SystemCallError, IOError
+        ""
       end
 
       def prefixed_block(name, text)

@@ -3475,6 +3475,27 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_input_editor_targets_errors_file_for_reviewer_partial_failure
+    Dir.mktmpdir("hive-review-partial-failure") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      errors = File.join(reviews, "errors-02.md")
+      File.write(errors, "# Reviewer infra errors\n")
+      File.write(File.join(reviews, "escalations-02.md"), "## Round 1\n\n### Q1. What should hive do?\n### A1.\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "reason" => "reviewer_partial_failure" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], errors ], seen_editor_invocation
+    end
+  end
+
   def test_open_input_editor_falls_back_to_reviews_dir_when_multiple_review_sources_have_no_escalations_file
     Dir.mktmpdir("hive-review-waiting") do |folder|
       reviews = File.join(folder, "reviews")

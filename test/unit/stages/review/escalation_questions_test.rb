@@ -76,4 +76,31 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       refute_includes accepted, "Should we add a new abstraction?"
     end
   end
+
+  def test_collect_accepted_findings_preserves_legacy_checked_escalations
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, ".hive-state", "stages", "5-review", "demo")
+      reviews_dir = File.join(task_folder, "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(File.join(reviews_dir, "codex-ce-code-review-01.md"), <<~MD)
+        ## Findings
+        - [ ] reviewer finding mirrored into legacy escalations
+      MD
+      File.write(File.join(reviews_dir, "escalations-01.md"), <<~MD)
+        # Escalations for pass 01
+
+        ## codex-ce-code-review-01.md
+
+        - [x] apply the requested legacy escalation fix
+        - [ ] still needs a user decision
+      MD
+
+      ctx = make_ctx(dir, task_folder)
+      accepted = Hive::Stages::Review.collect_accepted_findings(ctx)
+
+      assert_includes accepted, "Accepted legacy escalations from escalations-01.md"
+      assert_includes accepted, "apply the requested legacy escalation fix"
+      assert_equal 1, Hive::Stages::Review.count_escalations(ctx)
+    end
+  end
 end

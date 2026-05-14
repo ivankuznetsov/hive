@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "tmpdir"
 require "hive/daemon/child_supervisor"
 
@@ -74,6 +76,33 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       assert_equal 1, completed.size
       assert_equal 75, completed.first.exit_code
     end
+  end
+
+  def test_spawn_tmpdir_log_fallback_loads_its_own_dependency
+    script = <<~RUBY
+      require "hive/daemon/child_supervisor"
+
+      sup = Hive::Daemon::ChildSupervisor.new(hive_bin: #{FAKE_HIVE.inspect})
+      sup.spawn(
+        command_string: "hive run tmpdir-fallback --exit-code 0",
+        project: "p1",
+        slug: "tmpdir-fallback",
+        stage: "1-inbox"
+      )
+
+      deadline = Time.now + 5
+      completed = []
+      until Time.now > deadline || completed.any?
+        completed.concat(sup.reap_all)
+        sleep 0.05
+      end
+
+      abort "child did not complete" if completed.empty?
+      abort "exit=\#{completed.first.exit_code}" unless completed.first.exit_code == 0
+    RUBY
+
+    _out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-e", script)
+    assert status.success?, err
   end
 
   def test_spawn_two_children_reap_returns_both

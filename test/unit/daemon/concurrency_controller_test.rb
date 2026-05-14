@@ -46,6 +46,25 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s1", now: T0)
   end
 
+  def test_external_active_agents_count_toward_global_cap
+    c = make(global: 1, per_project: 5)
+    assert_equal :global_cap,
+                 c.can_dispatch?(project: "p1", slug: "s1", now: T0,
+                                  external_global_count: 1)
+  end
+
+  def test_external_active_agents_count_toward_project_cap
+    c = make(global: 5, per_project: 1)
+    assert_equal :project_cap,
+                 c.can_dispatch?(project: "p1", slug: "s1", now: T0,
+                                  external_global_count: 1,
+                                  external_project_count: 1)
+    assert_equal :ok,
+                 c.can_dispatch?(project: "p2", slug: "s1", now: T0,
+                                  external_global_count: 1,
+                                  external_project_count: 0)
+  end
+
   def test_daily_cap_blocks_after_n_dispatches
     c = make(daily: 2)
     dispatch(c, 100, "p1", "s1")
@@ -255,6 +274,16 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal 1, c.in_flight_count
     refute_includes c.running_pids, 100
     assert_includes c.running_pids, 101
+  end
+
+  def test_running_task_detects_tracked_project_slug
+    c = make(global: 5, per_project: 5)
+    refute c.running_task?(project: "p1", slug: "s1")
+
+    dispatch(c, 100, "p1", "s1")
+    assert c.running_task?(project: "p1", slug: "s1")
+    refute c.running_task?(project: "p1", slug: "s2")
+    refute c.running_task?(project: "p2", slug: "s1")
   end
 
   def test_completion_for_unknown_pid_is_a_no_op

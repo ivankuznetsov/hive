@@ -48,6 +48,7 @@ module Hive
         @started_at = nil
         @last_tick_at = nil
         @dispatched_today = 0
+        reset_active_agent_snapshot
         # Per-tick enable cache. Populated lazily within one tick so
         # each row-handler call does at most one `Config.load(project_root)`
         # per project, and cleared at the start of every tick so YAML
@@ -69,6 +70,7 @@ module Hive
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
+        reset_active_agent_snapshot
 
         # 1. Reap completed children, update controller, log decisions
         reap_completed(now: now)
@@ -83,6 +85,7 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
+        refresh_active_agent_snapshot(result.rows)
 
         # 3. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +
@@ -273,7 +276,11 @@ module Hive
       end
 
       def dispatch_or_block(row, now:)
-        gate = @controller.can_dispatch?(project: row.project, slug: row.slug, now: now)
+        gate = @controller.can_dispatch?(
+          project: row.project, slug: row.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(row.project)
+        )
         if gate == :ok
           dispatch_command(
             row.suggested_command,
@@ -306,7 +313,11 @@ module Hive
           return
         end
 
-        gate = @controller.can_dispatch?(project: project, slug: slug, now: now)
+        gate = @controller.can_dispatch?(
+          project: project, slug: slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(project)
+        )
         if gate == :ok
           dispatch_command(
             archive_dispatch[:command],
@@ -369,6 +380,31 @@ module Hive
                                task_folder: row.folder)
         @logger.event(:merge_watcher_enqueued, project: row.project, slug: row.slug,
                                                folder: row.folder)
+      end
+
+      def reset_active_agent_snapshot
+        @external_active_agent_total = 0
+        @external_active_agent_counts = Hash.new(0)
+      end
+
+      def refresh_active_agent_snapshot(rows)
+        reset_active_agent_snapshot
+        rows.each do |row|
+          next unless active_agent_row?(row)
+          next if @controller.running_task?(project: row.project, slug: row.slug)
+
+          @external_active_agent_total += 1
+          @external_active_agent_counts[row.project] += 1
+        end
+      end
+
+      def active_agent_row?(row)
+        row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING &&
+          row.claude_pid_alive == true
+      end
+
+      def external_active_agent_count_for(project)
+        @external_active_agent_counts.fetch(project, 0)
       end
 
       def project_enabled?(project_name)

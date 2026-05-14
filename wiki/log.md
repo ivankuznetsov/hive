@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-14T23:30:00Z] brainstorm — tmux interactive runtime (U1–U8)
+
+**Action:** Documented the new interactive tmux runtime for 2-brainstorm. The stage can now spawn the agent inside a detached tmux session (U3) via the `Stages::BrainstormTmux` runner, with U2's interactive Claude wrapper, U4's stop-hook install, U5's tmux sentinel fallback, U7's hardened preflight/teardown, and U8's operator notes. `lib/hive/tmux_runner.rb` (U1) is the shared runtime primitive. Selection is gated by a per-project config flag (U6) surfaced through `templates/project_config.yml.erb`. `hive doctor` (U7) preflights `tmux` availability + version and reports stale brainstorm sessions; the brainstorm stage cleans them up on completion. Wiki refresh in b67096c updated the brainstorm stage, doctor command, and state-model pages.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — tmux runtime path, sentinel completion contract, and waiting reasons.
+- [[commands/doctor]] — tmux preflight and stale-session reporting.
+- [[state-model]] — `brainstorm.runtime` config flag.
+
 ## [2026-05-14T17:17:00Z] review — clarify live review-pass config and stale recovery docs
 
 **Action:** Follow-up from code review on the review/daemon default PR. Removed the stale top-level `max_review_passes` key from `Config::DEFAULTS`, the project config template, README, and wiki examples so `review.max_passes` is the only documented live review-loop cap. Replaced the README troubleshooting row that still described max review pass exhaustion as `EXECUTE_STALE` with the current `REVIEW_STALE` / `hive markers clear ... --name REVIEW_STALE` recovery flow. Clarified daemon docs that `max_concurrent_per_project` is a per-project burst cap; setting it below the global cap is what enforces cross-project fairness.

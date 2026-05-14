@@ -29,21 +29,8 @@ module Hive
       end
 
       def run_headless!(task, cfg)
-        idea_path = File.join(task.folder, "idea.md")
-        idea_text = File.exist?(idea_path) ? File.read(idea_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
-        skill = cfg.dig("brainstorm", "skill") ||
-          Hive::Config::DEFAULTS.dig("brainstorm", "skill")
-        prompt = Hive::Stages::Base.render(
-          "brainstorm_prompt.md.erb",
-          Hive::Stages::Base::TemplateBindings.new(
-            project_name: File.basename(task.project_root),
-            task_folder: task.folder,
-            idea_text: idea_text,
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            skill_invocation: profile.format_skill_invocation(skill)
-          )
-        )
+        prompt = render_prompt(task, cfg, profile: profile)
         # add_dirs is intentionally limited to the task folder. Brainstorm
         # operates on user-supplied idea text and must not have write access
         # to the project source code (claude runs with
@@ -67,6 +54,23 @@ module Hive
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def render_prompt(task, cfg, profile:)
+        idea_path = File.join(task.folder, "idea.md")
+        idea_text = File.exist?(idea_path) ? File.read(idea_path) : ""
+        skill = cfg.dig("brainstorm", "skill") ||
+          Hive::Config::DEFAULTS.dig("brainstorm", "skill")
+        Hive::Stages::Base.render(
+          "brainstorm_prompt.md.erb",
+          Hive::Stages::Base::TemplateBindings.new(
+            project_name: File.basename(task.project_root),
+            task_folder: task.folder,
+            idea_text: idea_text,
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            skill_invocation: profile.format_skill_invocation(skill)
+          )
+        )
       end
 
       def action_for(marker_name)

@@ -378,6 +378,8 @@ module Hive
 
     def extract_final_message(line)
       data = JSON.parse(line)
+      return nil unless data.is_a?(Hash)
+
       case data["type"]
       when "result"
         text_value(data["result"])

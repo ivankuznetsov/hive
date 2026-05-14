@@ -183,6 +183,21 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_ignores_non_object_json_stream_events
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate([ "not", "an", "event" ])
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "", result[:final_message]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
   def test_codex_profile_reads_prompt_from_stdin
     with_tmp_dir do |dir|
       task = make_task(dir)

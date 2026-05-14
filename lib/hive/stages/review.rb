@@ -501,6 +501,8 @@ module Hive
           # rather than retrying the fix on already-applied [x] marks.
           write_fix_success(ctx_pass)
 
+          break if pass >= max_passes
+
           # On the next iteration, treat as fresh entry (not waiting-
           # resume / fix-retry). fix_retry_pass only ever applies to
           # the very first iteration after entry; once we've executed

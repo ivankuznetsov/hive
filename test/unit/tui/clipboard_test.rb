@@ -83,6 +83,19 @@ class HiveTuiClipboardTest < Minitest::Test
     { File.expand_path(path) => entry }
   end
 
+  def test_probe_result_rejects_impossible_union_shape
+    err = assert_raises(ArgumentError) do
+      Hive::Tui::Clipboard::ProbeResult.new(
+        kind: :image_bytes,
+        bytes: nil,
+        path: "/tmp/shot.png",
+        ext: "png"
+      )
+    end
+
+    assert_match(/image_bytes/, err.message)
+  end
+
   def test_wayland_wl_paste_png_returns_image_bytes
     kernel = FakeKernel.new(
       commands: { "wl-paste" => true },

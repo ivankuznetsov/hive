@@ -561,21 +561,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def clipboard_image_bytes(bytes: "png".b, ext: "png")
-    Hive::Tui::Clipboard::ProbeResult.new(
-      kind: :image_bytes,
-      bytes: bytes,
-      path: nil,
-      ext: ext
-    )
+    Hive::Tui::Clipboard::ProbeResult.image_bytes(bytes: bytes, ext: ext)
   end
 
   def clipboard_image_file(path, ext: File.extname(path).delete_prefix("."))
-    Hive::Tui::Clipboard::ProbeResult.new(
-      kind: :image_file,
-      bytes: nil,
-      path: path,
-      ext: ext
-    )
+    Hive::Tui::Clipboard::ProbeResult.image_file(path: path, ext: ext)
   end
 
   def test_new_idea_submission_dispatches_hive_new_with_resolved_project

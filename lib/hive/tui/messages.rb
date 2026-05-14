@@ -1,4 +1,5 @@
 require "hive"
+require "hive/tui/model"
 
 module Hive
   module Tui
@@ -10,7 +11,7 @@ module Hive
     # Each Message is a frozen Data record. The shape is:
     #   - one Message per state-transition kind
     #   - fields carry exactly the data Update needs to apply the transition
-    #   - no behavior on the records themselves — pure data
+    #   - no runtime behavior beyond narrow constructor validation
     #
     # Adding a new Message: define it here, add an `Update.apply` branch
     # for it, write the test case in `test/unit/tui/update_test.rb`.
@@ -278,11 +279,17 @@ module Hive
       NewIdeaPasteRequested = Data.define(:raw_text)
 
       # An image was staged for the in-progress composer. Update inserts
-      # the textual placeholder and appends the attachment metadata.
-      # `:ext` carries the canonical (normalized) extension chosen at
-      # staging time so the downstream `Attachment` record never has
-      # to re-derive it from `staging_path`.
-      NewIdeaImageAttached = Data.define(:label, :staging_path, :ext)
+      # the textual placeholder and appends the exact attachment record
+      # produced by the side-effecting staging path.
+      NewIdeaImageAttached = Data.define(:attachment) do
+        def initialize(attachment:)
+          unless attachment.is_a?(Hive::Tui::Model::Attachment)
+            raise ArgumentError, "attachment must be Hive::Tui::Model::Attachment"
+          end
+
+          super(attachment: attachment)
+        end
+      end
 
       # Cursor navigation within the new-idea prompt.
       NewIdeaCursorLeft = Class.new

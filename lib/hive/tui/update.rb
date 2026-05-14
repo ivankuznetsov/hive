@@ -405,8 +405,9 @@ module Hive
       # preserves Update's purity (no I/O, no Bubbletea coupling).
       # `apply_open_new_idea_prompt` and `apply_new_idea_cancelled`
       # both clear `new_idea_buffer`, `new_idea_cursor`,
-      # `new_idea_attachments`, AND `new_idea_staging_dir` so a fresh
-      # entry starts from a clean slate. The rich-submit success path
+      # `new_idea_attachments`, `new_idea_staging_dir`, AND the
+      # captured staging tmp root so a fresh entry starts from a clean
+      # slate. The rich-submit success path
       # does NOT go through `apply_new_idea_cancelled` — BubbleModel's
       # `reset_to_grid_with_flash` carries the same clearing shape
       # plus a flash payload.
@@ -418,6 +419,7 @@ module Hive
           new_idea_cursor: 0,
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0
         )
       end
@@ -433,20 +435,16 @@ module Hive
       # reach this handler the gate has already passed, so we just
       # splice the placeholder + attachment into the model.
       def apply_new_idea_image_attached(model, msg)
-        placeholder = "[#{msg.label}]"
+        attachment = msg.attachment
+        placeholder = "[#{attachment.label}]"
         buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
         prefix = buffer[0...cursor].to_s
         suffix = buffer[cursor..].to_s
-        attachment = Model::Attachment.new(
-          label: msg.label,
-          staging_path: msg.staging_path,
-          ext: msg.ext
-        )
-        # Bump the monotonic counter past `msg.label`'s numeric suffix
+        # Bump the monotonic counter past the label's numeric suffix
         # so a future paste cannot re-use this label even if the next
         # prune drops the attachment (label format is `imageN`; the
         # composer's `stage_image` reads the counter to derive `N`).
-        label_number = msg.label.to_s.delete_prefix("image").to_i
+        label_number = attachment.label.to_s.delete_prefix("image").to_i
         next_counter = [ model.new_idea_attachment_counter.to_i, label_number ].max
         model.with(
           new_idea_buffer: prefix + placeholder + suffix,
@@ -521,6 +519,7 @@ module Hive
           new_idea_cursor: 0,
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0
         )
       end

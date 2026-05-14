@@ -31,6 +31,7 @@ module Hive
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
       :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea
       :new_idea_staging_dir, # String or nil — temp dir holding staged image files
+      :new_idea_staging_tmp_root, # String or nil — tmp root captured when staging dir was created
       # Integer — monotonic-per-composer counter; never decrements on
       # prune. Used to derive `[imageN]` labels so a prune-then-paste
       # cycle cannot re-use a label and overwrite a previously staged
@@ -99,6 +100,7 @@ module Hive
           new_idea_cursor: 0,
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           flash: nil,
           flash_set_at: nil,

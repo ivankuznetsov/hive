@@ -32,18 +32,30 @@ module Hive
 
       module_function
 
-      # Returns the absolute staging dir and a Model carrying it. If
-      # `model` already pins a non-empty `new_idea_staging_dir`, the
-      # input is reused and the returned Model is unchanged (so a
-      # caller `model = ComposerStaging.ensure_dir!(model).model`
-      # assignment is always safe).
+      # Returns the absolute staging dir and a Model carrying it. The
+      # tmp root is captured alongside the dir so cleanup still accepts
+      # a legitimate session dir even if ENV["TMPDIR"] changes later.
       Result = Data.define(:dir, :model)
 
       def ensure_dir!(model)
-        return Result.new(dir: model.new_idea_staging_dir, model: model) unless model.new_idea_staging_dir.to_s.empty?
+        unless model.new_idea_staging_dir.to_s.empty?
+          return Result.new(dir: model.new_idea_staging_dir, model: model) unless model.new_idea_staging_tmp_root.to_s.empty?
 
-        dir = Dir.mktmpdir("hive-tui-composer-#{Process.pid}-#{SecureRandom.hex(4)}-")
-        Result.new(dir: dir, model: model.with(new_idea_staging_dir: dir))
+          return Result.new(
+            dir: model.new_idea_staging_dir,
+            model: model.with(new_idea_staging_tmp_root: File.expand_path(Dir.tmpdir))
+          )
+        end
+
+        tmp_root = File.expand_path(Dir.tmpdir)
+        dir = Dir.mktmpdir("hive-tui-composer-#{Process.pid}-#{SecureRandom.hex(4)}-", tmp_root)
+        Result.new(
+          dir: dir,
+          model: model.with(
+            new_idea_staging_dir: dir,
+            new_idea_staging_tmp_root: tmp_root
+          )
+        )
       end
 
       # Build the next placeholder label and absolute disk path for an

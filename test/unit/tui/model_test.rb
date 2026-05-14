@@ -22,6 +22,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal 0, model.new_idea_cursor
     assert_equal [], model.new_idea_attachments
     assert_nil model.new_idea_staging_dir
+    assert_nil model.new_idea_staging_tmp_root
     assert_nil model.flash
     assert_nil model.flash_set_at
     assert_nil model.triage_state
@@ -110,7 +111,7 @@ class HiveTuiModelTest < Minitest::Test
   def test_model_carries_all_documented_fields
     # Schema-pinning test: catch accidental field renames or removals.
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_buffer new_idea_cursor
-                  new_idea_attachments new_idea_staging_dir new_idea_attachment_counter
+                  new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
                   flash flash_set_at triage_state tail_state cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end
@@ -144,12 +145,18 @@ class HiveTuiModelTest < Minitest::Test
       ext: "png"
     )
     a = Hive::Tui::Model.initial
-    b = a.with(new_idea_attachments: [ attachment ], new_idea_staging_dir: "/tmp/hive-tui-composer")
+    b = a.with(
+      new_idea_attachments: [ attachment ],
+      new_idea_staging_dir: "/tmp/hive-tui-composer",
+      new_idea_staging_tmp_root: "/tmp"
+    )
 
     assert_equal [], a.new_idea_attachments
     assert_nil a.new_idea_staging_dir
+    assert_nil a.new_idea_staging_tmp_root
     assert_equal [ attachment ], b.new_idea_attachments
     assert_equal "/tmp/hive-tui-composer", b.new_idea_staging_dir
+    assert_equal "/tmp", b.new_idea_staging_tmp_root
     assert attachment.frozen?
   end
 end

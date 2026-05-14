@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/tui/model"
 require "hive/tui/messages"
 
 # Hive::Tui::Messages is the closed enum of MVU messages. Pure data —
@@ -154,21 +155,28 @@ class HiveTuiMessagesTest < Minitest::Test
   end
 
   def test_new_idea_image_attached_has_data_equality
-    a = Hive::Tui::Messages::NewIdeaImageAttached.new(
+    attachment = Hive::Tui::Model::Attachment.new(
       label: "image1",
       staging_path: "/tmp/image-1.png",
       ext: "png"
     )
+    a = Hive::Tui::Messages::NewIdeaImageAttached.new(
+      attachment: attachment
+    )
     b = Hive::Tui::Messages::NewIdeaImageAttached.new(
-      label: "image1",
-      staging_path: "/tmp/image-1.png",
-      ext: "png"
+      attachment: attachment
     )
 
     assert_equal a, b
-    assert_equal "image1", a.label
-    assert_equal "/tmp/image-1.png", a.staging_path
-    assert_equal "png", a.ext
+    assert_equal attachment, a.attachment
+  end
+
+  def test_new_idea_image_attached_requires_attachment_record
+    err = assert_raises(ArgumentError) do
+      Hive::Tui::Messages::NewIdeaImageAttached.new(attachment: Object.new)
+    end
+
+    assert_match(/Attachment/, err.message)
   end
 
   def test_new_idea_singletons_are_frozen

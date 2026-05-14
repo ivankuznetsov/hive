@@ -14,6 +14,15 @@ class HiveTuiUpdateTest < Minitest::Test
     @model ||= Hive::Tui::Model.initial
   end
 
+  def image_attached_message(label:, staging_path:, ext: "png")
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: label,
+      staging_path: staging_path,
+      ext: ext
+    )
+    Hive::Tui::Messages::NewIdeaImageAttached.new(attachment: attachment)
+  end
+
   # ---------- WindowSized ----------
 
   def test_window_sized_updates_dimensions
@@ -563,7 +572,8 @@ class HiveTuiUpdateTest < Minitest::Test
       new_idea_buffer: "leftover-text",
       new_idea_cursor: 4,
       new_idea_attachments: [ attachment ],
-      new_idea_staging_dir: "/tmp/hive-tui-composer"
+      new_idea_staging_dir: "/tmp/hive-tui-composer",
+      new_idea_staging_tmp_root: "/tmp"
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
@@ -571,6 +581,7 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, new_model.new_idea_cursor
     assert_equal [], new_model.new_idea_attachments
     assert_nil new_model.new_idea_staging_dir
+    assert_nil new_model.new_idea_staging_tmp_root
   end
 
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
@@ -677,7 +688,7 @@ class HiveTuiUpdateTest < Minitest::Test
     starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
     new_model, _cmd = Hive::Tui::Update.apply(
       starting,
-      Hive::Tui::Messages::NewIdeaImageAttached.new(
+      image_attached_message(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
         ext: "png"
@@ -696,7 +707,7 @@ class HiveTuiUpdateTest < Minitest::Test
     starting = model.with(mode: :new_idea, new_idea_buffer: "see ", new_idea_cursor: 4)
     new_model, _cmd = Hive::Tui::Update.apply(
       starting,
-      Hive::Tui::Messages::NewIdeaImageAttached.new(
+      image_attached_message(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
         ext: "png"
@@ -710,7 +721,7 @@ class HiveTuiUpdateTest < Minitest::Test
   def test_new_idea_image_attached_keeps_order_for_consecutive_images
     first, _cmd = Hive::Tui::Update.apply(
       model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0),
-      Hive::Tui::Messages::NewIdeaImageAttached.new(
+      image_attached_message(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
         ext: "png"
@@ -718,7 +729,7 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     second, _cmd = Hive::Tui::Update.apply(
       first,
-      Hive::Tui::Messages::NewIdeaImageAttached.new(
+      image_attached_message(
         label: "image2",
         staging_path: "/tmp/hive-tui-composer/image-2.png",
         ext: "png"
@@ -740,7 +751,7 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(
       starting,
-      Hive::Tui::Messages::NewIdeaImageAttached.new(
+      image_attached_message(
         label: "image1",
         staging_path: "/tmp/hive-tui-composer/image-1.png",
         ext: "png"
@@ -759,7 +770,7 @@ class HiveTuiUpdateTest < Minitest::Test
     final = %w[image1 image2 image3].each_with_index.reduce(starting) do |state, (label, idx)|
       next_model, _cmd = Hive::Tui::Update.apply(
         state,
-        Hive::Tui::Messages::NewIdeaImageAttached.new(
+        image_attached_message(
           label: label,
           staging_path: "/tmp/hive-tui-composer/image-#{idx + 1}.png",
           ext: "png"
@@ -839,7 +850,8 @@ class HiveTuiUpdateTest < Minitest::Test
       new_idea_buffer: "rss feeds",
       new_idea_cursor: 4,
       new_idea_attachments: [ attachment ],
-      new_idea_staging_dir: "/tmp/hive-tui-composer"
+      new_idea_staging_dir: "/tmp/hive-tui-composer",
+      new_idea_staging_tmp_root: "/tmp"
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
     assert_equal :grid, new_model.mode
@@ -847,6 +859,7 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, new_model.new_idea_cursor
     assert_equal [], new_model.new_idea_attachments
     assert_nil new_model.new_idea_staging_dir
+    assert_nil new_model.new_idea_staging_tmp_root
   end
 
   def test_cursor_down_under_right_focus_preserves_v1_behaviour

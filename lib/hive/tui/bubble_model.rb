@@ -511,10 +511,13 @@ module Hive
         # paste tool the hint should be allowed to surface again
         # instead of staying suppressed for the whole session.
         @clipboard_tool_hint_shown = false
-        message = Hive::Tui::Messages::NewIdeaImageAttached.new(
+        attachment = Hive::Tui::Model::Attachment.new(
           label: label,
           staging_path: path,
           ext: normalized_ext
+        )
+        message = Hive::Tui::Messages::NewIdeaImageAttached.new(
+          attachment: attachment
         )
         new_model, _cmd = Hive::Tui::Update.apply(@hive_model, message)
         [ new_model, nil ]
@@ -551,11 +554,18 @@ module Hive
 
       def cleanup_new_idea_staging
         dir = @hive_model.new_idea_staging_dir
+        tmp_root = @hive_model.new_idea_staging_tmp_root
         # Reset the model field BEFORE the actual rm_rf so a subsequent
         # paste after an unhandled exception cannot dispatch against a
         # now-deleted tmpdir (ENOENT on the next write_bytes!).
-        @hive_model = @hive_model.with(new_idea_staging_dir: nil) unless dir.to_s.empty?
-        Hive::Tui::ComposerStaging.cleanup!(dir)
+        unless dir.to_s.empty? && tmp_root.to_s.empty?
+          @hive_model = @hive_model.with(
+            new_idea_staging_dir: nil,
+            new_idea_staging_tmp_root: nil
+          )
+        end
+        cleanup_kwargs = tmp_root.to_s.empty? ? {} : { tmproot: tmp_root }
+        Hive::Tui::ComposerStaging.cleanup!(dir, **cleanup_kwargs)
       rescue ArgumentError => e
         # The "refusing to clean outside tmpdir" guard fires when the
         # staging path drifted out of `Dir.tmpdir` between creation
@@ -2225,6 +2235,7 @@ module Hive
         # is independent of any later `@hive_model.with` reassignment
         # within this method's call tree.
         staging_dir_at_entry = @hive_model.new_idea_staging_dir
+        staging_tmp_root_at_entry = @hive_model.new_idea_staging_tmp_root
         if (reason = rich_new_idea_validation_error(buffer))
           preserve_staging = true
           return [
@@ -2307,12 +2318,21 @@ module Hive
         unless preserve_staging
           if staging_dir_at_entry && !staging_dir_at_entry.empty?
             begin
-              Hive::Tui::ComposerStaging.cleanup!(staging_dir_at_entry)
+              cleanup_kwargs =
+                if staging_tmp_root_at_entry.to_s.empty?
+                  {}
+                else
+                  { tmproot: staging_tmp_root_at_entry }
+                end
+              Hive::Tui::ComposerStaging.cleanup!(staging_dir_at_entry, **cleanup_kwargs)
             rescue ArgumentError, SystemCallError, IOError => e
               Hive::Tui::Debug.log("new_idea_staging", "ensure cleanup: #{e.class}: #{e.message}")
             end
             if @hive_model.new_idea_staging_dir == staging_dir_at_entry
-              @hive_model = @hive_model.with(new_idea_staging_dir: nil)
+              @hive_model = @hive_model.with(
+                new_idea_staging_dir: nil,
+                new_idea_staging_tmp_root: nil
+              )
             end
           end
         end
@@ -2448,6 +2468,7 @@ module Hive
           new_idea_cursor: 0,
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           flash: text,
           flash_set_at: Time.now

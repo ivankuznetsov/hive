@@ -29,7 +29,65 @@ module Hive
         "webp" => [].freeze
       }.freeze
 
-      ProbeResult = Data.define(:kind, :bytes, :path, :ext)
+      ProbeResult = Data.define(:kind, :bytes, :path, :ext) do
+        def initialize(kind:, bytes:, path:, ext:)
+          clean_ext = self.class.clean_ext(ext)
+          validate_shape!(kind, bytes, path, clean_ext)
+          super(kind: kind, bytes: bytes, path: path, ext: clean_ext)
+        end
+
+        def validate_shape!(kind, bytes, path, ext)
+          case kind
+          when :none, :empty_image, :clipboard_timeout
+            raise ArgumentError, "#{kind} probe result must not carry payload" unless bytes.nil? && path.nil? && ext.nil?
+          when :oversize_image
+            raise ArgumentError, "oversize image probe result must carry only ext" unless bytes.nil? && path.nil? && present?(ext)
+          when :image_bytes
+            unless bytes.respond_to?(:bytesize) && bytes.bytesize.positive? && path.nil? && present?(ext)
+              raise ArgumentError, "image_bytes probe result requires non-empty bytes and ext"
+            end
+          when :image_file
+            raise ArgumentError, "image_file probe result requires path and ext" unless bytes.nil? && present?(path) && present?(ext)
+          else
+            raise ArgumentError, "unknown probe result kind: #{kind.inspect}"
+          end
+        end
+
+        def present?(value)
+          !value.to_s.empty?
+        end
+
+        class << self
+          def none
+            new(kind: :none, bytes: nil, path: nil, ext: nil)
+          end
+
+          def oversize_image(ext: "png")
+            new(kind: :oversize_image, bytes: nil, path: nil, ext: ext)
+          end
+
+          def empty_image
+            new(kind: :empty_image, bytes: nil, path: nil, ext: nil)
+          end
+
+          def clipboard_timeout
+            new(kind: :clipboard_timeout, bytes: nil, path: nil, ext: nil)
+          end
+
+          def image_bytes(bytes:, ext: "png")
+            new(kind: :image_bytes, bytes: bytes, path: nil, ext: ext)
+          end
+
+          def image_file(path:, ext:)
+            new(kind: :image_file, bytes: nil, path: path, ext: ext)
+          end
+
+          def clean_ext(ext)
+            clean = ext.nil? ? nil : ext.to_s.downcase.delete_prefix(".")
+            clean == "" ? nil : clean
+          end
+        end
+      end
 
       # Minimal stand-in for `Process::Status` that only implements
       # `success?`. Surfaced when the clipboard subprocess hits
@@ -40,10 +98,10 @@ module Hive
 
       TIMEOUT_STATUS = TimeoutStatus.new.freeze
 
-      NONE = ProbeResult.new(kind: :none, bytes: nil, path: nil, ext: nil).freeze
-      OVERSIZE_IMAGE = ProbeResult.new(kind: :oversize_image, bytes: nil, path: nil, ext: "png").freeze
-      EMPTY_IMAGE = ProbeResult.new(kind: :empty_image, bytes: nil, path: nil, ext: nil).freeze
-      CLIPBOARD_TIMEOUT = ProbeResult.new(kind: :clipboard_timeout, bytes: nil, path: nil, ext: nil).freeze
+      NONE = ProbeResult.none
+      OVERSIZE_IMAGE = ProbeResult.oversize_image
+      EMPTY_IMAGE = ProbeResult.empty_image
+      CLIPBOARD_TIMEOUT = ProbeResult.clipboard_timeout
 
       module_function
 
@@ -90,7 +148,7 @@ module Hive
         return OVERSIZE_IMAGE if size > MAX_IMAGE_BYTES
         return NONE unless image_signature_matches?(expanded, ext, kernel: kernel)
 
-        ProbeResult.new(kind: :image_file, bytes: nil, path: expanded, ext: ext).freeze
+        ProbeResult.image_file(path: expanded, ext: ext)
       end
 
       def non_image_file_path?(pasted_text:, kernel: DefaultShim)
@@ -155,7 +213,7 @@ module Hive
         return OVERSIZE_IMAGE if bytes.bytesize > MAX_IMAGE_BYTES
         return NONE unless bytes.start_with?(PNG_SIGNATURE)
 
-        ProbeResult.new(kind: :image_bytes, bytes: bytes, path: nil, ext: "png").freeze
+        ProbeResult.image_bytes(bytes: bytes, ext: "png")
       rescue Timeout::Error => e
         Hive::Tui::Debug.log("clipboard", "probe timed out: #{e.class}: #{e.message}")
         CLIPBOARD_TIMEOUT

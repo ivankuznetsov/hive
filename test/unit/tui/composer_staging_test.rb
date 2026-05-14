@@ -10,19 +10,37 @@ class HiveTuiComposerStagingTest < Minitest::Test
 
     assert File.directory?(result.dir)
     assert_equal result.dir, result.model.new_idea_staging_dir
-    assert File.expand_path(result.dir).start_with?("#{File.expand_path(Dir.tmpdir)}#{File::SEPARATOR}")
+    assert_equal File.expand_path(Dir.tmpdir), result.model.new_idea_staging_tmp_root
+    assert File.expand_path(result.dir).start_with?("#{result.model.new_idea_staging_tmp_root}#{File::SEPARATOR}")
   ensure
-    Hive::Tui::ComposerStaging.cleanup!(result.dir) if result
+    Hive::Tui::ComposerStaging.cleanup!(
+      result.dir,
+      tmproot: result.model.new_idea_staging_tmp_root
+    ) if result
   end
 
   def test_ensure_dir_reuses_existing_dir_and_returns_input_model
+    with_tmp_dir do |dir|
+      model = Hive::Tui::Model.initial.with(
+        new_idea_staging_dir: dir,
+        new_idea_staging_tmp_root: File.dirname(dir)
+      )
+
+      result = Hive::Tui::ComposerStaging.ensure_dir!(model)
+
+      assert_equal dir, result.dir
+      assert_same model, result.model
+    end
+  end
+
+  def test_ensure_dir_backfills_missing_tmp_root_for_legacy_model_shape
     with_tmp_dir do |dir|
       model = Hive::Tui::Model.initial.with(new_idea_staging_dir: dir)
 
       result = Hive::Tui::ComposerStaging.ensure_dir!(model)
 
       assert_equal dir, result.dir
-      assert_same model, result.model
+      assert_equal File.expand_path(Dir.tmpdir), result.model.new_idea_staging_tmp_root
     end
   end
 
@@ -110,5 +128,15 @@ class HiveTuiComposerStagingTest < Minitest::Test
     end
 
     assert_match(/outside tmpdir/, err.message)
+  end
+
+  def test_cleanup_uses_captured_tmp_root
+    with_tmp_dir do |tmp_root|
+      dir = Dir.mktmpdir("hive-tui-composer-test-", tmp_root)
+
+      Hive::Tui::ComposerStaging.cleanup!(dir, tmproot: tmp_root)
+
+      refute File.exist?(dir)
+    end
   end
 end

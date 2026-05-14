@@ -7,7 +7,6 @@ module Hive
     DEFAULTS = {
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
-      "max_review_passes" => 4,
       "default_branch" => nil,
       "project_name" => nil,
       # Budget and timeout caps are GENEROUS sanity caps for runaway agents,
@@ -120,7 +119,7 @@ module Hive
           "prompt_template" => "browser_test_prompt.md.erb",
           "max_attempts" => 2
         },
-        "max_passes" => 4,
+        "max_passes" => 2,
         "max_wall_clock_sec" => 5400
       },
       # Hive daemon settings (ADR-024). The daemon polls
@@ -140,8 +139,8 @@ module Hive
         "poll_interval_sec" => 30,
         "edit_debounce_sec" => 30,
         "pr_merge_poll_interval_sec" => 300,
-        "max_concurrent_runs" => 3,
-        "max_concurrent_per_project" => 1,
+        "max_concurrent_runs" => 5,
+        "max_concurrent_per_project" => 5,
         "max_runs_per_day_per_project" => 50,
         "transient_retry_backoff_sec" => 60,
         "shutdown_grace_sec" => 600,

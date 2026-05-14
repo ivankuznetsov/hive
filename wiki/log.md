@@ -2,6 +2,22 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-14T17:17:00Z] review — clarify live review-pass config and stale recovery docs
+
+**Action:** Follow-up from code review on the review/daemon default PR. Removed the stale top-level `max_review_passes` key from `Config::DEFAULTS`, the project config template, README, and wiki examples so `review.max_passes` is the only documented live review-loop cap. Replaced the README troubleshooting row that still described max review pass exhaustion as `EXECUTE_STALE` with the current `REVIEW_STALE` / `hive markers clear ... --name REVIEW_STALE` recovery flow. Clarified daemon docs that `max_concurrent_per_project` is a per-project burst cap; setting it below the global cap is what enforces cross-project fairness.
+
+**Refreshed pages:**
+- [[commands/daemon]] — concurrency table wording now matches the 5/5 default.
+- [[modules/config]] and [[state-model]] — config examples only expose `review.max_passes`.
+
+## [2026-05-14T15:20:40Z] review — lower default review loop cap to 2 passes
+
+**Action:** Changed the review loop default from four passes to two passes (`Config::DEFAULTS["review"]["max_passes"]`). The first pass still runs the configured reviewer set and triage; if triage marks auto-fixable findings, the fix phase runs and the second pass verifies the result. Additional review rounds remain available through per-project `review.max_passes` overrides, but fresh projects now default to one fix+verify cycle instead of repeated reviewer loops that often re-surface plan-answered or human-decision escalations. Updated the project config template, README config example, and review/state/config wiki references.
+
+**Refreshed pages:**
+- [[stages/review]] — pass-cap default now documents 2.
+- [[state-model]] and [[modules/config]] — default config examples now show `review.max_passes: 2`.
+
 ## [2026-05-14T00:30:00Z] run — auto-rebase pre-step (`Hive::Rebase`) closes the long-running-task drift loop
 
 **Action:** Added a fail-soft auto-rebase pre-step to `hive run` that runs inside `Hive::Lock.with_task_lock` before the stage runner dispatches. Detects when the task's worktree branch is behind `origin/<default_branch>`, fetches with non-interactive env (`GIT_TERMINAL_PROMPT=0` + SSH `BatchMode=yes`), attempts `git rebase`, and dispatches the project's execute-stage agent (`cfg.execute.agent`, isolated to the worktree via `add_dirs: []`) to resolve conflicts. After a successful rebase, rewrites `worktree.yml`'s `execute_base_head` to the post-rebase HEAD so 4-execute continuation passes don't trip `EXECUTE_WAITING(reason=head_not_descendant)`. Any failure (agent non-zero exit, conflict markers remaining, max attempts exceeded, protected-files conflict, agent ran `git rebase --continue` itself against the prompt directive, network/fetch failure) triggers `git rebase --abort` followed by `git reset --hard ORIG_HEAD` to clean agent-created untracked files; the stage runner proceeds against the (stale) base with a stderr warning. Closes the failure mode where long-running tasks accumulated REVIEW_STALE because reviewers saw "phantom deletions" of code that landed on main after the branch was created (originating incidents: `i-want-to-be-able-260507-7682` REVIEW_STALE pass=4 after PRs #63-#68 merged; `create-proper-readme-md-for-260513-2ba1` from a different angle). New code: `lib/hive/rebase.rb` (orchestrator + `Hive::Rebase::Result` Data.define), `lib/hive/git_ops.rb` (rebase plumbing — `commits_behind`, `fetch_default_branch`, `dirty?`, `detached_head?`, `rebase_onto`, `rebase_continue`, `rebase_abort`, `rebase_in_progress?`, `staged_unmerged_files`, `reset_hard_orig_head`), `templates/rebase_conflict_resolution.md.erb`. New error class `Hive::RebaseConflict < Hive::GitError`. Config additions: `cfg.rebase.enabled` (default `true`), `cfg.rebase.conflict_resolution_timeout_sec` (default 2700, min 60). The `MAX_CONFLICT_RESOLUTIONS = 5` cap is a hardcoded Ruby constant (not configurable per S1 from doc-review). JSON envelope: `hive run --json` SuccessPayload gains a required `rebase` block (added to `schemas/hive-run.v1.json` explicitly with `additionalProperties: false` preserved — no schema-version bump). Plan: `docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md`.

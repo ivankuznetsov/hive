@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb
 created: 2026-04-25
-updated: 2026-05-13
+updated: 2026-05-14
 tags: [state, filesystem, model, architecture, review]
 ---
 
@@ -71,7 +71,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_WORKING phase=ci\|reviewers\|triage\|fix\|browser pass=NN -->` | 5-review phase in flight (transient — replaced at phase exit) | `Stages::Review` phase entry |
 | `<!-- REVIEW_WAITING escalations=N pass=NN -->` | review pass produced escalations awaiting human edit | `Stages::Review` orchestrator |
 | `<!-- REVIEW_CI_STALE attempts=N -->` | CI hard-block — `cfg.review.ci.max_attempts` reached without green; reviewers don't run on red CI | `Stages::Review` CI phase |
-| `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 4) | `Stages::Review` orchestrator |
+| `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 2) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to mv to 6-pr (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=… reason=… -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`) | `Stages::Review` orchestrator |
 
@@ -158,7 +158,6 @@ project_name: <name>
 default_branch: master              # detected by GitOps#detect_default_branch
 worktree_root: /home/.../<name>.worktrees
 hive_state_path: .hive-state
-max_review_passes: 4
 # Budgets and timeouts are GENEROUS sanity caps for runaway agents — not
 # cost targets. Bumped ~5× from pre-2026-05-04 values (ADR-023). The
 # `execute_review` key was DROPPED from DEFAULTS in plan 2026-05-04-001:
@@ -200,7 +199,7 @@ review:                 # 5-review stage config (U2)
   triage:       { enabled: true, agent: claude, bias: courageous, prompt_template: null, custom_prompt: null }
   fix:          { agent: claude, prompt_template: fix_prompt.md.erb }
   browser_test: { enabled: false, agent: claude, prompt_template: browser_test_prompt.md.erb, max_attempts: 2 }
-  max_passes: 4
+  max_passes: 2
   max_wall_clock_sec: 5400
   reviewers: [...]      # Array — REPLACED wholesale on override (no per-element merge)
 rebase:                 # auto-rebase pre-step for `hive run` (plan 2026-05-14-001)

@@ -243,10 +243,22 @@ class RunBrainstormTmuxTest < Minitest::Test
 
       def fire_hook(turn)
         settings = JSON.parse(File.read(File.join(Dir.pwd, ".claude", "settings.json")))
-        hook = settings.fetch("hooks").fetch("Stop").fetch(0)
+        handler = settings.fetch("hooks").fetch("Stop").fetch(0).fetch("hooks").fetch(0)
         payload = JSON.generate("turn" => turn, "session_id" => "fake-session")
-        _out, err, status = Open3.capture3(hook.fetch("env"), hook.fetch("command"), stdin_data: payload)
+        # Claude Code invokes the hook command via a shell; mirror that so
+        # the `HIVE_TASK_STAGE_DIR=…` prefix in the shell-string command is
+        # interpreted as an environment assignment.
+        _out, err, status = Open3.capture3("bash", "-c", handler.fetch("command"), stdin_data: payload)
         abort(err) unless status.success?
+      end
+
+      def wait_for_done_cleared
+        done = File.join(ENV.fetch("HIVE_TASK_STAGE_DIR"), ".done")
+        deadline = Time.now + 5
+        while File.exist?(done)
+          raise "orchestrator never cleared .done" if Time.now >= deadline
+          sleep 0.05
+        end
       end
 
       case scenario
@@ -260,7 +272,7 @@ class RunBrainstormTmuxTest < Minitest::Test
         fire_hook("complete")
       when "manual_then_complete"
         fire_hook("first")
-        sleep 0.3
+        wait_for_done_cleared
         File.write(state_file, "## Requirements\\n- Done after manual turn\\n<!-- COMPLETE -->\\n")
         puts "<!-- COMPLETE -->"
         fire_hook("second")

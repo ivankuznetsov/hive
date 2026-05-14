@@ -80,7 +80,7 @@ module Hive
         return [] unless Hive::Stages::Brainstorm.runtime_for(@config) == :tmux_interactive
 
         status, message = Hive::Stages::BrainstormTmux.tmux_status
-        [
+        rows = [
           {
             kind: "dependency",
             stage: "2-brainstorm",
@@ -92,6 +92,65 @@ module Hive
             message: message
           }
         ]
+        rows.concat(tmux_runtime_warnings)
+        rows
+      end
+
+      # Operator-visible warnings for the tmux runtime. Each warning is a
+      # `kind: "warning"` row — it does NOT contribute to the missing-skill
+      # exit code, but renders in the human table with a "!" marker and in
+      # the JSON envelope under `summary.warning`. Two checks today:
+      #
+      #   1. `brainstorm.agent` ≠ claude — the tmux runtime hardcodes claude
+      #      at the wrapper level (`interactive_claude_wrapper.sh`), so a
+      #      project that picked codex/pi for brainstorm would get a green
+      #      doctor and then fail on the first tmux run with a missing
+      #      claude install.
+      #
+      #   2. `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` exported — the wrapper
+      #      unsets these before exec'ing claude, but a parent shell that
+      #      exports either still implies the operator may be confused
+      #      about the billing-auth boundary. Surface the boundary loudly.
+      def tmux_runtime_warnings
+        warnings = []
+        agent_name = (@config.dig("brainstorm", "agent") || "claude").to_s
+        if agent_name != "claude"
+          warnings << warning_row(
+            label: "2-brainstorm/tmux",
+            agent: agent_name,
+            configured_skill: "brainstorm.agent",
+            skill: agent_name,
+            message: "brainstorm.runtime=tmux_interactive hardcodes the claude binary, " \
+                     "but brainstorm.agent=#{agent_name}; the tmux run will try to launch claude regardless"
+          )
+        end
+
+        leaked = %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].select { |k| ENV[k] && !ENV[k].empty? }
+        unless leaked.empty?
+          warnings << warning_row(
+            label: "2-brainstorm/tmux",
+            agent: "tmux",
+            configured_skill: "billing-auth",
+            skill: leaked.join(","),
+            message: "#{leaked.join(' and ')} is exported in this shell; the tmux wrapper unsets it before exec, " \
+                     "but the export hints at parent-shell intent — confirm you want OAuth/subscription billing, not API-key billing"
+          )
+        end
+
+        warnings
+      end
+
+      def warning_row(label:, agent:, configured_skill:, skill:, message:)
+        {
+          kind: "warning",
+          stage: "2-brainstorm",
+          label: label,
+          agent: agent,
+          configured_skill: configured_skill,
+          skill: skill,
+          status: "warning",
+          message: message
+        }
       end
 
       def check_stage(stage)
@@ -186,7 +245,8 @@ module Hive
           "summary" => {
             "missing" => rows.count { |r| r[:status] == "missing" },
             "present" => rows.count { |r| r[:status] == "present" },
-            "not_applicable" => rows.count { |r| r[:status] == "not_applicable" }
+            "not_applicable" => rows.count { |r| r[:status] == "not_applicable" },
+            "warning" => rows.count { |r| r[:status] == "warning" }
           }
         }
       end
@@ -232,6 +292,7 @@ module Hive
         when "present" then "✓"
         when "missing" then "✗"
         when "not_applicable" then "—"
+        when "warning" then "!"
         else "?"
         end
         format("%-#{widths[:label]}s  %-#{widths[:agent]}s  %-#{widths[:skill]}s  #{marker} %-#{widths[:status]}s",

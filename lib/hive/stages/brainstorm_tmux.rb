@@ -3,6 +3,7 @@ require "open3"
 require "time"
 
 require "hive/agent_profiles"
+require "hive/lock"
 require "hive/markers"
 require "hive/stages/brainstorm"
 require "hive/stop_hook_installer"
@@ -36,6 +37,7 @@ module Hive
           settings_path = Hive::StopHookInstaller.install(stage_dir: task.folder)
           runner.start_detached(command: wrapper_command(task, profile))
           wait_until_session_exists!(runner)
+          record_claude_pid(task, runner)
           runner.send_prompt(prompt)
           marker = wait_for_terminal_marker(task, runner, timeout_sec(cfg))
           { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
@@ -125,12 +127,35 @@ module Hive
       end
 
       def wait_until_session_exists!(runner)
-        deadline = Time.now + READY_WAIT_TIMEOUT_SEC
+        deadline = Time.now + ready_wait_timeout
         until runner.session_exists?
           raise Hive::AgentError, "tmux session #{runner.name} did not start" if Time.now >= deadline
 
           sleep 0.1
         end
+      end
+
+      # Mirror the headless path's PID-into-task-lock contract so
+      # `hive status`, signal routing, and observability tooling that
+      # reads `claude_pid` find a value during an active brainstorm.
+      # The wrapper execs into claude (`exec "$@"`), so the pane PID is
+      # the claude PID after the exec lands. We retry briefly because
+      # `display-message` can race the very first pane process showing
+      # up.
+      def record_claude_pid(task, runner)
+        pid = nil
+        deadline = Time.now + ready_wait_timeout
+        while pid.nil? && Time.now < deadline
+          pid = runner.pane_pid
+          break if pid
+
+          sleep 0.05
+        end
+        return unless pid
+
+        Hive::Lock.update_task_lock(task.folder, "claude_pid" => pid)
+      rescue Hive::TmuxError
+        nil
       end
 
       def wait_for_terminal_marker(task, runner, timeout)
@@ -168,15 +193,10 @@ module Hive
         return nil unless terminal_marker?(marker)
 
         pane = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
-        pane_marker_names(pane).include?(marker.name) ? marker : nil
+        names = pane.scan(Hive::Markers::MARKER_RE).map { |name, _| name.downcase.to_sym }
+        names.include?(marker.name) ? marker : nil
       rescue Hive::TmuxError
         nil
-      end
-
-      def pane_marker_names(text)
-        text.scan(Hive::Markers::MARKER_RE).map do
-          Regexp.last_match[:name].downcase.to_sym
-        end
       end
 
       def timeout_sec(cfg)
@@ -191,16 +211,42 @@ module Hive
         Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC", SENTINEL_POLL_INTERVAL_SEC.to_s))
       end
 
+      def ready_wait_timeout
+        Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", READY_WAIT_TIMEOUT_SEC.to_s))
+      end
+
       def reset_signal_files(task)
         cleanup_done(task)
         result = result_path(task)
         File.delete(result) if File.exist?(result)
       end
 
+      # Best-effort defensive sweep. tmux kill-session already terminates
+      # the pane's descendents; this only catches orphans whose ancestry
+      # is detached from the pane (rare). We log the pgrep match list and
+      # the pkill exit status so silent kills surface in the orchestrator
+      # log instead of getting swallowed when, e.g., task.folder is a
+      # substring of another concurrent task's folder.
       def sweep_orphan_processes(task)
         pattern = "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}"
-        Open3.capture3("pkill", "-f", pattern)
+        matches, _err, _status = Open3.capture3("pgrep", "-fa", pattern)
+        return if matches.strip.empty?
+
+        out, err, status = Open3.capture3("pkill", "-f", pattern)
+        log_orphan_sweep(task, matches, out, err, status)
       rescue Errno::ENOENT
+        nil
+      end
+
+      def log_orphan_sweep(task, matches, out, err, status)
+        log_dir = File.join(task.folder)
+        log_path = File.join(log_dir, "brainstorm-tmux-orphan-sweep.log")
+        File.open(log_path, "a") do |f|
+          f.puts "[#{Time.now.utc.iso8601}] pgrep matches:"
+          f.puts matches
+          f.puts "[#{Time.now.utc.iso8601}] pkill exit=#{status&.exitstatus} out=#{out.strip.inspect} err=#{err.strip.inspect}"
+        end
+      rescue StandardError
         nil
       end
 

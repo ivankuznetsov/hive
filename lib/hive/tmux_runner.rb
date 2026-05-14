@@ -6,6 +6,17 @@ require "hive"
 
 module Hive
   class TmuxRunner
+    # Typed TmuxError subclasses let rescue clauses test by class rather
+    # than by message substring. `ExecutableMissing` is the binary-not-found
+    # case (rescued during `kill_session` to keep teardown idempotent);
+    # `NoServerRunning` is the soft-failure sentinel for "no tmux server
+    # left to talk to" (so kill is idempotent across server exits);
+    # `CommandFailed` is the fallback for everything else a tmux invocation
+    # may report.
+    class ExecutableMissing < Hive::TmuxError; end
+    class NoServerRunning < Hive::TmuxError; end
+    class CommandFailed < Hive::TmuxError; end
+
     DEFAULT_COLS = 200
     DEFAULT_ROWS = 50
 
@@ -60,18 +71,22 @@ module Hive
       out.bytesize > bytes ? out.byteslice(-bytes, bytes) : out
     end
 
+    # Active pane's process PID. The wrapper script execs into claude
+    # (`exec "$@"` in interactive_claude_wrapper.sh), preserving the PID
+    # across the exec, so this is the claude PID we record into the task
+    # lock for `hive status` / signal-routing parity with the headless path.
+    def pane_pid
+      out = run_tmux("display-message", "-t", target_pane, "-p", '#{pane_pid}').strip
+      Integer(out)
+    rescue ArgumentError, TypeError
+      nil
+    end
+
     def kill_session
-      _out, err, status = capture_tmux("kill-session", "-t", @name)
-      return true if status.success?
-      return true if err.include?("can't find session") ||
-                     err.include?("no server running") ||
-                     err.include?("server exited unexpectedly")
-
-      raise Hive::TmuxError, "tmux kill-session failed for #{@name}: #{err.strip}"
-    rescue Hive::TmuxError => e
-      return true if e.message.include?("tmux executable not found")
-
-      raise
+      run_tmux("kill-session", "-t", @name)
+      true
+    rescue ExecutableMissing, NoServerRunning
+      true
     end
 
     private
@@ -84,13 +99,15 @@ module Hive
       out, err, status = capture_tmux(*args)
       return out if status.success?
 
-      raise Hive::TmuxError, "tmux #{args.inspect} failed: #{err.strip}"
+      raise NoServerRunning, "tmux #{args.inspect} unavailable: #{err.strip}" if tmux_server_unavailable?(err)
+
+      raise CommandFailed, "tmux #{args.inspect} failed: #{err.strip}"
     end
 
     def capture_tmux(*args)
       Open3.capture3(*tmux_argv(args))
     rescue Errno::ENOENT, Errno::EACCES => e
-      raise Hive::TmuxError, "tmux executable not found: #{@tmux_bin} (#{e.class}: #{e.message})"
+      raise ExecutableMissing, "tmux executable not found: #{@tmux_bin} (#{e.class}: #{e.message})"
     end
 
     def tmux_argv(args)
@@ -98,6 +115,12 @@ module Hive
       argv.concat([ "-L", @socket_name ]) if @socket_name
       argv.concat(args)
       argv
+    end
+
+    def tmux_server_unavailable?(err)
+      err.include?("can't find session") ||
+        err.include?("no server running") ||
+        err.include?("server exited unexpectedly")
     end
   end
 end

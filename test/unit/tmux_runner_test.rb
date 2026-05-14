@@ -109,7 +109,21 @@ class TmuxRunnerTest < Minitest::Test
     with_tmp_dir do |dir|
       runner = Hive::TmuxRunner.new(name: unique_name("missing"), cwd: dir, tmux_bin: "missing-tmux-for-hive")
 
-      assert_raises(Hive::TmuxError) { runner.start_detached(command: [ "sleep", "1" ]) }
+      assert_raises(Hive::TmuxRunner::ExecutableMissing) { runner.start_detached(command: [ "sleep", "1" ]) }
+    end
+  end
+
+  def test_tmux_server_unavailable_raises_typed_error
+    with_tmp_dir do |dir|
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/bin/sh
+        echo "no server running on /tmp/tmux-test" >&2
+        exit 1
+      SH
+      runner = Hive::TmuxRunner.new(name: unique_name("no-server"), cwd: dir, tmux_bin: fake)
+
+      assert_raises(Hive::TmuxRunner::NoServerRunning) { runner.capture_pane_tail(bytes: 10) }
+      assert runner.kill_session
     end
   end
 
@@ -134,5 +148,12 @@ class TmuxRunnerTest < Minitest::Test
       sleep 0.1
     end
     flunk "timed out waiting for #{path}"
+  end
+
+  def write_fake_tmux(dir, body)
+    path = File.join(dir, "tmux")
+    File.write(path, body)
+    File.chmod(0o755, path)
+    path
   end
 end

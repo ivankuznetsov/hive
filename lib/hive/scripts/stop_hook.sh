@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 set -eu
 
 : "${HIVE_TASK_STAGE_DIR:?HIVE_TASK_STAGE_DIR required}"

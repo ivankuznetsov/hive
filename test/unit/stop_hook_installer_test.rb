@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "open3"
+require "shellwords"
 require "hive/stop_hook_installer"
 
 class StopHookInstallerTest < Minitest::Test
@@ -12,12 +13,13 @@ class StopHookInstallerTest < Minitest::Test
     with_tmp_dir do |dir|
       path = Hive::StopHookInstaller.install(stage_dir: dir)
       data = JSON.parse(File.read(path))
-      hook = data.fetch("hooks").fetch("Stop").fetch(0)
+      group = data.fetch("hooks").fetch("Stop").fetch(0)
+      handler = group.fetch("hooks").fetch(0)
 
-      assert_equal HOOK, hook.fetch("command")
-      assert_equal [], hook.fetch("args")
-      assert_equal({ "HIVE_TASK_STAGE_DIR" => dir }, hook.fetch("env"))
-      assert File.absolute_path?(hook.fetch("command"))
+      assert_equal "command", handler.fetch("type")
+      command = handler.fetch("command")
+      assert_includes command, "HIVE_TASK_STAGE_DIR=#{Shellwords.escape(dir)}"
+      assert_includes command, Shellwords.escape(HOOK)
     end
   end
 
@@ -51,6 +53,6 @@ class StopHookInstallerTest < Minitest::Test
   end
 
   def test_stop_hook_syntax
-    assert system("bash", "-n", HOOK)
+    assert system("sh", "-n", HOOK)
   end
 end

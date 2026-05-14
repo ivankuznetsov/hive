@@ -1,5 +1,6 @@
 require "fileutils"
 require "json"
+require "shellwords"
 
 module Hive
   module StopHookInstaller
@@ -15,14 +16,22 @@ module Hive
       settings_path
     end
 
+    # Real Claude Code expects each Stop entry to be a matcher group whose
+    # `hooks` array carries handler descriptors with `type: "command"` and a
+    # shell-string `command`. HIVE_TASK_STAGE_DIR is propagated by prefixing
+    # the command with a shell `VAR=… script` assignment, since Claude Code
+    # invokes the command via a shell and there is no per-hook `env` field.
     def settings(stage_dir)
       {
         "hooks" => {
           "Stop" => [
             {
-              "command" => HOOK_PATH,
-              "args" => [],
-              "env" => { "HIVE_TASK_STAGE_DIR" => stage_dir }
+              "hooks" => [
+                {
+                  "type" => "command",
+                  "command" => "HIVE_TASK_STAGE_DIR=#{Shellwords.escape(stage_dir)} #{Shellwords.escape(HOOK_PATH)}"
+                }
+              ]
             }
           ]
         }

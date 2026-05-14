@@ -1393,4 +1393,90 @@ class ConfigTest < Minitest::Test
       ENV["HIVE_HOME"] = old
     end
   end
+
+  # ---- Auto-rebase `rebase:` block (plan
+  # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md U5) ----
+
+  def test_rebase_defaults_when_block_absent
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), "")
+      cfg = Hive::Config.load(dir)
+      assert_equal true, cfg.dig("rebase", "enabled")
+      assert_equal 2700, cfg.dig("rebase", "conflict_resolution_timeout_sec")
+    end
+  end
+
+  def test_rebase_enabled_false_override_is_respected
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        rebase:
+          enabled: false
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal false, cfg.dig("rebase", "enabled")
+      assert_equal 2700, cfg.dig("rebase", "conflict_resolution_timeout_sec"),
+                   "other keys keep their defaults when only `enabled` is overridden"
+    end
+  end
+
+  def test_rebase_timeout_override_is_respected
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        rebase:
+          conflict_resolution_timeout_sec: 600
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal 600, cfg.dig("rebase", "conflict_resolution_timeout_sec")
+    end
+  end
+
+  def test_rebase_enabled_must_be_boolean
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        rebase:
+          enabled: "yes"
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/rebase\.enabled.*must be a boolean/, err.message)
+    end
+  end
+
+  def test_rebase_timeout_must_be_positive_integer
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        rebase:
+          conflict_resolution_timeout_sec: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/conflict_resolution_timeout_sec.*must be an integer >= 60/, err.message)
+    end
+  end
+
+  def test_rebase_timeout_must_be_integer_not_string
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        rebase:
+          conflict_resolution_timeout_sec: "five"
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/conflict_resolution_timeout_sec.*must be an integer/, err.message)
+    end
+  end
+
+  def test_rebase_block_must_be_hash_shaped
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        rebase: true
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/rebase.*must be a Hash/, err.message)
+    end
+  end
 end

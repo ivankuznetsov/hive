@@ -313,6 +313,13 @@ module Hive
     end
   end
 
+  # Signals that `git rebase` halted with merge conflicts the caller is
+  # expected to handle (typically by dispatching a conflict-resolution
+  # agent or aborting). Distinct from the generic GitError so callers
+  # can rescue conflicts without swallowing unrelated git failures.
+  class RebaseConflict < GitError
+  end
+
   class WorktreeError < Error
     def exit_code
       ExitCodes::SOFTWARE

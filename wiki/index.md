@@ -2,7 +2,7 @@
 title: Hive Wiki Index
 type: index
 created: 2026-04-25
-updated: 2026-05-08
+updated: 2026-05-14
 tags: [index]
 ---
 
@@ -12,7 +12,7 @@ tags: [index]
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seven-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-review` → `6-pr` → `7-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the only approval gesture.
 
-**Pages**: 49 (excl. `index.md`/`log.md`) · **Date**: 2026-05-08
+**Pages**: 51 (excl. `index.md`/`log.md`) · **Date**: 2026-05-14
 
 ## Top level
 
@@ -20,7 +20,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[state-model]] — directory layout, marker grammar, state files, slug rules, configs, frontmatter, lock files, worktree pointer.
 - [[cli]] — top-level CLI surface (entry point, command table, error conventions).
 - [[dependencies]] — runtime gems, dev gems, external CLI deps, Ruby version, stdlib reliance.
-- [[decisions]] — 23 ADRs (ADR-023 covers TTY-prompted hive init / stage agents / generous limits).
+- [[decisions]] — 25 ADRs (ADR-024 covers daemon-mode autonomy; ADR-025 covers the additive-required JSON-envelope policy).
 - [[active-areas]] — what's currently in flight and what's deferred.
 - [[gaps]] — coverage table, open questions, patterns not yet documented.
 - [[templates]] — ERB template catalogue and prompt-injection boundary policy.
@@ -32,7 +32,8 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 
 - [[commands/init]] — bootstrap orphan branch, attach worktree, register globally.
 - [[commands/new]] — capture an idea, derive a slug, scaffold `idea.md`.
-- [[commands/run]] — dispatcher: lock → stage runner → commit → report (`--json` supported).
+- [[commands/run]] — dispatcher: lock → auto-rebase pre-step → stage runner → commit → report (`--json` and `--no-rebase` supported).
+- [[commands/rebase-status]] — read-only inspector reporting whether the next `hive run` would attempt an auto-rebase, and how far behind `origin/<default>` the worktree is. Never mutates; never fetches.
 - [[commands/status]] — read-only table of every active task across registered projects (`--json` supported).
 - [[commands/tui]] — live, keystroke-driven curses dashboard over `hive status` (human-only; no JSON).
 - [[commands/approve]] — agent-callable `mv <task> <next-stage>/` with marker validation, ambiguity resolution, and a hive/state commit per move.
@@ -77,3 +78,4 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a seve
 - [[modules/secret_patterns]] — shared regex set for credential/secret detection.
 - [[modules/protected_files]] — SHA-256 snapshot/diff helper for orchestrator-owned files.
 - [[modules/daemon]] — auto-advancing dispatcher (ADR-024): Policy + ConcurrencyController + ChildSupervisor + StatusConsumer + Dispatcher + Logger + PrMergeWatcher.
+- [[modules/rebase]] — auto-rebase orchestrator (`Hive::Rebase.perform`): pre-run guards, fetch with timeout, conflict-resolution agent dispatch (bounded to 5), fail-soft abort, post-rebase `execute_base_head` rewrite. Fail-soft: never raises; returns `Result` with closed-enum `reason`.

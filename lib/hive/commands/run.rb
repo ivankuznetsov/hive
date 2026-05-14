@@ -19,7 +19,7 @@ module Hive
       # definition: adding/removing a key here is the only place to do it.
       REQUIRED_PAYLOAD_KEYS = %w[
         schema schema_version ok slug stage stage_index folder state_file
-        marker attrs commit_action next_action
+        marker attrs commit_action next_action rebase
       ].freeze
 
       # Optional top-level keys allowed in the SuccessPayload. They're emitted
@@ -28,12 +28,13 @@ module Hive
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
-      def initialize(target, project: nil, stage: nil, json: false, quiet: false)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false)
         @target = target
         @project_filter = project
         @stage_filter = stage
         @json = json
         @quiet = quiet
+        @no_rebase = no_rebase
       end
 
       def call
@@ -57,10 +58,65 @@ module Hive
         cfg = Hive::Config.load(task.project_root)
 
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
+          @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
           result = runner.call(task, cfg)
           commit_after(task, result)
           report(task, result)
+        end
+      end
+
+      # Auto-rebase pre-step. Fail-soft: any failure aborts the rebase
+      # and we proceed to the stage runner against the (stale) base.
+      # See lib/hive/rebase.rb and
+      # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md.
+      def perform_rebase(task, cfg)
+        require "hive/rebase"
+        # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
+        # Use the same shape as the cfg-disabled path so JSON consumers
+        # see the disabled result; distinguish by reason for ops debugging.
+        if @no_rebase
+          result = Hive::Rebase::Result.skipped(:cli_override)
+        else
+          result = Hive::Rebase.perform(task, cfg)
+        end
+        log_rebase_outcome(task, result)
+        result
+      end
+
+      def log_rebase_outcome(task, result)
+        # `pre_existing_rebase` is a skip-state (attempted=false) but is
+        # the ONE skip-state operators need to see explicitly: a stale
+        # rebase-merge directory means a prior run aborted mid-flight
+        # and the worktree needs manual cleanup. Surface this BEFORE
+        # the attempted-guard. PR #69 review P2.
+        if result.reason == :pre_existing_rebase
+          warn "[hive] rebase skipped (pre_existing_rebase): #{task.worktree_path} has a mid-rebase state on disk. " \
+               "Run `git -C #{task.worktree_path} rebase --abort` to clean up, then re-run."
+          return
+        end
+
+        return unless result.attempted
+
+        if result.succeeded
+          if result.commits_behind && result.commits_behind > 0
+            agent_part =
+              if result.agent_resolutions > 0
+                " (#{result.agent_resolutions} conflict#{'s' if result.agent_resolutions != 1} resolved by agent)"
+              else
+                ""
+              end
+            warn "[hive] rebased #{result.commits_behind} commits from origin onto #{task.slug} branch#{agent_part}"
+          end
+          # Always surface post-rebase warnings — these mean the
+          # rebase itself succeeded but a follow-up step (e.g.,
+          # worktree.yml write) failed, so the operator needs to know.
+          (result.post_rebase_warnings || []).each do |w|
+            warn "[hive] post-rebase warning: #{w}"
+          end
+        else
+          warn "[hive] rebase attempt failed (#{result.reason}); continuing with stale base. Manual rebase recommended: " \
+               "cd #{task.worktree_path} && git rebase origin/<default-branch>"
         end
       end
 
@@ -137,7 +193,8 @@ module Hive
           "marker" => marker.name.to_s,
           "attrs" => marker.attrs,
           "commit_action" => result.is_a?(Hash) ? result[:commit] : nil,
-          "next_action" => json_next_action(task, marker)
+          "next_action" => json_next_action(task, marker),
+          "rebase" => rebase_envelope_block
         }
         # Build the emitted hash strictly in REQUIRED_PAYLOAD_KEYS order so
         # adding a key to one without the other is a load-time error rather
@@ -155,6 +212,29 @@ module Hive
         @stdout_written = true
         if [ :error, :review_error ].include?(marker.name)
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
+        end
+      end
+
+      # JSON envelope block for the auto-rebase pre-step. Always present
+      # (even when rebase was disabled / never ran), so consumers can rely
+      # on the key existing. See lib/hive/rebase.rb and U6 in
+      # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md.
+      def rebase_envelope_block
+        if @rebase_result
+          @rebase_result.to_h_for_envelope.transform_keys(&:to_s)
+        else
+          # Defensive: should never fire in practice — perform_rebase runs
+          # before report_json. Emit the "disabled" shape so the envelope
+          # is well-formed regardless.
+          {
+            "attempted" => false,
+            "commits_behind" => nil,
+            "succeeded" => false,
+            "agent_resolutions" => 0,
+            "resolved_files" => [],
+            "reason" => "disabled",
+            "post_rebase_warnings" => []
+          }
         end
       end
 

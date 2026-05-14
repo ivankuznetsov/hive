@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-04-29
+updated: 2026-05-14
 tags: [decisions, adr]
 ---
 
@@ -210,6 +210,43 @@ The human approval gesture for the daemon is **enabling it at `hive init`** (TTY
   - ADR-020 (fix-guardrail) and ADR-021 (orchestrator-owned markers) invariants preserved automatically — both manifest as `kind: edit` or `agent_running` rows the daemon never advances past.
   - Cost ceiling under daemon load: `max_concurrent_runs × per-task-budget-cap` (ADR-023) ≈ ~$4425 worst-case in-flight at default `max_concurrent_runs=3`. First per-project rollout requires `--dry-run` validation.
   - For operators who want the prototype-era manual-`mv` model, the answer is `daemon.enabled: false` (or no daemon running). The CLI surface is unchanged; the daemon is purely additive.
+
+## ADR-025: JSON envelope additions are required, not optional; closed-enum reasons
+
+**Status:** Active (shipped with PR #69 — feat: hive auto-rebase stale-worktree)
+
+**Context:** PR #69 added the `rebase` block to `hive-run.v1`'s `SuccessPayload`. The reviewer raised an API-contract question: should new fields land as `required` (forcing every producer to emit them) or as optional/additive (so legacy producers stay valid)? A related question: should `rebase.reason` be a free-form `string` or a closed enum?
+
+Hive's JSON envelopes are consumed by:
+1. The daemon (`Hive::Daemon::StatusConsumer`) — same Ruby process as the producer; version always matches.
+2. Agent tooling (subagent scripts, CE skills, `gh pr view --json` callers) — typically running against the same `hive` binary that wrote the envelope.
+3. The e2e harness, which validates every emitted envelope against `schemas/hive-run.v1.json` via `json_schemer`.
+
+There is no third-party consumer that pins to a different `hive` version. The producer and the schema move together by construction: a `schema_version: 1` envelope from version `X` is read by tooling on the same version `X`.
+
+**Decision:**
+1. **New fields are added as `required` from the moment they ship.** No "opt-in" phase. The schema lists every field every producer must emit; missing-field bugs are caught at e2e validation time, not deferred to runtime parsing in consumers.
+2. **`additionalProperties: false` on every object.** Typos in field names fail schema validation immediately rather than being silently ignored by consumers.
+3. **Enums are closed.** `rebase.reason`, `marker`, `next_action.kind`, `error_kind`, etc. all enumerate every allowed value. Adding a new value is a deliberate code change (new enum entry + new producer code + new docstring) — not an accidental drift where the producer emits `"foo_failed"` while consumers never learn about it.
+4. **Bumping the major version is the escape hatch.** If a future change must drop a required field or break consumer parsing, the right move is `hive-run.v2.json` with `schema_version: 2` — not loosening v1's required list.
+
+**Why required-and-closed beats optional-and-open:**
+
+| Property | required + closed | optional + open |
+|----------|-------------------|-----------------|
+| Missing field at runtime | Caught at e2e validation | Silent `nil` in consumer; bug surfaces later |
+| Typo'd field name | Caught at e2e validation | Silently dropped; consumer sees `nil` |
+| Producer adds a new reason | Schema diff makes it reviewable | Producer drift goes unnoticed until consumer logic breaks |
+| Cost to add a new field | One schema edit + one test fixture update | Free in the short term, costly in debug time later |
+| Cost to make required when "more callers exist" | Doesn't apply — required from day one | Hard: every consumer that already special-cased the absence has to be touched |
+
+Hive's deployment model (single binary, no third-party consumers on different versions) makes the "but legacy consumers!" cost — the usual reason to start fields as optional — irrelevant. The closure-by-default rule pays dividends every time a producer evolves and a typo or missing branch would have shipped silently.
+
+**Consequences:**
+- Every `Hive::Rebase::Result.reason` symbol is mirrored 1:1 in `schemas/hive-run.v1.json#/$defs/SuccessPayload/properties/rebase/properties/reason/enum`. PR #69 enforces this — the `unexpected_io_error` symbol replaces an earlier dynamic `:"unexpected_error:#{e.class}"` precisely because the dynamic form could not be expressed in a closed enum.
+- `test/schema_files_test.rb` verifies the schema file is parseable and that the SuccessPayload-side rebase enum is locked.
+- Future fields: when adding a new field to `SuccessPayload`, the producer change and the schema change land in the same commit. The e2e suite catches the omission before merge.
+- This ADR does **not** apply retroactively to `ErrorPayload`'s per-error-class fields (`candidates`, `id`, `path`, `holder`, `lock_path`). Those are conditional on `error_kind` and intentionally listed as optional in the schema's per-kind properties — they're documented as "present only on the matching error_kind." That conditional-presence shape is a different contract than the unconditional `rebase` block.
 
 ## Source
 

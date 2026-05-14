@@ -203,7 +203,12 @@ review:                 # 5-review stage config (U2)
   max_passes: 4
   max_wall_clock_sec: 5400
   reviewers: [...]      # Array — REPLACED wholesale on override (no per-element merge)
+rebase:                 # auto-rebase pre-step for `hive run` (plan 2026-05-14-001)
+  enabled: true                         # opt out per-project
+  conflict_resolution_timeout_sec: 2700 # min 60; per-spawn cap on conflict agent
 ```
+
+The `rebase:` block (added 2026-05-14) drives a pre-dispatch step in `hive run`: before invoking the stage runner, the runner detects whether the task's worktree branch is behind `origin/<default_branch>`, fetches, attempts `git rebase`, and on conflict spawns the project's `cfg.execute.agent` against `templates/rebase_conflict_resolution.md.erb` to resolve them. Fail-soft — any failure aborts the rebase, cleans agent-created untracked files, and proceeds with the stale base. The agent-dispatch cap (`MAX_CONFLICT_RESOLUTIONS = 5`) is a Ruby constant in `lib/hive/rebase.rb`, not config. See [[modules/git_ops]] and [[modules/config]].
 
 `Config::ROLE_AGENT_PATHS` (validated by `validate_role_agent_names!`) now also covers the three new stage-agent paths: `%w[brainstorm agent]`, `%w[plan agent]`, `%w[execute agent]` — alongside the existing `review.{ci,triage,fix,browser_test}.agent` paths.
 

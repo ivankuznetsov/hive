@@ -114,7 +114,7 @@ module Hive
         return Messages::NOOP if row.nil?
 
         return Messages::OpenTaskFolder.new(row: row) if key == "o"
-        return verb_message(row) if VERB_KEYS.key?(key)
+        return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 
         Messages::NOOP
@@ -133,7 +133,7 @@ module Hive
         nil
       end
 
-      def verb_message(row)
+      def verb_message(row, key)
         # Verb-on-agent-running refusal pre-empts ConcurrentRunError
         # from `Hive::Lock`; the stale-pid escape hatch only fires when
         # the lock is *provably* dead (claude_pid_alive == false). Nil
@@ -150,6 +150,19 @@ module Hive
           end
 
           return dispatch_command_for(row.suggested_command)
+        end
+
+        # `r` (review) on a max_passes-hit REVIEW_STALE row is the
+        # explicit "I edited the escalations file, retry now" gesture.
+        # Enter on the same row routes to OpenReviewStaleFile (browse)
+        # because auto-retry without edits would just produce the same
+        # findings; `r` declares the edits are done and bypasses the
+        # `retryable_review_stale?` gate in BubbleModel#recover_review.
+        # Limited to `r` so other verbs (`b`/`p`/`d`/`P`) on a stale
+        # review row keep flashing "no action available" — only the
+        # review verb is semantically a retry.
+        if key == "r" && row.action_key == "recover_review" && row.marker.to_s == "review_stale"
+          return Messages::RecoverReview.new(row: row, force: true)
         end
 
         if row.suggested_command.nil?

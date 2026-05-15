@@ -3,8 +3,8 @@ title: hive doctor
 type: command
 source: lib/hive/commands/doctor.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-05-07
-tags: [command, preflight, skills]
+updated: 2026-05-14
+tags: [command, preflight, skills, tmux]
 ---
 
 **TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/compound-engineering:ce-brainstorm`, `/ce-code-review`, `/skill:plan`) actually resolves to an installed slash-command or skill on disk. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
@@ -22,7 +22,7 @@ Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
 | Code | Meaning |
 |------|---------|
 | 0 | All probed skills `:present` or `:not_applicable` |
-| 65 | At least one row is `:missing` |
+| 65 | At least one row is `:missing` or `:version_too_old` |
 | 78 | `Hive::ConfigError` / `KeyError` / `ArgumentError` while loading config |
 
 ## Row kinds

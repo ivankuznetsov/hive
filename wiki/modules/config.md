@@ -7,7 +7,7 @@ updated: 2026-05-14
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, max review passes, **stage agents**, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -24,7 +24,7 @@ tags: [config, yaml, validation]
   # nothing reads it and fresh `hive init` no longer renders it.
   "budget_usd" => {
     "brainstorm" => 50, "plan" => 100,
-    "execute_implementation" => 500, "pr" => 50,
+    "execute_implementation" => 500, "open_pr" => 50, "finalize" => 50,
     "review_ci" => 100, "review_triage" => 75,
     "review_fix" => 500, "review_browser" => 100
   },

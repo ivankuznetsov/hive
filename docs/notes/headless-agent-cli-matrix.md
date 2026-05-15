@@ -183,3 +183,18 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
    - pi: `add_dir_flag: nil` (gap), `permission_skip_flag: nil` (gap), `headless_flag: "-p"`, `budget_flag: nil`, `output_format: "--mode json"`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "0.70.2"`, `headless_supported: true`
 5. **Pi auth precondition:** pi cannot be exercised on this machine until the user runs `pi` interactively and logs into a provider. Document in the Pi profile's `headless_supported` check or add a `Hive::AgentProfile#preflight!` method that raises a friendly error if auth isn't set up.
 6. **CHANGELOG note for v1:** "v1's default reviewer set is claude + codex. Pi and opencode are supported as opt-in agent CLIs per project; users opting in accept the ADR-018 trust-model trade-off documented in `wiki/decisions.md`."
+
+---
+
+## Brainstorm Interactive Tmux Addendum
+
+The matrix above describes headless `AgentProfile` spawns. Brainstorm now
+has one opt-in exception: `brainstorm.runtime: tmux_interactive`.
+
+That path does not go through `Hive::Agent` and does not use `claude -p`.
+It starts a fresh interactive `claude` process inside
+`tmux` session `hive-2-brainstorm-<slug>`, pastes the same rendered
+`brainstorm_prompt.md.erb`, and waits for the same terminal marker in
+`brainstorm.md`. The wrapper unsets `ANTHROPIC_API_KEY` and
+`CLAUDE_API_KEY` so billing follows the operator's logged-in Claude
+subscription. See `docs/notes/brainstorm-interactive-tmux.md`.

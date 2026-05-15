@@ -29,6 +29,22 @@ class HiveCommandsDoctorTest < Minitest::Test
     }.merge(overrides) { |_k, a, b| a.merge(b) }
   end
 
+  def with_fake_tmux(output)
+    with_tmp_dir do |dir|
+      path = File.join(dir, "tmux")
+      File.write(path, <<~SH)
+        #!/usr/bin/env bash
+        echo "#{output}"
+      SH
+      File.chmod(0o755, path)
+      old = ENV["HIVE_TMUX_BIN"]
+      ENV["HIVE_TMUX_BIN"] = path
+      yield
+    ensure
+      old.nil? ? ENV.delete("HIVE_TMUX_BIN") : ENV["HIVE_TMUX_BIN"] = old
+    end
+  end
+
   def test_exit_success_when_all_present
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
@@ -176,6 +192,109 @@ class HiveCommandsDoctorTest < Minitest::Test
         assert_match(/✓ present/, out.string)
       end
     end
+  end
+
+  def test_tmux_dependency_row_is_reported_for_interactive_brainstorm_runtime
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
+      write_file("#{home}/.claude/commands/plan.md")
+      with_fake_tmux("tmux 3.6a") do
+        out = StringIO.new
+        cfg = base_config(
+          "brainstorm" => {
+            "agent" => "claude",
+            "skill" => "/compound-engineering:ce-brainstorm",
+            "runtime" => "tmux_interactive"
+          },
+          "plan" => { "agent" => "claude", "skill" => "/plan" }
+        )
+
+        exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
+
+        assert_equal 0, exit_code
+        assert_match(%r{2-brainstorm/tmux.*tmux.*✓ present}, out.string)
+      end
+    end
+  end
+
+  def test_tmux_dependency_row_fails_when_interactive_runtime_cannot_run_tmux
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
+      write_file("#{home}/.claude/commands/plan.md")
+      old = ENV["HIVE_TMUX_BIN"]
+      ENV["HIVE_TMUX_BIN"] = "missing-tmux-for-hive"
+      out = StringIO.new
+      cfg = base_config(
+        "brainstorm" => {
+          "agent" => "claude",
+          "skill" => "/compound-engineering:ce-brainstorm",
+          "runtime" => "tmux_interactive"
+        },
+        "plan" => { "agent" => "claude", "skill" => "/plan" }
+      )
+
+      exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
+
+      assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
+      assert_match(%r{2-brainstorm/tmux.*✗ missing}, out.string)
+      assert_match(/tmux binary not runnable/, out.string)
+    ensure
+      old.nil? ? ENV.delete("HIVE_TMUX_BIN") : ENV["HIVE_TMUX_BIN"] = old
+    end
+  end
+
+  def test_tmux_runtime_warns_when_configured_agent_is_not_claude
+    with_fake_home do |home|
+      write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
+      write_file("#{home}/.claude/commands/plan.md")
+      with_fake_tmux("tmux 3.6a") do
+        out = StringIO.new
+        cfg = base_config(
+          "brainstorm" => { "agent" => "pi", "runtime" => "tmux_interactive" },
+          "plan" => { "agent" => "claude", "skill" => "/plan" }
+        )
+
+        exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
+
+        assert_equal 0, exit_code
+        assert_match(%r{2-brainstorm/tmux.*pi.*! warning}, out.string)
+        assert_match(/hardcodes the claude binary/, out.string)
+      end
+    end
+  end
+
+  def test_tmux_runtime_warns_when_api_key_env_is_exported
+    old_anthropic = ENV["ANTHROPIC_API_KEY"]
+    old_claude = ENV["CLAUDE_API_KEY"]
+    ENV["ANTHROPIC_API_KEY"] = "test-key"
+    ENV.delete("CLAUDE_API_KEY")
+
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
+      write_file("#{home}/.claude/commands/plan.md")
+      with_fake_tmux("tmux 3.6a") do
+        out = StringIO.new
+        cfg = base_config(
+          "brainstorm" => {
+            "agent" => "claude",
+            "skill" => "/compound-engineering:ce-brainstorm",
+            "runtime" => "tmux_interactive"
+          },
+          "plan" => { "agent" => "claude", "skill" => "/plan" }
+        )
+
+        Hive::Commands::Doctor.new(config: cfg, project_root: nil, json: true, output: out).call
+
+        env = JSON.parse(out.string)
+        warning = env.fetch("checks").find { |check| check["status"] == "warning" }
+        assert_equal 1, env.fetch("summary").fetch("warning")
+        assert_equal "billing-auth", warning.fetch("configured_skill")
+        assert_equal "ANTHROPIC_API_KEY", warning.fetch("skill")
+      end
+    end
+  ensure
+    old_anthropic.nil? ? ENV.delete("ANTHROPIC_API_KEY") : ENV["ANTHROPIC_API_KEY"] = old_anthropic
+    old_claude.nil? ? ENV.delete("CLAUDE_API_KEY") : ENV["CLAUDE_API_KEY"] = old_claude
   end
 
   # ---- Review.reviewers extension (U1/U2/U3) ----

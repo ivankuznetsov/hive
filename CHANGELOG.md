@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added — opt-in interactive tmux brainstorm runtime
+
+- `brainstorm.runtime: tmux_interactive` runs stage `2-brainstorm` in a fresh per-task tmux session (`hive-2-brainstorm-<slug>`) with interactive `claude`, while preserving the existing `brainstorm.md` WAITING/COMPLETE marker contract.
+- Added a Claude Stop-hook signal (`.done` + `result.json`), a conservative pane-tail marker fallback, tmux preflight/doctor reporting, and teardown that kills the session after each task. Default remains the existing headless `claude -p` path.
+- `hive doctor` adds a `2-brainstorm/tmux` row (and `kind: "warning"` rows for non-claude `brainstorm.agent` and exported `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY`) when the project is on `tmux_interactive`. Run `hive doctor` after opting in to confirm tmux is installed and the billing-auth boundary is what you expect.
+
 ### Changed — PR-first workflow
 
 - Added `5-open-pr`: after `4-execute`, hive pushes the feature branch and opens a draft GitHub PR before autonomous review starts.

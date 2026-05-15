@@ -7,8 +7,8 @@ class ConfigTest < Minitest::Test
   def test_load_returns_defaults_when_no_config_file
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
-      refute cfg.key?("max_review_passes"),
-             "review.max_passes is the live review loop cap"
+      assert_nil cfg["max_review_passes"],
+                 "deprecated max_review_passes key must be absent from DEFAULTS"
       # Generous defaults bumped ~5x in plan 2026-05-04-001 / ADR-023.
       assert_equal 50, cfg["budget_usd"]["brainstorm"]
       assert_equal 500, cfg["budget_usd"]["execute_implementation"]
@@ -23,11 +23,13 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         default_branch: main
+        max_review_passes: 6
         budget_usd:
           brainstorm: 20
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
+      assert_equal 6, cfg["max_review_passes"]
       assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
       assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
     end
@@ -58,6 +60,7 @@ class ConfigTest < Minitest::Test
       assert_equal "claude", cfg.dig("brainstorm", "agent"), "brainstorm agent must default to claude"
       assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
       assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
+      assert_equal "headless", cfg.dig("brainstorm", "runtime"), "brainstorm runtime must default to headless"
     end
   end
 
@@ -73,8 +76,35 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "codex", cfg.dig("brainstorm", "agent")
       assert_equal "pi",    cfg.dig("plan", "agent")
+      assert_equal "headless", cfg.dig("brainstorm", "runtime")
       assert_equal "claude", cfg.dig("execute", "agent"),
                    "execute agent must fall back to default when not overridden"
+    end
+  end
+
+  def test_load_honors_brainstorm_tmux_runtime_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm:
+          runtime: tmux_interactive
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "tmux_interactive", cfg.dig("brainstorm", "runtime")
+    end
+  end
+
+  def test_load_raises_when_brainstorm_runtime_is_unknown
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        brainstorm:
+          runtime: warm_pool
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/brainstorm\.runtime/, err.message)
+      assert_match(/headless/, err.message)
+      assert_match(/tmux_interactive/, err.message)
     end
   end
 
@@ -1225,12 +1255,12 @@ class ConfigTest < Minitest::Test
         daemon:
           enabled: true
           poll_interval_sec: 15
-          max_concurrent_runs: 8
+          max_concurrent_runs: 5
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal true, cfg.dig("daemon", "enabled")
       assert_equal 15,   cfg.dig("daemon", "poll_interval_sec")
-      assert_equal 8,    cfg.dig("daemon", "max_concurrent_runs")
+      assert_equal 5,    cfg.dig("daemon", "max_concurrent_runs")
       # Unspecified keys still fall back to defaults via deep-merge.
       assert_equal 50,   cfg.dig("daemon", "max_runs_per_day_per_project")
     end
@@ -1334,7 +1364,6 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load_global_daemon
       assert_equal 30, cfg["poll_interval_sec"]
       assert_equal 5, cfg["max_concurrent_runs"]
-      assert_equal 5, cfg["max_concurrent_per_project"]
       assert_equal 50, cfg["max_runs_per_day_per_project"]
     end
   end

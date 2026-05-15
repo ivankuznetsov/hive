@@ -191,7 +191,7 @@ timeout_sec:
 # fix,browser_test}.agent`. Runtime fallback in stage code stays
 # `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
 # these keys keep working.
-brainstorm: { agent: claude }
+brainstorm: { agent: claude, runtime: headless }  # runtime: headless | tmux_interactive (U6/U7)
 plan:       { agent: claude }
 execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`
 agents:                 # per-CLI profile overrides (claude, codex, pi)

@@ -1673,3 +1673,11 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 - `wiki/operating.md` — documented prefix update behavior, tier-3 macOS x86_64 install.sh status, `--force-purge-state`, AUR `hv` caveat, and skills-package deferral.
 - `wiki/decisions.md` — updated ADR-024 and ADR-027 for Homebrew stable daemon paths and release-workflow Tebako validation.
 - `wiki/gaps.md` — added AUR publish, Rosetta/macOS x86_64, and skills-package follow-ups.
+
+## [2026-05-15T16:03:12Z] tui — manual steering key
+
+**Action:** Documented the `s` manual-steering gesture for `hive tui`. The key opens the focused task in the configured `execute.agent` inside the feature worktree, passes existing slug stage folders as add-dir context, marks the row `MANUAL_STEERING` so headless automation skips it, and archives the active folder under `.hive-state/stages/archived-manual/` after the interactive agent exits.
+
+**Refreshed pages:**
+- [[commands/tui]] — added keybinding, subprocess/manual-steering behavior, and status icon notes.
+- [[operating]] — added the stuck-task manual takeover path for daemon operators.

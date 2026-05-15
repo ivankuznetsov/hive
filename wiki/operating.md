@@ -337,6 +337,7 @@ drain path when you are not using systemd/launchd.
 | Reload caps without restart                   | edit `~/.config/hive/config.yml` → `hive daemon reload` |
 | Disable a project mid-flight                  | `hive daemon disable PROJECT` → `hive daemon reload`* |
 | Enable a project mid-flight                   | `hive daemon enable PROJECT` → `hive daemon reload`*  |
+| Take over a stuck task manually               | `hive tui`, focus the row, press `s`                  |
 | Drain + stop                                  | `hive daemon stop` (graceful TERM, ≤ `shutdown_grace_sec`) |
 | Force-stop after a hang                       | `hive daemon stop` then check PID; the stop CLI escalates to KILL |
 | Bot status / uptime                           | `hive bot status` (`--json` for envelope)          |
@@ -424,6 +425,13 @@ The PR-merge watcher polls every `pr_merge_poll_interval_sec`
 and after 5 consecutive failures drops the entry. Re-authenticate
 with `gh auth login`, then either restart the daemon or run the
 archive manually: `hive archive <slug>`.
+
+**A task is stuck but you want to finish it yourself.**
+Open `hive tui`, focus the row, and press `s`. Hive marks the task
+`MANUAL_STEERING` so `hive run` and the daemon skip it, opens the
+configured development agent in the feature worktree with the slug's
+stage folders preloaded, then archives the stage folder under
+`.hive-state/stages/archived-manual/` when the agent exits.
 
 **A project I disabled is still being dispatched.**
 The per-tick cache invalidation lands within one `poll_interval_sec`

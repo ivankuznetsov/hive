@@ -1,0 +1,32 @@
+name: Install smoke
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  shell:
+    name: Shell checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh
+      - run: bash install.sh --dry-run --version=v0.1.0
+
+  macos-dry-run:
+    name: macOS dry run
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash install.sh --dry-run --version=v0.1.0
+
+  arch-dry-run:
+    name: Arch dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker run --rm -v "$PWD:/src" -w /src archlinux:latest \
+            bash -lc 'pacman -Sy --noconfirm bash curl grep sed gawk coreutils && bash install.sh --dry-run --version=v0.1.0'

@@ -478,6 +478,31 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil cmd
   end
 
+  def test_open_in_agent_is_side_effect_owned_and_noops_in_update
+    new_model, cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::OpenInAgent.new(row: Object.new)
+    )
+
+    assert_same model, new_model
+    assert_nil cmd
+  end
+
+  def test_agent_steer_exited_is_side_effect_owned_and_noops_in_update
+    new_model, cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::AgentSteerExited.new(
+        slug: "manual-task",
+        folder: "/tmp/hive/manual-task",
+        exit_code: 0,
+        worktree: "/tmp/hive.worktrees/manual-task"
+      )
+    )
+
+    assert_same model, new_model
+    assert_nil cmd
+  end
+
   # ---------- Pure-function discipline ----------
 
   def test_apply_does_not_mutate_input_model

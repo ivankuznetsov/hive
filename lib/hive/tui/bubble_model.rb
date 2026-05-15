@@ -1,11 +1,16 @@
 require "bubbletea"
 require "digest"
+require "fileutils"
 require "set"
 require "shellwords"
 require "stringio"
+require "time"
 require "hive"
+require "hive/agent_profiles"
+require "hive/config"
 require "hive/commands/new"
 require "hive/markers"
+require "hive/stages"
 require "hive/task"
 require "hive/findings"
 require "hive/tui/debug"
@@ -382,6 +387,8 @@ module Hive
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
           open_task_folder(message.row)
+        when Hive::Tui::Messages::OpenInAgent
+          open_in_agent(message.row)
         when Hive::Tui::Messages::OpenSummary
           open_summary(message.row)
         when Hive::Tui::Messages::LogTailPoll
@@ -1624,6 +1631,71 @@ module Hive
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def open_in_agent(row)
+        task = Hive::Task.new(row.folder)
+        cfg = Hive::Config.load(task.project_root)
+        agent_name = cfg.dig("execute", "agent") || "claude"
+        profile = Hive::AgentProfiles.lookup(agent_name, cfg: cfg)
+        profile.check_version!
+        profile.preflight!
+
+        worktree_path = task.worktree_path
+        unless worktree_path && File.directory?(worktree_path)
+          return [ flashed("no worktree for #{row.slug}"), nil ]
+        end
+
+        context_paths = agent_context_paths(task)
+        argv = agent_steer_argv(profile, context_paths)
+        Hive::Markers.set(row.state_file, "MANUAL_STEERING", agent: agent_name, started_at: Time.now.utc.iso8601)
+
+        callable = lambda do
+          clear_terminal_for_takeover
+          exit_code = Hive::Tui::Subprocess.run_takeover_child_sync(argv, chdir: worktree_path)
+          clear_terminal_for_takeover
+          @dispatch.call(Hive::Tui::Messages::AgentSteerExited.new(
+            slug: row.slug,
+            folder: row.folder,
+            exit_code: exit_code,
+            worktree: worktree_path
+          ))
+        end
+
+        flash = "steering #{row.slug} in #{File.basename(profile.bin)} → #{File.basename(worktree_path)}"
+        if context_paths.any? && profile.add_dir_flag.to_s.empty?
+          flash = "#{flash} (no add-dir flag; context not preloaded)"
+        end
+
+        [ @hive_model.with(flash: flash, flash_set_at: Time.now),
+          Hive::Tui::Subprocess.foreground_takeover_command(callable) ]
+      rescue Hive::AgentProfiles::UnknownAgent
+        [ flashed("unknown agent in config: #{agent_name}"), nil ]
+      rescue Hive::ConfigError => e
+        [ flashed("agent config invalid: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      rescue Hive::AgentError => e
+        [ flashed("agent unavailable: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      rescue Hive::InvalidTaskPath
+        [ flashed("no task folder for #{row.slug}"), nil ]
+      end
+
+      def agent_context_paths(task)
+        Hive::Stages::DIRS.filter_map do |stage_dir|
+          path = File.join(task.hive_state_path, "stages", stage_dir, task.slug)
+          path if File.directory?(path)
+        end
+      end
+
+      def agent_steer_argv(profile, context_paths)
+        argv = [ profile.bin ]
+        add_dir_flag = profile.add_dir_flag
+        if add_dir_flag
+          context_paths.each do |path|
+            argv << add_dir_flag
+            argv << path
+          end
+        end
+        argv
       end
 
       def open_summary(row)

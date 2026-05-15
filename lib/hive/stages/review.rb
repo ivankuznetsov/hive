@@ -665,7 +665,7 @@ module Hive
 
         File.mtime(fix_success_path) >= File.mtime(escalations_path)
       rescue SystemCallError, IOError
-        false
+        true
       end
 
       # Back-compat shim: PR #56 named the narrower predicate this. Now

@@ -57,7 +57,7 @@ class HiveTuiInputDecoderTest < Minitest::Test
     require "hive/tui/bubble_model"
     bubble = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
-      dispatch: ->(_msg) {}
+      dispatch: ->(_msg) { }
     )
     raw_text_input = Hive::Tui::Messages::RawTextInput.new(text: "", paste: true)
     translated = bubble.send(:translate, raw_text_input)

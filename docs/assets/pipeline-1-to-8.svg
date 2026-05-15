@@ -1,70 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 190" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 130" role="img" aria-labelledby="title desc">
   <title id="title">Hive pipeline from inbox to done</title>
   <desc id="desc">Eight stage boxes connected left to right: inbox, brainstorm, plan, execute, open-pr, review, finalize, done.</desc>
-  <style>
-    :root {
-      color: #111827;
-      --muted: #6b7280;
-      --panel: #ffffff;
-      --line: #9ca3af;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        color: #f9fafb;
-        --muted: #d1d5db;
-        --panel: #111827;
-        --line: #6b7280;
-      }
-    }
-    text { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .box { fill: var(--panel); stroke: currentColor; stroke-width: 2; rx: 8; }
-    .arrow { stroke: var(--line); stroke-width: 3; marker-end: url(#arrow); }
-    .stage { fill: currentColor; font-size: 16px; font-weight: 700; }
-    .label { fill: var(--muted); font-size: 13px; }
-  </style>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="var(--line)"/>
+      <path d="M0,0 L0,6 L9,3 z" fill="#9ca3af"/>
     </marker>
   </defs>
-  <g>
-    <rect class="box" x="20" y="45" width="115" height="78"/>
-    <text class="stage" x="77.5" y="78" text-anchor="middle">1-inbox</text>
-    <text class="label" x="77.5" y="101" text-anchor="middle">capture</text>
-    <line class="arrow" x1="143" y1="84" x2="178" y2="84"/>
+  <g font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <rect x="20" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="77.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">1-inbox</text>
+    <text x="77.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">capture</text>
+    <line x1="143" y1="64" x2="178" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="185" y="45" width="130" height="78"/>
-    <text class="stage" x="250" y="78" text-anchor="middle">2-brainstorm</text>
-    <text class="label" x="250" y="101" text-anchor="middle">refine</text>
-    <line class="arrow" x1="323" y1="84" x2="358" y2="84"/>
+    <rect x="185" y="25" width="130" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="250" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">2-brainstorm</text>
+    <text x="250" y="81" text-anchor="middle" fill="#6b7280" font-size="13">refine</text>
+    <line x1="323" y1="64" x2="358" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="365" y="45" width="115" height="78"/>
-    <text class="stage" x="422.5" y="78" text-anchor="middle">3-plan</text>
-    <text class="label" x="422.5" y="101" text-anchor="middle">design</text>
-    <line class="arrow" x1="488" y1="84" x2="523" y2="84"/>
+    <rect x="365" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="422.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">3-plan</text>
+    <text x="422.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">design</text>
+    <line x1="488" y1="64" x2="523" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="530" y="45" width="115" height="78"/>
-    <text class="stage" x="587.5" y="78" text-anchor="middle">4-execute</text>
-    <text class="label" x="587.5" y="101" text-anchor="middle">build</text>
-    <line class="arrow" x1="653" y1="84" x2="688" y2="84"/>
+    <rect x="530" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="587.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">4-execute</text>
+    <text x="587.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">build</text>
+    <line x1="653" y1="64" x2="688" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="695" y="45" width="115" height="78"/>
-    <text class="stage" x="752.5" y="78" text-anchor="middle">5-open-pr</text>
-    <text class="label" x="752.5" y="101" text-anchor="middle">draft PR</text>
-    <line class="arrow" x1="818" y1="84" x2="853" y2="84"/>
+    <rect x="695" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="752.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">5-open-pr</text>
+    <text x="752.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">draft PR</text>
+    <line x1="818" y1="64" x2="853" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="860" y="45" width="115" height="78"/>
-    <text class="stage" x="917.5" y="78" text-anchor="middle">6-review</text>
-    <text class="label" x="917.5" y="101" text-anchor="middle">harden</text>
-    <line class="arrow" x1="983" y1="84" x2="1018" y2="84"/>
+    <rect x="860" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="917.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">6-review</text>
+    <text x="917.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">harden</text>
+    <line x1="983" y1="64" x2="1018" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="1025" y="20" width="115" height="60"/>
-    <text class="stage" x="1082.5" y="48" text-anchor="middle">7-finalize</text>
-    <text class="label" x="1082.5" y="68" text-anchor="middle">publish</text>
-    <line class="arrow" x1="1082" y1="88" x2="1082" y2="118"/>
+    <rect x="1025" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1082.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">7-finalize</text>
+    <text x="1082.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">publish</text>
+    <line x1="1148" y1="64" x2="1183" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect class="box" x="1025" y="125" width="115" height="45"/>
-    <text class="stage" x="1082.5" y="153" text-anchor="middle">8-done</text>
-    <text class="label" x="1082.5" y="169" text-anchor="middle">archive</text>
+    <rect x="1190" y="25" width="80" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1230" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">8-done</text>
+    <text x="1230" y="81" text-anchor="middle" fill="#6b7280" font-size="13">archive</text>
   </g>
 </svg>

@@ -1,9 +1,8 @@
 # xbookmark dogfood replay
 
 This is a replay transcript derived from the completed local
-`i-want-to-create-a-260504-1253` task. The task was created before the current
-`5-open-pr` / `7-finalize` split, but this transcript shows the same work in the
-current eight-stage model.
+`i-want-to-create-a-260504-1253` task, rendered in the current eight-stage
+pipeline.
 
 The task produced a real draft PR. The original plan asked for a live capture,
 but this docs change was run from a Hive execute worktree whose constraints
@@ -17,7 +16,7 @@ $ cd ~/Dev/hive
 $ bundle install
 $ ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 $ hive --version
-0.1.0
+<version>
 
 $ cd ~/Dev/xbookmark
 $ hive init .
@@ -53,7 +52,7 @@ next: review plan.md, then run hive develop i-want-to-create-a-260504-1253 --fro
 
 ```text
 $ hive develop i-want-to-create-a-260504-1253
-created worktree /home/asterio/Dev/xbookmark.worktrees/i-want-to-create-a-260504-1253
+created worktree ~/Dev/xbookmark.worktrees/i-want-to-create-a-260504-1253
 marker: EXECUTE_COMPLETE
 
 $ hive open-pr i-want-to-create-a-260504-1253

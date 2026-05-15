@@ -31,7 +31,7 @@ The project checkout holds code. `.hive-state/` holds durable Hive state on the 
 ```text
 <project>/.hive-state/
 |-- config.yml
-|-- .commit-lock
+|-- .commit-lock                    # (only while a commit is in flight)
 |-- stages/
 |   |-- 1-inbox/<slug>/
 |   |-- 2-brainstorm/<slug>/
@@ -56,16 +56,16 @@ Default new-project setup uses `claude` for planning, `codex` for execute, and a
 
 Hive's prompts invoke skills inside the chosen agent. `hive doctor` checks the configured rows and reports missing installs.
 
-| Stage | Default invocation | Claude install target | Codex install target |
+| Stage | Default invocation | Install for claude | Install for codex |
 |---|---|---|---|
-| `2-brainstorm` | `/compound-engineering:ce-brainstorm` | compound-engineering plugin or matching Claude skill | compound-engineering plugin or matching Codex skill |
-| `3-plan` | `/plan` | user slash command, commonly provided by llm-wiki | `~/.codex/skills/plan/SKILL.md` or plugin equivalent |
+| `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
+| `3-plan` | `/plan` | a user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | a skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
 
-| Reviewer | Default skill | Agent |
-|---|---|---|
-| `claude-ce-code-review` | `/ce-code-review` | `claude` |
-| `codex-ce-code-review` | `/ce-code-review` | `codex` |
-| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude` |
+| Reviewer | Default skill | Agent | Install target |
+|---|---|---|---|
+| `claude-ce-code-review` | `/ce-code-review` | `claude` | `~/.claude/skills/ce-code-review/SKILL.md` (or set `skill: compound-engineering:ce-code-review` in config to use the plugin form explicitly) |
+| `codex-ce-code-review` | `/ce-code-review` | `codex` | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
+| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude` | `claude plugin install <pr-review-toolkit-marketplace>` |
 
 Run:
 
@@ -127,13 +127,39 @@ timeout_sec:
   review_browser: 3600
 
 review:
+  ci:
+    command: null            # path to project CI command; null skips the CI-fix phase
+    max_attempts: 3
+    agent: claude
+    prompt_template: ci_fix_prompt.md.erb
+  triage:
+    enabled: true
+    agent: claude
+    bias: courageous         # or `safetyist`
+  fix:
+    agent: claude
+    prompt_template: fix_prompt.md.erb
+  browser_test:
+    enabled: false
+    agent: claude
+    prompt_template: browser_test_prompt.md.erb
+    max_attempts: 2
+  github_publish:
+    enabled: true
+    max_attempts: 2
   max_passes: 2
   max_wall_clock_sec: 5400
-  reviewers: []
+  reviewers: []              # `hive init` writes the recommended set here
 
 daemon:
   enabled: true
+
+rebase:
+  enabled: true
+  conflict_resolution_timeout_sec: 2700
 ```
+
+`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks — they read project state and operate on stage folders.
 
 `HIVE_HOME` changes where Hive reads the global registry. `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, and `HIVE_PI_BIN` override agent binaries for tests or local shims.
 
@@ -152,3 +178,4 @@ Stage commands are safe to retry because they inspect the task folder, current s
 - [wiki/state-model.md](../wiki/state-model.md)
 - [wiki/operating.md](../wiki/operating.md)
 - [wiki/templates.md](../wiki/templates.md)
+- [wiki/modules/lock.md](../wiki/modules/lock.md)

@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-15T00:00:00Z] docs assets — pipeline diagram rename
+
+**Action:** Recorded that `docs/assets/pipeline-1-to-7.svg` (named in the original onboarding plan during brainstorm) shipped as `docs/assets/pipeline-1-to-8.svg`. The pipeline grew an eighth stage (`8-done`) between brainstorm and execution; the diagram file and embedded references were renamed accordingly.
+
 ## [2026-05-14T23:30:00Z] brainstorm — tmux interactive runtime (U1–U8)
 
 **Action:** Documented the new interactive tmux runtime for 2-brainstorm. The stage can now spawn the agent inside a detached tmux session (U3) via the `Stages::BrainstormTmux` runner, with U2's interactive Claude wrapper, U4's stop-hook install, U5's tmux sentinel fallback, U7's hardened preflight/teardown, and U8's operator notes. `lib/hive/tmux_runner.rb` (U1) is the shared runtime primitive. Selection is gated by a per-project config flag (U6) surfaced through `templates/project_config.yml.erb`. `hive doctor` (U7) preflights `tmux` availability + version and reports stale brainstorm sessions; the brainstorm stage cleans them up on completion. Wiki refresh in b67096c updated the brainstorm stage, doctor command, and state-model pages.

@@ -2,30 +2,18 @@ xbookmark/.hive-state/
 |-- config.yml
 |-- logs/
 |   `-- i-want-to-create-a-260504-1253/
-|       |-- review-claude-ce-code-review-pass01-20260507T141655Z.log
-|       |-- review-codex-ce-code-review-pass01-20260507T142656Z.log
-|       |-- review-pr-review-toolkit-pass01-20260507T143333Z.log
-|       `-- review-triage-pass01-20260507T144333Z.log
+|       |-- brainstorm-20260504T105230Z.log
+|       `-- plan-20260504T112045Z.log
 `-- stages/
     |-- 1-inbox/
     |-- 2-brainstorm/
     |-- 3-plan/
+    |   `-- i-want-to-create-a-260504-1253/
+    |       |-- idea.md
+    |       |-- brainstorm.md
+    |       `-- plan.md
     |-- 4-execute/
     |-- 5-open-pr/
     |-- 6-review/
     |-- 7-finalize/
     `-- 8-done/
-        `-- i-want-to-create-a-260504-1253/
-            |-- idea.md
-            |-- brainstorm.md
-            |-- plan.md
-            |-- task.md
-            |-- pr.md
-            |-- worktree.yml
-            `-- reviews/
-                |-- claude-ce-code-review-01.md
-                |-- codex-ce-code-review-01.md
-                |-- pr-review-toolkit-01.md
-                |-- escalations-01.md
-                |-- fix-guardrail-04.md
-                `-- fix-success-04.md

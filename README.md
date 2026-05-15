@@ -18,8 +18,10 @@ Read the model in depth in [docs/concepts.md](docs/concepts.md).
 ## Install
 
 ```bash
-git clone https://github.com/ivankuznetsov/hive ~/Dev/hive && cd ~/Dev/hive && bundle install && ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive
+git clone https://github.com/ivankuznetsov/hive ~/Dev/hive && cd ~/Dev/hive && bundle install && mkdir -p ~/.local/bin && ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 ```
+
+If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is.
 
 Requires Ruby 3.4, git >= 2.40, `claude` >= 2.1.118, `codex` >= 0.125.0 for the default execute agent, and authenticated `gh`. See [docs/getting-started.md](docs/getting-started.md) for the first run.
 
@@ -35,21 +37,23 @@ Before changing anything:
 - If `claude` is missing or `claude --version` is older than 2.1.118, stop and report the missing prerequisite.
 - If `codex` is missing or `codex --version` is older than 0.125.0, stop and report that the default execute agent will not work until Codex is installed.
 - If `gh auth status` fails, stop and ask the user to authenticate GitHub CLI.
-- If ~/.local/bin is not on PATH, stop and ask which PATH directory should receive the symlink.
+- If ~/.local/bin is not on PATH, stop and ask which PATH directory should receive the symlink, then substitute that directory for ~/.local/bin in the link command below.
 
-Run these commands in order:
+Run these commands in order (replace <bin-dir> with the chosen PATH directory; default is ~/.local/bin):
 
 git clone https://github.com/ivankuznetsov/hive ~/Dev/hive
 cd ~/Dev/hive
 bundle install
-mkdir -p ~/.local/bin
-ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
+mkdir -p <bin-dir>
+ln -sf ~/Dev/hive/bin/hive <bin-dir>/hive
 hive --version
 
 Report the installed version and the path returned by `command -v hive`.
 ```
 
 ## Quickstart
+
+Replace `your-project` with the registry name you pick at `hive init`.
 
 ```bash
 cd ~/Dev/your-project
@@ -62,17 +66,17 @@ hive develop <slug>                              # create the feature worktree a
 hive open-pr <slug>                              # push the branch and open a draft PR
 hive review <slug>                               # run CI, reviewers, triage, fixes, and browser test
 hive finalize <slug>                             # refresh the PR body and mark it ready
-hive archive <slug>                              # after merge, move the task to 8-done
+hive archive <slug>                              # after 7-finalize completes, move the task to 8-done
 ```
 
-Walk through the same shape on a real completed xbookmark task in [docs/getting-started.md](docs/getting-started.md).
+Walk through the same shape on a fresh project in [docs/getting-started.md](docs/getting-started.md), or read the replay of the completed xbookmark task in [docs/recipes.md#xbookmark-end-to-end](docs/recipes.md#xbookmark-end-to-end).
 
 ## Documentation
 
-- [docs/getting-started.md](docs/getting-started.md) - five-minute first run against a real project.
-- [docs/concepts.md](docs/concepts.md) - folder-as-agent, the eight stages, and compound engineering.
-- [docs/architecture.md](docs/architecture.md) - how stages, agents, files, config, and worktrees compose.
-- [docs/cli.md](docs/cli.md) - current command surface from `bin/hive`.
-- [docs/recipes.md](docs/recipes.md) - concrete workflows, including the xbookmark dogfood replay.
-- [docs/faq.md](docs/faq.md) - troubleshooting and design questions.
-- [wiki/index.md](wiki/index.md) - deeper engineering reference maintained by the LLM wiki.
+- [docs/getting-started.md](docs/getting-started.md): five-minute first run against a real project.
+- [docs/concepts.md](docs/concepts.md): folder-as-agent, the eight stages, and compound engineering.
+- [docs/architecture.md](docs/architecture.md): how stages, agents, files, config, and worktrees compose.
+- [docs/cli.md](docs/cli.md): current command surface from `bin/hive`.
+- [docs/recipes.md](docs/recipes.md): concrete workflows, including the xbookmark dogfood replay.
+- [docs/faq.md](docs/faq.md): troubleshooting and design questions.
+- [wiki/index.md](wiki/index.md): deeper engineering reference maintained by the LLM wiki.

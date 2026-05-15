@@ -4,7 +4,7 @@ These recipes are meant to be copied into real project work. They use the curren
 
 ## Xbookmark End-To-End
 
-The xbookmark dogfood task started from this idea:
+The xbookmark dogfood task started from this idea (typo `conenct` preserved from the original):
 
 ```text
 I want to create a service that will conenct to my X (twitter) account and collect all the bookmarks...

@@ -80,7 +80,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Most machine-callable commands accept `--json` and emit a single typed envelope with `ok: true` on success or `ok: false` on failure. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details.
+Every machine-callable command supports `--json` and emits a single typed envelope with `ok: true` on success or `ok: false` on failure. `hive tui` is the only surface that rejects `--json`. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details.
 
 ## Exit Codes
 
@@ -92,6 +92,7 @@ Most machine-callable commands accept `--json` and emit a single typed envelope 
 | 3 | Task is in an error marker state. |
 | 4 | Wrong stage. |
 | 64 | Usage error. |
+| 65 | `hive doctor`: at least one configured skill is missing. |
 | 70 | Software, git, worktree, agent, or stage failure. |
 | 75 | Temporary failure, usually lock contention. |
 | 78 | Config error. |

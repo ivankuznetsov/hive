@@ -11,7 +11,7 @@ You need Ruby 3.4, git >= 2.40, `claude` authenticated, `codex` installed for th
 ## Step 1 - Install
 
 ```bash
-git clone https://github.com/ivankuznetsov/hive ~/Dev/hive && cd ~/Dev/hive && bundle install && ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive
+git clone https://github.com/ivankuznetsov/hive ~/Dev/hive && cd ~/Dev/hive && bundle install && mkdir -p ~/.local/bin && ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 hive --version
 ```
 
@@ -32,7 +32,7 @@ hive init .
 hive new xbookmark "I want to create a service that will connect to my X account and collect all the bookmarks, then use llm-wiki to create a knowledge graph from them."
 ```
 
-The completed dogfood task started from this `idea.md` frontmatter:
+The completed dogfood task started from this `idea.md` frontmatter (typo `conenct` preserved from the original; the verbatim file is reproduced in [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt) since the original lives on xbookmark's local `hive/state` branch):
 
 ```yaml
 slug: i-want-to-create-a-260504-1253

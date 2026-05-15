@@ -5,7 +5,7 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "hive"
 require "hive/cli"
 
-if ARGV == ["--version"] || ARGV == ["-v"]
+if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
   exit 0
 end

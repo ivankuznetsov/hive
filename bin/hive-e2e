@@ -24,16 +24,16 @@ module Hive
     # bin/hive routing: success / failure / config so wrapper scripts and
     # CI matrices can branch precisely.
     #
-      #   0   = all scenarios passed
-      #   1   = one or more scenarios failed
-      #   64  = usage error (bad args, no matching scenarios)
-      #   78  = preflight failure (missing tooling, bad config, missing repro)
-      module BinaryExit
-        SUCCESS = 0
-        FAILURE = 1
-        USAGE  = Hive::ExitCodes::USAGE # 64
-        CONFIG  = Hive::ExitCodes::CONFIG # 78
-      end
+    #   0   = all scenarios passed
+    #   1   = one or more scenarios failed
+    #   64  = usage error (bad args, no matching scenarios)
+    #   78  = preflight failure (missing tooling, bad config, missing repro)
+    module BinaryExit
+      SUCCESS = 0
+      FAILURE = 1
+      USAGE  = Hive::ExitCodes::USAGE # 64
+      CONFIG  = Hive::ExitCodes::CONFIG # 78
+    end
 
     class PreflightError < StandardError; end
 

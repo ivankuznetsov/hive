@@ -1,5 +1,17 @@
 require "rake/testtask"
 
+namespace :build do
+  desc "Build a release tarball for TARGET (darwin-arm64, linux-x86_64-gnu, linux-aarch64-gnu)"
+  task :release, [ :target ] do |_task, args|
+    target = args[:target]
+    unless target && !target.strip.empty?
+      abort "usage: bundle exec rake build:release[<target>]"
+    end
+
+    sh "packaging/build/release.sh", target
+  end
+end
+
 # Default suite — everything under test/{unit,integration}. Self-contained,
 # uses fake-claude / fake-gh, no network or paid API calls.
 Rake::TestTask.new do |t|

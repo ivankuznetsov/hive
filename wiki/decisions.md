@@ -9,6 +9,13 @@ tags: [decisions, adr]
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows.
 
+## ADR-027: Release artifacts are Tebako-packed binaries
+
+**Status:** Active
+**Context:** The v0.1.0 install plan requires tier-1 channel installers to consume a self-contained `hive` artifact rather than asking end users to install Ruby and run from a clone. The high-risk gems are the TUI bindings (`bubbletea` 0.1.4 and `lipgloss` 0.2.x), because they use native components and `Hive::Tui::PasteAwareRunner` depends on private Bubble Tea runner state.
+**Decision:** Release artifacts are built by `packaging/build/release.sh`, called via `rake build:release[<target>]`, and the GitHub tag workflow installs Tebako before producing `hive-<version>-<target>.tar.gz` for `darwin-arm64`, `linux-x86_64-gnu`, and `linux-aarch64-gnu`. The local spike helper exits 69 when Tebako is unavailable, which is the state observed in this worktree; the release workflow is the authoritative validation surface for the packager.
+**Consequences:** Install channels share one artifact shape and one checksum file. A failed Tebako build fails the release before any channel metadata is published. If Tebako cannot support the pinned native gems in CI, the replacement point is `packaging/build/release.sh`; installers and update/uninstall behavior remain unchanged because they only depend on the tarball contract.
+
 ## ADR-024: PR-first workflow and finalize rename
 
 **Status:** Active

@@ -1489,6 +1489,13 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 - `wiki/testing.md` — updated the e2e starter scenario count to six.
 - `wiki/commands/tui.md` — documented bounded quiet subprocesses and truncated retained spawn captures.
 
+## [2026-05-15T00:00:00Z] release — v0.1.0 artifact workflow
+
+**Action:** Added the v0.1.0 release artifact scaffold: `rake build:release[<target>]`, Tebako-backed `packaging/build/release.sh`, a spike helper under `packaging/spike/`, and a tag-triggered GitHub Actions workflow that builds tier-1 tarballs, writes `SHA256SUMS`, signs the checksum file with cosign keyless, and publishes the GitHub Release. Recorded ADR-027 in [[decisions]] so the chosen packager and fallback point are explicit.
+
+**Refreshed pages:**
+- `wiki/decisions.md` — ADR-027 (Tebako release artifact strategy).
+
 ## [2026-05-05T18:00:00Z] architecture — TUI/MVU pipeline
 
 **Action:** Documented the TUI MVU pipeline (`BubbleModel ↔ Update ↔ KeyMap ↔ PasteAwareRunner ↔ InputDecoder`) in `wiki/architecture.md`, including the side-effect seam in `BubbleModel#handle_side_effect`, the paste-routing-by-mode contract for `RawTextInput`, decoder reset on cancel, and the GVL-yielding `YieldTick`. Hardened `InputDecoder` against unmapped C0 bytes (Ctrl+C now decodes to `KEY_CTRL_C`; other unmapped bytes are silently dropped), added 4 KiB `@pending` and 1 MiB `@paste_buffer` caps with truncation flashes, a 5 s paste-timeout flush, stray `\e[201~` consumption, ESC+CR/LF cancel-gesture absorption, and C0 stripping in `normalize_paste`. `PasteAwareRunner` now resets the decoder on transitions out of `:new_idea` / `:filter` and asserts `Bubbletea::VERSION == "0.1.4"` at load. Removed the dead `Messages::NewIdeaCharAppended` path; consolidated paste normalization on the decoder; switched the new-idea over-limit branch from drop-everything to partial-fit with a truncation flash; raised `input_timeout` from 1 ms to 5 ms to absorb fragmented paste markers; pinned bubbletea to `= 0.1.4` in the Gemfile.

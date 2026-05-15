@@ -138,6 +138,12 @@ module Hive
 
       def finalize_paste_timeout(messages)
         text = normalize_paste(@paste_buffer)
+        # Asymmetry with `drain_paste`: the normal paste-end path
+        # always emits an empty-text RawTextInput so the composer can
+        # probe an image-only clipboard (U4). A timed-out paste does
+        # NOT — we already lost the `\e[201~` marker, so synthesising
+        # a clipboard probe on the way out would hit a foreign-mode
+        # message after the flash, with no operator-visible benefit.
         messages << Messages::RawTextInput.new(text: text, paste: true) unless text.empty?
         messages << Messages::Flash.new(text: "paste timed out")
         @paste_buffer.clear
@@ -172,7 +178,7 @@ module Hive
             @paste_started_at = nil
             text = normalize_paste(@paste_buffer)
             @paste_buffer.clear
-            messages << Messages::RawTextInput.new(text: text, paste: true) unless text.empty?
+            messages << Messages::RawTextInput.new(text: text, paste: true)
           end
           return true
         end
@@ -307,6 +313,14 @@ module Hive
       #      mis-interpret. Done AFTER the whitespace rewrite so legit
       #      \t and \n are already gone.
       #   4. Collapse runs of spaces.
+      #
+      # Trailing/leading whitespace is intentionally preserved at this
+      # layer: `:filter` mode and the new-idea composer route raw paste
+      # buffers through here, and a global `.strip` would silently
+      # discard user-intended boundary spaces in non-image pastes. The
+      # image-path probe path already strips via
+      # `Clipboard.normalized_path` before path resolution, so dropping
+      # the strip here doesn't change image-path detection.
       def normalize_paste(bytes)
         bytes.to_s.dup.force_encoding(Encoding::UTF_8).scrub
              .gsub(/[\r\n\t]+/, " ")

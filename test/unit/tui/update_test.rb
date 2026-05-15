@@ -14,6 +14,15 @@ class HiveTuiUpdateTest < Minitest::Test
     @model ||= Hive::Tui::Model.initial
   end
 
+  def image_attached_message(label:, staging_path:, ext: "png")
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: label,
+      staging_path: staging_path,
+      ext: ext
+    )
+    Hive::Tui::Messages::NewIdeaImageAttached.new(attachment: attachment)
+  end
+
   # ---------- WindowSized ----------
 
   def test_window_sized_updates_dimensions
@@ -555,11 +564,24 @@ class HiveTuiUpdateTest < Minitest::Test
   # ---- v2 new-idea mode lifecycle ----
 
   def test_open_new_idea_prompt_sets_mode_and_clears_buffer
-    starting = model.with(mode: :grid, new_idea_buffer: "leftover-text", new_idea_cursor: 4)
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1", staging_path: "/tmp/image-1.png", ext: "png"
+    )
+    starting = model.with(
+      mode: :grid,
+      new_idea_buffer: "leftover-text",
+      new_idea_cursor: 4,
+      new_idea_attachments: [ attachment ],
+      new_idea_staging_dir: "/tmp/hive-tui-composer",
+      new_idea_staging_tmp_root: "/tmp"
+    )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
+    assert_equal [], new_model.new_idea_attachments
+    assert_nil new_model.new_idea_staging_dir
+    assert_nil new_model.new_idea_staging_tmp_root
   end
 
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
@@ -662,6 +684,124 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "fix bug report now".length, new_model.new_idea_cursor
   end
 
+  def test_new_idea_image_attached_in_empty_buffer_inserts_placeholder
+    starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      image_attached_message(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        ext: "png"
+      )
+    )
+
+    assert_equal "[image1]", new_model.new_idea_buffer
+    assert_equal 8, new_model.new_idea_cursor
+    assert_equal 1, new_model.new_idea_attachments.size
+    assert_equal "image1", new_model.new_idea_attachments.first.label
+    assert_equal "/tmp/hive-tui-composer/image-1.png", new_model.new_idea_attachments.first.staging_path
+    assert_equal "png", new_model.new_idea_attachments.first.ext
+  end
+
+  def test_new_idea_image_attached_inserts_at_cursor
+    starting = model.with(mode: :new_idea, new_idea_buffer: "see ", new_idea_cursor: 4)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      image_attached_message(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        ext: "png"
+      )
+    )
+
+    assert_equal "see [image1]", new_model.new_idea_buffer
+    assert_equal 12, new_model.new_idea_cursor
+  end
+
+  def test_new_idea_image_attached_keeps_order_for_consecutive_images
+    first, _cmd = Hive::Tui::Update.apply(
+      model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0),
+      image_attached_message(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        ext: "png"
+      )
+    )
+    second, _cmd = Hive::Tui::Update.apply(
+      first,
+      image_attached_message(
+        label: "image2",
+        staging_path: "/tmp/hive-tui-composer/image-2.png",
+        ext: "png"
+      )
+    )
+
+    assert_equal "[image1][image2]", second.new_idea_buffer
+    assert_equal %w[image1 image2], second.new_idea_attachments.map(&:label)
+  end
+
+  # R6: cursor in the middle of the buffer — the suffix branch of
+  # `prefix + placeholder + suffix` must keep typed text after the
+  # paste point intact and advance the cursor past the placeholder.
+  def test_new_idea_image_attached_inserts_mid_buffer
+    starting = model.with(
+      mode: :new_idea,
+      new_idea_buffer: "before after",
+      new_idea_cursor: 7
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      image_attached_message(
+        label: "image1",
+        staging_path: "/tmp/hive-tui-composer/image-1.png",
+        ext: "png"
+      )
+    )
+
+    assert_equal "before [image1]after", new_model.new_idea_buffer
+    assert_equal 7 + "[image1]".length, new_model.new_idea_cursor
+  end
+
+  # R5: three consecutive paste events must produce monotonic
+  # `image1 / image2 / image3` labels AND three distinct staging
+  # paths, regardless of how attachments.size moves.
+  def test_new_idea_image_attached_three_consecutive_pastes_label_monotonically
+    starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+    final = %w[image1 image2 image3].each_with_index.reduce(starting) do |state, (label, idx)|
+      next_model, _cmd = Hive::Tui::Update.apply(
+        state,
+        image_attached_message(
+          label: label,
+          staging_path: "/tmp/hive-tui-composer/image-#{idx + 1}.png",
+          ext: "png"
+        )
+      )
+      next_model
+    end
+
+    assert_equal %w[image1 image2 image3], final.new_idea_attachments.map(&:label)
+    paths = final.new_idea_attachments.map(&:staging_path)
+    assert_equal paths.uniq, paths, "three consecutive pastes must yield three distinct staging paths"
+    assert_equal 3, final.new_idea_attachment_counter
+  end
+
+  # The Update-layer test for "at-cap insert is refused without a
+  # partial token" used to live here. It was removed when the
+  # buffer-overflow gate was consolidated into BubbleModel#stage_image
+  # (the only caller path that produces a NewIdeaImageAttached
+  # message) so two duplicate gates against
+  # NEW_IDEA_BUFFER_MAX_CHARS could not drift. The behaviour is
+  # covered at the BubbleModel layer in
+  # test_new_idea_image_paste_at_buffer_cap_is_refused_without_orphan_file.
+
+  # NewIdeaSubmitBlocked was removed in 2026-05-13: it was a dead
+  # Data type that was defined and tested but never dispatched (rich-
+  # submit failures set the flash directly via `model.with`). Test
+  # kept as a placeholder for the contract that submit failures still
+  # surface a flash without clobbering the buffer — see the
+  # `submit_rich_new_idea` tests in bubble_model_test.rb for the live
+  # path.
+
   def test_new_idea_over_limit_insert_partial_fits_and_flashes_truncation
     # 6 cells of remaining capacity, 10-char paste → fit 6, flash truncation.
     existing = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS - 6)
@@ -702,11 +842,24 @@ class HiveTuiUpdateTest < Minitest::Test
   end
 
   def test_new_idea_cancelled_returns_to_grid_and_clears_buffer
-    starting = model.with(mode: :new_idea, new_idea_buffer: "rss feeds", new_idea_cursor: 4)
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1", staging_path: "/tmp/image-1.png", ext: "png"
+    )
+    starting = model.with(
+      mode: :new_idea,
+      new_idea_buffer: "rss feeds",
+      new_idea_cursor: 4,
+      new_idea_attachments: [ attachment ],
+      new_idea_staging_dir: "/tmp/hive-tui-composer",
+      new_idea_staging_tmp_root: "/tmp"
+    )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
     assert_equal :grid, new_model.mode
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
+    assert_equal [], new_model.new_idea_attachments
+    assert_nil new_model.new_idea_staging_dir
+    assert_nil new_model.new_idea_staging_tmp_root
   end
 
   def test_cursor_down_under_right_focus_preserves_v1_behaviour

@@ -1,4 +1,5 @@
 require "hive"
+require "hive/tui/composer_staging"
 
 module Hive
   module Tui
@@ -28,6 +29,15 @@ module Hive
       :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
       :new_idea_buffer,  # String — typed text in :new_idea mode
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
+      :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea
+      :new_idea_staging_dir, # String or nil — temp dir holding staged image files
+      :new_idea_staging_tmp_root, # String or nil — tmp root captured when staging dir was created
+      # Integer — monotonic-per-composer counter; never decrements on
+      # prune. Used to derive `[imageN]` labels so a prune-then-paste
+      # cycle cannot re-use a label and overwrite a previously staged
+      # asset. Resets only on open / cancel / submit.
+      :new_idea_attachment_counter,
+      :new_idea_broken_labels, # Array<String> — labels highlighted after rich-submit validation fails
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
       :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
@@ -46,7 +56,31 @@ module Hive
     # render layer (BubbleModel#compose_two_pane_view) and focus layer
     # (Update#apply_pane_focus_*) from drifting out of sync.
     Model::TWO_PANE_MIN_COLS = 70
+    # Model-wide buffer cap for the new-idea composer. Enforced in the
+    # single insert helper `Update.insert_new_idea_text` and the paste
+    # gate `BubbleModel#stage_image`; do not re-implement the check at
+    # callers — route new insertion paths through one of those two
+    # sites so the invariant has one source of truth.
     Model::NEW_IDEA_BUFFER_MAX_CHARS = 4096
+    # `:ext` is the canonical, lowercased + leading-dot-stripped
+    # extension chosen at staging time (via
+    # `Hive::Tui::ComposerStaging.normalized_extension`). It is
+    # authoritative for the body-markdown extension and the on-disk
+    # asset basename — derivation from `staging_path` is intentionally
+    # avoided so a future rename/move of the staging file cannot let
+    # the body markdown extension drift away from the on-disk copy.
+    Model::Attachment = Data.define(:label, :staging_path, :ext) do
+      # Canonicalize `ext` once at construction so callers can trust the
+      # field's documented invariant ("lowercased, leading-dot stripped,
+      # `png` fallback") instead of every reader re-normalizing.
+      def initialize(label:, staging_path:, ext:)
+        super(
+          label: label,
+          staging_path: staging_path,
+          ext: Hive::Tui::ComposerStaging.normalized_extension(ext)
+        )
+      end
+    end
 
     class Model
       # Boot state. App.run constructs the runner with this Model.
@@ -65,6 +99,11 @@ module Hive
           pane_focus: :right,
           new_idea_buffer: "",
           new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
+          new_idea_attachment_counter: 0,
+          new_idea_broken_labels: [],
           flash: nil,
           flash_set_at: nil,
           triage_state: nil,

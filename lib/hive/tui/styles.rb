@@ -92,6 +92,10 @@ module Hive
       # in the App's update path.
       FLASH = Lipgloss::Style.new.foreground(color(:yellow)).bold(true)
 
+      # Broken `[imageN]` placeholder in the new-idea prompt. Red + reverse
+      # mirrors failure-class rows and stays visible on low-color terminals.
+      BROKEN_PLACEHOLDER = Lipgloss::Style.new.foreground(color(:red)).reverse(true).bold(true)
+
       # Stalled-poll banner — yellow + reverse so it stands out when the
       # render loop is showing a snapshot older than the staleness threshold.
       STALLED = Lipgloss::Style.new.foreground(color(:yellow)).reverse(true)

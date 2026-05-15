@@ -26,8 +26,14 @@
 # locally-scoped runtime outputs, not source.
 /.context
 /.context/
+# Local daemon runtime outputs.
+/logs/
+/.daemon.pid
+/.daemon.pid.*
 /test/e2e/runs/*
 !/test/e2e/runs/.gitkeep
+# Per-task hive runner state (markers, stages, logs, worktrees).
+# Treated as runtime-only by GitOps#add_hive_state_to_master_gitignore!.
 /.hive-state/
 # Local daemon runtime artifacts.
 /.daemon.pid

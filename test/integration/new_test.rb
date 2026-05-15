@@ -29,6 +29,8 @@ class NewTest < Minitest::Test
         idea = File.read(File.join(glob.first, "idea.md"))
         assert_includes idea, "add inbox filter"
         assert_includes idea, "<!-- WAITING -->"
+        refute File.directory?(File.join(glob.first, "assets")),
+               "plain CLI-compatible ideas must not create an empty assets directory"
 
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
         assert_match(%r{\Ahive: 1-inbox/add-inbox-filter-\d{6}-[0-9a-f]{4} captured\z}, log)
@@ -102,6 +104,15 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_call_bang_raises_typed_project_not_found
+    with_tmp_global_config do
+      err = assert_raises(Hive::Commands::New::ProjectNotFound) do
+        Hive::Commands::New.new("nope", "x").call!
+      end
+      assert_includes err.message, "project not initialized"
+    end
+  end
+
   def test_slug_override
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -123,6 +134,134 @@ class NewTest < Minitest::Test
         end
         assert_equal 1, status
         assert_includes err, "invalid slug"
+      end
+    end
+  end
+
+  def test_call_bang_raises_typed_invalid_slug
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        assert_raises(Hive::Commands::New::InvalidSlugError) do
+          Hive::Commands::New.new(project, "x", slug_override: "invalid_slug").call!
+        end
+      end
+    end
+  end
+
+  def test_body_override_and_attachments_are_captured_in_one_commit
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        fixture = File.join(dir, "fixture.png")
+        File.binwrite(fixture, "png-fixture".b)
+        project = File.basename(dir)
+
+        capture_io do
+          Hive::Commands::New.new(
+            project,
+            "title",
+            body_override: "see ![](assets/bug-1.png)",
+            attachments: [ [ fixture, "bug-1.png" ] ]
+          ).call!
+        end
+
+        glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "title-*")]
+        assert_equal 1, glob.size
+        idea = File.read(File.join(glob.first, "idea.md"))
+        assert_includes idea, "original_text: |\n  title"
+        assert_includes idea, "see ![](assets/bug-1.png)"
+        refute_match(/^title$/m, idea.split("<!-- WAITING -->").first.lines.last(4).join)
+
+        asset = File.join(glob.first, "assets", "bug-1.png")
+        assert_equal "png-fixture", File.binread(asset)
+
+        hive_state = File.join(dir, ".hive-state")
+        log = run!("git", "-C", hive_state, "log", "--format=%s", "-1").strip
+        assert_match(%r{\Ahive: 1-inbox/title-\d{6}-[0-9a-f]{4} captured\z}, log)
+        diff_files = run!("git", "-C", hive_state, "show", "--name-only", "--format=")
+        assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/idea.md"
+        assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/assets/bug-1.png"
+      end
+    end
+  end
+
+  def test_attachments_accept_absolute_sources_outside_tmpdir
+    source_dir = Dir.mktmpdir("hive-new-src-", Dir.home)
+    begin
+      fixture = File.join(source_dir, "fixture.png")
+      File.binwrite(fixture, "outside-tmp".b)
+      refute File.expand_path(fixture).start_with?("#{File.expand_path(Dir.tmpdir)}#{File::SEPARATOR}")
+
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          capture_io do
+            Hive::Commands::New.new(
+              project,
+              "outside attachment",
+              body_override: "see ![](assets/bug-1.png)",
+              attachments: [ [ fixture, "bug-1.png" ] ]
+            ).call!
+          end
+
+          glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "outside-attachment-*")]
+          assert_equal 1, glob.size
+          assert_equal "outside-tmp", File.binread(File.join(glob.first, "assets", "bug-1.png"))
+        end
+      end
+    ensure
+      FileUtils.rm_rf(source_dir) if source_dir
+    end
+  end
+
+  # Defense-in-depth: copy_attachments! refuses dest_name values that
+  # contain a directory separator or `..` segment so a malformed TUI
+  # caller cannot escape `<task_dir>/assets/`. Raises the dedicated
+  # `InvalidAttachmentError` (separate from real slug failures).
+  def test_call_bang_rejects_dest_name_with_path_traversal
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        fixture = File.join(dir, "fixture.png")
+        File.binwrite(fixture, "png".b)
+        project = File.basename(dir)
+
+        err = assert_raises(Hive::Commands::New::InvalidAttachmentError) do
+          Hive::Commands::New.new(
+            project,
+            "title-traversal",
+            attachments: [ [ fixture, "../escape.png" ] ]
+          ).call!
+        end
+        assert_match(/invalid attachment filename/, err.message)
+        # Rollback should have removed the partial task dir on failure.
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "title-traversal-*")],
+          "attachment guard failure must roll back the partial task directory"
+      end
+    end
+  end
+
+  def test_call_bang_rejects_dest_name_with_slash
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        fixture = File.join(dir, "fixture.png")
+        File.binwrite(fixture, "png".b)
+        project = File.basename(dir)
+
+        err = assert_raises(Hive::Commands::New::InvalidAttachmentError) do
+          Hive::Commands::New.new(
+            project,
+            "title-slash",
+            attachments: [ [ fixture, "nested/file.png" ] ]
+          ).call!
+        end
+        assert_match(/invalid attachment filename/, err.message)
       end
     end
   end

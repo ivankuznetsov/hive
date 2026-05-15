@@ -42,6 +42,8 @@ module Hive
 
         # pid → { project, slug, stage, command, started_at, state_file_mtime_at_dispatch }
         @running = {}
+        @external_running_by_project = Hash.new(0)
+        @external_running_global = 0
         # [project, Date] → Integer
         @daily_counts = Hash.new(0)
         # [project, slug] → Time (cooldown expiry)
@@ -73,14 +75,28 @@ module Hive
         cooldown_expiry = @cooldown_until[[ project, slug ]]
         return :cooldown if cooldown_expiry && cooldown_expiry > now
 
-        active_global_count = @running.size + external_global_count
-        active_project_count = running_count_for(project) + external_project_count
+        external_global = [ @external_running_global, external_global_count.to_i ].max
+        external_project = [ @external_running_by_project[project].to_i, external_project_count.to_i ].max
+        active_global_count = @running.size + external_global
+        active_project_count = @running.count { |_pid, entry| entry[:project] == project } + external_project
 
         return :global_cap  if active_global_count >= @max_concurrent_runs
         return :project_cap if active_project_count >= @max_concurrent_per_project
         return :daily_cap   if daily_count_for(project, now) >= @max_runs_per_day_per_project
 
         :ok
+      end
+
+      # Refresh counts for active agent rows discovered from `hive status`
+      # that were not spawned by this daemon process. This keeps caps
+      # restart-safe: after a daemon restart, visible `agent_running` rows
+      # still consume global/per-project capacity until they finish.
+      def set_external_running_counts(per_project:)
+        @external_running_by_project = Hash.new(0)
+        per_project.each do |project, count|
+          @external_running_by_project[project] = count.to_i if count.to_i.positive?
+        end
+        @external_running_global = @external_running_by_project.values.sum
       end
 
       # Returns the mtime LAST observed on (project, slug)'s state file —
@@ -194,7 +210,7 @@ module Hive
       end
 
       def in_flight_count
-        @running.size
+        @running.size + @external_running_global
       end
 
       def quarantined?(project:, slug:)
@@ -216,7 +232,8 @@ module Hive
       private
 
       def running_count_for(project)
-        @running.count { |_pid, entry| entry[:project] == project }
+        @running.count { |_pid, entry| entry[:project] == project } +
+          @external_running_by_project[project].to_i
       end
 
       def dec_daily(project, started_at)

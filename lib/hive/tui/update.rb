@@ -87,6 +87,8 @@ module Hive
           [ apply_open_new_idea_prompt(model), nil ]
         when Messages::NewIdeaTextInserted
           [ apply_new_idea_text_inserted(model, message), nil ]
+        when Messages::NewIdeaImageAttached
+          [ apply_new_idea_image_attached(model, message), nil ]
         when Messages::NewIdeaCursorLeft
           [ apply_new_idea_cursor_left(model), nil ]
         when Messages::NewIdeaCursorRight
@@ -398,19 +400,60 @@ module Hive
       #
       # Submit (`Messages::NewIdeaSubmitted`) is intentionally NOT
       # handled here — it requires a subprocess call (`hive new …`)
-      # which lives in BubbleModel#handle_side_effect. That preserves
-      # Update's purity (no I/O, no Bubbletea coupling). On submit the
-      # BubbleModel reads `model.new_idea_buffer`, dispatches the child,
-      # and resets the model via `apply_new_idea_cancelled`-equivalent
-      # transition (mode → :grid, buffer cleared) on either success or
-      # validation failure.
+      # or an in-process `Hive::Commands::New#call!` (rich submit),
+      # both of which live in BubbleModel#handle_side_effect. That
+      # preserves Update's purity (no I/O, no Bubbletea coupling).
+      # `apply_open_new_idea_prompt` and `apply_new_idea_cancelled`
+      # both clear `new_idea_buffer`, `new_idea_cursor`,
+      # `new_idea_attachments`, `new_idea_staging_dir`, AND the
+      # captured staging tmp root so a fresh entry starts from a clean
+      # slate. The rich-submit success path
+      # does NOT go through `apply_new_idea_cancelled` — BubbleModel's
+      # `reset_to_grid_with_flash` carries the same clearing shape
+      # plus a flash payload.
 
       def apply_open_new_idea_prompt(model)
-        model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
+        model.with(
+          mode: :new_idea,
+          new_idea_buffer: "",
+          new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
+          new_idea_attachment_counter: 0,
+          new_idea_broken_labels: []
+        )
       end
 
       def apply_new_idea_text_inserted(model, msg)
         insert_new_idea_text(model, msg.text.to_s)
+      end
+
+      # Image attachments are atomic — a `[imageN]` placeholder is
+      # meaningless if only a prefix fits. The buffer-overflow gate
+      # lives upstream in `BubbleModel#stage_image` (so a rejected
+      # paste doesn't leave an orphan staging file). By the time we
+      # reach this handler the gate has already passed, so we just
+      # splice the placeholder + attachment into the model.
+      def apply_new_idea_image_attached(model, msg)
+        attachment = msg.attachment
+        placeholder = "[#{attachment.label}]"
+        buffer, cursor = normalized_new_idea_buffer_and_cursor(model)
+        prefix = buffer[0...cursor].to_s
+        suffix = buffer[cursor..].to_s
+        # Bump the monotonic counter past the label's numeric suffix
+        # so a future paste cannot re-use this label even if the next
+        # prune drops the attachment (label format is `imageN`; the
+        # composer's `stage_image` reads the counter to derive `N`).
+        label_number = attachment.label.to_s.delete_prefix("image").to_i
+        next_counter = [ model.new_idea_attachment_counter.to_i, label_number ].max
+        model.with(
+          new_idea_buffer: prefix + placeholder + suffix,
+          new_idea_cursor: cursor + placeholder.length,
+          new_idea_attachments: model.new_idea_attachments + [ attachment ],
+          new_idea_attachment_counter: next_counter,
+          new_idea_broken_labels: []
+        )
       end
 
       def apply_new_idea_cursor_left(model)
@@ -439,7 +482,10 @@ module Hive
 
         prefix = buffer[0...(cursor - 1)].to_s
         suffix = buffer[cursor..].to_s
-        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor - 1)
+        new_buffer = prefix + suffix
+        prune_orphan_attachments(
+          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor - 1, new_idea_broken_labels: [])
+        )
       end
 
       def apply_new_idea_char_deleted_forward(model)
@@ -448,11 +494,37 @@ module Hive
 
         prefix = buffer[0...cursor].to_s
         suffix = buffer[(cursor + 1)..].to_s
-        model.with(new_idea_buffer: prefix + suffix, new_idea_cursor: cursor)
+        new_buffer = prefix + suffix
+        prune_orphan_attachments(
+          model.with(new_idea_buffer: new_buffer, new_idea_cursor: cursor, new_idea_broken_labels: [])
+        )
+      end
+
+      # Backspacing through `[image1]` one character at a time leaves a
+      # partial placeholder in the buffer; once it no longer fully
+      # matches, the attachment becomes an orphan that submit would
+      # reject. Drop the orphan so the user isn't trapped in a state
+      # that can only be unwound by Esc + retype. The on-disk file is
+      # cleaned with the rest of the staging dir on submit/cancel.
+      def prune_orphan_attachments(model)
+        labels_in_buffer = model.new_idea_buffer.to_s.scan(/\[image(\d+)\]/).flatten.map { |n| "image#{n}" }.to_set
+        kept = model.new_idea_attachments.select { |att| labels_in_buffer.include?(att.label) }
+        return model if kept.size == model.new_idea_attachments.size
+
+        model.with(new_idea_attachments: kept)
       end
 
       def apply_new_idea_cancelled(model)
-        model.with(mode: :grid, new_idea_buffer: "", new_idea_cursor: 0)
+        model.with(
+          mode: :grid,
+          new_idea_buffer: "",
+          new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
+          new_idea_attachment_counter: 0,
+          new_idea_broken_labels: []
+        )
       end
 
       # Partial-fit on overflow: a 4096-char paste against a buffer with
@@ -471,6 +543,7 @@ module Hive
           return model.with(
             new_idea_buffer: buffer,
             new_idea_cursor: cursor,
+            new_idea_broken_labels: [],
             flash: "title too long",
             flash_set_at: Time.now
           )
@@ -486,7 +559,8 @@ module Hive
         suffix = buffer[cursor..].to_s
         new_model = model.with(
           new_idea_buffer: prefix + text + suffix,
-          new_idea_cursor: cursor + text.length
+          new_idea_cursor: cursor + text.length,
+          new_idea_broken_labels: []
         )
         return new_model unless flash_text
 

@@ -53,6 +53,12 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[stages/review]] — Phase 2 paragraph documents the plan-context embed: where it goes in the prompt, why it matters (without it, reviewers re-derive scope from worktree alone and escalate intentional gaps), and the absent-note fallback.
 
+## [2026-05-13T21:30:00Z] wiki/log — REVERTED note for rolled-back PR #63 / #64 intermediate entries
+
+**Action:** Pass-3 polish on the marker-finalize and `o`-browse work removed three intermediate log entries (timestamps 21:15, 22:00, 23:00) that had been written for in-flight versions of those features and superseded by the final landings. The removals were applied via direct edit rather than via an explicit `REVERTED` line, which contradicts this file's append-only contract. This entry records the deletion so the contract remains observable in the log itself. Reverted entries described intermediate design choices for marker-finalize ordering (build-dispatch-then-flip-marker landed in the final 18:30 entry) and `o`-browse early variants (final shape landed at 20:30). No content was lost — the surviving 18:30 and 20:30 entries are the authoritative record.
+
+**Refreshed pages:** none (this entry is the refresh).
+
 ## [2026-05-13T21:15:00Z] execute — capture implementer output and pause no-change runs
 
 **Action:** Hardened 4-execute's completion contract after the `now-we-run-claude-codex-260508-3b8f` investigation exposed a clean agent exit whose useful answer lived only in raw logs while `task.md` stayed empty. `Hive::Agent` now returns the final stream-json/plain-text message and tags whether it came from a structured agent event or plain output. `Stages::Execute` appends that message under `## Execute Output`, records the task branch's `execute_base_head` in `worktree.yml`, verifies the post-spawn HEAD is still on the expected branch and descends from that baseline, requires a clean worktree, and only writes `EXECUTE_COMPLETE` for a new baseline-descendant commit or explicit `execution_mode: research` plan with structured output. Clean no-commit exits now pause as `EXECUTE_WAITING reason=no_worktree_changes`; dirty exits pause as `reason=dirty_worktree`; detached/wrong-branch exits pause as `reason=branch_mismatch` / `head_not_descendant`; research plans without structured output pause as `reason=missing_research_output`. `Hive::ExecuteWaitingAction` now drives `hive run --json`, `hive status --json`, and TUI Enter behavior for these reasons so agents and humans do not blindly edit `task.md` when the repair belongs in the worktree, `plan.md`, or a rerun.
@@ -80,6 +86,14 @@ Append-only log of all wiki operations.
 - [[commands/tui]] — `needs_input` paragraph rewritten as three bulleted stages (2-brainstorm / 3-plan / 6-review) each describing their auto-continue gate. The 3-plan paragraph documents the build-dispatch-then-flip-marker order, the compare-and-set guard against marker races during edit, the `MarkerRaceError` flash, and the `:revise_plan` vs `:advance_to_develop` branching.
 
 **Round-2 polish on PR #63** (pr-review-toolkit follow-up): reversed the order of `develop_command_from_plan` and `finalize_plan_marker` (build the dispatch FIRST, flip the marker SECOND — a malformed `suggested_command` no longer leaves the plan with `:complete` but no dispatch). Added a compare-and-set re-read in `finalize_plan_marker` that raises `MarkerRaceError` when the marker drifted between `plan_outcome`'s race check and the finalize write — narrowing the observable TOCTOU window from "duration of editor session" to "one read+rename". Surfaced races to the user as `plan marker changed during edit (<observed>)` instead of silently overwriting a newer marker. Two new regression tests pin both invariants (marker stays `:waiting` on malformed-command; no overwrite + flash on marker race).
+
+## [2026-05-13T17:45:00Z] tui+new — image paste for new-idea composer
+
+**Action:** Documented rich image input for `hive tui` new-idea capture. The composer now probes clipboard image bytes or drag-dropped image paths, stages each image as `[imageN]`, rewrites placeholders to `![](assets/bug-N.<ext>)` on submit, and persists files under `1-inbox/<slug>/assets/` through `Hive::Commands::New#call!`. The CLI `hive new PROJECT TEXT...` argv surface remains text-only.
+
+**Refreshed pages:**
+- [[commands/tui]] — added the image-paste subsection, placeholder validation behavior, staging lifecycle, and the `.jpg`/`.webp` extension preservation note. macOS clipboard image paste is currently inert (`pbpaste` only returns text); a Linux Wayland/X11 host with `wl-clipboard` or `xclip` is required for clipboard-bytes paste.
+- [[commands/new]] — documented `call!`, `body_override:`, and `attachments:` for TUI-internal rich captures while noting that plain CLI captures still omit `assets/`. Attachment-filename failures now raise the dedicated `InvalidAttachmentError` instead of `InvalidSlugError`.
 
 ## [2026-05-13T13:00:00Z] review+tui+wiki — /pr-review-toolkit round-5 polish-tier sweep
 

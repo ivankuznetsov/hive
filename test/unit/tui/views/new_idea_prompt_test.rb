@@ -17,6 +17,14 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     )
   end
 
+  def attachment(label)
+    Hive::Tui::Model::Attachment.new(
+      label: label,
+      staging_path: "/tmp/hive-tui-composer/#{label}.png",
+      ext: "png"
+    )
+  end
+
   def test_renders_prompt_label_with_resolved_project
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
@@ -141,6 +149,96 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_includes out, "rss feeds", "short buffer must render verbatim"
+  end
+
+  def test_render_shows_single_staged_image_count
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_buffer: "hi [image1]",
+      new_idea_cursor: "hi [image1]".length,
+      new_idea_attachments: [ attachment("image1") ],
+      cols: 100
+    )
+
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+
+    assert_includes out, "[1 image]"
+  end
+
+  def test_render_shows_plural_staged_image_count
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_buffer: "[image1][image2][image3]",
+      new_idea_cursor: 24,
+      new_idea_attachments: [ attachment("image1"), attachment("image2"), attachment("image3") ],
+      cols: 100
+    )
+
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+
+    assert_includes out, "[3 images]"
+  end
+
+  def test_render_suppresses_staged_image_count_on_narrow_terminal
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_buffer: "hi [image1]",
+      new_idea_cursor: "hi [image1]".length,
+      new_idea_attachments: [ attachment("image1") ],
+      cols: 28
+    )
+
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model, width: 28)
+
+    refute_includes out, "[1 image"
+    assert_includes out, "hi"
+  end
+
+  def test_render_omits_staged_image_count_when_no_attachments
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_buffer: "hi",
+      new_idea_attachments: [],
+      cols: 100
+    )
+
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+
+    refute_includes out, "[1 image"
+  end
+
+  def test_broken_placeholder_ranges_normalizes_zero_padded_labels
+    ranges = Hive::Tui::Views::NewIdeaPrompt.broken_placeholder_ranges(
+      "before [image01] after [image2]",
+      [ "image1" ]
+    )
+
+    start_pos = "before ".length
+    assert_equal [ [ start_pos, start_pos + "[image01]".length ] ], ranges
+  end
+
+  def test_render_preserves_broken_placeholder_text
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_buffer: "see [image1]",
+      new_idea_cursor: "see [image1]".length,
+      new_idea_broken_labels: [ "image1" ],
+      cols: 100
+    )
+
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+
+    assert_includes out.gsub(/\e\[[\d;]*m/, ""), "see [image1]"
   end
 
   def test_explicit_width_kwarg_clamps_independently_of_cols

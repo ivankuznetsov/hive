@@ -1,4 +1,5 @@
 require "hive"
+require "hive/tui/model"
 
 module Hive
   module Tui
@@ -10,7 +11,7 @@ module Hive
     # Each Message is a frozen Data record. The shape is:
     #   - one Message per state-transition kind
     #   - fields carry exactly the data Update needs to apply the transition
-    #   - no behavior on the records themselves — pure data
+    #   - no runtime behavior beyond narrow constructor validation
     #
     # Adding a new Message: define it here, add an `Update.apply` branch
     # for it, write the test case in `test/unit/tui/update_test.rb`.
@@ -266,6 +267,29 @@ module Hive
       # path; KeyMap only emits TextInserted now, so the Char variant
       # was removed in PR #25.)
       NewIdeaTextInserted = Data.define(:text)
+
+      # Bracketed paste landed in :new_idea mode. BubbleModel's
+      # `handle_new_idea_paste` handles the clipboard/file probe and
+      # staging side effects before Update sees a NewIdeaImageAttached
+      # or NewIdeaTextInserted fallback. The side-effect handler can
+      # also return [model, nil] WITHOUT producing a downstream
+      # message — that path covers oversize-image flash, drag-drop-
+      # ignored flash, the missing-clipboard-tool hint, and the
+      # rescue branch for paste failures.
+      NewIdeaPasteRequested = Data.define(:raw_text)
+
+      # An image was staged for the in-progress composer. Update inserts
+      # the textual placeholder and appends the exact attachment record
+      # produced by the side-effecting staging path.
+      NewIdeaImageAttached = Data.define(:attachment) do
+        def initialize(attachment:)
+          unless attachment.is_a?(Hive::Tui::Model::Attachment)
+            raise ArgumentError, "attachment must be Hive::Tui::Model::Attachment"
+          end
+
+          super(attachment: attachment)
+        end
+      end
 
       # Cursor navigation within the new-idea prompt.
       NewIdeaCursorLeft = Class.new

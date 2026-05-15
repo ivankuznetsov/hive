@@ -1,4 +1,5 @@
 require "lipgloss"
+require "set"
 require "hive/tui/styles"
 
 module Hive
@@ -47,10 +48,21 @@ module Hive
           # chunk + cursor` always fits within `row_width`, keeping
           # continuation rows aligned to the same column as the first chunk.
           row_width = [ width - 2, 1 ].max
-          chunk_capacity = [ row_width - label.length - 1, 1 ].max
+          suffix = attachment_suffix(model, width: width)
+          suffix_width = suffix.to_s.length
+          chunk_capacity = [ row_width - label.length - 1 - suffix_width, 1 ].max
           chunks, cursor_chunk_idx, cursor_offset = chunk_buffer_with_cursor(buffer, cursor, chunk_capacity)
-          visible, visible_cursor_idx = visible_chunks_for_cursor(chunks, cursor_chunk_idx)
-          render_rows(label, visible, visible_cursor_idx, cursor_offset)
+          visible, visible_cursor_idx, first_visible_idx = visible_chunks_for_cursor(chunks, cursor_chunk_idx)
+          render_rows(
+            label,
+            visible,
+            visible_cursor_idx,
+            cursor_offset,
+            suffix: suffix,
+            capacity: chunk_capacity,
+            first_chunk_index: first_visible_idx,
+            broken_ranges: broken_placeholder_ranges(buffer, model.new_idea_broken_labels)
+          )
         end
 
         # Split `buffer` into chunks of `capacity` chars each. Always
@@ -83,30 +95,106 @@ module Hive
         end
 
         def visible_chunks_for_cursor(chunks, cursor_chunk_idx)
-          return [ chunks, cursor_chunk_idx ] if chunks.size <= MAX_VISIBLE_ROWS
+          return [ chunks, cursor_chunk_idx, 0 ] if chunks.size <= MAX_VISIBLE_ROWS
 
           start = [ cursor_chunk_idx - MAX_VISIBLE_ROWS + 1, 0 ].max
           start = [ start, chunks.size - MAX_VISIBLE_ROWS ].min
           visible = chunks[start, MAX_VISIBLE_ROWS]
-          [ visible, cursor_chunk_idx - start ]
+          [ visible, cursor_chunk_idx - start, start ]
         end
 
         # Row 1: styled label + chunk
         # Row 2..N: spaces aligned to label width + chunk
         # Cursor block at the logical cursor position.
-        def render_rows(label, chunks, cursor_chunk_idx, cursor_offset, cursor: Styles::CURSOR_HIGHLIGHT.render(" "))
+        def render_rows(label, chunks, cursor_chunk_idx, cursor_offset, cursor: Styles::CURSOR_HIGHLIGHT.render(" "), suffix: nil, capacity: nil, first_chunk_index: 0, broken_ranges: [])
           padding = " " * label.length
           rows = chunks.each_with_index.map do |chunk, idx|
             prefix = idx.zero? ? Styles::HINT.render(label) : padding
-            if idx == cursor_chunk_idx
-              before_cursor = chunk[0...cursor_offset].to_s
-              after_cursor = chunk[cursor_offset..].to_s
-              "#{prefix}#{before_cursor}#{cursor}#{after_cursor}"
+            chunk_start = capacity ? (first_chunk_index + idx) * capacity : nil
+            row = if idx == cursor_chunk_idx
+              body = if chunk_start
+                render_chunk_with_cursor(chunk, chunk_start, chunk_start + cursor_offset, cursor, broken_ranges)
+              else
+                before_cursor = chunk[0...cursor_offset].to_s
+                after_cursor = chunk[cursor_offset..].to_s
+                "#{before_cursor}#{cursor}#{after_cursor}"
+              end
+              "#{prefix}#{body}"
+            elsif chunk_start
+              "#{prefix}#{render_chunk_with_cursor(chunk, chunk_start, nil, cursor, broken_ranges)}"
             else
               "#{prefix}#{chunk}"
             end
+            idx == chunks.size - 1 && suffix ? "#{row}#{Styles::HINT.render(suffix)}" : row
           end
           rows.join("\n")
+        end
+
+        def broken_placeholder_ranges(buffer, broken_labels)
+          labels = Array(broken_labels).to_set
+          return [] if labels.empty?
+
+          ranges = []
+          buffer.to_s.to_enum(:scan, /\[image(\d+)\]/).each do
+            match = Regexp.last_match
+            label = "image#{match[1].to_i}"
+            ranges << [ match.begin(0), match.end(0) ] if labels.include?(label)
+          end
+          ranges
+        end
+
+        def render_chunk_with_cursor(chunk, chunk_start, cursor_absolute, cursor, broken_ranges)
+          out = +""
+          run = +""
+          run_broken = nil
+
+          chunk.each_char.with_index do |char, offset|
+            absolute = chunk_start + offset
+            if cursor_absolute == absolute
+              out << render_segment(run, run_broken)
+              run = +""
+              run_broken = nil
+              out << cursor
+            end
+
+            broken = broken_position?(absolute, broken_ranges)
+            if run_broken.nil? || run_broken == broken
+              run << char
+              run_broken = broken
+            else
+              out << render_segment(run, run_broken)
+              run = +char
+              run_broken = broken
+            end
+          end
+
+          out << render_segment(run, run_broken)
+          out << cursor if cursor_absolute == chunk_start + chunk.length
+          out
+        end
+
+        def render_segment(text, broken)
+          return "" if text.empty?
+
+          broken ? Styles::BROKEN_PLACEHOLDER.render(text) : text
+        end
+
+        def broken_position?(absolute, broken_ranges)
+          broken_ranges.any? { |start_pos, end_pos| absolute >= start_pos && absolute < end_pos }
+        end
+
+        # Trailing badge appended to the prompt's last visual row when
+        # at least one image is staged. Width threshold (30 cells)
+        # suppresses the badge on very narrow terminals where it would
+        # squeeze the prompt buffer below readable. The " · " separator
+        # is a single-codepoint, fixed-width separator — emoji would
+        # split unpredictably across terminals and lipgloss column math.
+        def attachment_suffix(model, width:)
+          count = model.new_idea_attachments.size
+          return nil if count.zero?
+          return nil if width.to_i < 30
+
+          " · [#{count} #{count == 1 ? "image" : "images"}]"
         end
 
         # Resolve which project an idea would land in. Pure read of the

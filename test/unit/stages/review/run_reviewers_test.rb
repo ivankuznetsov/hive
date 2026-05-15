@@ -398,6 +398,31 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_next_pass_for_retries_when_escalations_newer_than_fix_success
+    # If an operator edits escalations after the sentinel was written,
+    # the prior fix pass no longer covers the accepted set. Retry pass 4
+    # instead of treating the stale sentinel as final.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      reviewer = File.join(reviews, "foo-04.md")
+      escalations = File.join(reviews, "escalations-04.md")
+      sentinel = File.join(reviews, "fix-success-04.md")
+      File.write(reviewer, "## High\n- [x] original\n")
+      File.write(escalations, "# Escalations\n")
+      File.write(sentinel, "ok\n")
+      File.utime(Time.utc(2026, 5, 6, 12, 0, 0), Time.utc(2026, 5, 6, 12, 0, 0), sentinel)
+      File.utime(Time.utc(2026, 5, 6, 12, 1, 0), Time.utc(2026, 5, 6, 12, 1, 0), escalations)
+
+      task = Task.new(dir, File.join(dir, "task.md"))
+      marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+
+      assert_equal :fix_incomplete, Hive::Stages::Review.pass_completion_status(dir, 4)
+      assert_equal 4, Hive::Stages::Review.next_pass_for(task, marker),
+                   "stale fix-success sentinel must not skip edited escalations"
+    end
+  end
+
   def test_pass_completion_falls_back_to_next_pass_reviewer_files
     # Back-compat fallback: a legacy repo created BEFORE the
     # fix-success sentinel existed has no `fix-success-NN.md` files.

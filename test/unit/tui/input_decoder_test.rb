@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/tui/input_decoder"
+require "hive/tui/clipboard"
 
 class HiveTuiInputDecoderTest < Minitest::Test
   include HiveTestHelper
@@ -38,6 +39,32 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal true, messages.first.paste
   end
 
+  def test_empty_bracketed_paste_still_emits_paste_signal
+    messages = decoder.drain("\e[200~\e[201~")
+    assert_equal 1, messages.size
+    assert_kind_of Hive::Tui::Messages::RawTextInput, messages.first
+    assert_equal "", messages.first.text
+    assert_equal true, messages.first.paste
+  end
+
+  # Unit-level pin on the decoder → BubbleModel seam: an empty
+  # bracketed paste in :new_idea mode must translate to a
+  # NewIdeaPasteRequested with empty raw_text, not a NOOP or a
+  # NewIdeaTextInserted. Without this the only coverage is in the
+  # integration test, so a regression in `BubbleModel#translate_raw_text_input`
+  # routing lands silent.
+  def test_empty_bracketed_paste_routes_to_new_idea_paste_requested
+    require "hive/tui/bubble_model"
+    bubble = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: ->(_msg) { }
+    )
+    raw_text_input = Hive::Tui::Messages::RawTextInput.new(text: "", paste: true)
+    translated = bubble.send(:translate, raw_text_input)
+    assert_kind_of Hive::Tui::Messages::NewIdeaPasteRequested, translated
+    assert_equal "", translated.raw_text
+  end
+
   def test_bracketed_paste_start_marker_can_split_across_chunks
     assert_empty decoder.drain("\e[20")
     messages = decoder.drain("0~hello\e[201~")
@@ -63,6 +90,21 @@ class HiveTuiInputDecoderTest < Minitest::Test
   def test_bracketed_paste_normalizes_newlines_and_tabs
     msg = decoder.drain("\e[200~hello\n\tworld\ragain\e[201~").first
     assert_equal "hello world again", msg.text
+  end
+
+  def test_bracketed_paste_file_path_normalizes_trailing_newline
+    # The decoder preserves whitespace at boundaries (so non-image
+    # pastes don't silently lose user-intended leading/trailing
+    # spaces). It only normalizes CR/LF/TAB to single spaces and
+    # collapses runs. The image-path probe layer
+    # (`Clipboard.normalized_path`) strips the result before
+    # path resolution, so the trailing space here doesn't break
+    # drag-drop image detection downstream.
+    msg = decoder.drain("\e[200~/tmp/screenshot.png\n\e[201~").first
+    assert_equal "/tmp/screenshot.png ", msg.text
+    assert_equal true, msg.paste
+    assert_equal "/tmp/screenshot.png", Hive::Tui::Clipboard.normalized_path(msg.text),
+                 "downstream image-path probe must trim the boundary newline"
   end
 
   def test_arrow_home_end_delete_sequences_decode_to_key_messages

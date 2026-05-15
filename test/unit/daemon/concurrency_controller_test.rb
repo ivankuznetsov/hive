@@ -65,6 +65,18 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
                                   external_project_count: 0)
   end
 
+  def test_external_running_counts_consume_global_and_project_capacity
+    c = make(global: 2, per_project: 1)
+    c.set_external_running_counts(per_project: { "p1" => 1, "p2" => 1 })
+
+    assert_equal 2, c.in_flight_count
+    assert_equal :global_cap, c.can_dispatch?(project: "p3", slug: "s3", now: T0)
+
+    c.set_external_running_counts(per_project: { "p1" => 1 })
+    assert_equal :project_cap, c.can_dispatch?(project: "p1", slug: "s2", now: T0)
+    assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s2", now: T0)
+  end
+
   def test_daily_cap_blocks_after_n_dispatches
     c = make(daily: 2)
     dispatch(c, 100, "p1", "s1")

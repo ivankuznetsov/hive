@@ -2,7 +2,9 @@ require "bubbletea"
 require "digest"
 require "set"
 require "shellwords"
+require "stringio"
 require "hive"
+require "hive/commands/new"
 require "hive/markers"
 require "hive/task"
 require "hive/findings"
@@ -16,6 +18,8 @@ require "hive/tui/text"
 require "hive/tui/triage_state"
 require "hive/tui/log_tail"
 require "hive/tui/brainstorm_answers"
+require "hive/tui/clipboard"
+require "hive/tui/composer_staging"
 require "hive/tui/subprocess"
 require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
@@ -90,9 +94,14 @@ module Hive
         phase reason pass attempts elapsed files matches exception_class
       ].freeze
 
-      def initialize(hive_model: Hive::Tui::Model.initial, dispatch: ->(_msg) { })
+      def initialize(
+        hive_model: Hive::Tui::Model.initial,
+        dispatch: ->(_msg) { },
+        clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) }
+      )
         @hive_model = hive_model
         @dispatch = dispatch
+        @clipboard_probe = clipboard_probe
         # `@healed_folders` is touched from the main runner thread
         # (`auto_heal_kill_class_errors` registers folders before
         # spawning heals) AND from heal Threads (which evict on
@@ -124,6 +133,12 @@ module Hive
         # first pass settles. Reuses @healed_folders_mutex so the four
         # background-thread bookkeeping fields share a single lock.
         @error_recovery_inflight = Set.new
+        # Once-per-session latch (reset in #stage_image on success).
+        @clipboard_tool_hint_shown = false
+        # Consecutive `wl-paste`/`xclip` timeouts: a single timeout
+        # is plausibly a stalled compositor; two-in-a-row warrants a
+        # flash so the operator knows paste is wedged.
+        @clipboard_consecutive_timeouts = 0
       end
 
       # Late binding so App.run_charm can wire the runner reference
@@ -257,12 +272,16 @@ module Hive
 
       def translate_raw_text_input(message)
         text = message.text.to_s
-        return Hive::Tui::Messages::NOOP if text.empty?
 
         case @hive_model.mode
         when :new_idea
+          return Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: text) if message.paste
+          return Hive::Tui::Messages::NOOP if text.empty?
+
           Hive::Tui::Messages::NewIdeaTextInserted.new(text: text)
         when :filter
+          return Hive::Tui::Messages::NOOP if text.empty?
+
           Hive::Tui::Messages::FilterTextInserted.new(text: text)
         else
           Hive::Tui::Messages::NOOP
@@ -369,9 +388,204 @@ module Hive
           triage_develop
         when Hive::Tui::Messages::NewIdeaSubmitted
           submit_new_idea
+        when Hive::Tui::Messages::NewIdeaPasteRequested
+          handle_new_idea_paste(message.raw_text)
+        when Hive::Tui::Messages::NewIdeaCancelled
+          cleanup_new_idea_staging
+          nil
         when Hive::Tui::Messages::DropScopedProjectIfMissing
           drop_scoped_project_if_missing
         end
+      end
+
+      def handle_new_idea_paste(raw_text)
+        # Empty-paste short-circuit outside :new_idea: only the
+        # composer probes the OS clipboard on an empty paste-burst;
+        # other modes have no use for the wl-paste/xclip subprocess
+        # round-trip.
+        if raw_text.to_s.empty? && @hive_model.mode != :new_idea
+          return [ @hive_model, nil ]
+        end
+
+        result = @clipboard_probe.call(pasted_text: raw_text)
+        # Reset the consecutive-timeout latch on any non-timeout
+        # probe outcome so a recovered compositor immediately rearms
+        # the flash for the next wedge cycle.
+        @clipboard_consecutive_timeouts = 0 unless result.kind == :clipboard_timeout
+        case result.kind
+        when :image_bytes
+          stage_image_bytes(result)
+        when :image_file
+          stage_image_file(result)
+        when :empty_image
+          [ flashed("image file is empty — not staged"), nil ]
+        when :clipboard_timeout
+          @clipboard_consecutive_timeouts += 1
+          if @clipboard_consecutive_timeouts >= 2
+            @clipboard_consecutive_timeouts = 0
+            [ flashed("clipboard probe timed out — check wl-paste/xclip"), nil ]
+          else
+            [ @hive_model, nil ]
+          end
+        when :oversize_image
+          # Surface a flash for oversize PNG so the literal filesystem
+          # path or clipboard byte string doesn't fall through into the
+          # text-insertion path and corrupt the title buffer.
+          # Ceil-divide the byte cap to MiB so a future tune of
+          # `MAX_IMAGE_BYTES` to a non-MiB-aligned value (e.g. 5.5 MiB)
+          # doesn't surface as ">5 MiB — not staged"; the displayed
+          # boundary should always be ≥ the actual cap, never below.
+          mib_cap = (Hive::Tui::Clipboard::MAX_IMAGE_BYTES.to_f / (1024 * 1024)).ceil
+          [ flashed("image too large (>#{mib_cap} MiB) — not staged"), nil ]
+        else
+          if Hive::Tui::Clipboard.non_image_file_path?(pasted_text: raw_text)
+            [ flashed("drag-drop ignored (not an image)"), nil ]
+          elsif raw_text.to_s.empty? && (hint = missing_clipboard_tool_hint)
+            [ flashed(hint), nil ]
+          else
+            apply_new_idea_text(raw_text)
+          end
+        end
+      rescue Hive::Error, SystemCallError, IOError => e
+        # Log the cause class (ENOSPC vs EACCES vs IOError) so an
+        # operator with `HIVE_TUI_DEBUG=1` can tell why a paste failed.
+        # `Hive::Error` covers `ComposerStaging::WriteError` plus any
+        # future Hive-typed subclass intended to be handled here —
+        # aligned with the rich-submit rescue list.
+        cause_class = e.respond_to?(:cause_class) ? e.cause_class : e.class
+        Hive::Tui::Debug.log(
+          "new_idea_paste",
+          "rescued #{e.class}(cause=#{cause_class || '(unknown cause)'}): #{e.message}"
+        )
+        [ flashed("image paste failed: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      end
+
+      def stage_image_bytes(result)
+        stage_image(result.ext) do |path|
+          Hive::Tui::ComposerStaging.write_bytes!(path, result.bytes)
+        end
+      end
+
+      def stage_image_file(result)
+        stage_image(result.ext) do |path|
+          Hive::Tui::ComposerStaging.copy_file!(result.path, path)
+        end
+      end
+
+      # Stage an image attachment onto disk, splice the placeholder
+      # into the composer buffer, and update the model. The
+      # buffer-overflow gate runs BEFORE `ensure_dir!` so a refused
+      # paste does not allocate an orphan /tmp directory, and BEFORE
+      # the file write so it does not leave an orphan file behind.
+      # This gate is the SINGLE SOURCE OF TRUTH for the overflow
+      # predicate (the Update-layer apply handler trusts the gate has
+      # already passed).
+      #
+      # `number` comes from a monotonic per-composer counter on the
+      # model that never decrements on prune — `attachments.size + 1`
+      # would re-use a label after a prune-then-paste cycle and silently
+      # overwrite the previously staged asset.
+      def stage_image(ext)
+        normalized_ext = Hive::Tui::ComposerStaging.normalized_extension(ext)
+        number = @hive_model.new_idea_attachment_counter.to_i + 1
+        placeholder = "[image#{number}]"
+        buffer, _cursor = normalized_composer_buffer_and_cursor(@hive_model)
+        if buffer.length + placeholder.length > Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS
+          return [
+            @hive_model.with(
+              flash: "buffer full - submit or remove text before pasting more images",
+              flash_set_at: Time.now
+            ),
+            nil
+          ]
+        end
+
+        result = Hive::Tui::ComposerStaging.ensure_dir!(@hive_model)
+        # Adopt the dir-bearing model BEFORE the (possibly raising)
+        # yield so a write failure leaves the staging dir reachable via
+        # `cleanup_new_idea_staging` instead of leaking until process
+        # exit.
+        @hive_model = result.model
+        label, path = Hive::Tui::ComposerStaging.next_label_and_path(
+          result.dir, number, ext: normalized_ext
+        )
+
+        yield path
+        # Reset the "install wl-clipboard" hint latch once we've
+        # successfully staged an image — if the user later removes a
+        # paste tool the hint should be allowed to surface again
+        # instead of staying suppressed for the whole session.
+        @clipboard_tool_hint_shown = false
+        attachment = Hive::Tui::Model::Attachment.new(
+          label: label,
+          staging_path: path,
+          ext: normalized_ext
+        )
+        message = Hive::Tui::Messages::NewIdeaImageAttached.new(
+          attachment: attachment
+        )
+        new_model, _cmd = Hive::Tui::Update.apply(@hive_model, message)
+        [ new_model, nil ]
+      end
+
+      def normalized_composer_buffer_and_cursor(model)
+        buffer = model.new_idea_buffer.to_s
+        cursor = model.new_idea_cursor.to_i.clamp(0, buffer.length)
+        [ buffer, cursor ]
+      end
+
+      def apply_new_idea_text(raw_text)
+        new_model, _cmd = Hive::Tui::Update.apply(
+          @hive_model,
+          Hive::Tui::Messages::NewIdeaTextInserted.new(text: raw_text.to_s)
+        )
+        [ new_model, nil ]
+      end
+
+      def missing_clipboard_tool_hint
+        return nil if @clipboard_tool_hint_shown
+
+        env = ENV
+        if env.fetch("XDG_SESSION_TYPE", "").downcase == "wayland" &&
+           !Hive::Tui::Clipboard::DefaultShim.command_available?("wl-paste", env: env)
+          @clipboard_tool_hint_shown = true
+          "install `wl-clipboard` to paste images"
+        elsif !env.fetch("DISPLAY", "").empty? &&
+              !Hive::Tui::Clipboard::DefaultShim.command_available?("xclip", env: env)
+          @clipboard_tool_hint_shown = true
+          "install `xclip` to paste images"
+        end
+      end
+
+      def cleanup_new_idea_staging
+        dir = @hive_model.new_idea_staging_dir
+        tmp_root = @hive_model.new_idea_staging_tmp_root
+        # Reset the model field BEFORE the actual rm_rf so a subsequent
+        # paste after an unhandled exception cannot dispatch against a
+        # now-deleted tmpdir (ENOENT on the next write_bytes!).
+        unless dir.to_s.empty? && tmp_root.to_s.empty?
+          @hive_model = @hive_model.with(
+            new_idea_staging_dir: nil,
+            new_idea_staging_tmp_root: nil
+          )
+        end
+        cleanup_kwargs = tmp_root.to_s.empty? ? {} : { tmproot: tmp_root }
+        Hive::Tui::ComposerStaging.cleanup!(dir, **cleanup_kwargs)
+      rescue ArgumentError => e
+        # The "refusing to clean outside tmpdir" guard fires when the
+        # staging path drifted out of `Dir.tmpdir` between creation
+        # and cleanup. That's a correctness-bug indicator and must
+        # surface unconditionally to stderr, not stay hidden behind
+        # `HIVE_TUI_DEBUG=1`.
+        warn "hive tui: staging cleanup refused (#{e.class}: #{e.message})"
+        Hive::Tui::Debug.log("new_idea_staging", "cleanup refused: #{e.class}: #{e.message}")
+      rescue SystemCallError, IOError => e
+        # Cleanup failures are visible only in the debug log by design
+        # (the staging tree will be GC'd by the OS), but warn once so
+        # an operator hitting `paste never works` has a surfaced clue
+        # — mirrors the sibling ArgumentError branch's contract.
+        warn "hive tui: staging cleanup failed (#{e.class}: #{e.message[0, 80]})"
+        Hive::Tui::Debug.log("new_idea_staging", "cleanup failed: #{e.class}: #{e.message}")
       end
 
       # Handler for the grid-mode `X` keystroke. Resolves the target
@@ -1916,30 +2130,57 @@ module Hive
         dispatch_command(message)
       end
 
-      # `n` submission: dispatch `bin/hive new <project> <title>` via the
-      # same `run_quiet!` helper that backs accept-finding / reject-
-      # finding so the screen doesn't flash on every idea entry. Project
-      # is resolved from `model.scope` (0 = first registered project per
-      # the v2 brainstorm decision; N = nth registered project). Empty
-      # title or no-projects-registered states flash an error and return
-      # to :grid without spawning a child.
+      # `n` submission. Two paths depending on the composer buffer:
+      #
+      # * Plain text → shell out to `bin/hive new <project> <title>` via
+      #   `Subprocess.run_quiet!` so the screen doesn't flash on every
+      #   idea entry (the helper captures stdout/stderr cleanly).
+      # * Rich (any staged attachments or `[imageN]` placeholders) →
+      #   `submit_rich_new_idea` calls `Hive::Commands::New#call!`
+      #   in-process and routes its stdout/stderr through `capture_io`
+      #   so the success `puts` lines do NOT corrupt the alt-screen
+      #   render.
+      #
+      # Project is resolved from `model.scope` (0 = first registered
+      # project per the v2 brainstorm decision; N = nth registered
+      # project). Empty title or no-projects-registered states flash an
+      # error and return to :grid without spawning a child.
+      #
+      # Staging cleanup policy: every exit path either runs
+      # `cleanup_new_idea_staging` before the model resets, or
+      # deliberately preserves staging so the operator can retry.
+      # See the `cleanup_new_idea_staging` / `apply_new_idea_cancelled`
+      # / `submit_rich_new_idea` (rescue + ensure) call-sites for the
+      # branch-by-branch contract.
       def submit_new_idea
-        title = @hive_model.new_idea_buffer.to_s.strip
+        buffer = @hive_model.new_idea_buffer.to_s
+        if rich_new_idea_buffer?(buffer)
+          return submit_rich_new_idea(buffer)
+        end
+
+        title = buffer.strip
         # Empty submit is a likely fat-finger Enter; flash and stay in
         # the prompt so the operator can keep typing without re-opening
         # via `n`. The buffer is preserved so any leading whitespace
         # the operator typed isn't lost — strip happens at submit time
-        # only for validation.
+        # only for validation. Staging dir (if any) is preserved too
+        # so the operator can re-paste images after correcting the
+        # title; cleanup runs only when we leave :new_idea mode below.
         if title.empty?
           return [
             @hive_model.with(flash: "title required", flash_set_at: Time.now),
             nil
           ]
         end
+        @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
 
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
         if project.nil?
           flash = new_idea_resolution_flash(@hive_model)
+          # `reset_to_grid_with_flash` clears `new_idea_staging_dir`
+          # on the model; clean the on-disk dir first so orphaned
+          # files don't leak after we drop the reference.
+          cleanup_new_idea_staging unless @hive_model.new_idea_staging_dir.to_s.empty?
           return [ reset_to_grid_with_flash(flash), nil ]
         end
 
@@ -1950,23 +2191,29 @@ module Hive
         # this file and in lib/hive/tui/triage_state.rb.
         argv = [ "hive", "new", project, title ]
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
+        # User may have pasted an image and then deleted every
+        # placeholder before submitting plain text. The buffer no
+        # longer references the staging dir, but `@hive_model` still
+        # carries it — clean both on disk and (via
+        # `reset_to_grid_with_flash`) on the model so the orphaned
+        # /tmp dir doesn't leak.
+        cleanup_new_idea_staging unless @hive_model.new_idea_staging_dir.to_s.empty?
         if exit_code.zero?
           [ reset_to_grid_with_flash("+ #{title.inspect} → #{project}"), nil ]
         else
           msg = err.to_s.lines.first&.chomp || "hive new exit #{exit_code}"
           [ reset_to_grid_with_flash("new failed: #{msg}"), nil ]
         end
-      rescue StandardError => e
+      rescue Hive::Error, SystemCallError, IOError => e
         # `Subprocess.run_quiet!` already swallows Errno::ENOENT
         # (returns synthetic [127, ...]), so this rescue covers the
-        # narrower set of exceptions that escape the bounded child:
-        # Errno::E2BIG on oversized argv, ArgumentError from a
-        # downstream model.with typo, Encoding::CompatibilityError on
-        # weird bytes the runner can't paint, etc. Without this, the
-        # outer BubbleModel#update rescue would flash a generic message
-        # but leave us stuck in :new_idea mode. Stay in :new_idea and
-        # PRESERVE the typed buffer (consistent with the empty-title
-        # path) so the operator can retry without retyping.
+        # narrower set of typed exceptions that escape the bounded
+        # child. Aligned with the rich-submit rescue list: programmer-
+        # error exceptions (NoMethodError, ArgumentError, NameError)
+        # are intentionally not caught here — they bubble to the outer
+        # `BubbleModel#update` rescue, which surfaces them as
+        # `internal error: ...`. Stay in :new_idea and PRESERVE the
+        # typed buffer so the operator can retry without retyping.
         Hive::Tui::Debug.log("submit_new_idea", "rescued #{e.class}: #{e.message}")
         [
           @hive_model.with(
@@ -1975,6 +2222,253 @@ module Hive
           ),
           nil
         ]
+      end
+
+      def rich_new_idea_buffer?(buffer)
+        @hive_model.new_idea_attachments.any? || extract_image_labels(buffer).any?
+      end
+
+      def submit_rich_new_idea(buffer)
+        # Staging-cleanup policy lives in this local flag so the
+        # ensure-block has one source of truth: the happy path AND
+        # any unexpected (programmer-error) exception both clean up;
+        # the validation path and the typed-failure rescue both
+        # PRESERVE the staging dir so the operator can retry without
+        # re-pasting. Esc/cancel still triggers cleanup via
+        # `apply_new_idea_cancelled`'s side-effect path.
+        preserve_staging = false
+        # Capture the staging dir at method entry so the ensure block
+        # is independent of any later `@hive_model.with` reassignment
+        # within this method's call tree.
+        staging_dir_at_entry = @hive_model.new_idea_staging_dir
+        staging_tmp_root_at_entry = @hive_model.new_idea_staging_tmp_root
+        if (reason = rich_new_idea_validation_error(buffer))
+          preserve_staging = true
+          return [
+            @hive_model.with(
+              flash: reason,
+              flash_set_at: Time.now,
+              new_idea_broken_labels: rich_new_idea_broken_labels(buffer)
+            ),
+            nil
+          ]
+        end
+        @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
+
+        project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
+        if project.nil?
+          preserve_staging = true
+          flash = new_idea_resolution_flash(@hive_model)
+          return [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
+        end
+
+        title = derive_rich_new_idea_title(buffer)
+        body = render_rich_new_idea_body(buffer)
+        tuples = rich_new_idea_attachment_tuples
+
+        # `Hive::Commands::New#call!` `puts`-es two success lines
+        # (`hive: captured …` + `next: mv …`). Swallow them via
+        # `capture_io` so the alt-screen render is not corrupted by
+        # raw stdout writes between bubbletea frames.
+        capture_command_io do
+          Hive::Commands::New.new(
+            project,
+            title,
+            body_override: body,
+            attachments: tuples
+          ).call!
+        end
+        count = @hive_model.new_idea_attachments.size
+        image_word = count == 1 ? "image" : "images"
+        if derive_rich_new_idea_title_from_buffer_was_default?(buffer)
+          [ reset_to_grid_with_flash(
+              "+ #{title.inspect} → #{project} (#{count} #{image_word}); " \
+              "titled 'task' — add words for a better slug"
+            ), nil ]
+        else
+          [ reset_to_grid_with_flash("+ #{title.inspect} → #{project} (#{count} #{image_word})"), nil ]
+        end
+      # `Hive::Error` covers the typed family (ProjectNotFound,
+      # InvalidSlugError, InvalidAttachmentError, SlugCollisionError,
+      # ComposerStaging::WriteError). `SystemCallError` + `IOError`
+      # cover the typed disk failures. `KeyError` from
+      # `render_rich_new_idea_body`'s `attachments.fetch(label)` is
+      # dead now that `rich_new_idea_validation_error` covers the
+      # missing-attachment case before we render the body — listing it
+      # here would be theatre that breaks if the validator's contract
+      # ever changes.
+      rescue Hive::Error, SystemCallError, IOError => e
+        preserve_staging = true
+        cause_class = e.respond_to?(:cause_class) ? e.cause_class : nil
+        cause_label = cause_class || e.cause&.class || "(unknown cause)"
+        Hive::Tui::Debug.log(
+          "submit_new_idea",
+          "rich submit failed #{e.class}(cause=#{cause_label}): #{e.message}"
+        )
+        sanitized = Hive::Tui::Text.sanitize(e.message)
+        truncated = sanitized.length > 160 ? "#{sanitized[0, 159]}…" : sanitized
+        # Preserve the buffer, attachments, AND staging dir so the
+        # operator can correct the failure cause (register the
+        # project, free disk space, etc.) and retry without re-typing
+        # or re-pasting. ComposerStaging.ensure_dir! short-circuits
+        # to the existing dir on retry, so per-attempt /tmp/ leaks
+        # don't accumulate.
+        [
+          @hive_model.with(
+            flash: "new failed: #{truncated}",
+            flash_set_at: Time.now
+          ),
+          nil
+        ]
+      ensure
+        # Programmer-error path: cleanup the disk dir AND clear the
+        # model field. Without the model reset, the outer
+        # `BubbleModel#update` rescue preserves `new_idea_staging_dir`,
+        # so the next paste calls `ensure_dir!` which short-circuits to
+        # the now-deleted path and ENOENTs on the first write.
+        unless preserve_staging
+          if staging_dir_at_entry && !staging_dir_at_entry.empty?
+            begin
+              cleanup_kwargs =
+                if staging_tmp_root_at_entry.to_s.empty?
+                  {}
+                else
+                  { tmproot: staging_tmp_root_at_entry }
+                end
+              Hive::Tui::ComposerStaging.cleanup!(staging_dir_at_entry, **cleanup_kwargs)
+            rescue ArgumentError, SystemCallError, IOError => e
+              Hive::Tui::Debug.log("new_idea_staging", "ensure cleanup: #{e.class}: #{e.message}")
+            end
+            if @hive_model.new_idea_staging_dir == staging_dir_at_entry
+              @hive_model = @hive_model.with(
+                new_idea_staging_dir: nil,
+                new_idea_staging_tmp_root: nil
+              )
+            end
+          end
+        end
+      end
+
+      # Helper used by the success-flash hint: was the derived title
+      # the "task" fallback (images-only / whitespace-only buffer)?
+      # Shares `normalize_rich_new_idea_title_text` with
+      # `derive_rich_new_idea_title` so the two derivations can't
+      # drift apart on a future rewrite.
+      def derive_rich_new_idea_title_from_buffer_was_default?(buffer)
+        normalize_rich_new_idea_title_text(buffer).empty?
+      end
+
+      # Wraps `Hive::Commands::New#call!`'s `puts` lines so they don't
+      # corrupt the alt-screen render. Falls back to `$stdout`/`$stderr`
+      # redirection — `capture_io` from minitest is not available in
+      # production.
+      def capture_command_io
+        orig_out = $stdout
+        orig_err = $stderr
+        $stdout = StringIO.new
+        $stderr = StringIO.new
+        yield
+      ensure
+        $stdout = orig_out
+        $stderr = orig_err
+      end
+
+      def rich_new_idea_validation_error(buffer)
+        labels = rich_new_idea_broken_labels(buffer)
+        return nil if labels.empty?
+
+        return "broken image placeholders: #{labels.join(', ')}" if labels.size > 1
+
+        "broken image placeholder: #{labels.first}"
+      end
+
+      def rich_new_idea_broken_labels(buffer)
+        placeholder_labels = extract_image_labels(buffer).map { |n| "image#{n}" }.to_set
+        attachment_labels = @hive_model.new_idea_attachments.map(&:label).to_set
+
+        broken = (placeholder_labels - attachment_labels).to_a +
+                 (attachment_labels - placeholder_labels).to_a
+        broken += @hive_model.new_idea_attachments.filter_map do |attachment|
+          begin
+            attachment.label unless File.exist?(attachment.staging_path)
+          rescue SystemCallError
+            # `Errno::ENAMETOOLONG` / `Errno::ELOOP` etc on a malformed
+            # path — treat as "broken" rather than letting the generic
+            # outer rescue swallow the staging-path information.
+            attachment.label
+          end
+        end
+        broken.uniq
+      end
+
+      def extract_image_labels(buffer)
+        buffer.to_s.scan(/\[image(\d+)\]/).flatten.map(&:to_i)
+      end
+
+      def derive_rich_new_idea_title(buffer)
+        stripped = normalize_rich_new_idea_title_text(buffer)
+        stripped.empty? ? "task" : stripped
+      end
+
+      # Strip `[imageN]` placeholders and collapse whitespace to derive
+      # the "what counts as user-supplied title text?" view of the
+      # buffer. Single definition used by both the title-derivation
+      # and the "was the default fallback used?" predicate so they
+      # can't disagree about what counts as an empty title.
+      def normalize_rich_new_idea_title_text(buffer)
+        buffer.to_s.gsub(/\[image\d+\]/, " ").gsub(/\s+/, " ").strip
+      end
+
+      def render_rich_new_idea_body(buffer)
+        attachments = attachments_by_label
+        buffer.to_s.gsub(/\[image(\d+)\]/) do
+          # Normalize the captured digits the same way
+          # `rich_new_idea_validation_error` does (via `.to_i`) so a
+          # manually edited zero-padded placeholder like `[image01]`
+          # resolves to the canonical `image1` attachment label
+          # instead of the literal `image01` (which would miss the
+          # attachment map and raise `KeyError` after validation
+          # already cleared the buffer for submit).
+          number = Regexp.last_match(1).to_i
+          label = "image#{number}"
+          attachment = attachments.fetch(label)
+          ext = attachment_extension(attachment)
+          "![](assets/bug-#{number}.#{ext})"
+        end
+      end
+
+      def rich_new_idea_attachment_tuples
+        @hive_model.new_idea_attachments.map do |attachment|
+          number = attachment.label.to_s.delete_prefix("image")
+          [ attachment.staging_path, "bug-#{number}.#{attachment_extension(attachment)}" ]
+        end
+      end
+
+      def attachments_by_label
+        attachments = @hive_model.new_idea_attachments
+        # Defensive guard: the monotonic counter on the model is the
+        # primary defense against duplicate labels, but a regression
+        # there would otherwise be silently masked by `.to_h` collapse.
+        # Raise loudly so the next pass surfaces the drift instead of
+        # silently overwriting one of the duplicate staging paths in
+        # `copy_attachments!`.
+        labels = attachments.map(&:label)
+        if labels.uniq.size != labels.size
+          dups = labels.tally.select { |_, n| n > 1 }.keys
+          raise Hive::Error, "duplicate attachment labels: #{dups.join(', ')}"
+        end
+
+        attachments.to_h { |attachment| [ attachment.label, attachment ] }
+      end
+
+      # `Attachment.new` canonicalizes `ext` once at construction (see
+      # `lib/hive/tui/model.rb`), so the field is already lowercased,
+      # leading-dot stripped, and `png`-fallback-ed. Both
+      # `render_rich_new_idea_body` and `rich_new_idea_attachment_tuples`
+      # route through this single accessor so any future invariant
+      # tightening lands in one place.
+      def attachment_extension(attachment)
+        attachment.ext
       end
 
       # Shared transition for every submit_new_idea exit path: clear the
@@ -1986,6 +2480,11 @@ module Hive
           mode: :grid,
           new_idea_buffer: "",
           new_idea_cursor: 0,
+          new_idea_attachments: [],
+          new_idea_staging_dir: nil,
+          new_idea_staging_tmp_root: nil,
+          new_idea_attachment_counter: 0,
+          new_idea_broken_labels: [],
           flash: text,
           flash_set_at: Time.now
         )

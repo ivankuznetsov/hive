@@ -16,6 +16,7 @@ module Hive
         waiting: "⏸",
         complete: "✓",
         agent_working: "🤖",
+        manual_steering: "🛠",
         execute_waiting: "⏸",
         execute_complete: "✓",
         execute_stale: "⚠",

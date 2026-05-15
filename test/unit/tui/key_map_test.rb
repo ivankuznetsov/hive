@@ -167,6 +167,31 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_grid_s_with_row_returns_open_in_agent
+    row = make_row(action_key: "ready_to_plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "s", row: row)
+    assert_kind_of Hive::Tui::Messages::OpenInAgent, msg
+    assert_equal row, msg.row
+  end
+
+  def test_grid_s_with_nil_suggested_command_still_returns_open_in_agent
+    row = make_row(action_key: "error", suggested_command: nil, action_label: "Error")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "s", row: row)
+    assert_kind_of Hive::Tui::Messages::OpenInAgent, msg
+    assert_equal row, msg.row
+  end
+
+  def test_grid_s_with_nil_row_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "s", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_grid_s_with_left_pane_focus_is_noop
+    row = make_row(action_key: "ready_to_plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "s", row: row, pane_focus: :left)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_new_idea_o_continues_to_emit_text_inserted
     # Mode isolation R7: in :new_idea mode the `o` key still routes
     # through new_idea_message as a printable character, not the new
@@ -199,6 +224,17 @@ class TuiKeyMapMessageForTest < Minitest::Test
     # to NOOP (only q/Esc are bound — back to grid). Pins that
     # :log_tail doesn't accidentally route `o` to grid-mode dispatch.
     msg = Hive::Tui::KeyMap.message_for(mode: :log_tail, key: "o", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_triage_s_is_noop
+    row = make_row(action_key: "review_findings", suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "s", row: row)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_log_tail_s_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :log_tail, key: "s", row: nil)
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 

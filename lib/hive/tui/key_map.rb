@@ -117,6 +117,7 @@ module Hive
         return Messages::NOOP if row.nil?
 
         return Messages::OpenTaskFolder.new(row: row) if key == "o"
+        return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 

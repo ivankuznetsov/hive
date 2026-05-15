@@ -65,6 +65,18 @@ class HiveDaemonPolicyTest < Minitest::Test
                                           last_dispatched_state_file_mtime: nil)
   end
 
+  def test_plan_needs_input_dispatches_without_mtime_edit
+    # Plan-stage WAITING is an approval pause, not a request for fresh
+    # typed answers. In daemon-enabled projects, enabling the daemon is
+    # the approval gesture, so the generated plan should advance to
+    # develop without requiring a user to open and close the file.
+    assert_equal :dispatch, decide(action: "needs_input",
+                                   stage: "3-plan",
+                                   command: "hive develop slug-a --from 3-plan",
+                                   state_file_mtime: T0 - 600,
+                                   last_dispatched_state_file_mtime: nil)
+  end
+
   def test_needs_input_first_sight_with_fresh_mtime_records_baseline
     # First-sight always records baseline regardless of mtime age.
     assert_equal :record_baseline, decide(action: "needs_input",
@@ -223,10 +235,11 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   private
 
-  def decide(action:, command:, state_file_mtime: nil,
+  def decide(action:, command:, stage: nil, state_file_mtime: nil,
              last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30)
     Hive::Daemon::Policy.decide(
       action: action,
+      stage: stage,
       command: command,
       state_file_mtime: state_file_mtime,
       last_dispatched_state_file_mtime: last_dispatched_state_file_mtime,

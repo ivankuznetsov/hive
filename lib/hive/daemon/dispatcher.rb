@@ -243,6 +243,7 @@ module Hive
 
         decision = Policy.decide(
           action: row.action,
+          stage: row.stage,
           command: row.suggested_command,
           state_file_mtime: row.state_file_mtime,
           last_dispatched_state_file_mtime:

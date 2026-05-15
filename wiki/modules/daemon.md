@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-15
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -17,7 +17,7 @@ decisions are unit-testable without forking.
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind` + mtime debounce → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:skip`. Source of truth for "should this row fire a child?". |
+| `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, and mtime debounce → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:skip`. Source of truth for "should this row fire a child?". |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), cooldowns, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates schema version; surfaces parse failures as `Result(ok: false)`. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; reaps via `Process.wait(-1, WNOHANG)`; parses JSON envelopes from child stdout; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
@@ -57,6 +57,15 @@ folders, never touches per-task `.lock` files directly. Any
 misclassification at the `Policy` level surfaces as `Hive::WrongStage`
 (exit 4) at the workflow-verb level, not as a silent advance past a
 human gate. See ADR-024.
+
+`3-plan`/`needs_input` is the policy exception to the generic
+edit-resume debounce. A generated plan in `WAITING` is an approval
+pause, not a Q&A file waiting for typed answers. For daemon-enabled
+projects the durable approval gesture is `daemon.enabled: true`, so the
+policy dispatches the row's `hive develop ... --from 3-plan` command
+immediately. Brainstorm, execute, and review `needs_input` rows still
+use mtime-baseline + debounce because those states represent actual
+user-authored answers or review decisions.
 
 ## Backlinks
 

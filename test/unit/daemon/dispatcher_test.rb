@@ -283,6 +283,19 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil skipped, "must log :skipped reason: baseline_recorded"
   end
 
+  def test_plan_needs_input_first_sight_dispatches_without_baseline
+    rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
+                 command: "hive develop s1 --from 3-plan",
+                 mtime: T0 - 600) ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.tick(now: T0)
+    assert_equal 1, sup.spawned.size
+    assert_equal "hive develop s1 --from 3-plan", sup.spawned.first[:command]
+    assert_equal T0 - 600,
+                 ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+    refute logger.events.any? { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
+  end
+
   def test_edit_action_after_baseline_user_edit_dispatches
     rows = [ row(action: "needs_input", marker: "waiting",
                  command: "hive brainstorm s1 --from 2-brainstorm",

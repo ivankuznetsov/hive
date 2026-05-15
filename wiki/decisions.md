@@ -205,6 +205,12 @@ Meanwhile the system grew its own load-bearing safety net: `hive approve` (`wiki
   3. **Recovery waits** (`:execute_stale`, `:review_stale`, `:review_ci_stale`, `:review_error`, `:error`) — these markers EXIST to demand human intervention; skipping them is correct.
   4. **External-state waits** — 7-finalize/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
 
+`3-plan`/`:waiting` is not a Q&A wait. It is the plan-approval pause
+used by the manual TUI/editor flow. For daemon-enabled projects,
+`daemon.enabled: true` is already the durable approval gesture, so the
+daemon auto-dispatches the row's `hive develop ... --from 3-plan`
+command instead of waiting for an editor open/close or mtime change.
+
 The human approval gesture for the daemon is **enabling it at `hive init`** (TTY prompt, default `Y`, per ADR-023 onboarding pattern). Per-project `daemon.enabled: true` is the explicit, durable consent. Legacy projects already on disk (configs without the `daemon:` key) fall back to `Config::DEFAULTS`'s per-project default of `false` — same "don't silently flip legacy" pattern ADR-023 used for stage agents.
 
 **Relationship to ADR-004:**

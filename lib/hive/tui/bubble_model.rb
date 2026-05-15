@@ -1535,9 +1535,10 @@ module Hive
       # `task.md` / `pr.md`). For `:execute_waiting`, use Status's
       # reason-specific action target when it is an edit target. For
       # `:review_waiting`, send the operator
-      # to files the resume path actually consumes: reviewer-authored
-      # files for the pass, or the reviews directory when there are
-      # multiple possible sources / a fix-guardrail inspection gate.
+      # to files the resume path actually consumes: the Q&A-style
+      # escalations file for the pass, reviewer-authored files for
+      # legacy gates, or the reviews directory when there are multiple
+      # possible sources / a fix-guardrail inspection gate.
       def input_editor_path(row)
         execute_target = execute_waiting_editor_path(row)
         return execute_target if execute_target
@@ -1576,7 +1577,15 @@ module Hive
           return candidate if File.exist?(candidate)
         end
 
+        if reason == "reviewer_partial_failure" && pass
+          candidate = File.join(reviews_dir, "errors-#{format('%02d', pass)}.md")
+          return candidate if File.exist?(candidate)
+        end
+
         if reason != "fix_guardrail" && pass
+          escalations = File.join(reviews_dir, "escalations-#{format('%02d', pass)}.md")
+          return escalations if File.exist?(escalations)
+
           reviewer_files = review_waiting_reviewer_files(reviews_dir, pass)
           return reviewer_files.first if reviewer_files.size == 1
         end
@@ -1810,10 +1819,10 @@ module Hive
       # is hash-based ("did content actually differ"). Brainstorm gates on
       # `changed` (parser then decides). Plan needs `content_changed` to
       # distinguish "approved by saving without edits" (advance) from
-      # "added feedback" (revise). 6-review gates on `checkboxes_changed`
-      # (the file's `[x]/[ ]` counts shifted across the edit) so a bare
-      # `:wq` with no checkbox flips doesn't dispatch a multi-minute
-      # review pass; mtime / content alone would falsely fire.
+      # "added feedback" (revise). 6-review gates on checkbox deltas
+      # for legacy checkbox files, and on content changes for the
+      # Q&A-style escalations file. A bare `:wq` still doesn't dispatch
+      # a multi-minute review pass.
       def auto_continue_outcome(row, path, exit_code, changed, content_changed, checkboxes_changed = false)
         return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
@@ -1824,7 +1833,7 @@ module Hive
         when "3-plan"
           plan_outcome(row, path, exit_code, changed, content_changed)
         when "6-review"
-          review_outcome(row, checkboxes_changed)
+          review_outcome(row, path, checkboxes_changed, content_changed)
         else
           :silent
         end
@@ -1857,18 +1866,21 @@ module Hive
         end
       end
 
-      # U6 — auto-continue for 6-review needs_input rows. Gated more
-      # tightly than plan_outcome because the dispatched verb (`hive
-      # run`) re-enters a multi-minute review pass: a bare `:wq` that
-      # changes mtime but not the [x] set must NOT trigger a re-run.
-      # The gate is the checkbox-set delta, NOT mtime — captured pre-
-      # and post-edit in open_input_editor. The marker must be re-
-      # read from row.state_file (NOT the editor path, which is
-      # reviews/fix-guardrail-NN.md or reviews/escalations-NN.md after
-      # input_editor_path resolution) because the marker lives in
-      # task.md, not in the file the user just edited.
-      def review_outcome(row, checkboxes_changed)
-        return :silent unless checkboxes_changed
+      # U6 — auto-continue for 6-review needs_input rows. Review gates
+      # have two user-edit surfaces:
+      # - legacy checkbox files (reviewer files and fix-guardrail files)
+      #   dispatch only when the [x]/[ ] counts changed.
+      # - Q&A escalation files dispatch when their content changed so
+      #   the user can answer `### A1.` in the same style as brainstorm.
+      #
+      # The marker must be re-read from row.state_file (NOT the editor
+      # path, which is reviews/fix-guardrail-NN.md or
+      # reviews/escalations-NN.md after input_editor_path resolution)
+      # because the marker lives in task.md, not in the file the user
+      # just edited.
+      def review_outcome(row, path, checkboxes_changed, content_changed)
+        actionable_change = checkboxes_changed || (content_changed && review_escalations_file?(path))
+        return :silent unless actionable_change
         return :empty_command if row.suggested_command.to_s.empty?
 
         case review_marker_state(row)
@@ -1876,6 +1888,10 @@ module Hive
         when :drifted then :marker_changed
         when :unreadable then :marker_unreadable
         end
+      end
+
+      def review_escalations_file?(path)
+        File.basename(path.to_s).match?(/\Aescalations-\d{2}\.md\z/)
       end
 
       # pr-review-toolkit round-5 H3 + #13: tri-state replacement for

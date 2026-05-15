@@ -207,10 +207,15 @@ class InitTest < Minitest::Test
 
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect: planning, development, reviewers,
-    # 9 limit prompts, daemon-enable, confirm. Choose codex for both, only
-    # first + third reviewer, override `plan` budget/timeout, accept the rest
-    # (daemon defaults to enabled on blank, confirm defaults to yes on blank).
-    inputs = "codex\n2\n1,3\n\n30,900\n\n\n\n\n\n\n\n\n\n"
+    # triage bias, 9 limit prompts, daemon-enable, confirm. Choose codex
+    # for both, safetyist triage, only first + third reviewer, override
+    # `plan` budget/timeout, accept the rest (daemon defaults to enabled on
+    # blank, confirm defaults to yes on blank).
+    inputs = [
+      "codex", "2", "1,3", "safetyist",
+      "", "30,900", "", "", "", "", "", "", "",
+      "", ""
+    ].join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -220,6 +225,7 @@ class InitTest < Minitest::Test
         assert_equal "codex", cfg.dig("brainstorm", "agent")
         assert_equal "codex", cfg.dig("plan", "agent")
         assert_equal "codex", cfg.dig("execute", "agent")
+        assert_equal "safetyist", cfg.dig("review", "triage", "bias")
         assert_equal 30,  cfg.dig("budget_usd", "plan")
         assert_equal 900, cfg.dig("timeout_sec", "plan")
 
@@ -238,7 +244,7 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    inputs = "\n\n\n\n\n\n\n\n\n\n\n\nn\n\n"
+    inputs = (([ "" ] * 13) + [ "n", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -253,8 +259,8 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # 13 blanks: planning, dev, reviewers, 9 limits, daemon-enable.
-    inputs = ([ "" ] * 13).join("\n") + "\nn\n"
+    # 14 blanks: planning, dev, reviewers, triage bias, 9 limits, daemon-enable.
+    inputs = (([ "" ] * 14) + [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)

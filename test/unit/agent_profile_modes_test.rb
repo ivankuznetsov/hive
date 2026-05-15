@@ -271,8 +271,10 @@ class AgentProfileModesTest < Minitest::Test
       refute_includes cmd, "--dangerously-skip-permissions"
       refute_includes cmd, "--include-partial-messages"
       refute_includes cmd, "--no-session-persistence"
-      # prompt last
-      assert_equal "do work", cmd.last
+      # codex reads the prompt from stdin; the argv carries "-" instead
+      # of embedding the prompt body.
+      assert_equal "-", cmd.last
+      refute_includes cmd, "do work"
     end
   end
 

@@ -183,6 +183,62 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_ignores_non_object_json_stream_events
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate([ "not", "an", "event" ])
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "", result[:final_message]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
+  def test_codex_profile_reads_prompt_from_stdin
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      fake_codex = File.join(dir, "fake-codex")
+      argv_log = File.join(dir, "argv.log")
+      stdin_log = File.join(dir, "stdin.log")
+      File.write(fake_codex, <<~SH)
+        #!/usr/bin/env bash
+        printf '%s\\n' "$@" > "#{argv_log}"
+        cat > "#{stdin_log}"
+        exit 0
+      SH
+      File.chmod(0o755, fake_codex)
+      profile = Hive::AgentProfile.new(
+        name: :codex,
+        bin_default: fake_codex,
+        headless_flag: "exec",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only
+      )
+
+      result = Hive::Agent.new(
+        task: task,
+        prompt: "large prompt body",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :exit_code_only
+      ).run!
+
+      assert_equal :ok, result[:status]
+      argv = File.read(argv_log).lines.map(&:chomp)
+      assert_equal "exec", argv[0]
+      assert_equal "-", argv[-1]
+      refute_includes argv, "large prompt body"
+      assert_equal "large prompt body", File.read(stdin_log)
+    end
+  end
+
   # Regression: claude's Edit/Write tools rewrite atomically (write tempfile
   # then rename), changing the file's inode. The earlier inode-tracking
   # heuristic falsely flagged that as a "concurrent edit". Verify hive does

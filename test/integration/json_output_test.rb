@@ -539,8 +539,8 @@ class JsonOutputTest < Minitest::Test
           assert_equal "review_waiting", payload["marker"]
           next_action = payload["next_action"]
           assert_equal Hive::Schemas::NextActionKind::EDIT, next_action["kind"]
-          assert_equal review_dir, next_action["target"],
-                       "edit-target is the task folder for review_waiting"
+          assert_equal File.join(review_dir, "reviews", "escalations-01.md"), next_action["target"],
+                       "edit-target is the Q&A escalation file for review_waiting"
           assert_match(/hive run/, next_action["rerun_with"],
                        "rerun_with must surface a `hive run` command")
         ensure

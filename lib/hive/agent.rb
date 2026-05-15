@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "open3"
+require "tempfile"
 require "time"
 require "hive/agent_profiles"
 require "hive/lock"
@@ -104,11 +105,14 @@ module Hive
       final_message = nil
       final_message_source = nil
       plain_tail = +""
+      stdin_file = prompt_stdin_file
       File.open(log_file, "a") do |log|
         log.puts "[hive] #{Time.now.utc.iso8601} spawn cwd=#{@cwd} cmd=#{cmd.inspect}"
       end
       r, w = IO.pipe
-      pid = Process.spawn(*cmd, chdir: @cwd, pgroup: true, out: w, err: w)
+      spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
+      spawn_opts[:in] = stdin_file if stdin_file
+      pid = Process.spawn(*cmd, **spawn_opts)
       w.close
       pgid = begin
         Process.getpgid(pid)
@@ -202,6 +206,11 @@ module Hive
         final_message_source: message_source,
         status: nil
       }
+    ensure
+      if stdin_file
+        stdin_file.close
+        stdin_file.unlink
+      end
     end
 
     # Build the argv for the configured profile.
@@ -231,8 +240,21 @@ module Hive
         cmd << @profile.budget_flag << @max_budget_usd.to_s
       end
       cmd.concat(@profile.output_format_flags)
-      cmd << @prompt
+      cmd << (prompt_via_stdin? ? "-" : @prompt)
       cmd
+    end
+
+    def prompt_via_stdin?
+      @profile.name == :codex
+    end
+
+    def prompt_stdin_file
+      return nil unless prompt_via_stdin?
+
+      file = Tempfile.new([ "hive-agent-prompt-", ".txt" ])
+      file.write(@prompt)
+      file.rewind
+      file
     end
 
     def kill_group(pgid)
@@ -356,6 +378,8 @@ module Hive
 
     def extract_final_message(line)
       data = JSON.parse(line)
+      return nil unless data.is_a?(Hash)
+
       case data["type"]
       when "result"
         text_value(data["result"])

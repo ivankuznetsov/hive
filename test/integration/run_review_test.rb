@@ -984,11 +984,13 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  # --- T-002 (5): max_passes cap → REVIEW_STALE -----------------------
+  # --- T-002 (5): max_passes cap stops reviewer passes ----------------
 
-  def test_max_passes_cap_lands_review_stale
-    # max_passes=1: pass-1 produces findings, fix succeeds, pass-2
-    # reviewers find new findings → cap exceeded → :review_stale pass=1.
+  def test_max_passes_cap_completes_after_final_allowed_fix
+    # max_passes=1 means "run at most one reviewer pass". If that pass
+    # produces auto-fixable findings and the fix succeeds, stop the
+    # reviewer loop and continue to browser/final completion instead of
+    # entering a synthetic pass-2 just to mark REVIEW_STALE.
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir, cfg_overrides: {
@@ -1009,12 +1011,13 @@ class RunReviewTest < Minitest::Test
         })
         FileUtils.mkdir_p(File.join(folder, "reviews"))
 
-        # Both passes produce a [x] finding; fix-agent (default driver
+        # Pass 1 produces a [x] finding; fix-agent (default driver
         # exit 0) "succeeds" without changing the worktree, so the
-        # post-fix dirty check passes. Loop hits pass=2 and the
-        # max_passes check trips review_stale.
+        # post-fix dirty check passes. The runner must not start pass 2.
+        reviewer_passes = []
         Hive::Stages::Review.singleton_class.alias_method(:__orig_run_reviewers, :run_reviewers)
         Hive::Stages::Review.define_singleton_method(:run_reviewers) do |_cfg, ctx, _task, **_kwargs|
+          reviewer_passes << ctx.pass
           path = File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md")
           File.write(path, "## High\n- [x] still broken on pass #{ctx.pass}\n")
           :ok
@@ -1033,9 +1036,11 @@ class RunReviewTest < Minitest::Test
         begin
           capture_io { Hive::Commands::Run.new(folder).call }
           marker = Hive::Markers.current(File.join(folder, "task.md"))
-          assert_equal :review_stale, marker.name,
-                       "expected :review_stale, got #{marker.name} attrs=#{marker.attrs.inspect}"
+          assert_equal :review_complete, marker.name,
+                       "expected :review_complete, got #{marker.name} attrs=#{marker.attrs.inspect}"
           assert_equal "1", marker.attrs["pass"]
+          assert_equal [ 1 ], reviewer_passes,
+                       "max_passes=1 must run exactly one reviewer pass"
         ensure
           Hive::Stages::Review.singleton_class.alias_method(:run_reviewers, :__orig_run_reviewers)
           Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_run_reviewers)

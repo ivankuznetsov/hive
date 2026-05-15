@@ -1453,7 +1453,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "force-retry-slug",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/force-retry-slug",
       marker: "review_stale",
       attrs: { "pass" => "4" },
@@ -1487,7 +1487,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "browse-not-retry",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/browse-not-retry",
       marker: "review_stale",
       attrs: { "pass" => "4" },
@@ -3429,12 +3429,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal Hive::Tui::Subprocess::COMMAND_NOT_FOUND_EXIT, exit_code
   end
 
-  def test_open_input_editor_targets_single_review_waiting_source_reviewer_file
+  def test_open_input_editor_targets_review_waiting_escalations_file
     Dir.mktmpdir("hive-review-waiting") do |folder|
       reviews = File.join(folder, "reviews")
       FileUtils.mkdir_p(reviews)
       File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] real finding\n")
-      File.write(File.join(reviews, "escalations-02.md"), "## claude-02.md\n- [ ] real finding\n")
+      escalations = File.join(reviews, "escalations-02.md")
+      File.write(escalations, "## Round 1\n\n### Q1. What should hive do?\n### A1.\n")
       row = make_task_row(
         stage: "6-review",
         folder: folder,
@@ -3446,19 +3447,61 @@ class HiveTuiBubbleModelTest < Minitest::Test
       seen_editor_invocation = capture_input_editor_invocation(row)
 
       assert_equal(
-        [ [ "fake-editor" ], File.join(reviews, "claude-02.md") ],
+        [ [ "fake-editor" ], escalations ],
         seen_editor_invocation
       )
     end
   end
 
-  def test_open_input_editor_targets_reviews_dir_when_multiple_review_waiting_sources
+  def test_open_input_editor_targets_escalations_file_when_multiple_review_waiting_sources
     Dir.mktmpdir("hive-review-waiting") do |folder|
       reviews = File.join(folder, "reviews")
       FileUtils.mkdir_p(reviews)
       File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] claude finding\n")
       File.write(File.join(reviews, "codex-02.md"), "## High\n- [ ] codex finding\n")
-      File.write(File.join(reviews, "escalations-02.md"), "## mixed\n- [ ] real finding\n")
+      escalations = File.join(reviews, "escalations-02.md")
+      File.write(escalations, "## Round 1\n\n### Q1. What should hive do?\n### A1.\n")
+      row = make_task_row(
+        stage: "6-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "escalations" => "2" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], escalations ], seen_editor_invocation
+    end
+  end
+
+  def test_open_input_editor_targets_errors_file_for_reviewer_partial_failure
+    Dir.mktmpdir("hive-review-partial-failure") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      errors = File.join(reviews, "errors-02.md")
+      File.write(errors, "# Reviewer infra errors\n")
+      File.write(File.join(reviews, "escalations-02.md"), "## Round 1\n\n### Q1. What should hive do?\n### A1.\n")
+      row = make_task_row(
+        stage: "5-review",
+        folder: folder,
+        state_file: File.join(folder, "task.md"),
+        marker: "review_waiting",
+        attrs: { "pass" => "2", "reason" => "reviewer_partial_failure" }
+      )
+
+      seen_editor_invocation = capture_input_editor_invocation(row)
+
+      assert_equal [ [ "fake-editor" ], errors ], seen_editor_invocation
+    end
+  end
+
+  def test_open_input_editor_falls_back_to_reviews_dir_when_multiple_review_sources_have_no_escalations_file
+    Dir.mktmpdir("hive-review-waiting") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] claude finding\n")
+      File.write(File.join(reviews, "codex-02.md"), "## High\n- [ ] codex finding\n")
       row = make_task_row(
         stage: "6-review",
         folder: folder,
@@ -3602,7 +3645,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # critical U6 invariant: avoid no-op runner round-trips.
     Dir.mktmpdir("u6-review-outcome") do |folder|
       row = make_review_waiting_row(folder, pass: 4)
-      outcome = @model.send(:review_outcome, row, false)
+      outcome = @model.send(:review_outcome, row, File.join(folder, "reviews/escalations-04.md"), false, false)
       assert_equal :silent, outcome
     end
   end
@@ -3617,7 +3660,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         attrs: { "pass" => "4", "reason" => "fix_guardrail" },
         suggested_command: ""
       )
-      outcome = @model.send(:review_outcome, row, true)
+      outcome = @model.send(:review_outcome, row, File.join(folder, "reviews/fix-guardrail-04.md"), true, false)
       assert_equal :empty_command, outcome
     end
   end
@@ -3630,7 +3673,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- AGENT_WORKING phase=fix pass=4 -->\n")
       row = make_review_waiting_row(folder, pass: 4)
-      outcome = @model.send(:review_outcome, row, true)
+      outcome = @model.send(:review_outcome, row, File.join(folder, "reviews/fix-guardrail-04.md"), true, false)
       assert_equal :marker_changed, outcome
     end
   end
@@ -3640,7 +3683,17 @@ class HiveTuiBubbleModelTest < Minitest::Test
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
       row = make_review_waiting_row(folder, pass: 4)
-      outcome = @model.send(:review_outcome, row, true)
+      outcome = @model.send(:review_outcome, row, File.join(folder, "reviews/fix-guardrail-04.md"), true, false)
+      assert_equal :rerun_review, outcome
+    end
+  end
+
+  def test_review_outcome_rerun_review_on_escalation_answer_content_change
+    Dir.mktmpdir("u6-review-outcome") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING escalations=1 pass=4 -->\n")
+      row = make_review_waiting_row(folder, pass: 4, reason: nil)
+      outcome = @model.send(:review_outcome, row, File.join(folder, "reviews/escalations-04.md"), false, true)
       assert_equal :rerun_review, outcome
     end
   end
@@ -3741,7 +3794,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # path for the happy 6-review case. A regression that adds a new
   # `:silent` early-return in `auto_continue_outcome` before reaching
   # `review_outcome` would not be caught by the unit tests above.
-  def test_input_editor_exit_messages_5_review_dispatches_review_verb_on_checkbox_change
+  def test_input_editor_exit_messages_6_review_dispatches_review_verb_on_checkbox_change
     Dir.mktmpdir("u6-exit-integration") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
@@ -3764,7 +3817,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_input_editor_exit_messages_5_review_silent_on_no_checkbox_change
+  def test_input_editor_exit_messages_6_review_silent_on_no_checkbox_change
     Dir.mktmpdir("u6-exit-integration") do |folder|
       task_md = File.join(folder, "task.md")
       File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 matches=2 -->\n")
@@ -3777,6 +3830,25 @@ class HiveTuiBubbleModelTest < Minitest::Test
       )
       assert_equal 1, messages.size, "bare :wq must emit only [InputEditorExited], no dispatch"
       assert_kind_of Hive::Tui::Messages::InputEditorExited, messages[0]
+    end
+  end
+
+  def test_input_editor_exit_messages_5_review_dispatches_on_escalation_answer_edit
+    Dir.mktmpdir("u6-exit-integration") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING escalations=1 pass=4 -->\n")
+      row = make_review_waiting_row(folder, pass: 4, reason: nil)
+      messages = @model.send(
+        :input_editor_exit_messages,
+        row, File.join(folder, "reviews/escalations-04.md"),
+        0, true,
+        true,  # content changed in Q&A escalation file
+        false  # no checkbox changes needed for Q&A answers
+      )
+
+      assert_equal 3, messages.size
+      assert_kind_of Hive::Tui::Messages::Flash, messages[1]
+      assert_kind_of Hive::Tui::Messages::DispatchCommand, messages[2]
     end
   end
 

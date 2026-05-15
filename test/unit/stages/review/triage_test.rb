@@ -85,12 +85,15 @@ class TriageTest < Minitest::Test
     with_triage_dir do |dir, task_folder|
       ctx = make_ctx(dir, task_folder)
       reviews_dir = File.join(task_folder, "reviews")
+      File.write(File.join(task_folder, "plan.md"), "# Plan\n\nRequirements Trace: fix the README.\n")
+      File.write(File.join(task_folder, "brainstorm.md"), "## Requirements\n- User wants fewer escalations.\n")
       File.write(File.join(reviews_dir, "claude-ce-code-review-01.md"),
                  "## High\n- [ ] potential SQL injection: validate input\n")
       File.write(File.join(reviews_dir, "codex-ce-code-review-01.md"),
                  "## Nit\n- [ ] naming: prefer snake_case\n")
 
       escalations = File.join(reviews_dir, "escalations-01.md")
+      File.write(escalations, "# Existing escalations\n\nUser ruling: keep the README scope.\n")
       ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = escalations
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Escalations for pass 01\n\n_All clean._\n"
 
@@ -104,6 +107,11 @@ class TriageTest < Minitest::Test
 
       argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
       assert_includes argv, "courageous mode"
+      assert_includes argv, "Context for resolving findings before user escalation"
+      assert_includes argv, "Requirements Trace: fix the README."
+      assert_includes argv, "User wants fewer escalations."
+      assert_includes argv, "User ruling: keep the README scope."
+      assert_includes argv, "### Q1. <specific decision needed>"
       assert_includes argv, "claude-ce-code-review-01.md"
       assert_includes argv, "codex-ce-code-review-01.md"
       assert_includes argv, "escalations-01.md"

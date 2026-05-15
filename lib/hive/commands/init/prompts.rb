@@ -25,6 +25,8 @@ module Hive
 
         DEFAULT_PLANNING_AGENT = "claude".freeze
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
+        DEFAULT_TRIAGE_BIAS = "courageous".freeze
+        TRIAGE_BIASES = %w[courageous safetyist].freeze
 
         # Reviewer entries shipped in templates/project_config.yml.erb. The
         # multi-select prompt offers these as the toggleable set; rendering
@@ -91,8 +93,9 @@ module Hive
         #     "planning_agent"    => String,           # one of @registered_agents
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
-        #     "budgets"  => Hash<String, Integer>,     # 8 keys (LIMIT_KEYS)
-        #     "timeouts" => Hash<String, Integer>,     # 8 keys (LIMIT_KEYS)
+        #     "triage_bias"       => String,           # courageous | safetyist
+        #     "budgets"  => Hash<String, Integer>,     # 9 keys (LIMIT_KEYS)
+        #     "timeouts" => Hash<String, Integer>,     # 9 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
         #   }
         # Raises Aborted when the user declines confirmation.
@@ -103,6 +106,7 @@ module Hive
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
+          triage_bias = prompt_triage_bias
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
 
@@ -110,6 +114,7 @@ module Hive
             "planning_agent" => planning,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
+            "triage_bias" => triage_bias,
             "budgets" => budgets,
             "timeouts" => timeouts,
             "daemon_enabled" => daemon_enabled
@@ -135,6 +140,7 @@ module Hive
             "planning_agent" => DEFAULT_PLANNING_AGENT,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
+            "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true
@@ -144,7 +150,8 @@ module Hive
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
-            "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, limits=defaults, daemon=enabled"
+            "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
+            "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled"
           )
           answers
         end
@@ -245,6 +252,34 @@ module Hive
           out.uniq
         end
 
+        def prompt_triage_bias
+          @output.puts ""
+          @output.puts "Triage bias — choose how review findings are routed before auto-fix:"
+          @output.puts "  1) courageous - auto-fix polish, mechanical, and obvious findings; escalate judgment calls"
+          @output.puts "  2) safetyist  - auto-fix only truly mechanical findings; escalate the rest"
+          loop do
+            @output.print "Triage bias [#{DEFAULT_TRIAGE_BIAS}]: "
+            @output.flush
+            answer = read_line
+            return DEFAULT_TRIAGE_BIAS if answer.empty?
+
+            resolved = resolve_triage_bias_choice(answer)
+            return resolved if resolved
+
+            @output.puts "  unknown triage bias #{answer.inspect}; pick courageous/safetyist or 1..#{TRIAGE_BIASES.size}"
+          end
+        end
+
+        def resolve_triage_bias_choice(answer)
+          if answer =~ /\A\d+\z/
+            idx = answer.to_i
+            return TRIAGE_BIASES[idx - 1] if idx.between?(1, TRIAGE_BIASES.size)
+
+            return nil
+          end
+          TRIAGE_BIASES.find { |bias| bias.casecmp(answer).zero? }
+        end
+
         def prompt_limits
           @output.puts ""
           @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec> (blank = defaults)."
@@ -323,6 +358,7 @@ module Hive
           @output.puts "  planning_agent    = #{answers['planning_agent']}"
           @output.puts "  development_agent = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
+          @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"
         end

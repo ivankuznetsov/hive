@@ -78,7 +78,7 @@ review:
     #     contradictions / low-confidence.
     #   - safetyist: escalation-biased — auto-fix only the truly mechanical
     #     (typos, lint); escalate anything else by default.
-    bias: courageous
+    bias: <%= triage_bias %>
     # Optional path under <hive-state>/templates/ to override the bias
     # preset's prompt entirely.
     custom_prompt: null

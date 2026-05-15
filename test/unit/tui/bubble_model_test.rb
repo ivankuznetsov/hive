@@ -864,7 +864,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "recover-me",
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       marker: "review_error",
       attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
@@ -904,7 +904,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "recover-me",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/recover-me",
       marker: "review_error",
       attrs: { "reason" => "triage_failed", "pass" => "3" },
@@ -937,7 +937,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "stale-review",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/stale-review",
       marker: "review_stale",
       attrs: { "pass" => "4" },
@@ -1032,7 +1032,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         action_key: "recover_review",
         action_label: "Needs recovery",
         slug: "stale-review",
-        stage: "5-review",
+        stage: "6-review",
         folder: dir,
         marker: "review_stale",
         attrs: { "pass" => "4" },
@@ -1077,7 +1077,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         action_key: "recover_review",
         action_label: "Needs recovery",
         slug: "stale-review",
-        stage: "5-review",
+        stage: "6-review",
         folder: dir,
         marker: "review_stale",
         attrs: { "pass" => "4" },
@@ -1118,7 +1118,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         action_key: "recover_review",
         action_label: "Needs recovery",
         slug: "wall-clock-stale",
-        stage: "5-review",
+        stage: "6-review",
         folder: dir,
         marker: "review_stale",
         attrs: { "reason" => "wall_clock", "pass" => "1", "elapsed" => "5400" },
@@ -1160,7 +1160,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "partial-failure",
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       marker: "review_error",
       attrs: { "reason" => "triage_failed", "pass" => "2" },
@@ -1188,7 +1188,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "no-folder",
-      stage: "5-review",
+      stage: "6-review",
       folder: "",
       marker: "review_error",
       attrs: { "reason" => "triage_failed" },
@@ -1214,7 +1214,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "unknown-marker",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/unknown-marker",
       marker: "review_timeout",
       attrs: { "reason" => "future_marker" },
@@ -1241,7 +1241,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "io-fail",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/io-fail",
       marker: "review_error",
       attrs: { "reason" => "triage_failed" },
@@ -1272,7 +1272,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "logic-bug",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/logic-bug",
       marker: "review_error",
       attrs: { "reason" => "triage_failed" },
@@ -1304,7 +1304,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "dedup-me",
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       marker: "review_error",
       attrs: { "reason" => "triage_failed", "pass" => "2" },
@@ -1344,7 +1344,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "sanitize-me",
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       marker: "review_error",
       attrs: { "reason" => "bad\x1b[31mansi\x1b[0m\nNL", "pass" => "2" },
@@ -1372,7 +1372,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "no-attrs",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/no-attrs",
       marker: "review_error",
       attrs: {},
@@ -1403,7 +1403,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "recover_review",
       action_label: "Needs recovery",
       slug: "extra-attrs",
-      stage: "5-review",
+      stage: "6-review",
       folder: "/tmp/hive/extra-attrs",
       marker: "review_error",
       attrs: { "reason" => "triage_failed", "zebra" => "z", "apple" => "a" },
@@ -2299,7 +2299,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       File.write(escalations, "## High\n- [ ] real finding\n")
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
       )
       seen_editor_invocation = nil
@@ -2341,7 +2341,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       File.write(File.join(dir, "reviews", "escalations-04.md"), "## pass-4 findings\n")
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: { "pass" => "2" }, suggested_command: nil
       )
       seen_path = nil
@@ -2376,7 +2376,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "reviews"))
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
       )
       seen_path = nil
@@ -2407,7 +2407,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # Handler flashes refusal, returns no takeover command.
     with_tmp_dir do |dir|
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
       )
 
@@ -2425,7 +2425,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "reviews"))
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: {}, suggested_command: nil
       )
 
@@ -2443,7 +2443,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "reviews"))
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: { "pass" => "abc" }, suggested_command: nil
       )
       seen_path = nil
@@ -2473,7 +2473,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         # Empty reviews dir — the test pins the pass-rejection path,
         # not the dir-fallback. We're asserting refusal.
         row = make_task_row(
-          action_key: "recover_review", slug: "stale-review", stage: "5-review",
+          action_key: "recover_review", slug: "stale-review", stage: "6-review",
           folder: dir, marker: "review_stale", attrs: { "pass" => bad_pass }, suggested_command: nil
         )
         @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
@@ -2502,7 +2502,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "reviews"))
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale",
         attrs: { "pass" => "../../etc/passwd" }, suggested_command: nil
       )
@@ -2545,7 +2545,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       File.write(File.join(dir, "reviews", "escalations-04.md"), "## High\n")
 
       row = make_task_row(
-        action_key: "recover_review", slug: "stale-review", stage: "5-review",
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
         folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
       )
       @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
@@ -2952,7 +2952,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       File.write(File.join(reviews, "claude-02.md"), "## High\n- [ ] real finding\n")
       File.write(File.join(reviews, "escalations-02.md"), "## claude-02.md\n- [ ] real finding\n")
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: File.join(folder, "task.md"),
         marker: "review_waiting",
@@ -2976,7 +2976,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       File.write(File.join(reviews, "codex-02.md"), "## High\n- [ ] codex finding\n")
       File.write(File.join(reviews, "escalations-02.md"), "## mixed\n- [ ] real finding\n")
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: File.join(folder, "task.md"),
         marker: "review_waiting",
@@ -3004,7 +3004,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       guardrail_path = File.join(reviews, "fix-guardrail-03.md")
       File.write(guardrail_path, "- [ ] shell_pipe_to_interpreter\n")
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: File.join(folder, "task.md"),
         marker: "review_waiting",
@@ -3028,7 +3028,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       reviews = File.join(folder, "reviews")
       FileUtils.mkdir_p(reviews)
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: File.join(folder, "task.md"),
         marker: "review_waiting",
@@ -3044,7 +3044,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # --- U6 auto-continue unit coverage (ce-review P1 #9) ---------------
   #
-  # The new TUI auto-continue path for 5-review needs_input rows
+  # The new TUI auto-continue path for 6-review needs_input rows
   # gained four private methods that PR-A originally shipped without
   # direct tests. The two P0 bugs caught in /ce-review (Flash kwarg
   # crash + reviews-dir-as-editor-path silencing every dispatch) would
@@ -3055,7 +3055,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     attrs = { "pass" => pass.to_s }
     attrs["reason"] = reason if reason
     make_task_row(
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       state_file: File.join(folder, "task.md"),
       marker: "review_waiting",
@@ -3126,7 +3126,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_review_outcome_empty_command_when_suggested_command_blank
     Dir.mktmpdir("u6-review-outcome") do |folder|
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: File.join(folder, "task.md"),
         marker: "review_waiting",
@@ -3210,7 +3210,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       # Pass a directory where the state_file is expected — reading it
       # raises Errno::EISDIR, which the rescue catches.
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: folder, # directory, not a file
         marker: "review_waiting",
@@ -3228,7 +3228,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_dispatch_rerun_review_for_malformed_command_emits_suppression_flash
     folder = "/tmp/hive/test-malformed"
     row = make_task_row(
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       state_file: File.join(folder, "task.md"),
       marker: "review_waiting",
@@ -3254,7 +3254,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # pr-review-toolkit round-5 pr-test-analyzer #7 — integration test
   # through `input_editor_exit_messages` driving the full
   # `auto_continue_outcome → review_outcome → dispatch_rerun_review_for`
-  # path for the happy 5-review case. A regression that adds a new
+  # path for the happy 6-review case. A regression that adds a new
   # `:silent` early-return in `auto_continue_outcome` before reaching
   # `review_outcome` would not be caught by the unit tests above.
   def test_input_editor_exit_messages_5_review_dispatches_review_verb_on_checkbox_change
@@ -3268,7 +3268,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
         File.join(folder, "reviews/fix-guardrail-04.md"),
         0,        # exit_code
         true,     # changed (mtime)
-        false,    # content_changed (irrelevant for 5-review)
+        false,    # content_changed (irrelevant for 6-review)
         true      # checkboxes_changed — the load-bearing signal
       )
 
@@ -3302,7 +3302,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       # with Errno::EISDIR → review_marker_state returns :unreadable
       # → outcome is :marker_unreadable (distinct from :marker_changed).
       row = make_task_row(
-        stage: "5-review",
+        stage: "6-review",
         folder: folder,
         state_file: folder,
         marker: "review_waiting",
@@ -3329,7 +3329,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # This test pins the corrected message shape.
     folder = "/tmp/hive/test-slug"
     row = make_task_row(
-      stage: "5-review",
+      stage: "6-review",
       folder: folder,
       state_file: File.join(folder, "task.md"),
       marker: "review_waiting",
@@ -3406,7 +3406,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   def make_error_row(slug:, folder:, exit_code:, reason: "exit_code")
     Hive::Tui::Snapshot::Row.new(
-      project_name: "demo", stage: "5-review", slug: slug, folder: folder,
+      project_name: "demo", stage: "6-review", slug: slug, folder: folder,
       state_file: nil, marker: "error", attrs: { "reason" => reason, "exit_code" => exit_code.to_s },
       mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
@@ -3429,9 +3429,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   def test_snapshot_with_sigterm_error_triggers_heal
     captured = stub_heal_capture(@model)
-    snap = snapshot_with([ make_error_row(slug: "killed", folder: "/x/.hive-state/stages/5-review/killed", exit_code: 143) ])
+    snap = snapshot_with([ make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143) ])
     @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
-    assert_equal [ "/x/.hive-state/stages/5-review/killed" ], captured,
+    assert_equal [ "/x/.hive-state/stages/6-review/killed" ], captured,
       "sigterm-killed task must trigger one heal"
   end
 
@@ -3472,7 +3472,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_snapshot_with_multiple_kill_class_rows_triggers_heal_for_each
     captured = stub_heal_capture(@model)
     snap = snapshot_with([
-      make_error_row(slug: "a", folder: "/x/.hive-state/stages/5-review/a", exit_code: 143),
+      make_error_row(slug: "a", folder: "/x/.hive-state/stages/6-review/a", exit_code: 143),
       make_error_row(slug: "b", folder: "/x/.hive-state/stages/4-execute/b", exit_code: 137),
       make_error_row(slug: "c", folder: "/x/.hive-state/stages/3-plan/c", exit_code: 130)
     ])
@@ -3480,7 +3480,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal(
       [ "/x/.hive-state/stages/3-plan/c",
         "/x/.hive-state/stages/4-execute/b",
-        "/x/.hive-state/stages/5-review/a" ],
+        "/x/.hive-state/stages/6-review/a" ],
       captured.sort,
       "every kill-class row in the snapshot must trigger its own heal — not just the first"
     )
@@ -3500,7 +3500,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   def test_heal_dedup_only_fires_once_per_folder
     captured = stub_heal_capture(@model)
-    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/5-review/killed", exit_code: 143)
+    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
     snap = snapshot_with([ row ])
     @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
     @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
@@ -3623,7 +3623,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     with_isolated_subprocess_log do |log_path|
       write_log_section(
         log_path,
-        argv: %w[hive pr hello-world-test-260425-431f --project demo --from 6-pr],
+        argv: %w[hive pr hello-world-test-260425-431f --project demo --from 7-finalize],
         stderr: "hive: git push failed: fatal: 'origin' does not appear to be a git repository",
         exit_code: 1
       )
@@ -3688,11 +3688,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
     require "tmpdir"
     Dir.mktmpdir do |project_root|
       slug = "demo-260426-aaaa"
-      task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
       FileUtils.mkdir_p(File.join(project_root, ".hive-state", "logs", slug)) # logs dir but NO *.log files
 
       row = Hive::Tui::Snapshot::Row.new(
-        project_name: File.basename(project_root), stage: "5-review", slug: slug,
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
         action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
@@ -3716,13 +3716,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
     require "tmpdir"
     Dir.mktmpdir do |project_root|
       slug = "tail-260428-aaaa"
-      task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
       logs = File.join(project_root, ".hive-state", "logs", slug)
       FileUtils.mkdir_p(logs)
       File.write(File.join(logs, "agent.log"), "first line\n")
 
       row = Hive::Tui::Snapshot::Row.new(
-        project_name: File.basename(project_root), stage: "5-review", slug: slug,
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
         action_key: "agent_running", action_label: "Agent running", suggested_command: nil, next_action: nil
@@ -3739,13 +3739,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
     require "tmpdir"
     Dir.mktmpdir do |project_root|
       slug = "review-tail-260508-aaaa"
-      task_folder = File.join(project_root, ".hive-state", "stages", "5-review", slug)
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
       logs = File.join(task_folder, "logs")
       FileUtils.mkdir_p(logs)
       File.write(File.join(logs, "review-triage-pass04.log"), "review line\n")
 
       row = Hive::Tui::Snapshot::Row.new(
-        project_name: File.basename(project_root), stage: "5-review", slug: slug,
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: "review_stale", attrs: { "pass" => "4" },
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
         action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil, next_action: nil

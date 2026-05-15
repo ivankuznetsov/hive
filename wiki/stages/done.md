@@ -1,5 +1,5 @@
 ---
-title: 7-done stage
+title: 8-done stage
 type: stage
 source: lib/hive/stages/done.rb
 created: 2026-04-25
@@ -37,6 +37,6 @@ The MVP intentionally does not run `git worktree remove` automatically because s
 
 ## Backlinks
 
-- [[stages/pr]] · [[stages/execute]]
+- [[stages/finalize]] · [[stages/execute]]
 - [[modules/worktree]] · [[modules/markers]]
 - [[state-model]]

@@ -32,7 +32,8 @@ tags: [gap, todo]
 | `lib/hive/stages/brainstorm.rb` | ✓ [[stages/brainstorm]] |
 | `lib/hive/stages/plan.rb` | ✓ [[stages/plan]] |
 | `lib/hive/stages/execute.rb` | ✓ [[stages/execute]] |
-| `lib/hive/stages/pr.rb` | ✓ [[stages/pr]] |
+| `lib/hive/stages/open_pr.rb` | ✓ [[stages/open-pr]] |
+| `lib/hive/stages/finalize.rb` | ✓ [[stages/finalize]] |
 | `lib/hive/stages/done.rb` | ✓ [[stages/done]] |
 | `templates/*.erb` (all 9) | ✓ [[templates]] |
 | `test/**` | ✓ [[testing]] |

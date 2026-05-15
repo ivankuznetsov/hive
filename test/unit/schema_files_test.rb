@@ -32,7 +32,7 @@ class SchemaFilesTest < Minitest::Test
   end
 
   # v1 (the original 6-stage schema) is preserved for external validators
-  # pinned to the pre-5-review release. Loading by explicit version: must
+  # pinned to the pre-6-review release. Loading by explicit version: must
   # still resolve.
   def test_hive_approve_v1_schema_file_remains_for_back_compat
     path = Hive::Schemas.schema_path("hive-approve", version: 1)
@@ -46,16 +46,17 @@ class SchemaFilesTest < Minitest::Test
     v1_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
     assert_includes v1_dirs, "5-pr",
                     "v1 must keep its original enum (5-pr / 6-done) for pinned consumers"
-    refute_includes v1_dirs, "5-review",
-                    "v1 enum must NOT include the v2-introduced 5-review stage"
+    refute_includes v1_dirs, "6-review",
+                    "v1 enum must NOT include the v2-introduced 6-review stage"
   end
 
-  def test_hive_approve_v2_includes_review_stage
+  def test_hive_approve_v2_includes_current_stage_dirs
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
-    assert_includes v2_dirs, "5-review", "v2 introduces the 5-review stage"
-    assert_includes v2_dirs, "6-pr"
-    assert_includes v2_dirs, "7-done"
+    assert_includes v2_dirs, "5-open-pr"
+    assert_includes v2_dirs, "6-review"
+    assert_includes v2_dirs, "7-finalize"
+    assert_includes v2_dirs, "8-done"
     refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
   end
 
@@ -109,8 +110,15 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 1)))
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_includes doc.dig("$defs", "Task", "properties", "stage", "enum"), "6-pr"
+    assert_includes doc.dig("$defs", "Task", "properties", "action", "enum"), "ready_for_pr"
   end
 
   def test_hive_status_required_keys_match_producer_emission
@@ -208,8 +216,15 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-run",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_run_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run", version: 1)))
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_includes doc.dig("$defs", "SuccessPayload", "required"), "rebase"
+    assert_includes doc.dig("$defs", "SuccessPayload", "properties", "stage", "enum"), "pr"
   end
 
   def test_hive_run_required_keys_match_producer_emission
@@ -222,7 +237,7 @@ class SchemaFilesTest < Minitest::Test
     producer_required = Hive::Commands::Run::REQUIRED_PAYLOAD_KEYS.sort
 
     assert_equal producer_required, schema_required,
-                 "schema/producer required-key drift in hive-run.v1.json"
+                 "schema/producer required-key drift in current hive-run schema"
   end
 
   # OPTIONAL_PAYLOAD_KEYS documents fields that are valid in SuccessPayload
@@ -444,6 +459,15 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-stage-action",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 2,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_stage_action_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action", version: 1)))
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_includes doc.dig("$defs", "SuccessPayload", "properties", "verb", "enum"), "pr"
+    assert_includes doc.dig("$defs", "NextAction", "properties", "key", "enum"), "ready_for_pr"
   end
 
   def test_hive_stage_action_success_required_keys_match_producer

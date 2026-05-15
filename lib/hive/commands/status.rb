@@ -204,7 +204,9 @@ module Hive
         "Ready to develop",
         "Review findings",
         "Needs recovery",
-        "Ready for PR",
+        "Ready to open PR",
+        "Ready for review",
+        "Ready to finalize",
         "Ready to archive",
         "Archived",
         "Error"

@@ -10,8 +10,10 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 56
+Page count: 57
 Updated: 2026-05-14
+
+Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives an eight-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-finalize` → `8-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive.
 
 ## Pages
 
@@ -63,10 +65,11 @@ Updated: 2026-05-14
 - [[stages/brainstorm]] — `wiki/stages/brainstorm.md`
 - [[stages/done]] — `wiki/stages/done.md`
 - [[stages/execute]] — `wiki/stages/execute.md`
+- [[stages/finalize]] — `wiki/stages/finalize.md`
 - [[stages/inbox]] — `wiki/stages/inbox.md`
 - [[stages/index]] — `wiki/stages/index.md`
+- [[stages/open-pr]] — `wiki/stages/open-pr.md`
 - [[stages/plan]] — `wiki/stages/plan.md`
-- [[stages/pr]] — `wiki/stages/pr.md`
 - [[stages/review]] — `wiki/stages/review.md`
 - [[state-model]] — `wiki/state-model.md`
 - [[templates]] — `wiki/templates.md`

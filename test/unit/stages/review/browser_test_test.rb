@@ -28,7 +28,7 @@ class BrowserTestTest < Minitest::Test
 
   def with_browser_dir(pass: 1)
     with_tmp_dir do |dir|
-      task_folder = File.join(dir, ".hive-state", "stages", "5-review", "browser-test-task")
+      task_folder = File.join(dir, ".hive-state", "stages", "6-review", "browser-test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
       FileUtils.mkdir_p(File.join(task_folder, "logs"))
       ctx = Hive::Reviewers::Context.new(

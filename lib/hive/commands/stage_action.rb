@@ -9,8 +9,7 @@ require "hive/task_action"
 
 module Hive
   module Commands
-    # Workflow verb dispatcher. Each of `brainstorm`, `plan`, `develop`,
-    # `pr`, `archive` is a single Thor command that resolves a slug or
+    # Workflow verb dispatcher. Each workflow command resolves a slug or
     # folder, then either:
     #   - runs the target stage's agent if the task is already at the
     #     verb's target stage,
@@ -98,13 +97,13 @@ module Hive
         )
       end
 
-      # Archive on a task already at 7-done with :complete is a no-op.
+      # Archive on a task already at 8-done with :complete is a no-op.
       # Without this guard, every `hive archive <slug>` invocation re-runs
-      # the Done agent and writes a fresh `hive: 7-done/<slug> archived`
+      # the Done agent and writes a fresh `hive: 8-done/<slug> archived`
       # commit to hive/state.
       def archive_noop?(task, current_stage)
         return false unless @verb == "archive"
-        return false unless current_stage == "7-done"
+        return false unless current_stage == "8-done"
 
         Hive::Markers.current(task.state_file).name == :complete
       end
@@ -173,7 +172,7 @@ module Hive
                                              reason: "already_archived",
                                              marker: marker))
         else
-          puts "hive: noop — #{task.slug} is already at 7-done"
+          puts "hive: noop — #{task.slug} is already at 8-done"
         end
       end
 

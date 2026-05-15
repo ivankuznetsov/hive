@@ -92,7 +92,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       {
         "name" => "p2", "path" => "/tmp/p2", "hive_state_path" => "/tmp/p2/.h",
         "tasks" => [ task_row(slug: "s3", action: "ready_to_archive",
-                              command: "hive archive s3 --from 6-pr") ]
+                              command: "hive archive s3 --from 7-finalize") ]
       }
     ])
     with_fake_status(JSON.generate(payload)) do |bin|

@@ -30,7 +30,7 @@ Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
 `Doctor#call` builds two row kinds and concatenates them:
 
 - **`kind: "stage"`** — one row per entry in `STAGES = %w[brainstorm plan]`. `label = stage`. Reads `cfg.dig(stage, "agent")` (default `"claude"`) and `cfg.dig(stage, "skill")` (falling back to `Hive::Config::DEFAULTS.dig(stage, "skill")`). The configured skill is routed through `profile.format_skill_invocation(skill)` before verification, so a pi stage receives `/skill:<name>` even when the user wrote `/<name>` in config.
-- **`kind: "reviewer"`** — one row per entry in `cfg.dig("review", "reviewers")`. `label = "5-review/<name>"`. Reads `agent`, `name`, `kind` (default `"agent"`), and `skill`. The bare config skill is formatted through `profile.format_skill_invocation` to obtain the full invocation before passing to `verify_skill`, so the JSON envelope's `skill` field is uniform across stage and reviewer rows.
+- **`kind: "reviewer"`** — one row per entry in `cfg.dig("review", "reviewers")`. `label = "6-review/<name>"`. Reads `agent`, `name`, `kind` (default `"agent"`), and `skill`. The bare config skill is formatted through `profile.format_skill_invocation` to obtain the full invocation before passing to `verify_skill`, so the JSON envelope's `skill` field is uniform across stage and reviewer rows.
 
 Reviewer entries with `kind != "agent"` short-circuit to `:not_applicable` with a "kind '<X>' is not 'agent'; doctor only checks agent-kind reviewers" message. **This is the only load-time signal for non-agent kinds** — `Hive::Config.validate_reviewers!` does not validate `kind`; only `Hive::Reviewers.dispatch` does, at run-time.
 
@@ -62,7 +62,7 @@ A new agent profile becomes "doctorable" by registering a `Hive::SkillCheck::*` 
   "checks": [
     {"kind": "stage", "stage": "brainstorm", "label": "brainstorm", "agent": "claude", "configured_skill": "/compound-engineering:ce-brainstorm", "skill": "/compound-engineering:ce-brainstorm", "status": "present", "message": "..."},
     {"kind": "stage", "stage": "plan", "label": "plan", "agent": "pi", "configured_skill": "/plan", "skill": "/skill:plan", "status": "present", "message": "..."},
-    {"kind": "reviewer", "stage": "5-review", "name": "claude-ce-code-review", "label": "5-review/claude-ce-code-review", "agent": "claude", "configured_skill": "ce-code-review", "skill": "/ce-code-review", "status": "missing", "message": "..."}
+    {"kind": "reviewer", "stage": "6-review", "name": "claude-ce-code-review", "label": "6-review/claude-ce-code-review", "agent": "claude", "configured_skill": "ce-code-review", "skill": "/ce-code-review", "status": "missing", "message": "..."}
   ],
   "summary": {"missing": 1, "present": 2, "not_applicable": 0}
 }

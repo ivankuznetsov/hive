@@ -162,6 +162,10 @@ module Hive
       # (workflow-contextual) and the verb keys (subprocess dispatch).
       OpenTaskFolder = Data.define(:row)
 
+      # Enter on a completed 7-finalize row — browse the final summary
+      # document in $EDITOR. Falls back to pr.md if summary.md is missing.
+      OpenSummary = Data.define(:row)
+
       # Sent by the editor takeover callable after the editor exits.
       # `changed` is true when the input target's mtime changed during
       # the edit window, so the status flash can distinguish a saved

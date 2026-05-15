@@ -3,19 +3,19 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-05-05
+updated: 2026-05-13
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a small Ruby 3.4 / Thor CLI that drives a six-stage filesystem state machine. The CLI dispatches into per-stage runners; each runner spawns `claude -p` as a subprocess inside a per-task lock and a per-project commit lock. There is no daemon, no server, no database. Two filesystem trees per project hold all state.
+**TLDR**: Hive is a small Ruby 3.4 / Thor CLI that drives an eight-stage filesystem state machine. The CLI dispatches into per-stage runners; active runners spawn an AgentProfile CLI as a subprocess inside a per-task lock and a per-project commit lock. Two filesystem trees per project hold all state.
 
 ## Layer cake
 
 ```
 bin/hive                          Thor entry; rescues Hive::Error → exit
   └─ lib/hive/cli.rb              command class (init / new / run / status)
-       └─ lib/hive/commands/      Init · New · Run · Status
-            └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · Pr · Done
+       └─ lib/hive/commands/      Init · New · Run · Status · StageAction
+            └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Finalize · Done
                  ├─ Stages::Base  template render + agent spawn helpers
                  └─ Hive::Agent   `claude -p` subprocess wrapper
                       └─ Hive::Markers / Lock / Worktree / GitOps / Config / Task
@@ -56,8 +56,9 @@ Concurrency: any number of `hive run` processes on **different** tasks can proce
 | `brainstorm` | `Stages::Brainstorm` | yes | no |
 | `plan` | `Stages::Plan` | yes | no |
 | `execute` | `Stages::Execute` | yes (impl-only since ADR-014) | yes (in feature worktree) |
+| `open-pr` | `Stages::OpenPr` | yes | no code edits (`git push`, `gh pr create --draft`) |
 | `review` | `Stages::Review` (orchestrator) → `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | yes (CI-fix + reviewers + triage + fix + browser; sub-spawns use `status_mode: :exit_code_only` per ADR-021) | yes (fix agent commits in feature worktree) |
-| `pr` | `Stages::Pr` | yes (unless idempotent) | yes (`git push`, `gh pr create`) |
+| `finalize` | `Stages::Finalize` | yes | no code edits (`gh pr edit`, `gh pr ready`, `summary.md`) |
 | `done` | `Stages::Done` | no | no |
 
 Inbox/Done are the two non-working stages: capture-only and archive-only.
@@ -80,7 +81,7 @@ claude -p
 
 `HIVE_CLAUDE_BIN` env var overrides the binary (used by tests with `test/fixtures/fake-claude`). `--verbose` is mandatory whenever `-p` is paired with `--output-format stream-json` (claude rejects the invocation otherwise).
 
-`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 5-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), and (d) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. A separate post-PR secret-scan in `Stages::Pr` blocks publishing on api-key/AWS/GH-token regex hits.
+`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 6-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), and (d) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. PR publishing paths (`OpenPr`, `Review::GithubPublisher`, `Finalize`) also secret-scan before sending content to GitHub.
 
 ## State machine (cross-stage)
 
@@ -93,11 +94,12 @@ stateDiagram-v2
     S2_brainstorm --> S3_plan: user mv (COMPLETE)
     S3_plan --> S3_plan: hive run (refine)
     S3_plan --> S4_execute: user mv (COMPLETE)
-    S4_execute --> S5_review: user mv (EXECUTE_COMPLETE)
-    S5_review --> S5_review: hive run (autonomous loop: CI → reviewers → triage → fix → guardrail → browser)
-    S5_review --> S6_pr: user mv (REVIEW_COMPLETE)
-    S6_pr --> S7_done: user mv (after merge)
-    S7_done --> [*]
+    S4_execute --> S5_open_pr: user mv (EXECUTE_COMPLETE)
+    S5_open_pr --> S6_review: user mv (draft PR open)
+    S6_review --> S6_review: hive run (autonomous loop: CI → reviewers → triage → fix → guardrail → browser)
+    S6_review --> S7_finalize: user mv (REVIEW_COMPLETE)
+    S7_finalize --> S8_done: user mv (after merge)
+    S8_done --> [*]
 ```
 
 `mv` between directories is the only approval gesture. The user can always interrupt by editing files in place.
@@ -105,7 +107,7 @@ stateDiagram-v2
 ## Key external integrations
 
 - **`claude` CLI** ≥ 2.1.118 — verified via `claude --version` at agent spawn time (`Hive::Agent.check_version!`).
-- **`gh` CLI** — used by `6-pr` for `gh auth status`, `gh pr list`, `gh pr create`.
+- **`gh` CLI** — used by `5-open-pr`, review comment mirroring, and `7-finalize`.
 - **`git`** ≥ 2.40 — uses `worktree add --no-checkout --detach`, `worktree list --porcelain`, `worktree remove`, `commit`, `show-ref`, `symbolic-ref`. All invoked through `Open3.capture3` array form (no shell).
 
 ## TUI / MVU pipeline

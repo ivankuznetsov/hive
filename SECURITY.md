@@ -13,7 +13,7 @@ The boundaries Hive does enforce:
 1. **Prompt-injection wrapping with a per-process random nonce** — user-supplied content is wrapped in `<user_supplied_<hex16>>…</user_supplied_<hex16>>` with a tag that rotates per process; attacker `</user_supplied>` payloads cannot terminate the wrapper.
 2. **Physical isolation via `--add-dir` discipline** — the brainstorm and plan stages restrict the agent's filesystem access to the task folder only. The execute stage adds the feature worktree but never another project.
 3. **Post-run integrity checks** — SHA-256 pre/post on `plan.md` and `worktree.yml` around both the implementation and reviewer passes; tampering yields a structured `<!-- ERROR reason=implementer_tampered|reviewer_tampered -->` marker.
-4. **PR body secret-scan** — `Stages::Pr` regex-scans the published PR body for api-key / AWS / GitHub-token / PEM patterns and refuses to commit on hits.
+4. **PR body secret-scan** — `Stages::OpenPr` (after the agent's `gh pr create`) and `Stages::Finalize` (after the agent's `gh pr edit`, before the runner's `gh pr ready`) both regex-scan the published PR body via `Hive::Gh.scan_pr_for_secrets` for api-key / AWS / GitHub-token / PEM patterns. On a hit, `Stages::Finalize` reverts the ready-flip and redacts the body; `Stages::OpenPr` scrubs + closes the leaked draft. The actual `gh auth status` precondition lives in `Hive::Gh.ensure_authenticated!`.
 
 See [`wiki/decisions.md`](wiki/decisions.md) ADR-008 for the full reasoning.
 

@@ -3,11 +3,11 @@ title: Hive::SecretPatterns
 type: module
 source: lib/hive/secret_patterns.rb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-05-13
 tags: [security, secrets, regex, secret-scan]
 ---
 
-**TLDR**: Shared regex set for credential / secret detection. One Hash, one `scan(text)` method that returns `[{name:, snippet:}, …]`. Two consumers: `Stages::Pr`'s body secret-scan (ADR-008) and `Stages::Review::FixGuardrail`'s post-fix diff scan (ADR-020). New patterns must come with at least one test in `test/unit/secret_patterns_test.rb` (or a consumer's tests).
+**TLDR**: Shared regex set for credential / secret detection. One Hash, one `scan(text)` method that returns `[{name:, snippet:}, …]`. Consumers include `Stages::OpenPr` / `Stages::Finalize` PR-body scans, review PR-comment publishing, and `Stages::Review::FixGuardrail`'s post-fix diff scan. New patterns must come with at least one test in `test/unit/secret_patterns_test.rb` (or a consumer's tests).
 
 ## API
 
@@ -35,7 +35,8 @@ Snippets are truncated to 80 characters so callers can include them in error mes
 
 ## Used by
 
-- `Hive::Stages::Pr.scan_body_for_secrets!` — refuses to push a PR body containing any match (ADR-008).
+- `Hive::Stages::OpenPr` / `Hive::Stages::Finalize` — refuse PR body/state content containing any match (ADR-008).
+- `Hive::Stages::Review::GithubPublisher` — skips PR comment mirroring when a reviewer file contains a secret pattern.
 - `Hive::Stages::Review::FixGuardrail` — the `secrets_pattern_match` default pattern dispatches to `SecretPatterns.scan` for added lines in the post-fix diff.
 
 ## Tests
@@ -44,5 +45,5 @@ Snippets are truncated to 80 characters so callers can include them in error mes
 
 ## Backlinks
 
-- [[stages/pr]] · [[stages/review]]
+- [[stages/open-pr]] · [[stages/finalize]] · [[stages/review]]
 - [[decisions]] (ADR-008 / ADR-020)

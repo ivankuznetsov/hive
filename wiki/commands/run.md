@@ -7,7 +7,7 @@ updated: 2026-05-14T00:00:00Z
 tags: [command, dispatcher, stages, json, rebase]
 ---
 
-**TLDR**: `hive run TARGET` is the lower-level dispatcher for a slug or task folder. It resolves `TARGET` into a `Hive::Task`, takes the per-task lock, attempts an auto-rebase pre-step against the project's default branch (fail-soft), picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a workflow-oriented `next:` hint. Most humans should start with `hive status` and use `hive brainstorm|plan|develop|pr|archive <slug>`.
+**TLDR**: `hive run TARGET` is the lower-level dispatcher for a slug or task folder. It resolves `TARGET` into a `Hive::Task`, takes the per-task lock, attempts an auto-rebase pre-step against the project's default branch (fail-soft), picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a workflow-oriented `next:` hint. Most humans should start with `hive status` and use `hive brainstorm|plan|develop|open-pr|review|finalize|archive <slug>`.
 
 ## Usage
 
@@ -25,7 +25,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 1. Resolve `TARGET` via `Hive::TaskResolver` and load merged config via `Hive::Config.load(task.project_root)`.
 2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
 3. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see "Auto-rebase pre-step" below.
-4. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,Review,Pr,Done}.method(:run!)`. Unknown stage → `StageError`.
+4. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,OpenPr,Review,Finalize,Done}.method(:run!)`. Unknown stage → `StageError`.
 5. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
 6. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
 7. `report`: print the current marker, the state file path, and a stage-aware next step.
@@ -34,7 +34,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 
 `hive run` checks whether the task's worktree branch is behind `origin/<default_branch>` and, if so, attempts a rebase before dispatching the stage runner. This prevents the failure mode where a long-running task's branch drifts behind main and reviewers in 5-review see "phantom deletions" of code that landed on main after the branch was created (originating incident: `i-want-to-be-able-260507-7682` at REVIEW_STALE pass=4).
 
-**Trigger:** stages 4-execute, 5-review, 6-pr. Stages 2-brainstorm and 3-plan have no worktree (`task.worktree_path` is nil), so the trigger silently no-ops; 1-inbox doesn't enter `hive run`; 7-done is terminal.
+**Trigger:** stages 4-execute, 5-open-pr, 6-review, and 7-finalize. Stages 2-brainstorm and 3-plan have no worktree (`task.worktree_path` is nil), so the trigger silently no-ops; 1-inbox doesn't enter `hive run`; 8-done is terminal.
 
 **Pre-rebase guards (in order, before any fetch):**
 1. `cfg.rebase.enabled == false` → `Result.disabled`.
@@ -106,7 +106,6 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `unexpected_io_error` | A `Hive::GitError` / `SystemCallError` / `IOError` escaped the narrow rescue (programmer-error class) |
 
 `post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
-
 ## next: hints (by marker)
 
 | Marker | `report` output |
@@ -114,8 +113,8 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `:waiting` | `next: edit the file, then `hive <stage-verb> <slug>` again` |
 | `:execute_waiting` | `next: edit/recover the reason-specific target, then `hive develop <slug>` again`. JSON uses `Hive::ExecuteWaitingAction`: dirty worktrees and branch-integrity failures target the worktree, no-change exits target `plan.md`, and `missing_research_output` is `kind=run` because editing `task.md` cannot satisfy the structured final-message gate. |
 | `:complete` | `next: hive plan <slug>`, `hive develop <slug>`, or `hive archive <slug>` depending on current stage; JSON keeps path fields and uses the workflow command |
-| `:execute_complete` | `next: hive develop <slug>` (advances to 5-review); JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
-| `:review_complete` | `next: hive pr <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 5-review"` |
+| `:execute_complete` | `next: hive open-pr <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
+| `:review_complete` | `next: hive finalize <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 6-review"` |
 | `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
 | `:review_waiting` (escalations-only, no `reason` attr) | `next: edit reviews/escalations-NN.md or reviewer files, then `hive run <folder>` again`. JSON envelope: `target = task.folder`. |
 | `:review_waiting reason=fix_guardrail` | `next: review every finding in reviews/fix-guardrail-NN.md; tick every `[ ]` to `[x]` to approve the guarded commits (partial ticks keep the pause), then re-run`. Approval is rejected if the file's checkbox count differs from `marker.matches` or the worktree HEAD differs from `marker.head`. JSON envelope: `target = <folder>/reviews/fix-guardrail-NN.md`, `instructions` cites the count and HEAD rejection rules. |
@@ -125,7 +124,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `:review_error` | `next: investigate <reason>, then `hive markers clear FOLDER --name REVIEW_ERROR`, then re-run`. JSON: `next_action.kind = "review_error"` with `phase`, `reason`, and the full marker `attrs` surfaced so polling agents can branch without re-parsing the marker. Raises `Hive::TaskInErrorState` → exit 3 (`TASK_IN_ERROR`) after the JSON payload is emitted. |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 
-`next_stage_dir` increments `task.stage_index`; `7-done` has no `next:`.
+`next_stage_dir` increments `task.stage_index`; `8-done` has no `next:`.
 
 ## Stage routing
 
@@ -135,8 +134,9 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `brainstorm` | `Stages::Brainstorm` | [[stages/brainstorm]] |
 | `plan` | `Stages::Plan` | [[stages/plan]] |
 | `execute` | `Stages::Execute` | [[stages/execute]] |
+| `open-pr` | `Stages::OpenPr` | [[stages/open-pr]] |
 | `review` | `Stages::Review` | [[stages/review]] |
-| `pr` | `Stages::Pr` | [[stages/pr]] |
+| `finalize` | `Stages::Finalize` | [[stages/finalize]] |
 | `done` | `Stages::Done` | [[stages/done]] |
 
 ## Lock interactions
@@ -153,13 +153,14 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 - `test/integration/run_brainstorm_test.rb`
 - `test/integration/run_plan_test.rb`
 - `test/integration/run_execute_test.rb`
+- `test/integration/run_open_pr_test.rb`
 - `test/integration/run_review_test.rb`
-- `test/integration/run_pr_test.rb`
+- `test/integration/run_finalize_test.rb`
 - `test/integration/run_done_test.rb`
 - `test/integration/full_flow_test.rb` (chains all stages)
 
 ## Backlinks
 
 - [[cli]] · [[commands/init]] · [[commands/status]] · [[commands/approve]]
-- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/review]] · [[stages/pr]] · [[stages/done]]
+- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/finalize]] · [[stages/done]]
 - [[modules/task]] · [[modules/lock]] · [[modules/markers]] · [[modules/git_ops]]

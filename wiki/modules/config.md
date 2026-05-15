@@ -19,7 +19,7 @@ tags: [config, yaml, validation]
   "project_name"      => nil,
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
   # caps for runaway agents, not cost targets. The deprecated
-  # `execute_review` key was DROPPED — 5-review owns reviewer budgets per
+  # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
   # ADR-014. Old project configs that still set it survive deep-merge but
   # nothing reads it and fresh `hive init` no longer renders it.
   "budget_usd" => {
@@ -34,7 +34,7 @@ tags: [config, yaml, validation]
     "review_ci" => 3600, "review_triage" => 1800,
     "review_fix" => 14400, "review_browser" => 3600
   },
-  # Stage-level agent for the three single-agent stages (ADR-023). 5-review
+  # Stage-level agent for the three single-agent stages (ADR-023). 6-review
   # keeps its own per-role agent fields under review.{ci,triage,fix,
   # browser_test}.agent. Runtime fallback is `cfg.dig("<stage>", "agent")
   # || "claude"` (see Hive::Stages::Base.stage_profile in

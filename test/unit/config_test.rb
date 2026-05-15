@@ -423,7 +423,7 @@ class ConfigTest < Minitest::Test
 
   # ce-review P3 #8 — max_attempts is parsed by the adapter at spawn
   # time but should also fail loudly at config-load when malformed,
-  # so operators don't discover a typo deep in a 5-review pass.
+  # so operators don't discover a typo deep in a 6-review pass.
   def test_load_raises_when_max_attempts_is_zero
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

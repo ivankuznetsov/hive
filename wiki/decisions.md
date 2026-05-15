@@ -7,7 +7,14 @@ updated: 2026-05-14
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADRs 014–021 cover the 5-review stage; ADR-022 covers the agentic e2e test layer.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records the PR-first workflow and stage renumbering.
+
+## ADR-024: PR-first workflow and finalize rename
+
+**Status:** Active
+**Context:** Opening the GitHub PR only after autonomous review made human intervention awkward: a person had to find the task under `.hive-state/stages/6-review/` and edit local files instead of using `gh pr checkout`.
+**Decision:** Insert `5-open-pr` between execute and review. It pushes the branch and opens a draft PR. Rename the old PR stage to `7-finalize`; it now verifies the reviewed branch is pushed, refreshes the PR description, writes `summary.md`, and flips the PR from draft to ready-for-review. The full stage order is `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-finalize → 8-done`.
+**Consequences:** Review runs against an already-open draft PR. Reviewer files remain authoritative locally, but the review orchestrator mirrors each reviewer/escalation file to the PR as a comment for human visibility. Existing in-flight tasks on old stage names require explicit `hive migrate`; hive does not silently rename task folders.
 
 ## ADR-001: Folder-as-task, not single markdown file
 
@@ -107,17 +114,17 @@ tags: [decisions, adr]
 
 **Consequences:** Reviewer mistakes (or prompt injections) that touch the wrong files surface as errors instead of silent corruption. Cost: one extra hash pair per review pass (negligible).
 
-## ADR-014: 5-review is its own stage; 4-execute drops to impl-only
+## ADR-014: 6-review is its own stage; 4-execute drops to impl-only
 
-**Status:** Active (shipped in feat/5-review-stage; U1 + U9)
+**Status:** Active (shipped in feat/6-review-stage; U1 + U9)
 **Context:** Pre-U9 the review pass was an iteration loop inside `4-execute`. As soon as we wanted multiple reviewers, a triage pass, a CI-fix loop, a fix-guardrail, and a browser-test phase, the iteration loop became the dominant mass of `Stages::Execute` and obscured what the stage was for. The user owns the "implementation done" → "review starts" transition by `mv`-ing the folder.
-**Decision:** Add `5-review/` to `Hive::Stages::DIRS`. `Stages::Execute` becomes impl-only — runs `spawn_implementation`, SHA-protects `plan.md`/`worktree.yml`, sets `EXECUTE_COMPLETE`, exits. The user `mv`s the task to `5-review/`, which runs the new `Hive::Stages::Review.run!` autonomous loop (CI → reviewers → triage → fix → guardrail → browser → REVIEW_COMPLETE). One `hive run` lands a terminal marker or exhausts budgets; no partial-run states.
+**Decision:** Add `6-review/` to `Hive::Stages::DIRS`. `Stages::Execute` becomes impl-only — runs `spawn_implementation`, SHA-protects `plan.md`/`worktree.yml`, sets `EXECUTE_COMPLETE`, exits. The user `mv`s the task to `6-review/`, which runs the new `Hive::Stages::Review.run!` autonomous loop (CI → reviewers → triage → fix → guardrail → browser → REVIEW_COMPLETE). One `hive run` lands a terminal marker or exhausts budgets; no partial-run states.
 **Consequences:** Stage runners stay shape-uniform — each stage is one phase. The `mv` is the explicit gate between "agent wrote code" and "agents review code" — important because the review loop has different cost / safety properties (multiple agents, fix-guardrail, etc.). Cost: a dedicated stage means more files to maintain (review.rb is 450+ lines), but the alternative (re-cramming everything into 4-execute) was already untenable.
 
 ## ADR-015: Sequential reviewers; parallel deferred
 
 **Status:** Active
-**Context:** Phase 2 of the 5-review loop runs every configured reviewer adapter. The plan considered running them in parallel (each in its own thread / subprocess) versus sequentially.
+**Context:** Phase 2 of the 6-review loop runs every configured reviewer adapter. The plan considered running them in parallel (each in its own thread / subprocess) versus sequentially.
 **Decision:** Sequential by default. The reviewers we ship (claude `/ce-code-review`, codex `/ce-code-review`, `pr-review-toolkit`) overlap heavily on findings — running them in parallel mostly produces near-duplicate `[x]` marks for triage to dedupe, at the cost of more concurrent agent processes (subprocess management, OOM risk, harder logs).
 **Consequences:** Phase 2 wall-clock is the sum of per-reviewer durations. With three reviewers averaging ~3 minutes each, that's ~9 minutes per pass — fits well inside `review.max_wall_clock_sec` (default 5400). Parallel execution can be added behind a config flag if the wall-clock cost becomes painful.
 
@@ -134,7 +141,7 @@ tags: [decisions, adr]
 ## ADR-017: Agent CLI profile abstraction (`Hive::Agent` parameterized over `AgentProfile`)
 
 **Status:** Active
-**Context:** Pre-U12 `Hive::Agent` hardcoded `claude -p` invocation. The 5-review reviewer set wanted to spawn codex and pi alongside claude with the same lifecycle (per-spawn nonce, status detection, budget capture). Per-CLI behavior differs: codex emits status to stdout, pi exits non-zero on internal-server errors but cleanly on success, claude's `--dangerously-skip-permissions` flag has no codex equivalent.
+**Context:** Pre-U12 `Hive::Agent` hardcoded `claude -p` invocation. The 6-review reviewer set wanted to spawn codex and pi alongside claude with the same lifecycle (per-spawn nonce, status detection, budget capture). Per-CLI behavior differs: codex emits status to stdout, pi exits non-zero on internal-server errors but cleanly on success, claude's `--dangerously-skip-permissions` flag has no codex equivalent.
 **Decision:** Introduce `AgentProfile` (a frozen value object with `name`, `binary`, `args_format`, `add_dir_flag`, `skill_syntax_format`, `status_detection_mode`, `version_check`, `preflight!`) and a registry (`Hive::AgentProfiles`). `Hive::Agent.run!` takes a `profile:` kwarg per spawn (defaults to the configured `agent_profile` or `claude`). Three profiles ship in v1: `claude`, `codex`, `pi`. `opencode` was scoped out — see [[active-areas]].
 **Consequences:** Per-spawn `<user_supplied>` nonce (ADR-019) is profile-independent. CE skills are invoked via `profile.skill_syntax_format` (e.g., `/ce-code-review` for claude/codex, `/run-skill ce-code-review` for pi).
 
@@ -148,7 +155,7 @@ tags: [decisions, adr]
 ## ADR-019: Per-spawn `<user_supplied>` nonce; supersedes per-process memoization in ADR-008
 
 **Status:** Active (supersedes ADR-008's per-process nonce)
-**Context:** ADR-008 set the `<user_supplied>` wrapper nonce once per Ruby process. The 5-review pass spawns multiple agents (CI-fix, several reviewers, triage, fix, browser) in a single run; if every spawn shares the nonce, a hostile reviewer output saved verbatim into `accepted_findings` could escape its wrapper in the *next* spawn. The nonce must be fresh per spawn.
+**Context:** ADR-008 set the `<user_supplied>` wrapper nonce once per Ruby process. The 6-review pass spawns multiple agents (CI-fix, several reviewers, triage, fix, browser) in a single run; if every spawn shares the nonce, a hostile reviewer output saved verbatim into `accepted_findings` could escape its wrapper in the *next* spawn. The nonce must be fresh per spawn.
 **Decision:** `Hive::Stages::Base.user_supplied_tag` returns a fresh `<user_supplied_<hex>>` value on every call. `Stages::Base.spawn_agent` calls it once per spawn and threads the value into the rendered template. The runner never memoizes the tag at the stage level.
 **Consequences:** Nonce collision risk is now per-spawn (negligible). One `Stages::Review.run!` invocation that runs 2 passes with 3 reviewers, 1 triage, 1 fix, 1 guardrail-pass, 1 browser-test produces ~12 distinct nonces — all isolated.
 
@@ -162,8 +169,8 @@ tags: [decisions, adr]
 ## ADR-021: Per-spawn `status_mode` override; orchestrator-owned terminal markers
 
 **Status:** Active
-**Context:** The 5-review orchestrator owns the terminal `REVIEW_*` marker. Sub-agents spawned during a phase (reviewer / triage / fix / browser) must NOT write to `task.state_file`, or they'd race the orchestrator's marker. Pre-U4 every `spawn_agent` call wrote the agent's state to `task.state_file` unconditionally.
-**Decision:** `Stages::Base.spawn_agent` takes a `status_mode:` kwarg per spawn. Three values: `:state_file_marker` (legacy default — agent writes its own state to `task.state_file`), `:exit_code_only` (for sub-spawns inside an orchestrator — runner judges success purely by exit code; agent's task.md writes are no-ops via mode-gating), `:output_file_exists` (for cases where a side-effect file is the truth). 5-review uses `:exit_code_only` for every sub-spawn; `:state_file_marker` is reserved for stages where the agent IS the orchestrator (today: 2-brainstorm, 3-plan, 4-execute, 6-pr).
+**Context:** The 6-review orchestrator owns the terminal `REVIEW_*` marker. Sub-agents spawned during a phase (reviewer / triage / fix / browser) must NOT write to `task.state_file`, or they'd race the orchestrator's marker. Pre-U4 every `spawn_agent` call wrote the agent's state to `task.state_file` unconditionally.
+**Decision:** `Stages::Base.spawn_agent` takes a `status_mode:` kwarg per spawn. Three values: `:state_file_marker` (legacy default — agent writes its own state to `task.state_file`), `:exit_code_only` (for sub-spawns inside an orchestrator — runner judges success purely by exit code; agent's task.md writes are no-ops via mode-gating), `:output_file_exists` (for cases where a side-effect file is the truth). 6-review uses `:exit_code_only` for every sub-spawn; `:state_file_marker` is reserved for stages where the agent IS the orchestrator (today: 2-brainstorm, 3-plan, 4-execute, 7-finalize).
 **Consequences:** No marker collision between orchestrator and sub-spawns. The runner's mark/finalize logic stays simple — every sub-spawn returns `{status:, error_message:}` from `Hive::Agent.run!`, and the orchestrator decides what to write to disk.
 
 ## ADR-022: Agentic E2E test layer with structured failure artifacts
@@ -176,11 +183,11 @@ tags: [decisions, adr]
 ## ADR-023: TTY-prompted `hive init`; stage-level agent keys; generous limits
 
 **Status:** Active (shipped with plan `docs/plans/2026-05-04-001-feat-hive-init-interactive-prompts-plan.md`)
-**Context:** Pre-2026-05-04 `hive init` was fully non-interactive — it scaffolded `.hive-state/config.yml` from a static template with claude hardcoded everywhere and conservative budgets (~$305 per-task aggregate cap). Operators only discovered the agent-selection knob after hitting a cap or wanting a different model, and brainstorm/plan/execute spawn sites still hardcoded the `:claude` profile (the per-role pattern from ADR-017 hadn't extended upstream of 5-review).
+**Context:** Pre-2026-05-04 `hive init` was fully non-interactive — it scaffolded `.hive-state/config.yml` from a static template with claude hardcoded everywhere and conservative budgets (~$305 per-task aggregate cap). Operators only discovered the agent-selection knob after hitting a cap or wanting a different model, and brainstorm/plan/execute spawn sites still hardcoded the `:claude` profile (the per-role pattern from ADR-017 hadn't extended upstream of 6-review).
 **Decision:** Three changes behind one plan:
   1. **Stage-level agent keys.** Add `brainstorm.agent`, `plan.agent`, `execute.agent` to `Config::DEFAULTS` (default `"claude"`) and `ROLE_AGENT_PATHS` (validated by `validate_role_agent_names!`). Stage runners read `cfg.dig("<stage>", "agent")` via the new `Hive::Stages::Base.stage_profile` helper. Brainstorm / plan / execute spawn sites pin `status_mode: :state_file_marker` so swapping in codex (whose profile defaults to `:output_file_exists`) doesn't break the marker-based lifecycle these stages own.
   2. **TTY-prompted onboarding at `hive init`.** New `Hive::Commands::Init::Prompts` class asks for planning agent (combined brainstorm+plan), development agent, reviewer multi-select, and 8 per-stage limit pairs. Recommended defaults live at the **template** layer: claude / codex / all-3-reviewers / generous limits. They intentionally do NOT live in `Config::DEFAULTS["execute"]["agent"]` to avoid silently flipping the implementer for legacy projects. Non-TTY streams short-circuit to defaults and emit a one-line summary on stdout (machine-parseable for scripted callers), with prompt UI routed to stderr to keep `$(hive init)` capture clean. Aborting the prompt (`n` at confirmation) exits 64 (`Hive::ExitCodes::USAGE`) with zero disk side effects — placement immediately before `ops.hive_state_init` is load-bearing.
-  3. **Bumped-generous limit defaults.** `budget_usd` / `timeout_sec` bumped ~5×: per-task aggregate cap rises from ~$305 to ~$1475. Caps are sanity caps for runaway agents, not cost targets. The deprecated `execute_review` key (orphaned by ADR-014 — 5-review owns reviewer budgets) is dropped from `DEFAULTS` and the rendered template; existing project configs that still set it survive deep-merge.
+  3. **Bumped-generous limit defaults.** `budget_usd` / `timeout_sec` bumped ~5×: per-task aggregate cap rises from ~$305 to ~$1475. Caps are sanity caps for runaway agents, not cost targets. The deprecated `execute_review` key (orphaned by ADR-014 — 6-review owns reviewer budgets) is dropped from `DEFAULTS` and the rendered template; existing project configs that still set it survive deep-merge.
 **Consequences:** First-time `hive init` is self-documenting — every knob is visible at the prompt. Scripted automation gets a stable contract: agent and reviewer prompts accept **names** in addition to indices, and the iteration orders of `Hive::AgentProfiles.registered_names` and `Prompts::DEFAULT_REVIEWER_NAMES` are documented stability contracts. Trade-off: codex's `:output_file_exists` status mode would treat brainstorm/plan/execute spawns (which write a state-file marker, not an output file) as `:error`, so those three stage runners explicitly pin `status_mode: :state_file_marker` regardless of which profile is selected — this preserves the marker-based lifecycle independent of the operator's agent choice. Test surface added: 29 unit tests for the prompt module plus 7 new integration tests for the rendered template and the piped-input / abort / re-run guard flows. Deferred: a future `hive config edit` subcommand for tightening / loosening settings on already-initialized projects.
 
 ## ADR-024: Hive daemon — automation-first; the only gate is "user input required"; supersedes ADR-004 for daemon-enabled projects
@@ -196,7 +203,7 @@ Meanwhile the system grew its own load-bearing safety net: `hive approve` (`wiki
   1. **Q&A waits** (`:waiting`, `:execute_waiting`) — agent asked questions, user answers in the file.
   2. **Triage waits** (`:review_waiting`, including `reason=fix_guardrail`) — user ticks `[x]` on accepted findings or removes rogue commits.
   3. **Recovery waits** (`:execute_stale`, `:review_stale`, `:review_ci_stale`, `:review_error`, `:error`) — these markers EXIST to demand human intervention; skipping them is correct.
-  4. **External-state waits** — 6-pr/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
+  4. **External-state waits** — 7-finalize/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
 
 The human approval gesture for the daemon is **enabling it at `hive init`** (TTY prompt, default `Y`, per ADR-023 onboarding pattern). Per-project `daemon.enabled: true` is the explicit, durable consent. Legacy projects already on disk (configs without the `daemon:` key) fall back to `Config::DEFAULTS`'s per-project default of `false` — same "don't silently flip legacy" pattern ADR-023 used for stage agents.
 

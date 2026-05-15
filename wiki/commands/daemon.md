@@ -10,10 +10,10 @@ tags: [command, daemon, automation, json]
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
 auto-advancing dispatcher (ADR-024). One long-running process polls
 `hive status --json` every 30s, dispatches workflow verbs (`hive plan`
-/ `develop` / `review` / `pr`) on tasks ready to advance, and
-auto-archives 6-pr → 7-done after `gh pr view` reports `MERGED`. Stops
+/ `develop` / `open-pr` / `review` / `finalize`) on tasks ready to advance, and
+auto-archives 7-finalize → 8-done after `gh pr view` reports `MERGED`. Stops
 only at human-input gates: `_WAITING` markers (Q&A / triage), recovery
-markers (`_STALE` / `_ERROR`), and 6-pr while the PR is still open on
+markers (`_STALE` / `_ERROR`), and 7-finalize while the PR is still open on
 GitHub.
 
 ## Subcommands
@@ -49,9 +49,10 @@ value) and routes:
 | `ready_to_brainstorm` | Dispatch `hive brainstorm <slug>` (1→2)      |
 | `ready_to_plan`       | Dispatch `hive plan <slug> --from 2-brainstorm` (2→3) |
 | `ready_to_develop`    | Dispatch `hive develop <slug> --from 3-plan` (3→4) |
-| `ready_for_review`    | Dispatch `hive review <slug> --from 4-execute` (4→5) |
-| `ready_for_pr`        | Dispatch `hive pr <slug> --from 5-review` (5→6) |
-| `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 6-pr` (6→7) |
+| `ready_to_open_pr`    | Dispatch `hive open-pr <slug> --from 4-execute` (4→5) |
+| `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
+| `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 6-review` (6→7) |
+| `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 7-finalize` (7→8) |
 | `needs_input`         | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. |
 | `review_findings`     | Same as `needs_input` (legacy 4-execute findings; rare post-ADR-014). |
 | `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
@@ -112,7 +113,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 `~/Dev/hive/logs/daemon.log` is one JSON document per line:
 
 ```json
-{"ts":"2026-05-06T12:00:00Z","schema":"hive-daemon-log","schema_version":1,"event":"dispatched","pid":12345,"project":"writero","slug":"fix-x","stage":"5-review","command":"hive run fix-x --json","dry_run":false}
+{"ts":"2026-05-06T12:00:00Z","schema":"hive-daemon-log","schema_version":1,"event":"dispatched","pid":12345,"project":"writero","slug":"fix-x","stage":"6-review","command":"hive run fix-x --json","dry_run":false}
 ```
 
 Closed `event` enum (`Hive::Daemon::Logger::EVENTS`). Adding an event

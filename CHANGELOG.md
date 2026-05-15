@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed — PR-first workflow
+
+- Added `5-open-pr`: after `4-execute`, hive pushes the feature branch and opens a draft GitHub PR before autonomous review starts.
+- Renumbered the pipeline to `1-inbox`, `2-brainstorm`, `3-plan`, `4-execute`, `5-open-pr`, `6-review`, `7-finalize`, `8-done`.
+- Repurposed `7-finalize` from "open PR" to final wrap-up: verify clean/pushed state, refresh the PR body, write `summary.md`, and mark the draft PR ready for review.
+- `6-review` now mirrors each reviewer and escalations file to the open PR as a PR-level comment. Local `reviews/*.md` files remain authoritative; GitHub publish failures warn and do not block the loop.
+- Added `hive migrate` to opt-in rename in-flight old-stage task folders (`5-review` → `6-review`, `6-pr` → `7-finalize`, `7-done` → `8-done`).
+
 ### Added — `hive tui` new-idea editing and paste support
 
 - The `n` new-idea prompt now supports cursor-aware title editing: Left/Right, Home/End, Ctrl+A/Ctrl+E, Backspace, Delete, and insertion at the cursor.

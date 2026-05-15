@@ -5,7 +5,7 @@ require "time"
 
 module Hive
   module Daemon
-    # For tasks at 6-pr/`:complete`, periodically polls
+    # For tasks at 7-finalize/`:complete`, periodically polls
     # `gh pr view <url> --json state` and tells the dispatcher to fire
     # `hive archive <slug>` once the PR is `MERGED`.
     #
@@ -19,7 +19,7 @@ module Hive
     #                                     enqueued_at, hive_state_path,
     #                                     stage }>
     class PrMergeWatcher
-      ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from 6-pr --project %<project>s --json".freeze
+      ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from 7-finalize --project %<project>s --json".freeze
 
       # Backoff schedule for consecutive `gh` failures (network /
       # auth / rate limit). After exhaustion, the watcher drops the
@@ -34,7 +34,7 @@ module Hive
         @pending = {}
       end
 
-      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: "6-pr")
+      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: "7-finalize")
         key = [ project, slug ]
         return if @pending.key?(key) # idempotent
 

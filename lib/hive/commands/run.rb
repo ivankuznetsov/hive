@@ -24,7 +24,7 @@ module Hive
 
       # Optional top-level keys allowed in the SuccessPayload. They're emitted
       # only when the runner result carries the corresponding data — currently
-      # `cleanup_instructions:` from the 7-done stage. See
+      # `cleanup_instructions:` from the 8-done stage. See
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
@@ -134,12 +134,15 @@ module Hive
         when "execute"
           require "hive/stages/execute"
           Hive::Stages::Execute.method(:run!)
+        when "open-pr"
+          require "hive/stages/open_pr"
+          Hive::Stages::OpenPr.method(:run!)
         when "review"
           require "hive/stages/review"
           Hive::Stages::Review.method(:run!)
-        when "pr"
-          require "hive/stages/pr"
-          Hive::Stages::Pr.method(:run!)
+        when "finalize"
+          require "hive/stages/finalize"
+          Hive::Stages::Finalize.method(:run!)
         when "done"
           require "hive/stages/done"
           Hive::Stages::Done.method(:run!)
@@ -347,7 +350,7 @@ module Hive
 
       def report_text(task, result, marker)
         if result.is_a?(Hash) && result[:cleanup_instructions]
-          # 7-done stage returns the cleanup lines as data; the human path
+          # 8-done stage returns the cleanup lines as data; the human path
           # renders them on stdout while --json embeds them in the envelope.
           # See lib/hive/stages/done.rb.
           puts result[:cleanup_instructions]

@@ -4,7 +4,7 @@ default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
 
-# Stage-level agent for the three single-agent stages. (5-review uses
+# Stage-level agent for single-agent stages. (6-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
 # below.) Defaults are claude for planning (deeper reasoning) and codex
 # for development (its edit-mode is more efficient for implementation).
@@ -24,11 +24,15 @@ plan:
   # skill: /plan
 execute:
   agent: <%= development_agent %>
+open_pr:
+  agent: claude
+finalize:
+  agent: claude
 
 # Generous sanity caps for runaway agents, not cost targets. Most
 # tasks finish well within them; tighten manually only if you hit a
 # cap repeatedly. (The deprecated execute_review key from older
-# configs has been dropped — 5-review owns reviewer budgets per
+# configs has been dropped — review owns reviewer budgets per
 # ADR-014.)
 budget_usd:
 <% Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key| -%>
@@ -40,7 +44,16 @@ timeout_sec:
   <%= key %>: <%= timeouts[key] %>
 <% end -%>
 
-# 5-review stage configuration. Each role takes an `agent` (one of the
+gh:
+  # Deadline for GitHub CLI network calls (`gh auth`, `gh pr view`,
+  # `gh pr edit`, `gh pr ready`, etc.).
+  network_timeout_sec: 60
+
+rebase:
+  enabled: true
+  conflict_resolution_timeout_sec: 2700
+
+# 6-review stage configuration. Each role takes an `agent` (one of the
 # names registered in Hive::AgentProfiles — claude, codex, pi by default)
 # and an optional `prompt_template` path under templates/.
 review:
@@ -74,9 +87,12 @@ review:
     agent: claude
     prompt_template: browser_test_prompt.md.erb
     max_attempts: 2
+  github_publish:
+    enabled: true
+    max_attempts: 2
   max_passes: 2
   # Aggregate wall-clock cap across all phases of one `hive run` on a
-  # 5-review folder. 5400s = 90 min.
+  # 6-review folder. 5400s = 90 min.
   max_wall_clock_sec: 5400
   # Hive's recommended reviewer set: claude /ce-code-review + codex
   # /ce-code-review + claude /pr-review-toolkit:review-pr. Each entry's
@@ -121,7 +137,7 @@ review:
 # human-input gates. When `enabled: true`, `hive daemon start` polls
 # every project's status and dispatches workflow verbs on tasks ready
 # to advance. Stops at `:waiting` / `:review_waiting` / recovery markers
-# (where a human is needed) and at 6-pr while the PR is open on GitHub
+# (where a human is needed) and at 7-finalize while the PR is open on GitHub
 # (auto-archives once `gh pr view --json state` returns `MERGED`).
 # Disable per-project by flipping this flag and running `hive daemon reload`.
 daemon:

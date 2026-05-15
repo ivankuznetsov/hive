@@ -1,6 +1,6 @@
 module Hive
   module Reviewers
-    # Minimal task-shaped facade used by every 5-review sub-spawn
+    # Minimal task-shaped facade used by every 6-review sub-spawn
     # (reviewers, triage, ci-fix, browser-test). The orchestrator's real
     # Task is owned by the runner; sub-spawns receive a Reviewers::Context
     # with paths only and need a struct with `folder`, `state_file`,
@@ -17,14 +17,14 @@ module Hive
     module_function
 
     # Build a SyntheticTask from a Reviewers::Context. Stage_name is
-    # always "5-review" because every sub-spawn here is part of the
-    # 5-review autonomous loop.
+    # always "6-review" because every sub-spawn here is part of the
+    # review autonomous loop.
     def synthetic_task_for(ctx, project_root: nil)
       SyntheticTask.new(
         folder: ctx.task_folder,
         state_file: File.join(ctx.task_folder, "task.md"),
         log_dir: File.join(ctx.task_folder, "logs"),
-        stage_name: "5-review",
+        stage_name: "6-review",
         project_root: project_root
       )
     end

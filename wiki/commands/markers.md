@@ -51,7 +51,7 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
   "schema": "hive-markers-clear",
   "schema_version": 1,
   "ok": true,
-  "folder": "/home/you/Dev/proj/.hive-state/stages/5-review/feat-x-260424-aaaa",
+  "folder": "/home/you/Dev/proj/.hive-state/stages/6-review/feat-x-260424-aaaa",
   "slug": "feat-x-260424-aaaa",
   "marker_cleared": "REVIEW_STALE"
 }

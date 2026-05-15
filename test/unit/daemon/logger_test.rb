@@ -39,7 +39,7 @@ class HiveDaemonLoggerTest < Minitest::Test
   def test_event_passes_arbitrary_attrs_into_payload
     with_log do |logger, path|
       logger.event(:dispatched, project: "writero", slug: "fix-x",
-                                stage: "5-review", pid: 12_345,
+                                stage: "6-review", pid: 12_345,
                                 command: "hive run fix-x --json")
       logger.close
 

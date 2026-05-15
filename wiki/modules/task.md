@@ -11,9 +11,9 @@ tags: [model, task, parsing]
 
 ## Constants
 
-- `STAGE_NAMES = %w[inbox brainstorm plan execute pr done]`
-- `STATE_FILES` — maps stage name → state file basename (`idea.md`, `brainstorm.md`, `plan.md`, `task.md`, `pr.md`, `task.md`).
-- `PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>\w+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}` — the only validator for task paths.
+- `STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review finalize done]` — 8 stages post-PR-renumber. `open-pr` is hyphenated; the dash must be allowed by `PATH_RE`.
+- `STATE_FILES` — maps stage name → state file basename (`idea.md`, `brainstorm.md`, `plan.md`, `task.md`, `pr.md`, `task.md`, `pr.md`, `task.md`).
+- `PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}` — the only validator for task paths. The `[a-z][a-z0-9-]*` class for `stage_name` (no `\w+`) is what permits the dash in `5-open-pr`.
 
 ## Constructor (`#initialize(folder)`)
 

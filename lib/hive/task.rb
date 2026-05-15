@@ -1,18 +1,20 @@
 require "yaml"
+require "hive/stages"
 
 module Hive
   class Task
-    STAGE_NAMES = %w[inbox brainstorm plan execute review pr done].freeze
+    STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review finalize done].freeze
     STATE_FILES = {
       "inbox" => "idea.md",
       "brainstorm" => "brainstorm.md",
       "plan" => "plan.md",
       "execute" => "task.md",
+      "open-pr" => "pr.md",
       "review" => "task.md",
-      "pr" => "pr.md",
+      "finalize" => "pr.md",
       "done" => "task.md"
     }.freeze
-    PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>\w+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
+    PATH_RE = %r{\A(?<root>.+)/(?<state_dir>\.hive-state)/stages/(?<stage_idx>\d+)-(?<stage_name>[a-z][a-z0-9-]*)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])/?\z}
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,
                 :stage_name, :slug, :state_dir_basename
@@ -21,7 +23,10 @@ module Hive
       folder = File.expand_path(folder)
       m = PATH_RE.match(folder)
       raise InvalidTaskPath, "task path must match <project>/.hive-state/stages/<N>-<name>/<slug>/: #{folder}" unless m
-      raise InvalidTaskPath, "unknown stage name: #{m[:stage_name]}" unless STAGE_NAMES.include?(m[:stage_name])
+      stage_dir = "#{m[:stage_idx]}-#{m[:stage_name]}"
+      unless STAGE_NAMES.include?(m[:stage_name]) && Hive::Stages.parse(stage_dir)
+        raise InvalidTaskPath, "unknown stage name: #{stage_dir}; run `hive migrate` if this task uses pre-open-pr stage names"
+      end
 
       @folder = folder.sub(%r{/\z}, "")
       @project_root = m[:root]
@@ -49,8 +54,8 @@ module Hive
     end
 
     def worktree_path
-      # Worktree first appears in 4-execute and carries through 5-review
-      # and 6-pr; earlier stages don't have one. 7-done is post-PR; the
+      # Worktree first appears in 4-execute and carries through open-pr,
+      # review, and finalize; earlier stages don't have one. 8-done is post-PR; the
       # worktree may still exist (cleanup happens after merge).
       return nil if @stage_index < 4
 

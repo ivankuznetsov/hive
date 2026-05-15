@@ -32,11 +32,11 @@
         "slug": { "type": "string" },
         "stage": {
           "type": "string",
-          "enum": ["inbox", "brainstorm", "plan", "execute", "pr", "done"]
+          "enum": ["inbox", "brainstorm", "plan", "execute", "open-pr", "review", "finalize", "done"]
         },
         "stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-pr", "6-done"]
+          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr", "6-review", "7-finalize", "8-done"]
         },
         "task_folder": { "type": "string" },
         "review_file": { "type": "string" },

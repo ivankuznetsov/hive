@@ -1,13 +1,13 @@
 ---
-title: Workflow verbs (brainstorm / plan / develop / review / pr / archive)
+title: Workflow verbs
 type: command
 source: lib/hive/commands/stage_action.rb, lib/hive/workflows.rb
 created: 2026-04-26
-updated: 2026-04-28
+updated: 2026-05-13
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
-**TLDR**: Six Thor commands that wrap promote-or-run for the six stage transitions defined in `Hive::Workflows::VERBS`. `hive plan <slug> --from 2-brainstorm` either advances the task from 2-brainstorm to 3-plan and runs the plan agent, OR (if the task is already at 3-plan) just runs the plan agent. Same shape for `brainstorm`, `develop`, `review`, `pr`, `archive`. Backed by `Hive::Commands::StageAction` and `Hive::Workflows`.
+**TLDR**: Seven Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `finalize`, and `archive`.
 
 ## Usage
 
@@ -15,9 +15,10 @@ tags: [command, workflow, verbs, stage_action, json]
 hive brainstorm <slug>                    # promote 1-inbox → 2-brainstorm, run brainstorm
 hive plan <slug>                          # promote 2-brainstorm → 3-plan, run plan
 hive develop <slug>                       # promote 3-plan → 4-execute, run develop
-hive review <slug>                        # promote 4-execute → 5-review, run review
-hive pr <slug>                            # promote 5-review → 6-pr, run pr
-hive archive <slug>                       # promote 6-pr → 7-done, run archive
+hive open-pr <slug>                       # promote 4-execute → 5-open-pr, open draft PR
+hive review <slug>                        # promote 5-open-pr → 6-review, run review
+hive finalize <slug>                      # promote 6-review → 7-finalize, finalize PR
+hive archive <slug>                       # promote 7-finalize → 8-done, run archive
 
 hive plan <slug> --from 2-brainstorm      # idempotency assertion for retry
 hive plan <slug> --project NAME           # multi-project disambiguation
@@ -28,10 +29,10 @@ hive plan <slug> --json                   # machine-readable hive-stage-action e
 
 1. Resolve TARGET via `Hive::TaskResolver` (path or slug). When `--from` is set, the resolver narrows to that stage.
 2. **`--from` retry-after-success rescue**: if the resolver fails with `InvalidTaskPath` AND `--from` was set, re-resolve without `stage_filter` and raise `WrongStage` (4) with the actual stage. Mirrors the pattern in `Hive::Commands::Approve` so a retry after a successful advance returns a meaningful `WRONG_STAGE` instead of "no task folder" (64).
-3. **Archive idempotency check**: if the verb is `archive` AND the task is already at `6-done` with `:complete` marker, emit a `noop` payload and return. Without this guard, every `hive archive <slug>` would re-run the Done agent and write a fresh `hive: 6-done/<slug> archived` commit.
+3. **Archive idempotency check**: if the verb is `archive` AND the task is already at `8-done` with `:complete` marker, emit a `noop` payload and return.
 4. **At-target branch**: if the task is already at the verb's target stage, just run the stage's agent via `Hive::Commands::Run`. Phase: `ran`.
 5. **Wrong-stage guard**: if the task is at neither source nor target, raise `WrongStage` with the verb's expected source/target.
-6. **Marker validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `StageAction::ADVANCE_VERBS_TO_TERMINAL_MARKERS`). The `brainstorm` verb has `force_source: true` and skips this check (inbox tasks template-default to `:waiting`). Mismatch raises `WrongStage` with a copy-paste retry command. The `:review_complete` entry was added 2026-04-28 — without it, `hive pr --from 5-review` rejected every advance from a clean review with "WrongStage cannot advance ... while marker is :review_complete; finish the current stage first" (the marker IS the terminal marker `5-review` writes; gap was a stale whitelist).
+6. **Marker validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `StageAction::ADVANCE_VERBS_TO_TERMINAL_MARKERS`). The `brainstorm` verb has `force_source: true` and skips this check.
 7. **Promote**: call `Hive::Commands::Approve` with `to: target_stage`, `from: current_stage`, and `quiet: @json` so the inner Approve doesn't double-emit.
 8. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
 9. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).

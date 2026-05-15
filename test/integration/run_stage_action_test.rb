@@ -138,7 +138,7 @@ class RunStageActionTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
-        done = File.join(dir, ".hive-state", "stages", "7-done", slug)
+        done = File.join(dir, ".hive-state", "stages", "8-done", slug)
         FileUtils.mkdir_p(File.dirname(done))
         FileUtils.mv(inbox, done)
         # task.md is the state file for done stage.
@@ -160,7 +160,7 @@ class RunStageActionTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
-        done = File.join(dir, ".hive-state", "stages", "7-done", slug)
+        done = File.join(dir, ".hive-state", "stages", "8-done", slug)
         FileUtils.mkdir_p(File.dirname(done))
         FileUtils.mv(inbox, done)
         File.write(File.join(done, "task.md"), "## archived\n<!-- COMPLETE -->\n")
@@ -196,7 +196,7 @@ class RunStageActionTest < Minitest::Test
 
         payload = JSON.parse(out)
         assert_equal "hive-stage-action", payload["schema"]
-        assert_equal 1, payload["schema_version"]
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-stage-action"), payload["schema_version"]
         assert_equal false, payload["ok"]
         assert_equal "plan", payload["verb"]
         assert_equal "wrong_stage", payload["error_kind"]
@@ -255,15 +255,12 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
-  # ── develop / pr verbs ─────────────────────────────────────────────────
+  # ── develop / open-pr / review verbs ──────────────────────────────────
 
-  def test_review_moves_execute_complete_to_review_and_runs
-    # The new `hive review <slug>` workflow verb advances a 4-execute
-    # task with the EXECUTE_COMPLETE terminal marker into 5-review and
-    # runs the review-stage agent. The integration check is "did the
-    # move happen and did the runner reach 5-review", regardless of
-    # whether the (heavy) review loop finished cleanly in the test
-    # sandbox.
+  def test_open_pr_moves_execute_complete_to_open_pr_and_runs
+    # `hive open-pr <slug>` advances a 4-execute task with the
+    # EXECUTE_COMPLETE terminal marker into 5-open-pr and enters the
+    # open-pr runner.
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
@@ -272,20 +269,53 @@ class RunStageActionTest < Minitest::Test
         FileUtils.mv(inbox, execute)
         File.write(File.join(execute, "plan.md"), "# Plan\n<!-- COMPLETE -->\n")
         File.write(File.join(execute, "task.md"), "# task\n<!-- EXECUTE_COMPLETE -->\n")
-        review = File.join(dir, ".hive-state", "stages", "5-review", slug)
+        open_pr = File.join(dir, ".hive-state", "stages", "5-open-pr", slug)
+
+        out, err, status = with_captured_exit do
+          Hive::Commands::StageAction.new("open-pr", slug).call
+        end
+
+        assert File.directory?(open_pr), "open-pr must promote 4-execute → 5-open-pr"
+        refute File.directory?(execute), "source 4-execute folder must be gone after promote"
+
+        # The 5-open-pr runner needs a worktree.yml to make progress;
+        # since we didn't seed one (the test focuses on the move +
+        # entry into the runner), the runner exits 1 in pre-flight.
+        # Allow that exit alongside successful completions so the test
+        # is robust to runner internals shifting.
+        assert_includes [
+          Hive::ExitCodes::SUCCESS,
+          Hive::ExitCodes::GENERIC,
+          Hive::ExitCodes::SOFTWARE,
+          Hive::ExitCodes::TASK_IN_ERROR
+        ], status,
+                        "exit must be 0/1/3/70 depending on runner outcome; got #{status}, err=#{err.inspect}, out=#{out.inspect}"
+      end
+    end
+  end
+
+  def test_review_moves_open_pr_complete_to_review_and_runs
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        open_pr = File.join(dir, ".hive-state", "stages", "5-open-pr", slug)
+        FileUtils.mkdir_p(File.dirname(open_pr))
+        FileUtils.mv(inbox, open_pr)
+        File.write(File.join(open_pr, "task.md"), "# task\n")
+        File.write(File.join(open_pr, "pr.md"), <<~MD)
+          ---
+          pr_url: https://example.com/pr/42
+          ---
+          <!-- COMPLETE pr_url=https://example.com/pr/42 is_draft=true -->
+        MD
+        review = File.join(dir, ".hive-state", "stages", "6-review", slug)
 
         out, err, status = with_captured_exit do
           Hive::Commands::StageAction.new("review", slug).call
         end
 
-        assert File.directory?(review), "review must promote 4-execute → 5-review"
-        refute File.directory?(execute), "source 4-execute folder must be gone after promote"
-
-        # The 5-review runner needs a worktree.yml to make progress;
-        # since we didn't seed one (the test focuses on the move +
-        # entry into the runner), the runner exits 1 in pre-flight.
-        # Allow that exit alongside successful completions so the test
-        # is robust to runner internals shifting.
+        assert File.directory?(review), "review must promote 5-open-pr → 6-review"
+        refute File.directory?(open_pr), "source 5-open-pr folder must be gone after promote"
         assert_includes [
           Hive::ExitCodes::SUCCESS,
           Hive::ExitCodes::GENERIC,

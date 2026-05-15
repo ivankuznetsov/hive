@@ -40,7 +40,7 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
 
   def test_includes_grid_workflow_verb_keys
     out = Hive::Tui::Views::HelpOverlay.render(model)
-    %w[brainstorm plan develop review pr archive].each do |verb|
+    %w[brainstorm plan develop open-pr review finalize archive].each do |verb|
       assert_match(/#{verb}/, out, "help overlay must list #{verb}")
     end
   end

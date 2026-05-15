@@ -83,8 +83,8 @@ class InitDoctorPreflightTest < Minitest::Test
           _, err = capture_io { Hive::Commands::Init.new(dir).call }
           assert_match(/found \d+ issue/, err)
           assert_match(%r{\[brainstorm/claude\]}, err)
-          assert_match(%r{\[5-review/claude-ce-code-review/claude\]}, err,
-            "reviewer rows must use the 5-review/<name> label in the warning")
+          assert_match(%r{\[6-review/claude-ce-code-review/claude\]}, err,
+            "reviewer rows must use the 6-review/<name> label in the warning")
         end
       end
     end

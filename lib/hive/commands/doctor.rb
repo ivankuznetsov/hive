@@ -10,7 +10,7 @@ require "hive/agent_profiles/pi"
 module Hive
   module Commands
     # `hive doctor` — verifies that every configured stage skill AND every
-    # 5-review reviewer skill actually resolves to an installed
+    # 6-review reviewer skill actually resolves to an installed
     # slash-command / skill on the operator's machine. Walks brainstorm
     # + plan stage configs, plus `review.reviewers[]`, asks each agent
     # profile to probe its filesystem, prints a status table, and exits
@@ -138,9 +138,9 @@ module Hive
       def reviewer_row(name:, agent:, configured_skill:, skill:, status:, message:)
         {
           kind: "reviewer",
-          stage: "5-review",
+          stage: "6-review",
           name: name,
-          label: "5-review/#{name}",
+          label: "6-review/#{name}",
           agent: agent,
           configured_skill: configured_skill,
           skill: skill,

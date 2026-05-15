@@ -7,7 +7,7 @@
 Hive is a local, folder-based pipeline for taking a software idea from rough note to pull request. Each task is a directory, and the directory's location is the task's stage:
 
 ```text
-1-inbox -> 2-brainstorm -> 3-plan -> 4-execute -> 6-pr -> 7-done
+1-inbox -> 2-brainstorm -> 3-plan -> 4-execute -> 5-open-pr -> 6-review -> 7-finalize -> 8-done
 ```
 
 Stage agents run as `claude -p` subprocesses. They read the task folder, write their result back into that folder, and exit. You stay in control at each stage by approving the next move.
@@ -17,7 +17,7 @@ No web UI. No tracker. The filesystem is the queue, markdown is the source of tr
 **Status:** local single-user pilot. The original `mv` workflow still works, but the current CLI also includes agent-callable commands for the common handoff points:
 
 - `hive status` shows current slugs grouped by the next useful action.
-- `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, and `hive archive` move-or-run tasks by slug.
+- `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive finalize`, and `hive archive` move-or-run tasks by slug.
 - `hive approve` remains the lower-level move command with marker checks, locking, retries, and JSON output.
 - `hive daemon` (opt-in, ADR-024) auto-advances enrolled projects through the pipeline. Enable on existing projects via `hive daemon enable PROJECT` (or `--all`); install the autostart unit per `wiki/operating.md` (sample systemd-user unit at `examples/systemd/`, sample launchd plist at `examples/launchd/`).
 - `hive findings`, `hive accept-finding`, and `hive reject-finding` replace hand-editing review checkboxes.
@@ -38,14 +38,14 @@ ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive   # or add bin/ to PATH
 |------|-------------|-----|
 | Ruby | 3.4 | the runtime |
 | `claude` CLI | 2.1.118 | every active stage by default; verified at runtime |
-| `gh` CLI | recent | `6-pr` stage (`gh pr create`); must be authenticated |
+| `gh` CLI | recent | `5-open-pr` and `7-finalize`; must be authenticated |
 | `git` | 2.40 | worktrees, orphan branches |
 
 Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep works as fallback).
 
 ### Required slash-commands / skills
 
-The brainstorm, plan, and 5-review stages instruct their agents to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume the corresponding skills are installed alongside the agent CLI:
+The brainstorm, plan, and 6-review stages instruct their agents to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume the corresponding skills are installed alongside the agent CLI:
 
 **Stage skills** (single-agent stages):
 
@@ -54,7 +54,7 @@ The brainstorm, plan, and 5-review stages instruct their agents to invoke specif
 | `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
 | `3-plan` | `/plan` | A user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | A skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
 
-**Reviewer skills** (5-review stage's recommended-default reviewer set, written by `hive init`):
+**Reviewer skills** (6-review stage's recommended-default reviewer set, written by `hive init`):
 
 | Reviewer name | Default skill | Install for claude | Install for codex |
 |---|---|---|---|
@@ -107,8 +107,10 @@ hive findings <slug>
 hive accept-finding <slug> 1 3                  # or --severity high / --all
 hive develop <slug>
 
-# open/update PR
-hive pr <slug>
+# open a draft PR, run review, then finalize after review passes
+hive open-pr <slug>
+hive review <slug>
+hive finalize <slug>
 
 # after the PR merges: archive
 hive archive <slug>                             # prints worktree-cleanup commands
@@ -125,8 +127,10 @@ You can still move folders by hand when you want the lowest-level control. The C
 | `hive brainstorm <slug>` | Move an inbox task into brainstorm, or re-run an existing brainstorm task. |
 | `hive plan <slug>` | Move a completed brainstorm into plan, or re-run an existing plan task. |
 | `hive develop <slug>` | Move a completed plan into execute, or re-run an existing execute task. |
-| `hive pr <slug>` | Move a completed execute task into PR, or re-run an existing PR task. |
-| `hive archive <slug>` | Move a completed PR task into done, or re-run an existing done task. |
+| `hive open-pr <slug>` | Move a completed execute task into draft-PR creation, or re-run an existing open-pr task. |
+| `hive review <slug>` | Move an opened draft PR into autonomous review, or re-run an existing review task. |
+| `hive finalize <slug>` | Move a completed review into final PR wrap-up, or re-run an existing finalize task. |
+| `hive archive <slug>` | Move a finalized PR task into done, or re-run an existing done task. |
 | `hive run <target>` | Lower-level dispatcher for a slug or task folder. Safe to re-run. |
 | `hive approve <slug>` | Move a task to the next stage and commit the move on `hive/state`. Use `--from <stage>` for retry-safe automation, `--to <stage>` for explicit moves or recovery, `--force` when you intentionally bypass a marker check, and `--json` for agents. |
 | `hive findings <slug>` | List review findings from the latest `reviews/ce-review-NN.md`. Use `--pass N` for an older pass and `--json` for agents. |
@@ -146,10 +150,12 @@ Your default branch (`master` or `main`) never receives `.hive-state/` content. 
 | `2-brainstorm` | `brainstorm.md` | no | `WAITING` (your turn) / `COMPLETE` |
 | `3-plan` | `plan.md` | no | `WAITING` / `COMPLETE` |
 | `4-execute` | `task.md` (+ `reviews/`, `worktree.yml`) | yes — in the feature worktree | `EXECUTE_WAITING` / `EXECUTE_COMPLETE` / `EXECUTE_STALE` |
-| `6-pr` | `pr.md` | only `git push` + `gh pr create` | `COMPLETE` |
-| `7-done` | `task.md` | no — prints cleanup commands | `COMPLETE` |
+| `5-open-pr` | `pr.md` | no code edits — pushes branch + opens a draft PR | `COMPLETE` / `ERROR` |
+| `6-review` | `task.md` (+ `reviews/`) | yes — review fixes in the feature worktree | `REVIEW_WAITING` / `REVIEW_COMPLETE` / recovery markers |
+| `7-finalize` | `pr.md`, `summary.md` | no code edits — refreshes PR body + marks ready | `COMPLETE` |
+| `8-done` | `task.md` | no — prints cleanup commands | `COMPLETE` |
 
-Markers are HTML comments at end-of-file; the last one wins. The full vocabulary: `<!-- WAITING -->`, `<!-- COMPLETE -->`, `<!-- AGENT_WORKING pid=… started=… -->` (set while `claude -p` is running, replaced on exit), `<!-- ERROR reason=… -->`, plus the `4-execute`-only `EXECUTE_WAITING` / `EXECUTE_COMPLETE` / `EXECUTE_STALE`. `hive status` renders 🤖 on a live `AGENT_WORKING`, ⚠ on a stale one.
+Markers are HTML comments at end-of-file; the last one wins. The common vocabulary: `<!-- WAITING -->`, `<!-- COMPLETE -->`, `<!-- AGENT_WORKING pid=… started=… -->` (set while `claude -p` is running, replaced on exit), `<!-- ERROR reason=… -->`, plus execute/review-specific markers such as `EXECUTE_COMPLETE` and `REVIEW_COMPLETE`. `hive status` renders 🤖 on a live `AGENT_WORKING`, ⚠ on a stale one.
 
 ## Configuration
 
@@ -186,12 +192,17 @@ plan:
   agent: claude
 execute:
   agent: codex                    # rendered template recommends codex; runtime fallback is claude
+open_pr:
+  agent: claude
+finalize:
+  agent: claude
 
 budget_usd:                       # generous sanity caps, NOT cost targets — bumped ~5x in ADR-023
   brainstorm: 50
   plan: 100
   execute_implementation: 500
-  pr: 50
+  open_pr: 50
+  finalize: 50
   review_ci: 100
   review_triage: 75
   review_fix: 500
@@ -200,14 +211,15 @@ timeout_sec:
   brainstorm: 1800
   plan: 3600
   execute_implementation: 14400
-  pr: 1800
+  open_pr: 1800
+  finalize: 1800
   review_ci: 3600
   review_triage: 1800
   review_fix: 14400
   review_browser: 3600
 ```
 
-Override individual keys; deep-merge keeps the rest at defaults. The deprecated `execute_review` key was dropped in ADR-023 — 5-review owns reviewer budgets now (`review_ci`, `review_triage`, `review_fix`, `review_browser`).
+Override individual keys; deep-merge keeps the rest at defaults. The deprecated `execute_review` key was dropped in ADR-023 — 6-review owns reviewer budgets now (`review_ci`, `review_triage`, `review_fix`, `review_browser`).
 
 ## Troubleshooting
 
@@ -215,7 +227,7 @@ Override individual keys; deep-merge keeps the rest at defaults. The deprecated 
 - **`not a git repository`** — run `git init` first.
 - **`uncommitted modifications to tracked files`** at init — commit/stash tracked changes, or pass `hive init --force`. Untracked files alone don't block init.
 - **`plan.md missing`** in 4-execute — task didn't pass through `3-plan/`. Move it back, run plan, then forward again.
-- **`no worktree pointer`** in 6-pr — task didn't pass through `4-execute/`. Move it back through execute first.
+- **`no worktree pointer`** in 5-open-pr or 7-finalize — task didn't pass through `4-execute/`. Move it back through execute first.
 - **`worktree pointer present but worktree missing`** — `git -C <project> worktree prune`, delete `worktree.yml`, then re-run.
 - **`slug ... is ambiguous`** — the same slug exists in multiple projects or stages. Pass `--project <name>` for cross-project ambiguity, `--from <stage>` on workflow verbs, `--stage <stage>` on `run`/`findings`, or a full task folder path.
 - **`no finding with id=...`** — run `hive findings <slug>` again and use the IDs from the current review file. IDs are assigned by document order.

@@ -3,16 +3,16 @@ title: Hive::Stages
 type: module
 source: lib/hive/stages.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-05-13
 tags: [module, stages, constants]
 ---
 
-**TLDR**: Single source of truth for the six-stage list. Constants `DIRS`, `NAMES`, `SHORT_TO_FULL`; helpers `next_dir(idx)`, `resolve(name)`, `parse(dir)`. Every consumer (`GitOps`, `Status`, `Run#next_stage_dir`, `Approve`) delegates here so adding a 7th stage is a one-file change.
+**TLDR**: Single source of truth for the eight-stage list. Constants `DIRS`, `NAMES`, `SHORT_TO_FULL`; helpers `next_dir(idx)`, `resolve(name)`, `parse(dir)`. Every consumer (`GitOps`, `Status`, `Run#next_stage_dir`, `Approve`) delegates here so stage changes have one canonical source.
 
 ## Constants
 
-- `DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 6-pr 7-done]` — the canonical stage directory names (index + bare name).
-- `NAMES = %w[inbox brainstorm plan execute pr done]` — bare stage names without the index prefix; same as `Hive::Task::STAGE_NAMES`.
+- `DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-finalize 8-done]` — the canonical stage directory names (index + bare name).
+- `NAMES = %w[inbox brainstorm plan execute open-pr review finalize done]` — bare stage names without the index prefix; same as `Hive::Task::STAGE_NAMES`.
 - `SHORT_TO_FULL = { "inbox" => "1-inbox", … }` — frozen hash for short→full resolution.
 
 ## Helpers (`module_function`)

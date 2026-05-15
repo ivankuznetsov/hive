@@ -28,12 +28,17 @@ class HiveDaemonPolicyTest < Minitest::Test
 
   def test_ready_for_review_dispatches
     assert_equal :dispatch, decide(action: "ready_for_review",
-                                   command: "hive review slug-a --from 4-execute")
+                                   command: "hive review slug-a --from 5-open-pr")
   end
 
-  def test_ready_for_pr_dispatches
-    assert_equal :dispatch, decide(action: "ready_for_pr",
-                                   command: "hive pr slug-a --from 5-review")
+  def test_ready_to_open_pr_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_open_pr",
+                                   command: "hive open-pr slug-a --from 4-execute")
+  end
+
+  def test_ready_to_finalize_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_finalize",
+                                   command: "hive finalize slug-a --from 6-review")
   end
 
   # ── merge wait: hand off to PrMergeWatcher ─────────────────────────────
@@ -43,7 +48,7 @@ class HiveDaemonPolicyTest < Minitest::Test
     # daemon does NOT dispatch it directly — it routes to U10
     # PrMergeWatcher which gates on `gh pr view --json state == MERGED`.
     assert_equal :poll_for_merge, decide(action: "ready_to_archive",
-                                         command: "hive archive slug-a --from 6-pr")
+                                         command: "hive archive slug-a --from 7-finalize")
   end
 
   # ── edit-resume: mtime-debounced re-runs ───────────────────────────────
@@ -184,7 +189,7 @@ class HiveDaemonPolicyTest < Minitest::Test
   end
 
   def test_archived_skips
-    # 7-done with :complete marker: terminal, no further work.
+    # 8-done with :complete marker: terminal, no further work.
     assert_equal :skip, decide(action: "archived",
                                command: nil)
   end

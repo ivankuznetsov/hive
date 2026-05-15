@@ -5,7 +5,7 @@ module Hive
     # Markers.current). Both must list the same names — adding to one
     # without the other causes silent parse failures.
     #
-    # REVIEW_* markers (added in U3) carry the 5-review stage's state
+    # REVIEW_* markers (added in U3) carry the 6-review stage's state
     # machine. REVIEW_WORKING is transient (set at phase entry, replaced
     # at phase exit by writing the next marker per ADR-005's last-marker-
     # wins rule). REVIEW_WAITING / REVIEW_CI_STALE / REVIEW_STALE /

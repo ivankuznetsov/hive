@@ -101,7 +101,7 @@ class MarkersTest < Minitest::Test
 
   # --- REVIEW_* markers (U3) ---------------------------------------------
 
-  # The 5-review stage's state machine carries six new markers. Each must
+  # The 6-review stage's state machine carries six new markers. Each must
   # round-trip through set/current with attributes intact. KNOWN_NAMES and
   # MARKER_RE are two sources of truth — these tests exercise both at once
   # by writing via set (validates KNOWN_NAMES) and reading via current

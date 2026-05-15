@@ -20,7 +20,7 @@ class MarkersCommandTest < Minitest::Test
     project = File.basename(dir)
     capture_io { Hive::Commands::New.new(project, "markers probe").call }
     inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
-    review = File.join(dir, ".hive-state", "stages", "5-review", File.basename(inbox))
+    review = File.join(dir, ".hive-state", "stages", "6-review", File.basename(inbox))
     FileUtils.mkdir_p(File.dirname(review))
     FileUtils.mv(inbox, review)
 
@@ -290,7 +290,7 @@ class MarkersCommandTest < Minitest::Test
     project = File.basename(dir)
     capture_io { Hive::Commands::New.new(project, "match-attr probe").call }
     inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
-    review = File.join(dir, ".hive-state", "stages", "5-review", File.basename(inbox))
+    review = File.join(dir, ".hive-state", "stages", "6-review", File.basename(inbox))
     FileUtils.mkdir_p(File.dirname(review))
     FileUtils.mv(inbox, review)
 

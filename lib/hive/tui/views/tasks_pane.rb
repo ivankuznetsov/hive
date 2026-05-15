@@ -49,8 +49,9 @@ module Hive
           "ready_to_brainstorm" => "▶ ",
           "ready_to_plan"       => "▶ ",
           "ready_to_develop"    => "▶ ",
+          "ready_to_open_pr"    => "▶ ",
           "ready_for_review"    => "▶ ",
-          "ready_for_pr"        => "▶ ",
+          "ready_to_finalize"   => "▶ ",
           "ready_to_archive"    => "▶ "
         }.freeze
         DEFAULT_ICON = "  ".freeze

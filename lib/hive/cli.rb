@@ -170,6 +170,12 @@ module Hive
       ).call
     end
 
+    desc "migrate [PROJECT_PATH]", "Rename in-flight task folders from the pre-open-pr stage layout"
+    def migrate(project_path = Dir.pwd)
+      require "hive/commands/migrate"
+      Hive::Commands::Migrate.new(project_path).call
+    end
+
     desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
     def new_task(project, *text_parts)
       require "hive/commands/new"
@@ -237,7 +243,17 @@ module Hive
       run_stage_action("develop", target)
     end
 
-    desc "review TARGET", "Move a completed execute task into review, or run an existing review task"
+    desc "open-pr TARGET", "Move a completed execute task into open-pr, or run an existing open-pr task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def open_pr(target)
+      run_stage_action("open-pr", target)
+    end
+    map "open-pr" => :open_pr
+    map "pr" => :open_pr
+
+    desc "review TARGET", "Move a completed open-pr task into review, or run an existing review task"
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
@@ -245,15 +261,15 @@ module Hive
       run_stage_action("review", target)
     end
 
-    desc "pr TARGET", "Move a completed review task into PR, or run an existing PR task"
+    desc "finalize TARGET", "Move a completed review task into finalize, or run an existing finalize task"
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def pr(target)
-      run_stage_action("pr", target)
+    def finalize(target)
+      run_stage_action("finalize", target)
     end
 
-    desc "archive TARGET", "Move a completed PR task into done, or run an existing done task"
+    desc "archive TARGET", "Move a completed finalize task into done, or run an existing done task"
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
@@ -437,7 +453,7 @@ module Hive
 
       The daemon polls `hive status --json` periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
-      ready to advance, plus auto-archives 6-pr after PR merge (gated on
+      ready to advance, plus auto-archives 7-finalize after PR merge (gated on
       `gh pr view --json state`). Stops at human-input gates (waiting
       markers, recovery markers).
 

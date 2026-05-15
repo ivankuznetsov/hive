@@ -27,7 +27,7 @@ module Hive
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
       # :state_file_marker (agent writes terminal marker to task.md);
-      # the 5-review reviewer adapter uses :output_file_exists (agent
+      # the 6-review reviewer adapter uses :output_file_exists (agent
       # writes a structured findings file). Passing nil falls back to
       # the profile's default. Validation lives in AgentProfile's enum.
       if status_mode && !Hive::AgentProfile::STATUS_DETECTION_MODES.include?(status_mode)
@@ -86,7 +86,7 @@ module Hive
       # :agent_working pre-spawn — the agent itself overwrites it with
       # the terminal marker on exit. The other two modes do NOT write
       # the task marker because the orchestrator owns it (e.g., the
-      # 5-review runner sets REVIEW_WORKING phase=reviewers and that
+      # 6-review runner sets REVIEW_WORKING phase=reviewers and that
       # must persist across each per-reviewer spawn).
       if effective_status_mode == :state_file_marker
         Hive::Markers.set(@task.state_file, :agent_working,
@@ -271,7 +271,7 @@ module Hive
         # Only the :state_file_marker mode writes :error to task.state_file
         # on timeout. The other modes leave the orchestrator-owned marker
         # in place (e.g., REVIEW_WORKING phase=reviewers stays so the
-        # 5-review runner can decide whether to retry, escalate, or
+        # 6-review runner can decide whether to retry, escalate, or
         # convert to REVIEW_ERROR).
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(@task.state_file, :error,
@@ -316,7 +316,7 @@ module Hive
 
     # The :exit_code_only and :output_file_exists modes deliberately do
     # NOT write to task.state_file. The orchestrator owns the marker for
-    # these flows (5-review's runner aggregates per-reviewer results and
+    # these flows (6-review's runner aggregates per-reviewer results and
     # writes a single REVIEW_* marker at the end of the phase). Writing
     # :error here would clobber the in-progress REVIEW_WORKING marker.
     # Caller reads result[:status] (:ok | :error) and result[:error_message]

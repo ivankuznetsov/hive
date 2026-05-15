@@ -4,8 +4,12 @@
   "title": "hive workflow-verb output (v1)",
   "description": "Stable contract emitted by `hive brainstorm`, `hive plan`, `hive develop`, `hive pr`, and `hive archive` when invoked with `--json`. Each verb is a promote-or-run dispatcher; the envelope's `phase` field reports which path executed.",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" },
-    { "$ref": "#/$defs/ErrorPayload" }
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
   ],
   "$defs": {
     "SuccessPayload": {
@@ -26,31 +30,64 @@
         "next_action"
       ],
       "properties": {
-        "schema": { "const": "hive-stage-action" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": true },
+        "schema": {
+          "const": "hive-stage-action"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
         "verb": {
           "type": "string",
-          "enum": ["brainstorm", "plan", "develop", "review", "pr", "archive"]
+          "enum": [
+            "brainstorm",
+            "plan",
+            "develop",
+            "review",
+            "pr",
+            "archive"
+          ]
         },
         "phase": {
           "type": "string",
-          "enum": ["promoted_and_ran", "ran", "noop"],
+          "enum": [
+            "promoted_and_ran",
+            "ran",
+            "noop"
+          ],
           "description": "Which dispatch path executed: `promoted_and_ran` (Approve then Run), `ran` (already at target), `noop` (archive against an already-archived task)."
         },
         "noop": {
           "type": "boolean",
           "description": "True when nothing was promoted, run, or committed. Currently set only by `archive` against a task already at 6-done with :complete marker."
         },
-        "slug": { "type": "string" },
+        "slug": {
+          "type": "string"
+        },
         "from_stage_dir": {
           "type": "string",
-          "enum": ["1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr"],
+          "enum": [
+            "1-inbox",
+            "2-brainstorm",
+            "3-plan",
+            "4-execute",
+            "5-review",
+            "6-pr"
+          ],
           "description": "The verb's documented source stage."
         },
         "to_stage_dir": {
           "type": "string",
-          "enum": ["2-brainstorm", "3-plan", "4-execute", "5-review", "6-pr", "7-done"],
+          "enum": [
+            "2-brainstorm",
+            "3-plan",
+            "4-execute",
+            "5-review",
+            "6-pr",
+            "7-done"
+          ],
           "description": "The verb's documented target stage."
         },
         "task_folder": {
@@ -65,22 +102,48 @@
           "type": "string",
           "description": "Present when phase=noop; explains why nothing was done (e.g. `already_archived`)."
         },
-        "next_action": { "$ref": "#/$defs/NextAction" }
+        "next_action": {
+          "$ref": "#/$defs/NextAction"
+        }
       }
     },
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "verb", "error_class", "error_kind", "exit_code", "message"],
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "verb",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
       "properties": {
-        "schema": { "const": "hive-stage-action" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": false },
+        "schema": {
+          "const": "hive-stage-action"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
         "verb": {
           "type": "string",
-          "enum": ["brainstorm", "plan", "develop", "review", "pr", "archive"]
+          "enum": [
+            "brainstorm",
+            "plan",
+            "develop",
+            "review",
+            "pr",
+            "archive"
+          ]
         },
-        "error_class": { "type": "string" },
+        "error_class": {
+          "type": "string"
+        },
         "error_kind": {
           "type": "string",
           "enum": [
@@ -93,8 +156,20 @@
             "error"
           ]
         },
-        "exit_code": { "type": "integer", "enum": [1, 4, 64, 70, 75, 78] },
-        "message": { "type": "string" },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            1,
+            4,
+            64,
+            70,
+            75,
+            78
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
         "current_stage": {
           "type": "string",
           "description": "Present on WrongStage and FinalStageReached: the stage the task is actually at."
@@ -103,20 +178,39 @@
           "type": "string",
           "description": "Present on WrongStage when the workflow verb knows the expected stage."
         },
-        "candidates": { "type": "array" },
-        "id": { "type": "integer", "minimum": 1 },
-        "path": { "type": "string" },
-        "stage": { "type": "string" },
+        "candidates": {
+          "type": "array"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "path": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
         "holder": {
           "type": "object",
           "description": "Present on ConcurrentRunError when raised over a live task lock. Properties are best-effort and additionalProperties is open to allow forward-compatible additions.",
           "additionalProperties": true,
           "properties": {
-            "pid": { "type": "integer" },
-            "slug": { "type": "string" },
-            "stage": { "type": "string" },
-            "started_at": { "type": "string" },
-            "process_start_time": { "type": "string" }
+            "pid": {
+              "type": "integer"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": "string"
+            },
+            "process_start_time": {
+              "type": "string"
+            }
           }
         },
         "lock_path": {
@@ -127,7 +221,10 @@
     },
     "NextAction": {
       "type": "object",
-      "required": ["key", "label"],
+      "required": [
+        "key",
+        "label"
+      ],
       "additionalProperties": false,
       "properties": {
         "key": {
@@ -148,8 +245,15 @@
             "error"
           ]
         },
-        "label": { "type": "string" },
-        "command": { "type": ["string", "null"] }
+        "label": {
+          "type": "string"
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     }
   }

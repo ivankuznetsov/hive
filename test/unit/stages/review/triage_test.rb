@@ -4,7 +4,7 @@ require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/protected_files"
 
-# Direct coverage for the triage step of the 5-review autonomous loop.
+# Direct coverage for the triage step of the 6-review autonomous loop.
 class TriageTest < Minitest::Test
   include HiveTestHelper
 
@@ -26,7 +26,7 @@ class TriageTest < Minitest::Test
 
   def with_triage_dir
     with_tmp_dir do |dir|
-      task_folder = File.join(dir, ".hive-state", "stages", "5-review", "test-task")
+      task_folder = File.join(dir, ".hive-state", "stages", "6-review", "test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
       yield(dir, task_folder)
     end

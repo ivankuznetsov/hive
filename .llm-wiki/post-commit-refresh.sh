@@ -9,8 +9,10 @@ configure_qmd_environment() {
   if ! mkdir -p "$cache_home/qmd" 2>/dev/null || ! touch "$cache_home/qmd/.write-test" 2>/dev/null; then
     export XDG_CACHE_HOME="$project_root/.llm-wiki/qmd-cache"
     mkdir -p "$XDG_CACHE_HOME/qmd"
+    export LLM_WIKI_QMD_CACHE_DIR="$XDG_CACHE_HOME/qmd"
   else
     rm -f "$cache_home/qmd/.write-test"
+    export LLM_WIKI_QMD_CACHE_DIR="$cache_home/qmd"
   fi
 }
 
@@ -46,9 +48,9 @@ run_refresh() {
   local prompt="$1"
   ran_refresh=1
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
+    timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
   else
-    codex exec -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
+    codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt" >>"$log_file" 2>&1 || true
   fi
 }
 

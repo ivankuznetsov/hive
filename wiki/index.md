@@ -10,7 +10,7 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 57
+Page count: 59
 Updated: 2026-05-14
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives an eight-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-finalize` → `8-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive.
@@ -22,6 +22,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives an eig
 - [[cli]] — `wiki/cli.md`
 - [[commands]] — `wiki/commands.md`
 - [[commands/approve]] — `wiki/commands/approve.md`
+- [[commands/bot]] — `wiki/commands/bot.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
 - [[commands/findings]] — `wiki/commands/findings.md`
@@ -43,6 +44,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives an eig
 - [[log]] — `wiki/log.md`
 - [[modules/agent]] — `wiki/modules/agent.md`
 - [[modules/agent_profile]] — `wiki/modules/agent_profile.md`
+- [[modules/bot]] — `wiki/modules/bot.md`
 - [[modules/config]] — `wiki/modules/config.md`
 - [[modules/daemon]] — `wiki/modules/daemon.md`
 - [[modules/execute_waiting_action]] — `wiki/modules/execute_waiting_action.md`

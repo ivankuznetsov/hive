@@ -75,4 +75,5 @@ These are not gems but the CLI tools the runtime invokes:
 
 - [[architecture]]
 - [[modules/agent]]
+- [[commands/bot]]
 - [[e2e]]

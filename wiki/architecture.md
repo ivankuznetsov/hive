@@ -3,18 +3,18 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-05-13
+updated: 2026-05-14
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a small Ruby 3.4 / Thor CLI that drives an eight-stage filesystem state machine. The CLI dispatches into per-stage runners; active runners spawn an AgentProfile CLI as a subprocess inside a per-task lock and a per-project commit lock. Two filesystem trees per project hold all state.
+**TLDR**: Hive is a Ruby 3.4 / Thor control plane over an eight-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. There is still no database; durable state is the filesystem plus global YAML config.
 
 ## Layer cake
 
 ```
 bin/hive                          Thor entry; rescues Hive::Error → exit
-  └─ lib/hive/cli.rb              command class (init / new / run / status)
-       └─ lib/hive/commands/      Init · New · Run · Status · StageAction
+  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot)
+       └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot
             └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Finalize · Done
                  ├─ Stages::Base  template render + agent spawn helpers
                  └─ Hive::Agent   `claude -p` subprocess wrapper
@@ -148,6 +148,38 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 
 Cross-link: [[commands/tui]] for the user-facing surface, [[state-model]] for the snapshot grammar the TUI renders.
 
+## Telegram bot pipeline
+
+The Telegram bot ([[commands/bot]]) is the mobile-shaped companion to
+the daemon. It watches the same `hive status --json` stream, uses the
+same `Hive::TaskAction` classification, and turns rows that require
+human input into inline-keyboard or free-text conversations.
+
+```
+hive bot start  →  Hive::Commands::Bot
+                    └─ Hive::Bot::Supervisor
+                         ├─ Telegram long-poll loop
+                         │    └─ Router → slash/callback/free-text handlers
+                         ├─ StatusWatcher loop
+                         │    └─ NotificationDispatcher → inline keyboards
+                         └─ ChildSupervisor reaper
+                              └─ replies when spawned hive commands finish
+```
+
+The trust boundary matches the daemon: the bot is a subprocess caller,
+not an orchestrator. Stage approvals call workflow verbs with
+`--from <stage> --json`; recovery buttons call `hive markers clear`;
+triage buttons call `hive accept-finding` / `reject-finding`; `/idea`
+calls `hive new`. The one direct write is brainstorm answer insertion,
+which is scoped to `### A<N>.` blocks and protected by
+`Hive::Lock.with_task_lock`.
+
+Path A brainstorm help uses Codex as a short-lived subprocess per turn
+through `Hive::Bot::CodexConversation`. Telegram-sourced text is wrapped
+with the same per-spawn `<user_supplied_<hex>>` nonce boundary as stage
+prompts, and Codex only returns a draft. The bot writes the literal
+confirmed draft; Codex never edits `brainstorm.md` directly.
+
 ## Code conventions
 
 - Ruby 3.4, frozen-string-literal **disabled** (per `.rubocop.yml`).
@@ -162,4 +194,4 @@ Cross-link: [[commands/tui]] for the user-facing surface, [[state-model]] for th
 - [[cli]] — command surface.
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
-- [[modules/agent]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]]
+- [[modules/agent]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/bot]]

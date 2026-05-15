@@ -3,11 +3,11 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-04-26
+updated: 2026-05-14
 tags: [roadmap, status]
 ---
 
-**TLDR**: Phase 1 MVP shipped Apr-25. The 6-review stage and its sub-pipeline (CI-fix, sequential reviewers, triage, fix, fix-guardrail, browser-test) shipped on `feat/6-review-stage` (branch in flight 2026-04-26). 295 unit/integration tests green; `hive metrics rollback-rate` operational.
+**TLDR**: Phase 1 MVP shipped Apr-25. The 6-review loop, PR-first draft/finalize flow, daemon dispatcher, rollback-rate metric, auto-rebase pre-step, and Telegram bot mobile surface are now implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, and daemon/bot operational polish.
 
 ## Status
 
@@ -30,6 +30,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 | Repo hygiene | `CHANGELOG.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | Authored |
 | Docs | `README.md`, `wiki/` knowledge base | Authored |
 | Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 7-finalize after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
+| Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. |
 
 ## Phase 1 deferred work
 
@@ -44,7 +45,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 ## Phase 2/3 work (also deferred)
 
 - ~~Dispatcher daemon at `~/Dev/hive/daemon.rb` with polling + fswatch.~~ Shipped (polling-only) under ADR-024. fswatch deferred behind `daemon.fswatch.enabled: true`.
-- Telegram bot bidirectional adapter.
+- ~~Telegram bot bidirectional adapter.~~ Shipped under ADR-026 as `hive bot`.
 - Observability probes track (`<project>/.hive-state/reports/`).
 - QMD export of `8-done/` task artefacts to per-project learning collections.
 - `gh api` PR-comment ingestion into `reviews/pr-comments-NN.md`.
@@ -62,3 +63,4 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 - [[gaps]]
 - [[architecture]]
 - [[decisions]]
+- [[commands/bot]] · [[modules/bot]]

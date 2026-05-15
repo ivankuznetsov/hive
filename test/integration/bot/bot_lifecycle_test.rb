@@ -71,4 +71,42 @@ class HiveBotLifecycleTest < Minitest::Test
       assert_empty schema.validate(doc).map { |error| error["error"] }
     end
   end
+
+  def test_start_creates_pid_file_lockable_and_log_directory
+    with_bot_home do |home|
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "test-token"
+      pid_path = File.join(home, ".bot.pid")
+      log_dir = File.join(home, "logs")
+
+      cmd = Hive::Commands::Bot.new("start", dry_run: true)
+
+      pid = fork do
+        cmd.send(:start_bot)
+      rescue StandardError
+        exit 1
+      end
+
+      begin
+        wait_until_exists(pid_path)
+        assert File.exist?(pid_path), "start should create the PID file"
+        assert File.directory?(log_dir), "start should create the bot log directory"
+
+        contender = File.open(pid_path, File::RDWR | File::CREAT)
+        refute contender.flock(File::LOCK_EX | File::LOCK_NB),
+               "second start must not acquire the PID lock"
+      ensure
+        contender&.close
+        Process.kill("TERM", pid) rescue nil
+        Process.wait(pid) rescue nil
+        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      end
+    end
+  end
+
+  private
+
+  def wait_until_exists(path, deadline_sec: 3)
+    deadline = Time.now + deadline_sec
+    sleep 0.05 until File.exist?(path) || Time.now >= deadline
+  end
 end

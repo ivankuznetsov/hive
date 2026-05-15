@@ -28,6 +28,7 @@ module Hive
           when :callback_codex_cancel then @result_class.new(action: :reply, text: "Draft cancelled.")
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
+          when :callback_idea_project_new then idea_project_new(data)
           else @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
           end
         rescue ArgumentError => e
@@ -69,6 +70,15 @@ module Hive
             project: project,
             slug: slug,
             command_argv: [ "hive", "status", "--project", project, "--slug", slug, "--json" ]
+          )
+        end
+
+        def idea_project_new(data)
+          _prefix, token = split_callback(data, 2)
+          @pending_ideas.delete(token)
+          @result_class.new(
+            action: :reply,
+            text: "Registering a new project from the bot is out of MVP scope — run `hive init` on a laptop, then send /idea again."
           )
         end
 

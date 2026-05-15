@@ -31,6 +31,7 @@ module Hive
         callback_codex_cancel
         callback_findings_accept_all
         callback_findings_reject_all
+        callback_idea_project_new
         free_text_answer
         unauthorized
         unknown
@@ -163,6 +164,7 @@ module Hive
         when /\Acodex_cancel:/ then :callback_codex_cancel
         when /\Afindings:accept_all:/ then :callback_findings_accept_all
         when /\Afindings:reject_all:/ then :callback_findings_reject_all
+        when /\Aidea_project_new:/ then :callback_idea_project_new
         else :unknown
         end
       end

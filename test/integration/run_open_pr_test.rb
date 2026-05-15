@@ -25,33 +25,33 @@ class RunOpenPrTest < Minitest::Test
     %w[
       HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
       HIVE_FAKE_GH_PR_EXISTS HIVE_FAKE_GH_AUTH_EXIT HIVE_FAKE_GH_LOG_DIR
-	      HIVE_FAKE_GH_PR_BODY HIVE_FAKE_GH_PR_STATE
-	      HIVE_FAKE_GH_PR_ISDRAFT HIVE_FAKE_GH_READY_STDERR
-	      HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
-	    ].each { |k| ENV.delete(k) }
-	  end
+        HIVE_FAKE_GH_PR_BODY HIVE_FAKE_GH_PR_STATE
+        HIVE_FAKE_GH_PR_ISDRAFT HIVE_FAKE_GH_READY_STDERR
+        HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
+      ].each { |k| ENV.delete(k) }
+    end
 
-	  def test_existing_non_draft_pr_records_state_and_finalize_skips_ready
-	    with_tmp_global_config do
-	      with_tmp_git_repo do |dir|
-	        task_dir, worktree_path = setup_open_pr_task(dir)
-	        stub_push(worktree_path)
-	        slug = File.basename(task_dir)
-	        run!("git", "-C", worktree_path, "push", "-u", "origin", slug, "--quiet")
-	        ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
-	        ENV["HIVE_FAKE_GH_PR_ISDRAFT"] = "false"
+    def test_existing_non_draft_pr_records_state_and_finalize_skips_ready
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          task_dir, worktree_path = setup_open_pr_task(dir)
+          stub_push(worktree_path)
+          slug = File.basename(task_dir)
+          run!("git", "-C", worktree_path, "push", "-u", "origin", slug, "--quiet")
+          ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
+          ENV["HIVE_FAKE_GH_PR_ISDRAFT"] = "false"
 
-	        capture_io { Hive::Commands::Run.new(task_dir).call }
-	        pr_md = File.join(task_dir, "pr.md")
-	        assert_includes File.read(pr_md),
-	                        "<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false idempotent=true -->"
+          capture_io { Hive::Commands::Run.new(task_dir).call }
+          pr_md = File.join(task_dir, "pr.md")
+          assert_includes File.read(pr_md),
+                          "<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false idempotent=true -->"
 
-	        finalize_dir = File.join(dir, ".hive-state", "stages", "7-finalize", slug)
-	        FileUtils.mkdir_p(File.dirname(finalize_dir))
-	        FileUtils.mv(task_dir, finalize_dir)
-	        pr_md = File.join(finalize_dir, "pr.md")
-	        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
-	        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          finalize_dir = File.join(dir, ".hive-state", "stages", "7-finalize", slug)
+          FileUtils.mkdir_p(File.dirname(finalize_dir))
+          FileUtils.mv(task_dir, finalize_dir)
+          pr_md = File.join(finalize_dir, "pr.md")
+          ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+          ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
 	          ---
 	          pr_url: https://example.com/pr/1
 	          pr_number: 1
@@ -61,15 +61,15 @@ class RunOpenPrTest < Minitest::Test
 	          final body
 
 	          <!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false -->
-	        MD
+          MD
 
-	        capture_io { Hive::Commands::Run.new(finalize_dir).call }
-	        log = gh_argv_log
-	        refute_match(/arg=ready\n/, log,
-	                     "finalize must not call `gh pr ready` when gh reports the PR is already ready")
-	      end
-	    end
-	  end
+          capture_io { Hive::Commands::Run.new(finalize_dir).call }
+          log = gh_argv_log
+          refute_match(/arg=ready\n/, log,
+                       "finalize must not call `gh pr ready` when gh reports the PR is already ready")
+        end
+      end
+    end
 
   # Wire fake-gh to flip its `pr list` result from "[]" to "[<pr>]"
   # AFTER fake-claude runs — proxy for `gh pr create`'s side effect.
@@ -165,11 +165,11 @@ class RunOpenPrTest < Minitest::Test
         # agent and requires the URL to match. Arm fake-gh to report
         # the PR once fake-claude has run.
         arm_post_agent_pr_exists(url: "https://example.com/pr/9", number: 9)
-	        capture_io { Hive::Commands::Run.new(task_dir).call }
-	        assert_equal :complete, Hive::Markers.current(pr_md).name
-	      end
-	    end
-	  end
+          capture_io { Hive::Commands::Run.new(task_dir).call }
+          assert_equal :complete, Hive::Markers.current(pr_md).name
+        end
+      end
+    end
 
   def test_open_pr_success_without_complete_marker_lands_error
     with_tmp_global_config do

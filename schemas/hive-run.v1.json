@@ -33,12 +33,12 @@
         "slug": { "type": "string" },
         "stage": {
           "type": "string",
-          "enum": ["inbox", "brainstorm", "plan", "execute", "open-pr", "review", "finalize", "done"]
+          "enum": ["inbox", "brainstorm", "plan", "execute", "review", "pr", "done"]
         },
         "stage_index": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 8
+          "maximum": 7
         },
         "folder": { "type": "string" },
         "state_file": { "type": "string" },
@@ -78,7 +78,7 @@
           }
         },
         "cleanup_instructions": {
-          "description": "Human-readable cleanup guidance returned by the 8-done stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
+          "description": "Human-readable cleanup guidance returned by the 7-done stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
           "type": "array",
           "items": { "type": "string" }
         },

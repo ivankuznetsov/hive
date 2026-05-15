@@ -13,10 +13,14 @@
       "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! — internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
     },
     {
+      "fingerprint": "2b04ae09c74c02877b56a2a2a91f97b6363dbd965e1537c105d6781bb785a670",
+      "note": "False positive. Open3.capture3 array form in Stages::Finalize#final_commits. base is produced by `git merge-base HEAD origin/<default>` and interpolated into one revspec argv element (`base..HEAD`); no shell ever sees it."
+    },
+    {
       "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",
       "note": "False positive. Open3.capture3 array form in GitOps#commits_behind. `ref` is `origin/<default_branch>` constructed inside Hive::Rebase from `cfg.default_branch || git.default_branch` (the latter from `git symbolic-ref refs/remotes/origin/HEAD`). Not attacker-controlled; passed as a single argv element to execve(2)."
     }
   ],
-  "updated": "2026-05-14",
+  "updated": "2026-05-15",
   "brakeman_version": "8.0.4"
 }

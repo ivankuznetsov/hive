@@ -24,11 +24,11 @@ class GhUnitTest < Minitest::Test
     FileUtils.rm_rf(@gh_dir)
     FileUtils.rm_rf(@log_dir)
     %w[
-	      HIVE_FAKE_GH_LOG_DIR
-	      HIVE_FAKE_GH_PR_BODY
-	      HIVE_FAKE_GH_VIEW_EXIT
-	      HIVE_FAKE_GH_LIST_JSON
-	    ].each { |k| ENV.delete(k) }
+        HIVE_FAKE_GH_LOG_DIR
+        HIVE_FAKE_GH_PR_BODY
+        HIVE_FAKE_GH_VIEW_EXIT
+        HIVE_FAKE_GH_LIST_JSON
+      ].each { |k| ENV.delete(k) }
   end
 
   # --- with_network_timeout --------------------------------------------

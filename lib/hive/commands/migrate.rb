@@ -125,11 +125,12 @@ module Hive
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
         return if status.success?
 
-        message = if config_only && moved.empty?
-                    "hive: migrate config keys (no tasks moved)"
-                  else
-                    "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
-                  end
+        message =
+          if config_only && moved.empty?
+            "hive: migrate config keys (no tasks moved)"
+          else
+            "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
+          end
         ops.run_git!("-C", hive_state, "commit", "-m", message)
       end
 

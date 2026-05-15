@@ -146,6 +146,7 @@ module Hive
       # before the daemon will touch them.
       "daemon" => {
         "enabled" => false,
+        "autostart" => false,
         "poll_interval_sec" => 30,
         "edit_debounce_sec" => 30,
         "pr_merge_poll_interval_sec" => 300,
@@ -849,6 +850,13 @@ module Hive
         raise ConfigError,
               "daemon.enabled in #{describe_source(source_path)} must be a boolean " \
               "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      autostart = daemon["autostart"]
+      unless autostart.nil? || autostart == true || autostart == false
+        raise ConfigError,
+              "daemon.autostart in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{autostart.inspect} (#{autostart.class})"
       end
 
       DAEMON_NUMERIC_BOUNDS.each do |key, min|

@@ -5,7 +5,7 @@ class InitTest < Minitest::Test
   include HiveTestHelper
 
   def test_initializes_project_with_orphan_branch_and_global_registration
-    with_tmp_global_config do
+    with_tmp_global_config do |home|
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
 
@@ -36,6 +36,12 @@ class InitTest < Minitest::Test
 
         projects = Hive::Config.registered_projects
         assert(projects.any? { |p| p["path"] == File.expand_path(dir) })
+
+        assert File.exist?(File.join(home, ".config/systemd/user/hive-daemon.service")),
+               "init should register the per-user daemon service unit"
+        global = YAML.safe_load(File.read(File.join(home, "config.yml")))
+        assert_equal false, global.dig("daemon", "autostart"),
+                     "non-TTY init writes the service unit but does not start it by default"
       end
     end
   end
@@ -207,14 +213,14 @@ class InitTest < Minitest::Test
 
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect: planning, development, reviewers,
-    # triage bias, 9 limit prompts, daemon-enable, confirm. Choose codex
+    # triage bias, 9 limit prompts, daemon-enable, daemon-autostart, confirm. Choose codex
     # for both, safetyist triage, only first + third reviewer, override
     # `plan` budget/timeout, accept the rest (daemon defaults to enabled on
     # blank, confirm defaults to yes on blank).
     inputs = [
       "codex", "2", "1,3", "safetyist",
       "", "30,900", "", "", "", "", "", "", "",
-      "", ""
+      "", "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -244,7 +250,7 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    inputs = (([ "" ] * 13) + [ "n", "" ]).join("\n") + "\n"
+    inputs = (([ "" ] * 13) + [ "n", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -259,8 +265,8 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # 14 blanks: planning, dev, reviewers, triage bias, 9 limits, daemon-enable.
-    inputs = (([ "" ] * 14) + [ "n" ]).join("\n") + "\n"
+    # 15 blanks: planning, dev, reviewers, triage bias, 9 limits, daemon-enable, daemon-autostart.
+    inputs = (([ "" ] * 15) + [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)

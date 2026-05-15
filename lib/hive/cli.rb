@@ -669,10 +669,15 @@ module Hive
       Modes (each with its own keymap):
 
         grid (default)
-          b/p/d/r/P/a   dispatch hive brainstorm/plan/develop/review/pr/archive
+          b/p/d/r/P/F/a dispatch hive brainstorm/plan/develop/review/open-pr/finalize/archive
           j/k or Down/Up cursor up/down (jumps across projects at edges)
           Enter         contextual: review_findings opens triage,
-                        agent_running/error opens log tail, ready_* dispatches
+                        agent_running opens log tail, recoverable errors rerun,
+                        ready_* dispatches
+          o             open the focused task folder in $EDITOR for browse-only inspection
+          s             steer the focused task manually in the configured dev agent;
+                        marks MANUAL_STEERING and archives it on agent exit
+          n             open the new-idea prompt
           /             open the slug-filter prompt
           1-9           scope to the Nth registered project; 0 clears scope
           ?             open this help overlay

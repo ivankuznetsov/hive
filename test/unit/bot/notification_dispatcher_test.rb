@@ -71,12 +71,52 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal [], telegram.messages
   end
 
-  def test_recent_dispatch_suppresses_notification
+  def test_recent_dispatch_does_not_suppress_unrelated_state_change
     d = dispatcher
     d.record_dispatch(project: "hive", slug: "slug-260514-abcd")
     d.process_rows([ row(action: "needs_input", marker: "waiting") ])
 
-    assert_equal [], telegram.messages
+    assert_equal 1, telegram.messages.size,
+                 "post-dispatch state-change notifications must not be suppressed (plan R6)"
+  end
+
+  def test_record_dispatch_with_fingerprint_suppresses_same_fingerprint
+    d = dispatcher
+    target_row = row(action: "needs_input", marker: "waiting")
+    fp = Hive::Bot::NotificationBuilders.fingerprint(target_row)
+    d.record_dispatch(project: "hive", slug: "slug-260514-abcd", fingerprint: fp)
+    d.process_rows([ target_row ])
+
+    assert_equal [], telegram.messages,
+                 "same-fingerprint dispatch should suppress re-notification of the marker that just transitioned"
+  end
+
+  def test_multi_chat_fanout_delivers_to_all_allowed_chats
+    multi = Hive::Bot::NotificationDispatcher.new(
+      telegram: telegram, logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345, 67890 ], "notification_dedupe_window_sec" => 300 }
+    )
+    multi.process_rows([ row ])
+
+    assert_equal [ 12345, 67890 ], telegram.messages.map { |msg| msg[:chat_id] }
+  end
+
+  def test_prune_window_lets_repeated_fingerprint_re_notify_after_dedupe_window
+    advancing_clock = Time.utc(2026, 5, 14, 12, 0, 0)
+    clock = -> { advancing_clock }
+    d = Hive::Bot::NotificationDispatcher.new(
+      telegram: telegram, logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345 ], "notification_dedupe_window_sec" => 60 },
+      now: clock
+    )
+
+    d.process_rows([ row ])
+    assert_equal 1, telegram.messages.size
+
+    advancing_clock += 120
+    d.process_rows([ row ])
+    assert_equal 2, telegram.messages.size,
+                 "dedupe entry should expire after the window so the same fingerprint re-notifies"
   end
 
   class StubTelegram

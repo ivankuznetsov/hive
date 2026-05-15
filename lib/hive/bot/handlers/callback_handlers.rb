@@ -2,11 +2,13 @@ module Hive
   module Bot
     module Handlers
       class CallbackHandlers
-        def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:)
+        def initialize(pending_ideas:, set_last_project:, conversation_store:, result_class:,
+                       logger: nil)
           @pending_ideas = pending_ideas
           @set_last_project = set_last_project
           @conversation_store = conversation_store
           @result_class = result_class
+          @logger = logger
         end
 
         def handle(intent, update)
@@ -16,7 +18,7 @@ module Hive
           when :callback_reject then @result_class.new(action: :reply, text: "Left unchanged.")
           when :callback_clear_and_retry then clear_and_retry(data)
           when :callback_open_laptop then @result_class.new(action: :reply, text: "Open laptop for this one.")
-          when :callback_show_details then @result_class.new(action: :reply, text: "Details are available from /queue.")
+          when :callback_show_details then show_details(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
           when :callback_path_a_yes then path_a(data)
@@ -28,7 +30,8 @@ module Hive
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
           else @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
           end
-        rescue ArgumentError
+        rescue ArgumentError => e
+          @logger&.event(:callback_malformed, data: data, error_class: e.class.name, message: e.message)
           @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
         end
 
@@ -59,9 +62,20 @@ module Hive
           @result_class.new(action: :start_answer, project: project, slug: slug, mode: :path_b)
         end
 
+        def show_details(data)
+          _prefix, project, slug = split_callback(data, 3)
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: project,
+            slug: slug,
+            command_argv: [ "hive", "status", "--project", project, "--slug", slug, "--json" ]
+          )
+        end
+
         def idea_project(data)
           _prefix, project, token = split_callback(data, 3)
-          idea_text = @pending_ideas.delete(token)
+          entry = @pending_ideas.delete(token)
+          idea_text = entry.is_a?(Hash) ? entry[:text] : entry
           return @result_class.new(action: :reply, text: "That idea picker expired. Send /idea <text> again.") unless idea_text
 
           @set_last_project.call(project)
@@ -85,17 +99,28 @@ module Hive
 
         def codex_write(data)
           _prefix, project, slug, question_n = split_callback(data, 4)
+          begin
+            n = Integer(question_n)
+          rescue ArgumentError, TypeError => e
+            @logger&.event(:callback_malformed, data: data, reason: "non_integer_question_n",
+                                                  error_class: e.class.name)
+            return @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
+          end
           @result_class.new(action: :confirm_codex_draft, project: project, slug: slug,
-                            question_n: Integer(question_n))
+                            question_n: n)
         end
 
         def findings_toggle(data, verb)
           _prefix, _kind, project, slug, stage = split_callback(data, 5)
+          stage_argv = stage ? [ "--stage", stage ] : []
           @result_class.new(
-            action: :dispatch_then_reply,
+            action: :dispatch_commands,
             project: project,
             slug: slug,
-            command_argv: [ "hive", verb, slug, "--all", "--stage", stage, "--project", project, "--json" ]
+            commands: [
+              [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ],
+              [ "hive", retry_verb_for_stage(stage) || "review", slug, "--from", stage, "--project", project, "--json" ]
+            ]
           )
         end
 

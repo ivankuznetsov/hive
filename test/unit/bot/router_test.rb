@@ -74,7 +74,7 @@ class HiveBotRouterTest < Minitest::Test
   end
 
   def test_free_text_inside_active_conversation_writes_current_question
-    @router.handle(update(text: "/answer slug-260514-abcd"))
+    @store.start(chat_id: 12345, slug: "slug-260514-abcd", question_n: 1)
 
     result = @router.handle(update(text: "answer body"))
 
@@ -82,6 +82,14 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "slug-260514-abcd", result.slug
     assert_equal 1, result.question_n
     assert_equal "answer body", result.answer_text
+  end
+
+  def test_slash_answer_returns_start_answer_action_not_immediate_start
+    result = @router.handle(update(text: "/answer slug-260514-abcd"))
+
+    assert_equal :start_answer, result.action
+    assert_equal "slug-260514-abcd", result.slug
+    assert_equal :path_b, result.mode
   end
 
   def test_free_text_outside_conversation_gets_help_hint

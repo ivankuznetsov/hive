@@ -105,4 +105,54 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal 1, questions.size
     assert_equal "The phrase ### Q5. was part of the answer, not a heading.", questions.first.answer
   end
+
+  def test_multi_paragraph_answer_with_internal_blank_line_is_preserved
+    text = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. Multi para?
+
+      ### A1.
+
+      First paragraph.
+
+      Second paragraph.
+    MARKDOWN
+
+    answer = Hive::Bot::BrainstormParser.parse_text(text).first.answer
+
+    assert_equal "First paragraph.\n\nSecond paragraph.", answer
+  end
+
+  def test_question_without_round_context_returns_nil_round
+    text = <<~MARKDOWN
+      ### Q1. Question without preceding round?
+      Body.
+
+      ### A1.
+    MARKDOWN
+
+    question = Hive::Bot::BrainstormParser.parse_text(text).first
+
+    assert_equal 1, question.n
+    assert_nil question.round
+  end
+
+  def test_answered_predicate_reflects_presence_of_answer
+    questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. First?
+
+      ### A1.
+      Yes.
+
+      ### Q2. Second?
+
+      ### A2.
+    MARKDOWN
+
+    assert_predicate questions.first, :answered?
+    refute_predicate questions.last, :answered?
+  end
 end

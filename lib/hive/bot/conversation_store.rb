@@ -3,6 +3,8 @@ require "time"
 module Hive
   module Bot
     class ConversationStore
+      VALID_MODES = %i[path_a path_b].freeze
+
       State = Struct.new(:chat_id, :slug, :question_n, :history, :draft, :mode,
                          :awaiting_confirm, :updated_at, keyword_init: true)
 
@@ -12,7 +14,12 @@ module Hive
         @states = {}
       end
 
+      def update_ttl(seconds)
+        @ttl_sec = seconds
+      end
+
       def start(chat_id:, slug:, question_n:, mode: :path_b)
+        validate_mode!(mode)
         state = State.new(
           chat_id: chat_id,
           slug: slug,
@@ -42,10 +49,17 @@ module Hive
           setter = "#{name}="
           raise ArgumentError, "unknown conversation state attr: #{name}" unless state.respond_to?(setter)
 
+          validate_mode!(value) if name == :mode
           state.public_send(setter, value)
         end
         state.updated_at = @now.call
         state
+      end
+
+      def validate_mode!(mode)
+        return if VALID_MODES.include?(mode)
+
+        raise ArgumentError, "conversation mode must be one of #{VALID_MODES.inspect}; got #{mode.inspect}"
       end
 
       def clear(chat_id:, slug:)

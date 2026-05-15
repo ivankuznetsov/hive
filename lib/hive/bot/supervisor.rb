@@ -12,6 +12,7 @@ require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
+require "hive/bot/codex_conversation"
 
 module Hive
   module Bot
@@ -96,8 +97,8 @@ module Hive
         return if updates.empty?
 
         count = updates.size
-        text = "Hive is back online, #{count} #{count == 1 ? 'message' : 'messages'} queued"
-        chat_ids.each { |chat_id| @telegram.send_message(chat_id: chat_id, text: text) }
+        text = "👋 Hive is back online, #{count} #{count == 1 ? 'message' : 'messages'} queued"
+        chat_ids.each { |chat_id| safe_send_message(chat_id: chat_id, text: text) }
         @logger.event(:reconnect_summary, queued_count: count)
       end
 
@@ -106,70 +107,138 @@ module Hive
       def poll_loop
         first_poll = true
         until @shutdown
-          reload_config_if_requested
-          updates = @telegram.poll_updates(
-            timeout: @config.fetch("long_poll_timeout_sec"),
-            since_update_id: @next_update_id
-          )
-          if first_poll
-            queued = queued_updates(updates)
-            send_reconnect_summary(queued)
-            first_poll = false
-          end
-          updates.each do |update|
-            process_update(update)
-            @next_update_id = update.update_id + 1
+          begin
+            reload_config_if_requested
+            updates = @telegram.poll_updates(
+              timeout: @config.fetch("long_poll_timeout_sec"),
+              since_update_id: @next_update_id
+            )
+            if first_poll
+              queued = queued_updates(updates)
+              send_reconnect_summary(queued)
+              first_poll = false
+            end
+            updates.each do |update|
+              begin
+                process_update(update)
+              rescue StandardError => e
+                @logger.event(:fatal, source: "process_update", error_class: e.class.name,
+                                       message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
+              end
+              @next_update_id = update.update_id + 1
+            end
+          rescue StandardError => e
+            @logger.event(:fatal, source: "poll_loop", error_class: e.class.name,
+                                   message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
+            interruptible_sleep(1)
           end
         end
       end
 
       def status_loop
         until @shutdown
-          reload_config_if_requested
-          status_tick
+          begin
+            reload_config_if_requested
+            status_tick
+          rescue StandardError => e
+            @logger.event(:fatal, source: "status_loop", error_class: e.class.name,
+                                   message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
+          end
           interruptible_sleep(@config.fetch("poll_interval_sec"))
         end
       end
 
       def reaper_loop
         until @shutdown
-          reap_children
+          begin
+            reap_children
+          rescue StandardError => e
+            @logger.event(:fatal, source: "reaper_loop", error_class: e.class.name,
+                                   message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
+          end
           sleep 1
         end
       end
+
+      def safe_send_message(chat_id:, text:, reply_markup: nil)
+        @telegram.send_message(chat_id: chat_id, text: text, reply_markup: reply_markup)
+      rescue StandardError => e
+        @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
+        nil
+      end
+
+      ALLOWED_RESULT_ACTIONS = %i[
+        noop reply dispatch_then_reply dispatch_commands start_answer
+        write_answer_then_reply start_codex confirm_codex_draft
+      ].freeze
 
       def execute_result(result, update)
         case result.action
         when :noop
           nil
         when :reply
-          @telegram.send_message(chat_id: update.chat_id, text: result.text,
-                                 reply_markup: result.reply_markup)
+          safe_send_message(chat_id: update.chat_id, text: result.text,
+                            reply_markup: result.reply_markup)
         when :dispatch_then_reply
           execute_dispatch(result, update)
         when :dispatch_commands
-          result.commands.each { |argv| execute_dispatch(result.dup.tap { |r| r.command_argv = argv }, update) }
+          dispatch_command_sequence(result, update)
         when :start_answer
           start_answer(result, update)
         when :write_answer_then_reply
           execute_answer_write(result, update)
         when :start_codex
-          @telegram.send_message(chat_id: update.chat_id, text: "Codex chat is starting for #{result.slug}.")
+          execute_start_codex(result, update)
         when :confirm_codex_draft
-          @telegram.send_message(chat_id: update.chat_id, text: "Draft confirmed for #{result.slug}.")
+          execute_confirm_codex_draft(result, update)
+        else
+          raise "Supervisor cannot execute unknown action #{result.action.inspect}"
         end
+      end
+
+      def dispatch_command_sequence(result, update)
+        commands = Array(result.commands)
+        commands.each_with_index do |argv, idx|
+          per_command = @router.class::Result.new(
+            action: :dispatch_then_reply,
+            command_argv: argv,
+            project: result.project,
+            slug: result.slug
+          )
+          last_pid = execute_dispatch(per_command, update)
+          if idx < commands.length - 1 && last_pid
+            wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
+          end
+        end
+      end
+
+      def wait_for_child_success(pid, deadline:)
+        loop do
+          completed = @child_supervisor.reap_all
+          completed.each { |child| reply_for_child(child) }
+          match = completed.find { |child| child.pid == pid }
+          if match
+            return match.exit_code.to_i.zero?
+          end
+
+          break if Time.now >= deadline
+
+          sleep 0.1
+        end
+        false
       end
 
       def execute_dispatch(result, update)
         if result.command_argv == [ "hive", "status", "--json" ]
           rows = @status_watcher.fetch.rows
-          @telegram.send_message(chat_id: update.chat_id, text: render_queue(rows))
-          return
+          safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
+                            reply_markup: queue_inline_keyboard(rows))
+          return nil
         end
 
         if @dry_run
-          @telegram.send_message(chat_id: update.chat_id, text: "Dry run: #{result.command_argv.join(' ')}")
-          return
+          safe_send_message(chat_id: update.chat_id, text: "Dry run: #{result.command_argv.join(' ')}")
+          return nil
         end
 
         project_path = project_path_for(result.project)
@@ -182,13 +251,14 @@ module Hive
           slug: result.slug
         )
         @notification_dispatcher.record_dispatch(project: result.project, slug: result.slug) if result.project && result.slug
-        @telegram.send_message(chat_id: update.chat_id, text: "Queued command pid=#{pid}")
+        safe_send_message(chat_id: update.chat_id, text: "Queued command pid=#{pid}")
+        pid
       end
 
       def execute_answer_write(result, update)
-        path = brainstorm_path_for(result.slug)
+        path = brainstorm_path_for(result.slug, project: result.project)
         unless path
-          @telegram.send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
+          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
           return
         end
 
@@ -199,18 +269,23 @@ module Hive
         )
         text = case write_result
                when :written
+                 @logger.event(:answer_written, slug: result.slug, question_n: result.question_n,
+                                                  project: result.project)
                  "Got Q#{result.question_n}."
                when :already_answered
+                 @logger.event(:answer_skipped_already_answered, slug: result.slug,
+                                                                  question_n: result.question_n,
+                                                                  project: result.project)
                  "Question #{result.question_n} was already answered by another device"
                else
                  "Question #{result.question_n} was not found."
                end
         advance_conversation_after_write(result, update, path) if write_result == :written
-        @telegram.send_message(chat_id: update.chat_id, text: text)
+        safe_send_message(chat_id: update.chat_id, text: text)
       end
 
       def start_answer(result, update)
-        path = brainstorm_path_for(result.slug)
+        path = brainstorm_path_for(result.slug, project: result.project)
         question = if path
                      Hive::Bot::BrainstormParser.next_unanswered_question(
                        Hive::Bot::BrainstormParser.parse(path)
@@ -219,8 +294,107 @@ module Hive
         question_n = question&.n || 1
         @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
                                   question_n: question_n, mode: result.mode || :path_b)
-        @telegram.send_message(chat_id: update.chat_id,
-                               text: "Answer mode started for #{result.slug}. Send Q#{question_n}'s answer as a message.")
+        safe_send_message(chat_id: update.chat_id,
+                          text: "Answer mode started for #{result.slug}. Send Q#{question_n}'s answer as a message.")
+      end
+
+      def execute_start_codex(result, update)
+        path = brainstorm_path_for(result.slug, project: result.project)
+        unless path
+          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
+          return
+        end
+
+        parsed = Hive::Bot::BrainstormParser.parse(path)
+        question = Hive::Bot::BrainstormParser.next_unanswered_question(parsed)
+        unless question
+          safe_send_message(chat_id: update.chat_id,
+                            text: "No unanswered questions remain for #{result.slug}.")
+          return
+        end
+
+        @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
+                                  question_n: question.n, mode: :path_a)
+
+        conversation = codex_conversation
+        task = codex_task_for(path, result.slug, result.project)
+        outcome = conversation.next_turn(task: task, question: question, history: [],
+                                         draft: nil, user_input: "")
+
+        case outcome.kind
+        when :draft_ready
+          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
+                                     draft: outcome.draft.to_s, awaiting_confirm: true)
+          safe_send_message(chat_id: update.chat_id,
+                            text: "Codex draft for Q#{question.n}:\n#{outcome.draft}",
+                            reply_markup: codex_draft_keyboard(result.project, result.slug, question.n))
+        when :reply
+          safe_send_message(chat_id: update.chat_id, text: outcome.text.to_s)
+        else
+          safe_send_message(chat_id: update.chat_id,
+                            text: "Codex failed: #{outcome.reason}. Send your answer directly.")
+        end
+      end
+
+      def execute_confirm_codex_draft(result, update)
+        state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
+        draft = state&.draft.to_s
+        if draft.strip.empty?
+          safe_send_message(chat_id: update.chat_id, text: "No draft to confirm for #{result.slug}.")
+          return
+        end
+
+        path = brainstorm_path_for(result.slug, project: result.project)
+        unless path
+          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
+          return
+        end
+
+        write_result = Hive::Bot::BrainstormAnswerWriter.append!(
+          brainstorm_path: path,
+          question_n: result.question_n,
+          answer_text: draft
+        )
+        if write_result == :written
+          @logger.event(:answer_written, slug: result.slug, question_n: result.question_n,
+                                          project: result.project)
+          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
+                                     draft: nil, awaiting_confirm: false)
+          advance_conversation_after_write(result, update, path)
+        elsif write_result == :already_answered
+          @logger.event(:answer_skipped_already_answered, slug: result.slug,
+                                                            question_n: result.question_n,
+                                                            project: result.project)
+        end
+        text = case write_result
+               when :written then "Draft saved as Q#{result.question_n}."
+               when :already_answered then "Question #{result.question_n} was already answered by another device"
+               else "Question #{result.question_n} was not found."
+               end
+        safe_send_message(chat_id: update.chat_id, text: text)
+      end
+
+      def codex_conversation
+        @codex_conversation ||= Hive::Bot::CodexConversation.new(
+          config: { "bot" => @config },
+          logger: @logger
+        )
+      end
+
+      def codex_task_for(brainstorm_path, slug, project)
+        Struct.new(:slug, :folder, :project, keyword_init: true).new(
+          slug: slug,
+          folder: File.dirname(brainstorm_path),
+          project: project
+        )
+      end
+
+      def codex_draft_keyboard(project, slug, question_n)
+        [
+          [ { text: "Write", callback_data: "codex_write:#{project}:#{slug}:#{question_n}" } ],
+          [ { text: "Edit", callback_data: "codex_edit:#{project}:#{slug}:#{question_n}" } ],
+          [ { text: "Cancel", callback_data: "codex_cancel:#{project}:#{slug}:#{question_n}" } ]
+        ]
       end
 
       def advance_conversation_after_write(result, update, brainstorm_path)
@@ -252,22 +426,44 @@ module Hive
         @telegram.send_message(chat_id: child.chat_id, text: text)
       end
 
+      QUEUE_DISPLAY_CAP = 10
+
       def render_queue(rows)
-        actionable = Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
+        actionable = actionable_queue_rows(rows)
         return "No active Hive tasks." if actionable.empty?
 
-        lines = actionable.first(10).map do |row|
+        lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
           "#{row.project}/#{row.slug} #{row.stage} #{row.action_label || row.action} #{row.marker}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
+        if actionable.size > QUEUE_DISPLAY_CAP
+          lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks (use /status for full list)"
+        end
         ([ header ] + lines).join("\n")
+      end
+
+      def queue_inline_keyboard(rows)
+        actionable = actionable_queue_rows(rows).first(QUEUE_DISPLAY_CAP)
+        return nil if actionable.empty?
+
+        actionable.flat_map do |row|
+          [ [ { text: "Details: #{row.project}/#{row.slug}",
+                callback_data: "details:#{row.project}:#{row.slug}" } ] ]
+        end
+      end
+
+      def actionable_queue_rows(rows)
+        Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
       end
 
       def queued_updates(updates)
         last_seen = read_last_seen_update_id
         return [] unless last_seen
 
-        updates.select { |update| update.update_id > last_seen }
+        allowed = chat_ids
+        updates.select do |update|
+          update.update_id > last_seen && allowed.include?(update.chat_id)
+        end
       end
 
       def project_path_for(project_name)
@@ -276,9 +472,11 @@ module Hive
         Hive::Config.find_project(project_name)&.fetch("path", nil)
       end
 
-      def brainstorm_path_for(slug)
-        Hive::Config.registered_projects.each do |project|
-          path = File.join(project["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md")
+      def brainstorm_path_for(slug, project: nil)
+        projects = Hive::Config.registered_projects
+        projects = projects.select { |entry| entry["name"] == project } if project && !project.empty?
+        projects.each do |entry|
+          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md")
           return path if File.exist?(path)
         end
         nil
@@ -293,7 +491,7 @@ module Hive
         return nil unless path && File.exist?(path)
 
         Integer(File.read(path).strip)
-      rescue ArgumentError
+      rescue ArgumentError, SystemCallError, IOError
         nil
       end
 
@@ -309,6 +507,17 @@ module Hive
         return unless @reload
 
         @config = Hive::Config.load_global_bot(require_runtime: true)
+        @router = Hive::Bot::Router.new(
+          bot_config: @config,
+          logger: @logger,
+          conversation_store: @conversation_store
+        )
+        @notification_dispatcher = Hive::Bot::NotificationDispatcher.new(
+          telegram: @telegram,
+          logger: @logger,
+          bot_config: @config
+        )
+        @conversation_store.update_ttl(@config.fetch("conversation_ttl_sec")) if @conversation_store.respond_to?(:update_ttl)
         @logger.event(:config_reloaded)
         @reload = false
       rescue Hive::ConfigError => e

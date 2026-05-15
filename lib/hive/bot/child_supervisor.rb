@@ -6,9 +6,9 @@ require "tmpdir"
 module Hive
   module Bot
     class ChildSupervisor
-      ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :command_argv,
-                             :chat_id, :update_id, :started_at, :finished_at,
-                             :log_path, :json_envelope, keyword_init: true)
+      ChildExit = Data.define(:pid, :exit_code, :project, :slug, :command_argv,
+                              :chat_id, :update_id, :started_at, :finished_at,
+                              :log_path, :json_envelope)
 
       ENVELOPE_TAIL_BYTES = 64 * 1024
 
@@ -18,6 +18,7 @@ module Hive
         @log_dir_for_task = log_dir_for_task
         @dry_run = dry_run
         @running = {}
+        @mutex = Mutex.new
       end
 
       def dispatch(command_argv:, cwd:, chat_id:, update_id:, project: nil, slug: nil)
@@ -27,9 +28,11 @@ module Hive
 
         if @dry_run
           pid = next_dry_pid
-          @running[pid] = entry(project: project, slug: slug, command_argv: argv,
-                                chat_id: chat_id, update_id: update_id,
-                                started_at: Time.now, log_path: nil, dry_run: true)
+          @mutex.synchronize do
+            @running[pid] = entry(project: project, slug: slug, command_argv: argv,
+                                  chat_id: chat_id, update_id: update_id,
+                                  started_at: Time.now, log_path: nil, dry_run: true)
+          end
           @logger.event(:dispatched_command, pid: pid, project: project, slug: slug,
                                              command: argv.join(" "), dry_run: true,
                                              update_id: update_id)
@@ -44,9 +47,11 @@ module Hive
 
         pid = Process.spawn(*argv, chdir: cwd, pgroup: true, out: log_io, err: log_io)
         log_io.close
-        @running[pid] = entry(project: project, slug: slug, command_argv: argv,
-                              chat_id: chat_id, update_id: update_id,
-                              started_at: Time.now, log_path: log_path, dry_run: false)
+        @mutex.synchronize do
+          @running[pid] = entry(project: project, slug: slug, command_argv: argv,
+                                chat_id: chat_id, update_id: update_id,
+                                started_at: Time.now, log_path: log_path, dry_run: false)
+        end
         @logger.event(:dispatched_command, pid: pid, project: project, slug: slug,
                                            command: argv.join(" "), dry_run: false,
                                            update_id: update_id)
@@ -55,38 +60,45 @@ module Hive
 
       def reap_all(now: Time.now)
         completed = []
-        loop do
-          pid, status = Process.wait2(-1, Process::WNOHANG)
-          break if pid.nil?
-        rescue Errno::ECHILD
-          break
-        else
-          entry = @running.delete(pid)
+        tracked_pids = @mutex.synchronize { @running.keys.dup }
+        tracked_pids.each do |pid|
+          begin
+            reaped_pid, status = Process.wait2(pid, Process::WNOHANG)
+          rescue Errno::ECHILD
+            entry = @mutex.synchronize { @running.delete(pid) }
+            completed << build_exit(pid, nil, entry, now) if entry
+            next
+          end
+          next if reaped_pid.nil?
+
+          entry = @mutex.synchronize { @running.delete(reaped_pid) }
           next unless entry
 
-          completed << build_exit(pid, status.exitstatus, entry, now)
+          completed << build_exit(reaped_pid, status.exitstatus, entry, now)
         end
         completed
       end
 
       def reap_dry_run(now: Time.now)
-        exits = @running.filter_map do |pid, entry|
-          build_exit(pid, 0, entry, now) if entry[:dry_run]
+        dry_entries = @mutex.synchronize do
+          @running.select { |_pid, entry| entry[:dry_run] }
         end
-        exits.each { |exit| @running.delete(exit.pid) }
+        exits = dry_entries.map { |pid, entry| build_exit(pid, 0, entry, now) }
+        @mutex.synchronize { exits.each { |exit| @running.delete(exit.pid) } }
         exits
       end
 
       def terminate_all(grace_sec: 60)
-        return if @running.empty?
+        return if @mutex.synchronize { @running.empty? }
 
         collect_pgids.each { |pgid| safe_kill(:TERM, -pgid) }
         deadline = Time.now + grace_sec
-        until @running.empty? || Time.now >= deadline
+        until @mutex.synchronize { @running.empty? } || Time.now >= deadline
           reap_all
           sleep 0.1
         end
-        @running.each_key do |pid|
+        remaining_pids = @mutex.synchronize { @running.keys.dup }
+        remaining_pids.each do |pid|
           pgid = Process.getpgid(pid)
           safe_kill(:KILL, -pgid)
         rescue Errno::ESRCH
@@ -94,7 +106,8 @@ module Hive
         end
         sleep 0.1
         reap_all
-        @running.delete_if do |pid, _entry|
+        stale_pids = @mutex.synchronize { @running.keys.dup }
+        gone_pids = stale_pids.select do |pid|
           Process.kill(0, pid)
           false
         rescue Errno::ESRCH
@@ -102,14 +115,15 @@ module Hive
         rescue Errno::EPERM
           false
         end
+        @mutex.synchronize { gone_pids.each { |pid| @running.delete(pid) } }
       end
 
       def in_flight_count
-        @running.size
+        @mutex.synchronize { @running.size }
       end
 
       def in_flight_pids
-        @running.keys
+        @mutex.synchronize { @running.keys.dup }
       end
 
       private
@@ -155,11 +169,22 @@ module Hive
         [ @hive_bin, *argv.drop(1) ]
       end
 
+      SLUG_BEARING_VERBS = %w[
+        new run plan develop review pr archive approve brainstorm markers
+        accept-finding reject-finding
+      ].freeze
+
       def derive_slug(argv)
         idx = argv.index { |part| !part.to_s.start_with?("-") && part != @hive_bin && part != "hive" }
         return "unknown" unless idx
 
-        argv[idx + 1] || "unknown"
+        verb = argv[idx].to_s
+        return nil unless SLUG_BEARING_VERBS.include?(verb)
+
+        candidate = argv[idx + 1]
+        return nil if candidate.nil? || candidate.start_with?("-")
+
+        candidate
       end
 
       def log_path_for(cwd:, project:, slug:)
@@ -179,18 +204,24 @@ module Hive
         return nil if log_path.nil? || !File.exist?(log_path)
 
         tail = read_tail(log_path, ENVELOPE_TAIL_BYTES)
-        return nil if tail.to_s.empty?
-
-        tail.lines.reverse_each do |line|
-          line = line.strip
-          next unless line.start_with?("{")
-
-          begin
-            return JSON.parse(line)
-          rescue JSON::ParserError
-            next
-          end
+        if tail.to_s.empty?
+          @logger.event(:envelope_parse_failure, log_path: log_path, reason: "empty_tail")
+          return nil
         end
+
+        candidate_lines = tail.lines.reverse_each.select { |line| line.strip.start_with?("{") }
+        if candidate_lines.empty?
+          @logger.event(:envelope_parse_failure, log_path: log_path, reason: "no_json_candidate")
+          return nil
+        end
+
+        candidate_lines.each do |line|
+          return JSON.parse(line.strip)
+        rescue JSON::ParserError
+          next
+        end
+
+        @logger.event(:envelope_parse_failure, log_path: log_path, reason: "malformed_json")
         nil
       end
 
@@ -203,12 +234,19 @@ module Hive
           chunk = chunk.split("\n", 2)[1].to_s if start.positive?
           chunk
         end
-      rescue Errno::ENOENT, Errno::EACCES, IOError
+      rescue Errno::ENOENT
+        nil
+      rescue Errno::EACCES, IOError => e
+        @logger.event(:envelope_parse_failure, log_path: path,
+                                                reason: "read_tail_failed",
+                                                error_class: e.class.name,
+                                                message: e.message)
         nil
       end
 
       def collect_pgids
-        @running.keys.filter_map do |pid|
+        pids = @mutex.synchronize { @running.keys.dup }
+        pids.filter_map do |pid|
           Process.getpgid(pid)
         rescue Errno::ESRCH
           nil

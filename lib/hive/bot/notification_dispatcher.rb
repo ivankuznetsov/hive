@@ -21,31 +21,36 @@ module Hive
         rows.each { |row| process_row(row) }
       end
 
-      def record_dispatch(project:, slug:)
-        @recent_dispatches[[ project, slug ]] = @now.call
+      def record_dispatch(project:, slug:, fingerprint: nil)
+        @recent_dispatches[fingerprint || [ project, slug ]] = @now.call
       end
 
       private
 
       def process_row(row)
         return if suppress_ready_action?(row)
-        return if recently_dispatched?(row)
 
         notification = NotificationBuilders.build(row)
         return unless notification
 
         fingerprint = NotificationBuilders.fingerprint(row)
-        if @seen.key?(fingerprint)
+        if @seen.key?(fingerprint) || @recent_dispatches.key?(fingerprint)
           @logger.event(:notification_skipped_dedupe, project: row.project,
                                                        slug: row.slug,
                                                        marker: row.marker)
           return
         end
 
+        any_sent = false
         chat_ids.each do |chat_id|
           @telegram.send_message(chat_id: chat_id, text: notification.text,
                                  reply_markup: notification.keyboard)
+          any_sent = true
+        rescue StandardError => e
+          @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
         end
+        return unless any_sent
+
         @seen[fingerprint] = @now.call
         @logger.event(:notification_sent, project: row.project, slug: row.slug,
                                           marker: row.marker, action: row.action)
@@ -64,15 +69,10 @@ module Hive
         return false unless entry
 
         Hive::Config.load(entry["path"]).dig("daemon", "enabled") == true
-      rescue Hive::ConfigError
+      rescue Hive::ConfigError => e
+        @logger.event(:poll_failure, source: "daemon_check", project: project,
+                                      error_class: e.class.name, message: e.message)
         false
-      end
-
-      def recently_dispatched?(row)
-        dispatched_at = @recent_dispatches[[ row.project, row.slug ]]
-        return false unless dispatched_at
-
-        (@now.call - dispatched_at) < dedupe_window
       end
 
       def prune_seen!

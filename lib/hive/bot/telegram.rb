@@ -6,12 +6,16 @@ module Hive
   module Bot
     class Telegram
       MAX_MESSAGE_CHARS = 4096
-      MARKDOWN_V2_SPECIALS = /([_*\[\]()~`>#+\-=|{}.!\\])/
 
-      Update = Struct.new(:update_id, :chat_id, :from_id, :message_id, :text,
-                          :callback_data, :entities, keyword_init: true) do
+      Update = Data.define(:update_id, :chat_id, :from_id, :message_id, :text,
+                           :callback_data, :entities) do
+        def initialize(update_id:, chat_id:, from_id: nil, message_id: nil,
+                       text: nil, callback_data: nil, entities: nil)
+          super
+        end
+
         def message?
-          callback_data.nil?
+          callback_data.nil? && !text.to_s.empty?
         end
 
         def text?
@@ -28,6 +32,7 @@ module Hive
       def initialize(token:, logger:, client: nil)
         @logger = logger
         @client = client || ::Telegram::Bot::Client.new(token)
+        @build_update_error_classes_seen = {}
       end
 
       def poll_updates(timeout:, since_update_id:)
@@ -39,16 +44,16 @@ module Hive
              ::Telegram::Bot::Exceptions::ResponseError => e
         @logger.event(:poll_failure, error_class: e.class.name, message: e.message)
         []
+      rescue StandardError => e
+        @logger.event(:poll_failure, error_class: e.class.name, message: e.message)
+        []
       end
 
-      def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
+      def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
         chunks = split_message(text)
         chunks.map.with_index do |chunk, idx|
-          params = {
-            chat_id: chat_id,
-            text: chunk,
-            parse_mode: parse_mode_value(parse_mode)
-          }
+          params = { chat_id: chat_id, text: chunk }
+          params[:parse_mode] = parse_mode_value(parse_mode) if parse_mode
           params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup && idx == chunks.length - 1
           client.api.send_message(params)
         end
@@ -58,10 +63,6 @@ module Hive
         params = { chat_id: chat_id, message_id: message_id }
         params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup
         client.api.edit_message_reply_markup(params)
-      end
-
-      def self.escape_markdown_v2(text)
-        text.to_s.gsub(MARKDOWN_V2_SPECIALS, '\\\\\1')
       end
 
       private
@@ -87,12 +88,16 @@ module Hive
           chat_id: chat_id,
           from_id: from_id,
           message_id: value(source_message, :message_id),
-          text: value(message, :text),
+          text: callback ? nil : value(message, :text),
           callback_data: value(callback, :data),
           entities: Array(value(message, :entities))
         )
       rescue StandardError => e
-        @logger.event(:poll_failure, error_class: e.class.name, message: e.message)
+        already_seen = @build_update_error_classes_seen.key?(e.class)
+        @build_update_error_classes_seen[e.class] = true
+        attrs = { error_class: e.class.name, message: e.message }
+        attrs[:backtrace] = Array(e.backtrace).first(10).join("\n") unless already_seen
+        @logger.event(:poll_failure, **attrs)
         nil
       end
 
@@ -105,13 +110,20 @@ module Hive
       end
 
       def split_message(text)
-        body = text.to_s.dup
+        body = text.to_s
         return [ "" ] if body.empty?
 
         chunks = []
-        until body.empty?
-          chunks << body.slice!(0, MAX_MESSAGE_CHARS)
+        remaining = body.dup
+        while remaining.length > MAX_MESSAGE_CHARS
+          slice = remaining[0, MAX_MESSAGE_CHARS]
+          break_point = slice.rindex("\n")
+          break_point ||= MAX_MESSAGE_CHARS
+          chunks << remaining[0, break_point].sub(/\n\z/, "")
+          remaining = remaining[break_point..]
+          remaining = remaining.sub(/\A\n/, "") if break_point == slice.rindex("\n")
         end
+        chunks << remaining unless remaining.empty?
         chunks
       end
 

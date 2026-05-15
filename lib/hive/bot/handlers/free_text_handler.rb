@@ -15,7 +15,8 @@ module Hive
             action: :write_answer_then_reply,
             slug: state.slug,
             question_n: state.question_n,
-            answer_text: update.text.to_s
+            answer_text: update.text.to_s,
+            mode: state.mode
           )
         end
       end

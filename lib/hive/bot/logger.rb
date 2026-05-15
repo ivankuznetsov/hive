@@ -25,6 +25,10 @@ module Hive
         answer_skipped_already_answered
         reconnect_summary
         config_reloaded
+        envelope_parse_failure
+        send_failure
+        callback_malformed
+        pid_file_corrupted
         fatal
       ].freeze
 
@@ -91,11 +95,23 @@ module Hive
           end
         end
         @file = File.open(@path, "a")
+      rescue SystemCallError => e
+        begin
+          @file = File.open(@path, "a")
+        rescue SystemCallError => reopen_err
+          @file = nil
+          @stderr_fallback = true
+          warn "hive bot: log rotation failed (#{e.message}) and reopen failed (#{reopen_err.message}); falling back to stderr"
+        end
       end
 
       def file_size_for_rotation
         @file.size
-      rescue StandardError
+      rescue StandardError => e
+        unless @file_size_warned
+          warn "hive bot: cannot read log file size for rotation (#{e.class}: #{e.message})"
+          @file_size_warned = true
+        end
         0
       end
     end

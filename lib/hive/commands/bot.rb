@@ -42,11 +42,11 @@ module Hive
       end
 
       def pid_file
-        bot_config.fetch("pid_file", File.join(@hive_home, ".bot.pid"))
+        File.expand_path(bot_config.fetch("pid_file", File.join(@hive_home, ".bot.pid")))
       end
 
       def log_file
-        bot_config.fetch("log_file", File.join(@hive_home, "logs", "bot.log"))
+        File.expand_path(bot_config.fetch("log_file", File.join(@hive_home, "logs", "bot.log")))
       end
 
       private
@@ -56,13 +56,20 @@ module Hive
         FileUtils.mkdir_p(File.dirname(pid_file))
         FileUtils.mkdir_p(File.dirname(log_file))
 
-        if (pid = live_pid)
-          raise Hive::ConcurrentRunError.new("hive bot already running (pid #{pid})",
-                                             holder: { pid: pid }, lock_path: pid_file)
+        lock_file = File.open(pid_file, File::RDWR | File::CREAT, 0o644)
+        unless lock_file.flock(File::LOCK_EX | File::LOCK_NB)
+          payload = pid_file_payload
+          existing_pid = payload["pid"]
+          lock_file.close
+          raise Hive::ConcurrentRunError.new("hive bot already running (pid #{existing_pid})",
+                                             holder: { pid: existing_pid }, lock_path: pid_file)
         end
-        File.delete(pid_file) if File.exist?(pid_file)
+
         Process.daemon(true, true) if @detach
-        File.write(pid_file, { "pid" => Process.pid, "started_at" => Time.now.utc.iso8601 }.to_yaml)
+        lock_file.rewind
+        lock_file.truncate(0)
+        lock_file.write({ "pid" => Process.pid, "started_at" => Time.now.utc.iso8601 }.to_yaml)
+        lock_file.flush
 
         supervisor = Hive::Bot::Supervisor.new(
           config: bot_config,
@@ -73,6 +80,11 @@ module Hive
       ensure
         begin
           File.delete(pid_file) if File.exist?(pid_file) && pid_file_payload["pid"] == Process.pid
+        rescue StandardError
+          nil
+        end
+        begin
+          lock_file&.close
         rescue StandardError
           nil
         end
@@ -89,9 +101,14 @@ module Hive
         end
 
         Process.kill("TERM", pid)
-        deadline = Time.now + bot_config.fetch("shutdown_grace_sec", 60)
-        sleep 0.2 while pid_alive?(pid) && Time.now < deadline
-        Process.kill("KILL", pid) if pid_alive?(pid)
+        grace = bot_config.fetch("shutdown_grace_sec", 60)
+        deadline = Time.now + grace
+        sleep 0.5 while pid_alive?(pid) && Time.now < deadline
+        if pid_alive?(pid)
+          Process.kill("KILL", pid)
+          escalate_deadline = Time.now + 5
+          sleep 0.2 while pid_alive?(pid) && Time.now < escalate_deadline
+        end
         File.delete(pid_file) if File.exist?(pid_file)
         @json ? puts_json(stop_envelope(running: false, was_running: true)) : puts("hive: bot stopped (pid #{pid})")
       rescue Errno::ESRCH
@@ -101,7 +118,16 @@ module Hive
       def status_bot
         pid = live_pid
         running = !pid.nil?
-        uptime = running ? (Time.now - File.mtime(pid_file)).to_i : nil
+        uptime = if running
+                   started_at_raw = pid_file_payload["started_at"]
+                   if started_at_raw
+                     begin
+                       (Time.now - Time.parse(started_at_raw.to_s)).to_i
+                     rescue ArgumentError
+                       nil
+                     end
+                   end
+                 end
         payload = {
           "schema" => "hive-bot-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"),
@@ -141,18 +167,11 @@ module Hive
           raise Hive::Error, "bot log file missing"
         end
 
-        File.open(log_file, "r") do |file|
-          file.seek(0, IO::SEEK_END)
-          loop do
-            chunk = file.read
-            if chunk && !chunk.empty?
-              $stdout.write(chunk)
-              $stdout.flush
-            else
-              sleep 0.5
-            end
-          end
-        end
+        tail_bin = ENV.fetch("HIVE_TAIL_BIN", "tail")
+        Process.exec([ tail_bin, tail_bin ], "-F", log_file)
+      rescue Errno::ENOENT
+        warn "hive: tail binary not found"
+        raise Hive::Error, "tail binary not available"
       rescue Interrupt
         nil
       end
@@ -170,8 +189,9 @@ module Hive
 
         data = YAML.safe_load(File.read(pid_file)) || {}
         data.is_a?(Hash) ? data : {}
-      rescue Psych::Exception
-        {}
+      rescue Psych::Exception => e
+        warn "hive: bot PID file at #{pid_file} is corrupted (#{e.class}: #{e.message}); refusing to assume bot state"
+        raise Hive::Error, "bot pid file at #{pid_file} is corrupted"
       end
 
       def pid_alive?(pid)

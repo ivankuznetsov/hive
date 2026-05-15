@@ -42,8 +42,8 @@ module Hive
       end
 
       def fingerprint(row)
-        attrs = row.attrs.to_a.sort_by(&:first)
-        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.marker, attrs ]))
+        normalized_attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
+        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.marker, normalized_attrs ]))
       end
 
       def recovery?(row)
@@ -92,8 +92,15 @@ module Hive
       end
 
       def review_waiting(row)
-        if row.attrs["reason"] == "fix_guardrail"
-          return recovery(row)
+        normalized_attrs = row.attrs.to_h.transform_keys(&:to_s)
+        if normalized_attrs["reason"] == "fix_guardrail"
+          return Notification.new(
+            text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
+            keyboard: [
+              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+            ]
+          )
         end
 
         Notification.new(
@@ -124,7 +131,8 @@ module Hive
       end
 
       def marker_with_attrs(row)
-        attrs = row.attrs.to_a.sort_by(&:first).map { |key, value| "#{key}=#{value}" }.join(" ")
+        normalized = row.attrs.to_h.transform_keys(&:to_s)
+        attrs = normalized.to_a.sort_by(&:first).map { |key, value| "#{key}=#{value}" }.join(" ")
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
       end
 
@@ -139,11 +147,33 @@ module Hive
         }[action]
       end
 
+      CALLBACK_DATA_MAX = 64
+
       def button(text, callback_data)
-        { text: text, callback_data: callback_data }
+        { text: text, callback_data: compact_callback(callback_data) }
       end
 
-      Notification = Struct.new(:text, :keyboard, keyword_init: true)
+      def compact_callback(callback_data)
+        return callback_data if callback_data.bytesize <= CALLBACK_DATA_MAX
+
+        prefix, _ = callback_data.split(":", 2)
+        digest = Digest::SHA256.hexdigest(callback_data)[0, 16]
+        registry[digest] = callback_data
+        "##{prefix}:#{digest}"
+      end
+
+      def resolve_callback(token)
+        return token unless token.start_with?("#")
+
+        _, digest = token.split(":", 2)
+        registry.fetch(digest, token)
+      end
+
+      def registry
+        @registry ||= {}
+      end
+
+      Notification = Data.define(:text, :keyboard)
     end
   end
 end

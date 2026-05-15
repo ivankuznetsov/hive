@@ -48,7 +48,7 @@ module Hive
       end
 
       def spawn_with_base(task:, prompt:, config:)
-        profile = Hive::Stages::Base.stage_profile(config, "execute")
+        profile = Hive::Stages::Base.stage_profile(config, "develop")
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -78,7 +78,9 @@ module Hive
         when "DRAFT"
           Result.new(kind: :draft_ready, draft: value)
         when "ERROR"
-          Result.new(kind: :error, reason: value.empty? ? :codex_error : value)
+          Result.new(kind: :error, reason: value.empty? ? "codex_error" : value)
+        else
+          raise "CodexConversation got unknown marker kind #{kind.inspect}"
         end
       end
 

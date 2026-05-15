@@ -1,4 +1,6 @@
 require "securerandom"
+require "set"
+require "time"
 require "hive/config"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
@@ -38,12 +40,22 @@ module Hive
                           :project, :slug, :question_n, :answer_text, :mode,
                           :intent, keyword_init: true)
 
+      ALLOWED_ACTIONS = %i[
+        noop reply dispatch_then_reply dispatch_commands start_answer
+        write_answer_then_reply start_codex confirm_codex_draft
+      ].freeze
+
+      UNAUTHORIZED_LOG_TTL_SEC = 3600
+      PENDING_IDEA_TTL_SEC = 900
+
       def initialize(bot_config:, logger:, conversation_store:,
-                     projects_provider: -> { Hive::Config.registered_projects })
+                     projects_provider: -> { Hive::Config.registered_projects },
+                     now: -> { Time.now })
         @bot_config = bot_config
         @logger = logger
         @conversation_store = conversation_store
         @projects_provider = projects_provider
+        @now = now
         @unauthorized_logged = {}
         @pending_ideas = {}
         @last_project = nil
@@ -58,7 +70,8 @@ module Hive
           pending_ideas: @pending_ideas,
           set_last_project: ->(project) { @last_project = project },
           conversation_store: @conversation_store,
-          result_class: Result
+          result_class: Result,
+          logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
           conversation_store: @conversation_store,
@@ -67,6 +80,8 @@ module Hive
       end
 
       def classify(update)
+        prune_pending_ideas!
+        prune_unauthorized_log!
         return :unauthorized unless authorized?(update.chat_id)
 
         if update.callback_query?
@@ -89,25 +104,47 @@ module Hive
 
       def handle(update)
         intent = classify(update)
+        raise "Router produced unknown intent #{intent.inspect}" unless INTENTS.include?(intent)
+
         @logger.event(:update_received, update_id: update.update_id,
                                         chat_id: update.chat_id,
                                         intent: intent.to_s) unless intent == :unauthorized
         result = dispatch(intent, update)
-        result.intent = intent if result.respond_to?(:intent=)
+        raise "Router result action #{result.action.inspect} is not allowed" unless ALLOWED_ACTIONS.include?(result.action)
+
+        result.intent = intent
         result
       end
 
       private
 
       def authorized?(chat_id)
-        allowed = Array(@bot_config.fetch("chat_id_allowlist"))
-        return true if allowed.include?(chat_id)
+        return true if allowed_chat_ids.include?(chat_id)
 
         unless @unauthorized_logged[chat_id]
           @logger.event(:update_rejected_unauthorized, chat_id: chat_id)
-          @unauthorized_logged[chat_id] = true
         end
+        @unauthorized_logged[chat_id] = @now.call
         false
+      end
+
+      def allowed_chat_ids
+        current_allowed = Array(@bot_config.fetch("chat_id_allowlist"))
+        if @allowed_chat_ids.nil? || @allowed_chat_ids_source != current_allowed
+          @allowed_chat_ids_source = current_allowed.dup
+          @allowed_chat_ids = current_allowed.to_set
+        end
+        @allowed_chat_ids
+      end
+
+      def prune_pending_ideas!
+        cutoff = @now.call - PENDING_IDEA_TTL_SEC
+        @pending_ideas.delete_if { |_token, entry| entry.is_a?(Hash) && entry[:created_at] < cutoff }
+      end
+
+      def prune_unauthorized_log!
+        cutoff = @now.call - UNAUTHORIZED_LOG_TTL_SEC
+        @unauthorized_logged.delete_if { |_chat_id, seen_at| seen_at.is_a?(Time) && seen_at < cutoff }
       end
 
       def callback_intent(data)

@@ -1,14 +1,17 @@
 require "securerandom"
+require "time"
 
 module Hive
   module Bot
     module Handlers
       class SlashHandlers
-        def initialize(projects_provider:, pending_ideas:, last_project:, result_class:)
+        def initialize(projects_provider:, pending_ideas:, last_project:, result_class:,
+                       now: -> { Time.now })
           @projects_provider = projects_provider
           @pending_ideas = pending_ideas
           @last_project = last_project
           @result_class = result_class
+          @now = now
         end
 
         def status(_update)
@@ -29,7 +32,7 @@ module Hive
           return @result_class.new(action: :reply, text: "No Hive projects are registered yet.") if projects.empty?
 
           token = SecureRandom.hex(4)
-          @pending_ideas[token] = text
+          @pending_ideas[token] = { text: text, created_at: @now.call }
           @result_class.new(
             action: :reply,
             text: "Pick a project for the idea.",
@@ -37,13 +40,11 @@ module Hive
           )
         end
 
-        def answer(update, conversation_store)
+        def answer(update, _conversation_store)
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
           return @result_class.new(action: :reply, text: "Use /answer <slug>.") if slug.empty?
 
-          conversation_store.start(chat_id: update.chat_id, slug: slug, question_n: 1, mode: :path_b)
-          @result_class.new(action: :reply, slug: slug,
-                            text: "Answer mode started for #{slug}. Send the next answer as a message.")
+          @result_class.new(action: :start_answer, slug: slug, mode: :path_b)
         end
 
         def approve(update)

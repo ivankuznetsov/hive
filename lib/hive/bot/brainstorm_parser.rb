@@ -1,7 +1,11 @@
 module Hive
   module Bot
     module BrainstormParser
-      Question = Struct.new(:round, :n, :text, :answer, keyword_init: true)
+      Question = Struct.new(:round, :n, :text, :answer, keyword_init: true) do
+        def answered?
+          !answer.nil?
+        end
+      end
 
       ROUND_RE = /\A##\s+Round\s+(\d+)\b/i
       QUESTION_RE = /\A###\s+Q(\d+)\.\s*(.*)\z/
@@ -94,7 +98,7 @@ module Hive
         return nil if lines.nil?
 
         body_lines = Array(lines).dup
-        body_lines.pop while body_lines.any? { |line| line.strip.empty? || MARKER_RE.match?(line) }
+        body_lines.pop while (last = body_lines.last) && (last.strip.empty? || MARKER_RE.match?(last))
         body = body_lines.join("\n").strip
         body.empty? ? nil : body
       end

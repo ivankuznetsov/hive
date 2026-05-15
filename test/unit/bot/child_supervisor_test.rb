@@ -107,6 +107,26 @@ class HiveBotChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_terminate_all_escalates_to_sigkill_for_sigterm_ignoring_child
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "child.log")
+      child = script(dir, <<~RUBY)
+        #!/usr/bin/env ruby
+        Signal.trap("TERM") { }
+        sleep 30
+      RUBY
+      sup = supervisor(log_path: log_path)
+      sup.dispatch(command_argv: [ RbConfig.ruby, child ],
+                   cwd: dir, chat_id: 123, update_id: 10,
+                   project: "hive", slug: "slug")
+
+      sup.terminate_all(grace_sec: 0)
+
+      assert_equal 0, sup.in_flight_count,
+                   "TERM-ignoring child must be reaped via SIGKILL escalation"
+    end
+  end
+
   def wait_for_exit(sup)
     deadline = Time.now + 5
     loop do

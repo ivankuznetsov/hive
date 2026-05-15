@@ -5,11 +5,22 @@ require "time"
 module Hive
   module Bot
     class StatusWatcher
-      Row = Struct.new(:project, :project_path, :hive_state_path, :slug, :stage, :marker,
-                       :attrs, :folder, :state_file, :state_file_mtime, :age_seconds,
-                       :action, :action_label, :suggested_command, :next_action,
-                       keyword_init: true)
-      Result = Struct.new(:ok, :rows, :error, keyword_init: true)
+      Row = Data.define(:project, :project_path, :hive_state_path, :slug, :stage, :marker,
+                        :attrs, :folder, :state_file, :state_file_mtime, :age_seconds,
+                        :action, :action_label, :suggested_command, :next_action) do
+        def initialize(project:, slug:, project_path: nil, hive_state_path: nil,
+                       stage: nil, marker: nil, attrs: {}, folder: nil,
+                       state_file: nil, state_file_mtime: nil, age_seconds: nil,
+                       action: nil, action_label: nil, suggested_command: nil,
+                       next_action: nil)
+          super
+        end
+      end
+      Result = Data.define(:ok, :rows, :error) do
+        def initialize(ok:, rows: [], error: nil)
+          super
+        end
+      end
 
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"), extra_env: {}, logger: nil)
         @hive_bin = hive_bin

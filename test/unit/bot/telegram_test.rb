@@ -93,7 +93,7 @@ class HiveBotTelegramTest < Minitest::Test
     _, params = api.calls.last
     assert_equal :send_message, api.calls.last.first
     assert_equal 12345, params[:chat_id]
-    assert_equal "Markdown", params[:parse_mode]
+    refute params.key?(:parse_mode), "parse_mode should default to plain text to avoid entity-parse rejections"
     assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
     hash = params[:reply_markup].to_compact_hash
     assert_equal "Approve", hash[:inline_keyboard].first.first[:text]
@@ -124,10 +124,6 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal :edit_message_reply_markup, api.calls.last.first
     assert_equal 50, params[:message_id]
     assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
-  end
-
-  def test_escape_markdown_v2_escapes_special_characters
-    assert_equal "\\*hi\\* \\[x\\]", Hive::Bot::Telegram.escape_markdown_v2("*hi* [x]")
   end
 
   class StubLogger

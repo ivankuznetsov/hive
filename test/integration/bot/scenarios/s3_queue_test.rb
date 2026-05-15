@@ -26,6 +26,51 @@ class HiveBotScenarioQueueTest < Minitest::Test
     refute_match(/archived-a/, text)
   end
 
+  def test_s3_queue_caps_at_10_rows_and_shows_more_affordance
+    telegram = FakeTelegram.new
+    overflow_rows = 12.times.map do |i|
+      row(slug: "slug-#{i}", action: "needs_input", marker: "waiting")
+    end
+    supervisor = Hive::Bot::Supervisor.new(
+      config: bot_config,
+      token: "token",
+      logger: FakeLogger.new,
+      telegram: telegram,
+      status_watcher: FakeStatusWatcher.new(overflow_rows),
+      notification_dispatcher: FakeNotificationDispatcher.new,
+      child_supervisor: FakeChildSupervisor.new
+    )
+
+    supervisor.process_update(update("/queue"))
+
+    text = telegram.messages.last[:text]
+    assert_match(/12 active tasks/, text)
+    assert_match(/\+ 2 more tasks/, text)
+    refute text.length > Hive::Bot::Telegram::MAX_MESSAGE_CHARS,
+           "queue summary should never blow Telegram's char cap"
+  end
+
+  def test_s3_unauthorized_chat_id_produces_no_send_or_dispatch
+    telegram = FakeTelegram.new
+    child = FakeChildSupervisor.new
+    supervisor = Hive::Bot::Supervisor.new(
+      config: bot_config,
+      token: "token",
+      logger: FakeLogger.new,
+      telegram: telegram,
+      status_watcher: FakeStatusWatcher.new(rows),
+      notification_dispatcher: FakeNotificationDispatcher.new,
+      child_supervisor: child
+    )
+
+    hostile = Hive::Bot::Telegram::Update.new(update_id: 99, chat_id: 99999,
+                                              from_id: 99999, text: "/status")
+    supervisor.process_update(hostile)
+
+    assert_empty telegram.messages, "unauthorized chat must not receive any reply"
+    refute child.dispatched?, "unauthorized chat must not trigger child dispatch"
+  end
+
   private
 
   def rows
@@ -84,9 +129,15 @@ class HiveBotScenarioQueueTest < Minitest::Test
   end
 
   class FakeChildSupervisor
-    def dispatch(**_opts) = 123
+    attr_reader :dispatches
+    def initialize = @dispatches = []
+    def dispatch(**opts)
+      @dispatches << opts
+      123
+    end
     def reap_all = []
     def terminate_all(grace_sec:); end
     def in_flight_count = 0
+    def dispatched? = !@dispatches.empty?
   end
 end

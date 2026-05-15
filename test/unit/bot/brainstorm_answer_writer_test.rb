@@ -103,4 +103,28 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       )
     end
   end
+
+  def test_concurrent_threads_first_write_wins
+    with_brainstorm(sample) do |path|
+      results = Array.new(8) { Queue.new }
+      threads = 8.times.map do |i|
+        Thread.new do
+          result = Hive::Bot::BrainstormAnswerWriter.append!(
+            brainstorm_path: path,
+            question_n: 1,
+            answer_text: "Answer from thread #{i}"
+          )
+          results[i] << result
+        end
+      end
+      threads.each(&:join)
+
+      outcomes = results.map(&:pop)
+      assert_equal 1, outcomes.count(:written), "exactly one concurrent writer should win"
+      assert_equal 7, outcomes.count(:already_answered), "all other writers should see already_answered"
+
+      saved = Hive::Bot::BrainstormParser.parse(path).first.answer
+      assert_match(/Answer from thread/, saved)
+    end
+  end
 end

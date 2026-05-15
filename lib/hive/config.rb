@@ -946,6 +946,7 @@ module Hive
                 "bot.#{key} in #{describe_source(source_path)} must not contain '..' path segments; " \
                 "got #{value.inspect}"
         end
+        bot[key] = File.expand_path(value)
       end
     end
 

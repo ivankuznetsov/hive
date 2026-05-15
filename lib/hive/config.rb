@@ -1,6 +1,7 @@
 require "yaml"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/paths"
 
 module Hive
   module Config
@@ -209,7 +210,7 @@ module Hive
     module_function
 
     def hive_home
-      ENV["HIVE_HOME"] || File.expand_path("~/Dev/hive")
+      Hive::Paths.config_home
     end
 
     def global_config_path
@@ -254,6 +255,7 @@ module Hive
     end
 
     def registered_projects
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       return [] unless File.exist?(path)
@@ -336,6 +338,7 @@ module Hive
     # Returns the bare DEFAULTS["daemon"] when no global config is
     # present (first-run scenario, no projects registered yet).
     def load_global_daemon
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -360,6 +363,7 @@ module Hive
     # credentials fail loudly there without making read-only commands like
     # `hive status` require a Telegram token.
     def load_global_bot(require_runtime: false)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -386,13 +390,14 @@ module Hive
 
     def global_bot_defaults
       defaults = deep_dup(DEFAULTS["bot"])
-      defaults["pid_file"] = File.join(hive_home, ".bot.pid")
-      defaults["log_file"] = File.join(hive_home, "logs", "bot.log")
-      defaults["last_seen_state_file"] = File.join(hive_home, ".bot.last_seen_update_id")
+      defaults["pid_file"] = File.join(Hive::Paths.state_home, ".bot.pid")
+      defaults["log_file"] = File.join(Hive::Paths.state_home, "logs", "bot.log")
+      defaults["last_seen_state_file"] = File.join(Hive::Paths.state_home, ".bot.last_seen_update_id")
       defaults
     end
 
     def register_project(name:, path:)
+      Hive::Paths.ensure_migrated!
       FileUtils.mkdir_p(hive_home)
       data = if File.exist?(global_config_path)
                load_global_config(global_config_path)
@@ -431,6 +436,7 @@ module Hive
     # `entries - [removed]` would clear BOTH. delete_at on the matched
     # index removes exactly the row the operator named.
     def unregister_project(name:)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
       return nil unless File.exist?(global_config_path)
 
@@ -475,6 +481,7 @@ module Hive
     # consistency window where a concurrent register/forget between the
     # two reads produced inconsistent counts.
     def prune_missing_projects!(dry_run: false)
+      Hive::Paths.ensure_migrated!
       validate_hive_home!
       return { removed: [], kept_count: 0 } unless File.exist?(global_config_path)
 

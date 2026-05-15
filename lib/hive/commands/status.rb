@@ -376,6 +376,7 @@ module Hive
         "Ready to finalize",
         "Ready to archive",
         "Archived",
+        "Manually steered",
         "Error"
       ].freeze
 

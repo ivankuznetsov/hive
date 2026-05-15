@@ -121,6 +121,7 @@ module Hive
       RECOVER_REVIEW      = "recover_review".freeze
       AGENT_RUNNING       = "agent_running".freeze
       ARCHIVED            = "archived".freeze
+      MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end

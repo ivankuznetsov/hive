@@ -1,0 +1,81 @@
+# xbookmark dogfood replay
+
+This is a replay transcript derived from the completed local
+`i-want-to-create-a-260504-1253` task. The task was created before the current
+`5-open-pr` / `7-finalize` split, but this transcript shows the same work in the
+current eight-stage model.
+
+The task produced a real draft PR. The original plan asked for a live capture,
+but this docs change was run from a Hive execute worktree whose constraints
+allowed edits only inside the Hive worktree. This replay keeps the acceptance
+artefact reproducible without mutating xbookmark state.
+
+## Install and attach
+
+```text
+$ cd ~/Dev/hive
+$ bundle install
+$ ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
+$ hive --version
+0.1.0
+
+$ cd ~/Dev/xbookmark
+$ hive init .
+hive: .hive-state already initialized for xbookmark
+```
+
+## Capture
+
+```text
+$ hive new xbookmark "I want to create a service that will connect to my X account and collect all the bookmarks..."
+created 1-inbox/i-want-to-create-a-260504-1253
+
+$ sed -n '1,12p' .hive-state/stages/1-inbox/i-want-to-create-a-260504-1253/idea.md
+---
+slug: i-want-to-create-a-260504-1253
+created_at: 2026-05-04T10:50:09Z
+original_text: |
+  I want to create a service that will conenct to my X (twitter) account...
+---
+```
+
+## Brainstorm and plan
+
+```text
+$ hive brainstorm i-want-to-create-a-260504-1253
+next: edit brainstorm.md, then re-run hive brainstorm i-want-to-create-a-260504-1253 --from 2-brainstorm
+
+$ hive plan i-want-to-create-a-260504-1253
+next: review plan.md, then run hive develop i-want-to-create-a-260504-1253 --from 3-plan
+```
+
+## Execute, PR, review, finalize, archive
+
+```text
+$ hive develop i-want-to-create-a-260504-1253
+created worktree /home/asterio/Dev/xbookmark.worktrees/i-want-to-create-a-260504-1253
+marker: EXECUTE_COMPLETE
+
+$ hive open-pr i-want-to-create-a-260504-1253
+opened draft PR https://github.com/ivankuznetsov/xbookmark/pull/1
+
+$ hive review i-want-to-create-a-260504-1253
+review pass 1: reviewers -> triage -> fix
+review pass 2: reviewers -> triage -> fix
+review pass 3: reviewers -> triage -> fix
+review pass 4: reviewers -> triage -> fix-guardrail -> fix-success
+marker: REVIEW_COMPLETE
+
+$ hive finalize i-want-to-create-a-260504-1253
+marker: COMPLETE pr_url=https://github.com/ivankuznetsov/xbookmark/pull/1 is_draft=false
+
+$ hive archive i-want-to-create-a-260504-1253
+archived 8-done/i-want-to-create-a-260504-1253
+```
+
+## Result
+
+The finished task folder contains `idea.md`, `brainstorm.md`, `plan.md`,
+`task.md`, `pr.md`, `worktree.yml`, reviewer outputs, escalation notes, logs,
+and guardrail artefacts. The PR summary recorded a greenfield Ruby CLI that
+ingests X bookmarks into a local markdown/QMD knowledge base.

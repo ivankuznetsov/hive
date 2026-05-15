@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title desc">
+  <title id="title">Hive logo</title>
+  <desc id="desc">A compact hexagonal hive mark with three linked cells.</desc>
+  <style>
+    :root { color: #111827; }
+    @media (prefers-color-scheme: dark) { :root { color: #f9fafb; } }
+  </style>
+  <g fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M48 8 82 28v40L48 88 14 68V28z"/>
+    <path d="M48 24 64 33v18l-16 9-16-9V33z"/>
+    <path d="M32 33 16 42v18l16 9 16-9"/>
+    <path d="M64 33 80 42v18l-16 9-16-9"/>
+  </g>
+  <circle cx="48" cy="42" r="4" fill="currentColor"/>
+  <circle cx="32" cy="51" r="4" fill="currentColor"/>
+  <circle cx="64" cy="51" r="4" fill="currentColor"/>
+</svg>

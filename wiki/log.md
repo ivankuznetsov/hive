@@ -1496,6 +1496,13 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 **Refreshed pages:**
 - `wiki/decisions.md` — ADR-027 (Tebako release artifact strategy).
 
+## [2026-05-15T01:00:00Z] install — channels, XDG paths, prompt installer
+
+**Action:** Added the user-facing install surface for v0.1.0: `install.sh`, `install.md`, Homebrew/AUR templates, XDG path docs, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint. `hive init` now writes the per-user daemon service unit and records whether the user chose to start it immediately.
+
+**Refreshed pages:**
+- `wiki/operating.md` — install channels, tier matrix, XDG layout, update/uninstall, skills marketplace command shapes.
+
 ## [2026-05-05T18:00:00Z] architecture — TUI/MVU pipeline
 
 **Action:** Documented the TUI MVU pipeline (`BubbleModel ↔ Update ↔ KeyMap ↔ PasteAwareRunner ↔ InputDecoder`) in `wiki/architecture.md`, including the side-effect seam in `BubbleModel#handle_side_effect`, the paste-routing-by-mode contract for `RawTextInput`, decoder reset on cancel, and the GVL-yielding `YieldTick`. Hardened `InputDecoder` against unmapped C0 bytes (Ctrl+C now decodes to `KEY_CTRL_C`; other unmapped bytes are silently dropped), added 4 KiB `@pending` and 1 MiB `@paste_buffer` caps with truncation flashes, a 5 s paste-timeout flush, stray `\e[201~` consumption, ESC+CR/LF cancel-gesture absorption, and C0 stripping in `normalize_paste`. `PasteAwareRunner` now resets the decoder on transitions out of `:new_idea` / `:filter` and asserts `Bubbletea::VERSION == "0.1.4"` at load. Removed the dead `Messages::NewIdeaCharAppended` path; consolidated paste normalization on the decoder; switched the new-idea over-limit branch from drop-everything to partial-fit with a truncation flash; raised `input_timeout` from 1 ms to 5 ms to absorb fragmented paste markers; pinned bubbletea to `= 0.1.4` in the Gemfile.

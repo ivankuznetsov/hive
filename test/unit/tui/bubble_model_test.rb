@@ -3320,6 +3320,67 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  # ---- AgentSteerExited → archived-manual move ----
+
+  def test_agent_steer_exited_archives_folder_on_zero_exit
+    with_manual_task_context do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug,
+        folder: folder,
+        exit_code: 0,
+        worktree: worktree_path
+      )
+
+      _, cmd = @model.update(message)
+
+      target = File.join(hive_state, "stages", "archived-manual", row.slug)
+      assert_nil cmd
+      refute File.exist?(folder), "source stage folder must be moved out of active stages"
+      assert File.directory?(target), "manual archive target must exist"
+      assert_match(/archived manual-task/, @model.hive_model.flash)
+      assert_match(/shipped/, @model.hive_model.flash)
+    end
+  end
+
+  def test_agent_steer_exited_archives_folder_on_nonzero_exit
+    with_manual_task_context(slug: "failed-manual-task") do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug,
+        folder: folder,
+        exit_code: 130,
+        worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      target = File.join(hive_state, "stages", "archived-manual", row.slug)
+      assert File.directory?(target), "non-zero agent exits still archive the task"
+      assert_match(/agent exited 130/, @model.hive_model.flash)
+      assert_match(/archived failed-manual-task anyway/, @model.hive_model.flash)
+    end
+  end
+
+  def test_agent_steer_exited_uses_numeric_suffix_on_archive_collision
+    with_manual_task_context do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      archived_root = File.join(hive_state, "stages", "archived-manual")
+      FileUtils.mkdir_p(File.join(archived_root, row.slug))
+
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug,
+        folder: folder,
+        exit_code: 0,
+        worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      assert File.directory?(File.join(archived_root, row.slug)), "existing archive must be preserved"
+      assert File.directory?(File.join(archived_root, "#{row.slug}-2")), "collision must use -2 suffix"
+      assert_match(/archived-manual\/manual-task-2/, @model.hive_model.flash)
+      assert_match(/collision/, @model.hive_model.flash)
+    end
+  end
+
   # ---- max_passes-hit REVIEW_STALE → open_review_stale_file ----
 
   def test_recover_review_stale_max_passes_opens_focal_escalations_file

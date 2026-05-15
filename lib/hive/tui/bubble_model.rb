@@ -389,6 +389,8 @@ module Hive
           open_task_folder(message.row)
         when Hive::Tui::Messages::OpenInAgent
           open_in_agent(message.row)
+        when Hive::Tui::Messages::AgentSteerExited
+          archive_steer(message)
         when Hive::Tui::Messages::OpenSummary
           open_summary(message.row)
         when Hive::Tui::Messages::LogTailPoll
@@ -1696,6 +1698,46 @@ module Hive
           end
         end
         argv
+      end
+
+      def archive_steer(message)
+        task = Hive::Task.new(message.folder)
+        archived_root = File.join(task.hive_state_path, "stages", "archived-manual")
+        FileUtils.mkdir_p(archived_root)
+        target = manual_archive_target(archived_root, task.slug)
+        collision = File.basename(target) != task.slug
+        File.rename(message.folder, target)
+
+        flash = manual_archive_flash(task.slug, target, message.exit_code, collision)
+        [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
+      rescue Hive::InvalidTaskPath
+        [ flashed("manual archive failed for #{message.slug}: invalid task folder"), nil ]
+      rescue SystemCallError, IOError => e
+        [ flashed("manual archive failed for #{message.slug}: #{e.class.name.split('::').last}"), nil ]
+      end
+
+      def manual_archive_target(archived_root, slug)
+        target = File.join(archived_root, slug)
+        return target unless File.exist?(target)
+
+        suffix = 2
+        loop do
+          candidate = File.join(archived_root, "#{slug}-#{suffix}")
+          return candidate unless File.exist?(candidate)
+
+          suffix += 1
+        end
+      end
+
+      def manual_archive_flash(slug, target, exit_code, collision)
+        target_name = File.basename(target)
+        if exit_code.to_i.zero?
+          return "archived #{slug} → archived-manual/ (shipped)" unless collision
+
+          "archived #{slug} → archived-manual/#{target_name}/ (collision)"
+        else
+          "agent exited #{exit_code}; archived #{slug} anyway"
+        end
       end
 
       def open_summary(row)

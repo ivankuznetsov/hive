@@ -70,5 +70,5 @@ tags: [gap, todo]
 ## Resolved Bootstrap Validation
 
 - 2026-05-14: Managed llm-wiki config, agent context, post-commit hook, and daily systemd timer were validated for `hive`.
-- 2026-05-14: `qmd update`, `qmd embed`, and collection-scoped `qmd search` passed for `hive`. QMD tries GPU first and falls back to CPU on this host because Vulkan headers are missing.
-- 2026-05-14: `qmd query` can still be slow under the sandboxed local-model path; use `qmd search` for maintenance checks and fall back to `rg` when semantic generation is too slow.
+- 2026-05-15: `qmd status` reports Vulkan GPU offload on AMD Radeon 890M Graphics (RADV STRIX1) after installing the Arch Vulkan stack.
+- 2026-05-15: `qmd query "llm wiki managed bootstrap" -c hive --no-rerank -n 3` completed with local Vulkan-backed generation; sandboxed agent sessions still need qmd cache write access via `--add-dir` or host-side maintenance hooks.

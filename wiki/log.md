@@ -1449,7 +1449,7 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 **Action:** Validated managed llm-wiki bootstrap and scheduled maintenance after Hive registry bootstrap.
 **Headless agent:** Codex (`.llm-wiki/config.json` has `headless_agent: "codex"`).
 **Context:** `AGENTS.md` and `CLAUDE.md` contain the managed LLM WIKI block; Claude `SessionStart` prints `wiki/index.md` and recent `wiki/log.md`.
-**QMD:** `qmd 2.1.0` collection update, embed, and `qmd search` succeeded for this collection after the scheduled refresh test. QMD attempted GPU first and fell back to CPU because Vulkan headers are missing.
+**QMD:** `qmd 2.1.0` collection update, embed, and `qmd search` succeeded for this collection after the scheduled refresh test. Follow-up verification on 2026-05-15 confirmed `qmd status` uses Vulkan GPU offload on AMD Radeon 890M Graphics (RADV STRIX1), and `qmd query "llm wiki managed bootstrap" -c hive --no-rerank -n 3` completes with local GPU-backed generation.
 **Scheduler:** `llm-wiki-hive-e2088c70.timer` is enabled and active under `systemctl --user`; next run is scheduled for 2026-05-15 18:03:41 BST.
 **Maintenance scripts:** `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh` use bounded Codex and qmd timeouts and tell headless Codex not to run `qmd update` or `qmd embed` itself.
 **Source:** `systemctl --user list-timers`, `qmd update`, `qmd embed`, and collection-scoped `qmd search`.

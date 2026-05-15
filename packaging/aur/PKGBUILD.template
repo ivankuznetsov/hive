@@ -1,0 +1,30 @@
+# Maintainer: Hive maintainers <maintainers@users.noreply.github.com>
+pkgname=hive-bin
+pkgver=<%= version %>
+pkgrel=1
+pkgdesc='Folder-as-agent pipeline for autonomous software tasks'
+arch=('x86_64' 'aarch64')
+url='https://github.com/ivankuznetsov/hive'
+license=('MIT')
+provides=('hive')
+conflicts=('hive' 'apache-hive')
+install=hive.install
+source_x86_64=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-${pkgver}-linux-x86_64-gnu.tar.gz")
+source_aarch64=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-${pkgver}-linux-aarch64-gnu.tar.gz")
+sha256sums_x86_64=('<%= sha256_linux_x86_64_gnu %>')
+sha256sums_aarch64=('<%= sha256_linux_aarch64_gnu %>')
+
+package() {
+  local target
+  case "${CARCH}" in
+    x86_64) target="linux-x86_64-gnu" ;;
+    aarch64) target="linux-aarch64-gnu" ;;
+    *) echo "unsupported architecture: ${CARCH}" >&2; return 1 ;;
+  esac
+
+  install -Dm755 "${srcdir}/hive-${pkgver}-${target}/bin/hive" "${pkgdir}/usr/bin/hive"
+  install -Dm644 "${srcdir}/hive-${pkgver}-${target}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  cp -R "${srcdir}/hive-${pkgver}-${target}/share/hive" "${pkgdir}/usr/share/"
+
+  printf 'aur\n' > "${pkgdir}/usr/share/hive/install-channel"
+}

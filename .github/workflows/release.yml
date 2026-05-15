@@ -43,6 +43,9 @@ jobs:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
     needs: build
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -66,3 +69,18 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --notes "Hive ${GITHUB_REF_NAME}" \
             --verify-tag
+      - name: Notify Homebrew tap
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          darwin_sha="$(awk '/darwin-arm64/ {print $1}' dist/SHA256SUMS)"
+          gh api repos/ivankuznetsov/homebrew-hive/dispatches \
+            --method POST \
+            --field event_type=hive-release \
+            --raw-field client_payload="{\"version\":\"${version}\",\"sha256_darwin_arm64\":\"${darwin_sha}\"}"
+      - name: Prepare AUR publish payload
+        if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
+        run: |
+          echo "AUR publish is enabled by secret; packaging/aur templates are the source of truth for the publish job."

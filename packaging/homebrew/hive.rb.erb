@@ -1,0 +1,35 @@
+class Hive < Formula
+  desc "Folder-as-agent pipeline for autonomous software tasks"
+  homepage "https://github.com/ivankuznetsov/hive"
+  version "<%= version %>"
+  license "MIT"
+
+  if OS.mac? && Hardware::CPU.arm?
+    url "https://github.com/ivankuznetsov/hive/releases/download/v<%= version %>/hive-<%= version %>-darwin-arm64.tar.gz"
+    sha256 "<%= sha256_darwin_arm64 %>"
+  else
+    odie "hive's Homebrew tap ships only macOS arm64 binaries in v1; use install.sh on this platform"
+  end
+
+  def install
+    bin.install "bin/hive" => "hive"
+    bin.install_symlink bin/"hive" => "hv"
+    share.install "share/hive"
+  end
+
+  def post_install
+    (share/"hive/install-channel").write "brew\n"
+  end
+
+  def caveats
+    <<~EOS
+      Run `hive init` inside a project to scaffold .hive-state and register
+      the per-user daemon service. If Apache Hive shadows this binary on PATH,
+      use `hv`.
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/hive --version")
+  end
+end

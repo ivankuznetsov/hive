@@ -8,9 +8,9 @@ module Hive
       MAX_MESSAGE_CHARS = 4096
 
       Update = Data.define(:update_id, :chat_id, :from_id, :message_id, :text,
-                           :callback_data, :entities) do
+                           :callback_data, :entities, :reply_to_text) do
         def initialize(update_id:, chat_id:, from_id: nil, message_id: nil,
-                       text: nil, callback_data: nil, entities: nil)
+                       text: nil, callback_data: nil, entities: nil, reply_to_text: nil)
           super
         end
 
@@ -19,6 +19,7 @@ module Hive
         end
 
         def text?
+          # Callback updates intentionally do not inherit source-message text.
           !text.to_s.empty?
         end
 
@@ -72,6 +73,7 @@ module Hive
         message = value(raw, :message)
         callback = value(raw, :callback_query)
         source_message = callback ? value(callback, :message) : message
+        reply_to = value(message, :reply_to_message)
         chat = value(source_message, :chat)
         from = callback ? value(callback, :from) : value(message, :from)
         chat_id = value(chat, :id)
@@ -90,7 +92,8 @@ module Hive
           message_id: value(source_message, :message_id),
           text: callback ? nil : value(message, :text),
           callback_data: value(callback, :data),
-          entities: Array(value(message, :entities))
+          entities: Array(value(message, :entities)),
+          reply_to_text: value(reply_to, :text)
         )
       rescue StandardError => e
         already_seen = @build_update_error_classes_seen.key?(e.class)

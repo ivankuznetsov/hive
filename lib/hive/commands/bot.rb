@@ -143,7 +143,7 @@ module Hive
         else
           puts(running ? "hive bot: running (pid #{pid}, uptime #{uptime}s)" : "hive bot: not running")
         end
-        raise Hive::Error, "bot not running" unless running
+        raise Hive::Error, "bot not running" if !running && !@json
       end
 
       def reload_bot
@@ -167,11 +167,18 @@ module Hive
           raise Hive::Error, "bot log file missing"
         end
 
-        tail_bin = ENV.fetch("HIVE_TAIL_BIN", "tail")
-        Process.exec([ tail_bin, tail_bin ], "-F", log_file)
-      rescue Errno::ENOENT
-        warn "hive: tail binary not found"
-        raise Hive::Error, "tail binary not available"
+        File.open(log_file, "r") do |f|
+          f.seek(0, IO::SEEK_END)
+          loop do
+            chunk = f.read
+            if chunk && !chunk.empty?
+              $stdout.write(chunk)
+              $stdout.flush
+            else
+              sleep 0.5
+            end
+          end
+        end
       rescue Interrupt
         nil
       end

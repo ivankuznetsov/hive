@@ -14,15 +14,16 @@ module Hive
         @now = now
         @seen = {}
         @recent_dispatches = {}
+        @mutex = Mutex.new
       end
 
       def process_rows(rows)
-        prune_seen!
+        synchronize { prune_seen! }
         rows.each { |row| process_row(row) }
       end
 
       def record_dispatch(project:, slug:, fingerprint: nil)
-        @recent_dispatches[fingerprint || [ project, slug ]] = @now.call
+        synchronize { @recent_dispatches[fingerprint || [ project, slug ]] = @now.call }
       end
 
       private
@@ -34,7 +35,7 @@ module Hive
         return unless notification
 
         fingerprint = NotificationBuilders.fingerprint(row)
-        if @seen.key?(fingerprint) || @recent_dispatches.key?(fingerprint)
+        if synchronize { @seen.key?(fingerprint) || @recent_dispatches.key?(fingerprint) }
           @logger.event(:notification_skipped_dedupe, project: row.project,
                                                        slug: row.slug,
                                                        marker: row.marker)
@@ -51,9 +52,13 @@ module Hive
         end
         return unless any_sent
 
-        @seen[fingerprint] = @now.call
+        synchronize { @seen[fingerprint] = @now.call }
         @logger.event(:notification_sent, project: row.project, slug: row.slug,
                                           marker: row.marker, action: row.action)
+      end
+
+      def synchronize(&block)
+        @mutex.synchronize(&block)
       end
 
       def suppress_ready_action?(row)

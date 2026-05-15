@@ -7,7 +7,7 @@ module Hive
     module BrainstormAnswerWriter
       module_function
 
-      RESULTS = %i[written already_answered question_not_found].freeze
+      RESULTS = %i[written already_answered lock_busy question_not_found].freeze
 
       QUESTION_RE = /\A###\s+Q(\d+)\.\s*/
       ANSWER_RE = /\A###\s+A(\d+)\.\s*\z/
@@ -29,7 +29,7 @@ module Hive
 
           sleep LOCK_RETRY_SLEEP_SEC
         end
-        result ||= :already_answered
+        result ||= :lock_busy
 
         raise "BrainstormAnswerWriter returned unknown result #{result.inspect}" unless RESULTS.include?(result)
 

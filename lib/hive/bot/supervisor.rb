@@ -13,6 +13,7 @@ require "hive/bot/child_supervisor"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/codex_conversation"
+require "hive/task"
 
 module Hive
   module Bot
@@ -207,16 +208,22 @@ module Hive
           )
           last_pid = execute_dispatch(per_command, update)
           if idx < commands.length - 1 && last_pid
-            wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
+            unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
+              safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
+              break
+            end
           end
         end
       end
 
       def wait_for_child_success(pid, deadline:)
         loop do
-          completed = @child_supervisor.reap_all
-          completed.each { |child| reply_for_child(child) }
-          match = completed.find { |child| child.pid == pid }
+          match = @child_supervisor.completed_exit(pid) if @child_supervisor.respond_to?(:completed_exit)
+          unless match
+            completed = @child_supervisor.reap_all
+            completed.each { |child| reply_for_child(child) }
+            match = completed.find { |child| child.pid == pid }
+          end
           if match
             return match.exit_code.to_i.zero?
           end
@@ -231,8 +238,12 @@ module Hive
       def execute_dispatch(result, update)
         if result.command_argv == [ "hive", "status", "--json" ]
           rows = @status_watcher.fetch.rows
-          safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
-                            reply_markup: queue_inline_keyboard(rows))
+          if result.slug
+            safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
+          else
+            safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
+                              reply_markup: queue_inline_keyboard(rows))
+          end
           return nil
         end
 
@@ -250,7 +261,6 @@ module Hive
           project: result.project,
           slug: result.slug
         )
-        @notification_dispatcher.record_dispatch(project: result.project, slug: result.slug) if result.project && result.slug
         safe_send_message(chat_id: update.chat_id, text: "Queued command pid=#{pid}")
         pid
       end
@@ -262,23 +272,31 @@ module Hive
           return
         end
 
+        question_n = result.question_n || next_unanswered_question_n(path)
+        unless question_n
+          safe_send_message(chat_id: update.chat_id, text: "No unanswered questions remain for #{result.slug}.")
+          return
+        end
+
         write_result = Hive::Bot::BrainstormAnswerWriter.append!(
           brainstorm_path: path,
-          question_n: result.question_n,
+          question_n: question_n,
           answer_text: result.answer_text
         )
         text = case write_result
                when :written
-                 @logger.event(:answer_written, slug: result.slug, question_n: result.question_n,
+                 @logger.event(:answer_written, slug: result.slug, question_n: question_n,
                                                   project: result.project)
-                 "Got Q#{result.question_n}."
+                 "Got Q#{question_n}."
                when :already_answered
                  @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                                  question_n: result.question_n,
+                                                                  question_n: question_n,
                                                                   project: result.project)
-                 "Question #{result.question_n} was already answered by another device"
+                 "Question #{question_n} was already answered by another device"
+               when :lock_busy
+                 "Try again - another run holds the lock"
                else
-                 "Question #{result.question_n} was not found."
+                 "Question #{question_n} was not found."
                end
         advance_conversation_after_write(result, update, path) if write_result == :written
         safe_send_message(chat_id: update.chat_id, text: text)
@@ -293,7 +311,8 @@ module Hive
                    end
         question_n = question&.n || 1
         @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                  question_n: question_n, mode: result.mode || :path_b)
+                                  question_n: question_n, mode: result.mode || :path_b,
+                                  project: result.project)
         safe_send_message(chat_id: update.chat_id,
                           text: "Answer mode started for #{result.slug}. Send Q#{question_n}'s answer as a message.")
       end
@@ -313,22 +332,36 @@ module Hive
           return
         end
 
-        @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                  question_n: question.n, mode: :path_a)
+        state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
+        unless state
+          state = @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
+                                            question_n: question.n, mode: :path_a,
+                                            project: result.project)
+        end
 
         conversation = codex_conversation
         task = codex_task_for(path, result.slug, result.project)
-        outcome = conversation.next_turn(task: task, question: question, history: [],
-                                         draft: nil, user_input: "")
+        history = Array(state.history)
+        user_input = result.answer_text.to_s
+        outcome = conversation.next_turn(task: task, question: question, history: history,
+                                         draft: state.draft, user_input: user_input)
 
         case outcome.kind
         when :draft_ready
+          history << { role: "user", text: user_input } unless user_input.empty?
+          history << { role: "assistant", text: outcome.draft.to_s }
           @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     draft: outcome.draft.to_s, awaiting_confirm: true)
+                                     draft: outcome.draft.to_s, awaiting_confirm: true,
+                                     history: history, project: result.project)
           safe_send_message(chat_id: update.chat_id,
                             text: "Codex draft for Q#{question.n}:\n#{outcome.draft}",
                             reply_markup: codex_draft_keyboard(result.project, result.slug, question.n))
         when :reply
+          history << { role: "user", text: user_input } unless user_input.empty?
+          history << { role: "assistant", text: outcome.text.to_s }
+          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
+                                     history: history, awaiting_confirm: false,
+                                     project: result.project)
           safe_send_message(chat_id: update.chat_id, text: outcome.text.to_s)
         else
           safe_send_message(chat_id: update.chat_id,
@@ -369,6 +402,7 @@ module Hive
         text = case write_result
                when :written then "Draft saved as Q#{result.question_n}."
                when :already_answered then "Question #{result.question_n} was already answered by another device"
+               when :lock_busy then "Try again - another run holds the lock"
                else "Question #{result.question_n} was not found."
                end
         safe_send_message(chat_id: update.chat_id, text: text)
@@ -382,11 +416,7 @@ module Hive
       end
 
       def codex_task_for(brainstorm_path, slug, project)
-        Struct.new(:slug, :folder, :project, keyword_init: true).new(
-          slug: slug,
-          folder: File.dirname(brainstorm_path),
-          project: project
-        )
+        Hive::Task.new(File.dirname(brainstorm_path))
       end
 
       def codex_draft_keyboard(project, slug, question_n)
@@ -447,13 +477,38 @@ module Hive
         return nil if actionable.empty?
 
         actionable.flat_map do |row|
-          [ [ { text: "Details: #{row.project}/#{row.slug}",
-                callback_data: "details:#{row.project}:#{row.slug}" } ] ]
+          notification = Hive::Bot::NotificationBuilders.build(row)
+          buttons = Array(notification&.keyboard).flatten
+          primary = buttons.find { |button| button[:callback_data].to_s !~ /\Aopen_laptop:|details:/ } ||
+            buttons.first ||
+            { text: "Details", callback_data: "details:#{row.project}:#{row.slug}" }
+          [ [ { text: "#{primary[:text]}: #{row.project}/#{row.slug}",
+                callback_data: primary[:callback_data] } ] ]
         end
+      end
+
+      def render_details(rows, project, slug)
+        row = Array(rows).find { |candidate| candidate.project == project && candidate.slug == slug }
+        return "No active row found for #{project}/#{slug}." unless row
+
+        attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
+                   .map { |key, value| "#{key}=#{value}" }
+        [
+          "#{row.project}/#{row.slug} (#{row.stage})",
+          "Action: #{row.action_label || row.action}",
+          "Marker: #{row.marker || 'none'}",
+          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
+        ].compact.join("\n")
       end
 
       def actionable_queue_rows(rows)
         Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
+      end
+
+      def next_unanswered_question_n(brainstorm_path)
+        Hive::Bot::BrainstormParser.next_unanswered_question(
+          Hive::Bot::BrainstormParser.parse(brainstorm_path)
+        )&.n
       end
 
       def queued_updates(updates)
@@ -533,6 +588,8 @@ module Hive
       end
 
       def interruptible_sleep(seconds)
+        # Signal traps run on Ruby's main thread between bytecodes on MRI;
+        # these flags are intentionally simple cross-loop wakeups.
         deadline = Time.now + seconds
         while Time.now < deadline && !@shutdown && !@reload
           sleep 0.5

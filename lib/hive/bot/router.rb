@@ -2,6 +2,7 @@ require "securerandom"
 require "set"
 require "time"
 require "hive/config"
+require "hive/bot/notification_builders"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/handlers/free_text_handler"
@@ -86,7 +87,9 @@ module Hive
         return :unauthorized unless authorized?(update.chat_id)
 
         if update.callback_query?
-          return callback_intent(update.callback_data.to_s)
+          data = Hive::Bot::NotificationBuilders.resolve_callback(update.callback_data.to_s)
+          update = update.with(callback_data: data) if update.respond_to?(:with)
+          return callback_intent(data)
         end
 
         text = update.text.to_s.strip
@@ -99,11 +102,15 @@ module Hive
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         else
-          @conversation_store.get(chat_id: update.chat_id) ? :free_text_answer : :unknown
+          @conversation_store.get(chat_id: update.chat_id) || reattach_target(update) ? :free_text_answer : :unknown
         end
       end
 
       def handle(update)
+        if update.callback_query?
+          data = Hive::Bot::NotificationBuilders.resolve_callback(update.callback_data.to_s)
+          update = update.with(callback_data: data) if update.respond_to?(:with)
+        end
         intent = classify(update)
         raise "Router produced unknown intent #{intent.inspect}" unless INTENTS.include?(intent)
 
@@ -144,8 +151,8 @@ module Hive
       end
 
       def prune_unauthorized_log!
-        cutoff = @now.call - UNAUTHORIZED_LOG_TTL_SEC
-        @unauthorized_logged.delete_if { |_chat_id, seen_at| seen_at.is_a?(Time) && seen_at < cutoff }
+        # R3 is "once per chat per bot lifetime". Keep the set bounded only
+        # by process lifetime; do not prune hostile probes back into logging.
       end
 
       def callback_intent(data)
@@ -167,6 +174,14 @@ module Hive
         when /\Aidea_project_new:/ then :callback_idea_project_new
         else :unknown
         end
+      end
+
+      def reattach_target(update)
+        reply_text = update.respond_to?(:reply_to_text) ? update.reply_to_text.to_s : ""
+        return nil if reply_text.empty?
+
+        reply_text.match(%r{(?:\A|\s)(?<project>[A-Za-z0-9_.-]+)/(?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\s*\(}) ||
+          reply_text.match(/\AAnswer mode started for (?<slug>[a-z][a-z0-9-]{0,62}[a-z0-9])\./)
       end
 
       def dispatch(intent, update)

@@ -24,6 +24,12 @@ class HiveBotScenarioQueueTest < Minitest::Test
     assert_match(/4 active tasks/, text)
     assert_match(/hive\/brainstorm-a/, text)
     refute_match(/archived-a/, text)
+
+    keyboard = telegram.messages.last[:reply_markup]
+    labels = keyboard.flatten.map { |button| button[:text] }
+    assert labels.any? { |label| label.start_with?("Answer in chat: hive/brainstorm-a") }
+    assert labels.any? { |label| label.start_with?("Accept all: hive/review-a") }
+    assert labels.any? { |label| label.start_with?("Approve: hive/pr-a") }
   end
 
   def test_s3_queue_caps_at_10_rows_and_shows_more_affordance

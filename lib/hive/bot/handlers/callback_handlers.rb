@@ -69,7 +69,7 @@ module Hive
             action: :dispatch_then_reply,
             project: project,
             slug: slug,
-            command_argv: [ "hive", "status", "--project", project, "--slug", slug, "--json" ]
+            command_argv: [ "hive", "status", "--json" ]
           )
         end
 
@@ -92,7 +92,7 @@ module Hive
           @result_class.new(
             action: :dispatch_then_reply,
             project: project,
-            command_argv: [ "hive", "new", project, idea_text ]
+            command_argv: [ "hive", "new", project, idea_text, "--json" ]
           )
         end
 
@@ -123,14 +123,17 @@ module Hive
         def findings_toggle(data, verb)
           _prefix, _kind, project, slug, stage = split_callback(data, 5)
           stage_argv = stage ? [ "--stage", stage ] : []
+          retry_verb = retry_verb_for_stage(stage)
+          retry_argv = retry_verb ? [ "hive", retry_verb, slug, "--from", stage, "--project", project, "--json" ] : nil
+          commands = [
+            [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ]
+          ]
+          commands << retry_argv if retry_argv
           @result_class.new(
             action: :dispatch_commands,
             project: project,
             slug: slug,
-            commands: [
-              [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ],
-              [ "hive", retry_verb_for_stage(stage) || "review", slug, "--from", stage, "--project", project, "--json" ]
-            ]
+            commands: commands
           )
         end
 

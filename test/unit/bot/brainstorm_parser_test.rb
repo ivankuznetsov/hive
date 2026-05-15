@@ -138,6 +138,25 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_nil question.round
   end
 
+  def test_questions_are_sorted_by_round_and_number
+    text = <<~MARKDOWN
+      ## Round 2
+
+      ### Q3. Third?
+
+      ### A3.
+
+      ### Q2. Second?
+
+      ### A2.
+    MARKDOWN
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    assert_equal [ 2, 3 ], questions.map(&:n)
+    assert_equal 2, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
+  end
+
   def test_answered_predicate_reflects_presence_of_answer
     questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
       ## Round 1

@@ -62,7 +62,7 @@ module Hive
         end
 
         finalize(questions, current)
-        questions
+        questions.sort_by { |question| [ question.round || 0, question.n ] }
       end
 
       def next_unanswered_question(parsed)

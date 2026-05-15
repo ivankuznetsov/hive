@@ -63,6 +63,8 @@ module Hive
       end
 
       def parse_response(output)
+        # Codex should emit one terminal BOT_* marker; if it emits more while
+        # reasoning or revising, the last marker is the final operator-facing state.
         markers = output.lines.filter_map do |line|
           match = /\ABOT_(REPLY|DRAFT|ERROR):\s*(.*)\z/.match(line.strip)
           next unless match

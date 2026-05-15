@@ -18,6 +18,7 @@ module Hive
         @log_dir_for_task = log_dir_for_task
         @dry_run = dry_run
         @running = {}
+        @completed = {}
         @mutex = Mutex.new
       end
 
@@ -66,7 +67,7 @@ module Hive
             reaped_pid, status = Process.wait2(pid, Process::WNOHANG)
           rescue Errno::ECHILD
             entry = @mutex.synchronize { @running.delete(pid) }
-            completed << build_exit(pid, nil, entry, now) if entry
+            completed << remember_exit(build_exit(pid, nil, entry, now)) if entry
             next
           end
           next if reaped_pid.nil?
@@ -74,7 +75,7 @@ module Hive
           entry = @mutex.synchronize { @running.delete(reaped_pid) }
           next unless entry
 
-          completed << build_exit(reaped_pid, status.exitstatus, entry, now)
+          completed << remember_exit(build_exit(reaped_pid, status.exitstatus, entry, now))
         end
         completed
       end
@@ -126,7 +127,16 @@ module Hive
         @mutex.synchronize { @running.keys.dup }
       end
 
+      def completed_exit(pid)
+        @mutex.synchronize { @completed[pid] }
+      end
+
       private
+
+      def remember_exit(child)
+        @mutex.synchronize { @completed[child.pid] = child }
+        child
+      end
 
       def entry(project:, slug:, command_argv:, chat_id:, update_id:, started_at:, log_path:, dry_run:)
         {

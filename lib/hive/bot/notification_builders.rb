@@ -86,6 +86,7 @@ module Hive
           text: header(row) + "\nBrainstorm questions are waiting.",
           keyboard: [
             [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ],
+            [ button("Ask Codex", "path_a_yes:#{row.project}:#{row.slug}") ],
             [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
           ]
         )
@@ -116,14 +117,29 @@ module Hive
       end
 
       def recovery(row)
+        keyboard = if open_laptop_only_recovery?(row)
+                     [
+                       [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+                       [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+                     ]
+                   else
+                     [
+                       [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
+                       [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+                       [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+                     ]
+                   end
         Notification.new(
           text: header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}",
-          keyboard: [
-            [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
-            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-            [ button("Show details", "details:#{row.project}:#{row.slug}") ]
-          ]
+          keyboard: keyboard
         )
+      end
+
+      def open_laptop_only_recovery?(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        row.marker.to_s == "review_error" &&
+          attrs["phase"] == "fix" &&
+          attrs["reason"] == "fix_tampered"
       end
 
       def header(row)
@@ -148,6 +164,8 @@ module Hive
       end
 
       CALLBACK_DATA_MAX = 64
+      CALLBACK_REGISTRY_TTL_SEC = 3600
+      CALLBACK_REGISTRY_MAX = 2048
 
       def button(text, callback_data)
         { text: text, callback_data: compact_callback(callback_data) }
@@ -158,7 +176,8 @@ module Hive
 
         prefix, _ = callback_data.split(":", 2)
         digest = Digest::SHA256.hexdigest(callback_data)[0, 16]
-        registry[digest] = callback_data
+        prune_registry!
+        registry[digest] = [ callback_data, Time.now ]
         "##{prefix}:#{digest}"
       end
 
@@ -166,11 +185,18 @@ module Hive
         return token unless token.start_with?("#")
 
         _, digest = token.split(":", 2)
-        registry.fetch(digest, token)
+        entry = registry[digest]
+        entry.is_a?(Array) ? entry.first : token
       end
 
       def registry
         @registry ||= {}
+      end
+
+      def prune_registry!
+        cutoff = Time.now - CALLBACK_REGISTRY_TTL_SEC
+        registry.delete_if { |_digest, entry| entry.is_a?(Array) && entry.last < cutoff }
+        registry.shift while registry.size > CALLBACK_REGISTRY_MAX
       end
 
       Notification = Data.define(:text, :keyboard)

@@ -27,7 +27,7 @@ class HiveBotLifecycleTest < Minitest::Test
       end
 
       doc = JSON.parse(out)
-      assert_equal 1, status
+      assert_equal 0, status
       assert_equal "hive-bot-status", doc["schema"]
       assert_equal false, doc["running"]
       assert_equal File.join(home, ".bot.pid"), doc["pid_file"]

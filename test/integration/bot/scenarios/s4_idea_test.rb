@@ -22,7 +22,7 @@ class HiveBotScenarioIdeaTest < Minitest::Test
     result = router.handle(update(callback_data: hive_button[:callback_data]))
 
     assert_equal :dispatch_then_reply, result.action
-    assert_equal [ "hive", "new", "hive", "fix the broken cron" ], result.command_argv
+    assert_equal [ "hive", "new", "hive", "fix the broken cron", "--json" ], result.command_argv
   end
 
   private

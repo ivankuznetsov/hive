@@ -37,6 +37,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     assert_match(/Brainstorm questions/, notification.text)
     assert_equal "Answer in chat", notification.keyboard.first.first[:text]
+    assert_equal "Ask Codex", notification.keyboard[1].first[:text]
+  end
+
+  def test_compacted_callback_round_trips
+    long_slug = "slug-" + ("a" * 80)
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_plan", marker: "complete", slug: long_slug)
+    )
+    token = notification.keyboard.first.first[:callback_data]
+
+    assert_operator token.bytesize, :<=, Hive::Bot::NotificationBuilders::CALLBACK_DATA_MAX
+    assert_match(/\A#approve:/, token)
+    assert_equal "approve:plan:hive:#{long_slug}:2-brainstorm",
+                 Hive::Bot::NotificationBuilders.resolve_callback(token)
   end
 
   def test_review_waiting_fix_guardrail_builds_operator_keyboard_without_invalid_clear
@@ -59,6 +73,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     assert_equal [ "Clear and retry", "Open laptop", "Show details" ], labels
+  end
+
+  def test_fix_tampered_recovery_falls_back_to_laptop
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error", attrs: { "phase" => "fix", "reason" => "fix_tampered" })
+    )
+
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    refute_includes labels, "Clear and retry"
+    assert_equal [ "Open laptop", "Show details" ], labels
   end
 
   def test_fingerprint_changes_when_marker_attrs_change

@@ -19,13 +19,14 @@ class HiveBotRouterTest < Minitest::Test
     )
   end
 
-  def update(text: nil, callback_data: nil, chat_id: 12345)
+  def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil)
     Hive::Bot::Telegram::Update.new(
       update_id: 1,
       chat_id: chat_id,
       from_id: chat_id,
       text: text,
-      callback_data: callback_data
+      callback_data: callback_data,
+      reply_to_text: reply_to_text
     )
   end
 
@@ -70,18 +71,42 @@ class HiveBotRouterTest < Minitest::Test
     result = @router.handle(update(callback_data: callback))
 
     assert_equal :dispatch_then_reply, result.action
-    assert_equal [ "hive", "new", "hive", "fix broken cron" ], result.command_argv
+    assert_equal [ "hive", "new", "hive", "fix broken cron", "--json" ], result.command_argv
   end
 
   def test_free_text_inside_active_conversation_writes_current_question
-    @store.start(chat_id: 12345, slug: "slug-260514-abcd", question_n: 1)
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd", question_n: 1)
 
     result = @router.handle(update(text: "answer body"))
 
     assert_equal :write_answer_then_reply, result.action
+    assert_equal "hive", result.project
     assert_equal "slug-260514-abcd", result.slug
     assert_equal 1, result.question_n
     assert_equal "answer body", result.answer_text
+  end
+
+  def test_free_text_inside_path_a_conversation_continues_codex
+    @store.start(chat_id: 12345, project: "hive", slug: "slug-260514-abcd",
+                 question_n: 1, mode: :path_a)
+
+    result = @router.handle(update(text: "clarifying answer"))
+
+    assert_equal :start_codex, result.action
+    assert_equal "hive", result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_equal "clarifying answer", result.answer_text
+  end
+
+  def test_free_text_reply_can_reattach_to_slug_after_restart
+    result = @router.handle(
+      update(text: "offline answer", reply_to_text: "hive/slug-260514-abcd (2-brainstorm)")
+    )
+
+    assert_equal :write_answer_then_reply, result.action
+    assert_equal "hive", result.project
+    assert_equal "slug-260514-abcd", result.slug
+    assert_nil result.question_n
   end
 
   def test_slash_answer_returns_start_answer_action_not_immediate_start
@@ -106,6 +131,17 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal [ "hive", "plan", "slug-260514-abcd", "--from", "2-brainstorm",
+                   "--project", "hive", "--json" ], result.command_argv
+  end
+
+  def test_compacted_callback_is_resolved_before_dispatch
+    long_slug = "slug-" + ("a" * 80)
+    token = Hive::Bot::NotificationBuilders.compact_callback("approve:plan:hive:#{long_slug}:2-brainstorm")
+
+    result = @router.handle(update(callback_data: token))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "plan", long_slug, "--from", "2-brainstorm",
                    "--project", "hive", "--json" ], result.command_argv
   end
 

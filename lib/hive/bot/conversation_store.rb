@@ -5,7 +5,7 @@ module Hive
     class ConversationStore
       VALID_MODES = %i[path_a path_b].freeze
 
-      State = Struct.new(:chat_id, :slug, :question_n, :history, :draft, :mode,
+      State = Struct.new(:chat_id, :project, :slug, :question_n, :history, :draft, :mode,
                          :awaiting_confirm, :updated_at, keyword_init: true)
 
       def initialize(ttl_sec: 3600, now: -> { Time.now })
@@ -18,10 +18,11 @@ module Hive
         @ttl_sec = seconds
       end
 
-      def start(chat_id:, slug:, question_n:, mode: :path_b)
+      def start(chat_id:, slug:, question_n:, mode: :path_b, project: nil)
         validate_mode!(mode)
         state = State.new(
           chat_id: chat_id,
+          project: project,
           slug: slug,
           question_n: question_n,
           history: [],

@@ -283,32 +283,34 @@ module Hive
           question_n: question_n,
           answer_text: result.answer_text
         )
-        text = case write_result
-               when :written
-                 @logger.event(:answer_written, slug: result.slug, question_n: question_n,
-                                                  project: result.project)
-                 "Got Q#{question_n}."
-               when :already_answered
-                 @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                                  question_n: question_n,
-                                                                  project: result.project)
-                 "Question #{question_n} was already answered by another device"
-               when :lock_busy
-                 "Try again - another run holds the lock"
-               else
-                 "Question #{question_n} was not found."
-               end
+        text =
+          case write_result
+          when :written
+            @logger.event(:answer_written, slug: result.slug, question_n: question_n,
+                                           project: result.project)
+            "Got Q#{question_n}."
+          when :already_answered
+            @logger.event(:answer_skipped_already_answered, slug: result.slug,
+                                                           question_n: question_n,
+                                                           project: result.project)
+            "Question #{question_n} was already answered by another device"
+          when :lock_busy
+            "Try again - another run holds the lock"
+          else
+            "Question #{question_n} was not found."
+          end
         advance_conversation_after_write(result, update, path) if write_result == :written
         safe_send_message(chat_id: update.chat_id, text: text)
       end
 
       def start_answer(result, update)
         path = brainstorm_path_for(result.slug, project: result.project)
-        question = if path
-                     Hive::Bot::BrainstormParser.next_unanswered_question(
-                       Hive::Bot::BrainstormParser.parse(path)
-                     )
-                   end
+        question =
+          if path
+            Hive::Bot::BrainstormParser.next_unanswered_question(
+              Hive::Bot::BrainstormParser.parse(path)
+            )
+          end
         question_n = question&.n || 1
         @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
                                   question_n: question_n, mode: result.mode || :path_b,
@@ -399,12 +401,13 @@ module Hive
                                                             question_n: result.question_n,
                                                             project: result.project)
         end
-        text = case write_result
-               when :written then "Draft saved as Q#{result.question_n}."
-               when :already_answered then "Question #{result.question_n} was already answered by another device"
-               when :lock_busy then "Try again - another run holds the lock"
-               else "Question #{result.question_n} was not found."
-               end
+        text =
+          case write_result
+          when :written then "Draft saved as Q#{result.question_n}."
+          when :already_answered then "Question #{result.question_n} was already answered by another device"
+          when :lock_busy then "Try again - another run holds the lock"
+          else "Question #{result.question_n} was not found."
+          end
         safe_send_message(chat_id: update.chat_id, text: text)
       end
 

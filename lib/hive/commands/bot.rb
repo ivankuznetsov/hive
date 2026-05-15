@@ -118,16 +118,17 @@ module Hive
       def status_bot
         pid = live_pid
         running = !pid.nil?
-        uptime = if running
-                   started_at_raw = pid_file_payload["started_at"]
-                   if started_at_raw
-                     begin
-                       (Time.now - Time.parse(started_at_raw.to_s)).to_i
-                     rescue ArgumentError
-                       nil
-                     end
-                   end
-                 end
+        uptime =
+          if running
+            started_at_raw = pid_file_payload["started_at"]
+            if started_at_raw
+              begin
+                (Time.now - Time.parse(started_at_raw.to_s)).to_i
+              rescue ArgumentError
+                nil
+              end
+            end
+          end
         payload = {
           "schema" => "hive-bot-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"),

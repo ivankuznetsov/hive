@@ -117,18 +117,19 @@ module Hive
       end
 
       def recovery(row)
-        keyboard = if open_laptop_only_recovery?(row)
-                     [
-                       [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-                       [ button("Show details", "details:#{row.project}:#{row.slug}") ]
-                     ]
-                   else
-                     [
-                       [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
-                       [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-                       [ button("Show details", "details:#{row.project}:#{row.slug}") ]
-                     ]
-                   end
+        keyboard =
+          if open_laptop_only_recovery?(row)
+            [
+              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+            ]
+          else
+            [
+              [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
+              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+            ]
+          end
         Notification.new(
           text: header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}",
           keyboard: keyboard

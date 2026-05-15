@@ -1,0 +1,109 @@
+---
+title: hive bot
+type: command
+source: lib/hive/commands/bot.rb, lib/hive/bot/*
+created: 2026-05-14
+updated: 2026-05-14
+tags: [command, bot, telegram, mobile, json]
+---
+
+**TLDR**: `hive bot SUBCOMMAND` runs the Telegram mobile surface for
+human-input gates. It long-polls Telegram, ignores chats outside the
+global allowlist, renders waiting/status rows with inline buttons, and
+dispatches the same `hive` workflow verbs the daemon and CLI already
+use. It is a subprocess caller, not a second approval engine.
+
+## Subcommands
+
+```
+hive bot start [--detach] [--dry-run]
+hive bot stop [--json]
+hive bot status [--json]
+hive bot reload [--json]
+hive bot tail
+```
+
+| Subcommand | Behavior |
+|-----------|----------|
+| `start` | Loads `bot:` from `~/Dev/hive/config.yml`, requires `HIVE_TELEGRAM_BOT_TOKEN`, writes `~/Dev/hive/.bot.pid`, then starts the long-poll/status/reaper supervisor. With `--detach`, daemonizes. With `--dry-run`, outbound Telegram parsing still works but child `hive ...` dispatches are reported rather than spawned. A second live bot exits `75 (TEMPFAIL)`. |
+| `stop` | Sends `SIGTERM` to the PID file's process and waits up to `bot.shutdown_grace_sec`, then escalates to `SIGKILL`. Idempotent when no bot is running. With `--json`, emits `hive-bot-stop.v1`. |
+| `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, and `log_file`. |
+| `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
+| `tail` | Streams `~/Dev/hive/logs/bot.log`; exits 1 if the log does not exist. |
+
+## Commands in Telegram
+
+| Slash command | Behavior |
+|--------------|----------|
+| `/status` | Renders the active cross-project queue from `hive status --json`. |
+| `/queue` | Same queue view, focused on actionable waiting/recovery rows. |
+| `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
+| `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
+| `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
+| `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. |
+| `/help` | Lists the supported command set. |
+
+Free text outside an active answer conversation is rejected with a
+`/help` hint. Unauthorized chats receive no reply.
+
+## Inline actions
+
+Notifications and `/queue` rows use callback data that routes to:
+
+- Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
+- Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
+- Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
+- Recovery markers: `Clear and retry` dispatches `hive markers clear ... --name <MARKER> --json`, then dispatches the stage's workflow verb when one exists.
+- `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
+
+## Config
+
+The bot is global, not per-project:
+
+```yaml
+bot:
+  enabled: false
+  chat_id_allowlist: [123456789]
+  poll_interval_sec: 30
+  long_poll_timeout_sec: 25
+  notification_dedupe_window_sec: 300
+  pid_file: ~/Dev/hive/.bot.pid
+  log_file: ~/Dev/hive/logs/bot.log
+  last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
+```
+
+`HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
+token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
+(exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
+silently.
+
+## Structured log
+
+`~/Dev/hive/logs/bot.log` is one JSON document per line with schema
+`hive-bot-log.v1`. The event enum is closed in
+`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
+Events include `bot_started`, `poll_failure`, `update_received`,
+`notification_sent`, `dispatched_command`, `command_completed`,
+`codex_spawned`, `answer_written`, `reconnect_summary`, and `fatal`.
+
+## Exit codes
+
+| Subcommand | Code | Condition |
+|------------|------|-----------|
+| `start` | 0 | Foreground bot exits cleanly |
+| `start` | 75 | Another bot is already running |
+| `start` | 78 | Token/allowlist/config is missing or malformed |
+| `stop` | 0 | Always, including not-running |
+| `status` | 0 | Bot is running |
+| `status` | 1 | Bot is not running |
+| `reload` | 0 | SIGHUP sent |
+| `reload` | 1 | Bot is not running |
+| `tail` | 0 | Stream ended via Ctrl-C |
+| `tail` | 1 | Log file missing |
+
+## Backlinks
+
+- [[modules/bot]]
+- [[cli]] · [[operating]]
+- [[decisions]] (ADR-026)
+- [[architecture]]

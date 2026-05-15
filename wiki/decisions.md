@@ -7,7 +7,7 @@ updated: 2026-05-14
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records the PR-first workflow and stage renumbering.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface.
 
 ## ADR-024: PR-first workflow and finalize rename
 
@@ -255,6 +255,33 @@ Hive's deployment model (single binary, no third-party consumers on different ve
 - Future fields: when adding a new field to `SuccessPayload`, the producer change and the schema change land in the same commit. The e2e suite catches the omission before merge.
 - This ADR does **not** apply retroactively to `ErrorPayload`'s per-error-class fields (`candidates`, `id`, `path`, `holder`, `lock_path`). Those are conditional on `error_kind` and intentionally listed as optional in the schema's per-kind properties — they're documented as "present only on the matching error_kind." That conditional-presence shape is a different contract than the unconditional `rebase` block.
 
+## ADR-026: Telegram bot mediates human-input gates; subprocess caller, no parallel approval logic
+
+**Status:** Active (shipped with plan `feat: hive Telegram bot — fully usable mobile interface`)
+
+**Context:** ADR-024 made the daemon the default way to advance tasks once a project is enrolled. The remaining stalls are intentional human-input gates: brainstorm questions, review triage, recovery markers, and stage approvals in non-daemon scenarios. Those gates previously required a terminal, so the daemon could park a task at `WAITING` while the operator was away from the laptop.
+
+**Decision:** Add `hive bot` as a long-running Telegram process. It long-polls Telegram, authenticates by a global `bot.chat_id_allowlist`, watches the same `hive status --json` stream as the daemon, and turns waiting/recovery rows into mobile interactions. The bot is a subprocess caller:
+
+1. Stage approvals dispatch workflow verbs (`hive plan` / `develop` / `review` / `pr` / `archive`) with `--from <stage> --project <project> --json`.
+2. Recovery buttons dispatch `hive markers clear` and then the appropriate workflow verb when safe.
+3. Review triage buttons dispatch `hive accept-finding` / `hive reject-finding`.
+4. `/idea` dispatches `hive new`.
+5. `/status` and `/queue` render the status rows; they do not scan task folders directly.
+
+The one direct write is brainstorm answering. The bot writes literal answer text into `brainstorm.md` under `Hive::Lock.with_task_lock`, after re-parsing the file and confirming the target `### A<N>.` slot is still empty. First-write-wins across multiple Telegram devices is the concurrency contract.
+
+Path B is the default: the operator reads the question and replies in Telegram; the text is written verbatim. Path A exists for long brainstorm rounds: the bot spawns Codex for a short conversational turn, Codex returns a draft, and the bot writes only the literal draft the operator confirms. Codex never receives permission to edit `brainstorm.md` directly.
+
+**Relationship to ADR-024:** ADR-024 says approval is given once per project when the daemon is enabled. ADR-026 adds a mobile input surface for the gates the daemon deliberately cannot cross. Tapping Approve in Telegram is the same approval gesture as running the workflow verb in a terminal; safety still lives in `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`, `Hive::TaskAction`, marker clear allowlists, and the existing command contracts.
+
+**Consequences:**
+- The mobile phone becomes a complete surface for the daemon's human-input gaps: answer brainstorm questions, clear/retry recoverable errors, triage findings, approve transitions, capture ideas, and read the cross-project queue.
+- Telegram session compromise has the same blast radius as the operator's terminal session for bot-supported actions. MVP deliberately has no per-action PIN, read-only mode, team ACLs, or audit attribution beyond JSON logs.
+- No new persistence sidecar is introduced for conversations. `brainstorm.md` is the source of truth; after a bot restart, parsing the file identifies the next unanswered question.
+- The bot token is environment-only (`HIVE_TELEGRAM_BOT_TOKEN`); it is never stored in config or logged.
+- Cloud relay/webhook mode is deferred. The same long-poll process can run on the laptop or on an always-on host.
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.
@@ -265,3 +292,4 @@ Once `git log` accumulates real history, future updates should add ADRs from sub
 - [[state-model]]
 - [[e2e]]
 - [[stages/execute]]
+- [[commands/bot]] · [[modules/bot]]

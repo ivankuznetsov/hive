@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-reload.v1.json",
+  "title": "hive bot reload output (v1)",
+  "description": "Stable contract emitted by `hive bot reload --json`. Sends SIGHUP to a live bot process. Reports ok=true when the signal was delivered; ok=false when no bot is running.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-bot-reload" },
+        "schema_version": { "const": 1 },
+        "ok": {
+          "type": "boolean",
+          "description": "True only when SIGHUP was delivered."
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "description": "PID that was signalled, or null when no PID was available."
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["not_running"],
+          "description": "Why reload was refused. Present only when ok=false."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable explanation."
+        }
+      }
+    }
+  }
+}

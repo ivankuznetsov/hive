@@ -538,6 +538,40 @@ module Hive
       end
     end
 
+    desc "bot SUBCOMMAND", "Manage the Telegram bot (start / stop / status / reload / tail)"
+    long_desc <<~DESC
+      Subcommands:
+        start [--detach] [--dry-run]      Run the Telegram long-poll bot.
+                                          Without --detach, runs in foreground.
+        stop [--json]                     Send SIGTERM to the running bot.
+                                          --json emits hive-bot-stop.v1.
+        status [--json]                   Show running / not-running.
+                                          --json emits hive-bot-status.v1.
+        reload [--json]                   Send SIGHUP to reload bot config.
+                                          --json emits hive-bot-reload.v1.
+        tail                              Stream bot.log.
+
+      The bot reads the global `bot:` block from ~/Dev/hive/config.yml.
+      Its Telegram token comes only from HIVE_TELEGRAM_BOT_TOKEN. Incoming
+      updates from chat IDs outside bot.chat_id_allowlist are ignored.
+
+      Exit codes: 0 success; 1 bot-not-running for status/reload; 64 usage;
+      70 internal error; 75 TEMPFAIL when start finds a live bot; 78 CONFIG
+      when runtime config or HIVE_TELEGRAM_BOT_TOKEN is missing.
+    DESC
+    option :detach, type: :boolean, default: false, desc: "fork to background after start"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "log/send would-be actions without spawning child commands"
+    def bot(subcommand = nil)
+      require "hive/commands/bot"
+      Hive::Commands::Bot.new(
+        subcommand,
+        detach: options[:detach],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"
     long_desc <<~DESC
       Opens a full-screen Charm bubbletea + lipgloss dashboard over `hive status`.

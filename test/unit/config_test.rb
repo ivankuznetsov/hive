@@ -1423,6 +1423,130 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # ── Telegram bot global settings ──────────────────────────────────────
+
+  def test_load_returns_documented_bot_defaults_when_key_absent
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("bot", "enabled")
+      assert_equal [], cfg.dig("bot", "chat_id_allowlist")
+      assert_equal 30, cfg.dig("bot", "poll_interval_sec")
+      assert_equal 25, cfg.dig("bot", "long_poll_timeout_sec")
+      assert_equal 300, cfg.dig("bot", "notification_dedupe_window_sec")
+      assert_equal 3600, cfg.dig("bot", "conversation_ttl_sec")
+      assert_equal 1, cfg.dig("bot", "codex_budget_usd")
+      assert_equal 120, cfg.dig("bot", "codex_timeout_sec")
+    end
+  end
+
+  def test_load_global_bot_honors_global_config_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: true
+          chat_id_allowlist: [12345]
+          poll_interval_sec: 10
+          log_max_files: 2
+      YAML
+
+      cfg = Hive::Config.load_global_bot
+
+      assert_equal true, cfg["enabled"]
+      assert_equal [ 12_345 ], cfg["chat_id_allowlist"]
+      assert_equal 10, cfg["poll_interval_sec"]
+      assert_equal 2, cfg["log_max_files"]
+      assert_equal 25, cfg["long_poll_timeout_sec"]
+    end
+  end
+
+  def test_load_global_bot_uses_hive_home_for_default_paths
+    Dir.mktmpdir do |dir|
+      old = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+
+      cfg = Hive::Config.load_global_bot
+
+      assert_equal File.join(dir, ".bot.pid"), cfg["pid_file"]
+      assert_equal File.join(dir, "logs", "bot.log"), cfg["log_file"]
+      assert_equal File.join(dir, ".bot.last_seen_update_id"), cfg["last_seen_state_file"]
+    ensure
+      ENV["HIVE_HOME"] = old
+    end
+  end
+
+  def test_load_global_bot_rejects_string_chat_id
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          chat_id_allowlist: ["12345"]
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot.chat_id_allowlist\[0\].*Integer/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_too_large_long_poll_timeout
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          long_poll_timeout_sec: 100
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot.long_poll_timeout_sec.*between 5 and 50/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_parent_directory_path_segments
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pid_file: ../etc/passwd
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot.pid_file.*must not contain '\.\.'/, err.message)
+    end
+  end
+
+  def test_load_global_bot_runtime_requires_token
+    with_tmp_global_config do |home|
+      old = ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          chat_id_allowlist: [12345]
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
+      assert_match(/HIVE_TELEGRAM_BOT_TOKEN/, err.message)
+    ensure
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old if old
+    end
+  end
+
+  def test_load_global_bot_runtime_requires_non_empty_allowlist
+    with_tmp_global_config do
+      old = ENV["HIVE_TELEGRAM_BOT_TOKEN"]
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "token"
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
+      assert_match(/bot.chat_id_allowlist.*at least one chat_id/, err.message)
+    ensure
+      if old
+        ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old
+      else
+        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      end
+    end
+  end
+
   # ---- Auto-rebase `rebase:` block (plan
   # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md U5) ----
 

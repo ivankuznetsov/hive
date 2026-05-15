@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-status.v1.json",
+  "title": "hive bot status output (v1)",
+  "description": "Stable contract emitted by `hive bot status --json`. Reports whether the Telegram bot process is running, its PID, and uptime. Exit code is 0 when running, 1 when not.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "running",
+        "pid",
+        "uptime_sec",
+        "pid_file",
+        "log_file"
+      ],
+      "properties": {
+        "schema": { "const": "hive-bot-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "running": {
+          "type": "boolean",
+          "description": "Whether a live bot process holds the PID file."
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "description": "PID of the running bot, or null when running=false."
+        },
+        "uptime_sec": {
+          "type": ["integer", "null"],
+          "description": "Seconds since the PID file was written, or null when running=false."
+        },
+        "pid_file": {
+          "type": "string",
+          "description": "Absolute path of the bot PID file."
+        },
+        "log_file": {
+          "type": "string",
+          "description": "Absolute path of the bot JSON-line log file."
+        }
+      }
+    }
+  }
+}

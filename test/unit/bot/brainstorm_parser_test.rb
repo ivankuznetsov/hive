@@ -1,0 +1,177 @@
+require "test_helper"
+require "hive/bot/brainstorm_parser"
+
+class HiveBotBrainstormParserTest < Minitest::Test
+  FIXTURE_DIR = File.expand_path("../../fixtures/brainstorm", __dir__)
+
+  def fixture(name)
+    File.join(FIXTURE_DIR, name)
+  end
+
+  def test_parses_two_rounds_and_returns_first_unanswered_in_document_order
+    questions = Hive::Bot::BrainstormParser.parse(fixture("round1_full_round2_partial.md"))
+
+    assert_equal 5, questions.size
+    assert_equal [ 1, 1, 2, 2, 2 ], questions.map(&:round)
+    assert_equal "Which project should receive the first test idea?", questions[2].text
+    assert_equal "Hive.", questions[2].answer
+
+    next_question = Hive::Bot::BrainstormParser.next_unanswered_question(questions)
+    assert_equal 2, next_question.round
+    assert_equal 2, next_question.n
+    assert_equal "How should long questions be handled?\nInclude the phone-screen constraint.", next_question.text
+  end
+
+  def test_complete_file_has_no_next_question
+    questions = Hive::Bot::BrainstormParser.parse(fixture("complete.md"))
+
+    assert_equal 2, questions.size
+    assert_nil Hive::Bot::BrainstormParser.next_unanswered_question(questions)
+  end
+
+  def test_empty_file_returns_empty_list
+    questions = Hive::Bot::BrainstormParser.parse(fixture("empty.md"))
+
+    assert_equal [], questions
+    assert_nil Hive::Bot::BrainstormParser.next_unanswered_question(questions)
+  end
+
+  def test_malformed_file_without_blocks_returns_empty_list
+    assert_equal [], Hive::Bot::BrainstormParser.parse(fixture("malformed_no_blocks.md"))
+  end
+
+  def test_missing_answer_block_is_unanswered
+    text = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. The question exists.
+      It has more context.
+    MARKDOWN
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    assert_equal 1, questions.size
+    assert_equal "The question exists.\nIt has more context.", questions.first.text
+    assert_nil questions.first.answer
+  end
+
+  def test_crlf_line_endings_are_supported
+    text = "## Round 1\r\n\r\n### Q1. First?\r\n\r\n### A1.\r\nAnswered.\r\n"
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    assert_equal 1, questions.size
+    assert_equal "First?", questions.first.text
+    assert_equal "Answered.", questions.first.answer
+  end
+
+  def test_question_text_spans_multiple_lines
+    text = <<~MARKDOWN
+      ## Round 3
+
+      ### Q7. Explain the tradeoff.
+      Include latency.
+      Include safety.
+
+      ### A7.
+    MARKDOWN
+
+    question = Hive::Bot::BrainstormParser.parse_text(text).first
+
+    assert_equal 3, question.round
+    assert_equal 7, question.n
+    assert_equal "Explain the tradeoff.\nInclude latency.\nInclude safety.", question.text
+    assert_nil question.answer
+  end
+
+  def test_marker_after_answer_is_ignored
+    questions = Hive::Bot::BrainstormParser.parse(fixture("complete.md"))
+
+    assert_equal "Also yes.", questions.last.answer
+  end
+
+  def test_question_heading_text_embedded_inside_answer_line_does_not_split_answer
+    text = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. What happened?
+
+      ### A1.
+      The phrase ### Q5. was part of the answer, not a heading.
+    MARKDOWN
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    assert_equal 1, questions.size
+    assert_equal "The phrase ### Q5. was part of the answer, not a heading.", questions.first.answer
+  end
+
+  def test_multi_paragraph_answer_with_internal_blank_line_is_preserved
+    text = <<~MARKDOWN
+      ## Round 1
+
+      ### Q1. Multi para?
+
+      ### A1.
+
+      First paragraph.
+
+      Second paragraph.
+    MARKDOWN
+
+    answer = Hive::Bot::BrainstormParser.parse_text(text).first.answer
+
+    assert_equal "First paragraph.\n\nSecond paragraph.", answer
+  end
+
+  def test_question_without_round_context_returns_nil_round
+    text = <<~MARKDOWN
+      ### Q1. Question without preceding round?
+      Body.
+
+      ### A1.
+    MARKDOWN
+
+    question = Hive::Bot::BrainstormParser.parse_text(text).first
+
+    assert_equal 1, question.n
+    assert_nil question.round
+  end
+
+  def test_questions_are_sorted_by_round_and_number
+    text = <<~MARKDOWN
+      ## Round 2
+
+      ### Q3. Third?
+
+      ### A3.
+
+      ### Q2. Second?
+
+      ### A2.
+    MARKDOWN
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    assert_equal [ 2, 3 ], questions.map(&:n)
+    assert_equal 2, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
+  end
+
+  def test_answered_predicate_reflects_presence_of_answer
+    questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. First?
+
+      ### A1.
+      Yes.
+
+      ### Q2. Second?
+
+      ### A2.
+    MARKDOWN
+
+    assert_predicate questions.first, :answered?
+    refute_predicate questions.last, :answered?
+  end
+end

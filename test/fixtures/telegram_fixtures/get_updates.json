@@ -1,0 +1,26 @@
+[
+  {
+    "update_id": 1001,
+    "message": {
+      "message_id": 10,
+      "from": { "id": 12345, "is_bot": false, "first_name": "Operator" },
+      "chat": { "id": 12345, "type": "private" },
+      "date": 1778750000,
+      "text": "/status"
+    }
+  },
+  {
+    "update_id": 1002,
+    "callback_query": {
+      "id": "abc",
+      "from": { "id": 12345, "is_bot": false, "first_name": "Operator" },
+      "message": {
+        "message_id": 11,
+        "chat": { "id": 12345, "type": "private" },
+        "date": 1778750001
+      },
+      "chat_instance": "ci",
+      "data": "approve:plan:hive:slug-260514-abcd:2-brainstorm"
+    }
+  }
+]

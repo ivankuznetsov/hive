@@ -1,16 +1,16 @@
 ---
 title: Operating Hive
 type: operating
-source: lib/hive/commands/daemon.rb, examples/systemd/, examples/launchd/
+source: lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-08
-tags: [operating, daemon, systemd, launchd, install]
+updated: 2026-05-14
+tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
-**TLDR**: Day-2 guide for running the hive daemon. Covers per-project
-enrollment, autostart on macOS (launchd) and Linux (systemd), the
-mandatory `--dry-run` shakedown, log inspection, and how to disable
-projects mid-flight.
+**TLDR**: Day-2 guide for running the hive daemon and Telegram bot.
+Covers per-project daemon enrollment, bot token/allowlist setup,
+autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
+log inspection, and how to disable automation mid-flight.
 
 ## Prerequisites
 
@@ -25,6 +25,9 @@ Once per workstation:
 - **`/proc` mounted OR `ps` available.** The daemon refuses to start
   if it can't read its own `process_start_time` (PID-reuse defense).
   Verify: `ls /proc/$$ >/dev/null && echo OK` or `command -v ps`.
+- **Telegram bot token** if using `hive bot`. Create the bot with
+  BotFather, export `HIVE_TELEGRAM_BOT_TOKEN`, and add your numeric
+  `chat_id` to `bot.chat_id_allowlist` in `~/Dev/hive/config.yml`.
 
 ## Enrolling existing projects
 
@@ -165,6 +168,61 @@ which `KeepAlive { SuccessfulExit: false }` then respects (no respawn).
 A real daemon crash still exits non-zero through `exec` and respawns
 normally. If you customise `ProgramArguments`, keep the precheck.
 
+## Bot setup
+
+The bot is global and uses the registry in `~/Dev/hive/config.yml`.
+Minimum config:
+
+```yaml
+bot:
+  enabled: true
+  chat_id_allowlist: [123456789]
+```
+
+Runtime token:
+
+```bash
+export HIVE_TELEGRAM_BOT_TOKEN=123456:token-from-botfather
+hive bot start --dry-run
+```
+
+`--dry-run` is useful for first shakedown: inbound command parsing and
+status notifications run, but state-changing child commands are not
+spawned. The bot log is `~/Dev/hive/logs/bot.log`:
+
+```bash
+jq -r '.event' ~/Dev/hive/logs/bot.log | sort | uniq -c
+```
+
+Unauthorized chat IDs are logged once and receive no reply. Missing
+token or empty allowlist exits 78 (`CONFIG`).
+
+### Bot autostart
+
+Linux sample unit:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp examples/systemd/hive-bot.service ~/.config/systemd/user/
+$EDITOR ~/.config/systemd/user/hive-bot.service   # set token / paths
+systemctl --user daemon-reload
+systemctl --user enable --now hive-bot
+journalctl --user -u hive-bot -f
+```
+
+macOS sample plist:
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+cp examples/launchd/hive-bot.plist ~/Library/LaunchAgents/
+$EDITOR ~/Library/LaunchAgents/hive-bot.plist     # set token / paths
+launchctl load ~/Library/LaunchAgents/hive-bot.plist
+```
+
+The sample files run `hive bot start` in the foreground and let the
+host supervisor restart on failure. `hive bot stop` remains the manual
+drain path when you are not using systemd/launchd.
+
 ## Day-2 operations
 
 | Need                                          | Command                                               |
@@ -176,11 +234,25 @@ normally. If you customise `ProgramArguments`, keep the precheck.
 | Enable a project mid-flight                   | `hive daemon enable PROJECT` → `hive daemon reload`*  |
 | Drain + stop                                  | `hive daemon stop` (graceful TERM, ≤ `shutdown_grace_sec`) |
 | Force-stop after a hang                       | `hive daemon stop` then check PID; the stop CLI escalates to KILL |
+| Bot status / uptime                           | `hive bot status` (`--json` for envelope)          |
+| Follow bot log                                | `hive bot tail`                                    |
+| Reload bot allowlist / polling config         | edit `~/Dev/hive/config.yml` → `hive bot reload`   |
+| Drain + stop bot                              | `hive bot stop`                                    |
 
 \* `hive daemon reload` clears the per-tick enable cache, but the
 cache is also cleared at the start of every tick (PR-40 follow-up
 #2), so within one `poll_interval_sec` the toggle takes effect on
 its own. Reload is just for instant pickup.
+
+**Bot shutdown latency**: `hive bot stop` sends `SIGTERM` and waits up to
+`shutdown_grace_sec` (default 60) for in-flight children before
+escalating to `SIGKILL`. The supervisor's signal-reaction wakeup is
+clamped to half-second slices; expect up to ~0.5s of slop between
+`SIGTERM` arriving and the worker threads observing `@shutdown`. This
+is an intentional latency/safety trade — the half-second granularity
+keeps the polling threads from busy-spinning while still letting
+`hive bot stop` return inside its grace window for any well-behaved
+child.
 
 ## Tuning concurrency
 
@@ -259,5 +331,6 @@ safest path.
 ## Backlinks
 
 - [[commands/daemon]] · [[modules/daemon]]
-- [[decisions]] (ADR-024) · [[active-areas]]
+- [[commands/bot]] · [[modules/bot]]
+- [[decisions]] (ADR-024, ADR-026) · [[active-areas]]
 - [[architecture]] · [[cli]]

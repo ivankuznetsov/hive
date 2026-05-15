@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-stop.v1.json",
+  "title": "hive bot stop output (v1)",
+  "description": "Stable contract emitted by `hive bot stop --json`. Idempotent: a stop against a non-running bot returns ok=true with running=false.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "running",
+        "was_running",
+        "pid_file"
+      ],
+      "properties": {
+        "schema": { "const": "hive-bot-stop" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "running": {
+          "type": "boolean",
+          "description": "True only if the bot is still running after the stop attempt."
+        },
+        "was_running": {
+          "type": "boolean",
+          "description": "True if a live bot was signalled by this call."
+        },
+        "pid_file": {
+          "type": "string",
+          "description": "Absolute path of the bot PID file."
+        }
+      }
+    }
+  }
+}

@@ -41,10 +41,10 @@
           "type": "string"
         },
         "diagnostic": {
-          "description": "The same Diagnostic shape emitted under hive-status.v2 `tasks[].diagnostic`. Null for non-red tasks invoked with --diagnose.",
+          "description": "Mirrors the Diagnostic shape under hive-status.v2 `tasks[].diagnostic`. Inlined here so the schema validates standalone (JSONSchemer + most validators reject external URN refs without a registry).",
           "oneOf": [
             {
-              "$ref": "urn:hive:schema:status:v2#/$defs/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             {
               "type": "null"
@@ -130,6 +130,97 @@
         },
         "path": {
           "type": "string"
+        }
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "detail",
+        "source",
+        "source_path",
+        "artifact_paths",
+        "generated_by",
+        "marker_signature",
+        "suggested_next_action",
+        "updated_at"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "marker",
+            "artifact"
+          ]
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "generated_by": {
+          "type": "string",
+          "enum": [
+            "local",
+            "claude",
+            "codex",
+            "pi"
+          ]
+        },
+        "marker_signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "suggested_next_action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "retry",
+                    "clear_marker",
+                    "manual_fix"
+                  ]
+                },
+                "command": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     }

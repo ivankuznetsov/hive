@@ -46,14 +46,24 @@ module Hive
     def initialize(task:, local_diagnostic: nil, spawn: nil)
       @task = task
       @local_diagnostic = local_diagnostic
+      # An injected spawn callable owns the agent lifecycle (used by
+      # unit tests and any future in-process consumers). When injected,
+      # we deliberately skip profile.check_version! / profile.preflight!
+      # — those validate the OS-level agent binary (claude / codex / pi)
+      # which is irrelevant to the test double AND is missing on stock
+      # CI runners. Production callers always go through the default
+      # method(:spawn_profile) path and still hit both checks.
+      @injected_spawn = !spawn.nil?
       @spawn = spawn || method(:spawn_profile)
     end
 
     def run!
       cfg = Hive::Config.load(@task.project_root)
       profile = Hive::Stages::Base.stage_profile(cfg, "execute")
-      profile.check_version!
-      profile.preflight!
+      unless @injected_spawn
+        profile.check_version!
+        profile.preflight!
+      end
 
       marker = Hive::Markers.current(@task.state_file)
       signature_at_dispatch = marker_signature(marker)
@@ -271,6 +281,17 @@ module Hive
       "diagnosis agent failed: #{tail}"
     end
 
+    # IMPORTANT: do NOT append `profile.output_format_flags` here. Those
+    # are tuned for the workflow-stage spawn path that consumes a
+    # structured event stream (claude → `--output-format stream-json`,
+    # codex → `--json`). We want the agent's plain markdown verdict to
+    # land verbatim in `diagnostics/red-status.md`; piping JSON event
+    # frames into a markdown artifact gave operators a wall of JSON
+    # instead of the diagnosis. Plain-text print mode is the default
+    # when `--output-format` is omitted, so dropping the flag is enough.
+    # Also intentionally drop `extra_flags` — Hive::Stages-level extras
+    # (e.g. `--mcp-config`, `--strict-mcp-config`) configure the
+    # structured-stream context the diagnose flow doesn't need.
     def build_cmd(profile, prompt, add_dirs, max_budget_usd)
       cmd = [ profile.bin ]
       cmd << profile.headless_flag if profile.headless_flag
@@ -279,8 +300,6 @@ module Hive
         add_dirs.each { |dir| cmd << profile.add_dir_flag << dir }
       end
       cmd << profile.budget_flag << max_budget_usd.to_s if profile.budget_flag && max_budget_usd
-      cmd.concat(profile.output_format_flags)
-      cmd.concat(profile.extra_flags)
       cmd << (profile.name == :codex ? "-" : prompt)
       cmd
     end

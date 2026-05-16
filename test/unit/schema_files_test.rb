@@ -207,6 +207,94 @@ class SchemaFilesTest < Minitest::Test
            "schema must reject error_kind values outside StatusErrorKind::ALL"
   end
 
+  # ── hive-status-diagnose ───────────────────────────────────────────────
+
+  def test_hive_status_diagnose_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-status-diagnose")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-status-diagnose",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_diagnose_schema_is_self_contained_for_jsonschemer
+    # The schema must validate without an external ref registry —
+    # JSONSchemer raises UnknownRef on `urn:` refs unless callers pre-
+    # register the referenced schema, which agent consumers and CI
+    # validators don't. Pinning this guards against a future edit
+    # reintroducing the cross-schema $ref that broke validation in
+    # PR #84's first push.
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    # Minimal-but-real success payload with a Diagnostic block; if any
+    # ref doesn't resolve inside the file, schemer.validate raises.
+    payload = {
+      "schema" => "hive-status-diagnose",
+      "schema_version" => 1,
+      "ok" => true,
+      "slug" => "probe",
+      "task_folder" => "/tmp/probe",
+      "path" => nil,
+      "diagnostic" => {
+        "summary" => "REVIEW_ERROR phase=fix pass=1",
+        "detail" => "fix failed",
+        "source" => "marker",
+        "source_path" => nil,
+        "artifact_paths" => [],
+        "generated_by" => "local",
+        "marker_signature" => Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix"),
+        "suggested_next_action" => {
+          "kind" => "retry",
+          "command" => "hive markers clear /tmp/probe --name REVIEW_ERROR --match-attr pass=1 && hive run /tmp/probe"
+        },
+        "updated_at" => "2026-05-16T00:00:00Z"
+      }
+    }
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "hive-status-diagnose success payload must validate without external refs"
+  end
+
+  def test_hive_status_diagnose_accepts_null_diagnostic_for_non_red_rows
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    payload = {
+      "schema" => "hive-status-diagnose",
+      "schema_version" => 1,
+      "ok" => true,
+      "slug" => "probe",
+      "task_folder" => "/tmp/probe",
+      "diagnostic" => nil,
+      "path" => nil
+    }
+    assert schemer.valid?(payload),
+           "non-red --diagnose target must validate with diagnostic: null " \
+           "(errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+  end
+
+  def test_hive_status_diagnose_error_envelope_validates
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    error = Hive::AmbiguousSlug.new(
+      "ambig", slug: "probe",
+      candidates: [ { project: "alpha", stage: "6-review", folder: "/tmp/alpha/probe" } ]
+    )
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-status-diagnose",
+      error: error,
+      error_kind: Hive::Schemas::StatusErrorKind::ERROR
+    )
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "diagnose error envelope must validate (errors: #{errors.inspect})"
+  end
+
   # ── hive-run ───────────────────────────────────────────────────────────
 
   def test_hive_run_schema_file_exists_and_is_valid_json

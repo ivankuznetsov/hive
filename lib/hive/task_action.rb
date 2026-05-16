@@ -299,15 +299,18 @@ module Hive
 
     private
 
-    # recover_execute rows are deliberately excluded: TUI red_detail_row?
-    # has no rendering branch for them (no "what next?" answer text, no
-    # autofix wiring), so emitting a diagnostic for every execute_stale
-    # row on every poll would pay the file-I/O cost with no consumer.
-    # Re-add to this list when (and only when) the TUI gating predicates
-    # in lib/hive/tui/key_map.rb#red_detail_row? + Update#red_status_row?
-    # gain matching branches.
+    # The diagnostic shape exists for ALL three recovery action keys per
+    # ADR-027 and wiki/commands/status.md — recover_review, error, AND
+    # recover_execute (EXECUTE_STALE). The TUI's red_status_detail view
+    # doesn't yet render recover_execute rows (no autofix branch in
+    # key_map.rb#red_detail_row?), but bot, daemon, and external agent
+    # consumers reading `hive status --json` rely on the field to
+    # explain why an execute_stale task is stuck. Emitting `nil` here
+    # would make EXECUTE_STALE invisible to those consumers — defeating
+    # the diagnose-then-act feature for one of the three red states it
+    # was meant to cover.
     def diagnostic_action?
-      %w[recover_review error].include?(key.to_s)
+      %w[recover_execute recover_review error].include?(key.to_s)
     end
 
     def diagnostic_artifacts
@@ -318,6 +321,8 @@ module Hive
         fresh_diagnosis_artifact + review_ci_artifacts
       when :review_stale
         fresh_diagnosis_artifact + review_stale_artifacts
+      when :execute_stale
+        fresh_diagnosis_artifact + execute_stale_artifacts
       when :error
         fresh_diagnosis_artifact + generic_error_artifacts
       else
@@ -365,6 +370,16 @@ module Hive
       paths.concat(glob_task_artifacts("reviews", "*-#{pass}.md")) if pass
       paths.concat(latest_log_artifacts)
       paths
+    end
+
+    # EXECUTE_STALE artifacts: the previous-pass review files (the user
+    # needs to inspect findings the agent could not satisfy) plus the
+    # last few agent logs. Cap the review-md glob at the most recent
+    # entries by filename so a long-lived task with dozens of review
+    # files doesn't blow past the schema's artifact_paths maxItems.
+    def execute_stale_artifacts
+      review_md = glob_task_artifacts("reviews", "*.md").sort.last(3)
+      [ *review_md, *latest_log_artifacts ]
     end
 
     def generic_error_artifacts

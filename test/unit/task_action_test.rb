@@ -274,6 +274,29 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_execute_stale_recovery_emits_diagnostic_for_external_consumers
+    # ADR-027 and wiki/commands/status.md commit to emitting bounded
+    # diagnostics for ALL three red action_keys (recover_review, error,
+    # recover_execute). Bot / daemon / external-agent consumers reading
+    # `hive status --json` need the diagnostic to explain why an
+    # EXECUTE_STALE task is stuck — even though the TUI red_status_detail
+    # view doesn't yet render this case. Without the diagnostic, the
+    # whole class of execute-stalled tasks becomes invisible to those
+    # consumers.
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "ce-review-02.md"), "P1 finding remains unresolved\n")
+
+      diagnostic = Hive::TaskAction.for(task, marker(:execute_stale, "pass" => "2")).diagnostic
+
+      refute_nil diagnostic, "EXECUTE_STALE must emit a diagnostic for non-TUI consumers"
+      assert_includes diagnostic["summary"], "EXECUTE_STALE"
+      assert_includes diagnostic["detail"], "P1 finding remains unresolved"
+    end
+  end
+
   def test_recovery_diagnostic_falls_back_to_marker_when_artifacts_are_missing
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

@@ -294,6 +294,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal T0 - 600,
                  ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
     refute logger.events.any? { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
+    # The :dispatched audit event must fire — every other dispatch
+    # test asserts this; a regression dropping the log line would
+    # otherwise pass silently.
+    assert events_include?(logger, :dispatched)
+    # The trigger field distinguishes plan-approval auto-advance from
+    # regular advance-action dispatch so daemon.log readers do not
+    # have to re-implement Policy.decide to audit the source.
+    dispatched_event = logger.events.find { |(n, _a)| n == :dispatched }
+    assert_equal "plan_approval", dispatched_event[1][:trigger]
   end
 
   def test_edit_action_after_baseline_user_edit_dispatches

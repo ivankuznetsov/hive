@@ -1458,28 +1458,6 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 **Refreshed pages:**
 - `wiki/commands/tui.md` — updated the "max_passes hit with completed passes" paragraph to document the Enter-vs-`r` gesture split and the `force:` flag's role in `BubbleModel#recover_review`.
 
-## [2026-05-15T15:55:00Z] daemon — plan WAITING rows auto-advance for daemon-enabled projects
-
-**Action:** Fixed the daemon scheduler treating every `needs_input` row
-as a user-edit wait. The symptom was a generated plan sitting in
-`3-plan` with `<!-- WAITING -->` and "Needs your input" while the daemon
-logged `skipped` every tick with `in_flight=0`; manually running
-`hive run --json` flipped the marker to `complete`, after which the
-daemon immediately dispatched `hive develop ... --from 3-plan`.
-Root cause: `Hive::Daemon::Policy` only saw `action=needs_input`, so it
-applied the mtime-baseline/debounce path meant for brainstorm answers,
-execute questions, and review decisions. `Policy.decide` now accepts
-the status row's `stage`; `3-plan` + `needs_input` dispatches
-immediately because a plan WAITING marker is an approval pause, not a
-Q&A file. Other `needs_input` stages keep the existing edit debounce.
-Tests: added policy and dispatcher pins for first-sight plan WAITING
-dispatch while preserving first-sight brainstorm baseline behavior.
-
-**Refreshed pages:**
-- `wiki/modules/daemon.md` — documents the stage-aware policy exception.
-- `wiki/decisions.md` — ADR-024 now calls out `3-plan`/`:waiting` as
-  daemon-auto-approved by `daemon.enabled: true`.
-
 ## [2026-05-14T14:00:00Z] review — operator-edit detection retries pass N's fix when escalations-NN.md is edited after fix-success-NN.md
 
 **Action:** Closed the recovery hole that made `r`-press on a max_passes-hit REVIEW_STALE row visually re-run hive but immediately re-write `REVIEW_STALE pass=N` without anything happening. Root cause: `Stages::Review#pass_completion_status` returned `:complete` whenever `fix-success-NN.md` existed, regardless of whether the operator had edited `escalations-NN.md` afterwards. `next_pass_for` then advanced to N+1, the loop body saw `pass > max_passes` and set REVIEW_STALE pass=N — same state, no progress. Fix: `pass_completion_status` now returns `:fix_incomplete` instead of `:complete` when `mtime(escalations-NN.md) > mtime(fix-success-NN.md)`, which keeps `next_pass_for` on pass N and routes the loop through the existing Phase-4-retry-only path (skips reviewers + triage, re-runs fix against the operator's current `[x]` marks). New helper `operator_edited_escalations_after_fix?` swallows `SystemCallError` / `IOError` so a transient stat failure fails-closed (no surprise retries). The comparison is strict `>` not `>=` so back-to-back same-second writes don't spuriously trigger retries. The TUI's `r` gesture from PR #72 is now actually useful for the max_passes-exhausted shape: Enter to open `escalations-NN.md`, edit, save, `r` to retry — Phase 4 re-runs with the edits as authoritative input, no max_passes bump required. Tests: +4 in `run_reviewers_test.rb` (post-fix newer-fix-success still :complete, operator edit flips to :fix_incomplete, equal mtimes stay :complete, stat failure fails closed) plus an end-to-end pin via `next_pass_for` returning N (not N+1) when escalations is newer.
@@ -1520,3 +1498,25 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 
 **Refreshed pages:**
 - `wiki/stages/index.md`, `wiki/stages/open-pr.md`, `wiki/stages/review.md`, `wiki/stages/finalize.md`, `wiki/state-model.md`, `wiki/architecture.md`, `wiki/commands/stage_action.md`, `wiki/commands/run.md`, `wiki/decisions.md`.
+
+## [2026-05-15T15:55:00Z] daemon — plan WAITING rows auto-advance for daemon-enabled projects
+
+**Action:** Fixed the daemon scheduler treating every `needs_input` row
+as a user-edit wait. The symptom was a generated plan sitting in
+`3-plan` with `<!-- WAITING -->` and "Needs your input" while the daemon
+logged `skipped` every tick with `in_flight=0`; manually running
+`hive run --json` flipped the marker to `complete`, after which the
+daemon immediately dispatched `hive develop ... --from 3-plan`.
+Root cause: `Hive::Daemon::Policy` only saw `action=needs_input`, so it
+applied the mtime-baseline/debounce path meant for brainstorm answers,
+execute questions, and review decisions. `Policy.decide` now accepts
+the status row's `stage`; `3-plan` + `needs_input` dispatches
+immediately because a plan WAITING marker is an approval pause, not a
+Q&A file. Other `needs_input` stages keep the existing edit debounce.
+Tests: added policy and dispatcher pins for first-sight plan WAITING
+dispatch while preserving first-sight brainstorm baseline behavior.
+
+**Refreshed pages:**
+- `wiki/modules/daemon.md` — documents the stage-aware policy exception.
+- `wiki/decisions.md` — ADR-024 now calls out `3-plan`/`:waiting` as
+  daemon-auto-approved by `daemon.enabled: true`.

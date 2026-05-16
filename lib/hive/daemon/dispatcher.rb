@@ -254,7 +254,13 @@ module Hive
 
         case decision
         when :dispatch
-          dispatch_or_block(row, now: now)
+          # Pass through the reason the dispatch fired so the
+          # `:dispatched` logger event can distinguish plan-approval
+          # auto-advance from regular advance-action dispatches. An
+          # agent or operator reading daemon.log can then audit WHICH
+          # policy branch fired without re-implementing Policy.decide.
+          trigger = Policy.plan_approval?(row.action, row.stage) ? "plan_approval" : "advance"
+          dispatch_or_block(row, now: now, trigger: trigger)
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,
                                      stage: row.stage, mtime: row.state_file_mtime&.utc&.iso8601)
@@ -278,7 +284,7 @@ module Hive
         end
       end
 
-      def dispatch_or_block(row, now:)
+      def dispatch_or_block(row, now:, trigger: "advance")
         gate = @controller.can_dispatch?(
           project: row.project, slug: row.slug, now: now,
           external_global_count: @external_active_agent_total,
@@ -291,7 +297,8 @@ module Hive
             state_file_mtime: row.state_file_mtime,
             state_file_path: row.state_file,
             hive_state_path: nil, # supervisor falls back to tmpdir
-            now: now
+            now: now,
+            trigger: trigger
           )
         else
           @logger.event(:blocked, project: row.project, slug: row.slug,
@@ -367,7 +374,7 @@ module Hive
       end
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
-                           state_file_path:, hive_state_path:, now:)
+                           state_file_path:, hive_state_path:, now:, trigger: "advance")
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
@@ -384,7 +391,8 @@ module Hive
           command: command, started_at: now, state_file_mtime: state_file_mtime
         )
         @logger.event(:dispatched, pid: pid, project: project, slug: slug,
-                                   stage: stage, command: command, dry_run: @dry_run)
+                                   stage: stage, command: command, trigger: trigger,
+                                   dry_run: @dry_run)
         @dispatched_today += 1
       end
 

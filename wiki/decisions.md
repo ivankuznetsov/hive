@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-15
 tags: [decisions, adr]
 ---
 

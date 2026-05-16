@@ -81,6 +81,7 @@ module Hive
         when :grid then grid_message(key: key, row: row, pane_focus: pane_focus)
         when :triage then triage_message(key: key, row: row)
         when :log_tail then log_tail_message(key: key, row: row)
+        when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
         when :new_idea then new_idea_message(key: key, row: row)
@@ -175,6 +176,7 @@ module Hive
 
       def enter_message(row)
         return Messages::OpenSummary.new(row: row) if finalize_complete_row?(row)
+        return Messages::OpenRedStatusDetail.new(row: row) if red_detail_row?(row)
 
         case row.action_key
         when "review_findings" then Messages::OpenFindings.new(row: row)
@@ -205,6 +207,40 @@ module Hive
         return Messages::OpenLogTail.new(row: row) if KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
 
         Messages::RecoverError.new(row: row)
+      end
+
+      def red_detail_row?(row)
+        return false if row.nil?
+
+        case row.action_key.to_s
+        when "recover_review"
+          recover_review_detail_row?(row)
+        when "error"
+          attrs = row.attrs || {}
+          !KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+        else
+          false
+        end
+      end
+
+      def recover_review_detail_row?(row)
+        return false if row.marker.to_s == "review_stale" && wall_clock_stale?(row)
+        return false if max_passes_stale_with_escalations?(row)
+
+        true
+      end
+
+      def wall_clock_stale?(row)
+        (row.attrs || {})["reason"].to_s == "wall_clock"
+      end
+
+      def max_passes_stale_with_escalations?(row)
+        return false unless row.marker.to_s == "review_stale"
+
+        pass = (row.attrs || {})["pass"].to_s
+        return false unless pass.match?(/\A[1-9]\d*\z/)
+
+        File.exist?(File.join(row.folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
       end
 
       # Enter on a `needs_input` row opens the row's input file in the
@@ -271,6 +307,15 @@ module Hive
 
       def log_tail_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
+
+        Messages::NOOP
+      end
+
+      def red_status_detail_message(key:, row:)
+        return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
+        return Messages::RedStatusAutofix.new(row: row) if ENTER_KEYS.include?(key) && row
+        return Messages::OpenManualFix.new(row: row) if key == "f" && row
+        return Messages::RefreshRedStatusDiagnosis.new(row: row) if key == "R" && row
 
         Messages::NOOP
       end

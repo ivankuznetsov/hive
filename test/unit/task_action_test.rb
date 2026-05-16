@@ -1,4 +1,5 @@
 require "test_helper"
+require "fileutils"
 require "hive/task_action"
 require "hive/markers"
 
@@ -218,6 +219,77 @@ class TaskActionTest < Minitest::Test
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
     assert_equal %w[command key label next_action].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
+  end
+
+  def test_non_recovery_rows_do_not_emit_diagnostic
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:complete))
+
+    assert_nil action.diagnostic
+  end
+
+  def test_review_error_diagnostic_points_at_relevant_artifact_and_redacts_secrets
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      artifact = File.join(reviews, "fix-guardrail-04.md")
+      token = "ghp_#{'a' * 40}"
+      File.write(artifact, "Fix guardrail failed with #{token}\n")
+
+      action = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "reason" => "fix_guardrail", "pass" => "4")
+      )
+      diagnostic = action.diagnostic
+
+      assert_equal "artifact", diagnostic["source"]
+      assert_equal artifact, diagnostic["source_path"]
+      assert_includes diagnostic["artifact_paths"], artifact
+      assert_includes diagnostic["summary"], "REVIEW_ERROR"
+      assert_includes diagnostic["summary"], "reason=fix_guardrail"
+      assert_includes diagnostic["detail"], "[REDACTED:github_token]"
+      refute_includes diagnostic["detail"], token
+      assert_equal "local", diagnostic["generated_by"]
+    end
+  end
+
+  def test_review_ci_stale_diagnostic_points_at_ci_blocked_artifact
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      ci_blocked = File.join(reviews, "ci-blocked.md")
+      File.write(ci_blocked, "CI failed on bundle exec rake test\n")
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_ci_stale, "attempts" => "3")
+      ).diagnostic
+
+      assert_equal "artifact", diagnostic["source"]
+      assert_equal ci_blocked, diagnostic["source_path"]
+      assert_includes diagnostic["summary"], "REVIEW_CI_STALE"
+      assert_includes diagnostic["detail"], "bundle exec rake test"
+    end
+  end
+
+  def test_recovery_diagnostic_falls_back_to_marker_when_artifacts_are_missing
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=triage pass=7 -->\n")
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "triage", "pass" => "7")
+      ).diagnostic
+
+      assert_equal "marker", diagnostic["source"]
+      assert_nil diagnostic["source_path"]
+      assert_empty diagnostic["artifact_paths"]
+      assert_includes diagnostic["detail"], "No diagnostic artifact"
+    end
   end
 
   # ── closed enum membership ─────────────────────────────────────────────

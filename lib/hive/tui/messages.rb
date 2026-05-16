@@ -151,6 +151,22 @@ module Hive
       # uniform "Enter to retry" gesture across recoverable failures.
       RecoverError = Data.define(:row)
 
+      # Enter on a gated red row — open the diagnosis/action view
+      # without clearing markers or dispatching recovery.
+      OpenRedStatusDetail = Data.define(:row)
+
+      # Enter inside the red-status detail view — run the same
+      # recovery handler the grid row used to run directly.
+      RedStatusAutofix = Data.define(:row)
+
+      # `f` inside the red-status detail view — open the task worktree
+      # in $EDITOR for manual edits. This never clears markers.
+      OpenManualFix = Data.define(:row)
+
+      # `R` inside the red-status detail view — ask Hive to refresh the
+      # durable headless diagnosis artifact for this row.
+      RefreshRedStatusDiagnosis = Data.define(:row)
+
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or
       # revise inline questions before re-running the stage.

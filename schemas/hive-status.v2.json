@@ -168,7 +168,8 @@
         "action",
         "action_label",
         "suggested_command",
-        "next_action"
+        "next_action",
+        "diagnostic"
       ],
       "properties": {
         "stage": {
@@ -285,6 +286,64 @@
               ]
             }
           }
+        },
+        "diagnostic": {
+          "description": "Red-row diagnostic payload for recovery/error states; null for ordinary actionable rows.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "detail",
+        "source",
+        "source_path",
+        "artifact_paths",
+        "generated_by",
+        "updated_at"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "marker",
+            "artifact"
+          ]
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "generated_by": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     }

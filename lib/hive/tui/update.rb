@@ -75,6 +75,8 @@ module Hive
           [ apply_show_help(model), nil ]
         when Messages::OpenFilterPrompt
           [ apply_open_filter_prompt(model), nil ]
+        when Messages::OpenRedStatusDetail
+          [ apply_open_red_status_detail(model, message), nil ]
         when Messages::Back
           [ apply_back(model), nil ]
         when Messages::ProjectScope
@@ -151,10 +153,47 @@ module Hive
       # user's selection on every benign poll).
       def apply_snapshot_arrived(model, msg)
         new_model = model.with(snapshot: msg.snapshot, last_error: nil)
+        if model.mode == :red_status_detail && model.red_status_detail_state
+          return apply_red_status_detail_snapshot(new_model, model.red_status_detail_state)
+        end
+
         visible = visible_snapshot(new_model)
         return new_model if visible.nil?
 
         new_model.with(cursor: reclamp_cursor(visible, new_model.cursor))
+      end
+
+      def apply_red_status_detail_snapshot(model, state)
+        row = find_row_for_detail(model.snapshot, state.row)
+        unless row
+          return model.with(
+            mode: :grid,
+            red_status_detail_state: nil,
+            flash: "#{state.row.slug} no longer in this project",
+            flash_set_at: Time.now
+          )
+        end
+
+        unless red_status_row?(row)
+          return model.with(
+            mode: :grid,
+            red_status_detail_state: nil,
+            flash: "#{row.slug} recovered — status updated",
+            flash_set_at: Time.now
+          )
+        end
+
+        signature = red_status_marker_signature(row)
+        next_state = state.with(row: row, marker_signature: signature, refreshing: false)
+        if signature != state.marker_signature
+          return model.with(
+            red_status_detail_state: next_state,
+            flash: "marker changed since you opened this view — refresh (R)",
+            flash_set_at: Time.now
+          )
+        end
+
+        model.with(red_status_detail_state: next_state)
       end
 
       # Keep the cursor coords if they still point at an existing row
@@ -618,6 +657,16 @@ module Hive
         model.with(mode: :filter, filter_buffer: model.filter.to_s)
       end
 
+      def apply_open_red_status_detail(model, msg)
+        model.with(
+          mode: :red_status_detail,
+          red_status_detail_state: Model::RedStatusDetailState.new(
+            row: msg.row,
+            marker_signature: red_status_marker_signature(msg.row)
+          )
+        )
+      end
+
       # Esc / `q` from a sub-mode returns to grid. Clears triage_state
       # and tail_state on exit so the next entry starts clean. Help
       # overlay dismisses to grid; filter mode goes through
@@ -627,6 +676,7 @@ module Hive
         case model.mode
         when :triage then model.with(mode: :grid, triage_state: nil)
         when :log_tail then model.with(mode: :grid, tail_state: nil)
+        when :red_status_detail then model.with(mode: :grid, red_status_detail_state: nil)
         when :help, :filter then model.with(mode: :grid)
         else model
         end
@@ -650,6 +700,22 @@ module Hive
         return nil if snap.nil?
 
         snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
+      end
+
+      def find_row_for_detail(snapshot, original_row)
+        return nil if snapshot.nil? || original_row.nil?
+
+        snapshot.rows.find { |row| row.folder == original_row.folder } ||
+          snapshot.rows.find { |row| row.project_name == original_row.project_name && row.slug == original_row.slug && row.stage == original_row.stage }
+      end
+
+      def red_status_row?(row)
+        %w[recover_review error].include?(row.action_key.to_s)
+      end
+
+      def red_status_marker_signature(row)
+        attrs = (row.attrs || {}).sort_by { |key, _value| key.to_s }.map { |key, value| "#{key}=#{value}" }
+        ([ row.marker.to_s ] + attrs).join("\0")
       end
 
       def next_non_empty_project_idx(visible, start_idx)

@@ -32,7 +32,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: action_label,
-      suggested_command: suggested_command, next_action: next_action
+      suggested_command: suggested_command, next_action: next_action,
+      diagnostic: nil
     )
   end
 
@@ -538,6 +539,64 @@ class HiveTuiBubbleModelTest < Minitest::Test
     yield
   ensure
     Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
+  end
+
+  def test_refresh_red_status_diagnosis_dispatches_status_diagnose_and_dedups
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      marker: "error",
+      attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "error")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+      dispatch: @dispatch
+    )
+
+    calls = []
+    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+    end
+
+    assert_equal [ [ "hive", "status", "--diagnose", row.slug, "--project", row.project_name, "--write" ] ], calls
+    assert @model.hive_model.red_status_detail_state.refreshing
+    assert_match(/already in progress/, @model.hive_model.flash)
+  end
+
+  def test_open_manual_fix_opens_task_worktree_without_changing_marker
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "manual-fix-260516-aaaa"
+      folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      worktree = File.join(project_root, "worktrees", slug)
+      FileUtils.mkdir_p(folder)
+      FileUtils.mkdir_p(worktree)
+      marker_path = File.join(folder, "task.md")
+      marker_body = "<!-- REVIEW_ERROR phase=fix pass=1 -->\n"
+      File.write(marker_path, marker_body)
+      File.write(File.join(folder, "worktree.yml"), { "path" => worktree }.to_yaml)
+      row = make_task_row(
+        action_key: "error",
+        action_label: "Error",
+        stage: "6-review",
+        slug: slug,
+        folder: folder,
+        state_file: marker_path,
+        marker: "error",
+        attrs: { "reason" => "exit_code", "exit_code" => "1" },
+        suggested_command: nil
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+
+      _model, cmd = @model.update(Hive::Tui::Messages::OpenManualFix.new(row: row))
+
+      refute_nil cmd
+      assert_match(/opening worktree/, @model.hive_model.flash)
+      assert_equal marker_body, File.read(marker_path)
+    end
   end
 
   def with_clipboard_probe_stub(stub_proc)
@@ -3965,7 +4024,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       project_name: "demo", stage: "6-review", slug: slug, folder: folder,
       state_file: nil, marker: "error", attrs: { "reason" => reason, "exit_code" => exit_code.to_s },
       mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
+      action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil,
+      diagnostic: nil
     )
   end
 
@@ -4251,7 +4311,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
+        action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil,
+        diagnostic: nil
       )
 
       # Must not raise — must convert NoLogFiles into a flashed model
@@ -4281,7 +4342,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "agent_running", action_label: "Agent running", suggested_command: nil, next_action: nil
+        action_key: "agent_running", action_label: "Agent running", suggested_command: nil, next_action: nil,
+        diagnostic: nil
       )
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))
@@ -4304,7 +4366,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: "review_stale", attrs: { "pass" => "4" },
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil, next_action: nil
+        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil, next_action: nil,
+        diagnostic: nil
       )
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))

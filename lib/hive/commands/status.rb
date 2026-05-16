@@ -6,6 +6,7 @@ require "hive/markers"
 require "hive/lock"
 require "hive/stages"
 require "hive/task_action"
+require "hive/task_resolver"
 
 module Hive
   module Commands
@@ -27,12 +28,18 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false)
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false)
         @json = json
+        @diagnose = diagnose
+        @project = project
+        @stage = stage
+        @write = write
       end
 
       def call
         @stdout_written = false
+        return diagnose_call if @diagnose
+
         do_call
       rescue Hive::Error => e
         emit_error_envelope(e) if @json && !@stdout_written
@@ -108,8 +115,58 @@ module Hive
           "action" => row[:action_key],
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
-          "next_action" => row[:next_action]
+          "next_action" => row[:next_action],
+          "diagnostic" => row[:diagnostic]
         }
+      end
+
+      def diagnose_call
+        task = Hive::TaskResolver.new(
+          @diagnose,
+          project_filter: @project,
+          stage_filter: @stage
+        ).resolve
+        marker = Hive::Markers.current(task.state_file)
+        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task))
+        diagnostic = action.diagnostic
+
+        if @write
+          require "hive/diagnosis_agent"
+          result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
+          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task)).diagnostic
+          emit_diagnose_result(task, diagnostic, result["path"] || result[:path])
+        else
+          emit_diagnose_result(task, diagnostic, nil)
+        end
+      end
+
+      def emit_diagnose_result(task, diagnostic, path)
+        if @json
+          puts JSON.generate(
+            "schema" => "hive-status-diagnose",
+            "schema_version" => 1,
+            "ok" => true,
+            "slug" => task.slug,
+            "task_folder" => task.folder,
+            "diagnostic" => diagnostic,
+            "path" => path
+          )
+          @stdout_written = true
+        else
+          if path
+            puts "wrote #{path}"
+          elsif diagnostic
+            puts diagnostic["summary"]
+            puts diagnostic["detail"]
+          else
+            puts "no red-status diagnostic for #{task.slug}"
+          end
+        end
+      end
+
+      def project_name_for(task)
+        project = Hive::Config.registered_projects.find { |entry| entry["path"] == task.project_root }
+        project ? project["name"] : File.basename(task.project_root)
       end
 
       def render_project(project, project_count:)
@@ -226,7 +283,8 @@ module Hive
             action_key: action.key,
             action_label: action.label,
             suggested_command: action.command,
-            next_action: action.next_action
+            next_action: action.next_action,
+            diagnostic: action.diagnostic
           )
         end
       end

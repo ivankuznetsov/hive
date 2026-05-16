@@ -3,8 +3,8 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-05-13T23:00:00Z
-tags: [command, tui, observability, interactive]
+updated: 2026-05-16T00:00:00Z
+tags: [command, tui, observability, interactive, diagnostics]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing the scoped tasks as a 5-column compact table — icon · slug · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
@@ -40,6 +40,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 |------|-----------|-----------|
 | Two-pane dashboard (default) | boot | `q` |
 | Findings triage | `Enter` on a `review_findings` row | `Esc` |
+| Red-status detail | `Enter` on selected red recovery/error rows | `q` / `Esc` |
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
 | Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue; plan rows auto-advance to `develop` (or auto-revise if user added feedback) |
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
@@ -62,7 +63,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `P` | run `hive open-pr` (capital so it doesn't collide with `plan`) |
 | `F` | run `hive finalize` |
 | `a` | run `hive archive` |
-| `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), recover + rerun on review-recovery and non-kill-class `error` rows; ready rows still dispatch the suggested command |
+| `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), red-status detail on selected review-recovery and non-kill-class `error` rows, direct retry/browse for the legacy review-stale exceptions, and suggested-command dispatch for ready rows |
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `8-done` (or any stage). |
 | `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
 | `/` | open filter prompt |
@@ -73,7 +74,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `q` | quit (default mode) |
 | `Esc` | back to default mode (any sub-mode) |
 
-In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (against `hive accept-finding --all` / `hive reject-finding --all`). The help overlay groups bindings by mode for the disambiguation.
+In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (against `hive accept-finding --all` / `hive reject-finding --all`). In red-status detail mode, `Enter` runs the existing autofix/retry path, `f` opens the task worktree in `$VISUAL` / `$EDITOR` / `vi`, `R` runs `hive status --diagnose <slug> --project <project> --write` in the background, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
 
 ## New Idea Prompt Editing
 
@@ -142,7 +143,26 @@ Three stages get an auto-continue convenience after the editor exits cleanly:
 
 Partial brainstorm answers, stale rows whose marker changed while the editor was open, and any other stage's `:waiting` state stay manual; workflow verb keys (`b` / `p` / `d` / `r` / `P`) remain the explicit rerun path. Note: partial `[x]` ticks on `fix-guardrail-NN.md` and edits that truncate findings (changing the marker's `matches` count) are rejected by [[stages/review]]'s `fix_guardrail_approved?` and keep the pause — the TUI may still dispatch, but the runner re-fires the same `:review_waiting reason=fix_guardrail` marker.
 
-`recover_review` rows show the observed recovery cause in the status column (for example `triage_failed` from `<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=2 -->`, or `stale pass=N` for a `REVIEW_STALE` max_passes-hit row that carries the runner's pass attr) instead of the generic `Needs recovery` label; control bytes and ANSI CSI escapes embedded in the reason are stripped through `Hive::Tui::Text.sanitize` before render so a stdout-tail snippet captured into the marker cannot corrupt column alignment or hijack the cursor. Pressing `Enter` on `REVIEW_ERROR` / `REVIEW_CI_STALE` sequences the documented CLI recovery flow on a background worker thread (mirroring `auto_heal_kill_class_errors` so the bubbletea render loop never blocks on `run_quiet!`'s 30 s upper bound): first `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_CI_STALE`, guarded with one observed `--match-attr` when available, then `hive run <folder>` in the normal background-spawn path. `REVIEW_STALE` uses that same clear+rerun path in two retryable cases:
+## Red-status detail mode
+
+Red rows still show the concrete marker details in the grid status column, but selected rows now open a full-screen Q&A detail view before clearing anything. The view renders `row.diagnostic` from `hive status --json`:
+
+- `Q: Why is this red?` uses the bounded local/agent diagnostic summary and detail.
+- `Q: What can Hive do next?` names the available action.
+- `Artifacts` lists the exact files Hive used to explain the row.
+
+The goal is "auto-fix first, ask only when needed." `Enter` inside the detail view invokes the same recovery path that grid Enter used to call directly. `f` opens the task worktree in the configured editor without clearing markers, for the "open worktree in development agent/fix manually" path. `R` asks the configured development agent for a fresh diagnosis by dispatching `hive status --diagnose <slug> --project <project> --write`; once the next snapshot lands, the view refreshes from `diagnostics/red-status.md` if its marker signature matches the current marker.
+
+Snapshot polling keeps the view honest. If the row disappears, the detail view closes with `<slug> no longer in this project`. If the row recovers to a non-red action, it closes with `<slug> recovered - status updated`. If the marker changes under the open view, the row refreshes in place and the footer prompts the user to refresh diagnosis with `R`.
+
+The grid still preserves the established direct paths where the right answer is already known:
+
+- `REVIEW_STALE reason=wall_clock` retries directly; there may be no reviewer file to inspect yet.
+- Max-passes `REVIEW_STALE` with `reviews/escalations-NN.md` opens that file, preserving the browse/edit then `r` retry gesture.
+- Kill-class `ERROR exit_code=130|137|143` opens the log tail while background auto-heal clears the interruption marker.
+- `recover_execute` rows keep the old findings/recovery hint; there is no autofix detail action in v1.
+
+`recover_review` rows show the observed recovery cause in the status column (for example `triage_failed` from `<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=2 -->`, or `stale pass=N` for a `REVIEW_STALE` max_passes-hit row that carries the runner's pass attr) instead of the generic `Needs recovery` label; control bytes and ANSI CSI escapes embedded in the reason are stripped through `Hive::Tui::Text.sanitize` before render so a stdout-tail snippet captured into the marker cannot corrupt column alignment or hijack the cursor. The recovery implementation sequences the documented CLI recovery flow on a background worker thread (mirroring `auto_heal_kill_class_errors` so the bubbletea render loop never blocks on `run_quiet!`'s 30 s upper bound): first `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_CI_STALE`, guarded with one observed `--match-attr` when available, then `hive run <folder>` in the normal background-spawn path. Grid Enter now opens red-status detail for ambiguous `REVIEW_ERROR` / `REVIEW_CI_STALE` rows; Enter inside that detail view starts this recovery. `REVIEW_STALE` uses the same clear+rerun path in two retryable cases:
 
 - **`reason=wall_clock`**: the runner's aggregate wall-clock budget elapsed mid-phase. The operator's correct response is "give it more time and retry"; this can fire BEFORE any reviewer files exist (e.g. during Phase 1 CI-fix), and a missing-file state has no operator action to take, so retry must not require reviewer-file presence.
 - **incomplete-triage shape**: the highest pass has reviewer files but no matching `reviews/escalations-NN.md` — triage never completed and the same pass is retryable.
@@ -153,7 +173,7 @@ For other `REVIEW_STALE` rows (max_passes hit with completed passes), Enter rout
 
 Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no reviewer files exist for the recorded pass — wall-clock can fire during Phase 1 CI-fix, before any reviewer ran. The pre-fix gate told the operator to "edit/rename highest-pass review files" but in that scenario there are no files to edit. Retry the run, and if wall-clock keeps firing, the operator's lever is `review.max_wall_clock_sec` in `<project>/.hive-state/config.yml`.
 
-`error` rows behave by exit_code. Kill-class codes (`130` / `137` / `143`, hosted on `Hive::Markers::KILL_CLASS_EXIT_CODES`) are signal kills (SIGINT / SIGKILL / SIGTERM); the background auto-healer in `BubbleModel#auto_heal_kill_class_errors` clears those `<!-- ERROR -->` markers on its own, so Enter on those rows falls through to the log-tail view rather than triggering a parallel clear that would race the auto-healer for the same markers-lock. Every other exit_code (`1`, `2`, anything outside the kill-class list, or markers with no exit_code attr at all) is a real failure the agent ran into; Enter routes through `RecoverError` on a background worker, mirroring the `recover_review` sequence: `hive markers clear <folder> --name ERROR --match-attr exit_code=N` (the match-attr ties the clear to the specific marker seen at snapshot time so a concurrent fresh failure with a different code is not erased), then `hive run <folder>` in the normal background-spawn path. The status column shows `ERROR exit_code=N` (or `ERROR <reason>` when no exit code is set) so the operator can read WHY the agent failed without leaving the grid. Per-folder dedup is tracked on `@error_recovery_inflight`; same partial-failure and programmer-error contracts as `recover_review`. The synchronous flash announces `error recovery: clearing ERROR …`; the worker dispatches a follow-up `Messages::Flash` with the outcome.
+`error` rows behave by exit_code. Kill-class codes (`130` / `137` / `143`, hosted on `Hive::Markers::KILL_CLASS_EXIT_CODES`) are signal kills (SIGINT / SIGKILL / SIGTERM); the background auto-healer in `BubbleModel#auto_heal_kill_class_errors` clears those `<!-- ERROR -->` markers on its own, so Enter on those rows falls through to the log-tail view rather than triggering a parallel clear that would race the auto-healer for the same markers-lock. Every other exit_code (`1`, `2`, anything outside the kill-class list, or markers with no exit_code attr at all) is a real failure the agent ran into; grid Enter opens red-status detail first, and Enter in that view routes through `RecoverError` on a background worker, mirroring the `recover_review` sequence: `hive markers clear <folder> --name ERROR --match-attr exit_code=N` (the match-attr ties the clear to the specific marker seen at snapshot time so a concurrent fresh failure with a different code is not erased), then `hive run <folder>` in the normal background-spawn path. The status column shows `ERROR exit_code=N` (or `ERROR <reason>` when no exit code is set) so the operator can read WHY the agent failed without leaving the grid. Per-folder dedup is tracked on `@error_recovery_inflight`; same partial-failure and programmer-error contracts as `recover_review`. The synchronous flash announces `error recovery: clearing ERROR …`; the worker dispatches a follow-up `Messages::Flash` with the outcome.
 
 Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — a bounded captured-stdio child runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line; a hung helper is terminated as a process group and reported as exit 124.
 
@@ -172,7 +192,7 @@ Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead
 
 - `test/integration/tui_command_test.rb` — Thor help-text registration, `--json` rejection, non-tty boundary check.
 - `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `TriageState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
-- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `Triage`, `LogTail`, `HelpOverlay`, `FilterPrompt`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
+- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `Triage`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
 - `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0.
 

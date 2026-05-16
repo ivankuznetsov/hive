@@ -138,7 +138,8 @@ class SchemaFilesTest < Minitest::Test
       claude_pid_alive: nil,
       action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
       action_label: "Ready to brainstorm",
-      suggested_command: "hive brainstorm probe --from 1-inbox"
+      suggested_command: "hive brainstorm probe --from 1-inbox",
+      diagnostic: nil
     }
     producer_keys = Hive::Commands::Status.new.task_payload(row).keys.sort
     schema_task_required = doc.dig("$defs", "Task", "required").sort

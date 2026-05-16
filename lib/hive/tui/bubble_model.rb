@@ -25,6 +25,7 @@ require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
 require "hive/tui/views/triage"
 require "hive/tui/views/log_tail"
+require "hive/tui/views/red_status_detail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
 require "hive/tui/views/new_idea_prompt"
@@ -133,6 +134,7 @@ module Hive
         # first pass settles. Reuses @healed_folders_mutex so the four
         # background-thread bookkeeping fields share a single lock.
         @error_recovery_inflight = Set.new
+        @diagnosis_inflight = Set.new
         # Once-per-session latch (reset in #stage_image on success).
         @clipboard_tool_hint_shown = false
         # Consecutive `wl-paste`/`xclip` timeouts: a single timeout
@@ -217,6 +219,7 @@ module Hive
         when :grid then compose_two_pane_view
         when :triage then Views::Triage.render(@hive_model)
         when :log_tail then Views::LogTail.render(@hive_model)
+        when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
         when :new_idea then compose_new_idea_view
@@ -250,7 +253,7 @@ module Hive
       # on stale-pid rows and to synthesize argv from suggested_command.
       def translate_key(key_message)
         key = bubble_key_to_keymap(key_message)
-        row = current_row
+        row = @hive_model.mode == :red_status_detail ? @hive_model.red_status_detail_state&.row : current_row
         Hive::Tui::KeyMap.message_for(
           mode: @hive_model.mode,
           key: key,
@@ -363,6 +366,12 @@ module Hive
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
           recover_error(message.row)
+        when Hive::Tui::Messages::RedStatusAutofix
+          red_status_autofix(message.row)
+        when Hive::Tui::Messages::OpenManualFix
+          open_manual_fix(message.row)
+        when Hive::Tui::Messages::RefreshRedStatusDiagnosis
+          refresh_red_status_diagnosis(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
@@ -653,12 +662,31 @@ module Hive
       # `Update.apply_subprocess_exited` keeps its existing default
       # flash behavior.
       def diagnose_subprocess_exit(msg)
+        if msg.verb.to_s == "status"
+          evict_all_diagnosis_attempts
+          model = clear_detail_refreshing(@hive_model)
+          if msg.exit_code.to_i.zero?
+            return [ model.with(flash: "red-status diagnosis refreshed", flash_set_at: Time.now), nil ]
+          end
+
+          diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
+          text = diagnostic || "`status --diagnose` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess.log_path}"
+          return [ model.with(flash: text, flash_set_at: Time.now), nil ]
+        end
+
         return nil if msg.exit_code.nil? || msg.exit_code.zero?
 
         diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
         return nil if diagnostic.nil?
 
         [ @hive_model.with(flash: diagnostic, flash_set_at: Time.now), nil ]
+      end
+
+      def clear_detail_refreshing(model)
+        state = model.red_status_detail_state
+        return model if state.nil?
+
+        model.with(red_status_detail_state: state.with(refreshing: false))
       end
 
       # Scan a fresh snapshot for tasks whose `:error` marker came from
@@ -832,6 +860,83 @@ module Hive
       rescue StandardError => e
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         evict_heal_attempt(row.folder)
+      end
+
+      def red_status_autofix(row)
+        case row.action_key.to_s
+        when "recover_review"
+          recover_review(row, force: row.marker.to_s == "review_stale")
+        when "error"
+          recover_error(row)
+        else
+          [ flashed("no autofix action available for #{row.slug}"), nil ]
+        end
+      end
+
+      def register_diagnosis_attempt(folder)
+        @healed_folders_mutex.synchronize do
+          return false if @diagnosis_inflight.include?(folder)
+
+          @diagnosis_inflight.add(folder)
+          true
+        end
+      end
+
+      def evict_all_diagnosis_attempts
+        @healed_folders_mutex.synchronize { @diagnosis_inflight.clear }
+      end
+
+      def refresh_red_status_diagnosis(row)
+        return [ flashed("diagnosis unavailable: task folder missing"), nil ] if row.folder.to_s.empty?
+        return [ flashed("diagnosis already in progress for #{row.slug}"), nil ] unless register_diagnosis_attempt(row.folder)
+
+        argv = [ "hive", "status", "--diagnose", row.slug ]
+        argv += [ "--project", row.project_name ] if row.project_name.to_s != ""
+        argv << "--write"
+
+        Hive::Tui::Subprocess.dispatch_background(argv, dispatch: @dispatch)
+        state = @hive_model.red_status_detail_state
+        model = state ? @hive_model.with(red_status_detail_state: state.with(refreshing: true)) : @hive_model
+        [ model.with(flash: "refreshing diagnosis for #{row.slug}", flash_set_at: Time.now), nil ]
+      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
+        @healed_folders_mutex.synchronize { @diagnosis_inflight.delete(row.folder) }
+        [ flashed("diagnosis failed to start: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      end
+
+      def open_manual_fix(row)
+        path = manual_fix_path(row)
+        return [ flashed("worktree not found for #{row.slug}: #{manual_fix_candidate(row)}"), nil ] if path.empty?
+
+        argv = editor_argv
+        callable = lambda do
+          run_editor(argv, path)
+          clear_terminal_for_takeover
+        end
+
+        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
+        [
+          @hive_model.with(
+            flash: "opening worktree for #{row.slug} in #{File.basename(argv.first)}",
+            flash_set_at: Time.now
+          ),
+          cmd
+        ]
+      rescue ArgumentError => e
+        [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def manual_fix_path(row)
+        candidate = manual_fix_candidate(row)
+        return "" if candidate.to_s.empty?
+
+        File.directory?(candidate) ? candidate : ""
+      end
+
+      def manual_fix_candidate(row)
+        task = Hive::Task.new(row.folder.to_s)
+        task.worktree_path.to_s
+      rescue Hive::InvalidTaskPath, SystemCallError, Psych::SyntaxError, Psych::DisallowedClass
+        ""
       end
 
       # Enter-driven review recovery. Review-stage recovery markers are

@@ -278,9 +278,21 @@ module Hive
     end
 
     desc "status", "Show all active tasks across registered projects"
+    option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
+    option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope --diagnose slug lookup to one stage"
+    option :write, type: :boolean, default: false,
+                   desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
     def status
       require "hive/commands/status"
-      Hive::Commands::Status.new(json: options[:json]).call
+      Hive::Commands::Status.new(
+        json: options[:json],
+        diagnose: options[:diagnose],
+        project: options[:project],
+        stage: options[:stage],
+        write: options[:write]
+      ).call
     end
 
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"

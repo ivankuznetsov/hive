@@ -1,5 +1,10 @@
 require "shellwords"
+require "digest"
+require "time"
+require "yaml"
 require "hive/execute_waiting_action"
+require "hive/agent_profiles"
+require "hive/secret_patterns"
 require "hive/stages"
 require "hive/workflows"
 
@@ -13,6 +18,10 @@ module Hive
   # `hive run` / `hive approve` / `hive accept-finding` JSON
   # `next_action` emission.
   class TaskAction
+    DIAGNOSTIC_SUMMARY_MAX = 120
+    DIAGNOSTIC_DETAIL_MAX = 4_000
+    DIAGNOSTIC_TAIL_BYTES = 8_192
+
     ACTIONS = {
       inbox: {
         key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
@@ -247,6 +256,26 @@ module Hive
 
     public
 
+    def diagnostic
+      return nil unless diagnostic_action?
+
+      artifacts = diagnostic_artifacts.select { |path| path && File.exist?(path) }
+      primary = artifacts.first
+      updated_at = diagnostic_updated_at(primary)
+      detail = primary ? artifact_detail(primary) : marker_detail
+      generator = diagnostic_generated_by(primary)
+
+      {
+        "summary" => truncate(redact(marker_summary), DIAGNOSTIC_SUMMARY_MAX),
+        "detail" => truncate(redact(detail), DIAGNOSTIC_DETAIL_MAX),
+        "source" => primary ? "artifact" : "marker",
+        "source_path" => primary,
+        "artifact_paths" => artifacts.uniq,
+        "generated_by" => generator,
+        "updated_at" => updated_at.utc.iso8601
+      }
+    end
+
     def next_action
       return nil unless execute_waiting_input?
 
@@ -254,6 +283,223 @@ module Hive
     end
 
     private
+
+    def diagnostic_action?
+      %w[recover_execute recover_review error].include?(key.to_s)
+    end
+
+    def diagnostic_artifacts
+      case marker.name
+      when :review_error
+        fresh_diagnosis_artifact + review_error_artifacts
+      when :review_ci_stale
+        fresh_diagnosis_artifact + review_ci_artifacts
+      when :review_stale
+        fresh_diagnosis_artifact + review_stale_artifacts
+      when :execute_stale
+        fresh_diagnosis_artifact + execute_stale_artifacts
+      when :error
+        fresh_diagnosis_artifact + generic_error_artifacts
+      else
+        []
+      end
+    end
+
+    def fresh_diagnosis_artifact
+      path = task_artifact("diagnostics", "red-status.md")
+      return [] unless File.exist?(path)
+
+      metadata = diagnostic_frontmatter(path)
+      return [] unless trusted_diagnostic_generator?(metadata["generated_by"])
+      return [] unless metadata["marker_signature"].to_s == marker_signature
+
+      [ path ]
+    end
+
+    def review_error_artifacts
+      pass = pass_suffix
+      phase = marker.attrs["phase"].to_s
+      reason = marker.attrs["reason"].to_s
+      paths = []
+      paths << task_artifact("reviews", "errors-#{pass}.md") if pass
+      paths << task_artifact("reviews", "fix-guardrail-#{pass}.md") if pass && reason == "fix_guardrail"
+      paths << task_artifact("reviews", "escalations-#{pass}.md") if pass
+      paths.concat(paths_from_marker_files)
+      paths.concat(review_phase_logs(phase, pass))
+      paths.concat(latest_log_artifacts)
+      paths
+    end
+
+    def review_ci_artifacts
+      [
+        task_artifact("reviews", "ci-blocked.md"),
+        *glob_task_artifacts("logs", "review-ci-fix-attempt*.log"),
+        *latest_log_artifacts
+      ]
+    end
+
+    def review_stale_artifacts
+      pass = pass_suffix
+      paths = []
+      paths << task_artifact("reviews", "escalations-#{pass}.md") if pass
+      paths.concat(glob_task_artifacts("reviews", "*-#{pass}.md")) if pass
+      paths.concat(latest_log_artifacts)
+      paths
+    end
+
+    def execute_stale_artifacts
+      [
+        *glob_task_artifacts("reviews", "*.md"),
+        *latest_log_artifacts
+      ]
+    end
+
+    def generic_error_artifacts
+      [
+        *latest_log_artifacts,
+        task.state_file
+      ]
+    end
+
+    def review_phase_logs(phase, pass)
+      return [] unless pass
+
+      case phase
+      when "fix"
+        glob_task_artifacts("logs", "review-fix-pass#{pass}*.log")
+      when "triage"
+        glob_task_artifacts("logs", "review-triage-pass#{pass}*.log")
+      when "browser"
+        glob_task_artifacts("logs", "review-browser-pass#{pass}*.log")
+      when "reviewers"
+        glob_task_artifacts("logs", "review-*-pass#{pass}*.log")
+      else
+        []
+      end
+    end
+
+    def paths_from_marker_files
+      marker.attrs.fetch("files", "").to_s.split(/[,\s]+/).filter_map do |relative|
+        next if relative.empty? || relative.include?("..") || relative.start_with?("/")
+
+        File.join(task.folder, relative)
+      end
+    end
+
+    def latest_log_artifacts
+      log_dirs.flat_map { |dir| Dir[File.join(dir, "*.log")] }
+              .sort_by { |path| safe_mtime(path) || Time.at(0) }
+              .last(3)
+              .reverse
+    end
+
+    def log_dirs
+      [
+        (task.log_dir if task.respond_to?(:log_dir)),
+        File.join(task.folder, "logs")
+      ].compact.uniq
+    end
+
+    def glob_task_artifacts(*parts)
+      Dir[task_artifact(*parts)]
+    end
+
+    def task_artifact(*parts)
+      File.join(task.folder, *parts)
+    end
+
+    def pass_suffix
+      raw = marker.attrs["pass"].to_s
+      return nil unless raw.match?(/\A[1-9]\d*\z/)
+
+      format("%02d", raw.to_i)
+    end
+
+    def marker_summary
+      attrs = marker.attrs.map { |key, value| "#{key}=#{value}" }.join(" ")
+      marker_name = marker.name.to_s.upcase
+      attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
+    end
+
+    def marker_detail
+      lines = [ marker_summary ]
+      lines << "No diagnostic artifact was found under #{task.folder}."
+      lines.join("\n")
+    end
+
+    def artifact_detail(path)
+      body = tail_file(path)
+      "#{path}:\n#{body}"
+    rescue SystemCallError => e
+      "#{path}: #{e.class}: #{e.message}"
+    end
+
+    def tail_file(path)
+      File.open(path, "rb") do |file|
+        begin
+          file.seek(-DIAGNOSTIC_TAIL_BYTES, IO::SEEK_END)
+        rescue Errno::EINVAL
+          file.rewind
+        end
+        file.read.to_s
+      end
+    end
+
+    def diagnostic_updated_at(primary)
+      safe_mtime(primary) || safe_mtime(task.state_file) || Time.now
+    end
+
+    def diagnostic_generated_by(primary)
+      return "local" unless primary && File.basename(primary) == "red-status.md"
+
+      diagnostic_frontmatter(primary)["generated_by"].to_s.tap do |value|
+        return value unless value.empty?
+      end
+      "local"
+    end
+
+    def diagnostic_frontmatter(path)
+      body = File.read(path, 4_096)
+      match = body.match(/\A---\n(.*?)\n---\n/m)
+      return {} unless match
+
+      parsed = YAML.safe_load(match[1], permitted_classes: [ Time ]) || {}
+      parsed.is_a?(Hash) ? parsed.transform_keys(&:to_s) : {}
+    rescue Psych::Exception, SystemCallError
+      {}
+    end
+
+    def trusted_diagnostic_generator?(name)
+      allowed = [ "local", *Hive::AgentProfiles.registered_names.map(&:to_s) ]
+      allowed.include?(name.to_s)
+    end
+
+    def marker_signature
+      attrs = marker.attrs.sort_by { |key, _value| key.to_s }.map { |key, value| "#{key}=#{value}" }
+      Digest::SHA256.hexdigest(([ marker.name.to_s ] + attrs).join("\n"))
+    end
+
+    def safe_mtime(path)
+      return nil if path.nil? || path.to_s.empty?
+
+      File.mtime(path)
+    rescue SystemCallError
+      nil
+    end
+
+    def redact(text)
+      output = text.to_s.dup
+      Hive::SecretPatterns::PATTERNS.each do |name, regex|
+        output.gsub!(regex, "[REDACTED:#{name}]")
+      end
+      output
+    end
+
+    def truncate(text, max)
+      return text if text.length <= max
+
+      "#{text[0, max - 1]}…"
+    end
 
     def execute_waiting_input?
       task.stage_name == "execute" &&

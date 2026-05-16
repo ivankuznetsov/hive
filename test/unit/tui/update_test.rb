@@ -23,6 +23,23 @@ class HiveTuiUpdateTest < Minitest::Test
     Hive::Tui::Messages::NewIdeaImageAttached.new(attachment: attachment)
   end
 
+  def red_detail_row(marker: "review_error", attrs: { "phase" => "fix", "pass" => "1" }, action_key: "recover_review")
+    Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "6-review", slug: "red-task", folder: "/tmp/red-task",
+      state_file: "/tmp/red-task/task.md", marker: marker, attrs: attrs, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: action_key, action_label: "Needs recovery", suggested_command: nil,
+      next_action: nil, diagnostic: { "summary" => "REVIEW_ERROR", "detail" => "failed" }
+    )
+  end
+
+  def snapshot_with_rows(*rows)
+    project = Hive::Tui::Snapshot::ProjectView.new(
+      name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: rows.freeze
+    ).freeze
+    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
+  end
+
   # ---------- WindowSized ----------
 
   def test_window_sized_updates_dimensions
@@ -63,7 +80,8 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "alpha", stage: "1-input", slug: "a1", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready", suggested_command: "hive brainstorm a1", next_action: nil
+        action_label: "ready", suggested_command: "hive brainstorm a1", next_action: nil,
+        diagnostic: nil
       ).freeze ].freeze
     ).freeze
     smaller_snap = Hive::Tui::Snapshot.new(generated_at: nil, projects: [ pa ])
@@ -99,6 +117,58 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     assert_equal [ 0, 0 ], new_model.cursor,
       "first snapshot must seed cursor at first visible row instead of leaving it nil"
+  end
+
+  def test_open_red_status_detail_enters_mode_with_marker_signature
+    row = red_detail_row
+    new_model, cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+
+    assert_nil cmd
+    assert_equal :red_status_detail, new_model.mode
+    assert_same row, new_model.red_status_detail_state.row
+    assert_match(/review_error/, new_model.red_status_detail_state.marker_signature)
+  end
+
+  def test_snapshot_arrived_closes_red_detail_when_row_recovers
+    row = red_detail_row
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
+        row: row,
+        marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
+      )
+    )
+    recovered = red_detail_row(marker: "review_complete", attrs: {}, action_key: "ready_to_finalize")
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(recovered))
+    )
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.red_status_detail_state
+    assert_match(/recovered/, new_model.flash)
+  end
+
+  def test_snapshot_arrived_updates_red_detail_when_marker_signature_changes
+    row = red_detail_row
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
+        row: row,
+        marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
+      )
+    )
+    changed = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(changed))
+    )
+
+    assert_equal :red_status_detail, new_model.mode
+    assert_same changed, new_model.red_status_detail_state.row
+    assert_match(/marker changed/, new_model.flash)
   end
 
   # ---------- PollFailed ----------
@@ -375,7 +445,8 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "alpha", stage: "1-input", slug: "a#{i}", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}", next_action: nil
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}",
+        next_action: nil, diagnostic: nil
       ).freeze
     end
     rows_b = (1..3).map do |i|
@@ -383,7 +454,8 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "beta", stage: "1-input", slug: "b#{i}", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}", next_action: nil
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}",
+        next_action: nil, diagnostic: nil
       ).freeze
     end
     pa = Hive::Tui::Snapshot::ProjectView.new(name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: rows_a.freeze).freeze

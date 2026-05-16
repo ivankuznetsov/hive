@@ -36,7 +36,8 @@ module Hive
         :action_key,
         :action_label,
         :suggested_command,
-        :next_action
+        :next_action,
+        :diagnostic
       )
 
       attr_reader :generated_at, :projects
@@ -99,7 +100,8 @@ module Hive
           action_key: payload["action"],
           action_label: payload["action_label"],
           suggested_command: payload["suggested_command"],
-          next_action: payload["next_action"]
+          next_action: payload["next_action"],
+          diagnostic: payload["diagnostic"]
         ).freeze
       end
 

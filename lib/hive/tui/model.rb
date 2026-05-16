@@ -42,6 +42,7 @@ module Hive
       :flash_set_at,     # Time or nil — flash decay timestamp
       :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
       :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
+      :red_status_detail_state, # Model::RedStatusDetailState or nil — :red_status_detail mode only
       :cols,             # Integer — terminal width (set on WindowSized)
       :rows,             # Integer — terminal height
       :last_error        # Exception or nil — last poll failure
@@ -82,6 +83,12 @@ module Hive
       end
     end
 
+    Model::RedStatusDetailState = Data.define(:row, :marker_signature, :refreshing) do
+      def initialize(row:, marker_signature:, refreshing: false)
+        super
+      end
+    end
+
     class Model
       # Boot state. App.run constructs the runner with this Model.
       # `pane_focus` defaults to `:right` so the table is the first
@@ -108,6 +115,7 @@ module Hive
           flash_set_at: nil,
           triage_state: nil,
           tail_state: nil,
+          red_status_detail_state: nil,
           cols: cols,
           rows: rows,
           last_error: nil

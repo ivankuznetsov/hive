@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-15
+updated: 2026-05-16
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows.
 
 ## ADR-024: PR-first workflow and finalize rename
 
@@ -287,6 +287,28 @@ Path B is the default: the operator reads the question and replies in Telegram; 
 - No new persistence sidecar is introduced for conversations. `brainstorm.md` is the source of truth; after a bot restart, parsing the file identifies the next unanswered question.
 - The bot token is environment-only (`HIVE_TELEGRAM_BOT_TOKEN`); it is never stored in config or logged.
 - Cloud relay/webhook mode is deferred. The same long-poll process can run on the laptop or on an always-on host.
+
+## ADR-027: Red status rows use diagnose-then-act, not checkbox-gated escalation
+
+**Status:** Active (shipped with plan `docs/plans/2026-05-16-001-feat-red-status-diagnostics-and-actions-plan.md`)
+
+**Context:** Review/recovery rows were technically actionable but operationally opaque. A row could say `Needs recovery` or `ERROR exit_code=1`, while the real explanation lived in a review artifact, a log tail, or the marker attrs. The user had to infer whether Enter would retry, whether manual work was needed, or whether the system should already have enough context to fix itself. Checkbox-only escalations made that worse: a checked or unchecked line did not explain which question was being asked, which context was already available, or why automation stopped.
+
+**Decision:** Red rows expose a Q&A-shaped diagnostic surface before user choice. `hive status --json` carries a required nullable `diagnostic` field on every task row; ordinary rows emit `null`, while `recover_execute`, `recover_review`, and `error` rows emit a bounded, redacted diagnostic built by `Hive::TaskAction`. `hive status --diagnose <task>` reads that same local diagnosis, and `--write` asks the configured development agent to write `diagnostics/red-status.md`. Status only trusts that artifact when `generated_by` is an allowed local/profile name and `marker_signature` matches the current marker.
+
+The TUI applies "auto-fix first, manual only when needed." Grid Enter opens red-status detail for ambiguous review recovery rows and non-kill-class errors. The detail view answers:
+
+1. Why is this red?
+2. What can Hive do next?
+
+Then it offers three explicit gestures: `Enter` for the existing autofix/retry path, `f` for manual worktree editing, and `R` for fresh headless diagnosis. Existing deterministic paths stay direct: wall-clock review stale retries, max-passes review stale with an escalations file opens that file for browse/edit, and kill-class errors open the log tail while auto-heal runs.
+
+**Consequences:**
+- Operators see the concrete artifact/log/marker explanation before retrying.
+- Agents and bots can consume the same `diagnostic` payload instead of scraping TUI text.
+- The schema follows ADR-025: `diagnostic` is required and nullable rather than optional.
+- A stale `diagnostics/red-status.md` cannot explain a new marker because the marker signature must match.
+- The diagnosis agent is intentionally outside the workflow lock/marker lifecycle; it writes one artifact and does not claim, clear, or advance the task.
 
 ## Source
 

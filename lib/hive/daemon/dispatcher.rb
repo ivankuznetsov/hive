@@ -1,6 +1,7 @@
 require "hive/config"
 require "hive/stages"
 require "hive/daemon/policy"
+require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
@@ -290,20 +291,42 @@ module Hive
           external_global_count: @external_active_agent_total,
           external_project_count: external_active_agent_count_for(row.project)
         )
-        if gate == :ok
-          dispatch_command(
-            row.suggested_command,
-            project: row.project, slug: row.slug, stage: row.stage,
-            state_file_mtime: row.state_file_mtime,
-            state_file_path: row.state_file,
-            hive_state_path: nil, # supervisor falls back to tmpdir
-            now: now,
-            trigger: trigger
-          )
-        else
+        unless gate == :ok
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: gate.to_s)
+          return
         end
+
+        # Plan-approval rows need a command rewrite + marker flip BEFORE
+        # dispatch because TaskAction emits `hive plan ...` for the
+        # `plan_waiting` row state (correct for the manual TUI's `p`
+        # re-run path) but the daemon wants `hive develop ...` to
+        # advance the stage. The marker also has to flip `:waiting →
+        # :complete` so the workflow verb's terminal-marker gate
+        # (Hive::Commands::Approve::VALID_TERMINAL_MARKERS) accepts the
+        # advance. Both steps live in Hive::Daemon::PlanApproval so the
+        # daemon and the TUI's equivalent helper cannot drift.
+        command = row.suggested_command
+        if trigger == "plan_approval"
+          begin
+            command = PlanApproval.prepare(row.suggested_command, row.state_file)
+          rescue PlanApproval::NotApprovable, ArgumentError => e
+            @logger.event(:skipped, project: row.project, slug: row.slug,
+                                    stage: row.stage, action: row.action,
+                                    reason: "plan_approval_invalid: #{e.message}")
+            return
+          end
+        end
+
+        dispatch_command(
+          command,
+          project: row.project, slug: row.slug, stage: row.stage,
+          state_file_mtime: row.state_file_mtime,
+          state_file_path: row.state_file,
+          hive_state_path: nil, # supervisor falls back to tmpdir
+          now: now,
+          trigger: trigger
+        )
       end
 
       def observe_external_running_rows(rows)

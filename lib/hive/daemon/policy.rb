@@ -98,7 +98,18 @@ module Hive
       def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
                  now:, edit_debounce_sec: 30)
         return :skip if action.nil?
-        return :skip if (advance?(action) || edit_resume?(action)) && (command.nil? || command.empty?)
+        # Three branches dispatch the row's command verbatim (advance,
+        # plan_approval) or via the edit-resume path (edit_resume).
+        # All three need nil/empty-command protection. The guard
+        # lists plan_approval? explicitly even though today's
+        # plan_approval? rows are always edit_resume? rows too
+        # (`needs_input`); a future refactor extending plan_approval?
+        # to a non-edit_resume action would otherwise silently lose
+        # this coverage. PR #83 code review finding #3.
+        if (advance?(action) || edit_resume?(action) || plan_approval?(action, stage)) &&
+           (command.nil? || command.empty?)
+          return :skip
+        end
 
         if advance?(action) || plan_approval?(action, stage)
           :dispatch
@@ -127,8 +138,18 @@ module Hive
         EDIT_RESUME_ACTIONS.include?(action)
       end
 
+      # Literal `"3-plan"` equality matches every other stage-identity
+      # check in the codebase (e.g., `bubble_model.rb:1833 when "3-plan"`
+      # and `Hive::Stages::DIRS` membership). Earlier drafts used
+      # `/\A\d+-plan\z/` but the regex matched any digit-prefixed plan
+      # stage; today's `Hive::Stages::DIRS` is a closed 8-entry enum
+      # with exactly one plan stage, so the regex implied a forward-flex
+      # that didn't exist and a hypothetical `1-plan`/`5-plan` would
+      # silently inherit auto-approval. PR #83 code review finding #4
+      # (cross-corroborated by reliability + testing + maintainability +
+      # project-standards reviewers).
       def plan_approval?(action, stage)
-        action == "needs_input" && stage.to_s.match?(/\A\d+-plan\z/)
+        action == "needs_input" && stage == "3-plan"
       end
 
       def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:)

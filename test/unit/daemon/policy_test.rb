@@ -233,6 +233,73 @@ class HiveDaemonPolicyTest < Minitest::Test
     assert_equal :skip, decide(action: "ready_to_plan", command: "")
   end
 
+  def test_plan_approval_matches_only_literal_3_plan_stage
+    # PR #83 code review finding #4 (cross-corroborated by 4
+    # reviewers): the earlier `/\A\d+-plan\z/` regex matched any
+    # digit-prefixed plan stage. Only `"3-plan"` exists in
+    # `Hive::Stages::DIRS`, so any other `N-plan` value coming
+    # through the status surface (typo, future renumbering,
+    # hostile injection) should take the standard mtime-debounce
+    # path, NOT auto-dispatch. With `stage: nil` and a non-nil
+    # mtime + nil last_dispatched, the brainstorm-shaped behavior
+    # is :record_baseline.
+    assert_equal :record_baseline,
+                 decide(action: "needs_input", stage: "1-plan",
+                        command: "hive plan slug-a --from 1-plan",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil)
+    assert_equal :record_baseline,
+                 decide(action: "needs_input", stage: "13-plan",
+                        command: "hive plan slug-a --from 13-plan",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil)
+    # Positive control: real "3-plan" still auto-dispatches.
+    assert_equal :dispatch,
+                 decide(action: "needs_input", stage: "3-plan",
+                        command: "hive plan slug-a --from 3-plan",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil)
+  end
+
+  def test_plan_approval_dispatches_on_subsequent_tick_with_unchanged_mtime
+    # PR #83 code review finding #8: pin the contrast between the
+    # brainstorm-path (same-mtime returns :skip because user hasn't
+    # edited since last dispatch) and the plan-path (must still
+    # return :dispatch because plan_approval? fires BEFORE
+    # decide_edit). A refactor reordering the branches in
+    # Policy#decide would silently break second-and-later ticks
+    # while every existing test still passes.
+    same_mtime = T0 - 600
+    # Brainstorm-stage control: same mtime + non-nil last_dispatched
+    # → :skip via decide_edit's "mtime hasn't moved" branch.
+    assert_equal :skip,
+                 decide(action: "needs_input", stage: "2-brainstorm",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: same_mtime,
+                        last_dispatched_state_file_mtime: same_mtime),
+                 "brainstorm path: unchanged mtime since last dispatch → :skip (sanity)"
+    # Plan-stage: plan_approval? fires first, returns :dispatch
+    # regardless of mtime state. This is what makes the auto-advance
+    # work — the brainstorm rule does not apply.
+    assert_equal :dispatch,
+                 decide(action: "needs_input", stage: "3-plan",
+                        command: "hive plan slug-a --from 3-plan",
+                        state_file_mtime: same_mtime,
+                        last_dispatched_state_file_mtime: same_mtime),
+                 "plan path: plan_approval? fires before decide_edit; subsequent ticks must still :dispatch"
+  end
+
+  def test_plan_approval_with_nil_or_empty_command_skips
+    # PR #83 code review finding #3: the nil-command guard must
+    # explicitly cover plan_approval? rows, not rely on the
+    # accidental overlap with edit_resume? (`needs_input` is in
+    # both sets today, but a future refactor extending plan_approval?
+    # to a non-edit_resume action would silently lose this coverage
+    # and a malformed status row would dispatch a nil command).
+    assert_equal :skip, decide(action: "needs_input", stage: "3-plan", command: nil)
+    assert_equal :skip, decide(action: "needs_input", stage: "3-plan", command: "")
+  end
+
   private
 
   def decide(action:, command:, stage: nil, state_file_mtime: nil,

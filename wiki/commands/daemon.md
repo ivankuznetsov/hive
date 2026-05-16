@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-05-08
+updated: 2026-05-15
 tags: [command, daemon, automation, json]
 ---
 
@@ -53,7 +53,8 @@ value) and routes:
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 6-review` (6→7) |
 | `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 7-finalize` (7→8) |
-| `needs_input`         | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. |
+| `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
+| `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. |
 | `review_findings`     | Same as `needs_input` (legacy 4-execute findings; rare post-ADR-014). |
 | `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
 | `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |

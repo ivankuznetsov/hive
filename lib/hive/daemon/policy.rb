@@ -19,11 +19,15 @@ module Hive
     # will fail loudly with `Hive::WrongStage` (exit 4) at the workflow-
     # verb level rather than silently advancing past a human gate.
     #
-    # The only non-marker-driven decision is the `:edit` debounce: when
-    # the task is in a `:waiting` state, the daemon dispatches only if
-    # the state-file mtime is strictly newer than the last observed
-    # mtime AND `now - mtime >= edit_debounce_sec` (so a partial
-    # mid-save draft doesn't trigger an early dispatch).
+    # The only non-marker-driven decisions are:
+    # - plan approval rows (`3-plan` + `needs_input`) are auto-dispatched
+    #   for daemon-enabled projects. The durable consent is enabling the
+    #   daemon; a generated plan should not sit forever waiting for an
+    #   editor open/close gesture.
+    # - true edit waits dispatch only if the state-file mtime is strictly
+    #   newer than the last observed mtime AND `now - mtime >=
+    #   edit_debounce_sec` (so a partial mid-save draft doesn't trigger
+    #   an early dispatch).
     #
     # First-sight policy on `kind: edit`: the daemon sees a `_WAITING`
     # task with no prior observation. We CANNOT distinguish "agent just
@@ -75,6 +79,7 @@ module Hive
       # Decide what to do with one task row.
       #
       # @param action [String] the `tasks[].action` value from hive-status JSON
+      # @param stage [String, nil] the `tasks[].stage` value (e.g. "3-plan")
       # @param command [String, nil] the `suggested_command` for the row (may be nil)
       # @param state_file_mtime [Time, nil] mtime of the task's state file
       # @param last_dispatched_state_file_mtime [Time, nil] mtime captured at the
@@ -90,12 +95,23 @@ module Hive
       # the dispatcher does NOT spawn a child, but it MUST call
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
-      def decide(action:, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
+      def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
                  now:, edit_debounce_sec: 30)
         return :skip if action.nil?
-        return :skip if (advance?(action) || edit_resume?(action)) && (command.nil? || command.empty?)
+        # Three branches dispatch the row's command verbatim (advance,
+        # plan_approval) or via the edit-resume path (edit_resume).
+        # All three need nil/empty-command protection. The guard
+        # lists plan_approval? explicitly even though today's
+        # plan_approval? rows are always edit_resume? rows too
+        # (`needs_input`); a future refactor extending plan_approval?
+        # to a non-edit_resume action would otherwise silently lose
+        # this coverage. PR #83 code review finding #3.
+        if (advance?(action) || edit_resume?(action) || plan_approval?(action, stage)) &&
+           (command.nil? || command.empty?)
+          return :skip
+        end
 
-        if advance?(action)
+        if advance?(action) || plan_approval?(action, stage)
           :dispatch
         elsif action == MERGE_WAIT_ACTION
           :poll_for_merge
@@ -120,6 +136,20 @@ module Hive
 
       def edit_resume?(action)
         EDIT_RESUME_ACTIONS.include?(action)
+      end
+
+      # Literal `"3-plan"` equality matches every other stage-identity
+      # check in the codebase (e.g., `bubble_model.rb:1833 when "3-plan"`
+      # and `Hive::Stages::DIRS` membership). Earlier drafts used
+      # `/\A\d+-plan\z/` but the regex matched any digit-prefixed plan
+      # stage; today's `Hive::Stages::DIRS` is a closed 8-entry enum
+      # with exactly one plan stage, so the regex implied a forward-flex
+      # that didn't exist and a hypothetical `1-plan`/`5-plan` would
+      # silently inherit auto-approval. PR #83 code review finding #4
+      # (cross-corroborated by reliability + testing + maintainability +
+      # project-standards reviewers).
+      def plan_approval?(action, stage)
+        action == "needs_input" && stage == "3-plan"
       end
 
       def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:)

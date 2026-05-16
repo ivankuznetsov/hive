@@ -1,4 +1,6 @@
 require "test_helper"
+require "tmpdir"
+require "hive/markers"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/logger"
@@ -122,11 +124,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
-          mtime: T0 - 600, claude_pid_alive: nil)
+          mtime: T0 - 600, claude_pid_alive: nil, state_file: nil)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
       folder: "/tmp/#{project}/#{stage}/#{slug}",
-      state_file: "/tmp/#{project}/#{stage}/#{slug}/idea.md",
+      state_file: state_file || "/tmp/#{project}/#{stage}/#{slug}/idea.md",
       state_file_mtime: mtime, action: action,
       suggested_command: command, claude_pid_alive: claude_pid_alive
     )
@@ -281,6 +283,104 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # Logged as :skipped with reason: baseline_recorded
     skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
     refute_nil skipped, "must log :skipped reason: baseline_recorded"
+  end
+
+  def test_plan_needs_input_first_sight_dispatches_without_baseline
+    # End-to-end fix for PR #83's P0: the production command for a
+    # `plan_waiting` row is `hive plan ...` (per TaskAction; see the
+    # `plan_waiting` entry in lib/hive/task_action.rb). The daemon
+    # rewrites it to `hive develop ...` AND flips the `:waiting`
+    # marker to `:complete` before dispatch so the workflow verb's
+    # terminal-marker gate (VALID_TERMINAL_MARKERS) accepts the
+    # advance. Both steps live in Hive::Daemon::PlanApproval.
+    Dir.mktmpdir("dispatcher-plan-approval") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
+
+      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
+                   command: "hive plan s1 --from 3-plan",
+                   mtime: T0 - 600, state_file: state_file) ]
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+      dispatcher.tick(now: T0)
+
+      # Dispatched the rewritten command (develop, not plan).
+      assert_equal 1, sup.spawned.size
+      assert_equal "hive develop s1 --from 3-plan", sup.spawned.first[:command],
+                   "PlanApproval must rewrite `hive plan ...` to `hive develop ...`"
+
+      # Marker flipped to :complete on disk so `hive develop --from
+      # 3-plan` will be accepted by VALID_TERMINAL_MARKERS on the
+      # spawned child.
+      assert_equal :complete, Hive::Markers.current(state_file).name,
+                   "plan-approval auto-dispatch must flip :waiting → :complete"
+
+      # Baseline mtime recorded so subsequent ticks have something
+      # to compare against (and don't re-record a baseline).
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+      refute logger.events.any? { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
+
+      # Audit event fired with the trigger field set so log readers
+      # can distinguish plan-approval dispatches from advance-action
+      # dispatches without re-implementing Policy.decide.
+      assert events_include?(logger, :dispatched)
+      dispatched_event = logger.events.find { |(n, _a)| n == :dispatched }
+      assert_equal "plan_approval", dispatched_event[1][:trigger]
+    end
+  end
+
+  def test_plan_needs_input_skips_when_marker_is_not_waiting_or_complete
+    # PlanApproval.prepare raises NotApprovable for any marker that
+    # isn't :waiting or :complete (e.g., :error). The dispatcher must
+    # log :skipped and NOT spawn — the workflow verb's WrongStage
+    # check would refuse the advance anyway, but failing in Policy is
+    # noisier than failing in PlanApproval, so we route to :skip
+    # before dispatch.
+    Dir.mktmpdir("dispatcher-plan-approval-error") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n<!-- ERROR reason=plan_failed -->\n")
+
+      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
+                   command: "hive plan s1 --from 3-plan",
+                   mtime: T0 - 600, state_file: state_file) ]
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+      dispatcher.tick(now: T0)
+
+      assert_equal 0, sup.spawned.size, "must not spawn when marker isn't :waiting/:complete"
+      skip_event = logger.events.find do |(n, a)|
+        n == :skipped && a[:reason].to_s.start_with?("plan_approval_invalid")
+      end
+      refute_nil skip_event,
+                 "must log :skipped reason: plan_approval_invalid (got events: #{logger.events.map(&:first).inspect})"
+    end
+  end
+
+  def test_plan_needs_input_with_malformed_command_skips
+    # If the suggested_command is not a well-formed `hive plan ...`
+    # invocation (e.g., a stale TaskAction emission or a malformed
+    # status JSON row), PlanApproval raises ArgumentError; dispatcher
+    # routes to :skip with a reason field instead of spawning a
+    # garbage subprocess.
+    Dir.mktmpdir("dispatcher-plan-approval-malformed") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
+
+      rows = [ row(stage: "3-plan", action: "needs_input", marker: "waiting",
+                   command: "hive review s1 --from 3-plan",
+                   mtime: T0 - 600, state_file: state_file) ]
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+      dispatcher.tick(now: T0)
+
+      assert_equal 0, sup.spawned.size
+      skip_event = logger.events.find do |(n, a)|
+        n == :skipped && a[:reason].to_s.start_with?("plan_approval_invalid")
+      end
+      refute_nil skip_event
+      # Marker NOT flipped — malformed command must leave the
+      # marker at :waiting so an operator can inspect.
+      assert_equal :waiting, Hive::Markers.current(state_file).name,
+                   "malformed command must not flip the marker"
+    end
   end
 
   def test_edit_action_after_baseline_user_edit_dispatches

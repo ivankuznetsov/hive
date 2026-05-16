@@ -1498,3 +1498,25 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 
 **Refreshed pages:**
 - `wiki/stages/index.md`, `wiki/stages/open-pr.md`, `wiki/stages/review.md`, `wiki/stages/finalize.md`, `wiki/state-model.md`, `wiki/architecture.md`, `wiki/commands/stage_action.md`, `wiki/commands/run.md`, `wiki/decisions.md`.
+
+## [2026-05-15T15:55:00Z] daemon — plan WAITING rows auto-advance for daemon-enabled projects
+
+**Action:** Fixed the daemon scheduler treating every `needs_input` row
+as a user-edit wait. The symptom was a generated plan sitting in
+`3-plan` with `<!-- WAITING -->` and "Needs your input" while the daemon
+logged `skipped` every tick with `in_flight=0`; manually running
+`hive run --json` flipped the marker to `complete`, after which the
+daemon immediately dispatched `hive develop ... --from 3-plan`.
+Root cause: `Hive::Daemon::Policy` only saw `action=needs_input`, so it
+applied the mtime-baseline/debounce path meant for brainstorm answers,
+execute questions, and review decisions. `Policy.decide` now accepts
+the status row's `stage`; `3-plan` + `needs_input` dispatches
+immediately because a plan WAITING marker is an approval pause, not a
+Q&A file. Other `needs_input` stages keep the existing edit debounce.
+Tests: added policy and dispatcher pins for first-sight plan WAITING
+dispatch while preserving first-sight brainstorm baseline behavior.
+
+**Refreshed pages:**
+- `wiki/modules/daemon.md` — documents the stage-aware policy exception.
+- `wiki/decisions.md` — ADR-024 now calls out `3-plan`/`:waiting` as
+  daemon-auto-approved by `daemon.enabled: true`.

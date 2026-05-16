@@ -42,12 +42,21 @@ module Hive
 
         do_call
       rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
+        emit_error_envelope(e, schema: status_schema_for_call) if @json && !@stdout_written
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
+        emit_error_envelope(wrapped, schema: status_schema_for_call) if @json && !@stdout_written
         raise wrapped
+      end
+
+      # `--diagnose` routes through diagnose_call which emits the
+      # `hive-status-diagnose` envelope on success; the top-level rescue
+      # must match the same schema so consumers can validate either
+      # branch against `urn:hive:schema:status-diagnose:v1`. Plain
+      # `hive status --json` stays on `hive-status`.
+      def status_schema_for_call
+        @diagnose ? "hive-status-diagnose" : "hive-status"
       end
 
       def do_call
@@ -95,7 +104,10 @@ module Hive
         elsif !File.directory?(hive_state)
           base.merge("error" => "not_initialised", "tasks" => [])
         else
-          rows = annotate_actions(collect_rows(hive_state), project, project_count)
+          # JSON path: pay the diagnostic-extraction cost because
+          # external consumers (TUI, daemon, bots) read `diagnostic` off
+          # every row. Schema mandates the field.
+          rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
           base.merge("tasks" => rows.map { |r| task_payload(r) })
         end
       end
@@ -144,7 +156,7 @@ module Hive
         if @json
           puts JSON.generate(
             "schema" => "hive-status-diagnose",
-            "schema_version" => 1,
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status-diagnose"),
             "ok" => true,
             "slug" => task.slug,
             "task_folder" => task.folder,
@@ -181,7 +193,11 @@ module Hive
           return
         end
 
-        rows = annotate_actions(collect_rows(hive_state), project, project_count)
+        # Text-mode renders icon / state_label / suggested_command / age
+        # only — `diagnostic` is unused here, so skip the bounded file-
+        # I/O that TaskAction#diagnostic performs per red row. JSON path
+        # still pays the full cost via project_payload.
+        rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
         puts project["name"]
         if rows.empty?
           puts "  no active tasks"
@@ -269,7 +285,7 @@ module Hive
         "Error"
       ].freeze
 
-      def annotate_actions(rows, project, project_count)
+      def annotate_actions(rows, project, project_count, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
         rows.map do |row|
           action = Hive::TaskAction.for(
@@ -284,7 +300,7 @@ module Hive
             action_label: action.label,
             suggested_command: action.command,
             next_action: action.next_action,
-            diagnostic: action.diagnostic
+            diagnostic: with_diagnostic ? action.diagnostic : nil
           )
         end
       end
@@ -335,13 +351,14 @@ module Hive
         end
       end
 
-      # Emit a hive-status ErrorPayload to stdout. Gated on @json +
-      # @stdout_written so a successful json_payload write doesn't get
-      # double-emitted by the rescue. `hive status` carries no slug/stage
-      # context, so extras stays empty.
-      def emit_error_envelope(error)
+      # Emit an ErrorPayload to stdout. Gated on @json + @stdout_written
+      # so a successful payload write doesn't get double-emitted by the
+      # rescue. `schema:` selects between "hive-status" (plain status)
+      # and "hive-status-diagnose" (the --diagnose route) so consumers
+      # see one envelope shape per CLI invocation.
+      def emit_error_envelope(error, schema: "hive-status")
         payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-status",
+          schema: schema,
           error: error,
           error_kind: error_kind_for(error)
         )

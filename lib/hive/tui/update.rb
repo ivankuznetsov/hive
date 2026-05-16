@@ -1,3 +1,4 @@
+require "digest"
 require "hive"
 require "hive/tui/model"
 require "hive/tui/messages"
@@ -166,25 +167,26 @@ module Hive
       def apply_red_status_detail_snapshot(model, state)
         row = find_row_for_detail(model.snapshot, state.row)
         unless row
-          return model.with(
-            mode: :grid,
-            red_status_detail_state: nil,
-            flash: "#{state.row.slug} no longer in this project",
-            flash_set_at: Time.now
+          return close_red_detail(
+            model,
+            flash: "#{state.row.slug} no longer in this project"
           )
         end
 
         unless red_status_row?(row)
-          return model.with(
-            mode: :grid,
-            red_status_detail_state: nil,
-            flash: "#{row.slug} recovered — status updated",
-            flash_set_at: Time.now
+          return close_red_detail(
+            model,
+            flash: "#{row.slug} recovered — status updated"
           )
         end
 
         signature = red_status_marker_signature(row)
-        next_state = state.with(row: row, marker_signature: signature, refreshing: false)
+        # Preserve the operator-visible "Refreshing diagnosis..." flag
+        # across snapshot polls. The 1Hz poll lands while a headless
+        # diagnose subprocess can run up to 600s; the indicator must
+        # survive snapshots and only clear on SubprocessExited (see
+        # BubbleModel#diagnose_subprocess_exit).
+        next_state = state.with(row: row, marker_signature: signature)
         if signature != state.marker_signature
           return model.with(
             red_status_detail_state: next_state,
@@ -194,6 +196,24 @@ module Hive
         end
 
         model.with(red_status_detail_state: next_state)
+      end
+
+      # Close the red-status detail view and return to grid. Recompute
+      # the cursor against the post-close snapshot so a row that
+      # disappeared while the operator was in the detail view doesn't
+      # leave the cursor pointing at a hidden row (which would silently
+      # wedge j/k navigation).
+      def close_red_detail(model, flash:)
+        closed = model.with(
+          mode: :grid,
+          red_status_detail_state: nil,
+          flash: flash,
+          flash_set_at: Time.now
+        )
+        visible = visible_snapshot(closed)
+        return closed if visible.nil?
+
+        closed.with(cursor: reclamp_cursor(visible, closed.cursor))
       end
 
       # Keep the cursor coords if they still point at an existing row
@@ -676,7 +696,10 @@ module Hive
         case model.mode
         when :triage then model.with(mode: :grid, triage_state: nil)
         when :log_tail then model.with(mode: :grid, tail_state: nil)
-        when :red_status_detail then model.with(mode: :grid, red_status_detail_state: nil)
+        when :red_status_detail
+          closed = model.with(mode: :grid, red_status_detail_state: nil)
+          visible = visible_snapshot(closed)
+          visible.nil? ? closed : closed.with(cursor: reclamp_cursor(visible, closed.cursor))
         when :help, :filter then model.with(mode: :grid)
         else model
         end
@@ -713,9 +736,29 @@ module Hive
         %w[recover_review error].include?(row.action_key.to_s)
       end
 
+      # Read the canonical marker_signature off the diagnostic payload
+      # rather than recomputing locally. TaskAction#marker_signature is
+      # the producer (the SHA256-hex value emitted into the status JSON
+      # and into the diagnostics/red-status.md artifact frontmatter); the
+      # TUI is a consumer. Recomputing here with a different algorithm
+      # (the prior `\\0`-joined raw concat) meant the freshness compare
+      # could never match the hex stored in row.diagnostic, so the
+      # "marker changed since you opened this view" banner fired on
+      # every poll regardless of marker state.
+      #
+      # Fallback (rarely hit): when row.diagnostic is nil — e.g., the
+      # row is no longer red, or the JSON producer's schema_version
+      # predates the field — fall back to a deterministic local digest
+      # so the live-update gate still compares against a stable value
+      # across snapshots. The local digest is namespaced with a
+      # "no-diag:" prefix so it cannot collide with a real signature.
       def red_status_marker_signature(row)
-        attrs = (row.attrs || {}).sort_by { |key, _value| key.to_s }.map { |key, value| "#{key}=#{value}" }
-        ([ row.marker.to_s ] + attrs).join("\0")
+        sig = row.diagnostic && row.diagnostic["marker_signature"]
+        return sig.to_s if sig && !sig.to_s.empty?
+
+        attrs = (row.attrs || {}).sort_by { |key, _value| key.to_s }
+                                 .map { |key, value| "#{key}=#{value}" }
+        "no-diag:" + Digest::SHA256.hexdigest(([ row.marker.to_s ] + attrs).join("\n"))
       end
 
       def next_non_empty_project_idx(visible, start_idx)

@@ -663,7 +663,13 @@ module Hive
       # flash behavior.
       def diagnose_subprocess_exit(msg)
         if msg.verb.to_s == "status"
-          evict_all_diagnosis_attempts
+          # Evict EXACTLY the completing folder (passed through by
+          # refresh_red_status_diagnosis's dispatcher wrap). Clearing
+          # the whole Set on every status exit cascaded across rows:
+          # a finish on folder A wiped B's inflight slot while B was
+          # still running, letting a second R-press on B spawn a
+          # duplicate agent.
+          evict_diagnosis_attempt(msg.folder) if msg.folder
           model = clear_detail_refreshing(@hive_model)
           if msg.exit_code.to_i.zero?
             return [ model.with(flash: "red-status diagnosis refreshed", flash_set_at: Time.now), nil ]
@@ -865,12 +871,31 @@ module Hive
       def red_status_autofix(row)
         case row.action_key.to_s
         when "recover_review"
-          recover_review(row, force: row.marker.to_s == "review_stale")
+          recover_review(row, force: red_status_autofix_force?(row))
         when "error"
           recover_error(row)
         else
           [ flashed("no autofix action available for #{row.slug}"), nil ]
         end
+      end
+
+      # The `r` grid-mode gesture (PR #72) sets force: true ONLY for
+      # max_passes-hit REVIEW_STALE — the case where the operator has
+      # presumably edited reviews/escalations-NN.md and wants to retry
+      # immediately. The detail-view Enter mirrors that contract: only
+      # max_passes-hit REVIEW_STALE rows get force: true. Other
+      # review_stale shapes (wall_clock, incomplete-triage) keep the
+      # default force: false so retryable_review_stale? still gates them.
+      # Non-REVIEW_STALE markers (REVIEW_ERROR, REVIEW_CI_STALE) never
+      # need force; they always pass the gate.
+      def red_status_autofix_force?(row)
+        return false unless row.marker.to_s == "review_stale"
+
+        attrs = row.attrs || {}
+        pass = attrs["pass"].to_s
+        return false unless pass.match?(/\A[1-9]\d*\z/)
+
+        File.exist?(File.join(row.folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
       end
 
       def register_diagnosis_attempt(folder)
@@ -882,8 +907,8 @@ module Hive
         end
       end
 
-      def evict_all_diagnosis_attempts
-        @healed_folders_mutex.synchronize { @diagnosis_inflight.clear }
+      def evict_diagnosis_attempt(folder)
+        @healed_folders_mutex.synchronize { @diagnosis_inflight.delete(folder) }
       end
 
       def refresh_red_status_diagnosis(row)
@@ -892,14 +917,34 @@ module Hive
 
         argv = [ "hive", "status", "--diagnose", row.slug ]
         argv += [ "--project", row.project_name ] if row.project_name.to_s != ""
+        # Disambiguate when the same slug lives in multiple stages of the
+        # same project (TaskResolver raises AmbiguousSlug otherwise).
+        argv += [ "--stage", row.stage ] if row.stage.to_s != ""
         argv << "--write"
 
-        Hive::Tui::Subprocess.dispatch_background(argv, dispatch: @dispatch)
+        folder = row.folder
+        # Wrap the dispatcher so the SubprocessExited message arriving
+        # from the reaper Thread carries the originating folder. This
+        # is what lets diagnose_subprocess_exit evict EXACTLY the
+        # completing folder from @diagnosis_inflight; without the wrap
+        # we either evicted the whole Set (cross-task cascade letting
+        # duplicates through) or we'd need the SubprocessRegistry to
+        # track per-pid folders.
+        wrapped_dispatch = lambda do |msg|
+          if msg.is_a?(Hive::Tui::Messages::SubprocessExited)
+            msg = Hive::Tui::Messages::SubprocessExited.new(
+              verb: msg.verb, exit_code: msg.exit_code, folder: folder
+            )
+          end
+          @dispatch.call(msg)
+        end
+
+        Hive::Tui::Subprocess.dispatch_background(argv, dispatch: wrapped_dispatch)
         state = @hive_model.red_status_detail_state
         model = state ? @hive_model.with(red_status_detail_state: state.with(refreshing: true)) : @hive_model
         [ model.with(flash: "refreshing diagnosis for #{row.slug}", flash_set_at: Time.now), nil ]
       rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-        @healed_folders_mutex.synchronize { @diagnosis_inflight.delete(row.folder) }
+        evict_diagnosis_attempt(folder)
         [ flashed("diagnosis failed to start: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
       end
 
@@ -935,7 +980,12 @@ module Hive
       def manual_fix_candidate(row)
         task = Hive::Task.new(row.folder.to_s)
         task.worktree_path.to_s
-      rescue Hive::InvalidTaskPath, SystemCallError, Psych::SyntaxError, Psych::DisallowedClass
+      rescue Hive::Error, SystemCallError, Psych::SyntaxError, Psych::DisallowedClass
+        # Hive::Error covers InvalidTaskPath, ConfigError, WorktreeError —
+        # any of which Task#worktree_path may raise via the config-load
+        # path. A bubbletea Update thread that lets one of these escape
+        # crashes the runner; the manual-fix path is best-effort browse,
+        # so swallowing-to-empty is the right shape.
         ""
       end
 

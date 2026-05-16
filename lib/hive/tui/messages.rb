@@ -42,7 +42,18 @@ module Hive
       # time — Update doesn't re-derive it. `exit_code` carries the
       # POSIX-shell-convention status (0 success; 128+signo for signal
       # kills; 127 command-not-found).
-      SubprocessExited = Data.define(:verb, :exit_code)
+      #
+      # `folder` is optional — present only when the dispatcher wrapped
+      # @dispatch to thread per-row context through the reaper Thread
+      # (today: `refresh_red_status_diagnosis`, so the diagnose-subprocess
+      # exit handler can evict the right slot from @diagnosis_inflight).
+      # Default nil keeps every existing call site (workflow-verb spawns,
+      # takeover-command spawns) unchanged.
+      SubprocessExited = Data.define(:verb, :exit_code, :folder) do
+        def initialize(verb:, exit_code:, folder: nil)
+          super
+        end
+      end
 
       # Cooperative shutdown signal — set by the SIGHUP trap (via
       # `runner.send`) and by `q`-keystroke dispatch in grid mode.

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:status-diagnose:v1",
+  "title": "hive status --diagnose output (v1)",
+  "description": "Emitted by `hive status --diagnose <slug> [--write] --json`. Either a SuccessPayload (local diagnostic plus optional artifact path) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "slug",
+        "task_folder",
+        "diagnostic",
+        "path"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-status-diagnose"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "slug": {
+          "type": "string"
+        },
+        "task_folder": {
+          "type": "string"
+        },
+        "diagnostic": {
+          "description": "The same Diagnostic shape emitted under hive-status.v2 `tasks[].diagnostic`. Null for non-red tasks invoked with --diagnose.",
+          "oneOf": [
+            {
+              "$ref": "urn:hive:schema:status:v2#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "Set only when `--write` was passed and the headless diagnose agent wrote diagnostics/red-status.md. Null otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "description": "Emitted by the top-level rescue in Hive::Commands::Status#call when --diagnose fails (unknown slug, ambiguous slug, agent profile misconfigured, headless agent failed/timed out).",
+      "properties": {
+        "schema": {
+          "const": "hive-status-diagnose"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "config",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "message": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": [
+              "project",
+              "stage",
+              "folder"
+            ],
+            "properties": {
+              "project": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

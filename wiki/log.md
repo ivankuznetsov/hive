@@ -1440,16 +1440,6 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 **Refreshed pages:**
 - `wiki/commands/tui.md` — Enter description updated for the dual error-row routing; new paragraph documenting the kill-class fallthrough, `--match-attr exit_code=N` discipline, status-column enrichment, and dedup behavior.
 
-## [2026-05-16T00:00:00Z] red status — diagnose-then-act recovery details
-
-**Action:** Added bounded red-row diagnostics to `hive status --json`, plus `hive status --diagnose <task>` for local inspection and `--write` for an agent-written `diagnostics/red-status.md` artifact. The TUI now opens a Q&A red-status detail view for ambiguous recovery/error rows, showing why the row is red, which artifacts were used, and explicit choices for autofix, manual worktree editing, or refreshed diagnosis.
-
-**Refreshed pages:**
-- `wiki/commands/status.md` — documented the required nullable `diagnostic` JSON field, diagnostic artifact selection, marker-signature freshness, and `--diagnose`.
-- `wiki/commands/tui.md` — documented red-status detail mode, keybindings, snapshot refresh behavior, and preserved direct recovery exceptions.
-- `wiki/decisions.md` — ADR-027 records the diagnose-then-act policy and its relationship to ADR-025.
-- `wiki/index.md` — bumped refresh date.
-
 ## [2026-05-14T12:00:00Z] rebase — PR #69 deferred-items follow-up + module/ADR docs
 
 **Action:** Closed the deferred items from PR #69's `/ce-code-review` synthesis. Wrote `wiki/modules/rebase.md` (Public API, Result struct, internals, conflict-resolution loop, abort/cleanup, security boundaries, latency budget). Wrote `wiki/commands/rebase-status.md` documenting the read-only inspector verb (eight states, JSON envelope shape, why-no-fetch rationale). Updated `wiki/commands/run.md`: documented `--no-rebase` flag with `cli_override` reason; expanded the `rebase.reason` enum into a full table; documented `post_rebase_warnings`; added per-op timeout (`REBASE_OP_TIMEOUT_SEC = 300`) + bounded stderr capture (`GIT_CAPTURE_MAX_BYTES = 1 MiB`); added an explicit "Lock-window trade-off (accepted v1)" subsection covering the `MAX_CONFLICT_RESOLUTIONS × conflict_resolution_timeout_sec` worst case and the `--no-rebase` escape hatch; documented the B8 removal of the basename-match protected-files guard and replacement with `add_dirs: []` physical isolation; documented the B9 "agent-completed-the-rebase" exception that accepts the agent's work when the rebase finishes cleanly. Added ADR-025 to `wiki/decisions.md` ratifying the "additions are required and enums are closed" policy for `hive-run.v1` envelopes, with a comparison table justifying the choice against Hive's single-binary-no-third-party-consumer deployment model.
@@ -1530,3 +1520,13 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 - `wiki/modules/daemon.md` — documents the stage-aware policy exception.
 - `wiki/decisions.md` — ADR-024 now calls out `3-plan`/`:waiting` as
   daemon-auto-approved by `daemon.enabled: true`.
+
+## [2026-05-16T00:00:00Z] red status — diagnose-then-act recovery details
+
+**Action:** Added bounded red-row diagnostics to `hive status --json`, plus `hive status --diagnose <task>` for local inspection and `--write` for an agent-written `diagnostics/red-status.md` artifact. The TUI now opens a Q&A red-status detail view for ambiguous recovery/error rows, showing why the row is red, which artifacts were used, and explicit choices for autofix, manual worktree editing, or refreshed diagnosis.
+
+**Refreshed pages:**
+- `wiki/commands/status.md` — documented the required nullable `diagnostic` JSON field, diagnostic artifact selection, marker-signature freshness, and `--diagnose`.
+- `wiki/commands/tui.md` — documented red-status detail mode, keybindings, snapshot refresh behavior, and preserved direct recovery exceptions.
+- `wiki/decisions.md` — ADR-027 records the diagnose-then-act policy and its relationship to ADR-025.
+- `wiki/index.md` — bumped refresh date.

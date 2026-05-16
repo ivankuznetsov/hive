@@ -21,6 +21,19 @@ module Hive
     DIAGNOSTIC_SUMMARY_MAX = 120
     DIAGNOSTIC_DETAIL_MAX = 4_000
     DIAGNOSTIC_TAIL_BYTES = 8_192
+    # Cap on artifact_paths reported in the diagnostic payload. The schema
+    # pins maxItems=20; this constant is the producer-side enforcement so
+    # a marker with hundreds of matching artifacts (legacy reviews/ dirs)
+    # cannot blow past the contract.
+    ARTIFACT_PATHS_MAX = 20
+    # Cap on .log files probed per task per status invocation. Bounds the
+    # File.mtime cost when a task accumulated many agent-run logs over a
+    # long-lived branch (saw 50+ on auto-rebase test fixtures).
+    LOG_GLOB_CAP = 20
+    # Cap on diagnostic_frontmatter scan window. Real frontmatter is < 1KB;
+    # 16KB is generous for human-written artifacts and tight enough to
+    # reject a runaway file masquerading as frontmatter.
+    FRONTMATTER_SCAN_BYTES = 16_384
 
     ACTIONS = {
       inbox: {
@@ -266,12 +279,14 @@ module Hive
       generator = diagnostic_generated_by(primary)
 
       {
-        "summary" => truncate(redact(marker_summary), DIAGNOSTIC_SUMMARY_MAX),
-        "detail" => truncate(redact(detail), DIAGNOSTIC_DETAIL_MAX),
+        "summary" => redact(truncate(marker_summary, DIAGNOSTIC_SUMMARY_MAX)),
+        "detail" => redact(truncate(detail, DIAGNOSTIC_DETAIL_MAX)),
         "source" => primary ? "artifact" : "marker",
         "source_path" => primary,
-        "artifact_paths" => artifacts.uniq,
+        "artifact_paths" => artifacts.uniq.first(ARTIFACT_PATHS_MAX),
         "generated_by" => generator,
+        "marker_signature" => marker_signature,
+        "suggested_next_action" => suggested_next_action_payload,
         "updated_at" => updated_at.utc.iso8601
       }
     end
@@ -284,8 +299,15 @@ module Hive
 
     private
 
+    # recover_execute rows are deliberately excluded: TUI red_detail_row?
+    # has no rendering branch for them (no "what next?" answer text, no
+    # autofix wiring), so emitting a diagnostic for every execute_stale
+    # row on every poll would pay the file-I/O cost with no consumer.
+    # Re-add to this list when (and only when) the TUI gating predicates
+    # in lib/hive/tui/key_map.rb#red_detail_row? + Update#red_status_row?
+    # gain matching branches.
     def diagnostic_action?
-      %w[recover_execute recover_review error].include?(key.to_s)
+      %w[recover_review error].include?(key.to_s)
     end
 
     def diagnostic_artifacts
@@ -296,8 +318,6 @@ module Hive
         fresh_diagnosis_artifact + review_ci_artifacts
       when :review_stale
         fresh_diagnosis_artifact + review_stale_artifacts
-      when :execute_stale
-        fresh_diagnosis_artifact + execute_stale_artifacts
       when :error
         fresh_diagnosis_artifact + generic_error_artifacts
       else
@@ -347,13 +367,6 @@ module Hive
       paths
     end
 
-    def execute_stale_artifacts
-      [
-        *glob_task_artifacts("reviews", "*.md"),
-        *latest_log_artifacts
-      ]
-    end
-
     def generic_error_artifacts
       [
         *latest_log_artifacts,
@@ -386,11 +399,19 @@ module Hive
       end
     end
 
+    # Cap the candidate set (LOG_GLOB_CAP) before sorting by mtime so a
+    # long-lived task with 100+ retained logs doesn't pay an O(N) stat
+    # sweep on every status poll. The cap is the most recent N by
+    # filename-suffix timestamp (hive's log filenames embed an ISO
+    # timestamp), which is a good proxy for mtime ordering and avoids
+    # the stat. Final sort-by-mtime over the capped set still produces
+    # the freshest 3.
     def latest_log_artifacts
-      log_dirs.flat_map { |dir| Dir[File.join(dir, "*.log")] }
-              .sort_by { |path| safe_mtime(path) || Time.at(0) }
-              .last(3)
-              .reverse
+      candidates = log_dirs.flat_map { |dir| Dir[File.join(dir, "*.log")] }
+      return [] if candidates.empty?
+
+      head = candidates.sort.last(LOG_GLOB_CAP)
+      head.sort_by { |path| safe_mtime(path) || Time.at(0) }.last(3).reverse
     end
 
     def log_dirs
@@ -458,8 +479,13 @@ module Hive
       "local"
     end
 
+    # Scan up to FRONTMATTER_SCAN_BYTES of the artifact head looking for
+    # the closing `---` boundary. A fixed 4KB head used to silently parse
+    # frontmatter blocks larger than 4KB as empty (no closing match) —
+    # widening the window to 16KB keeps the cost bounded while accepting
+    # real-world artifact frontmatter.
     def diagnostic_frontmatter(path)
-      body = File.read(path, 4_096)
+      body = File.read(path, FRONTMATTER_SCAN_BYTES)
       match = body.match(/\A---\n(.*?)\n---\n/m)
       return {} unless match
 
@@ -474,9 +500,96 @@ module Hive
       allowed.include?(name.to_s)
     end
 
+    public
+
+    # Canonical freshness key for the (marker, attrs) pair. Re-used by:
+    #   - this class's fresh_diagnosis_artifact (consumer side: validates
+    #     diagnostics/red-status.md's frontmatter against the current
+    #     marker before trusting the artifact body)
+    #   - Hive::DiagnosisAgent#artifact_body (producer side: writes the
+    #     signature into the artifact frontmatter at spawn time)
+    #   - Hive::Tui::Update.apply_red_status_detail_snapshot (TUI live-
+    #     update gate: detects marker rotation while the operator is in
+    #     the red-status detail view)
+    #
+    # All three call this single implementation so the producer, the
+    # local consumer, and the TUI freshness check can never disagree.
+    # Marker attrs are coerced to String so a future non-string value
+    # (Integer pass attr, Time stamp) cannot silently change the digest
+    # via Hash#to_s formatting.
     def marker_signature
-      attrs = marker.attrs.sort_by { |key, _value| key.to_s }.map { |key, value| "#{key}=#{value}" }
+      attrs = marker.attrs.sort_by { |key, _value| key.to_s }
+                     .map { |key, value| "#{key}=#{value}" }
       Digest::SHA256.hexdigest(([ marker.name.to_s ] + attrs).join("\n"))
+    end
+
+    private
+
+    # Recovery hint surfaced inside the diagnostic JSON so agents and
+    # external consumers don't have to re-derive the next move from
+    # marker shape alone. `kind` mirrors the operator gesture:
+    #   - "retry" — Enter-in-detail-view runs the existing recover_review
+    #     / recover_error path (clear marker + re-run); `command` is the
+    #     copy-paste shell form.
+    #   - "manual_fix" — max_passes-hit REVIEW_STALE; the operator must
+    #     edit `reviews/escalations-NN.md` before retry. command stays
+    #     null because there's nothing safe to dispatch.
+    #   - "clear_marker" — kept reserved for future expansion; not yet
+    #     emitted because the in-tree heuristics route everything else
+    #     through retry or manual_fix.
+    def suggested_next_action_payload
+      return nil unless diagnostic_action?
+
+      if max_passes_review_stale_with_escalations?
+        return { "kind" => "manual_fix", "command" => nil }
+      end
+
+      cmd = retry_command_string
+      return nil if cmd.nil?
+
+      { "kind" => "retry", "command" => cmd }
+    end
+
+    def max_passes_review_stale_with_escalations?
+      return false unless marker.name == :review_stale
+
+      pass = marker.attrs["pass"].to_s
+      return false unless pass.match?(/\A[1-9]\d*\z/)
+
+      File.exist?(File.join(task.folder, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
+    end
+
+    # `hive markers clear` accepts a single --match-attr KEY=VALUE; pick
+    # the most-identifying attr per marker shape. The recipe stays a
+    # copy-pasteable one-liner so external agents (and humans) can run
+    # it from a shell unchanged.
+    def retry_command_string
+      attrs = marker.attrs || {}
+      case marker.name
+      when :review_error, :review_ci_stale
+        attr_pair = priority_match_attr(attrs, %w[pass phase reason])
+        clear_argv = [ "hive", "markers", "clear", task.folder,
+                       "--name", marker.name.to_s.upcase, *attr_pair ]
+        "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
+      when :review_stale
+        attr_pair = priority_match_attr(attrs, %w[pass reason])
+        clear_argv = [ "hive", "markers", "clear", task.folder,
+                       "--name", "REVIEW_STALE", *attr_pair ]
+        "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
+      when :error
+        attr_pair = priority_match_attr(attrs, %w[exit_code])
+        clear_argv = [ "hive", "markers", "clear", task.folder,
+                       "--name", "ERROR", *attr_pair ]
+        "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
+      end
+    end
+
+    def priority_match_attr(attrs, keys)
+      keys.each do |key|
+        value = attrs[key]
+        return [ "--match-attr", "#{key}=#{value}" ] if value && !value.to_s.empty?
+      end
+      []
     end
 
     def safe_mtime(path)

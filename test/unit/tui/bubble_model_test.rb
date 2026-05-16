@@ -561,7 +561,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
       @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
     end
 
-    assert_equal [ [ "hive", "status", "--diagnose", row.slug, "--project", row.project_name, "--write" ] ], calls
+    # --stage disambiguates when the same slug exists in multiple stages
+    # of the same project. TaskResolver raises AmbiguousSlug otherwise,
+    # which the operator sees as "diagnosis failed to start" — silently
+    # losing the refresh signal.
+    expected = [ "hive", "status", "--diagnose", row.slug,
+                 "--project", row.project_name, "--stage", row.stage, "--write" ]
+    assert_equal [ expected ], calls
     assert @model.hive_model.red_status_detail_state.refreshing
     assert_match(/already in progress/, @model.hive_model.flash)
   end

@@ -316,6 +316,14 @@ module Hive
         return Messages::RedStatusAutofix.new(row: row) if ENTER_KEYS.include?(key) && row
         return Messages::OpenManualFix.new(row: row) if key == "f" && row
         return Messages::RefreshRedStatusDiagnosis.new(row: row) if key == "R" && row
+        # Grid-mode verb keys (b/p/d/r/P/F/a) silently no-oping in the
+        # detail view conflicts with the muscle memory documented in
+        # wiki/commands/tui.md — notably `r` is the in-grid force-retry
+        # gesture (PR #72). Flash an explicit refusal instead so the
+        # operator sees the mode boundary.
+        if VERB_KEYS.key?(key)
+          return Messages::Flash.new(text: "verb keys are grid-mode only — Esc to return")
+        end
 
         Messages::NOOP
       end

@@ -23,13 +23,15 @@ class HiveTuiUpdateTest < Minitest::Test
     Hive::Tui::Messages::NewIdeaImageAttached.new(attachment: attachment)
   end
 
-  def red_detail_row(marker: "review_error", attrs: { "phase" => "fix", "pass" => "1" }, action_key: "recover_review")
+  def red_detail_row(marker: "review_error", attrs: { "phase" => "fix", "pass" => "1" },
+                     action_key: "recover_review",
+                     diagnostic: { "summary" => "REVIEW_ERROR", "detail" => "failed" })
     Hive::Tui::Snapshot::Row.new(
       project_name: "alpha", stage: "6-review", slug: "red-task", folder: "/tmp/red-task",
       state_file: "/tmp/red-task/task.md", marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: "Needs recovery", suggested_command: nil,
-      next_action: nil, diagnostic: { "summary" => "REVIEW_ERROR", "detail" => "failed" }
+      next_action: nil, diagnostic: diagnostic
     )
   end
 
@@ -120,13 +122,31 @@ class HiveTuiUpdateTest < Minitest::Test
   end
 
   def test_open_red_status_detail_enters_mode_with_marker_signature
-    row = red_detail_row
+    # Pin the canonical contract: when row.diagnostic carries a
+    # marker_signature (the producer-side SHA256 hex from
+    # TaskAction#marker_signature), the TUI reads that value verbatim
+    # so producer + consumer can never drift. Without diagnostic on the
+    # row, Update falls back to a locally-computed hash so the
+    # freshness gate still detects rotation across snapshots.
+    sig = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+    row = red_detail_row(diagnostic: {
+      "summary" => "REVIEW_ERROR", "detail" => "failed", "marker_signature" => sig
+    })
     new_model, cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
 
     assert_nil cmd
     assert_equal :red_status_detail, new_model.mode
     assert_same row, new_model.red_status_detail_state.row
-    assert_match(/review_error/, new_model.red_status_detail_state.marker_signature)
+    assert_equal sig, new_model.red_status_detail_state.marker_signature,
+                 "TUI must read the canonical marker_signature off row.diagnostic"
+  end
+
+  def test_red_status_marker_signature_falls_back_when_diagnostic_absent
+    row = red_detail_row(diagnostic: nil)
+    sig = Hive::Tui::Update.red_status_marker_signature(row)
+
+    assert_match(/\Ano-diag:[0-9a-f]{64}\z/, sig,
+                 "missing diagnostic must produce a deterministic locally-namespaced digest")
   end
 
   def test_snapshot_arrived_closes_red_detail_when_row_recovers

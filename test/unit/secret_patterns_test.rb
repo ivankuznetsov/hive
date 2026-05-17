@@ -45,7 +45,67 @@ class SecretPatternsTest < Minitest::Test
   end
 
   def test_pem_private_key_is_detected
-    assert_match_name("-----BEGIN RSA PRIVATE KEY-----", :pem_private_key)
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----"
+    assert_match_name(pem, :pem_private_key)
+  end
+
+  def test_pem_private_key_block_body_is_redacted_not_just_header
+    # Pre-fix the regex matched only the BEGIN delimiter, leaving the
+    # base64 body and END line in redacted output. A leak path because
+    # diagnose-time artifacts now egress through the agent profile +
+    # on-disk red-status.md + diagnostic.detail JSON. See PR #84 #3.
+    pem = <<~PEM
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEowIBAAKCAQEAvbPHGfakebodyzxcvbnmasdfghjklqwertyuiopASDF1234==
+      QWERTYZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890abcdefABCDEFGH==
+      -----END RSA PRIVATE KEY-----
+    PEM
+    redacted = Hive::SecretPatterns.redact(pem)
+    refute_includes redacted, "MIIEow",
+                    "PEM body bytes must be redacted, not just the BEGIN delimiter"
+    refute_includes redacted, "-----END RSA PRIVATE KEY-----",
+                    "PEM END delimiter must also be inside the redaction span"
+    assert_includes redacted, "[REDACTED:pem_private_key]"
+  end
+
+  def test_password_assignment_unquoted_is_detected
+    assert_match_name("PASSWORD=hunter2spelledbackwards", :password_assignment)
+  end
+
+  def test_password_assignment_yaml_style_is_detected
+    assert_match_name("password: s3cretpassphrase42", :password_assignment)
+  end
+
+  def test_short_password_value_does_not_match
+    refute_match_any("password=abc")
+  end
+
+  def test_authorization_bearer_token_is_detected
+    assert_match_name(
+      "Authorization: Bearer abc123XYZdef456ghi789jklMNO",
+      :bearer_token
+    )
+  end
+
+  def test_authorization_basic_credentials_are_detected
+    assert_match_name(
+      "authorization: Basic dXNlcjpzdXBlcnNlY3JldHBhc3M=",
+      :bearer_token
+    )
+  end
+
+  def test_session_cookie_header_is_detected
+    assert_match_name(
+      "Cookie: sessionid=abcdef0123456789xyz; Path=/",
+      :session_cookie
+    )
+  end
+
+  def test_set_cookie_session_is_detected
+    assert_match_name(
+      "Set-Cookie: SID=abcdef0123456789xyz; HttpOnly",
+      :session_cookie
+    )
   end
 
   def test_github_token_is_detected
@@ -69,6 +129,35 @@ class SecretPatternsTest < Minitest::Test
                     "AWS pattern must match in multi-pattern input"
     assert_includes names, :anthropic_api_key,
                     "Anthropic pattern must match in multi-pattern input"
+  end
+
+  # ── redact helper ──────────────────────────────────────────────────────
+
+  def test_redact_replaces_match_with_named_placeholder
+    text = "ACCESS = AKIAIOSFODNN7EXAMPLE"
+    assert_equal "ACCESS = [REDACTED:aws_access_key]", Hive::SecretPatterns.redact(text)
+  end
+
+  def test_redact_handles_nil_and_blank
+    assert_equal "", Hive::SecretPatterns.redact(nil)
+    assert_equal "", Hive::SecretPatterns.redact("")
+  end
+
+  def test_redact_does_not_mutate_input
+    text = "ACCESS = AKIAIOSFODNN7EXAMPLE"
+    snapshot = text.dup
+    Hive::SecretPatterns.redact(text)
+    assert_equal snapshot, text, "redact must not mutate its argument"
+  end
+
+  def test_redact_coerces_binary_input_to_utf8_without_raising
+    # tail_file used to return ASCII-8BIT bytes; gsub against the
+    # PATTERNS regexes (UTF-8) raised Encoding::CompatibilityError on
+    # any non-ASCII byte, aborting `hive status --json`. See PR #84 #4.
+    binary = "log entry \xff\xfe AKIAIOSFODNN7EXAMPLE done".dup.force_encoding(Encoding::ASCII_8BIT)
+    redacted = Hive::SecretPatterns.redact(binary)
+    assert_equal Encoding::UTF_8, redacted.encoding
+    assert_includes redacted, "[REDACTED:aws_access_key]"
   end
 
   def test_long_secret_is_truncated_in_snippet_per_eighty_char_rule

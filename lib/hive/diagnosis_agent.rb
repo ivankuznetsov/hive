@@ -38,6 +38,9 @@ module Hive
     TERMINATE_GRACE_SECONDS = 5
 
     class StaleMarker < Hive::Error; end
+    class DiagnosisInFlight < Hive::Error; end
+
+    LOCK_FILENAME = ".diagnose.lock"
 
     def self.run!(task:, local_diagnostic: nil)
       new(task: task, local_diagnostic: local_diagnostic).run!
@@ -58,44 +61,72 @@ module Hive
     end
 
     def run!
-      cfg = Hive::Config.load(@task.project_root)
-      profile = Hive::Stages::Base.stage_profile(cfg, "execute")
-      unless @injected_spawn
-        profile.check_version!
-        profile.preflight!
+      with_diagnose_lock do
+        cfg = Hive::Config.load(@task.project_root)
+        profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        unless @injected_spawn
+          profile.check_version!
+          profile.preflight!
+        end
+
+        marker = Hive::Markers.current(@task.state_file)
+        signature_at_dispatch = marker_signature(marker)
+        nonce = Hive::Stages::Base.user_supplied_tag
+
+        output = @spawn.call(
+          profile: profile,
+          prompt: prompt_for(marker, nonce: nonce),
+          cwd: @task.worktree_path || @task.project_root,
+          add_dirs: [ @task.folder ],
+          timeout_sec: cfg.dig("timeout_sec", "diagnose") || DEFAULT_TIMEOUT_SECONDS,
+          max_budget_usd: cfg.dig("budget_usd", "diagnose") || DEFAULT_BUDGET_USD
+        )
+
+        # Write-time freshness gate: re-read the marker after the agent
+        # finishes and confirm the (name + sorted attrs) signature is
+        # unchanged. A concurrent `hive run` mid-spawn can rotate the
+        # marker — writing the agent's explanation against the new marker
+        # would mis-describe the current state. Raise instead of writing
+        # so the operator sees a "diagnose stale" flash and can retry.
+        fresh_marker = Hive::Markers.current(@task.state_file)
+        if marker_signature(fresh_marker) != signature_at_dispatch
+          raise StaleMarker,
+                "diagnosis stale: marker changed during agent run — retry"
+        end
+
+        artifact = artifact_body(profile: profile, marker: fresh_marker, body: output)
+        path = write_artifact(artifact)
+        { path: path, generated_by: profile.name.to_s }
       end
-
-      marker = Hive::Markers.current(@task.state_file)
-      signature_at_dispatch = marker_signature(marker)
-      nonce = Hive::Stages::Base.user_supplied_tag
-
-      output = @spawn.call(
-        profile: profile,
-        prompt: prompt_for(marker, nonce: nonce),
-        cwd: @task.worktree_path || @task.project_root,
-        add_dirs: [ @task.folder ],
-        timeout_sec: cfg.dig("timeout_sec", "diagnose") || DEFAULT_TIMEOUT_SECONDS,
-        max_budget_usd: cfg.dig("budget_usd", "diagnose") || DEFAULT_BUDGET_USD
-      )
-
-      # Write-time freshness gate: re-read the marker after the agent
-      # finishes and confirm the (name + sorted attrs) signature is
-      # unchanged. A concurrent `hive run` mid-spawn can rotate the
-      # marker — writing the agent's explanation against the new marker
-      # would mis-describe the current state. Raise instead of writing
-      # so the operator sees a "diagnose stale" flash and can retry.
-      fresh_marker = Hive::Markers.current(@task.state_file)
-      if marker_signature(fresh_marker) != signature_at_dispatch
-        raise StaleMarker,
-              "diagnosis stale: marker changed during agent run — retry"
-      end
-
-      artifact = artifact_body(profile: profile, marker: fresh_marker, body: output)
-      path = write_artifact(artifact)
-      { path: path, generated_by: profile.name.to_s }
     end
 
     private
+
+    # Advisory flock on <task.folder>/diagnostics/.diagnose.lock so two
+    # concurrent --diagnose --write invocations on the same task (TUI R
+    # + CLI, daemon + operator, two operators) cannot both spawn the
+    # configured agent and burn budget in parallel. Non-blocking: lose
+    # the race and raise DiagnosisInFlight so the second caller fails
+    # fast with a structured envelope instead of waiting for the first
+    # to complete. The lock is per-task — different tasks can diagnose
+    # in parallel. See PR #84 review finding #2 + #11.
+    def with_diagnose_lock
+      dir = File.join(@task.folder, "diagnostics")
+      FileUtils.mkdir_p(dir)
+      lock_path = File.join(dir, LOCK_FILENAME)
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
+        unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+          raise DiagnosisInFlight,
+                "another diagnose is already running for this task — retry once it completes"
+        end
+        begin
+          yield
+        ensure
+          lock.flock(File::LOCK_UN)
+        end
+      end
+    end
+
 
     # ADR-019 per-spawn nonce wrap protects every interpolated user-/
     # disk-derived value with a `<user_supplied_<hex>>` boundary. Agents
@@ -212,11 +243,7 @@ module Hive
     end
 
     def redact(text)
-      output = text.to_s.dup
-      Hive::SecretPatterns::PATTERNS.each do |name, regex|
-        output.gsub!(regex, "[REDACTED:#{name}]")
-      end
-      output
+      Hive::SecretPatterns.redact(text)
     end
 
     # popen3 + manual wait loop with pgroup-scoped SIGTERM/SIGKILL on

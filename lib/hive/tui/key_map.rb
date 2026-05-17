@@ -218,6 +218,15 @@ module Hive
         when "error"
           attrs = row.attrs || {}
           !KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+        when "recover_execute"
+          # EXECUTE_STALE rows expose the same diagnostic payload in
+          # JSON but historically lacked a detail view. Opening the
+          # view lets operators read the bounded summary + artifact
+          # tail and refresh the diagnosis with `R`. The autofix
+          # action is intentionally a no-op for these rows (they
+          # require a manual fix); see PR #84 review finding #10 and
+          # task_action.rb#suggested_next_action_payload.
+          true
         else
           false
         end
@@ -235,12 +244,9 @@ module Hive
       end
 
       def max_passes_stale_with_escalations?(row)
-        return false unless row.marker.to_s == "review_stale"
-
-        pass = (row.attrs || {})["pass"].to_s
-        return false unless pass.match?(/\A[1-9]\d*\z/)
-
-        File.exist?(File.join(row.folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
+        Hive::TaskAction.max_passes_review_stale_with_escalations?(
+          folder: row.folder, marker_name: row.marker, attrs: row.attrs
+        )
       end
 
       # Enter on a `needs_input` row opens the row's input file in the

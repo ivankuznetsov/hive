@@ -889,13 +889,9 @@ module Hive
       # Non-REVIEW_STALE markers (REVIEW_ERROR, REVIEW_CI_STALE) never
       # need force; they always pass the gate.
       def red_status_autofix_force?(row)
-        return false unless row.marker.to_s == "review_stale"
-
-        attrs = row.attrs || {}
-        pass = attrs["pass"].to_s
-        return false unless pass.match?(/\A[1-9]\d*\z/)
-
-        File.exist?(File.join(row.folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
+        Hive::TaskAction.max_passes_review_stale_with_escalations?(
+          folder: row.folder, marker_name: row.marker, attrs: row.attrs
+        )
       end
 
       def register_diagnosis_attempt(folder)
@@ -941,7 +937,16 @@ module Hive
 
         Hive::Tui::Subprocess.dispatch_background(argv, dispatch: wrapped_dispatch)
         state = @hive_model.red_status_detail_state
-        model = state ? @hive_model.with(red_status_detail_state: state.with(refreshing: true)) : @hive_model
+        # Pressing R is an explicit operator acknowledgement of the
+        # current marker_signature — re-baseline so a subsequent
+        # snapshot-poll marker rotation re-fires the "marker changed"
+        # flash. See PR #84 review finding #7.
+        next_state =
+          if state
+            state.with(refreshing: true,
+                       acknowledged_marker_signature: state.marker_signature)
+          end
+        model = next_state ? @hive_model.with(red_status_detail_state: next_state) : @hive_model
         [ model.with(flash: "refreshing diagnosis for #{row.slug}", flash_set_at: Time.now), nil ]
       rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
         evict_diagnosis_attempt(folder)

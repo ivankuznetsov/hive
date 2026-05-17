@@ -471,7 +471,7 @@ module Hive
     end
 
     def tail_file(path)
-      File.open(path, "rb") do |file|
+      raw = File.open(path, "rb") do |file|
         begin
           file.seek(-DIAGNOSTIC_TAIL_BYTES, IO::SEEK_END)
         rescue Errno::EINVAL
@@ -479,6 +479,13 @@ module Hive
         end
         file.read.to_s
       end
+      # Coerce to UTF-8 with invalid byte replacement so downstream
+      # redact / truncate / JSON.generate never raises
+      # Encoding::CompatibilityError on a binary log tail. A single
+      # corrupt byte in one task's log used to abort the entire
+      # `hive status --json` snapshot, breaking every downstream
+      # consumer (bot, daemon, TUI). See PR #84 review finding #4.
+      raw.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
     end
 
     def diagnostic_updated_at(primary)
@@ -559,6 +566,16 @@ module Hive
         return { "kind" => "manual_fix", "command" => nil }
       end
 
+      # EXECUTE_STALE rows have no auto-retry recipe: the operator must
+      # review findings and either edit the worktree or lower the pass
+      # counter. Emit manual_fix with command:null instead of falling
+      # through to a nil payload so agents reading hive-status JSON
+      # see an explicit "do not auto-retry" signal rather than the
+      # absence of data. See PR #84 review finding #9.
+      if marker.name == :execute_stale
+        return { "kind" => "manual_fix", "command" => nil }
+      end
+
       cmd = retry_command_string
       return nil if cmd.nil?
 
@@ -566,12 +583,24 @@ module Hive
     end
 
     def max_passes_review_stale_with_escalations?
-      return false unless marker.name == :review_stale
+      self.class.max_passes_review_stale_with_escalations?(
+        folder: task.folder, marker_name: marker.name, attrs: marker.attrs
+      )
+    end
 
-      pass = marker.attrs["pass"].to_s
+    # Class-level predicate so TUI consumers (KeyMap#red_detail_row?,
+    # BubbleModel#red_status_autofix_force?) share the exact same logic
+    # as the JSON producer here. Previously the rule lived in three
+    # near-identical implementations coordinated only by comments;
+    # drift would silently desync producer + consumers. See PR #84
+    # review finding #17.
+    def self.max_passes_review_stale_with_escalations?(folder:, marker_name:, attrs:)
+      return false unless marker_name.to_s == "review_stale"
+
+      pass = (attrs || {})["pass"].to_s
       return false unless pass.match?(/\A[1-9]\d*\z/)
 
-      File.exist?(File.join(task.folder, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
+      File.exist?(File.join(folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
     end
 
     # `hive markers clear` accepts a single --match-attr KEY=VALUE; pick
@@ -616,11 +645,7 @@ module Hive
     end
 
     def redact(text)
-      output = text.to_s.dup
-      Hive::SecretPatterns::PATTERNS.each do |name, regex|
-        output.gsub!(regex, "[REDACTED:#{name}]")
-      end
-      output
+      Hive::SecretPatterns.redact(text)
     end
 
     def truncate(text, max)

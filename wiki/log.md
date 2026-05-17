@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-17T00:00:00Z] review — deferred-finding fixes for PR #84
+
+**Action:** Resolved the 14 deferred findings from PR #84's multi-agent code review. P1s: gate `--write` on red-state tasks (#1), add cross-process flock in `Hive::DiagnosisAgent#run!` raising `DiagnosisInFlight` on contention (#2 + #11), extend `pem_private_key` regex to block-form `/m` and add `password_assignment` / `bearer_token` / `session_cookie` patterns (#3), coerce `tail_file` and `SecretPatterns.redact` to UTF-8 with invalid-byte replacement so one corrupt log byte no longer aborts `hive status --json` (#4). P2s/P3: added `tasks[].worktree_path` to v2 schema as an agent-callable primitive for the manual-fix path (#8); `recover_execute` rows now emit `suggested_next_action.kind = "manual_fix"` (#9) and open the TUI red-status detail view (#10); consolidated three near-identical max_passes-with-escalations predicates into `Hive::TaskAction.max_passes_review_stale_with_escalations?` (#17); split `marker_signature` into observed-vs-acknowledged so a second marker rotation between polls fires the flash again (#7); added `Hive::SecretPatterns.redact` shared helper replacing the two duplicate inline redactors in `TaskAction` and `DiagnosisAgent` (#13); added `--force` to `hive status --diagnose --write` for the idempotency short-circuit when a fresh artifact already covers the marker (#21).
+
+Skipped per product direction: schema versioning #5 (product unreleased, in-place additions to v2 are policy-permitted). Deferred: subprocess timeout helper consolidation #18 (`DiagnosisAgent#run_with_timeout` vs `Hive::Tui::Subprocess#bounded_capture3` — they have legitimately different signatures (chdir, stdin_data), low-value cleanup for a separate change).
+
+**Refreshed pages:**
+- [[modules/secret_patterns]] — `redact` API, four new patterns, block-form PEM, binary-input coercion.
+
 ## [2026-05-16T00:00:00Z] review — red-status diagnostics wiki refresh
 
 **Action:** Captured the new `Hive::DiagnosisAgent` module (lib/hive/diagnosis_agent.rb, ~307 lines) and `Hive::TaskAction#diagnostic` public surface from PR #84. Adds a dedicated wiki/modules/diagnosis_agent.md covering invariants (no marker writes, no task lock, ADR-019 nonce wrap, pgroup+SIGTERM cleanup, freshness gate, atomic write), the on-disk artifact contract, and consumers. Refreshes wiki/modules/task_action.md to document the new `#diagnostic` method, its bounded-extraction caps (`DIAGNOSTIC_SUMMARY_MAX=120`, `DIAGNOSTIC_DETAIL_MAX=4000`, `ARTIFACT_PATHS_MAX=20`), the `marker_signature` SHA256 freshness key shared with `DiagnosisAgent` and the TUI live-update gate, the `recover_execute` JSON-emission-without-TUI-detail-view rationale, and the `suggested_next_action` retry-recipe contract.

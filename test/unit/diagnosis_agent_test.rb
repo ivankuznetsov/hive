@@ -167,6 +167,61 @@ class DiagnosisAgentTest < Minitest::Test
            "stale-marker abort must NOT leave an artifact behind"
   end
 
+  def test_concurrent_diagnose_on_same_task_raises_diagnosis_in_flight
+    # Two concurrent `--diagnose --write` invocations on the same task
+    # must not both spawn the configured agent and burn budget in
+    # parallel. The first acquires the per-task flock; the second fails
+    # fast with DiagnosisInFlight rather than blocking or duplicating
+    # work. See PR #84 review findings #2 + #11.
+    started = Queue.new
+    release = Queue.new
+    slow_spawn = lambda do |**_kwargs|
+      started << :go
+      release.pop          # block until the test signals completion
+      "agent body"
+    end
+
+    holder = Thread.new do
+      Hive::DiagnosisAgent.new(task: @task, spawn: slow_spawn).run!
+    rescue StandardError
+      # Tolerate Config-load failures from the simplified FakeTask; the
+      # lock has already been acquired before that path is reached.
+      nil
+    end
+
+    started.pop          # ensure the holder has the lock
+
+    assert_raises(Hive::DiagnosisAgent::DiagnosisInFlight) do
+      Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn).run!
+    end
+
+    release << :done
+    holder.join
+  end
+
+  def test_diagnose_lock_released_on_exception_so_retry_can_acquire
+    # An agent spawn that raises must release the flock in ensure so
+    # the operator's retry isn't permanently blocked.
+    fail_spawn = lambda { |**_kwargs| raise Hive::Error, "boom" }
+    assert_raises(Hive::Error) do
+      Hive::DiagnosisAgent.new(task: @task, spawn: fail_spawn).run!
+    end
+
+    # A subsequent run on the same task must NOT see DiagnosisInFlight.
+    refute_raises_diagnosis_in_flight do
+      Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn).run!
+    end
+  end
+
+  def refute_raises_diagnosis_in_flight
+    yield
+  rescue Hive::DiagnosisAgent::DiagnosisInFlight
+    flunk "diagnose flock was not released — retry would be permanently blocked"
+  rescue StandardError
+    # Other errors are fine for this test's purpose (lock was released).
+    nil
+  end
+
   def test_missing_execute_agent_config_surfaces_actionable_error
     # An unknown agent profile is rejected by AgentProfiles.lookup with
     # Hive::ConfigError → exit 78. DiagnosisAgent must propagate that

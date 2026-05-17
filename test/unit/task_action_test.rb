@@ -297,6 +297,27 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_execute_stale_emits_manual_fix_suggested_next_action
+    # EXECUTE_STALE has no auto-retry recipe — the operator must edit
+    # findings or lower the pass counter. Emit manual_fix with
+    # command: null so agent consumers see an explicit "do not auto-
+    # retry" signal rather than absence of data. See PR #84 review
+    # finding #9.
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+
+      diagnostic = Hive::TaskAction.for(task, marker(:execute_stale, "pass" => "2")).diagnostic
+
+      refute_nil diagnostic
+      suggested = diagnostic["suggested_next_action"]
+      refute_nil suggested,
+                 "EXECUTE_STALE must emit a suggested_next_action so agents see an explicit do-not-retry signal"
+      assert_equal "manual_fix", suggested["kind"]
+      assert_nil suggested["command"], "manual_fix carries no shell recipe"
+    end
+  end
+
   def test_recovery_diagnostic_falls_back_to_marker_when_artifacts_are_missing
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

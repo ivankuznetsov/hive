@@ -28,12 +28,13 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false)
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false)
         @json = json
         @diagnose = diagnose
         @project = project
         @stage = stage
         @write = write
+        @force = force
       end
 
       def call
@@ -124,6 +125,7 @@ module Hive
           "slug" => row[:slug],
           "folder" => row[:folder],
           "state_file" => row[:state_file],
+          "worktree_path" => row[:worktree_path],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601,
@@ -149,6 +151,27 @@ module Hive
         diagnostic = action.diagnostic
 
         if @write
+          # Gate the agent spawn on a red recovery state (recover_review
+          # / error / recover_execute). Green tasks produce a nil
+          # diagnostic and there is nothing for the agent to diagnose —
+          # spawning would burn LLM budget for no signal. See PR #84
+          # review finding #1.
+          if diagnostic.nil?
+            raise Hive::Error,
+                  "task #{task.slug} is not in a red recovery state — nothing to diagnose"
+          end
+
+          # Idempotency: short-circuit when a fresh agent-written
+          # artifact already covers the current marker_signature. The
+          # TaskAction.for call above already returned that artifact's
+          # body inside `diagnostic` (source == "artifact" and
+          # generated_by != "local"). Pass --force to re-spawn anyway.
+          # See PR #84 review finding #21.
+          if !@force && diagnostic["source"] == "artifact" && diagnostic["generated_by"] != "local"
+            emit_diagnose_result(task, diagnostic, diagnostic["source_path"])
+            return
+          end
+
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
           diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task)).diagnostic
@@ -241,11 +264,22 @@ module Hive
             mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : File.mtime(entry)
             icon, state_label = decorate(task, marker)
             claude_pid = lookup_claude_pid(task)
+            # Resolve once per row so JSON consumers (bot / daemon / agents)
+            # get the absolute worktree path without re-implementing the
+            # branch.yml lookup. Pre-execute stages legitimately return
+            # nil. See PR #84 review finding #8.
+            worktree_path =
+              begin
+                task.worktree_path
+              rescue StandardError
+                nil
+              end
             rows << {
               stage: stage,
               slug: slug,
               folder: entry,
               state_file: task.state_file,
+              worktree_path: worktree_path,
               task: task,
               marker_name: marker.name,
               marker_attrs: marker.attrs,

@@ -191,6 +191,38 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_match(/marker changed/, new_model.flash)
   end
 
+  def test_snapshot_arrived_fires_flash_again_on_second_marker_rotation
+    # The "marker changed" flash must fire on EVERY rotation that
+    # hasn't been operator-acknowledged. Previously the state
+    # rebased marker_signature on every poll, so a second rotation
+    # between polls was silently swallowed and the operator never
+    # saw the warning. See PR #84 review finding #7.
+    row = red_detail_row
+    initial_sig = Hive::Tui::Update.red_status_marker_signature(row)
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
+        row: row,
+        marker_signature: initial_sig
+      )
+    )
+
+    rotated_once = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
+    after_first, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_once))
+    )
+    assert_match(/marker changed/, after_first.flash, "first rotation must flash")
+
+    rotated_twice = red_detail_row(attrs: { "phase" => "fix", "pass" => "3" })
+    after_second, _cmd = Hive::Tui::Update.apply(
+      after_first.with(flash: nil, flash_set_at: nil),
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_twice))
+    )
+    assert_match(/marker changed/, after_second.flash,
+                 "second rotation without operator acknowledgement must also flash")
+  end
+
   # ---------- PollFailed ----------
 
   def test_poll_failed_records_error_and_keeps_prior_snapshot

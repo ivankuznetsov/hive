@@ -299,9 +299,13 @@ module Hive
       A freshness gate (marker_signature SHA256) refuses to write
       stale diagnoses when the marker rotates mid-spawn.
 
-      --write requires --diagnose. Empty --diagnose values are
-      rejected. Non-zero exits emit a structured error envelope on
-      stderr/stdout per the schema.
+      --write requires --diagnose AND a task in a red recovery state
+      (recover_review / error / recover_execute); green tasks emit a
+      structured error rather than burning agent budget on a healthy
+      row. When a previous agent-written artifact already matches the
+      current marker_signature, --write short-circuits and returns
+      the existing path without re-spawning; pass --force to bypass
+      that idempotency check. Empty --diagnose values are rejected.
     DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
     option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
@@ -309,6 +313,8 @@ module Hive
                    desc: "scope --diagnose slug lookup to one stage"
     option :write, type: :boolean, default: false,
                    desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
+    option :force, type: :boolean, default: false,
+                   desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     def status
       require "hive/commands/status"
       Hive::Commands::Status.new(
@@ -316,7 +322,8 @@ module Hive
         diagnose: options[:diagnose],
         project: options[:project],
         stage: options[:stage],
-        write: options[:write]
+        write: options[:write],
+        force: options[:force]
       ).call
     end
 

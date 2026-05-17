@@ -503,6 +503,20 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_enter_on_recover_execute_opens_red_status_detail
+    # EXECUTE_STALE rows previously had no TUI detail view even though
+    # they emit `diagnostic` in JSON. Opening the view here gives the
+    # operator the same bounded summary + artifact tail + R-refresh
+    # primitives that recover_review / error rows have. See PR #84
+    # review finding #10.
+    row = make_row(action_key: "recover_execute", action_label: "Needs recovery",
+                   stage: "4-execute", marker: "execute_stale",
+                   attrs: { "pass" => "2" }, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg
+    assert_same row, msg.row
+  end
+
   def test_enter_on_wall_clock_review_stale_keeps_direct_recover_review
     row = make_row(action_key: "recover_review", action_label: "Needs recovery",
                    stage: "6-review", marker: "review_stale",

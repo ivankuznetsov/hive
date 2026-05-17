@@ -186,8 +186,14 @@ module Hive
         # diagnose subprocess can run up to 600s; the indicator must
         # survive snapshots and only clear on SubprocessExited (see
         # BubbleModel#diagnose_subprocess_exit).
+        #
+        # marker_signature follows the live row; acknowledged_marker_signature
+        # only moves on explicit operator actions. Comparing against the
+        # acknowledged value means a second marker rotation still flashes
+        # the "marker changed" warning even when the first rotation
+        # already updated state.marker_signature. See PR #84 review #7.
         next_state = state.with(row: row, marker_signature: signature)
-        if signature != state.marker_signature
+        if signature != state.acknowledged_marker_signature
           return model.with(
             red_status_detail_state: next_state,
             flash: "marker changed since you opened this view — refresh (R)",

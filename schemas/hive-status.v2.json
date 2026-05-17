@@ -159,6 +159,7 @@
         "slug",
         "folder",
         "state_file",
+        "worktree_path",
         "marker",
         "attrs",
         "mtime",
@@ -193,6 +194,13 @@
         },
         "state_file": {
           "type": "string"
+        },
+        "worktree_path": {
+          "description": "Absolute path of the task's git worktree, or null for pre-execute stages (1-inbox, 2-brainstorm, 3-plan) and for tasks whose worktree was never created. Agents that want to open the worktree, edit files, and retry get the path here without re-implementing Hive::Task#worktree_path resolution. See PR #84 review finding #8.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "marker": {
           "type": "string",

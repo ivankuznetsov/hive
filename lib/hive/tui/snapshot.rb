@@ -27,6 +27,7 @@ module Hive
         :slug,
         :folder,
         :state_file,
+        :worktree_path,
         :marker,
         :attrs,
         :mtime,
@@ -38,7 +39,15 @@ module Hive
         :suggested_command,
         :next_action,
         :diagnostic
-      )
+      ) do
+        # worktree_path defaults to nil so existing test factories that
+        # predate PR #84 finding #8 can keep their existing Row.new
+        # calls; production code in build_row always passes the value
+        # explicitly. New tests should pass it explicitly too.
+        def initialize(worktree_path: nil, **rest)
+          super(worktree_path: worktree_path, **rest)
+        end
+      end
 
       attr_reader :generated_at, :projects
 
@@ -91,6 +100,7 @@ module Hive
           slug: payload["slug"],
           folder: payload["folder"],
           state_file: payload["state_file"],
+          worktree_path: payload["worktree_path"],
           marker: payload["marker"],
           attrs: payload["attrs"],
           mtime: payload["mtime"],

@@ -278,6 +278,31 @@ module Hive
     end
 
     desc "status", "Show all active tasks across registered projects"
+    long_desc <<~DESC
+      Default: prints a grouped table of every task across registered
+      projects, ordered by stage. Combine with --json to emit the
+      `hive-status` envelope (schema v2); every row carries a required
+      nullable `diagnostic` field — null for green rows, populated with
+      a bounded summary + artifact tail + marker signature for red
+      recovery/error rows.
+
+      --diagnose <slug>: switch to the `hive-status-diagnose` envelope
+      (schema v1) and emit the diagnostic for a single task. Useful
+      for agents that want to inspect one row without paying the
+      full snapshot cost. Pair with --project / --stage to disambiguate
+      when the same slug exists across multiple projects or stages.
+
+      --diagnose <slug> --write: spawn the project's configured execute
+      AgentProfile to write `<task.folder>/diagnostics/red-status.md`,
+      then return the path. The agent run is bounded (default 600s,
+      $5 budget) and does NOT claim the task lock or touch markers.
+      A freshness gate (marker_signature SHA256) refuses to write
+      stale diagnoses when the marker rotates mid-spawn.
+
+      --write requires --diagnose. Empty --diagnose values are
+      rejected. Non-zero exits emit a structured error envelope on
+      stderr/stdout per the schema.
+    DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
     option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
     option :stage, type: :string, enum: APPROVE_TO_ENUM,

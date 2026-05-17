@@ -3,11 +3,11 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-05-13
-tags: [module, status, action, classifier]
+updated: 2026-05-16
+tags: [module, status, action, classifier, diagnostic]
 ---
 
-**TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, a copy-paste-executable shell command, and an optional structured `next_action` for row-specific recovery. Used by `hive status` (action grouping + `tasks[].action` JSON field), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), and `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle).
+**TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, a copy-paste-executable shell command, an optional structured `next_action` for row-specific recovery, and (since 2026-05-16) a bounded `diagnostic` payload for red recovery rows. Used by `hive status` (action grouping + `tasks[].action`/`diagnostic` JSON fields), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle), and `hive status --diagnose` (`#diagnostic` is the local fallback path when no agent-written artifact is fresh).
 
 ## Public surface
 
@@ -17,8 +17,21 @@ action.key         # closed enum string per Hive::Schemas::TaskActionKind
 action.label       # human label, e.g. "Ready to plan"
 action.command     # copy-paste shell command, or nil
 action.next_action # structured row-local recovery action, or nil
+action.diagnostic  # bounded diagnostic payload for recover_review / recover_execute / error rows, nil otherwise
 action.payload     # { "key", "label", "command", "next_action" } for JSON emission
 ```
+
+## Red-status diagnostic (`#diagnostic`)
+
+`#diagnostic` returns a Hash matching the `Diagnostic` shape under both `hive-status.v2` (`tasks[].diagnostic`) and `hive-status-diagnose.v1` (`SuccessPayload.diagnostic`). It is non-nil for exactly three action keys: `recover_review`, `recover_execute`, and `error` (see `#diagnostic_action?`). Every other row returns `nil`.
+
+The payload is the local-extraction fallback. When a fresh agent-written `<task.folder>/diagnostics/red-status.md` exists (frontmatter `marker_signature` matches the current marker's SHA256), `diagnostic_generated_by` returns the producing AgentProfile name (`claude`/`codex`/`pi`) and the artifact body becomes the source of truth. Otherwise it bounds the output via `DIAGNOSTIC_SUMMARY_MAX` (120 chars), `DIAGNOSTIC_DETAIL_MAX` (4000 chars), and `ARTIFACT_PATHS_MAX` (20 paths). All summary/detail text passes through `redact` (using `Hive::SecretPatterns`) before emission.
+
+`marker_signature` is the SHA256 hex of `marker.name + sorted(attrs)` joined by newline. It's the freshness key shared with `Hive::DiagnosisAgent` (which validates it pre-write) and the TUI live-update gate (`Hive::Tui::Update#red_status_marker_signature`); producer + both consumers compute identical bytes.
+
+`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers via `retry_command_string` (`hive markers clear ... && hive run ...` as a shell one-liner). For `:execute_stale` and max-passes `:review_stale`, the value is `nil` — the operator must edit before retry.
+
+EXECUTE_STALE rows emit a non-nil `diagnostic` even though `Hive::Tui::KeyMap#red_detail_row?` does not yet open the detail view for them; bot/daemon/external-agent consumers of `hive status --json` rely on the field to explain why an EXECUTE_STALE task is stuck.
 
 ## Action map (`Hive::TaskAction::ACTIONS`)
 
@@ -87,3 +100,6 @@ Most of the data IS in the `ACTIONS` hash, but `command` needs to compose multip
 - [[commands/status]] · [[commands/run]] · [[commands/approve]] · [[commands/findings]]
 - [[modules/workflows]] — verb→stage map this module consults
 - [[modules/markers]] — the marker name space this module switches on
+- [[modules/diagnosis_agent]] — headless agent that writes the artifact this module prefers when fresh
+- [[modules/secret_patterns]] — redaction patterns used by `#diagnostic`'s summary/detail emission
+- [[decisions]] ADR-025 (required-and-nullable JSON envelopes) and ADR-027 (red-status diagnose-then-act)

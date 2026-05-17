@@ -38,6 +38,12 @@ module Hive
 
       def call
         @stdout_written = false
+        if @diagnose && @diagnose.to_s.strip.empty?
+          raise Hive::Error, "--diagnose requires a non-empty task slug"
+        end
+        if @write && @diagnose.nil?
+          raise Hive::Error, "--write requires --diagnose <task>"
+        end
         return diagnose_call if @diagnose
 
         do_call

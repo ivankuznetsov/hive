@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-16T00:00:00Z] review — red-status diagnostics wiki refresh
+
+**Action:** Captured the new `Hive::DiagnosisAgent` module (lib/hive/diagnosis_agent.rb, ~307 lines) and `Hive::TaskAction#diagnostic` public surface from PR #84. Adds a dedicated wiki/modules/diagnosis_agent.md covering invariants (no marker writes, no task lock, ADR-019 nonce wrap, pgroup+SIGTERM cleanup, freshness gate, atomic write), the on-disk artifact contract, and consumers. Refreshes wiki/modules/task_action.md to document the new `#diagnostic` method, its bounded-extraction caps (`DIAGNOSTIC_SUMMARY_MAX=120`, `DIAGNOSTIC_DETAIL_MAX=4000`, `ARTIFACT_PATHS_MAX=20`), the `marker_signature` SHA256 freshness key shared with `DiagnosisAgent` and the TUI live-update gate, the `recover_execute` JSON-emission-without-TUI-detail-view rationale, and the `suggested_next_action` retry-recipe contract.
+
+**Refreshed pages:**
+- [[modules/diagnosis_agent]] — new page covering the headless diagnose-spawn module.
+- [[modules/task_action]] — added `#diagnostic` to Public surface, new Red-status diagnostic section, backlinks to [[modules/diagnosis_agent]] / [[modules/secret_patterns]] / ADR-025 / ADR-027.
+- [[index]] — page count 59 → 60, added [[modules/diagnosis_agent]] entry.
+
 ## [2026-05-14T23:30:00Z] brainstorm — tmux interactive runtime (U1–U8)
 
 **Action:** Documented the new interactive tmux runtime for 2-brainstorm. The stage can now spawn the agent inside a detached tmux session (U3) via the `Stages::BrainstormTmux` runner, with U2's interactive Claude wrapper, U4's stop-hook install, U5's tmux sentinel fallback, U7's hardened preflight/teardown, and U8's operator notes. `lib/hive/tmux_runner.rb` (U1) is the shared runtime primitive. Selection is gated by a per-project config flag (U6) surfaced through `templates/project_config.yml.erb`. `hive doctor` (U7) preflights `tmux` availability + version and reports stale brainstorm sessions; the brainstorm stage cleans them up on completion. Wiki refresh in b67096c updated the brainstorm stage, doctor command, and state-model pages.

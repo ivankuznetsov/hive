@@ -149,10 +149,14 @@
       ],
       "properties": {
         "summary": {
-          "type": "string"
+          "description": "Single-line operator summary. Producer caps at 120 chars (TaskAction::DIAGNOSTIC_SUMMARY_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 120
         },
         "detail": {
-          "type": "string"
+          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 4000
         },
         "source": {
           "type": "string",

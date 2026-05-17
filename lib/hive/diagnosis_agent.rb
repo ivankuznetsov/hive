@@ -168,8 +168,24 @@ module Hive
       # Redact only the body. Running SecretPatterns over the YAML
       # frontmatter would corrupt the document if a `generated_by:` /
       # `marker_signature:` value (controlled by hive, never a secret)
-      # incidentally matched a pattern.
-      "#{header}# Red Status Diagnosis\n\n#{redact(body.to_s.strip)}\n"
+      # incidentally matched a pattern. sanitize_control_bytes strips
+      # ANSI escapes and C0 control bytes so a hostile log tail echoed
+      # by the agent can't take over the operator's terminal when they
+      # `cat diagnostics/red-status.md` or flow through into the
+      # diagnostic.detail JSON consumed by downstream tooling.
+      "#{header}# Red Status Diagnosis\n\n#{sanitize_control_bytes(redact(body.to_s.strip))}\n"
+    end
+
+    # Strip ANSI CSI escapes (ESC [ ... final-byte) and C0 control
+    # bytes (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F). Preserves TAB
+    # (0x09), LF (0x0A), and CR (0x0D) so multi-line content survives.
+    # Mirrors the contract documented in wiki/log.md for
+    # Hive::Tui::Text.sanitize without forcing this library module to
+    # depend on the TUI namespace.
+    def sanitize_control_bytes(text)
+      text.to_s
+          .gsub(/\e\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/, "")
+          .gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
     end
 
     def write_artifact(body)

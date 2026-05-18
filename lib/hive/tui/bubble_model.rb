@@ -28,6 +28,7 @@ require "hive/tui/views/log_tail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
 require "hive/tui/views/new_idea_prompt"
+require "hive/tui/views/new_idea_project_picker"
 
 module Hive
   module Tui
@@ -217,9 +218,10 @@ module Hive
         when :grid then compose_two_pane_view
         when :triage then Views::Triage.render(@hive_model)
         when :log_tail then Views::LogTail.render(@hive_model)
-        when :help then Views::HelpOverlay.render(@hive_model)
-        when :filter then compose_filter_view
-        when :new_idea then compose_new_idea_view
+	        when :help then Views::HelpOverlay.render(@hive_model)
+	        when :filter then compose_filter_view
+	        when :new_idea_project then compose_new_idea_project_view
+	        when :new_idea then compose_new_idea_view
         else compose_two_pane_view
         end
       end
@@ -2157,9 +2159,10 @@ module Hive
       #   so the success `puts` lines do NOT corrupt the alt-screen
       #   render.
       #
-      # Project is resolved from `model.scope` (0 = first registered
-      # project per the v2 brainstorm decision; N = nth registered
-      # project). Empty title or no-projects-registered states flash an
+	      # Project is resolved from either the explicit chooser target
+	      # (`new_idea_project_name`, set when `n` starts from ★ All
+	      # projects) or from a concrete project scope. Empty title or
+	      # no-projects-registered states flash an
       # error and return to :grid without spawning a child.
       #
       # Staging cleanup policy: every exit path either runs
@@ -2491,10 +2494,12 @@ module Hive
       # buffer, return to :grid, set a flash. Three call sites in the
       # success/validation branches plus the rescue all funnel through
       # this so the mode/buffer/flash trio always moves together.
-      def reset_to_grid_with_flash(text)
-        @hive_model.with(
-          mode: :grid,
-          new_idea_buffer: "",
+	      def reset_to_grid_with_flash(text)
+	        @hive_model.with(
+	          mode: :grid,
+	          new_idea_project_name: nil,
+	          new_idea_project_cursor: 0,
+	          new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
@@ -2514,12 +2519,21 @@ module Hive
       # so the operator sees the actual cause rather than a generic
       # "no projects" message that doesn't match what they see in the
       # left pane (which shows the project, just broken).
-      def new_idea_resolution_flash(model)
-        snap = model.snapshot
-        return "no projects — run `hive init <path>` first" if snap.nil? || snap.projects.empty?
+	      def new_idea_resolution_flash(model)
+	        snap = model.snapshot
+	        return "no projects — run `hive init <path>` first" if snap.nil? || snap.projects.empty?
 
-        if model.scope.between?(1, snap.projects.size)
-          project = snap.projects[model.scope - 1]
+	        chosen = model.respond_to?(:new_idea_project_name) ? model.new_idea_project_name.to_s : ""
+	        unless chosen.empty?
+	          project = snap.projects.find { |p| p.name == chosen }
+	          if project&.error
+	            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — choose another project or re-init it"
+	          end
+	          return "project #{chosen.inspect} is not available — choose another project" if project.nil?
+	        end
+
+	        if model.scope.between?(1, snap.projects.size)
+	          project = snap.projects[model.scope - 1]
           if project.error
             return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init, press X to drop, or `hive forget`"
           end
@@ -2569,10 +2583,17 @@ module Hive
       # Width clamps the prompt so long titles don't overflow the
       # terminal — the visible buffer slides to keep the cursor on
       # screen (see Views::NewIdeaPrompt.render).
-      def compose_new_idea_view
-        usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: prompt_footer(Views::NewIdeaPrompt.render(@hive_model, width: usable), usable))
-      end
+	      def compose_new_idea_view
+	        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+	        compose_two_pane_view(footer: prompt_footer(Views::NewIdeaPrompt.render(@hive_model, width: usable), usable))
+	      end
+
+	      def compose_new_idea_project_view
+	        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+	        compose_two_pane_view(
+	          footer: prompt_footer(Views::NewIdeaProjectPicker.render(@hive_model, width: usable), usable)
+	        )
+	      end
 
       # Stack an active flash above the prompt strip so error states
       # raised inside `:new_idea` / `:filter` mode (paste truncated,

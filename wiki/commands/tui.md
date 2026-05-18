@@ -64,7 +64,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `a` | run `hive archive` |
 | `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), recover + rerun on review-recovery and non-kill-class `error` rows; ready rows still dispatch the suggested command |
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `8-done` (or any stage). |
-| `n` | open the new-idea prompt; submitting runs `hive new <project> "<title>"` against the project selected in the left pane (`★ All` falls back to the first registered project) |
+| `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
 | `0` | scope back to `★ All projects` |
@@ -77,7 +77,7 @@ In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (a
 
 ## New Idea Prompt Editing
 
-The `n` prompt is a cursor-aware single-line title editor. Printable typing inserts at the cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
+The `n` prompt is a cursor-aware single-line title editor. When the dashboard scope is `★ All projects`, `n` first opens a concrete project picker (`j`/`k` or arrows to move, `Enter` to choose, `Esc` to cancel) so task capture never silently lands in the first registered project. After a project is chosen, printable typing inserts at the title cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
 
 ### Image paste
 

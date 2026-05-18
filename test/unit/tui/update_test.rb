@@ -569,6 +569,8 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     starting = model.with(
       mode: :grid,
+      new_idea_project_name: "old-project",
+      new_idea_project_cursor: 2,
       new_idea_buffer: "leftover-text",
       new_idea_cursor: 4,
       new_idea_attachments: [ attachment ],
@@ -577,11 +579,57 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
     assert_equal [], new_model.new_idea_attachments
     assert_nil new_model.new_idea_staging_dir
     assert_nil new_model.new_idea_staging_tmp_root
+  end
+
+  def test_open_new_idea_from_all_projects_opens_project_picker
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea_project, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
+  def test_open_new_idea_from_explicit_scope_opens_title_prompt
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 2)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea, new_model.mode
+    assert_nil new_model.new_idea_project_name
+  end
+
+  def test_new_idea_project_picker_selects_project_without_changing_scope
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: snap_with_two_projects_three_rows_each,
+      scope: 0,
+      new_idea_project_cursor: 1
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal :new_idea, new_model.mode
+    assert_equal "beta", new_model.new_idea_project_name
+    assert_equal 0, new_model.scope
+  end
+
+  def test_new_idea_project_picker_skips_unhealthy_projects
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-17",
+      "projects" => [
+        { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "hive", "tasks" => [] },
+        { "name" => "writero", "tasks" => [] }
+      ]
+    )
+    starting = model.with(mode: :new_idea_project, snapshot: snap, new_idea_project_cursor: 0)
+    down, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN)
+    assert_equal 1, down.new_idea_project_cursor
+    selected, _cmd = Hive::Tui::Update.apply(down, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal "writero", selected.new_idea_project_name
   end
 
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
@@ -847,6 +895,8 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     starting = model.with(
       mode: :new_idea,
+      new_idea_project_name: "hive",
+      new_idea_project_cursor: 1,
       new_idea_buffer: "rss feeds",
       new_idea_cursor: 4,
       new_idea_attachments: [ attachment ],
@@ -855,6 +905,8 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
     assert_equal :grid, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
     assert_equal [], new_model.new_idea_attachments

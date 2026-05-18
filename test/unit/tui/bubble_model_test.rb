@@ -575,7 +575,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "rss feeds"
+        mode: :new_idea, snapshot: snap, scope: 0,
+        new_idea_project_name: "hive", new_idea_buffer: "rss feeds"
       ),
       dispatch: @dispatch
     )
@@ -947,8 +948,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, new_idea_buffer: "rss feeds"
+	      hive_model: Hive::Tui::Model.initial.with(
+	        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
+	        new_idea_buffer: "rss feeds"
       ),
       dispatch: @dispatch
     )
@@ -969,8 +971,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, new_idea_buffer: "an idea"
+	      hive_model: Hive::Tui::Model.initial.with(
+	        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
+	        new_idea_buffer: "an idea"
       ),
       dispatch: @dispatch
     )
@@ -988,10 +991,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea,
-        snapshot: snap,
-        new_idea_buffer: "see [image1]",
+	          hive_model: Hive::Tui::Model.initial.with(
+	            mode: :new_idea,
+	            snapshot: snap,
+	            new_idea_project_name: "ghost",
+	            new_idea_buffer: "see [image1]",
         new_idea_cursor: 12
       ),
       dispatch: @dispatch
@@ -1082,9 +1086,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
         )
         @model = Hive::Tui::BubbleModel.new(
           hive_model: Hive::Tui::Model.initial.with(
-            mode: :new_idea,
-            snapshot: snap,
-            new_idea_buffer: "see [image1]",
+	            mode: :new_idea,
+	            snapshot: snap,
+	            new_idea_project_name: "ghost",
+	            new_idea_buffer: "see [image1]",
             new_idea_cursor: 12,
             new_idea_attachments: [ attachment ],
             new_idea_staging_dir: staging_dir
@@ -1123,10 +1128,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea,
-        snapshot: snap,
-        new_idea_buffer: "title [image1]",
+	      hive_model: Hive::Tui::Model.initial.with(
+	        mode: :new_idea,
+	        snapshot: snap,
+	        new_idea_project_name: "hive",
+	        new_idea_buffer: "title [image1]",
         new_idea_cursor: 14,
         new_idea_attachments: [ attachment ],
         new_idea_staging_dir: staging_dir

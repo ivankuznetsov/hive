@@ -12,10 +12,12 @@ module Hive
       # the resulting `hive new <project> "<title>"` will land in before
       # pressing Enter.
       #
-      # Project resolution for the label:
-      # - `model.scope == 0` (★ All projects) → first registered project,
-      #   prefixed with `★→` so the operator sees the implicit fallback.
-      # - `model.scope == n` → the nth registered project.
+	      # Project resolution for the label:
+	      # - `model.new_idea_project_name` → explicit target chosen from the
+	      #   project picker opened by ★ All projects.
+	      # - `model.scope == 0` (★ All projects) → unresolved; the picker
+	      #   must choose a project before this prompt can submit.
+	      # - `model.scope == n` → the nth registered project.
       # - No registered projects → `(no projects)`; submission flashes an
       #   error in U6's BubbleModel handler instead of dispatching.
       module NewIdeaPrompt
@@ -199,28 +201,32 @@ module Hive
 
         # Resolve which project an idea would land in. Pure read of the
         # snapshot; never raises (falls through to "(no projects)").
-        def project_label(model)
-          name = resolve_project_name(model)
-          return "(no projects)" if name.nil?
-          return "★→#{name}" if model.scope.zero?
+	      def project_label(model)
+	        name = resolve_project_name(model)
+	        if name.nil?
+	          projects = Array(model.snapshot&.projects)
+	          return "(choose project)" if model.scope.zero? && projects.any? { |p| p.error.nil? }
 
-          name
-        end
+	          return "(no projects)"
+	        end
 
-        def resolve_project_name(model)
-          snap = model.snapshot
-          return nil if snap.nil? || snap.projects.empty?
+	        name
+	      end
 
-          if model.scope.zero?
-            # ★ All projects fallback: pick the first project that
-            # is HEALTHY. Skipping projects with `error:` (missing
-            # path / not initialised) prevents `hive new` from
-            # exploding inside the dispatched subprocess against a
-            # stale registration whose directory no longer exists.
-            healthy = snap.projects.find { |p| p.error.nil? }
-            return healthy&.name
-          end
-          return nil unless model.scope.between?(1, snap.projects.size)
+	      def resolve_project_name(model)
+	        snap = model.snapshot
+	        return nil if snap.nil? || snap.projects.empty?
+
+	        chosen = model.respond_to?(:new_idea_project_name) ? model.new_idea_project_name.to_s : ""
+	        unless chosen.empty?
+	          project = snap.projects.find { |p| p.name == chosen }
+	          return project.name if project && project.error.nil?
+
+	          return nil
+	        end
+
+	        return nil if model.scope.zero?
+	        return nil unless model.scope.between?(1, snap.projects.size)
 
           project = snap.projects[model.scope - 1]
           # An explicit scope onto an unhealthy project also returns

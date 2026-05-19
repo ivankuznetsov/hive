@@ -190,6 +190,13 @@ module Hive
       # (workflow-contextual) and the verb keys (subprocess dispatch).
       OpenTaskFolder = Data.define(:row)
 
+      # `i` in grid mode — read the focused row's source idea.md and
+      # show its original_text in the bottom strip. Carries the row so
+      # BubbleModel's side-effect handler can resolve `row.folder` at
+      # the moment of the keystroke; this cannot be a payload-free
+      # singleton because snapshot polling may move the live cursor.
+      OpenIdeaPreview = Data.define(:row)
+
       # Enter on a completed 7-finalize row — browse the final summary
       # document in $EDITOR. Falls back to pr.md if summary.md is missing.
       OpenSummary = Data.define(:row)

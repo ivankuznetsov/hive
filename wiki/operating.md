@@ -33,9 +33,19 @@ brew install ivankuznetsov/hive/hive
 # Arch Linux
 yay -S hive-bin
 
-# glibc Linux fallback / Ubuntu 22.04+
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh | bash
+# glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh | bash
 ```
+
+`install.sh` accepts:
+
+| Flag / env | Purpose |
+|------------|---------|
+| `--dry-run` | Resolve target + version + URLs and run the runtime preflight without downloading or writing anything. |
+| `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Stage the versioned payload + `install-channel` marker under `<dir>/hive/…` instead of `${XDG_DATA_HOME}/hive`. `hive update` probes the prefix marker after the XDG marker, so subsequent updates re-use the same channel. |
+| `--version=<tag>` (or `HIVE_VERSION=<tag>`) | Skip the GitHub API call and install a specific `vX.Y.Z` tag. |
+| `HIVE_REPO_OWNER` / `HIVE_REPO_NAME` | Override the upstream owner/repo (for forks or mirror staging). Inputs are shape-validated. |
+| `HIVE_BIN_OVERRIDE` (read by `hv` wrapper) | Point `hv` at a custom install path when Apache Hive shadows it. |
 
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
@@ -64,7 +74,9 @@ collision before fallback aliasing is possible.
 Updates and uninstall:
 
 ```bash
-hive update --dry-run     # prints brew/yay/paru/bash/dev action
+hive update --dry-run     # prints the would-be brew/yay/paru/bash command for the channel
+                          # (the `dev` channel has no executable equivalent; it emits a
+                          # `suggested action` line pointing at `git pull && bundle install`)
 hive update               # delegates to the installing channel
 hive uninstall            # removes registrations/config/cache, preserves work
 hive uninstall --purge    # non-interactive; still preserves work
@@ -163,9 +175,17 @@ hive daemon start --detach
 
 ## Autostart
 
+`hive init` writes the platform daemon unit for you (see ADR-024).
+On Linux it lands at `~/.config/systemd/user/hive-daemon.service`; on
+macOS at `~/Library/LaunchAgents/local.hive-daemon.plist`. The recipes
+below are the manual fallback for environments where `hive init` could
+not write the unit (read-only home, restricted user, custom layout) or
+for migrating an existing install onto a newer template.
+
 ### Linux (systemd-user)
 
-A sample unit ships at `examples/systemd/hive-daemon.service`. Install:
+A sample unit ships at `examples/systemd/hive-daemon.service`. Install
+manually only if `hive init` could not write it for you:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -199,9 +219,13 @@ doesn't load your shell's rc files.
 
 ### macOS (launchd)
 
-A sample plist ships at `examples/launchd/hive-daemon.plist`.
-Edit the absolute paths first (replace `/Users/YOU/...` with your
-real paths — `which hive` shows the binary), then:
+`hive init` writes the resolved plist at
+`~/Library/LaunchAgents/local.hive-daemon.plist` with your real `hive`
+binary path already substituted. The recipe below is the manual
+fallback (uses the placeholder filename `hive-daemon.plist` so it can
+sit alongside the auto-generated `local.hive-daemon.plist`); edit the
+absolute paths first (replace `/Users/YOU/...` with your real paths —
+`which hive` shows the binary), then:
 
 ```bash
 mkdir -p ~/Library/LaunchAgents

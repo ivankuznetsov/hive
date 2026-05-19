@@ -211,7 +211,7 @@ module Hive
       when "brainstorm"
         marker.name == :complete ? ACTIONS.fetch(:brainstorm_complete) : ACTIONS.fetch(:brainstorm_waiting)
       when "plan"
-        marker.name == :complete ? ACTIONS.fetch(:plan_complete) : ACTIONS.fetch(:plan_waiting)
+        plan_action
       when "execute"
         execute_action
       when "open-pr"
@@ -219,7 +219,7 @@ module Hive
       when "review"
         review_action
       when "finalize"
-        marker.name == :complete ? ACTIONS.fetch(:finalize_complete) : ACTIONS.fetch(:finalize_waiting)
+        finalize_action
       when "done"
         ACTIONS.fetch(:done)
       else
@@ -265,6 +265,20 @@ module Hive
       else
         ACTIONS.fetch(:execute_waiting)
       end
+    end
+
+    def plan_action
+      return ACTIONS.fetch(:plan_complete) if marker.name == :complete
+      return ACTIONS.fetch(:error) if incomplete_plan_artifact?
+
+      ACTIONS.fetch(:plan_waiting)
+    end
+
+    def finalize_action
+      return ACTIONS.fetch(:finalize_complete) if marker.name == :complete
+      return ACTIONS.fetch(:error) if finalize_missing_pr_md?
+
+      ACTIONS.fetch(:finalize_waiting)
     end
 
     public
@@ -315,6 +329,8 @@ module Hive
     end
 
     def diagnostic_artifacts
+      return generic_error_artifacts if incomplete_plan_artifact?
+
       case marker.name
       when :review_error
         fresh_diagnosis_artifact + review_error_artifacts
@@ -469,12 +485,31 @@ module Hive
     end
 
     def marker_summary
+      return "PLAN_MISSING_OUTPUT" if incomplete_plan_artifact?
+      return "FINALIZE_MISSING_PR_MD" if finalize_missing_pr_md?
+
       attrs = marker.attrs.map { |key, value| "#{key}=#{value}" }.join(" ")
       marker_name = marker.name.to_s.upcase
       attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
     end
 
     def marker_detail
+      if incomplete_plan_artifact?
+        return [
+          "PLAN_MISSING_OUTPUT",
+          "Plan is incomplete because #{task.state_file} is missing or empty.",
+          "Rerun the plan stage to regenerate plan.md."
+        ].join("\n")
+      end
+
+      if finalize_missing_pr_md?
+        return [
+          "FINALIZE_MISSING_PR_MD",
+          "Finalize cannot run because #{task.state_file} is missing.",
+          "Move the task back to 5-open-pr or recreate pr.md with pr_url frontmatter."
+        ].join("\n")
+      end
+
       lines = [ marker_summary ]
       lines << "No diagnostic artifact was found under #{task.folder}."
       lines.join("\n")
@@ -722,6 +757,20 @@ module Hive
       task.stage_name == "execute" &&
         marker.name == :execute_waiting &&
         marker.attrs["findings_count"].to_i <= 0
+    end
+
+    def finalize_missing_pr_md?
+      task.stage_name == "finalize" &&
+        marker.name == :none &&
+        task.state_file.to_s.end_with?("/pr.md") &&
+        !File.exist?(task.state_file)
+    end
+
+    def incomplete_plan_artifact?
+      task.stage_name == "plan" &&
+        marker.name == :none &&
+        task.state_file.to_s.end_with?("/plan.md") &&
+        (!File.exist?(task.state_file) || File.zero?(task.state_file))
     end
 
     # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for

@@ -136,8 +136,37 @@ class RunFinalizeTest < Minitest::Test
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
 
-        assert_equal 1, status
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         assert_includes err, "finalize entered without 5-open-pr"
+        marker = Hive::Markers.current(File.join(task_dir, "pr.md"))
+        assert_equal :error, marker.name
+        assert_equal "missing_pr_md", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_finalize_requires_pr_url
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        File.write(pr_md, <<~MD)
+          ---
+          pr_number: 9
+          ---
+
+          ## Summary
+          draft
+
+          <!-- COMPLETE is_draft=true -->
+        MD
+
+        _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        assert_includes err, "finalize entered with pr.md missing pr_url"
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "missing_pr_url", marker.attrs["reason"]
       end
     end
   end

@@ -3,7 +3,7 @@ title: 3-plan stage
 type: stage
 source: lib/hive/stages/plan.rb, templates/plan_prompt.md.erb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-05-19
 tags: [stage, plan, ce-plan]
 ---
 
@@ -29,6 +29,8 @@ tags: [stage, plan, ce-plan]
 2. If `plan.md` exists, integrate inline user feedback. End with `<!-- COMPLETE -->` only if no follow-up questions remain; otherwise `<!-- WAITING -->`.
 
 Agent must not modify any file other than `plan.md`. Must not execute code in the project (execution happens in 4-execute).
+
+If a daemon stop or killed agent leaves `plan.md` missing or zero-byte with no marker, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. That state means the agent never produced a reviewable plan; rerun `hive plan ... --from 3-plan` after clearing the error.
 
 ## Marker → commit action mapping (`Stages::Plan.action_for`)
 

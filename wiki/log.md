@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T16:00:00Z] status — surface legacy stage dirs in JSON + text + TUI (PR #93)
+
+**Action:** `hive status` now detects task folders left behind by a stage rename in `Hive::Stages::DIRS` and surfaces them on every operator surface, instead of silently truncating them out of view. `Status#detect_legacy_stage_dirs` scans `<hive_state>/stages/` for directories outside `Hive::Stages::DIRS` containing slug-shaped subfolders (per the new `Hive::Stages.task_slug?` predicate — single source of truth shared with `Hive::Commands::Migrate`, so the count matches what `hive migrate` would actually move). The JSON payload's `Project` entry now always carries an additive `legacy_stage_dirs` array (`[]` when clean, otherwise `[{stage_dir, task_count}, ...]` sorted alphabetically). Text output prints a `⚠ N task(s) hidden in legacy stage dirs: ...` warning + `run hive migrate` hint under the project header; the TUI projects pane prefixes the affected project with `⚠` and a `legacy dirs — run hive migrate` hint by extending `ProjectView` with the new field. Schema `urn:hive:schema:status:v2` gains the optional `legacy_stage_dirs` property on `Project` without bumping `SCHEMA_VERSIONS["hive-status"]` (additive-optional policy in `lib/hive.rb`, precedent in PR #69's `rebase` block).
+
+**Refreshed pages:**
+- [[commands/status]] — new "Legacy stage directories" section documenting JSON shape, text warning, TUI hint, and the schema additive-field rationale.
+
 ## [2026-05-19T12:41:25Z] review — PR #84 follow-up contract hardening
 
 **Action:** Documented the follow-up PR #84 fixes that tightened the red-status diagnostic contract after code review. Bot diagnose callbacks now carry `--stage`, refresh uses `--force`, and child completion replies render the `hive-status-diagnose` envelope instead of a generic completion message. `DiagnosisAgent` now validates worktree pointers before `chdir`, bounds inherited-stdio timeout hangs, redacts failed-agent stderr, and refuses custom execute profiles whose `generated_by` value is outside `Hive::Schemas::DIAGNOSTIC_GENERATORS`. `TaskAction` now rejects symlink-escaped diagnostic artifacts before tailing them.

@@ -207,6 +207,100 @@ class SchemaFilesTest < Minitest::Test
            "schema must reject error_kind values outside StatusErrorKind::ALL"
   end
 
+  # Round-trip: a SuccessPayload with `legacy_stage_dirs` populated must
+  # validate against the published schema. Without this, an additive
+  # field could land in the producer (Hive::Commands::Status#project_payload)
+  # without the schema declaring it — and `additionalProperties: false`
+  # on the Project def would reject the payload at runtime for external
+  # consumers (TUI, daemon, bots).
+  def test_hive_status_success_payload_with_legacy_stage_dirs_validates_against_published_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+    payload = {
+      "schema" => "hive-status",
+      "schema_version" => 2,
+      "ok" => true,
+      "generated_at" => "2026-05-19T00:00:00Z",
+      "projects" => [
+        {
+          "name" => "alpha",
+          "path" => "/tmp/alpha",
+          "hive_state_path" => "/tmp/alpha/.hive-state",
+          "tasks" => [],
+          "legacy_stage_dirs" => [
+            { "stage_dir" => "5-review", "task_count" => 2 },
+            { "stage_dir" => "6-pr",     "task_count" => 1 }
+          ],
+          # Machine-readable recovery hint; siblings legacy_stage_dirs.
+          # Issue #94.
+          "legacy_migrate_command" => "hive migrate"
+        },
+        {
+          # Clean project: explicit empty array still validates, and
+          # legacy_migrate_command is explicitly null.
+          "name" => "beta",
+          "path" => "/tmp/beta",
+          "hive_state_path" => "/tmp/beta/.hive-state",
+          "tasks" => [],
+          "legacy_stage_dirs" => [],
+          "legacy_migrate_command" => nil
+        }
+      ]
+    }
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "hive-status SuccessPayload with legacy_stage_dirs must validate " \
+                 "(errors: #{errors.inspect})"
+  end
+
+  # `legacy_migrate_command` accepts either "hive migrate" (when
+  # legacy_stage_dirs is non-empty) or `null` (when clean); any other
+  # JSON type (e.g. a boolean or a number) must be rejected. Issue #94.
+  def test_hive_status_legacy_migrate_command_rejects_non_string_non_null
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+    payload = {
+      "schema" => "hive-status",
+      "schema_version" => 2,
+      "ok" => true,
+      "generated_at" => "2026-05-19T00:00:00Z",
+      "projects" => [
+        {
+          "name" => "alpha",
+          "path" => "/tmp/alpha",
+          "hive_state_path" => "/tmp/alpha/.hive-state",
+          "tasks" => [],
+          "legacy_stage_dirs" => [],
+          "legacy_migrate_command" => false # not a string and not null
+        }
+      ]
+    }
+    refute schemer.valid?(payload),
+           "legacy_migrate_command must reject values that aren't string-or-null"
+  end
+
+  # Negative case: a legacy_stage_dirs entry missing `stage_dir` or with
+  # `task_count` below the schema minimum must be rejected — pins
+  # additionalProperties: false on the entry shape.
+  def test_hive_status_legacy_stage_dirs_entry_shape_is_enforced
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+    base = {
+      "schema" => "hive-status",
+      "schema_version" => 2,
+      "ok" => true,
+      "generated_at" => "2026-05-19T00:00:00Z",
+      "projects" => [
+        {
+          "name" => "alpha",
+          "path" => "/tmp/alpha",
+          "hive_state_path" => "/tmp/alpha/.hive-state",
+          "tasks" => [],
+          "legacy_stage_dirs" => [ { "stage_dir" => "6-pr" } ] # missing task_count
+        }
+      ]
+    }
+    refute schemer.valid?(base),
+           "legacy_stage_dirs entry without task_count must be rejected"
+  end
+
   # ── hive-status-diagnose ───────────────────────────────────────────────
 
   def test_hive_status_diagnose_schema_file_exists_and_is_valid_json

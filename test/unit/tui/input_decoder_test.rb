@@ -135,6 +135,24 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_equal Bubbletea::KeyMessage::KEY_CTRL_E, decoder.drain("\x05").first.key_type
   end
 
+  def test_ctrl_v_byte_becomes_key_ctrl_v_message
+    messages = decoder.drain("\x16")
+    assert_equal 1, messages.size
+    assert_kind_of Bubbletea::KeyMessage, messages.first
+    assert_equal Bubbletea::KeyMessage::KEY_CTRL_V, messages.first.key_type
+  end
+
+  def test_ctrl_v_between_text_chunks_preserves_order
+    messages = decoder.drain("hi\x16there")
+    assert_equal 3, messages.size
+    assert_kind_of Hive::Tui::Messages::RawTextInput, messages[0]
+    assert_equal "hi", messages[0].text
+    assert_kind_of Bubbletea::KeyMessage, messages[1]
+    assert_equal Bubbletea::KeyMessage::KEY_CTRL_V, messages[1].key_type
+    assert_kind_of Hive::Tui::Messages::RawTextInput, messages[2]
+    assert_equal "there", messages[2].text
+  end
+
   def test_lone_escape_flushes_after_timeout
     assert_empty decoder.drain("\e")
     msg = decoder.flush.first

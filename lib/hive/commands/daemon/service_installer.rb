@@ -1,6 +1,7 @@
 require "cgi"
 require "fileutils"
 require "rbconfig"
+require "shellwords"
 
 module Hive
   module Commands
@@ -11,7 +12,12 @@ module Hive
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
                        systemctl_available: nil)
           @host_os = host_os
-          @home = File.expand_path(home || ENV["HIVE_HOME"] || Dir.home)
+          # Anchor on the real user home for launchd/systemd paths —
+          # HIVE_HOME is a config/test override that does not apply
+          # here (launchd literally reads `~/Library/...`). We honor
+          # `ENV["HOME"]` over `Dir.home` so test sandboxes that swap
+          # HOME stay hermetic.
+          @home = File.expand_path(home || ENV["HOME"] || Dir.home)
           @binary_path = binary_path
           @runner = runner || ->(argv) { system(*argv) }
           @systemctl_available = systemctl_available
@@ -22,7 +28,7 @@ module Hive
           case platform
           when :macos then install_macos!(autostart: autostart)
           when :linux then install_linux!(autostart: autostart)
-          else
+          when :unsupported_host
             @messages << "daemon autostart not supported on this platform; run `hive daemon start` manually."
             :unsupported
           end
@@ -40,7 +46,13 @@ module Hive
         def install_macos!(autostart:)
           path = target_path
           write_if_safe(path, render_launchd)
-          @runner.call([ "launchctl", "load", path ]) if autostart
+          if autostart
+            ok = @runner.call([ "launchctl", "load", path ])
+            unless ok
+              @messages << "launchctl load failed for #{path}; run `launchctl load #{path}` manually"
+              return :failed
+            end
+          end
           :ok
         end
 
@@ -49,8 +61,12 @@ module Hive
           write_if_safe(path, render_systemd)
           if autostart
             if systemctl_available?
-              @runner.call(%w[systemctl --user daemon-reload])
-              @runner.call(%w[systemctl --user enable --now hive-daemon])
+              ok_reload = @runner.call(%w[systemctl --user daemon-reload])
+              ok_enable = @runner.call(%w[systemctl --user enable --now hive-daemon])
+              unless ok_reload && ok_enable
+                @messages << "systemctl --user enable failed; run `systemctl --user enable --now hive-daemon` manually"
+                return :failed
+              end
             else
               @messages << "systemd not detected; enable systemd in WSL or run `hive daemon start` manually."
             end
@@ -74,17 +90,27 @@ module Hive
 
         def render_systemd
           template = File.read(File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__))
-          template.sub(/^ExecStart=.*$/, "ExecStart=#{resolved_binary} daemon start")
+          # systemd .service files are POSIX-shell-ish — escape the
+          # resolved binary path so whitespace, `%`, or other special
+          # characters don't produce a malformed unit.
+          escaped = Shellwords.escape(resolved_binary)
+          template.sub(/^ExecStart=.*$/, "ExecStart=#{escaped} daemon start")
         end
 
         def render_launchd
           template = File.read(File.expand_path("../../../../examples/launchd/hive-daemon.plist", __dir__))
-          escaped_binary = CGI.escapeHTML(resolved_binary)
+          binary = resolved_binary
+          # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get
+          # the correct directory segmentation; then escape both for
+          # plist XML safety.
+          binary_dir = File.dirname(binary)
+          escaped_binary = CGI.escapeHTML(binary)
+          escaped_binary_dir = CGI.escapeHTML(binary_dir)
           escaped_home = CGI.escapeHTML(@home)
           template
             .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
             .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
-            .gsub("/Users/YOU/.local/bin", File.dirname(escaped_binary))
+            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
         end
 
         def resolved_binary
@@ -104,14 +130,21 @@ module Hive
           case @host_os
           when /darwin/i then :macos
           when /linux/i then :linux
-          else :unsupported
+          else :unsupported_host
           end
         end
 
+        # Differentiate "systemctl missing" (ENOENT — Tier-3 host)
+        # from "systemctl exists but rejected the call" (working-
+        # but-disabled systemd-user). Treat any non-ENOENT failure as
+        # available so we surface the real systemctl error to the
+        # user on the next call.
         def systemctl_available?
           return @systemctl_available unless @systemctl_available.nil?
 
           system("systemctl", "--user", "--version", out: File::NULL, err: File::NULL)
+        rescue Errno::ENOENT
+          false
         end
       end
     end

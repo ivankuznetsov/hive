@@ -1,9 +1,17 @@
+require "hive"
 require "hive/install_channel"
 
 module Hive
   module Commands
     class Update
-      INSTALL_URL = "https://raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh".freeze
+      # Centralised org+repo + brew tap so a future rename of the
+      # repository is a one-diff change. The installer URL pins to the
+      # current release tag (Hive::VERSION) rather than `main` so
+      # `hive update` doesn't keep re-running an unpinned script.
+      REPO_OWNER = "ivankuznetsov".freeze
+      REPO_NAME = "hive".freeze
+      BREW_TAP = "#{REPO_OWNER}/#{REPO_NAME}/hive".freeze
+      INSTALL_URL = "https://raw.githubusercontent.com/#{REPO_OWNER}/#{REPO_NAME}/v#{Hive::VERSION}/install.sh".freeze
 
       def initialize(dry_run: false, output: $stdout, runner: nil, env: ENV, channel: nil)
         @dry_run = dry_run
@@ -28,19 +36,52 @@ module Hive
           return 0
         end
 
-        @runner.call(argv)
+        invoke!(argv)
       end
 
       private
 
       def command_for(channel)
         case channel
-        when "brew" then %w[brew upgrade ivankuznetsov/hive/hive]
+        when "brew" then [ "brew", "upgrade", BREW_TAP ]
         when "aur" then aur_command
-        when "bash" then [ "bash", "-c", "curl -fsSL #{INSTALL_URL} | bash" ]
+        when "bash" then [ "bash", "-o", "pipefail", "-c", "curl -fsSL #{INSTALL_URL} | bash" ]
         when "dev" then nil
         else
           raise Hive::ConfigError, "unknown hive install channel #{channel.inspect}"
+        end
+      end
+
+      # Preflight the helper binary so a missing `brew` / `curl` /
+      # `yay` produces an actionable error instead of a Ruby ENOENT
+      # stacktrace from the process-replace call. The `bash` channel
+      # invokes `curl` inside the shell command, so we check curl
+      # rather than bash.
+      def invoke!(argv)
+        helper = primary_helper(argv)
+        unless helper_available?(helper)
+          raise Hive::UnavailableError,
+                "hive update: required helper '#{helper}' not found on PATH; install it and re-run"
+        end
+
+        @runner.call(argv)
+      rescue Errno::ENOENT => e
+        raise Hive::UnavailableError, "hive update: #{e.message}"
+      end
+
+      # Absolute paths come pre-resolved (e.g. from `aur_command`'s own
+      # `which("yay")` lookup); skip the PATH probe for those and trust
+      # the executable bit.
+      def helper_available?(helper)
+        return File.executable?(helper) if helper.start_with?("/")
+
+        !which(helper).nil?
+      end
+
+      def primary_helper(argv)
+        case argv.first
+        when "bash" then "curl"
+        else argv.first
         end
       end
 

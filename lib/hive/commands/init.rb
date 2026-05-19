@@ -108,10 +108,15 @@ module Hive
       def register_daemon_service!(autostart:)
         record_daemon_autostart!(autostart)
         installer = Hive::Commands::Daemon::ServiceInstaller.new
-        installer.install!(autostart: autostart)
+        result = installer.install!(autostart: autostart)
         installer.messages.each { |line| write_warn("hive: #{line}") }
-      rescue StandardError => e
-        write_warn("hive: daemon service registration failed: #{e.class}: #{e.message}")
+        if result == :failed
+          write_warn("hive: daemon service registration reported a failure; run `hive doctor` and check daemon logs")
+        end
+      rescue Errno::EACCES, Errno::ENOSPC, Errno::EPERM => e
+        write_warn("hive: daemon service registration failed (#{e.class}: #{e.message}); fix permissions and re-run `hive init`")
+      rescue Hive::Error => e
+        write_warn("hive: daemon service registration failed: #{e.message}")
       end
 
       def record_daemon_autostart!(autostart)

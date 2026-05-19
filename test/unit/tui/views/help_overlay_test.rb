@@ -22,9 +22,15 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     assert_includes out, "Triage mode"
     assert_includes out, "Log tail mode"
     assert_includes out, "Filter prompt"
+    assert_includes out, "Idea preview (i)"
     assert_includes out, "New-idea prompt",
                     "v2 :new_idea bindings must surface in the help overlay; without this " \
                     "header, the n / Enter / Esc bindings in :new_idea mode are invisible"
+  end
+
+  def test_renders_idea_preview_section_header
+    out = Hive::Tui::Views::HelpOverlay.render(model)
+    assert_includes out, "Idea preview (i)"
   end
 
   def test_renders_v2_pane_focus_and_navigation_keys

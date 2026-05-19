@@ -20,6 +20,7 @@ module Hive
           triage: "Triage mode (Enter on a 'review_findings' row)",
           log_tail: "Log tail mode (Enter on an 'agent_running' row)",
           filter: "Filter prompt",
+          idea_preview: "Idea preview (i)",
           new_idea: "New-idea prompt (n)"
         }.freeze
 

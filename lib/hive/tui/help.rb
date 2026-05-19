@@ -38,6 +38,7 @@ module Hive
         { mode: :grid, key: "Right",     action: :pane_focus_right,   description: "jump focus to the tasks pane" },
         { mode: :grid, key: "Enter",     action: :open_contextual,    description: "left pane: focus right. right pane: open red-status detail on gated red rows; wall_clock REVIEW_STALE keeps direct retry, kill-class ERROR opens log tail, max_passes REVIEW_STALE opens focal escalations; non-red contextual behavior is unchanged" },
         { mode: :grid, key: "o",         action: :open_task_folder,   description: "open the focused task's folder in $EDITOR (read-only browse — no workflow dispatch, distinct from Enter and the verb keys)" },
+        { mode: :grid, key: "i",         action: :open_idea_preview,  description: "preview the original idea text for the focused task in the bottom strip" },
         { mode: :grid, key: "n",         action: :new_idea,           description: "open the new-idea prompt; from ★ All projects, choose a target project first" },
         { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
         { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },
@@ -65,6 +66,8 @@ module Hive
         # Filter prompt mode.
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
         { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" },
+        # Idea preview mode.
+        { mode: :idea_preview, key: "any", action: :back, description: "any key dismisses the preview" },
         # New-idea prompt mode (v2).
         { mode: :new_idea_project, key: "j/k",     action: :project_cursor,  description: "move through projects for the new idea" },
         { mode: :new_idea_project, key: "Up/Down", action: :project_cursor,  description: "move through projects (arrow keys)" },

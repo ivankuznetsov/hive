@@ -20,7 +20,7 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea_project / :new_idea
+      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview
       :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
       :cursor,           # [project_idx, row_idx] (or nil for empty grid)
       :filter,           # String or nil — committed substring filter
@@ -40,6 +40,8 @@ module Hive
       # asset. Resets only on open / cancel / submit.
       :new_idea_attachment_counter,
       :new_idea_broken_labels, # Array<String> — labels highlighted after rich-submit validation fails
+      :idea_preview_text, # String or nil — original_text rendered in :idea_preview mode
+      :idea_preview_slug, # String or nil — slug captured when the preview opened
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
       :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
@@ -122,6 +124,8 @@ module Hive
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           new_idea_broken_labels: [],
+          idea_preview_text: nil,
+          idea_preview_slug: nil,
           flash: nil,
           flash_set_at: nil,
           triage_state: nil,

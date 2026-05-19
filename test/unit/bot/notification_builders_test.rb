@@ -5,7 +5,8 @@ require "hive/bot/notification_builders"
 class HiveBotNotificationBuildersTest < Minitest::Test
   Row = Hive::Bot::StatusWatcher::Row
 
-  def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm")
+  def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
+          diagnostic: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -15,7 +16,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       folder: "/tmp/#{slug}",
       action: action,
       action_label: "label",
-      suggested_command: nil
+      suggested_command: nil,
+      diagnostic: diagnostic
     )
   end
 
@@ -113,6 +115,41 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     # keystroke — issue #91. Order is locked so a future keyboard
     # tweak cannot accidentally drop or duplicate the button.
     assert_equal [ "Clear and retry", "Open laptop", "Show details", "Refresh diagnosis" ], labels
+  end
+
+  def test_markerless_retry_recovery_uses_retry_button_without_clear_copy
+    diagnostic = {
+      "summary" => "PLAN_MISSING_OUTPUT",
+      "suggested_next_action" => {
+        "kind" => "retry",
+        "command" => "hive plan slug-260514-abcd --from 3-plan"
+      }
+    }
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "error", marker: "none", stage: "3-plan", diagnostic: diagnostic)
+    )
+
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Retry", "Open laptop", "Show details", "Refresh diagnosis" ], labels
+    assert_equal "clear_retry:hive:slug-260514-abcd:3-plan:NONE",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
+  def test_manual_fix_recovery_omits_clear_and_retry_button
+    diagnostic = {
+      "summary" => "FINALIZE_MISSING_PR_MD",
+      "suggested_next_action" => {
+        "kind" => "manual_fix",
+        "command" => nil
+      }
+    }
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "error", marker: "error", stage: "7-finalize", diagnostic: diagnostic)
+    )
+
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    refute_includes labels, "Clear and retry"
+    assert_equal [ "Open laptop", "Show details", "Refresh diagnosis" ], labels
   end
 
   def test_fix_tampered_recovery_falls_back_to_laptop

@@ -12,7 +12,7 @@ tags: [stage, finalize, pr, github]
 ## Preconditions
 
 1. `worktree.yml` must exist and point at a live worktree.
-2. `pr.md` must already exist with `pr_url` frontmatter from 5-open-pr.
+2. `pr.md` must already exist with `pr_url` frontmatter from 5-open-pr; missing PR metadata records `ERROR reason=missing_pr_md` or `ERROR reason=missing_pr_url`.
 3. `gh auth status` must succeed.
 4. The feature worktree must be clean; otherwise the stage writes `<!-- ERROR reason=dirty_worktree -->`.
 5. The branch must be pushed to its upstream. The runner attempts one push before writing `<!-- ERROR reason=unpushed_commits -->`.
@@ -29,7 +29,8 @@ tags: [stage, finalize, pr, github]
 ## Marker → commit action
 
 - `:complete` → `pr_finalized`.
-- Dirty or unpushed state writes an `ERROR` marker and commits the corresponding error state.
+- Status only treats a `7-finalize` `:complete` marker as archive-ready when it carries `is_draft=false` and a `pr_url` matching `pr.md` frontmatter. A carried-over `5-open-pr` marker with `is_draft=true` remains ready to run finalize, not ready to archive.
+- Missing `pr.md` / missing `pr_url`, dirty worktree, or unpushed state writes an `ERROR` marker and commits the corresponding error state.
 
 ## Backlinks
 

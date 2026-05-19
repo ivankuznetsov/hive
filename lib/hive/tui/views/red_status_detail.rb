@@ -20,7 +20,7 @@ module Hive
         module_function
 
         def footer_for(row)
-          row && row.action_key.to_s == "recover_execute" ? FOOTER_NO_ENTER : FOOTER
+          auto_action_available?(row) ? FOOTER : FOOTER_NO_ENTER
         end
 
         def render(model)
@@ -70,7 +70,13 @@ module Hive
           when "recover_review"
             "A: Enter runs the existing review recovery path. f opens the worktree in $EDITOR without clearing the marker."
           when "error"
-            "A: Enter clears the ERROR marker and reruns the task. f opens the worktree in $EDITOR without clearing the marker."
+            if diagnostic_retry_command(row)
+              "A: Enter reruns the suggested recovery command. f opens the task folder in $EDITOR without changing state."
+            elsif manual_fix?(row)
+              "A: No autofix available. Press f to open the task folder in $EDITOR and repair the missing state."
+            else
+              "A: Enter clears the ERROR marker and reruns the task. f opens the worktree in $EDITOR without clearing the marker."
+            end
           when "recover_execute"
             # EXECUTE_STALE has no auto-retry recipe — the operator must
             # edit findings or lower the pass counter before re-running.
@@ -80,6 +86,30 @@ module Hive
           else
             "A: This row has no autofix action in the detail view."
           end
+        end
+
+        def auto_action_available?(row)
+          return false if row.nil?
+          return true if row.action_key.to_s == "recover_review"
+          return false if row.action_key.to_s == "recover_execute"
+          return true if row.action_key.to_s == "error" && diagnostic_retry_command(row)
+          return true if row.action_key.to_s == "error" && row.marker.to_s == "error"
+
+          false
+        end
+
+        def diagnostic_retry_command(row)
+          suggested = row&.diagnostic && row.diagnostic["suggested_next_action"]
+          return nil unless suggested.is_a?(Hash)
+          return nil unless suggested["kind"].to_s == "retry"
+
+          command = suggested["command"].to_s.strip
+          command.empty? ? nil : command
+        end
+
+        def manual_fix?(row)
+          suggested = row&.diagnostic && row.diagnostic["suggested_next_action"]
+          suggested.is_a?(Hash) && suggested["kind"].to_s == "manual_fix"
         end
 
         def artifact_lines(row, width)

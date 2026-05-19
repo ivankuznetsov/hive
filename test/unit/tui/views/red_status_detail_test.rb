@@ -84,4 +84,50 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "[q] back",
                     "recover_execute rows must keep the back affordance"
   end
+
+  def test_markerless_retry_error_keeps_enter_affordance
+    diagnostic = {
+      "summary" => "PLAN_MISSING_OUTPUT",
+      "suggested_next_action" => {
+        "kind" => "retry",
+        "command" => "hive plan red-task --from 3-plan"
+      }
+    }
+    retry_row = Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "3-plan", slug: "red-task",
+      folder: "/tmp/red-task", state_file: "/tmp/red-task/plan.md",
+      marker: "none", attrs: {}, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "error", action_label: "Error",
+      suggested_command: nil, next_action: nil, diagnostic: diagnostic
+    )
+
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(retry_row))
+
+    assert_includes output, "[Enter] autofix / retry"
+    assert_includes output, "Enter reruns the suggested recovery command"
+  end
+
+  def test_manual_fix_error_omits_enter_affordance
+    diagnostic = {
+      "summary" => "FINALIZE_MISSING_PR_MD",
+      "suggested_next_action" => {
+        "kind" => "manual_fix",
+        "command" => nil
+      }
+    }
+    manual_row = Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "7-finalize", slug: "red-task",
+      folder: "/tmp/red-task", state_file: "/tmp/red-task/pr.md",
+      marker: "none", attrs: {}, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "error", action_label: "Error",
+      suggested_command: nil, next_action: nil, diagnostic: diagnostic
+    )
+
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(manual_row))
+
+    refute_includes output, "[Enter] autofix / retry"
+    assert_includes output, "No autofix available"
+  end
 end

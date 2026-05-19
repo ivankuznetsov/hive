@@ -1,5 +1,6 @@
 require "test_helper"
 require "fileutils"
+require "hive/task"
 require "hive/task_action"
 require "hive/markers"
 
@@ -49,6 +50,39 @@ class TaskActionTest < Minitest::Test
   def test_plan_complete_is_ready_to_develop
     task = fake_task(stage_name: "plan", stage_index: 3)
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
+  end
+
+  def test_plan_missing_or_empty_output_is_error_not_needs_input
+    Dir.mktmpdir("task-action-plan") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "3-plan", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = Hive::Task.new(folder)
+
+      missing = Hive::TaskAction.for(task, marker(:none))
+      assert_equal "needs_input", missing.key,
+                   "freshly approved plan-stage folders start without plan.md and must remain runnable"
+      assert_equal "hive plan demo-260426-aaaa --from 3-plan", missing.command
+
+      FileUtils.mkdir_p(File.join(dir, ".hive-state", "logs", task.slug))
+      File.write(File.join(dir, ".hive-state", "logs", task.slug, "plan-20260519T221007Z.log"), "spawned\n")
+      interrupted = Hive::TaskAction.for(task, marker(:none))
+      assert_equal "error", interrupted.key
+      assert_nil interrupted.command
+      assert_match(/Plan is incomplete because .*plan\.md is missing or empty/,
+                   interrupted.diagnostic["detail"])
+
+      FileUtils.rm_rf(File.join(dir, ".hive-state", "logs", task.slug))
+      File.write(task.state_file, "")
+      empty = Hive::TaskAction.for(task, marker(:none))
+      assert_equal "error", empty.key
+      assert_nil empty.command
+      assert_match(/PLAN_MISSING_OUTPUT/, empty.diagnostic["summary"])
+      assert_match(/Rerun the plan stage to regenerate plan\.md/, empty.diagnostic["detail"])
+      assert_equal "marker", empty.diagnostic["source"]
+      assert_equal "retry", empty.diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_equal "hive plan demo-260426-aaaa --from 3-plan",
+                   empty.diagnostic.fetch("suggested_next_action").fetch("command")
+    end
   end
 
   def test_execute_complete_is_ready_to_open_pr
@@ -129,8 +163,122 @@ class TaskActionTest < Minitest::Test
   end
 
   def test_finalize_complete_is_ready_to_archive
-    task = fake_task(stage_name: "finalize", stage_index: 7)
-    assert_equal "ready_to_archive", Hive::TaskAction.for(task, marker(:complete)).key
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+      File.write(task.state_file, <<~MD)
+        ---
+        pr_url: https://example.com/pr/9
+        ---
+
+        <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+      MD
+
+      assert_equal "ready_to_archive",
+                   Hive::TaskAction.for(
+                     task,
+                     marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false")
+                   ).key
+    end
+  end
+
+  def test_finalize_complete_requires_final_pr_metadata_before_archive
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+
+      File.write(task.state_file, "<!-- COMPLETE is_draft=false -->\n")
+      missing_url = Hive::TaskAction.for(task, marker(:complete, "is_draft" => "false"))
+      assert_equal "error", missing_url.key
+      assert_match(/FINALIZE_MISSING_PR_URL/, missing_url.diagnostic["summary"])
+
+      File.write(task.state_file, <<~MD)
+        ---
+        pr_url: https://example.com/pr/9
+        ---
+
+        <!-- COMPLETE pr_url=https://example.com/pr/other is_draft=false -->
+      MD
+      mismatch = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/other", "is_draft" => "false")
+      )
+      assert_equal "error", mismatch.key
+      assert_match(/FINALIZE_PR_URL_MISMATCH/, mismatch.diagnostic["summary"])
+
+      open_pr_marker = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "true")
+      )
+      assert_equal "ready_to_finalize", open_pr_marker.key,
+                   "open-pr's is_draft=true COMPLETE marker must not look archive-ready"
+      assert_equal "hive finalize demo-260426-aaaa --from 7-finalize", open_pr_marker.command
+    end
+  end
+
+  def test_finalize_missing_pr_md_is_error_not_needs_input
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+
+      action = Hive::TaskAction.for(task, marker(:none))
+
+      assert_equal "error", action.key
+      assert_equal "Error", action.label
+      assert_nil action.command
+      assert_match(/Finalize cannot run because .*pr\.md is missing/, action.diagnostic["detail"])
+    end
+  end
+
+  def test_finalize_missing_metadata_error_is_manual_fix_not_retry
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+
+      %w[missing_pr_md missing_pr_url].each do |reason|
+        diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => reason)).diagnostic
+        suggested = diagnostic.fetch("suggested_next_action")
+
+        assert_equal "manual_fix", suggested.fetch("kind"), "reason=#{reason}"
+        assert_nil suggested["command"], "reason=#{reason}"
+      end
+    end
   end
 
   def test_done_is_archived_with_no_command

@@ -2,6 +2,22 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
+
+**Action:** Documented the recovery hardening for `3-plan` rows whose agent is interrupted before producing `plan.md`. Markerless plan rows with a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` proves the plan run started, now classify as `Error` with `PLAN_MISSING_OUTPUT`, so the TUI does not open an empty editor buffer as if user input were required. Freshly promoted `3-plan` folders with no plan output yet remain runnable as `Needs your input`; `PLAN_MISSING_OUTPUT` recovery reruns `hive plan ... --from 3-plan` directly because there is no `ERROR` marker to clear.
+
+**Refreshed pages:**
+- [[stages/plan]] — explains the interrupted-plan missing-output state and rerun path.
+
+## [2026-05-19T22:00:00Z] finalize — missing PR metadata surfaces as error
+
+**Action:** Documented the recovery hardening for `7-finalize` rows missing `pr.md`. `Stages::Finalize` now records `ERROR reason=missing_pr_md` / `missing_pr_url` instead of exiting before the state file exists, and `TaskAction` classifies a markerless `7-finalize` folder without `pr.md` as `Error` so the TUI does not open an empty editor buffer.
+
+Status also no longer treats any `7-finalize` `COMPLETE` marker as archive-ready. The marker must carry `is_draft=false` and a `pr_url` matching `pr.md` frontmatter; carried-over `5-open-pr` markers with `is_draft=true` stay ready to finalize, and missing/mismatched PR metadata becomes a red diagnostic.
+
+**Refreshed pages:**
+- [[stages/finalize]] — preconditions and marker-action table now mention missing PR metadata error markers.
+
 ## [2026-05-19T16:00:00Z] status — surface legacy stage dirs in JSON + text + TUI (PR #93)
 
 **Action:** `hive status` now detects task folders left behind by a stage rename in `Hive::Stages::DIRS` and surfaces them on every operator surface, instead of silently truncating them out of view. `Status#detect_legacy_stage_dirs` scans `<hive_state>/stages/` for directories outside `Hive::Stages::DIRS` containing slug-shaped subfolders (per the new `Hive::Stages.task_slug?` predicate — single source of truth shared with `Hive::Commands::Migrate`, so the count matches what `hive migrate` would actually move). The JSON payload's `Project` entry now always carries an additive `legacy_stage_dirs` array (`[]` when clean, otherwise `[{stage_dir, task_count}, ...]` sorted alphabetically). Text output prints a `⚠ N task(s) hidden in legacy stage dirs: ...` warning + `run hive migrate` hint under the project header; the TUI projects pane prefixes the affected project with `⚠` and a `legacy dirs — run hive migrate` hint by extending `ProjectView` with the new field. Schema `urn:hive:schema:status:v2` gains the optional `legacy_stage_dirs` property on `Project` without bumping `SCHEMA_VERSIONS["hive-status"]` (additive-optional policy in `lib/hive.rb`, precedent in PR #69's `rebase` block).

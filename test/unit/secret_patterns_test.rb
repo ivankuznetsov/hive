@@ -68,6 +68,59 @@ class SecretPatternsTest < Minitest::Test
     assert_includes redacted, "[REDACTED:pem_private_key]"
   end
 
+  def test_truncated_pem_header_with_partial_body_is_redacted
+    # Status diagnostic tails are cut at DIAGNOSTIC_DETAIL_MAX (4000 bytes);
+    # most real-world leaks look like BEGIN + partial body + EOF (no
+    # matching END). pem_private_key (block form) cannot match this; the
+    # pem_private_key_header fallback must catch it. See issue #88.
+    truncated = <<~PEM
+      ... noisy log tail ...
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEowIBAAKCAQEAvbPHGfakebodyzxcvbnmasdfghjklqwertyuiopASDF1234==
+      QWERTYZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890abcdefABCDEFGH==
+    PEM
+    matches = Hive::SecretPatterns.scan(truncated)
+    assert(matches.any? { |m| m[:name] == :pem_private_key_header },
+           "expected pem_private_key_header match; got #{matches.inspect}")
+
+    redacted = Hive::SecretPatterns.redact(truncated)
+    refute_includes redacted, "MIIEow",
+                    "partial PEM body bytes must be redacted even without END delimiter"
+    refute_includes redacted, "QWERTYZXCVBNM",
+                    "later partial PEM body lines must also be redacted"
+    assert_includes redacted, "[REDACTED:pem_private_key_header]"
+    # Non-PEM context (the noisy log tail) must survive — over-redaction
+    # would erase too much operator-useful context.
+    assert_includes redacted, "noisy log tail"
+  end
+
+  def test_truncated_pem_header_alone_with_no_body_is_redacted
+    # Edge case: truncation cut at the BEGIN line itself, leaving no
+    # body. Still redact — the header signal alone is meaningful and
+    # there may be a byte or two of key material on the same line.
+    head_only = "log line\n-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    matches = Hive::SecretPatterns.scan(head_only)
+    assert(matches.any? { |m| m[:name] == :pem_private_key_header },
+           "BEGIN line alone must trigger pem_private_key_header")
+    redacted = Hive::SecretPatterns.redact(head_only)
+    refute_includes redacted, "BEGIN OPENSSH PRIVATE KEY"
+  end
+
+  def test_complete_pem_uses_block_pattern_not_header_fallback
+    # Ordering invariant: a full BEGIN..END envelope must be redacted by
+    # pem_private_key (the block-form pattern), NOT swallowed by the
+    # broader header-only fallback. Otherwise the placeholder name
+    # changes silently as code evolves.
+    pem = <<~PEM
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEowIBAAKCAQEAvbPHGfakebodyzxcvbnmasdfghjklqwertyuiopASDF1234==
+      -----END RSA PRIVATE KEY-----
+    PEM
+    redacted = Hive::SecretPatterns.redact(pem)
+    assert_includes redacted, "[REDACTED:pem_private_key]"
+    refute_includes redacted, "[REDACTED:pem_private_key_header]"
+  end
+
   def test_password_assignment_unquoted_is_detected
     assert_match_name("PASSWORD=hunter2spelledbackwards", :password_assignment)
   end

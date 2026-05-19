@@ -24,6 +24,15 @@ module Hive
       # body. The previous header-only regex left the key body in
       # redacted output — see PR #84 review finding #3.
       pem_private_key:       /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----.*?-----END (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----/m,
+      # Truncated-PEM fallback. Status diagnostic tails are cut at a
+      # fixed byte budget (DIAGNOSTIC_DETAIL_MAX = 4000) so most leaks
+      # appear as BEGIN + partial body with no matching END. The
+      # block-form pattern above fails on these; this fallback redacts
+      # BEGIN through up to 4000 trailing bytes so the partial body is
+      # not surfaced. Ordering matters: the full-block pattern runs
+      # first via PATTERNS-iteration so complete PEMs are replaced
+      # before this fallback can see them. Resolves issue #88.
+      pem_private_key_header: /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----[\s\S]{0,4000}/,
       # `password=`, `passwd=`, `PASSWORD=` style assignments. Same
       # token-boundary shape as generic_api_key so unquoted shell/env
       # values trip without running past the secret.

@@ -54,18 +54,23 @@ else
 fi
 ```
 
-Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`). The default canonical path is curl-piped-to-bash:
+Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`). Download the installer to a temporary file, then run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh | bash
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
+bash "$tmpdir/hive-install.sh"
 ```
 
-Only switch to the two-step download-then-run form when the user has *explicitly* asked to inspect the installer first; otherwise prefer the canonical one-liner above. The two-step form re-fetches the checksums file on each invocation — state from `--dry-run` is not shared with the real run:
+To inspect the installer first, run a dry-run before the real invocation. State from `--dry-run` is not shared with the real run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o /tmp/hive-install.sh
-bash /tmp/hive-install.sh --dry-run
-bash /tmp/hive-install.sh
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
+bash "$tmpdir/hive-install.sh" --dry-run
+bash "$tmpdir/hive-install.sh"
 ```
 
 ## Verify

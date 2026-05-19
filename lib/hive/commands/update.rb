@@ -45,11 +45,22 @@ module Hive
         case channel
         when "brew" then [ "brew", "upgrade", BREW_TAP ]
         when "aur" then aur_command
-        when "bash" then [ "bash", "-o", "pipefail", "-c", "curl -fsSL #{INSTALL_URL} | bash" ]
+        when "bash" then bash_installer_command
         when "dev" then nil
         else
           raise Hive::ConfigError, "unknown hive install channel #{channel.inspect}"
         end
+      end
+
+      def bash_installer_command
+        script = [
+          "set -euo pipefail",
+          'tmpdir="$(mktemp -d)"',
+          'trap \'rm -rf "$tmpdir"\' EXIT',
+          "curl -fsSL #{INSTALL_URL} -o \"$tmpdir/install.sh\"",
+          'bash "$tmpdir/install.sh"'
+        ].join("; ")
+        [ "bash", "-c", script ]
       end
 
       # Preflight the helper binary so a missing `brew` / `curl` /
@@ -89,7 +100,7 @@ module Hive
         helper = which("yay") || which("paru")
         unless helper
           raise Hive::UnavailableError,
-                "hive update: install yay or paru, or re-run the bash installer: curl -fsSL #{INSTALL_URL} | bash"
+                "hive update: install yay or paru, or re-run the bash installer from install.md"
         end
 
         [ helper, "-Syu", "hive-bin" ]

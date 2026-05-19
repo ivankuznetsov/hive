@@ -18,6 +18,13 @@ Status also no longer treats any `7-finalize` `COMPLETE` marker as archive-ready
 **Refreshed pages:**
 - [[stages/finalize]] — preconditions and marker-action table now mention missing PR metadata error markers.
 
+## [2026-05-19T21:40:00Z] install — avoid remote-script pipe in bash channel
+
+**Action:** Follow-up from review fix-guardrail inspection. `hive update` now downloads the pinned `install.sh` into a temporary directory and runs that file instead of using a remote-script pipe. The agent installer prompt and operating guide now show the same download-then-run flow for glibc Linux installs, while still pinning to the release tag.
+
+**Refreshed pages:**
+- [[operating]] — bash install channel example now uses a tempfile download before execution.
+
 ## [2026-05-19T16:00:00Z] status — surface legacy stage dirs in JSON + text + TUI (PR #93)
 
 **Action:** `hive status` now detects task folders left behind by a stage rename in `Hive::Stages::DIRS` and surfaces them on every operator surface, instead of silently truncating them out of view. `Status#detect_legacy_stage_dirs` scans `<hive_state>/stages/` for directories outside `Hive::Stages::DIRS` containing slug-shaped subfolders (per the new `Hive::Stages.task_slug?` predicate — single source of truth shared with `Hive::Commands::Migrate`, so the count matches what `hive migrate` would actually move). The JSON payload's `Project` entry now always carries an additive `legacy_stage_dirs` array (`[]` when clean, otherwise `[{stage_dir, task_count}, ...]` sorted alphabetically). Text output prints a `⚠ N task(s) hidden in legacy stage dirs: ...` warning + `run hive migrate` hint under the project header; the TUI projects pane prefixes the affected project with `⚠` and a `legacy dirs — run hive migrate` hint by extending `ProjectView` with the new field. Schema `urn:hive:schema:status:v2` gains the optional `legacy_stage_dirs` property on `Project` without bumping `SCHEMA_VERSIONS["hive-status"]` (additive-optional policy in `lib/hive.rb`, precedent in PR #69's `rebase` block).

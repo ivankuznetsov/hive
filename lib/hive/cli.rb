@@ -177,7 +177,7 @@ module Hive
 
         brew  → brew upgrade ivankuznetsov/hive/hive
         aur   → yay -Syu hive-bin (or paru when yay is unavailable)
-        bash  → curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh | bash
+        bash  → download the pinned install.sh to a tempfile, then run it
         dev   → prints git pull && bundle install guidance
 
       Hive never swaps its own binary in place and never guesses across

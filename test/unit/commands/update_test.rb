@@ -19,6 +19,29 @@ class UpdateCommandTest < Minitest::Test
     assert_includes out.string, "channel: bash"
     assert_includes out.string, "curl -fsSL"
     assert_includes out.string, "install.sh"
+    refute_match(/\|\s*bash/, out.string)
+  end
+
+  def test_bash_channel_downloads_installer_before_running
+    with_tmp_dir do |dir|
+      curl = File.join(dir, "curl")
+      File.write(curl, "#!/bin/sh\n")
+      FileUtils.chmod(0755, curl)
+      captured = nil
+
+      Hive::Commands::Update.new(
+        channel: "bash",
+        env: { "PATH" => dir },
+        runner: ->(argv) { captured = argv }
+      ).call
+
+      assert_equal "bash", captured[0]
+      assert_equal "-c", captured[1]
+      assert_includes captured[2], "curl -fsSL"
+      assert_includes captured[2], '-o "$tmpdir/install.sh"'
+      assert_includes captured[2], 'bash "$tmpdir/install.sh"'
+      refute_match(/\|\s*bash/, captured[2])
+    end
   end
 
   def test_dev_channel_prints_git_guidance

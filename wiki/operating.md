@@ -34,7 +34,10 @@ brew install ivankuznetsov/hive/hive
 yay -S hive-bin
 
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh | bash
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
+bash "$tmpdir/hive-install.sh"
 ```
 
 `install.sh` accepts:

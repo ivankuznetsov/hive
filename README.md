@@ -238,10 +238,43 @@ Plus a feature worktree per active execute task at `~/Dev/your-project.worktrees
 
 ## Documentation
 
+Core docs:
+
 - [docs/getting-started.md](docs/getting-started.md): five-minute first run against a real project.
 - [docs/concepts.md](docs/concepts.md): folder-as-agent, the eight stages, and compound engineering.
 - [docs/architecture.md](docs/architecture.md): how stages, agents, files, config, and worktrees compose.
 - [docs/cli.md](docs/cli.md): current command surface from `bin/hive`.
 - [docs/recipes.md](docs/recipes.md): concrete workflows, including the xbookmark dogfood replay.
 - [docs/faq.md](docs/faq.md): troubleshooting and design questions.
-- [wiki/index.md](wiki/index.md): deeper engineering reference maintained by the LLM wiki.
+
+Wiki reference:
+
+- [wiki/index.md](wiki/index.md): start here. Catalog of every wiki page.
+- [wiki/architecture.md](wiki/architecture.md): layer cake, process model, agent contract.
+- [wiki/state-model.md](wiki/state-model.md): directory layout, marker grammar, config schemas.
+- [wiki/cli.md](wiki/cli.md): full command surface.
+- [wiki/decisions.md](wiki/decisions.md): ADRs covering the orphan branch, two-level locking, prompt-injection policy, install channels, daemon autonomy, and other architectural decisions.
+- [wiki/stages/](wiki/stages/): one page per pipeline stage.
+- [wiki/modules/](wiki/modules/): one page per Ruby module/class.
+- [wiki/gaps.md](wiki/gaps.md): known gaps and open questions.
+
+If `qmd` is installed:
+
+```bash
+qmd query 'EXECUTE_STALE recovery' --collection hive
+qmd search 'worktree pointer' --collection hive
+```
+
+The wiki is auto-refreshed by `.git/hooks/post-commit` when relevant files change (state-model, CLI, stages, dependencies, docs).
+
+## Development
+
+```bash
+bundle exec rake test          # run all unit + integration tests (Minitest)
+bundle exec rubocop            # lint
+bundle exec rubocop -a         # autocorrect
+```
+
+`HIVE_CLAUDE_BIN` env var overrides the `claude` binary — used by tests with `test/fixtures/fake-claude` and `test/fixtures/fake-gh` to avoid spending real budget.
+
+`HIVE_HOME` env var overrides the global config location — used by `test/test_helper.rb#with_tmp_global_config` so tests never touch the real registry.

@@ -5,46 +5,71 @@ module Hive
     module_function
 
     def config_home
-      legacy_override || File.join(base_home("XDG_CONFIG_HOME", ".config"), "hive")
+      hive_home_override || File.join(base_home("XDG_CONFIG_HOME", ".config"), "hive")
     end
 
     def data_home
-      legacy_override || File.join(base_home("XDG_DATA_HOME", ".local/share"), "hive")
+      hive_home_override || File.join(base_home("XDG_DATA_HOME", ".local/share"), "hive")
     end
 
     def state_home
-      legacy_override || File.join(base_home("XDG_STATE_HOME", ".local/state"), "hive")
+      hive_home_override || File.join(base_home("XDG_STATE_HOME", ".local/state"), "hive")
     end
 
     def cache_home
-      legacy_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
+      hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
     end
 
     def bin_home
-      File.expand_path(ENV["XDG_BIN_HOME"] || File.join(home, ".local/bin"))
+      # bin_home intentionally ignores HIVE_HOME — install.sh places
+      # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),
+      # regardless of how config/data/state/cache are collapsed via the
+      # test override.
+      File.expand_path(env_or_blank("XDG_BIN_HOME") || File.join(home, ".local/bin"))
+    end
+
+    # True when HIVE_HOME collapses every XDG directory onto one path —
+    # used by uninstall to refuse destructive deletes that would wipe a
+    # shared parent (state_home == config_home).
+    def hive_home_collapsed?
+      !hive_home_override.nil?
     end
 
     def ensure_migrated!
-      return if legacy_override
+      return if hive_home_override
       return if File.exist?(File.join(config_home, "config.yml"))
 
-      legacy = File.expand_path("~/.hive-state/registry.yml")
-      return unless File.exist?(legacy)
+      legacy = legacy_registry_path
+      return unless legacy
 
       FileUtils.mkdir_p(config_home)
       FileUtils.mv(legacy, File.join(config_home, "config.yml"))
+      File.write(
+        File.join(config_home, ".migrated-from"),
+        "#{legacy}\n"
+      )
       remove_empty_legacy_dir(File.dirname(legacy))
     end
 
     def base_home(env_key, fallback)
-      File.expand_path(ENV[env_key] || File.join(home, fallback))
+      File.expand_path(env_or_blank(env_key) || File.join(home, fallback))
     end
 
     def home
       ENV.fetch("HOME") { Dir.home }
     end
 
-    def legacy_override
+    # Per the XDG Base Directory spec, an exported but empty XDG_* var
+    # must be treated as unset — otherwise `XDG_CONFIG_HOME=` would
+    # resolve to `File.expand_path("")` → cwd-relative `<cwd>/hive`.
+    def env_or_blank(key)
+      value = ENV[key]
+      return nil if value.nil? || value.empty?
+
+      value
+    end
+
+    def hive_home_override
       value = ENV["HIVE_HOME"]
       return nil if value.nil? || value.empty?
 
@@ -53,8 +78,19 @@ module Hive
 
     def remove_empty_legacy_dir(path)
       Dir.rmdir(path)
-    rescue SystemCallError
+    rescue SystemCallError => e
+      warn "hive: could not remove empty legacy dir #{path}: #{e.message}"
       nil
+    end
+
+    # Legacy registry candidates probed by `ensure_migrated!`. Order
+    # matters: the older `~/Dev/hive/config.yml` is migrated only when
+    # there is no `~/.hive-state/registry.yml`.
+    def legacy_registry_path
+      [
+        File.expand_path("~/.hive-state/registry.yml"),
+        File.expand_path("~/Dev/hive/config.yml")
+      ].find { |p| File.exist?(p) }
     end
   end
 end

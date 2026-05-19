@@ -15,10 +15,10 @@ uname -s
 uname -m
 test -f /etc/os-release && cat /etc/os-release || true
 command -v hive || true
-hive --version || true
+hive --version 2>/dev/null | grep -qE '^hive [0-9]+\.[0-9]+\.[0-9]+' && echo "hive installed" || echo "hive not installed"
 ```
 
-If `hive --version` already succeeds, report the installed version and skip reinstall unless the user asked for an upgrade.
+`hive --version` must match the strict `hive X.Y.Z` shape from our CLI to count as "already installed" — a plain `X.Y.Z` line is Apache Hive (or some other tool named `hive`). If the strict match fails, treat this host as having no Hive CLI installed and continue with the install commands below. To upgrade an existing Hive install, run `hive update` instead of reinstalling.
 
 ## Choose Channel
 
@@ -46,21 +46,24 @@ if command -v yay >/dev/null 2>&1; then
 elif command -v paru >/dev/null 2>&1; then
   paru -S hive-bin
 else
+  # `return 69` keeps the agent's parent shell alive (using `exit 69`
+  # here would terminate the calling session). The agent should treat
+  # status 69 as "user must install yay or paru first" and abort.
   echo "Install yay or paru first, then run: yay -S hive-bin"
-  exit 69
+  return 69 2>/dev/null || exit 69
 fi
 ```
 
-Ubuntu 22.04+ / glibc Linux fallback:
+Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`). The default canonical path is curl-piped-to-bash:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh | bash
 ```
 
-Inspection-friendly bash path:
+Only switch to the two-step download-then-run form when the user has *explicitly* asked to inspect the installer first; otherwise prefer the canonical one-liner above. The two-step form re-fetches the checksums file on each invocation — state from `--dry-run` is not shared with the real run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh -o /tmp/hive-install.sh
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o /tmp/hive-install.sh
 bash /tmp/hive-install.sh --dry-run
 bash /tmp/hive-install.sh
 ```
@@ -71,7 +74,6 @@ Run:
 
 ```bash
 hive --version || hv --version
-hive doctor || true
 ```
 
 If `hive` is shadowed by Apache Hive, try `hv --version` and tell the user to use `hv` or adjust PATH.
@@ -82,13 +84,14 @@ If the current directory is a git project and the user wants Hive enabled here, 
 
 ```bash
 hive init .
+hive doctor || true
 ```
 
-During `hive init`, keep the user's prompt choices. If this is non-interactive, Hive uses recommended defaults and writes the daemon service unit without starting it.
+During `hive init`, keep the user's prompt choices. If this is non-interactive, Hive uses recommended defaults and writes the daemon service unit without starting it. `hive doctor` runs AFTER `hive init` because it requires an initialized project root.
 
 ## Optional Skills
 
-The Hive skills package is distributed separately through each agent marketplace and may still be unpublished for v0.1.0. If available, offer the matching command:
+The Hive skills package is forward-looking and may still be unpublished for v0.1.0. Treat the slugs below as the intended marketplace identifiers — running them today against an unpublished package returns an error from the agent's plugin registry. If/when the package is published, offer the matching command:
 
 ```bash
 claude plugin install ivankuznetsov/hive-skills

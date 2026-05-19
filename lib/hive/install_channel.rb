@@ -1,8 +1,13 @@
 require "fileutils"
+require "rbconfig"
 require "hive/paths"
 
 module Hive
   module InstallChannel
+    # `dev` is the synthetic git-clone fallback: it's never written to
+    # an install-channel marker — `detect` returns it when no marker
+    # exists, signalling "running from a working checkout, no
+    # release-channel updater to delegate to".
     VALID = %w[brew aur bash dev].freeze
 
     module_function
@@ -16,7 +21,7 @@ module Hive
 
     def detect(marker_paths: default_marker_paths)
       marker_paths.each do |path|
-        channel = read(path)
+        channel = safe_read(path)
         return channel if channel
       end
       "dev"
@@ -34,25 +39,70 @@ module Hive
       File.join(Hive::Paths.data_home, "install-channel")
     end
 
+    # Optional override for callers that installed via `install.sh
+    # --prefix=<dir>`; install.sh writes the marker under that prefix
+    # rather than the XDG default, so `hive update` needs an extra
+    # probe.
+    def prefix_marker_paths
+      prefix = ENV["HIVE_PREFIX"]
+      return [] if prefix.nil? || prefix.empty?
+
+      [ File.join(File.expand_path(prefix), "hive", "install-channel") ]
+    end
+
     def default_marker_paths
       [
         marker_path,
+        *prefix_marker_paths,
         *homebrew_marker_paths,
         "/usr/share/hive/install-channel"
       ].uniq
     end
 
+    # macOS-only: returning brew marker probes on a Linux/AUR host
+    # would let a stray `HOMEBREW_PREFIX=/tmp/evil` or `/usr/local`
+    # marker shadow the real `/usr/share/hive/install-channel`. Skip
+    # brew probes entirely when we're not on macOS (or when brew isn't
+    # actually installed under a known prefix).
     def homebrew_marker_paths
+      return [] unless macos?
+
       prefixes = []
-      prefixes << ENV["HOMEBREW_PREFIX"] if ENV["HOMEBREW_PREFIX"] && !ENV["HOMEBREW_PREFIX"].empty?
+      env_prefix = ENV["HOMEBREW_PREFIX"]
+      if env_prefix && !env_prefix.empty? && valid_homebrew_prefix?(env_prefix)
+        prefixes << env_prefix
+      end
       prefixes.concat(%w[/opt/homebrew /usr/local])
-      prefixes.map { |prefix| File.join(prefix, "share/hive/install-channel") }
+      prefixes.uniq.map { |prefix| File.join(prefix, "share/hive/install-channel") }
+    end
+
+    def macos?
+      RbConfig::CONFIG["host_os"] =~ /darwin/i
+    end
+
+    # Refuse paths that look attacker-shaped: must be absolute, no
+    # `..` segments, and the bin/brew binary must exist under it.
+    def valid_homebrew_prefix?(prefix)
+      return false unless prefix.start_with?("/")
+      return false if prefix.include?("..")
+
+      File.executable?(File.join(prefix, "bin", "brew"))
     end
 
     def validate!(channel)
       return if VALID.include?(channel)
 
       raise Hive::ConfigError, "unknown hive install channel #{channel.inspect} (expected: #{VALID.join(', ')})"
+    end
+
+    # Surface a malformed marker as an actionable error rather than a
+    # Ruby stacktrace from `validate!`; `detect` swallows the path and
+    # moves on so a single corrupt marker doesn't brick `hive update`.
+    def safe_read(path)
+      read(path)
+    rescue Hive::ConfigError => e
+      warn "hive: skipping invalid install-channel marker at #{path} (#{e.message}); remove it and re-install to fix"
+      nil
     end
   end
 end

@@ -115,8 +115,35 @@ module Hive
           # external consumers (TUI, daemon, bots) read `diagnostic` off
           # every row. Schema mandates the field.
           rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
-          base.merge("tasks" => rows.map { |r| task_payload(r) })
+          out = base.merge("tasks" => rows.map { |r| task_payload(r) })
+          legacy = detect_legacy_stage_dirs(hive_state)
+          out["legacy_stage_dirs"] = legacy unless legacy.empty?
+          out
         end
+      end
+
+      # Scan `<hive_state>/stages/` for directories that are NOT in
+      # `Hive::Stages::DIRS` and contain at least one subfolder. Returns
+      # `[{"dir" => name, "task_count" => N}, ...]` sorted by name.
+      # `collect_rows` walks only canonical DIRS, so any stage rename in
+      # `lib/hive/stages.rb` leaves pre-rename tasks unreachable from
+      # every operator surface — this is the detector that turns that
+      # silent gap into a visible warning instead.
+      def detect_legacy_stage_dirs(hive_state)
+        stages_root = File.join(hive_state, "stages")
+        return [] unless File.directory?(stages_root)
+
+        Dir.children(stages_root).filter_map do |basename|
+          next if Hive::Stages::DIRS.include?(basename)
+
+          dir = File.join(stages_root, basename)
+          next unless File.directory?(dir)
+
+          task_count = Dir.children(dir).count { |child| File.directory?(File.join(dir, child)) }
+          next if task_count.zero?
+
+          { "dir" => basename, "task_count" => task_count }
+        end.sort_by { |entry| entry["dir"] }
       end
 
       def task_payload(row)
@@ -227,9 +254,11 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
+        legacy = detect_legacy_stage_dirs(hive_state)
         puts project["name"]
+        render_legacy_stage_warning(legacy) unless legacy.empty?
         if rows.empty?
-          puts "  no active tasks"
+          puts "  no active tasks" if legacy.empty?
           return
         end
 
@@ -243,6 +272,13 @@ module Hive
             puts "    #{r[:icon]} #{r[:slug].ljust(36)} #{r[:state_label].ljust(24)} #{command} #{r[:age]}"
           end
         end
+      end
+
+      def render_legacy_stage_warning(legacy)
+        total = legacy.sum { |entry| entry["task_count"] }
+        dirs = legacy.map { |entry| "#{entry['dir']} (#{entry['task_count']})" }.join(", ")
+        puts "  ⚠ #{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}"
+        puts "    run `hive migrate` to move them into the current layout"
       end
 
       def collect_rows(hive_state)

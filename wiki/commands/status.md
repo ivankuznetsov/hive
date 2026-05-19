@@ -4,7 +4,7 @@ type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
 updated: 2026-05-19
-tags: [command, status, observability, json, diagnostics]
+tags: [command, status, observability, json, diagnostics, legacy-dirs]
 ---
 
 **TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker, and prints slugs grouped by the next useful action. Normal status is read-only and takes no args. Pass `--json` for a single machine-readable document on stdout (schema `hive-status`, version per `Hive::SCHEMA_VERSIONS`). Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
@@ -22,6 +22,22 @@ tags: [command, status, observability, json, diagnostics]
 ```
 
 `hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows.
+
+## Legacy stage directories (`legacy_stage_dirs`)
+
+Every Project entry in `hive status --json` carries a `legacy_stage_dirs` array — `[]` for healthy projects, otherwise a list of `{ "stage_dir": "<name>", "task_count": <N> }` entries (sorted alphabetically by `stage_dir`). The field is populated by `Status#detect_legacy_stage_dirs`, which scans `<hive_state>/stages/` for directories that are **not** in `Hive::Stages::DIRS` and contain at least one slug-shaped task subfolder (per `Hive::Stages.task_slug?`, the same predicate `hive migrate` uses to decide which entries it is allowed to mv — so the count reflects what `hive migrate` would actually move). Stray non-slug siblings (`logs/`, `.gitkeep`, `.DS_Store`) are ignored.
+
+When the field is non-empty, the text output prints a warning under the project header:
+
+```
+<project_name>
+  ⚠ 2 tasks hidden in legacy stage dirs: 5-review (1), 6-pr (1)
+    run `hive migrate` to move them into the current layout
+```
+
+The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
+
+The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hive:schema:status:v2` (see [[schemas]] and the policy comment in `lib/hive.rb` — additive optional fields do **not** bump `SCHEMA_VERSIONS["hive-status"]`).
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 

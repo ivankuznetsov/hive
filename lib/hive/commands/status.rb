@@ -116,19 +116,34 @@ module Hive
           # every row. Schema mandates the field.
           rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
           out = base.merge("tasks" => rows.map { |r| task_payload(r) })
-          legacy = detect_legacy_stage_dirs(hive_state)
-          out["legacy_stage_dirs"] = legacy unless legacy.empty?
+          # Always emit `legacy_stage_dirs` (default empty array) so
+          # consumers can branch on `.empty?` without a `key?` probe and
+          # the schema's optional-but-never-undefined contract holds.
+          legacy_stage_dirs = detect_legacy_stage_dirs(hive_state)
+          out["legacy_stage_dirs"] = legacy_stage_dirs
+          # `legacy_migrate_command` is the machine-readable parity of the
+          # text-mode "run `hive migrate`" recovery hint. Agents reading
+          # the JSON envelope get a ready-to-execute command string when
+          # legacy_stage_dirs is non-empty; `null` otherwise. The field is
+          # always present (never absent) — same diagnostic-field
+          # convention as `diagnostic` on tasks. Issue #94.
+          out["legacy_migrate_command"] = legacy_stage_dirs.empty? ? nil : "hive migrate"
           out
         end
       end
 
       # Scan `<hive_state>/stages/` for directories that are NOT in
-      # `Hive::Stages::DIRS` and contain at least one subfolder. Returns
-      # `[{"dir" => name, "task_count" => N}, ...]` sorted by name.
-      # `collect_rows` walks only canonical DIRS, so any stage rename in
-      # `lib/hive/stages.rb` leaves pre-rename tasks unreachable from
-      # every operator surface — this is the detector that turns that
-      # silent gap into a visible warning instead.
+      # `Hive::Stages::DIRS` and contain at least one task-slug-shaped
+      # subfolder. Returns `[{"stage_dir" => name, "task_count" => N},
+      # ...]` sorted by name. `collect_rows` walks only canonical DIRS, so
+      # any stage rename in `lib/hive/stages.rb` leaves pre-rename tasks
+      # unreachable from every operator surface — this is the detector
+      # that turns that silent gap into a visible warning instead. Only
+      # `Hive::Stages.task_slug?` children count toward `task_count` so
+      # stray `logs/`, `.DS_Store`, or `.gitkeep` siblings don't inflate
+      # the number — the same predicate `Hive::Commands::Migrate` uses to
+      # decide what it is allowed to mv, so the count matches what
+      # `hive migrate` would actually move.
       def detect_legacy_stage_dirs(hive_state)
         stages_root = File.join(hive_state, "stages")
         return [] unless File.directory?(stages_root)
@@ -139,11 +154,13 @@ module Hive
           dir = File.join(stages_root, basename)
           next unless File.directory?(dir)
 
-          task_count = Dir.children(dir).count { |child| File.directory?(File.join(dir, child)) }
+          task_count = Dir.children(dir).count do |child|
+            Hive::Stages.task_slug?(child) && File.directory?(File.join(dir, child))
+          end
           next if task_count.zero?
 
-          { "dir" => basename, "task_count" => task_count }
-        end.sort_by { |entry| entry["dir"] }
+          { "stage_dir" => basename, "task_count" => task_count }
+        end.sort_by { |entry| entry["stage_dir"] }
       end
 
       def task_payload(row)
@@ -276,7 +293,7 @@ module Hive
 
       def render_legacy_stage_warning(legacy)
         total = legacy.sum { |entry| entry["task_count"] }
-        dirs = legacy.map { |entry| "#{entry['dir']} (#{entry['task_count']})" }.join(", ")
+        dirs = legacy.map { |entry| "#{entry['stage_dir']} (#{entry['task_count']})" }.join(", ")
         puts "  ⚠ #{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}"
         puts "    run `hive migrate` to move them into the current layout"
       end

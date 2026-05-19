@@ -89,8 +89,18 @@ module Hive
         # this, broken projects are visually identical to healthy ones
         # and the user only finds out by trying to dispatch and seeing
         # `hive brainstorm` exit 70.
+        #
+        # A clean-pathed project that nevertheless carries
+        # `legacy_stage_dirs` (task folders under a renamed stage)
+        # gets the same `⚠` prefix and a short "legacy dirs — run
+        # hive migrate" hint, so the operator notices the migration
+        # nudge in the same scan they use for missing/needs-init.
         def project_label(project)
-          return project.name.to_s if project.error.nil?
+          if project.error.nil?
+            return project.name.to_s if Array(project.legacy_stage_dirs).empty?
+
+            return "⚠ #{project.name} (legacy dirs — run hive migrate)"
+          end
 
           short = case project.error
           when "missing_project_path" then "missing"

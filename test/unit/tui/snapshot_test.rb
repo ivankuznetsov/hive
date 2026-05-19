@@ -271,6 +271,55 @@ class TuiSnapshotTest < Minitest::Test
                  "JSON order is the stable secondary sort within a label group"
   end
 
+  # The Snapshot must preserve the JSON's `legacy_stage_dirs` field on
+  # each ProjectView so the renderer can flag projects with task folders
+  # stuck under a renamed stage dir without re-walking the filesystem.
+  def test_from_payload_preserves_legacy_stage_dirs_array
+    legacy_entries = [
+      { "stage_dir" => "5-review", "task_count" => 2 },
+      { "stage_dir" => "6-pr",     "task_count" => 1 }
+    ]
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [],
+                                 "legacy_stage_dirs" => legacy_entries,
+                                 "legacy_migrate_command" => "hive migrate"
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    project = snapshot.projects.first
+    assert_equal legacy_entries, project.legacy_stage_dirs,
+                 "ProjectView must preserve legacy_stage_dirs verbatim"
+    # The machine-readable recovery hint must flow through ProjectView
+    # so non-TUI consumers (and the TUI itself, eventually) can read it
+    # without re-deriving "is this project clean?". Issue #94.
+    assert_equal "hive migrate", project.legacy_migrate_command,
+                 "ProjectView must preserve legacy_migrate_command verbatim"
+  end
+
+  def test_from_payload_defaults_legacy_stage_dirs_to_empty_array_when_key_absent
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => []
+                                 # no legacy_stage_dirs / legacy_migrate_command keys
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    project = snapshot.projects.first
+    assert_equal [], project.legacy_stage_dirs,
+                 "missing legacy_stage_dirs key must default to []"
+    assert_nil project.legacy_migrate_command,
+               "missing legacy_migrate_command key must default to nil"
+  end
+
   def test_build_project_view_unknown_action_labels_sort_last_and_preserve_json_order
     known = sample_task(slug: "known-task")
     unknown_one = sample_task(slug: "future-one")

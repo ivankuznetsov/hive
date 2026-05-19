@@ -6,6 +6,7 @@ require "tempfile"
 require "time"
 require "hive"
 require "hive/agent_profiles"
+require "hive/config"
 require "hive/markers"
 require "hive/secret_patterns"
 require "hive/stages/base"
@@ -36,9 +37,26 @@ module Hive
     DEFAULT_BUDGET_USD = 5
     POLL_INTERVAL = 0.05
     TERMINATE_GRACE_SECONDS = 5
+    TERMINATE_POLL_INTERVAL = 0.1
 
-    class StaleMarker < Hive::Error; end
-    class DiagnosisInFlight < Hive::Error; end
+    # Raised when the marker's signature changes between dispatch and
+    # write — the agent's verdict would describe stale state. Retryable
+    # by re-spawning; map to TEMPFAIL (75) so agent wrappers branch on
+    # exit code without parsing the message.
+    class StaleMarker < Hive::Error
+      def exit_code
+        Hive::ExitCodes::TEMPFAIL
+      end
+    end
+
+    # Raised by the per-task flock when another --diagnose --write is
+    # already running for the same task. Retryable once the holder
+    # completes; same TEMPFAIL semantics as Hive::ConcurrentRunError.
+    class DiagnosisInFlight < Hive::Error
+      def exit_code
+        Hive::ExitCodes::TEMPFAIL
+      end
+    end
 
     LOCK_FILENAME = ".diagnose.lock"
 
@@ -70,6 +88,18 @@ module Hive
         end
 
         marker = Hive::Markers.current(@task.state_file)
+        # Dispatch-time freshness gate: the diagnostic shape is only
+        # meaningful for red recovery states (recover_review / error /
+        # recover_execute per Hive::TaskAction#diagnostic_action?). If a
+        # concurrent `hive run` flipped the marker to :agent_working
+        # between the lock acquisition and our marker re-read, the agent's
+        # verdict would describe an in-flight run rather than a red state.
+        # Raise before burning agent budget. See PR #84 review row 12.
+        unless red_recovery_marker?(marker)
+          raise StaleMarker,
+                "diagnosis stale: marker is not in a red recovery state " \
+                "(name=#{marker.name.inspect}) — retry"
+        end
         signature_at_dispatch = marker_signature(marker)
         nonce = Hive::Stages::Base.user_supplied_tag
 
@@ -83,12 +113,19 @@ module Hive
         )
 
         # Write-time freshness gate: re-read the marker after the agent
-        # finishes and confirm the (name + sorted attrs) signature is
-        # unchanged. A concurrent `hive run` mid-spawn can rotate the
-        # marker — writing the agent's explanation against the new marker
-        # would mis-describe the current state. Raise instead of writing
-        # so the operator sees a "diagnose stale" flash and can retry.
+        # finishes and confirm BOTH that the (name + sorted attrs)
+        # signature is unchanged AND that the marker is still in a red
+        # recovery state. A concurrent `hive run` mid-spawn can rotate
+        # the marker through :agent_working back to a recovery state with
+        # a new signature — writing the agent's explanation against the
+        # new marker would mis-describe the current state. Either path
+        # raises so the operator sees a "diagnose stale" flash and retries.
         fresh_marker = Hive::Markers.current(@task.state_file)
+        unless red_recovery_marker?(fresh_marker)
+          raise StaleMarker,
+                "diagnosis stale: marker transitioned to " \
+                "#{fresh_marker.name.inspect} during diagnosis — retry"
+        end
         if marker_signature(fresh_marker) != signature_at_dispatch
           raise StaleMarker,
                 "diagnosis stale: marker changed during agent run — retry"
@@ -232,14 +269,28 @@ module Hive
       path
     end
 
-    # Mirrors Hive::TaskAction#marker_signature byte-for-byte. Local
-    # extraction (TaskAction#fresh_diagnosis_artifact) re-validates this
-    # value before trusting the artifact body; the canonical impl lives
-    # in TaskAction so producer + consumer cannot drift.
+    # Marker names that map to a red recovery action_key per
+    # Hive::TaskAction (recover_review / recover_execute / error).
+    # Mirrors the matrix in TaskAction so the diagnose freshness gate
+    # cannot accept markers that produce a nil diagnostic.
+    RED_RECOVERY_MARKER_NAMES = %i[
+      review_error
+      review_ci_stale
+      review_stale
+      execute_stale
+      error
+    ].freeze
+
+    def red_recovery_marker?(marker)
+      RED_RECOVERY_MARKER_NAMES.include?(marker.name)
+    end
+
+    # Delegates to Hive::TaskAction.marker_signature so producer +
+    # consumer cannot drift. The class method is the canonical impl;
+    # local extraction (TaskAction#fresh_diagnosis_artifact) and write-
+    # time freshness gate (this module) both call through it.
     def marker_signature(marker)
-      attrs = (marker.attrs || {}).sort_by { |key, _value| key.to_s }
-                                  .map { |key, value| "#{key}=#{value}" }
-      Digest::SHA256.hexdigest(([ marker.name.to_s ] + attrs).join("\n"))
+      Hive::TaskAction.marker_signature(marker)
     end
 
     def redact(text)
@@ -265,23 +316,47 @@ module Hive
         out_reader = Thread.new { read_stream(stdout) }
         err_reader = Thread.new { read_stream(stderr) }
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        loop do
-          if wait_thr.join(POLL_INTERVAL)
-            status = wait_thr.value
-            out = out_reader.value
-            err = err_reader.value
-            raise Hive::Error, error_message(err, status) unless status.success?
+        # Ctrl-C / SIGINT during the popen3 block unwinds the body and
+        # Ruby's popen3 ensure calls wait_thr.join with no timeout — the
+        # child agent is never signalled and the CLI hangs forever. Trap
+        # INT (and TERM, mirroring Hive::Agent#spawn_and_wait) here so an
+        # operator's Ctrl-C terminates the pgroup before unwinding, and
+        # restore the original handlers in the ensure block. Re-raise
+        # Interrupt so the caller's stack still sees the cancellation.
+        child_pid = wait_thr.pid
+        interrupted = false
+        old_int = trap("INT") do
+          interrupted = true
+          terminate_process_group(child_pid)
+        end
+        old_term = trap("TERM") do
+          interrupted = true
+          terminate_process_group(child_pid)
+        end
+        begin
+          loop do
+            if wait_thr.join(POLL_INTERVAL)
+              raise Interrupt if interrupted
 
-            return out
+              status = wait_thr.value
+              out = out_reader.value
+              err = err_reader.value
+              raise Hive::Error, error_message(err, status) unless status.success?
+
+              return out
+            end
+
+            elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+            next if elapsed < timeout_sec
+
+            terminate_process_group(child_pid)
+            kill_reader_threads(out_reader, err_reader)
+            raise Hive::Error,
+                  "diagnosis agent timed out after #{timeout_sec}s"
           end
-
-          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-          next if elapsed < timeout_sec
-
-          terminate_process_group(wait_thr.pid)
-          kill_reader_threads(out_reader, err_reader)
-          raise Hive::Error,
-                "diagnosis agent timed out after #{timeout_sec}s"
+        ensure
+          trap("INT", old_int || "DEFAULT")
+          trap("TERM", old_term || "DEFAULT")
         end
       end
     end
@@ -304,12 +379,37 @@ module Hive
       ""
     end
 
+    # Send SIGTERM, then escalate to SIGKILL after TERMINATE_GRACE_SECONDS.
+    # The grace wait runs on a background thread so the calling thread
+    # (the main CLI thread on Ctrl-C, or the timeout-loop thread) is not
+    # blocked for 5 seconds on every cancellation. The bg thread polls
+    # Process.waitpid2(-pid, WNOHANG) so it exits early when the child has
+    # already reaped — no waste when SIGTERM is enough.
     def terminate_process_group(pid)
-      Process.kill("TERM", -pid)
-      sleep TERMINATE_GRACE_SECONDS
-      Process.kill("KILL", -pid)
-    rescue Errno::ESRCH
-      nil
+      begin
+        Process.kill("TERM", -pid)
+      rescue Errno::ESRCH
+        return
+      end
+      Thread.new do
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + TERMINATE_GRACE_SECONDS
+        loop do
+          begin
+            reaped = Process.waitpid2(-pid, Process::WNOHANG)
+          rescue Errno::ECHILD
+            break
+          end
+          break if reaped
+          break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+          sleep TERMINATE_POLL_INTERVAL
+        end
+        begin
+          Process.kill("KILL", -pid)
+        rescue Errno::ESRCH
+          nil
+        end
+      end
     end
 
     def kill_reader_threads(*threads)

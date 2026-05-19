@@ -318,6 +318,127 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_diagnostic_redacts_before_truncating_so_boundary_secrets_dont_leak
+    # PR #84 review row 1: a secret straddling the truncation boundary
+    # (summary 120 / detail 4000 chars) used to escape redaction because
+    # truncate ran first, splitting the credential and hiding only the
+    # trailing half. Re-ordered to redact-then-truncate; pin the invariant
+    # so a future contributor cannot flip the call order silently.
+    Dir.mktmpdir("hive-task-action-redact") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+
+      # Use a github_token-shaped credential (no \b prefix requirement)
+      # so the marker-built string actually matches a redaction pattern
+      # when interpolated next to other word characters. Place the token
+      # so that the truncation boundary (DIAGNOSTIC_SUMMARY_MAX) lands in
+      # the middle of the credential — pre-redaction truncation would
+      # leave the leading half intact in the emitted summary.
+      gh_token = "ghp_#{'A' * 40}"
+      summary_max = Hive::TaskAction::DIAGNOSTIC_SUMMARY_MAX
+      # The marker_summary is "REVIEW_ERROR phase=fix pass=4 reason=<padding><token>".
+      # We need the cut point to fall inside the token bytes — choose a
+      # padding that leaves the token spanning the cut.
+      prefix = "REVIEW_ERROR phase=fix pass=4 reason="
+      padding_len = summary_max - prefix.length - 10  # cut ~10 chars into the token
+      padding = " x" * (padding_len / 2)              # spaces give SecretPatterns a clean boundary
+      reason = "#{padding}#{gh_token}"
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "4", "reason" => reason)
+      ).diagnostic
+
+      # Negative invariants: the original token bytes (and any leading
+      # half thereof) MUST NOT appear in the emitted summary or detail.
+      # Pre-fix code would emit `ghp_AAAAAAA…` (leading half + ellipsis)
+      # because truncate fired before redact and split the token.
+      refute_includes diagnostic["summary"], gh_token,
+                      "summary must not contain the raw GitHub token (redact-then-truncate)"
+      refute_match(/ghp_A{4,}/, diagnostic["summary"],
+                   "summary must not leak ANY leading half of the token — " \
+                   "truncate-after-redact ordering is load-bearing for boundary secrets")
+      refute_includes diagnostic["detail"], gh_token,
+                      "detail must not contain the raw GitHub token"
+      refute_match(/ghp_A{4,}/, diagnostic["detail"],
+                   "detail must not leak ANY leading half of the token")
+    end
+  end
+
+  # Two-gate trust check: fresh_diagnosis_artifact rejects on EITHER
+  # marker_signature mismatch OR unknown generated_by. Pinning both
+  # rejection paths so a future refactor cannot drop one gate silently
+  # (the artifact would then describe stale state OR be authored by an
+  # untrusted profile).
+  def test_fresh_diagnosis_artifact_rejected_when_marker_signature_stale
+    Dir.mktmpdir("hive-task-action-stale") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      # Plant an artifact whose frontmatter pins a DIFFERENT marker
+      # signature than the current marker. Trust gate must reject.
+      stale_signature = Digest::SHA256.hexdigest("review_error\npass=999\nphase=stale")
+      File.write(File.join(diagnostics, "red-status.md"), <<~MD)
+        ---
+        generated_by: claude
+        marker_signature: #{stale_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        stale verdict body
+      MD
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      refute_equal "artifact", diagnostic["source"],
+                   "stale-signature artifact must NOT be surfaced as the diagnostic source"
+      refute_includes diagnostic["detail"], "stale verdict body",
+                      "stale artifact body must not leak into the diagnostic detail"
+      assert_equal "local", diagnostic["generated_by"],
+                   "rejected artifact falls back to local extraction (generated_by: 'local')"
+    end
+  end
+
+  def test_fresh_diagnosis_artifact_rejected_when_generator_unknown
+    Dir.mktmpdir("hive-task-action-evil") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      # Plant an artifact whose generated_by is NOT in the registered
+      # AgentProfiles registry. Even with a matching marker_signature,
+      # the trust gate must reject — a malicious actor with write access
+      # to diagnostics/ should not be able to inject arbitrary
+      # diagnostic text under a profile they invented.
+      current_signature = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+      File.write(File.join(diagnostics, "red-status.md"), <<~MD)
+        ---
+        generated_by: evil-profile
+        marker_signature: #{current_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        evil verdict body
+      MD
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      refute_equal "evil-profile", diagnostic["generated_by"],
+                   "untrusted generator must not surface as generated_by"
+      refute_includes diagnostic["detail"], "evil verdict body",
+                      "untrusted artifact body must not leak into the diagnostic detail"
+    end
+  end
+
   def test_recovery_diagnostic_falls_back_to_marker_when_artifacts_are_missing
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

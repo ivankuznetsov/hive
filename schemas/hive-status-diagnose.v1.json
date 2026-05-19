@@ -91,7 +91,11 @@
           "enum": [
             "config",
             "internal",
-            "error"
+            "error",
+            "stale_marker",
+            "in_flight",
+            "slug_not_found",
+            "ambiguous_slug"
           ]
         },
         "exit_code": {

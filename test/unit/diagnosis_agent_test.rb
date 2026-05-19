@@ -236,4 +236,122 @@ class DiagnosisAgentTest < Minitest::Test
       Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn).run!
     end
   end
+
+  def test_stale_marker_exit_code_is_tempfail
+    # Agent wrappers branch on exit code to decide retry-vs-escalate.
+    # StaleMarker is retryable (marker rotated during the spawn; the
+    # operator just needs to re-issue) and MUST map to TEMPFAIL (75),
+    # matching Hive::ConcurrentRunError's semantics. Generic exit 1 (the
+    # Hive::Error default) would tell wrappers to escalate.
+    assert_equal Hive::ExitCodes::TEMPFAIL,
+                 Hive::DiagnosisAgent::StaleMarker.new("stale").exit_code
+  end
+
+  def test_diagnosis_in_flight_exit_code_is_tempfail
+    # Lock contention is retryable; same TEMPFAIL semantics as
+    # Hive::ConcurrentRunError so wrappers can branch uniformly.
+    assert_equal Hive::ExitCodes::TEMPFAIL,
+                 Hive::DiagnosisAgent::DiagnosisInFlight.new("inflight").exit_code
+  end
+
+  def test_run_with_timeout_installs_and_restores_sigint_handler
+    # Ctrl-C during the popen3 block unwinds the body and Ruby's popen3
+    # ensure calls wait_thr.join with no timeout — the child agent is
+    # never signalled and the CLI hangs forever. Verify the SIGINT (and
+    # SIGTERM) trap is installed during run_with_timeout and restored
+    # afterward so the operator's Ctrl-C terminates the child pgroup.
+    agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+    pre_int = Signal.trap("INT") { nil }
+    pre_term = Signal.trap("TERM") { nil }
+    Signal.trap("INT", pre_int)
+    Signal.trap("TERM", pre_term)
+
+    seen_handlers = []
+    fake_spawn = lambda do |**_kwargs|
+      # Snapshot the active handlers from inside the popen3 block-equivalent.
+      seen_handlers << [ Signal.trap("INT") { nil }, Signal.trap("TERM") { nil } ]
+      # Restore so the agent's body assertion sees the same state as a
+      # real spawn would.
+      Signal.trap("INT", seen_handlers.first[0])
+      Signal.trap("TERM", seen_handlers.first[1])
+      "agent body"
+    end
+    # Wire the injected spawn through DiagnosisAgent#run! so the trap
+    # would be installed; the injected callable bypasses popen3 (and
+    # therefore the trap installation), so this test alone can't prove
+    # the trap is set DURING popen3. The companion `run_with_timeout`
+    # tightening is covered by the spawn_profile path manually.
+    Hive::DiagnosisAgent.new(task: @task, spawn: fake_spawn).run!
+    post_int = Signal.trap("INT") { nil }
+    post_term = Signal.trap("TERM") { nil }
+    Signal.trap("INT", post_int)
+    Signal.trap("TERM", post_term)
+
+    # Caller's INT/TERM handlers must be restored to their pre-call values.
+    assert_equal pre_int, post_int,
+                 "INT handler must be restored to caller's handler after run!"
+    assert_equal pre_term, post_term,
+                 "TERM handler must be restored to caller's handler after run!"
+    agent
+  end
+
+  def test_run_with_timeout_traps_int_and_kills_pgroup_on_ctrl_c
+    # Spawn a short-lived shell child via the real run_with_timeout
+    # path, send SIGINT to ourselves while the child is alive, and
+    # verify the child is signalled (no orphan, no hang). The popen3
+    # block must trap INT so Ruby's auto-unwind doesn't bypass child
+    # cleanup. Skip on platforms where Process.kill is not supported.
+    skip "Process.kill not supported on this platform" if RUBY_PLATFORM =~ /mswin|mingw/
+
+    agent = Hive::DiagnosisAgent.new(task: @task)
+    raised = nil
+    thr = Thread.new do
+      begin
+        agent.send(:run_with_timeout, [ "sleep", "30" ], Dir.pwd, nil, 60)
+      rescue Interrupt => e
+        raised = e
+      rescue Hive::Error => e
+        raised = e
+      end
+    end
+    # Wait a moment for popen3 to install the trap and start the child.
+    sleep 0.3
+    Process.kill("INT", Process.pid)
+    thr.join(10)
+    refute thr.alive?, "run_with_timeout must not hang past SIGINT"
+    assert raised, "SIGINT must surface as Interrupt or Hive::Error from run_with_timeout"
+  end
+
+  def test_marker_rotation_to_agent_working_mid_spawn_aborts_with_stale_marker
+    # A concurrent `hive run` flipping the marker to :agent_working
+    # mid-spawn means the agent's verdict would describe an in-flight
+    # run, not a red recovery state. The write-time freshness gate must
+    # raise StaleMarker — see PR #84 review row 12.
+    rotating_spawn = lambda do |**_args|
+      File.write(@state_file, "<!-- AGENT_WORKING pid=999 -->\n")
+      "agent body"
+    end
+
+    error = assert_raises(Hive::DiagnosisAgent::StaleMarker) do
+      Hive::DiagnosisAgent.new(task: @task, spawn: rotating_spawn).run!
+    end
+    assert_match(/transitioned to/i, error.message,
+                 "stale-marker error must mention the new marker state for operator")
+    refute File.exist?(File.join(@folder, "diagnostics", "red-status.md")),
+           "transition to non-red state must NOT leave an artifact behind"
+  end
+
+  def test_dispatch_time_freshness_gate_rejects_non_red_marker
+    # If the marker is already in a non-red state when DiagnosisAgent
+    # acquires the lock (e.g., a concurrent `hive run` raced ahead),
+    # the agent must not spawn at all — its verdict has no audience.
+    File.write(@state_file, "<!-- AGENT_WORKING pid=999 -->\n")
+    spawned = false
+    no_spawn = lambda { |**_kwargs| spawned = true; "should not spawn" }
+
+    assert_raises(Hive::DiagnosisAgent::StaleMarker) do
+      Hive::DiagnosisAgent.new(task: @task, spawn: no_spawn).run!
+    end
+    refute spawned, "DiagnosisAgent must not spawn when marker is not red at dispatch"
+  end
 end

@@ -153,6 +153,23 @@ module Hive
       ALL = constants.map { |c| const_get(c) }.freeze
     end
 
+    # Closed enum of `error_kind` values emitted by `hive status --diagnose --json`.
+    # Superset of StatusErrorKind — diagnose has additional retryable failure
+    # modes (stale marker mid-spawn, concurrent diagnose in flight) that agent
+    # callers branch on, plus slug-resolution errors surfaced through the
+    # TaskResolver path. The schema (schemas/hive-status-diagnose.v1.json)
+    # mirrors this enum.
+    module StatusDiagnoseErrorKind
+      CONFIG          = "config".freeze
+      INTERNAL        = "internal".freeze
+      ERROR           = "error".freeze
+      STALE_MARKER    = "stale_marker".freeze
+      IN_FLIGHT       = "in_flight".freeze
+      SLUG_NOT_FOUND  = "slug_not_found".freeze
+      AMBIGUOUS_SLUG  = "ambiguous_slug".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
     # Mixin for command classes that emit a versioned JSON envelope
     # under `--json`. Centralises the `@stdout_written` guard, the
     # twin `Hive::Error` / `StandardError` rescue scaffold, and the

@@ -175,7 +175,7 @@ module Hive
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
           diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task)).diagnostic
-          emit_diagnose_result(task, diagnostic, result["path"] || result[:path])
+          emit_diagnose_result(task, diagnostic, result[:path])
         else
           emit_diagnose_result(task, diagnostic, nil)
         end
@@ -417,11 +417,42 @@ module Hive
       # InternalError surface deliberately; everything else is the generic
       # `error` fallback (matching the convention used by approve/findings/
       # markers/stage_action/finding_toggle).
+      #
+      # The `--diagnose` route has a wider producer surface (TaskResolver
+      # AmbiguousSlug/InvalidTaskPath, DiagnosisAgent StaleMarker/
+      # DiagnosisInFlight) — those map through StatusDiagnoseErrorKind so
+      # agent callers can branch on retry-vs-escalate without parsing
+      # error messages. Non-diagnose callers stay on the narrow
+      # StatusErrorKind enum.
       def error_kind_for(error)
+        if @diagnose
+          diagnose_error_kind_for(error)
+        else
+          case error
+          when Hive::ConfigError   then Hive::Schemas::StatusErrorKind::CONFIG
+          when Hive::InternalError then Hive::Schemas::StatusErrorKind::INTERNAL
+          else                          Hive::Schemas::StatusErrorKind::ERROR
+          end
+        end
+      end
+
+      def diagnose_error_kind_for(error)
+        require "hive/diagnosis_agent"
         case error
-        when Hive::ConfigError   then Hive::Schemas::StatusErrorKind::CONFIG
-        when Hive::InternalError then Hive::Schemas::StatusErrorKind::INTERNAL
-        else                          Hive::Schemas::StatusErrorKind::ERROR
+        when Hive::DiagnosisAgent::StaleMarker
+          Hive::Schemas::StatusDiagnoseErrorKind::STALE_MARKER
+        when Hive::DiagnosisAgent::DiagnosisInFlight
+          Hive::Schemas::StatusDiagnoseErrorKind::IN_FLIGHT
+        when Hive::AmbiguousSlug
+          Hive::Schemas::StatusDiagnoseErrorKind::AMBIGUOUS_SLUG
+        when Hive::InvalidTaskPath
+          Hive::Schemas::StatusDiagnoseErrorKind::SLUG_NOT_FOUND
+        when Hive::ConfigError
+          Hive::Schemas::StatusDiagnoseErrorKind::CONFIG
+        when Hive::InternalError
+          Hive::Schemas::StatusDiagnoseErrorKind::INTERNAL
+        else
+          Hive::Schemas::StatusDiagnoseErrorKind::ERROR
         end
       end
     end

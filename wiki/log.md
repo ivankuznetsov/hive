@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T00:00:00Z] review — ce-code-review row fixes for PR #84
+
+**Action:** Applied 14 rows from the post-merge ce-code-review. Highlights: redact-before-truncate ordering for diagnostic summary/detail (row 1, prevents boundary-straddling secrets escaping); SIGINT/SIGTERM trap inside `DiagnosisAgent#run_with_timeout` so Ctrl-C kills the child pgroup instead of orphaning the agent (row 3); `StaleMarker` and `DiagnosisInFlight` now override `exit_code` → `Hive::ExitCodes::TEMPFAIL` (75) so wrappers branch on retry (row 4); diagnose error envelope grows a separate `StatusDiagnoseErrorKind` enum with `stale_marker` / `in_flight` / `slug_not_found` / `ambiguous_slug`; background-thread terminate_process_group avoids blocking the main thread for 5s on every cancellation (row 6); R-press path now passes `--force` so the marker_signature short-circuit cannot silently skip the spawn (row 8); refresh-during-autofix now refuses with operator-visible flash (row 13); marker-rotation-to-`agent_working` mid-spawn aborts at the dispatch-time freshness gate (row 12); `marker_signature` lifted to `Hive::TaskAction.marker_signature` class method, `DiagnosisAgent` delegates instead of duplicating (row 16); `red_status_detail` footer drops [Enter] for `recover_execute` rows (row 25); bot recovery notification appends `diagnostic.summary` inline (row 23); bot show-details callback uses `hive status --diagnose <slug>` for bounded reply instead of full snapshot (row 24); schema tests pin cross-schema Diagnostic equivalence + `generated_by` enum agreement with `AgentProfiles.registered_names` (row 17).
+
 ## [2026-05-17T00:00:00Z] review — deferred-finding fixes for PR #84
 
 **Action:** Resolved the 14 deferred findings from PR #84's multi-agent code review. P1s: gate `--write` on red-state tasks (#1), add cross-process flock in `Hive::DiagnosisAgent#run!` raising `DiagnosisInFlight` on contention (#2 + #11), extend `pem_private_key` regex to block-form `/m` and add `password_assignment` / `bearer_token` / `session_cookie` patterns (#3), coerce `tail_file` and `SecretPatterns.redact` to UTF-8 with invalid-byte replacement so one corrupt log byte no longer aborts `hive status --json` (#4). P2s/P3: added `tasks[].worktree_path` to v2 schema as an agent-callable primitive for the manual-fix path (#8); `recover_execute` rows now emit `suggested_next_action.kind = "manual_fix"` (#9) and open the TUI red-status detail view (#10); consolidated three near-identical max_passes-with-escalations predicates into `Hive::TaskAction.max_passes_review_stale_with_escalations?` (#17); split `marker_signature` into observed-vs-acknowledged so a second marker rotation between polls fires the flash again (#7); added `Hive::SecretPatterns.redact` shared helper replacing the two duplicate inline redactors in `TaskAction` and `DiagnosisAgent` (#13); added `--force` to `hive status --diagnose --write` for the idempotency short-circuit when a fresh artifact already covers the marker (#21).
@@ -19,6 +23,7 @@ Skipped per product direction: schema versioning #5 (product unreleased, in-plac
 - [[modules/diagnosis_agent]] — new page covering the headless diagnose-spawn module.
 - [[modules/task_action]] — added `#diagnostic` to Public surface, new Red-status diagnostic section, backlinks to [[modules/diagnosis_agent]] / [[modules/secret_patterns]] / ADR-025 / ADR-027.
 - [[index]] — page count 59 → 60, added [[modules/diagnosis_agent]] entry.
+- [[cli]] — `hive status` command table row updated to document `--diagnose`, `--write`, `--force`, `--project`, `--stage` options.
 
 ## [2026-05-14T23:30:00Z] brainstorm — tmux interactive runtime (U1–U8)
 

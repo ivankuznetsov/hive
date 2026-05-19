@@ -739,7 +739,7 @@ module Hive
       end
 
       def red_status_row?(row)
-        %w[recover_review error].include?(row.action_key.to_s)
+        %w[recover_review recover_execute error].include?(row.action_key.to_s)
       end
 
       # Read the canonical marker_signature off the diagnostic payload

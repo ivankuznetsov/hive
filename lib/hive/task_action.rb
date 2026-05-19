@@ -279,8 +279,8 @@ module Hive
       generator = diagnostic_generated_by(primary)
 
       {
-        "summary" => redact(truncate(marker_summary, DIAGNOSTIC_SUMMARY_MAX)),
-        "detail" => redact(truncate(detail, DIAGNOSTIC_DETAIL_MAX)),
+        "summary" => truncate(redact(marker_summary), DIAGNOSTIC_SUMMARY_MAX),
+        "detail" => truncate(redact(detail), DIAGNOSTIC_DETAIL_MAX),
         "source" => primary ? "artifact" : "marker",
         "source_path" => primary,
         "artifact_paths" => artifacts.uniq.first(ARTIFACT_PATHS_MAX),
@@ -524,25 +524,31 @@ module Hive
 
     public
 
-    # Canonical freshness key for the (marker, attrs) pair. Re-used by:
+    # Canonical freshness key for a (marker.name, marker.attrs) pair.
+    # Lifted to a class method so producer + consumer (DiagnosisAgent
+    # write side and TaskAction read side) call one canonical impl and
+    # cannot drift. Re-used by:
     #   - this class's fresh_diagnosis_artifact (consumer side: validates
     #     diagnostics/red-status.md's frontmatter against the current
     #     marker before trusting the artifact body)
     #   - Hive::DiagnosisAgent#artifact_body (producer side: writes the
-    #     signature into the artifact frontmatter at spawn time)
+    #     signature into the artifact frontmatter at spawn time) and
+    #     freshness gate (compares dispatch-time vs write-time signature)
     #   - Hive::Tui::Update.apply_red_status_detail_snapshot (TUI live-
     #     update gate: detects marker rotation while the operator is in
     #     the red-status detail view)
     #
-    # All three call this single implementation so the producer, the
-    # local consumer, and the TUI freshness check can never disagree.
     # Marker attrs are coerced to String so a future non-string value
     # (Integer pass attr, Time stamp) cannot silently change the digest
     # via Hash#to_s formatting.
-    def marker_signature
-      attrs = marker.attrs.sort_by { |key, _value| key.to_s }
-                     .map { |key, value| "#{key}=#{value}" }
+    def self.marker_signature(marker)
+      attrs = (marker.attrs || {}).sort_by { |key, _value| key.to_s }
+                                  .map { |key, value| "#{key}=#{value}" }
       Digest::SHA256.hexdigest(([ marker.name.to_s ] + attrs).join("\n"))
+    end
+
+    def marker_signature
+      self.class.marker_signature(marker)
     end
 
     private

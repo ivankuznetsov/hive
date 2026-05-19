@@ -7,9 +7,21 @@ module Hive
   module Tui
     module Views
       module RedStatusDetail
+        # Default footer for rows whose Enter has a meaningful action
+        # (recover_review / error → autofix path).
         FOOTER = "[Enter] autofix / retry  [f] manual fix ($EDITOR)  [R] refresh diagnosis  [q] back".freeze
+        # recover_execute (EXECUTE_STALE) rows have NO Enter affordance —
+        # there is no auto-retry recipe (the operator must edit findings
+        # or lower the pass counter). Advertising [Enter] would set up an
+        # expectation that the no-op Enter then breaks. Drop the affordance
+        # and keep [f]/[R]/[q]. See PR #84 review row 25.
+        FOOTER_NO_ENTER = "[f] manual fix ($EDITOR)  [R] refresh diagnosis  [q] back".freeze
 
         module_function
+
+        def footer_for(row)
+          row && row.action_key.to_s == "recover_execute" ? FOOTER_NO_ENTER : FOOTER
+        end
 
         def render(model)
           state = model.red_status_detail_state
@@ -32,7 +44,7 @@ module Hive
           lines << Styles::HINT.render(truncate("Refreshing diagnosis...", width)) if state.refreshing
 
           visible = lines.first(body_height)
-          footer = Styles::CURSOR_HIGHLIGHT.render(truncate(FOOTER, width))
+          footer = Styles::CURSOR_HIGHLIGHT.render(truncate(footer_for(row), width))
           Lipgloss.join_vertical(Lipgloss::TOP, *visible, footer)
         end
 
@@ -59,6 +71,12 @@ module Hive
             "A: Enter runs the existing review recovery path. f opens the worktree in $EDITOR without clearing the marker."
           when "error"
             "A: Enter clears the ERROR marker and reruns the task. f opens the worktree in $EDITOR without clearing the marker."
+          when "recover_execute"
+            # EXECUTE_STALE has no auto-retry recipe — the operator must
+            # edit findings or lower the pass counter before re-running.
+            # The footer drops the [Enter] affordance for this row; mirror
+            # the contract in the answer so the operator knows why.
+            "A: No autofix available. Edit findings or lower the pass counter; press f to open the worktree in $EDITOR, then re-run."
           else
             "A: This row has no autofix action in the detail view."
           end

@@ -130,10 +130,17 @@ module Hive
               [ button("Show details", "details:#{row.project}:#{row.slug}") ]
             ]
           end
-        Notification.new(
-          text: header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}",
-          keyboard: keyboard
-        )
+        # Append the bounded diagnostic summary so the operator sees the
+        # one-line "why is this red" without an extra round-trip through
+        # the Show-details callback. StatusWatcher::Row carries the
+        # diagnostic hash from `hive status --json`; nil when the row is
+        # green or the snapshot pre-dates the schema. See PR #84 review
+        # row 23.
+        text = header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}"
+        if row.diagnostic.is_a?(Hash) && !row.diagnostic["summary"].to_s.empty?
+          text += "\n\n#{row.diagnostic['summary']}"
+        end
+        Notification.new(text: text, keyboard: keyboard)
       end
 
       def open_laptop_only_recovery?(row)

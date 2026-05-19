@@ -65,11 +65,15 @@ module Hive
 
         def show_details(data)
           _prefix, project, slug = split_callback(data, 3)
+          # Replace the previous full-status dump with a targeted
+          # `hive status --diagnose <slug>` so the bot reply renders the
+          # bounded Diagnostic envelope (summary + detail) instead of
+          # the whole snapshot. See PR #84 review row 24.
           @result_class.new(
             action: :dispatch_then_reply,
             project: project,
             slug: slug,
-            command_argv: [ "hive", "status", "--json" ]
+            command_argv: [ "hive", "status", "--diagnose", slug, "--project", project, "--json" ]
           )
         end
 

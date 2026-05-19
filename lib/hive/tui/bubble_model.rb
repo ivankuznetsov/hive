@@ -894,6 +894,20 @@ module Hive
         )
       end
 
+      # Returns true if a per-row autofix (recover_review / recover_error)
+      # is currently in flight. Used by refresh_red_status_diagnosis to
+      # refuse R-press while autofix is running — the autofix path
+      # acquires the per-task lock via `hive run`, and a parallel
+      # diagnose would either fail at the flock or write an artifact that
+      # describes pre-autofix state. See PR #84 review row 13.
+      def autofix_in_flight?(row)
+        @healed_folders_mutex.synchronize do
+          @review_recovery_inflight.include?(row.folder)
+        end
+      rescue StandardError
+        false
+      end
+
       def register_diagnosis_attempt(folder)
         @healed_folders_mutex.synchronize do
           return false if @diagnosis_inflight.include?(folder)
@@ -909,6 +923,16 @@ module Hive
 
       def refresh_red_status_diagnosis(row)
         return [ flashed("diagnosis unavailable: task folder missing"), nil ] if row.folder.to_s.empty?
+        # Refuse to spawn a second diagnose if autofix is already running
+        # against this row — the autofix path acquires the per-task lock
+        # via `hive run` and a parallel diagnose would either fail at the
+        # flock or write an artifact that describes pre-autofix state.
+        # Surface the operator-visible reason rather than a generic
+        # "in progress" flash so the operator knows which gesture to
+        # wait on. See PR #84 review row 13.
+        if row.action_key.to_s == "agent_running" || autofix_in_flight?(row)
+          return [ flashed("autofix already running for #{row.slug}; wait or press q to abort"), nil ]
+        end
         return [ flashed("diagnosis already in progress for #{row.slug}"), nil ] unless register_diagnosis_attempt(row.folder)
 
         argv = [ "hive", "status", "--diagnose", row.slug ]
@@ -917,6 +941,13 @@ module Hive
         # same project (TaskResolver raises AmbiguousSlug otherwise).
         argv += [ "--stage", row.stage ] if row.stage.to_s != ""
         argv << "--write"
+        # An explicit operator R-press signals "show me a fresh verdict";
+        # the idempotency short-circuit (cache hit on matching
+        # marker_signature) would otherwise return the previous artifact
+        # silently and the TUI would flash "refreshed" without any
+        # new agent run. --force bypasses the short-circuit. See PR #84
+        # review row 8.
+        argv << "--force"
 
         folder = row.folder
         # Wrap the dispatcher so the SubprocessExited message arriving

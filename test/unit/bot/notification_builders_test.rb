@@ -85,6 +85,45 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ "Open laptop", "Show details" ], labels
   end
 
+  def test_recovery_notification_appends_diagnostic_summary_when_present
+    # Operators reading the bot notification get the "why is this red"
+    # one-liner inline instead of needing to round-trip through Show
+    # details. Mirrors what the TUI red_status_detail view shows at the
+    # top of the screen. See PR #84 review row 23.
+    diag = {
+      "summary" => "REVIEW_ERROR phase=fix pass=2 reason=timeout",
+      "detail" => "agent timed out",
+      "generated_by" => "local"
+    }
+    row_with_diag = row(action: "recover_review", marker: "review_error",
+                        attrs: { "phase" => "fix", "reason" => "timeout" })
+    # Re-construct with diagnostic since the test helper does not pass it.
+    enriched = Row.new(
+      project: row_with_diag.project, slug: row_with_diag.slug,
+      stage: row_with_diag.stage, marker: row_with_diag.marker,
+      attrs: row_with_diag.attrs, folder: row_with_diag.folder,
+      action: row_with_diag.action, action_label: row_with_diag.action_label,
+      suggested_command: row_with_diag.suggested_command,
+      diagnostic: diag
+    )
+
+    notification = Hive::Bot::NotificationBuilders.build(enriched)
+    assert_includes notification.text, diag["summary"],
+                    "recovery notification must surface diagnostic.summary inline"
+  end
+
+  def test_recovery_notification_omits_diagnostic_when_nil
+    # Pre-schema snapshots / non-red rows return nil diagnostic. The
+    # notification must work without the inline summary — the existing
+    # "Needs recovery: marker attrs" line carries enough operator signal.
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "phase" => "fix", "reason" => "timeout" })
+    )
+    refute_nil notification
+    assert_match(/Needs recovery/, notification.text)
+  end
+
   def test_fingerprint_changes_when_marker_attrs_change
     first = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" })
     second = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "3" })

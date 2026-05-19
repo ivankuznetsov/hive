@@ -159,6 +159,7 @@
         "slug",
         "folder",
         "state_file",
+        "worktree_path",
         "marker",
         "attrs",
         "mtime",
@@ -168,7 +169,8 @@
         "action",
         "action_label",
         "suggested_command",
-        "next_action"
+        "next_action",
+        "diagnostic"
       ],
       "properties": {
         "stage": {
@@ -192,6 +194,13 @@
         },
         "state_file": {
           "type": "string"
+        },
+        "worktree_path": {
+          "description": "Absolute path of the task's git worktree, or null for pre-execute stages (1-inbox, 2-brainstorm, 3-plan) and for tasks whose worktree was never created. Agents that want to open the worktree, edit files, and retry get the path here without re-implementing Hive::Task#worktree_path resolution. See PR #84 review finding #8.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "marker": {
           "type": "string",
@@ -285,6 +294,117 @@
               ]
             }
           }
+        },
+        "diagnostic": {
+          "description": "Red-row diagnostic payload for recovery/error states; null for ordinary actionable rows.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "detail",
+        "source",
+        "source_path",
+        "artifact_paths",
+        "generated_by",
+        "marker_signature",
+        "suggested_next_action",
+        "updated_at"
+      ],
+      "properties": {
+        "summary": {
+          "description": "Single-line operator summary. Producer caps at 120 chars (TaskAction::DIAGNOSTIC_SUMMARY_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 120
+        },
+        "detail": {
+          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "marker",
+            "artifact"
+          ]
+        },
+        "source_path": {
+          "description": "Absolute filesystem path of the primary artifact backing this diagnostic, or null when source == marker.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_paths": {
+          "description": "Absolute paths to the bounded set of artifacts the local extractor inspected. Capped at 20 entries.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "generated_by": {
+          "description": "Origin of the diagnostic body. \"local\" = TaskAction's bounded marker+artifact extraction; agent-profile names (claude / codex / pi) = a headless Hive::DiagnosisAgent run wrote diagnostics/red-status.md. Extending this enum requires registering a new profile in Hive::AgentProfiles AND updating this enum in the same PR (covered by test/unit/schema_files_test.rb).",
+          "type": "string",
+          "enum": [
+            "local",
+            "claude",
+            "codex",
+            "pi"
+          ]
+        },
+        "marker_signature": {
+          "description": "SHA256 hex of the marker name + sorted attrs (key=value joined by newline). Pinned freshness key shared by local extraction, TUI live-update gating, and the headless DiagnosisAgent artifact frontmatter. Length 64.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "suggested_next_action": {
+          "description": "Optional structured recovery hint for agent consumers. Today populated for recover_review and error rows whose existing suggested_command path applies; null when the operator must edit before retry (max_passes-hit REVIEW_STALE).",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "retry",
+                    "clear_marker",
+                    "manual_fix"
+                  ]
+                },
+                "command": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     }

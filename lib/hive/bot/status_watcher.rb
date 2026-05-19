@@ -7,12 +7,12 @@ module Hive
     class StatusWatcher
       Row = Data.define(:project, :project_path, :hive_state_path, :slug, :stage, :marker,
                         :attrs, :folder, :state_file, :state_file_mtime, :age_seconds,
-                        :action, :action_label, :suggested_command, :next_action) do
+                        :action, :action_label, :suggested_command, :next_action, :diagnostic) do
         def initialize(project:, slug:, project_path: nil, hive_state_path: nil,
                        stage: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, state_file_mtime: nil, age_seconds: nil,
                        action: nil, action_label: nil, suggested_command: nil,
-                       next_action: nil)
+                       next_action: nil, diagnostic: nil)
           super
         end
       end
@@ -89,7 +89,8 @@ module Hive
               action: task["action"],
               action_label: task["action_label"],
               suggested_command: task["suggested_command"],
-              next_action: task["next_action"]
+              next_action: task["next_action"],
+              diagnostic: task["diagnostic"]
             )
           end
         end

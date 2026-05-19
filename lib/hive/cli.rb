@@ -278,9 +278,53 @@ module Hive
     end
 
     desc "status", "Show all active tasks across registered projects"
+    long_desc <<~DESC
+      Default: prints a grouped table of every task across registered
+      projects, ordered by stage. Combine with --json to emit the
+      `hive-status` envelope (schema v2); every row carries a required
+      nullable `diagnostic` field — null for green rows, populated with
+      a bounded summary + artifact tail + marker signature for red
+      recovery/error rows.
+
+      --diagnose <slug>: switch to the `hive-status-diagnose` envelope
+      (schema v1) and emit the diagnostic for a single task. Useful
+      for agents that want to inspect one row without paying the
+      full snapshot cost. Pair with --project / --stage to disambiguate
+      when the same slug exists across multiple projects or stages.
+
+      --diagnose <slug> --write: spawn the project's configured execute
+      AgentProfile to write `<task.folder>/diagnostics/red-status.md`,
+      then return the path. The agent run is bounded (default 600s,
+      $5 budget) and does NOT claim the task lock or touch markers.
+      A freshness gate (marker_signature SHA256) refuses to write
+      stale diagnoses when the marker rotates mid-spawn.
+
+      --write requires --diagnose AND a task in a red recovery state
+      (recover_review / error / recover_execute); green tasks emit a
+      structured error rather than burning agent budget on a healthy
+      row. When a previous agent-written artifact already matches the
+      current marker_signature, --write short-circuits and returns
+      the existing path without re-spawning; pass --force to bypass
+      that idempotency check. Empty --diagnose values are rejected.
+    DESC
+    option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
+    option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope --diagnose slug lookup to one stage"
+    option :write, type: :boolean, default: false,
+                   desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
+    option :force, type: :boolean, default: false,
+                   desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     def status
       require "hive/commands/status"
-      Hive::Commands::Status.new(json: options[:json]).call
+      Hive::Commands::Status.new(
+        json: options[:json],
+        diagnose: options[:diagnose],
+        project: options[:project],
+        stage: options[:stage],
+        write: options[:write],
+        force: options[:force]
+      ).call
     end
 
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"

@@ -81,6 +81,7 @@ module Hive
         when :grid then grid_message(key: key, row: row, pane_focus: pane_focus)
         when :triage then triage_message(key: key, row: row)
         when :log_tail then log_tail_message(key: key, row: row)
+        when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
         when :new_idea_project then new_idea_project_message(key: key, row: row)
@@ -176,6 +177,7 @@ module Hive
 
       def enter_message(row)
         return Messages::OpenSummary.new(row: row) if finalize_complete_row?(row)
+        return Messages::OpenRedStatusDetail.new(row: row) if red_detail_row?(row)
 
         case row.action_key
         when "review_findings" then Messages::OpenFindings.new(row: row)
@@ -206,6 +208,46 @@ module Hive
         return Messages::OpenLogTail.new(row: row) if KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
 
         Messages::RecoverError.new(row: row)
+      end
+
+      def red_detail_row?(row)
+        return false if row.nil?
+
+        case row.action_key.to_s
+        when "recover_review"
+          recover_review_detail_row?(row)
+        when "error"
+          attrs = row.attrs || {}
+          !KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+        when "recover_execute"
+          # EXECUTE_STALE rows expose the same diagnostic payload in
+          # JSON but historically lacked a detail view. Opening the
+          # view lets operators read the bounded summary + artifact
+          # tail and refresh the diagnosis with `R`. The autofix
+          # action is intentionally a no-op for these rows (they
+          # require a manual fix); see PR #84 review finding #10 and
+          # task_action.rb#suggested_next_action_payload.
+          true
+        else
+          false
+        end
+      end
+
+      def recover_review_detail_row?(row)
+        return false if row.marker.to_s == "review_stale" && wall_clock_stale?(row)
+        return false if max_passes_stale_with_escalations?(row)
+
+        true
+      end
+
+      def wall_clock_stale?(row)
+        (row.attrs || {})["reason"].to_s == "wall_clock"
+      end
+
+      def max_passes_stale_with_escalations?(row)
+        Hive::TaskAction.max_passes_review_stale_with_escalations?(
+          folder: row.folder, marker_name: row.marker, attrs: row.attrs
+        )
       end
 
       # Enter on a `needs_input` row opens the row's input file in the
@@ -272,6 +314,23 @@ module Hive
 
       def log_tail_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
+
+        Messages::NOOP
+      end
+
+      def red_status_detail_message(key:, row:)
+        return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
+        return Messages::RedStatusAutofix.new(row: row) if ENTER_KEYS.include?(key) && row
+        return Messages::OpenManualFix.new(row: row) if key == "f" && row
+        return Messages::RefreshRedStatusDiagnosis.new(row: row) if key == "R" && row
+        # Grid-mode verb keys (b/p/d/r/P/F/a) silently no-oping in the
+        # detail view conflicts with the muscle memory documented in
+        # wiki/commands/tui.md — notably `r` is the in-grid force-retry
+        # gesture (PR #72). Flash an explicit refusal instead so the
+        # operator sees the mode boundary.
+        if VERB_KEYS.key?(key)
+          return Messages::Flash.new(text: "verb keys are grid-mode only — Esc to return")
+        end
 
         Messages::NOOP
       end

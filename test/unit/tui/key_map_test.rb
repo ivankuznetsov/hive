@@ -1,4 +1,6 @@
 require "test_helper"
+require "fileutils"
+require "tmpdir"
 require "hive/tui/key_map"
 require "hive/tui/snapshot"
 
@@ -23,7 +25,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       marker: marker, attrs: attrs, mtime: "2026-04-27T12:00:00Z", age_seconds: 1,
       claude_pid: claude_pid_alive ? 1234 : nil, claude_pid_alive: claude_pid_alive,
       action_key: action_key, action_label: action_label,
-      suggested_command: suggested_command, next_action: next_action
+      suggested_command: suggested_command, next_action: next_action, diagnostic: nil
     ).freeze
   end
 
@@ -305,7 +307,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       state_file: "/s.md", marker: "complete", attrs: {}, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: "ready_to_plan", action_label: "Ready to plan",
-      suggested_command: "hive plan s --from 2-brainstorm", next_action: nil
+      suggested_command: "hive plan s --from 2-brainstorm", next_action: nil, diagnostic: nil
     )
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row, pane_focus: :right)
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
@@ -320,7 +322,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
       state_file: "/s.md", marker: "complete", attrs: {}, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: "ready_to_plan", action_label: "Ready to plan",
-      suggested_command: "hive plan s --from 2-brainstorm", next_action: nil
+      suggested_command: "hive plan s --from 2-brainstorm", next_action: nil, diagnostic: nil
     )
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
@@ -461,19 +463,16 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
-  # Enter on an error-state row with a non-kill-class exit code routes
-  # to RecoverError (clear marker + re-run), which is the path the UI
-  # previously had no affordance for. Without this branch the row sat
-  # in "Error" forever and recovery required a shell-level `hive
-  # markers clear --name ERROR`.
-  def test_enter_on_error_with_real_failure_returns_recover_error
+  # Enter on an error-state row with a non-kill-class exit code now
+  # opens the red-status detail view first. The detail view's Enter
+  # key still routes to RecoverError, but only after the operator sees
+  # the diagnosis and explicit action choices.
+  def test_enter_on_error_with_real_failure_opens_red_status_detail
     row = make_row(action_key: "error", action_label: "Error",
                    marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
                    suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
-    assert_kind_of Hive::Tui::Messages::RecoverError, msg,
-      "Enter on a real-failure error row must route to RecoverError so the operator " \
-      "can retry from the TUI instead of falling out to a shell"
+    assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg
     assert_same row, msg.row
   end
 
@@ -498,23 +497,61 @@ class TuiKeyMapMessageForTest < Minitest::Test
   # ERROR markers without an `exit_code` attr (legacy or hand-written)
   # take the recovery path because there is no other gesture available
   # and `hive markers clear --name ERROR` accepts them.
-  def test_enter_on_error_without_exit_code_returns_recover_error
+  def test_enter_on_error_without_exit_code_opens_red_status_detail
     row = make_row(action_key: "error", action_label: "Error",
                    marker: "error", attrs: {}, suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
-    assert_kind_of Hive::Tui::Messages::RecoverError, msg
+    assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg
     assert_same row, msg.row
   end
 
-  def test_enter_on_recover_review_returns_recover_review_with_row
+  def test_enter_on_recover_review_opens_red_status_detail
     row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                   marker: "review_error", attrs: { "phase" => "fix", "pass" => "1" },
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg
+    assert_same row, msg.row
+  end
+
+  def test_enter_on_recover_execute_opens_red_status_detail
+    # EXECUTE_STALE rows previously had no TUI detail view even though
+    # they emit `diagnostic` in JSON. Opening the view here gives the
+    # operator the same bounded summary + artifact tail + R-refresh
+    # primitives that recover_review / error rows have. See PR #84
+    # review finding #10.
+    row = make_row(action_key: "recover_execute", action_label: "Needs recovery",
+                   stage: "4-execute", marker: "execute_stale",
+                   attrs: { "pass" => "2" }, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg
+    assert_same row, msg.row
+  end
+
+  def test_enter_on_wall_clock_review_stale_keeps_direct_recover_review
+    row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                   stage: "6-review", marker: "review_stale",
+                   attrs: { "reason" => "wall_clock", "pass" => "1" },
                    suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
     assert_kind_of Hive::Tui::Messages::RecoverReview, msg
-    assert_same row, msg.row
-    refute msg.force,
-           "Enter on recover_review keeps default force=false so BubbleModel can route" \
-           " max_passes-hit REVIEW_STALE rows to OpenReviewStaleFile browse mode"
+    refute msg.force
+  end
+
+  def test_enter_on_max_passes_review_stale_with_escalations_keeps_browse_path
+    Dir.mktmpdir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "escalations-04.md"), "## pass 4\n")
+      row = make_row(action_key: "recover_review", action_label: "Needs recovery",
+                     stage: "6-review", marker: "review_stale", folder: dir,
+                     attrs: { "pass" => "4" }, suggested_command: nil)
+
+      msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+
+      assert_kind_of Hive::Tui::Messages::RecoverReview, msg
+      refute msg.force
+    end
   end
 
   def test_r_verb_on_max_passes_hit_review_stale_force_retries
@@ -562,6 +599,26 @@ class TuiKeyMapMessageForTest < Minitest::Test
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
     assert_kind_of Hive::Tui::Messages::Flash, msg
     assert_match(/no action available/, msg.text)
+  end
+
+  def test_red_status_detail_enter_dispatches_autofix
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::RedStatusAutofix, msg
+    assert_same row, msg.row
+  end
+
+  def test_red_status_detail_keys_route_to_manual_refresh_and_back
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+
+    assert_kind_of Hive::Tui::Messages::OpenManualFix,
+      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "f", row: row)
+    assert_kind_of Hive::Tui::Messages::RefreshRedStatusDiagnosis,
+      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "R", row: row)
+    assert_same Hive::Tui::Messages::BACK,
+      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "q", row: row)
   end
 
   def test_enter_on_needs_input_opens_input_editor_when_command_present

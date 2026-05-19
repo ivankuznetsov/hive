@@ -62,7 +62,7 @@ class TuiHelpTest < Minitest::Test
   end
 
   def test_modes_are_drawn_from_a_known_set
-    expected_modes = %i[grid triage log_tail filter new_idea_project new_idea].to_set
+    expected_modes = %i[grid triage log_tail red_status_detail filter new_idea_project new_idea].to_set
     actual_modes = Hive::Tui::Help::BINDINGS.map { |b| b[:mode] }.to_set
     extra = actual_modes - expected_modes
     assert_empty extra, "unexpected modes in BINDINGS: #{extra.inspect}"

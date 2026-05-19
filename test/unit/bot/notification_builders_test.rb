@@ -66,13 +66,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes labels, "Show details"
   end
 
-  def test_recovery_marker_builds_three_button_keyboard
+  def test_recovery_marker_builds_full_recovery_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "recover_review", marker: "review_error", attrs: { "phase" => "fix", "reason" => "timeout" })
     )
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Clear and retry", "Open laptop", "Show details" ], labels
+    # "Refresh diagnosis" is the bot-side parity of the TUI's R
+    # keystroke — issue #91. Order is locked so a future keyboard
+    # tweak cannot accidentally drop or duplicate the button.
+    assert_equal [ "Clear and retry", "Open laptop", "Show details", "Refresh diagnosis" ], labels
   end
 
   def test_fix_tampered_recovery_falls_back_to_laptop
@@ -82,7 +85,27 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "Clear and retry"
-    assert_equal [ "Open laptop", "Show details" ], labels
+    assert_equal [ "Open laptop", "Show details", "Refresh diagnosis" ], labels
+  end
+
+  def test_refresh_diagnosis_button_carries_callback_with_project_and_slug
+    # The button data must round-trip through the router's callback_intent
+    # regex (\Arefresh_diagnose:/) and split cleanly into prefix:project:slug
+    # for CallbackHandlers#refresh_diagnose. Pin the exact callback shape.
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "phase" => "fix", "reason" => "timeout" })
+    )
+    refresh_btn = notification.keyboard.flatten.find { |b| b[:text] == "Refresh diagnosis" }
+    refute_nil refresh_btn, "Refresh diagnosis button must be present on the recovery keyboard"
+
+    raw = Hive::Bot::NotificationBuilders.resolve_callback(refresh_btn[:callback_data])
+    assert raw.start_with?("refresh_diagnose:"),
+           "Refresh diagnosis callback must use the refresh_diagnose: prefix; got #{raw.inspect}"
+    parts = raw.split(":")
+    assert_equal 3, parts.length,
+                 "callback data must be refresh_diagnose:<project>:<slug>"
+    assert_equal "refresh_diagnose", parts[0]
   end
 
   def test_recovery_notification_appends_diagnostic_summary_when_present

@@ -19,6 +19,7 @@ module Hive
           when :callback_clear_and_retry then clear_and_retry(data)
           when :callback_open_laptop then @result_class.new(action: :reply, text: "Open laptop for this one.")
           when :callback_show_details then show_details(data)
+          when :callback_refresh_diagnose then refresh_diagnose(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
           when :callback_path_a_yes then path_a(data)
@@ -74,6 +75,24 @@ module Hive
             project: project,
             slug: slug,
             command_argv: [ "hive", "status", "--diagnose", slug, "--project", project, "--json" ]
+          )
+        end
+
+        def refresh_diagnose(data)
+          _prefix, project, slug = split_callback(data, 3)
+          # Bot-side parity of the TUI's R keystroke: spawn the
+          # configured execute AgentProfile via --write so a fresh
+          # diagnostic verdict is produced and written to
+          # <task>/diagnostics/red-status.md. The reply renders the
+          # refreshed Diagnostic envelope. Idempotent — without --force
+          # a matching marker_signature short-circuits and reuses the
+          # existing artifact (see schemas/hive-status-diagnose.v1.json
+          # idempotency contract). Resolves issue #91.
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: project,
+            slug: slug,
+            command_argv: [ "hive", "status", "--diagnose", slug, "--project", project, "--write", "--json" ]
           )
         end
 

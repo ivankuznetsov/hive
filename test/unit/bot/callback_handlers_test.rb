@@ -41,4 +41,32 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       "show_details must invoke `hive status --diagnose` so the reply renders the bounded envelope"
     )
   end
+
+  def test_refresh_diagnose_dispatches_diagnose_write_for_fresh_agent_verdict
+    # Bot-side parity of the TUI R keystroke (issue #91). The Refresh
+    # diagnosis button must spawn the configured execute AgentProfile
+    # via --write, not just re-read the cached artifact. The argv
+    # shape is pinned so a future tweak cannot silently turn the
+    # write-path back into a read-only fetch.
+    result = @handlers.handle(:callback_refresh_diagnose, update("refresh_diagnose:alpha:red-task-260518-bbbb"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal "alpha", result.project
+    assert_equal "red-task-260518-bbbb", result.slug
+    assert_equal(
+      [ "hive", "status", "--diagnose", "red-task-260518-bbbb", "--project", "alpha", "--write", "--json" ],
+      result.command_argv,
+      "refresh_diagnose must invoke --diagnose --write so the LLM verdict refreshes (not just re-reads the artifact)"
+    )
+  end
+
+  def test_refresh_diagnose_rejects_malformed_callback_data
+    # Defense against malformed callback round-trips. Any non-3-part
+    # callback (legacy data, manual postback fuzzing) should fall back
+    # to the friendly "bot got confused" reply rather than raising.
+    result = @handlers.handle(:callback_refresh_diagnose, update("refresh_diagnose:alpha"))
+
+    assert_equal :reply, result.action
+    assert_match(/bot got confused/i, result.text)
+  end
 end

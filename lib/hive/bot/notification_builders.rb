@@ -117,17 +117,26 @@ module Hive
       end
 
       def recovery(row)
+        # The "Refresh diagnosis" button is the bot-side parity of the
+        # TUI's R keystroke: dispatches `hive status --diagnose <slug>
+        # --write --json` so the configured execute AgentProfile
+        # produces a fresh diagnostic verdict. Pairs with Show details
+        # (which just reads the current verdict). Resolves issue #91.
+        details_row = [
+          button("Show details", "details:#{row.project}:#{row.slug}"),
+          button("Refresh diagnosis", "refresh_diagnose:#{row.project}:#{row.slug}")
+        ]
         keyboard =
           if open_laptop_only_recovery?(row)
             [
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+              details_row
             ]
           else
             [
               [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+              details_row
             ]
           end
         # Append the bounded diagnostic summary so the operator sees the

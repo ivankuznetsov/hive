@@ -917,6 +917,60 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "mixed-error set must point at re-init or per-name `hive forget`")
   end
 
+  # new_idea_project_name points to a project that exists in the
+  # snapshot but has an error — the picker chose it before the snapshot
+  # poll dropped its health. Submission must flash the per-project error
+  # + "choose another project" rather than dispatch against a broken project.
+  def test_new_idea_submission_with_chosen_project_now_unhealthy_flashes_choose_another
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-06",
+      "projects" => [
+        { "name" => "alpha", "tasks" => [] },
+        { "name" => "beta", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0,
+        new_idea_project_name: "beta", new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "must NOT dispatch when the chosen project went unhealthy under us"
+    assert_match(/"beta".*not initialised.*choose another project/i, @model.hive_model.flash.to_s,
+                 "flash must name the chosen project, the specific error, and steer to a new pick")
+  end
+
+  # new_idea_project_name points to a name no longer in the snapshot
+  # (project was removed between picker selection and submit). Submission
+  # must flash "is not available — choose another".
+  def test_new_idea_submission_with_chosen_project_missing_from_snapshot_flashes_unavailable
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-06",
+      "projects" => [
+        { "name" => "alpha", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0,
+        new_idea_project_name: "ghost", new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "must NOT dispatch when the chosen project disappeared from snapshot"
+    assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s,
+                 "flash must say the chosen name is not available and steer to a new pick")
+  end
+
   def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01", "projects" => []
@@ -948,9 +1002,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-	      hive_model: Hive::Tui::Model.initial.with(
-	        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
-	        new_idea_buffer: "rss feeds"
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
+        new_idea_buffer: "rss feeds"
       ),
       dispatch: @dispatch
     )
@@ -971,9 +1025,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-	      hive_model: Hive::Tui::Model.initial.with(
-	        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
-	        new_idea_buffer: "an idea"
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
+        new_idea_buffer: "an idea"
       ),
       dispatch: @dispatch
     )
@@ -991,11 +1045,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-	          hive_model: Hive::Tui::Model.initial.with(
-	            mode: :new_idea,
-	            snapshot: snap,
-	            new_idea_project_name: "ghost",
-	            new_idea_buffer: "see [image1]",
+          hive_model: Hive::Tui::Model.initial.with(
+            mode: :new_idea,
+            snapshot: snap,
+            new_idea_project_name: "ghost",
+            new_idea_buffer: "see [image1]",
         new_idea_cursor: 12
       ),
       dispatch: @dispatch
@@ -1086,10 +1140,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
         )
         @model = Hive::Tui::BubbleModel.new(
           hive_model: Hive::Tui::Model.initial.with(
-	            mode: :new_idea,
-	            snapshot: snap,
-	            new_idea_project_name: "ghost",
-	            new_idea_buffer: "see [image1]",
+            mode: :new_idea,
+            snapshot: snap,
+            new_idea_project_name: "ghost",
+            new_idea_buffer: "see [image1]",
             new_idea_cursor: 12,
             new_idea_attachments: [ attachment ],
             new_idea_staging_dir: staging_dir
@@ -1128,11 +1182,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       ext: "png"
     )
     @model = Hive::Tui::BubbleModel.new(
-	      hive_model: Hive::Tui::Model.initial.with(
-	        mode: :new_idea,
-	        snapshot: snap,
-	        new_idea_project_name: "hive",
-	        new_idea_buffer: "title [image1]",
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: snap,
+        new_idea_project_name: "hive",
+        new_idea_buffer: "title [image1]",
         new_idea_cursor: 14,
         new_idea_attachments: [ attachment ],
         new_idea_staging_dir: staging_dir

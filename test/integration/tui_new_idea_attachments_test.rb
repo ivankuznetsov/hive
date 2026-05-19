@@ -20,11 +20,11 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
   def model_for(project:, buffer:, attachments:, staging_dir:)
     Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-	        mode: :new_idea,
-	        snapshot: snapshot_for(project),
-	        scope: 0,
-	        new_idea_project_name: project,
-	        new_idea_buffer: buffer,
+        mode: :new_idea,
+        snapshot: snapshot_for(project),
+        scope: 0,
+        new_idea_project_name: project,
+        new_idea_buffer: buffer,
         new_idea_cursor: buffer.length,
         new_idea_attachments: attachments,
         new_idea_staging_dir: staging_dir

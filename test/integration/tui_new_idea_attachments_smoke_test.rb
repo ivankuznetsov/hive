@@ -81,15 +81,15 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
           buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?(project_prefix) }
           assert_includes buffer, project_prefix
 
-	          writer.write("n")
-	          writer.flush
-	          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("Choose project for new idea") }
-	          assert_includes buffer, "Choose project for new idea"
+          writer.write("n")
+          writer.flush
+          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("Choose project for new idea") }
+          assert_includes buffer, "Choose project for new idea"
 
-	          writer.write("\r")
-	          writer.flush
-	          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("New idea") }
-	          assert_includes buffer, "New idea"
+          writer.write("\r")
+          writer.flush
+          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("New idea") }
+          assert_includes buffer, "New idea"
 
           writer.write("bug here ")
           writer.write("\e[200~\e[201~")

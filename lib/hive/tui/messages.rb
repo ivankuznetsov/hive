@@ -257,23 +257,23 @@ module Hive
       # Mirror the FilterChar* shape so Update can be unit-tested against
       # the full message set without dependency on view code.
 
-	      # `n` from :grid — open the inline new-idea prompt, or a project
-	      # picker first when scope is ★ All projects.
-	      OpenNewIdeaPrompt = Class.new
-	      OPEN_NEW_IDEA_PROMPT = OpenNewIdeaPrompt.new.freeze
+      # `n` from :grid — open the inline new-idea prompt, or a project
+      # picker first when scope is ★ All projects.
+      OpenNewIdeaPrompt = Class.new
+      OPEN_NEW_IDEA_PROMPT = OpenNewIdeaPrompt.new.freeze
 
-	      # Project picker cursor movement for the pre-new-idea selection
-	      # shown when the operator starts from ★ All projects.
-	      NewIdeaProjectCursorDown = Class.new
-	      NEW_IDEA_PROJECT_CURSOR_DOWN = NewIdeaProjectCursorDown.new.freeze
+      # Project picker cursor movement for the pre-new-idea selection
+      # shown when the operator starts from ★ All projects.
+      NewIdeaProjectCursorDown = Class.new
+      NEW_IDEA_PROJECT_CURSOR_DOWN = NewIdeaProjectCursorDown.new.freeze
 
-	      NewIdeaProjectCursorUp = Class.new
-	      NEW_IDEA_PROJECT_CURSOR_UP = NewIdeaProjectCursorUp.new.freeze
+      NewIdeaProjectCursorUp = Class.new
+      NEW_IDEA_PROJECT_CURSOR_UP = NewIdeaProjectCursorUp.new.freeze
 
-	      # Enter in the project picker — lock the highlighted project as
-	      # the target and continue into the normal new-idea prompt.
-	      NewIdeaProjectSelected = Class.new
-	      NEW_IDEA_PROJECT_SELECTED = NewIdeaProjectSelected.new.freeze
+      # Enter in the project picker — lock the highlighted project as
+      # the target and continue into the normal new-idea prompt.
+      NewIdeaProjectSelected = Class.new
+      NEW_IDEA_PROJECT_SELECTED = NewIdeaProjectSelected.new.freeze
 
       # User inserted text into the new-idea buffer at the cursor. This
       # is the primary path for both printable characters and paste.

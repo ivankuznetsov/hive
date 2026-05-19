@@ -25,25 +25,25 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     )
   end
 
-	  def test_renders_prompt_label_with_chosen_project
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss feeds"
-	    )
-	    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
-	    assert_includes out, "New idea (project="
-	    assert_includes out, "hive", "chosen project must be shown before submission"
-	    assert_includes out, "rss feeds", "buffer text must surface verbatim"
-	  end
+  def test_renders_prompt_label_with_chosen_project
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss feeds"
+    )
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+    assert_includes out, "New idea (project="
+    assert_includes out, "hive", "chosen project must be shown before submission"
+    assert_includes out, "rss feeds", "buffer text must surface verbatim"
+  end
 
-	  def test_label_indicates_unresolved_project_when_scope_zero
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
-	      scope: 0
-	    )
-	    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
-	    assert_includes out, "(choose project)",
-	                    "scope=0 must not silently label or submit to the first project"
+  def test_label_indicates_unresolved_project_when_scope_zero
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
+      scope: 0
+    )
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+    assert_includes out, "(choose project)",
+                    "scope=0 must not silently label or submit to the first project"
   end
 
   def test_label_uses_explicit_project_when_scope_n
@@ -51,9 +51,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
       scope: 2
     )
-	    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
-	    assert_includes out, "myapp"
-	    refute_includes out, "choose project", "explicit scope must NOT look unresolved"
+    out = Hive::Tui::Views::NewIdeaPrompt.render(model)
+    assert_includes out, "myapp"
+    refute_includes out, "choose project", "explicit scope must NOT look unresolved"
   end
 
   def test_label_handles_nil_snapshot
@@ -120,9 +120,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   def test_project_label_returns_plain_name_when_scope_n
     model = Hive::Tui::Model.initial.with(
       snapshot: make_snapshot(%w[hive myapp]), scope: 2
-	    )
-	    assert_equal "myapp", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
-	                 "explicit scope must NOT look unresolved"
+    )
+    assert_equal "myapp", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
+                 "explicit scope must NOT look unresolved"
   end
 
   def test_project_label_handles_no_projects_gracefully
@@ -138,9 +138,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_long_buffer_slides_to_show_tail_within_cols
     long = ("a" * 60) + ("z" * 60) # 120 chars
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: long, new_idea_cursor: long.length, cols: 50
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: long, new_idea_cursor: long.length, cols: 50
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     refute_includes out, ("a" * 60),
@@ -150,9 +150,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   end
 
   def test_buffer_within_cols_renders_in_full
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss feeds", cols: 100
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss feeds", cols: 100
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_includes out, "rss feeds", "short buffer must render verbatim"
@@ -160,11 +160,11 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_render_shows_single_staged_image_count
     model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea,
-	      snapshot: make_snapshot(%w[hive]),
-	      scope: 0,
-	      new_idea_project_name: "hive",
-	      new_idea_buffer: "hi [image1]",
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_project_name: "hive",
+      new_idea_buffer: "hi [image1]",
       new_idea_cursor: "hi [image1]".length,
       new_idea_attachments: [ attachment("image1") ],
       cols: 100
@@ -177,11 +177,11 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_render_shows_plural_staged_image_count
     model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea,
-	      snapshot: make_snapshot(%w[hive]),
-	      scope: 0,
-	      new_idea_project_name: "hive",
-	      new_idea_buffer: "[image1][image2][image3]",
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_project_name: "hive",
+      new_idea_buffer: "[image1][image2][image3]",
       new_idea_cursor: 24,
       new_idea_attachments: [ attachment("image1"), attachment("image2"), attachment("image3") ],
       cols: 100
@@ -194,11 +194,11 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_render_suppresses_staged_image_count_on_narrow_terminal
     model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea,
-	      snapshot: make_snapshot(%w[hive]),
-	      scope: 0,
-	      new_idea_project_name: "hive",
-	      new_idea_buffer: "hi [image1]",
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_project_name: "hive",
+      new_idea_buffer: "hi [image1]",
       new_idea_cursor: "hi [image1]".length,
       new_idea_attachments: [ attachment("image1") ],
       cols: 28
@@ -212,11 +212,11 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_render_omits_staged_image_count_when_no_attachments
     model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea,
-	      snapshot: make_snapshot(%w[hive]),
-	      scope: 0,
-	      new_idea_project_name: "hive",
-	      new_idea_buffer: "hi",
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_project_name: "hive",
+      new_idea_buffer: "hi",
       new_idea_attachments: [],
       cols: 100
     )
@@ -238,11 +238,11 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_render_preserves_broken_placeholder_text
     model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea,
-	      snapshot: make_snapshot(%w[hive]),
-	      scope: 0,
-	      new_idea_project_name: "hive",
-	      new_idea_buffer: "see [image1]",
+      mode: :new_idea,
+      snapshot: make_snapshot(%w[hive]),
+      scope: 0,
+      new_idea_project_name: "hive",
+      new_idea_buffer: "see [image1]",
       new_idea_cursor: "see [image1]".length,
       new_idea_broken_labels: [ "image1" ],
       cols: 100
@@ -254,9 +254,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   end
 
   def test_explicit_width_kwarg_clamps_independently_of_cols
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "x" * 80, cols: 200
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "x" * 80, cols: 200
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model, width: 30)
     refute_match(/x{80}/, out, "width: kwarg must clamp regardless of model.cols")
@@ -266,9 +266,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_long_buffer_wraps_across_multiple_rows
     long = "abcdef" * 30 # 180 chars
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: long, cols: 80
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: long, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert out.lines.count > 1, "180-char buffer at cols=80 must wrap onto multiple rows"
@@ -280,13 +280,13 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   end
 
   def test_continuation_rows_align_to_label_column
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "a" * 200, cols: 80
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "a" * 200, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     rows = out.lines.map { |l| l.chomp.gsub(/\e\[[\d;]*m/, "") }
-	    label_col = "New idea (project=hive): ".length
+    label_col = "New idea (project=hive): ".length
     rows[1..].each do |row|
       assert row.start_with?(" " * label_col),
              "continuation row must start with label-width padding (got #{row.inspect})"
@@ -294,9 +294,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   end
 
   def test_buffer_within_first_row_capacity_renders_single_line
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss", cols: 80
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss", cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_equal 1, out.lines.count, "short buffer must NOT wrap"
@@ -305,9 +305,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   def test_extreme_overflow_caps_at_max_visible_rows
     # Buffer big enough to wrap to 20+ rows; renderer caps at
     # MAX_VISIBLE_ROWS so the prompt doesn't push the panes off-screen.
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "x" * 2000, cols: 80
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "x" * 2000, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_operator out.lines.count, :<=, Hive::Tui::Views::NewIdeaPrompt::MAX_VISIBLE_ROWS
@@ -357,10 +357,10 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   def test_wrapped_render_keeps_cursor_row_visible
     buffer = "abcdefghij" * 10
-	    model = Hive::Tui::Model.initial.with(
-	      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-	      scope: 0, new_idea_project_name: "hive", new_idea_buffer: buffer, new_idea_cursor: 4, cols: 45
-	    )
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea, snapshot: make_snapshot(%w[hive]),
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: buffer, new_idea_cursor: 4, cols: 45
+    )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
 
     assert_includes out, "abcd", "cursor near the start should keep the start of the buffer visible"
@@ -369,17 +369,17 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   # ---- Unhealthy-project resolution ----
 
-	  def test_resolve_project_name_refuses_unhealthy_chosen_project
-	    snap = Hive::Tui::Snapshot.from_payload(
-	      "generated_at" => "2026-05-04",
-	      "projects" => [
-	        { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
-	        { "name" => "alpha", "tasks" => [] }
-	      ]
-	    )
-	    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, new_idea_project_name: "broken")
-	    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model),
-	               "chosen project must be revalidated against the latest snapshot before dispatch"
+  def test_resolve_project_name_refuses_unhealthy_chosen_project
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "alpha", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, new_idea_project_name: "broken")
+    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model),
+               "chosen project must be revalidated against the latest snapshot before dispatch"
   end
 
   def test_resolve_project_name_returns_nil_when_explicit_scope_is_unhealthy

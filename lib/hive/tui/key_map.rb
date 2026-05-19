@@ -83,8 +83,8 @@ module Hive
         when :log_tail then log_tail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
-	        when :new_idea_project then new_idea_project_message(key: key, row: row)
-	        when :new_idea then new_idea_message(key: key, row: row)
+        when :new_idea_project then new_idea_project_message(key: key, row: row)
+        when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
         end
       end
@@ -319,9 +319,9 @@ module Hive
       # symbol from BubbleModel#bubble_key_to_keymap, so it must be
       # mapped explicitly to a literal space — without this branch,
       # multi-word titles like "rss feeds" would land as "rssfeeds".
-	      def new_idea_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
-	        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key)
-	        return Messages::NEW_IDEA_SUBMITTED if ENTER_KEYS.include?(key)
+      def new_idea_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key)
+        return Messages::NEW_IDEA_SUBMITTED if ENTER_KEYS.include?(key)
         return Messages::NEW_IDEA_CHAR_DELETED if key == :key_backspace
         return Messages::NEW_IDEA_CHAR_DELETED_FORWARD if key == :key_delete
         return Messages::NEW_IDEA_CURSOR_LEFT if key == :key_left
@@ -331,22 +331,22 @@ module Hive
         return Messages::NewIdeaTextInserted.new(text: " ") if key == :space
         return Messages::NewIdeaTextInserted.new(text: key) if printable_filter_char?(key)
 
-	        Messages::NOOP
-	      end
+        Messages::NOOP
+      end
 
-	      # Project chooser shown before the title prompt when `n` starts
-	      # from ★ All projects. Keep the key surface intentionally narrow:
-	      # choose with Enter, move with j/k or arrows, cancel with Esc/q.
-	      def new_idea_project_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
-	        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key) || key == "q"
-	        return Messages::NEW_IDEA_PROJECT_SELECTED if ENTER_KEYS.include?(key)
-	        return Messages::NEW_IDEA_PROJECT_CURSOR_DOWN if DOWN_KEYS.include?(key)
-	        return Messages::NEW_IDEA_PROJECT_CURSOR_UP if UP_KEYS.include?(key)
+      # Project chooser shown before the title prompt when `n` starts
+      # from ★ All projects. Keep the key surface intentionally narrow:
+      # choose with Enter, move with j/k or arrows, cancel with Esc/q.
+      def new_idea_project_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key) || key == "q"
+        return Messages::NEW_IDEA_PROJECT_SELECTED if ENTER_KEYS.include?(key)
+        return Messages::NEW_IDEA_PROJECT_CURSOR_DOWN if DOWN_KEYS.include?(key)
+        return Messages::NEW_IDEA_PROJECT_CURSOR_UP if UP_KEYS.include?(key)
 
-	        Messages::NOOP
-	      end
+        Messages::NOOP
+      end
 
-	      # Shared DispatchCommand builder. `argv[1]` is the workflow verb
+      # Shared DispatchCommand builder. `argv[1]` is the workflow verb
       # (`brainstorm`/`plan`/`develop`/`review`/`pr`/`archive`); cached
       # at construction time so SubprocessExited can flash by verb name.
       def dispatch_command_for(suggested_command)

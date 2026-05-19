@@ -255,24 +255,24 @@ class TuiKeyMapMessageForTest < Minitest::Test
   # SPACE key, but printable_filter_char? returns false for symbols.
   # Without an explicit branch, multi-word titles like "rss feeds"
   # would land as "rssfeeds" in the buffer.
-	  def test_new_idea_space_symbol_appends_literal_space
-	    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :space, row: nil)
-	    assert_kind_of Hive::Tui::Messages::NewIdeaTextInserted, msg
-	    assert_equal " ", msg.text
-	  end
+  def test_new_idea_space_symbol_appends_literal_space
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :space, row: nil)
+    assert_kind_of Hive::Tui::Messages::NewIdeaTextInserted, msg
+    assert_equal " ", msg.text
+  end
 
-	  def test_new_idea_project_picker_keys_choose_move_and_cancel
-	    assert_same Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED,
-	      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: :key_enter, row: nil)
-	    assert_same Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN,
-	      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: "j", row: nil)
-	    assert_same Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP,
-	      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: :key_up, row: nil)
-	    assert_same Hive::Tui::Messages::NEW_IDEA_CANCELLED,
-	      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: "q", row: nil)
-	  end
+  def test_new_idea_project_picker_keys_choose_move_and_cancel
+    assert_same Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: :key_enter, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: "j", row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: :key_up, row: nil)
+    assert_same Hive::Tui::Messages::NEW_IDEA_CANCELLED,
+      Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: "q", row: nil)
+  end
 
-	  # Same regression for filter mode — slug filters with spaces like
+  # Same regression for filter mode — slug filters with spaces like
   # "rss feeds" must work too.
   def test_filter_space_symbol_appends_literal_space
     msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :space, row: nil)

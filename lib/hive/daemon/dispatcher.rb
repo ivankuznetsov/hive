@@ -57,6 +57,18 @@ module Hive
         # interval without the operator having to send SIGHUP.
         # PR-40 follow-up #2.
         @enabled_cache = {}
+        # Per-tick set of project names whose layout is half-migrated
+        # (non-empty legacy_stage_dirs). Populated at the start of each
+        # tick from StatusConsumer::Result#projects; row dispatch refuses
+        # any row whose project lives in this set. Issue #95.
+        @legacy_layout_projects = {}
+        # Process-lifetime set of project names we've already logged the
+        # "legacy stage dirs detected" warning for, so a half-migrated
+        # project doesn't spam daemon.log on every 30s poll. Cleared on
+        # SIGHUP/reload — operator fixing the layout + reloading will
+        # see the next warning the next time it goes red, but we don't
+        # actively re-emit on every tick. Issue #95.
+        @legacy_layout_logged = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -86,6 +98,12 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
+        # Rebuild the per-tick set of half-migrated projects from the
+        # status snapshot. Stays empty when the daemon talks to an old
+        # status binary that didn't ship the field (Result#projects
+        # defaults to []) so old binaries stay forward-compatible.
+        # Issue #95.
+        refresh_legacy_layout_projects(result.projects)
         refresh_active_agent_snapshot(result.rows)
 
         observe_external_running_rows(result.rows)
@@ -241,6 +259,7 @@ module Hive
 
       def handle_row(row, now:)
         return unless project_enabled?(row.project)
+        return if @legacy_layout_projects.key?(row.project)
 
         decision = Policy.decide(
           action: row.action,
@@ -433,7 +452,30 @@ module Hive
         @external_active_agent_counts = Hash.new(0)
       end
 
-      def refresh_active_agent_snapshot(rows)
+       # Populate the per-tick "skip this project's rows" set from the
+       # status snapshot's projects[] list. A project counts as legacy if
+       # its `legacy_stage_dirs` array is non-empty (i.e. tasks were left
+       # in a pre-rename stage directory). Advancing a row on top of a
+       # half-migrated layout would silently lose work, so we skip the
+       # whole project until the operator runs `hive migrate`. Logging is
+       # gated by `@legacy_layout_logged` so a half-migrated project
+       # doesn't spam daemon.log every tick — first-sight only.
+       # Issue #95.
+       def refresh_legacy_layout_projects(projects)
+         @legacy_layout_projects = {}
+         Array(projects).each do |project|
+           next unless project.respond_to?(:legacy?) && project.legacy?
+
+           @legacy_layout_projects[project.name] = true
+           next if @legacy_layout_logged[project.name]
+
+           @logger.event(:legacy_layout_detected, project: project.name,
+                                                  stage_dirs: project.legacy_stage_dirs.map { |d| d["stage_dir"] })
+           @legacy_layout_logged[project.name] = true
+         end
+       end
+
+       def refresh_active_agent_snapshot(rows)
         reset_active_agent_snapshot
         rows.each do |row|
           next unless active_agent_row?(row)

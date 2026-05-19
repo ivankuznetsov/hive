@@ -16,7 +16,21 @@ module Hive
     NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
     SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze
 
+    # Slug shape for task-folder names (see Task::PATH_RE / Migrate::SLUG_RE).
+    # Single source of truth so the legacy-stage detector in
+    # `Hive::Commands::Status` and the `Hive::Commands::Migrate` walker stay
+    # in lockstep — both must treat the same set of entries as task folders.
+    SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
+
     module_function
+
+    # True iff `name` is a task-folder slug (per `SLUG_RE`). Used by Status
+    # to count only task subfolders inside a legacy stage dir (skipping
+    # `.gitkeep`, `logs/`, `.DS_Store`, etc.) and by Migrate to decide
+    # which entries it is allowed to mv.
+    def task_slug?(name)
+      SLUG_RE.match?(name.to_s)
+    end
 
     # Directory for the stage *after* the one whose numeric prefix is `idx`.
     # Returns nil when `idx` is past the final stage's prefix or when no

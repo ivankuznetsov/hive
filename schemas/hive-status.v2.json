@@ -148,6 +148,22 @@
           "items": {
             "$ref": "#/$defs/Task"
           }
+        },
+        "legacy_stage_dirs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stage_dir", "task_count"],
+            "properties": {
+              "stage_dir": { "type": "string" },
+              "task_count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "legacy_migrate_command": {
+          "description": "Machine-readable parity of the text-mode `hive migrate` recovery hint. \"hive migrate\" when `legacy_stage_dirs` is non-empty; `null` when the project is clean. Always present (never absent) — the same diagnostic-field-always-present convention `diagnostic` uses on Task.",
+          "type": ["string", "null"]
         }
       }
     },

@@ -15,10 +15,10 @@ uname -s
 uname -m
 test -f /etc/os-release && cat /etc/os-release || true
 command -v hive || true
-hive --version 2>/dev/null | grep -qE '^hive [0-9]+\.[0-9]+\.[0-9]+' && echo "hive installed" || echo "hive not installed"
+hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' && echo "hive installed" || echo "hive not installed"
 ```
 
-`hive --version` must match the strict `hive X.Y.Z` shape from our CLI to count as "already installed" — a plain `X.Y.Z` line is Apache Hive (or some other tool named `hive`). If the strict match fails, treat this host as having no Hive CLI installed and continue with the install commands below. To upgrade an existing Hive install, run `hive update` instead of reinstalling.
+`bin/hive --version` prints a bare `X.Y.Z` line (no `hive ` prefix). Apache Hive's `hive --version` first line starts with a capital-H `Hive X.Y.Z`, so a strict `^[0-9]+\.[0-9]+\.[0-9]+$` regex distinguishes the two. If the strict match SUCCEEDS, the host already has the Hive CLI: SKIP the Install Commands block below and go straight to Verify / Initialize Project. To upgrade an existing Hive install, run `hive update` instead of reinstalling. If the strict match fails, continue with the Install Commands below.
 
 ## Choose Channel
 

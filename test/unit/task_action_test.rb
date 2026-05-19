@@ -439,6 +439,92 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # marker_signature is SHA-256(marker_name + sorted_attr_pairs) so a
+  # red → green → same-shape red rotation cycle produces an IDENTICAL
+  # signature across episodes. The signature check alone cannot tell
+  # them apart. fresh_diagnosis_artifact rejects when the artifact mtime
+  # predates the state_file mtime (every marker rotation touches the
+  # state_file). See issue #89.
+  def test_fresh_diagnosis_artifact_rejected_when_predates_state_file
+    Dir.mktmpdir("hive-task-action-rotation") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      # Write the state_file FIRST and capture its mtime; the artifact
+      # we plant will have an earlier mtime, simulating a stale
+      # diagnosis from a previous red-episode in the same rotation
+      # cycle.
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      current_signature = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+      artifact = File.join(diagnostics, "red-status.md")
+      File.write(artifact, <<~MD)
+        ---
+        generated_by: claude
+        marker_signature: #{current_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        verdict from a previous red episode (cycle collision)
+      MD
+      # Roll the artifact mtime back so it visibly predates the
+      # state_file. 60s is well above any filesystem mtime granularity.
+      File.utime(Time.now - 120, Time.now - 120, artifact)
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      refute_equal "artifact", diagnostic["source"],
+                   "artifact older than state_file must NOT be surfaced (rotation-cycle collision)"
+      refute_includes diagnostic["detail"], "previous red episode",
+                      "stale-rotation artifact body must not leak into diagnostic detail"
+      assert_equal "local", diagnostic["generated_by"],
+                   "rejected stale-rotation artifact falls back to local extraction"
+    end
+  end
+
+  def test_fresh_diagnosis_artifact_accepted_when_artifact_newer_than_state_file
+    # Inverse of the rotation-cycle case: a fresh artifact written
+    # AFTER the most recent marker rotation must still be trusted.
+    # Regression guard so the mtime check doesn't accidentally reject
+    # legitimate freshly-written diagnoses.
+    Dir.mktmpdir("hive-task-action-fresh-mtime") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      File.utime(Time.now - 120, Time.now - 120, task.state_file)
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      current_signature = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+      artifact = File.join(diagnostics, "red-status.md")
+      File.write(artifact, <<~MD)
+        ---
+        generated_by: claude
+        marker_signature: #{current_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        fresh-after-rotation verdict
+      MD
+      # artifact mtime defaults to now (newer than state_file's -120s).
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      assert_equal "artifact", diagnostic["source"],
+                   "fresh artifact (mtime newer than state_file) must be accepted"
+      assert_equal "claude", diagnostic["generated_by"]
+    end
+  end
+
   def test_recovery_diagnostic_falls_back_to_marker_when_artifacts_are_missing
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

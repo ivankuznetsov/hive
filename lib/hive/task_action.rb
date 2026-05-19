@@ -337,8 +337,23 @@ module Hive
       metadata = diagnostic_frontmatter(path)
       return [] unless trusted_diagnostic_generator?(metadata["generated_by"])
       return [] unless metadata["marker_signature"].to_s == marker_signature
+      # marker_signature is SHA-256(marker_name + sorted_attr_pairs), so a
+      # red → green → same-shape red rotation cycle produces an identical
+      # signature across episodes. Without an ordering check the second
+      # episode would silently reuse the first's artifact. Compare mtimes:
+      # the state_file is touched on every marker rotation, so an artifact
+      # older than the state_file is from a previous episode. See #89.
+      return [] if artifact_predates_marker?(path)
 
       [ path ]
+    end
+
+    def artifact_predates_marker?(artifact_path)
+      artifact_mtime = safe_mtime(artifact_path)
+      state_mtime = safe_mtime(task.state_file)
+      return false if artifact_mtime.nil? || state_mtime.nil?
+
+      artifact_mtime < state_mtime
     end
 
     def review_error_artifacts

@@ -626,11 +626,31 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, new_model.scope
   end
 
-  def test_new_idea_project_picker_enter_without_choices_stays_in_picker
+  def test_new_idea_project_picker_enter_without_snapshot_flashes_waiting
     starting = model.with(mode: :new_idea_project, snapshot: nil, scope: 0)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
-    assert_equal :new_idea_project, new_model.mode
+    assert_equal :new_idea_project, new_model.mode,
+                 "Enter on a nil-snapshot picker must stay in picker (not advance silently)"
     assert_nil new_model.new_idea_project_name
+    assert_match(/waiting for snapshot/i, new_model.flash.to_s,
+                 "Enter on a loading picker must acknowledge the keystroke via flash so the mode does not appear frozen")
+  end
+
+  def test_new_idea_project_picker_enter_when_all_unhealthy_flashes_no_healthy
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-19",
+      "projects" => [
+        { "name" => "broken-a", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "broken-b", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    starting = model.with(mode: :new_idea_project, snapshot: snap, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal :new_idea_project, new_model.mode,
+                 "Enter against an all-unhealthy snapshot must stay in picker (not advance to composer with nil project)"
+    assert_nil new_model.new_idea_project_name
+    assert_match(/no healthy projects/i, new_model.flash.to_s,
+                 "must acknowledge the keystroke and explain why selection is impossible")
   end
 
   def test_new_idea_project_picker_skips_unhealthy_projects

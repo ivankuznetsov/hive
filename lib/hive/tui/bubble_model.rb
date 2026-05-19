@@ -2196,6 +2196,26 @@ module Hive
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
         if project.nil?
           flash = new_idea_resolution_flash(@hive_model)
+          # If the operator had picked a concrete project via the picker
+          # and it later went stale (snapshot poll dropped it or marked
+          # it unhealthy), bounce back to the picker with the typed
+          # buffer preserved — the flash advises "choose another
+          # project", and Esc still cleanly discards everything. The
+          # plain "no-projects" / "no scope" cases (no chosen name in
+          # play) fall through to `reset_to_grid_with_flash` because
+          # there's nothing to re-pick.
+          chosen = @hive_model.new_idea_project_name.to_s
+          if !chosen.empty? && @hive_model.scope.zero?
+            return [
+              @hive_model.with(
+                mode: :new_idea_project,
+                new_idea_project_name: nil,
+                flash: flash,
+                flash_set_at: Time.now
+              ),
+              nil
+            ]
+          end
           # `reset_to_grid_with_flash` clears `new_idea_staging_dir`
           # on the model; clean the on-disk dir first so orphaned
           # files don't leak after we drop the reference.
@@ -2278,6 +2298,22 @@ module Hive
         if project.nil?
           preserve_staging = true
           flash = new_idea_resolution_flash(@hive_model)
+          # Mirror the plain-text path: if the operator's picked project
+          # went stale mid-compose, bounce back to the picker so they
+          # can re-pick without losing the staged images. The flash
+          # tells them what happened; Esc still cleans everything.
+          chosen = @hive_model.new_idea_project_name.to_s
+          if !chosen.empty? && @hive_model.scope.zero?
+            return [
+              @hive_model.with(
+                mode: :new_idea_project,
+                new_idea_project_name: nil,
+                flash: flash,
+                flash_set_at: Time.now
+              ),
+              nil
+            ]
+          end
           return [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
         end
 
@@ -2512,8 +2548,12 @@ module Hive
       end
 
       # Build a flash for the case where new-idea resolution returned
-      # nil. Distinguishes three reasons:
+      # nil. Distinguishes five reasons:
       # - no registered projects at all → "run `hive init <path>`"
+      # - chosen project (via picker) now unhealthy → name the error +
+      #   "choose another project" (caller bounces back to picker)
+      # - chosen project name no longer present in snapshot → "is not
+      #   available" + "choose another project" (caller bounces back)
       # - explicit scope onto an unhealthy project → name the error
       # - scope=0 (★ All) but every registered project is unhealthy
       # so the operator sees the actual cause rather than a generic
@@ -2596,11 +2636,12 @@ module Hive
       end
 
       # Stack an active flash above the prompt strip so error states
-      # raised inside `:new_idea` / `:filter` mode (paste truncated,
-      # title too long, decoder overflow, paste timed out) reach the
-      # operator. Without this the flash sets `model.flash` but the
-      # prompt-mode views replace `default_footer` entirely, so the
-      # flash never renders.
+      # raised inside any prompt mode (`:new_idea`, `:new_idea_project`,
+      # `:filter`) — paste truncated, title too long, decoder overflow,
+      # paste timed out, waiting-for-snapshot, no-healthy-projects —
+      # reach the operator. Without this the flash sets `model.flash`
+      # but the prompt-mode views replace `default_footer` entirely, so
+      # the flash never renders.
       def prompt_footer(prompt_strip, usable_width)
         flash = active_flash_line(usable_width)
         flash ? "#{flash}\n#{prompt_strip}" : prompt_strip

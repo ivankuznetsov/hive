@@ -201,39 +201,40 @@ module Hive
 
         # Resolve which project an idea would land in. Pure read of the
         # snapshot; never raises (falls through to "(no projects)").
-      def project_label(model)
-        name = resolve_project_name(model)
-        if name.nil?
-          projects = Array(model.snapshot&.projects)
-          return "(choose project)" if model.scope.zero? && projects.any? { |p| p.error.nil? }
+        def project_label(model)
+          name = resolve_project_name(model)
+          if name.nil?
+            projects = Array(model.snapshot&.projects)
+            return "(choose project)" if model.scope.zero? && projects.any? { |p| p.error.nil? }
 
-          return "(no projects)"
+            return "(no projects)"
+          end
+
+          name
         end
 
-        name
-      end
+        def resolve_project_name(model)
+          snap = model.snapshot
+          return nil if snap.nil? || snap.projects.empty?
 
-      def resolve_project_name(model)
-        snap = model.snapshot
-        return nil if snap.nil? || snap.projects.empty?
+          chosen = model.new_idea_project_name.to_s
+          unless chosen.empty?
+            project = snap.projects.find { |p| p.name == chosen }
+            return project.name if project && project.error.nil?
 
-        chosen = model.new_idea_project_name.to_s
-        unless chosen.empty?
-          project = snap.projects.find { |p| p.name == chosen }
-          return project.name if project && project.error.nil?
+            return nil
+          end
 
-          return nil
-        end
-
-        return nil if model.scope.zero?
-        return nil unless model.scope.between?(1, snap.projects.size)
+          return nil if model.scope.zero?
+          return nil unless model.scope.between?(1, snap.projects.size)
 
           project = snap.projects[model.scope - 1]
-          # An explicit scope onto an unhealthy project also returns
-          # nil — submit_new_idea then flashes "no projects" rather
-          # than dispatching against a doomed directory. The TUI's
-          # left pane still shows the project (with its name) so the
-          # operator can navigate elsewhere.
+          # An explicit scope onto an unhealthy project also returns nil;
+          # `submit_new_idea` then surfaces the per-project recovery hint
+          # produced by `BubbleModel#new_idea_resolution_flash` rather than
+          # dispatching against a doomed directory. The TUI's left pane
+          # still shows the project (with its name) so the operator can
+          # navigate elsewhere.
           return nil if project.error
 
           project.name

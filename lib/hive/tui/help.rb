@@ -60,9 +60,11 @@ module Hive
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
         { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" },
         # New-idea prompt mode (v2).
-        { mode: :new_idea_project, key: "j/k",   action: :project_cursor, description: "move through projects for the new idea" },
-        { mode: :new_idea_project, key: "Enter", action: :choose_project,  description: "choose the highlighted project and continue to the title prompt" },
-        { mode: :new_idea_project, key: "Esc",   action: :cancel_new_idea, description: "cancel and return to grid" },
+        { mode: :new_idea_project, key: "j/k",     action: :project_cursor,  description: "move through projects for the new idea" },
+        { mode: :new_idea_project, key: "Up/Down", action: :project_cursor,  description: "move through projects (arrow keys)" },
+        { mode: :new_idea_project, key: "Enter",   action: :choose_project,  description: "choose the highlighted project and continue to the title prompt" },
+        { mode: :new_idea_project, key: "Esc",     action: :cancel_new_idea, description: "cancel and return to grid" },
+        { mode: :new_idea_project, key: "q",       action: :cancel_new_idea, description: "cancel and return to grid (alias for Esc)" },
 
         { mode: :new_idea, key: "Enter", action: :submit_new_idea, description: "submit — runs `hive new <project> \"<title>\"` against the project shown in the prompt label" },
         { mode: :new_idea, key: "Esc",   action: :cancel_new_idea, description: "cancel and return to grid; the typed buffer is discarded" }

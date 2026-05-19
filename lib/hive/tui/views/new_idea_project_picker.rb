@@ -13,21 +13,30 @@ module Hive
         module_function
 
         def render(model, width: model.cols.to_i)
-          return Styles::HINT.render("Loading projects...") if model.snapshot.nil?
-
-          projects = choices(model)
-          return Styles::FLASH.render("No healthy projects available") if projects.empty?
-
-          cursor = model.new_idea_project_cursor.to_i.clamp(0, projects.size - 1)
-          visible, first_idx = visible_projects(projects, cursor)
           rows = [ "Choose project for new idea:" ]
-          visible.each_with_index do |project, idx|
-            absolute_idx = first_idx + idx
-            prefix = absolute_idx == cursor ? "> " : "  "
-            line = "#{prefix}#{project.name}"
-            rows << (absolute_idx == cursor ? Styles::CURSOR_HIGHLIGHT.render(line) : line)
+          projects = nil
+          if model.snapshot.nil?
+            rows << Styles::HINT.render("Loading projects...")
+          else
+            projects = choices(model)
+            if projects.empty?
+              rows << Styles::FLASH.render("No healthy projects available")
+            else
+              cursor = model.new_idea_project_cursor.to_i.clamp(0, projects.size - 1)
+              visible, first_idx = visible_projects(projects, cursor)
+              visible.each_with_index do |project, idx|
+                absolute_idx = first_idx + idx
+                prefix = absolute_idx == cursor ? "> " : "  "
+                line = "#{prefix}#{project.name}"
+                rows << (absolute_idx == cursor ? Styles::CURSOR_HIGHLIGHT.render(line) : line)
+              end
+            end
           end
-          rows << Styles::HINT.render("Enter choose  Esc cancel")
+          # Always anchor the operator with at least an Esc-cancel hint —
+          # loading + no-healthy-projects states used to render with no
+          # exit affordance, making the mode look frozen.
+          hint = projects && !projects.empty? ? "Enter choose  Esc cancel" : "Esc cancel"
+          rows << Styles::HINT.render(hint)
 
           rows.map { |line| truncate(line, width) }.join("\n")
         end

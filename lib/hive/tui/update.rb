@@ -452,8 +452,20 @@ module Hive
       end
 
       def apply_new_idea_project_selected(model)
+        # Enter pressed in the picker while no snapshot has arrived yet,
+        # or every project in the snapshot is unhealthy. Acknowledge the
+        # keystroke with a flash instead of silently swallowing it — the
+        # alternative makes the picker feel frozen.
+        if model.snapshot.nil?
+          return model.with(flash: "waiting for snapshot — Esc cancels", flash_set_at: Time.now)
+        end
+
         choices = new_idea_project_choices(model)
-        project = choices[model.new_idea_project_cursor.to_i.clamp(0, [ choices.size - 1, 0 ].max)]
+        if choices.empty?
+          return model.with(flash: "no healthy projects — Esc cancels", flash_set_at: Time.now)
+        end
+
+        project = choices[model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)]
         return model if project.nil?
 
         model.with(

@@ -943,6 +943,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal 0, spawn_count, "must NOT dispatch when the chosen project went unhealthy under us"
     assert_match(/"beta".*not initialised.*choose another project/i, @model.hive_model.flash.to_s,
                  "flash must name the chosen project, the specific error, and steer to a new pick")
+    assert_equal :new_idea_project, @model.hive_model.mode,
+                 "must bounce back to the picker so operator can re-pick without retyping"
+    assert_nil @model.hive_model.new_idea_project_name,
+               "stale project name must be cleared on bounce"
+    assert_equal "an idea", @model.hive_model.new_idea_buffer,
+                 "typed buffer must survive the bounce so the re-pick doesn't cost retyping"
   end
 
   # new_idea_project_name points to a name no longer in the snapshot
@@ -969,6 +975,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal 0, spawn_count, "must NOT dispatch when the chosen project disappeared from snapshot"
     assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s,
                  "flash must say the chosen name is not available and steer to a new pick")
+    assert_equal :new_idea_project, @model.hive_model.mode,
+                 "must bounce back to the picker so operator can re-pick without retyping"
+    assert_nil @model.hive_model.new_idea_project_name,
+               "stale project name must be cleared on bounce"
+    assert_equal "an idea", @model.hive_model.new_idea_buffer,
+                 "typed buffer must survive the bounce so the re-pick doesn't cost retyping"
   end
 
   def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
@@ -1045,11 +1057,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
     )
     @model = Hive::Tui::BubbleModel.new(
-          hive_model: Hive::Tui::Model.initial.with(
-            mode: :new_idea,
-            snapshot: snap,
-            new_idea_project_name: "ghost",
-            new_idea_buffer: "see [image1]",
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: snap,
+        new_idea_project_name: "hive",
+        new_idea_buffer: "see [image1]",
         new_idea_cursor: 12
       ),
       dispatch: @dispatch

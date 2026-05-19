@@ -2,6 +2,20 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T00:00:00Z] tui — keep All projects idea picker open while loading
+
+**Action:** Documented the follow-up behavior that `n` from `★ All projects` enters the concrete project picker even before the first status snapshot arrives. The picker now uses a loading state instead of falling through to the title composer without a selected project.
+
+**Refreshed pages:**
+- [[commands/tui]] — clarified the picker loading state before projects are available.
+
+## [2026-05-17T00:55:00Z] tui — require project choice for new ideas from All projects
+
+**Action:** Updated the TUI new-idea behavior so `n` from `★ All projects` opens a concrete project picker before the title composer. The old implicit first-registered-project fallback could land ideas in the wrong repo while the header still read All projects. The chosen project is carried only for that new idea, so the dashboard can remain scoped to All while `hive new <project> "<title>"` targets the explicit selection.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the project picker and removed the old `★ All` first-project fallback wording.
+
 ## [2026-05-14T23:30:00Z] brainstorm — tmux interactive runtime (U1–U8)
 
 **Action:** Documented the new interactive tmux runtime for 2-brainstorm. The stage can now spawn the agent inside a detached tmux session (U3) via the `Stages::BrainstormTmux` runner, with U2's interactive Claude wrapper, U4's stop-hook install, U5's tmux sentinel fallback, U7's hardened preflight/teardown, and U8's operator notes. `lib/hive/tmux_runner.rb` (U1) is the shared runtime primitive. Selection is gated by a per-project config flag (U6) surfaced through `templates/project_config.yml.erb`. `hive doctor` (U7) preflights `tmux` availability + version and reports stale brainstorm sessions; the brainstorm stage cleans them up on completion. Wiki refresh in b67096c updated the brainstorm stage, doctor command, and state-model pages.

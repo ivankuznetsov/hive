@@ -35,8 +35,17 @@ FAKE_GH_FIXTURE = File.expand_path("fixtures/fake-gh", __dir__).freeze
 FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
 
 module HiveTestHelper
-  def with_tmp_dir(&block)
-    Dir.mktmpdir("hive-test", &block)
+  # Tests run real `git` inside the tmpdir; pack-objects renames internal
+  # state like `bitmap-ref-tips_*` between scan and unlink, so `Dir.mktmpdir`'s
+  # built-in cleanup (which uses `FileUtils.remove_entry`) intermittently
+  # raises `Errno::ENOENT` under CI load. Replace the block form with an
+  # explicit ensure that uses `FileUtils.rm_rf`, which tolerates concurrent
+  # disappearance instead of raising.
+  def with_tmp_dir
+    dir = Dir.mktmpdir("hive-test")
+    yield dir
+  ensure
+    FileUtils.rm_rf(dir) if dir
   end
 
   def with_tmp_git_repo
@@ -60,15 +69,18 @@ module HiveTestHelper
   end
 
   def with_tmp_global_config
-    Dir.mktmpdir("hive-global") do |dir|
-      old = ENV["HIVE_HOME"]
-      ENV["HIVE_HOME"] = dir
-      File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
-      begin
-        yield(dir)
-      ensure
-        ENV["HIVE_HOME"] = old
-      end
+    dir = Dir.mktmpdir("hive-global")
+    old = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = dir
+    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+    begin
+      yield(dir)
+    ensure
+      ENV["HIVE_HOME"] = old
+      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
+      # tmpdir invoke `hive`/git subprocesses that can leave the tree
+      # mid-rename.
+      FileUtils.rm_rf(dir)
     end
   end
 

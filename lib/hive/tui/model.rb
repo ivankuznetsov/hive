@@ -20,13 +20,15 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea
+      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea_project / :new_idea
       :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
       :cursor,           # [project_idx, row_idx] (or nil for empty grid)
       :filter,           # String or nil — committed substring filter
       :filter_buffer,    # String — typed text in :filter mode
       :scope,            # Integer — 0 means all projects; 1..N selects Nth
       :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
+      :new_idea_project_name, # String or nil — explicit target chosen from ★ All
+      :new_idea_project_cursor, # Integer — selection cursor in :new_idea_project mode
       :new_idea_buffer,  # String — typed text in :new_idea mode
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
       :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea
@@ -97,6 +99,8 @@ module Hive
           filter_buffer: "",
           scope: 0,
           pane_focus: :right,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],

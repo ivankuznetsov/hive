@@ -13,8 +13,10 @@ module Hive
       # pressing Enter.
       #
       # Project resolution for the label:
-      # - `model.scope == 0` (★ All projects) → first registered project,
-      #   prefixed with `★→` so the operator sees the implicit fallback.
+      # - `model.new_idea_project_name` → explicit target chosen from the
+      #   project picker opened by ★ All projects.
+      # - `model.scope == 0` (★ All projects) → unresolved; the picker
+      #   must choose a project before this prompt can submit.
       # - `model.scope == n` → the nth registered project.
       # - No registered projects → `(no projects)`; submission flashes an
       #   error in U6's BubbleModel handler instead of dispatching.
@@ -201,8 +203,12 @@ module Hive
         # snapshot; never raises (falls through to "(no projects)").
         def project_label(model)
           name = resolve_project_name(model)
-          return "(no projects)" if name.nil?
-          return "★→#{name}" if model.scope.zero?
+          if name.nil?
+            projects = Array(model.snapshot&.projects)
+            return "(choose project)" if model.scope.zero? && projects.any? { |p| p.error.nil? }
+
+            return "(no projects)"
+          end
 
           name
         end
@@ -211,23 +217,24 @@ module Hive
           snap = model.snapshot
           return nil if snap.nil? || snap.projects.empty?
 
-          if model.scope.zero?
-            # ★ All projects fallback: pick the first project that
-            # is HEALTHY. Skipping projects with `error:` (missing
-            # path / not initialised) prevents `hive new` from
-            # exploding inside the dispatched subprocess against a
-            # stale registration whose directory no longer exists.
-            healthy = snap.projects.find { |p| p.error.nil? }
-            return healthy&.name
+          chosen = model.new_idea_project_name.to_s
+          unless chosen.empty?
+            project = snap.projects.find { |p| p.name == chosen }
+            return project.name if project && project.error.nil?
+
+            return nil
           end
+
+          return nil if model.scope.zero?
           return nil unless model.scope.between?(1, snap.projects.size)
 
           project = snap.projects[model.scope - 1]
-          # An explicit scope onto an unhealthy project also returns
-          # nil — submit_new_idea then flashes "no projects" rather
-          # than dispatching against a doomed directory. The TUI's
-          # left pane still shows the project (with its name) so the
-          # operator can navigate elsewhere.
+          # An explicit scope onto an unhealthy project also returns nil;
+          # `submit_new_idea` then surfaces the per-project recovery hint
+          # produced by `BubbleModel#new_idea_resolution_flash` rather than
+          # dispatching against a doomed directory. The TUI's left pane
+          # still shows the project (with its name) so the operator can
+          # navigate elsewhere.
           return nil if project.error
 
           project.name

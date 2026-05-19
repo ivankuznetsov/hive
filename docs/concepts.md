@@ -76,9 +76,13 @@ Markers are HTML comments at the bottom of the stage state file. The last marker
 | `<!-- ERROR reason=... -->` | The runner or agent failed and needs investigation. |
 | `<!-- EXECUTE_WAITING reason=... -->` | Execute paused without a clean implementation commit. |
 | `<!-- EXECUTE_COMPLETE -->` | Execute produced a clean task-branch commit. |
+| `<!-- EXECUTE_STALE ... -->` | Execute exhausted its retry budget without a clean commit. |
+| `<!-- REVIEW_WORKING ... -->` | Review is mid-phase (transient; overwritten when the phase exits). |
 | `<!-- REVIEW_WAITING ... -->` | Review needs human triage or guardrail approval. |
+| `<!-- REVIEW_CI_STALE ... -->` | Review's CI-fix phase exhausted its attempts. |
 | `<!-- REVIEW_STALE ... -->` | Review hit a pass or wall-clock cap. |
 | `<!-- REVIEW_COMPLETE ... -->` | Review is done and the task can finalize. |
+| `<!-- REVIEW_ERROR ... -->` | A review phase failed or protected-file tampering was detected. |
 
 Human edits are part of the protocol. You can edit `brainstorm.md`, `plan.md`, `reviews/escalations-NN.md`, or a recovery file, then re-run the same stage command.
 

@@ -12,10 +12,13 @@ You need Ruby 3.4, git >= 2.40, `claude` authenticated, `codex` installed for th
 
 ```bash
 git clone https://github.com/ivankuznetsov/hive ~/Dev/hive && cd ~/Dev/hive && bundle install && mkdir -p ~/.local/bin && ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
-hive --version
 ```
 
-If `~/.local/bin` is not on your `PATH`, put the symlink in a directory that is.
+If `~/.local/bin` is not on your `PATH`, put the symlink in a directory that is before running the next step. The `-sf` form will overwrite an existing `hive` at the target path, so check `command -v hive` first if you already have one installed.
+
+```bash
+hive --version
+```
 
 ## Step 2 - Attach Hive To A Project
 
@@ -32,16 +35,16 @@ hive init .
 hive new xbookmark "I want to create a service that will connect to my X account and collect all the bookmarks, then use llm-wiki to create a knowledge graph from them."
 ```
 
-The completed dogfood task started from this `idea.md` frontmatter (typo `conenct` preserved from the original; the verbatim file is reproduced in [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt) since the original lives on xbookmark's local `hive/state` branch):
+The new task is now in `1-inbox/<slug>/idea.md`. Hive stores the text you typed verbatim, typos and all.
 
-```yaml
-slug: i-want-to-create-a-260504-1253
-created_at: 2026-05-04T10:50:09Z
-original_text: |
-  I want to create a service that will conenct to my X (twitter) account and collect all the bookmarks...
-```
-
-The new task is now in `1-inbox/<slug>/idea.md`.
+> What xbookmark actually had: the original idea.md (sampled in [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt) since it lives on xbookmark's local `hive/state` branch) looked like this, with the typo `conenct` preserved from the original prompt:
+>
+> ```yaml
+> slug: i-want-to-create-a-260504-1253
+> created_at: 2026-05-04T10:50:09Z
+> original_text: |
+>   I want to create a service that will conenct to my X (twitter) account and collect all the bookmarks...
+> ```
 
 ## Step 4 - Watch Brainstorm Work
 
@@ -55,6 +58,8 @@ Hive promotes the task to `2-brainstorm/`, runs the configured planning agent, a
 $EDITOR .hive-state/stages/2-brainstorm/<slug>/brainstorm.md
 hive brainstorm <slug> --from 2-brainstorm
 ```
+
+`--from <stage>` is the retry-safety assertion explained in [docs/architecture.md#markers-and-idempotency](architecture.md#markers-and-idempotency); it is optional when you run a stage by hand.
 
 When brainstorm is complete, the state file ends with `<!-- COMPLETE -->`.
 
@@ -73,7 +78,7 @@ Hive moves the task to `3-plan/`, writes `plan.md`, and pauses for edits if the 
 ## Artefacts
 
 - [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt) replays the completed dogfood task.
-- [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt) shows the finished `.hive-state/` layout.
+- [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt) shows a mid-run `.hive-state/` layout (the task is paused in `3-plan/` to pair with Step 5 above).
 - [docs/recipes.md#xbookmark-end-to-end](recipes.md#xbookmark-end-to-end) expands the same example through PR and archive.
 
 Next, read [docs/concepts.md](concepts.md), [docs/cli.md](cli.md), or [docs/recipes.md](recipes.md).

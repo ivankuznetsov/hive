@@ -8,13 +8,13 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 |---|---|---|
 | `hive status` | See active tasks grouped by next action. | `hive status` |
 | `hive new PROJECT TEXT` | Capture an idea in `1-inbox/`. | `hive new xbookmark "save bookmarks"` |
-| `hive brainstorm TARGET` | Promote inbox to brainstorm or re-run brainstorm. | `hive brainstorm save-bookmarks-260515-abcd` |
-| `hive plan TARGET` | Promote completed brainstorm to plan or re-run plan. | `hive plan save-bookmarks-260515-abcd --from 2-brainstorm` |
-| `hive develop TARGET` | Promote completed plan to execute or re-run execute. | `hive develop save-bookmarks-260515-abcd --from 3-plan` |
-| `hive open-pr TARGET` | Promote completed execute to draft PR creation. | `hive open-pr save-bookmarks-260515-abcd --from 4-execute` |
-| `hive review TARGET` | Run the autonomous review loop. | `hive review save-bookmarks-260515-abcd --from 5-open-pr` |
-| `hive finalize TARGET` | Refresh PR body and mark the draft PR ready. | `hive finalize save-bookmarks-260515-abcd --from 6-review` |
-| `hive archive TARGET` | Move finalized work to `8-done/`. | `hive archive save-bookmarks-260515-abcd --from 7-finalize` |
+| `hive brainstorm TARGET` | Promote inbox to brainstorm or re-run brainstorm. | `hive brainstorm <slug>` |
+| `hive plan TARGET` | Promote completed brainstorm to plan or re-run plan. | `hive plan <slug> --from 2-brainstorm` |
+| `hive develop TARGET` | Promote completed plan to execute or re-run execute. | `hive develop <slug> --from 3-plan` |
+| `hive open-pr TARGET` | Promote completed execute to draft PR creation. | `hive open-pr <slug> --from 4-execute` |
+| `hive review TARGET` | Run the autonomous review loop. | `hive review <slug> --from 5-open-pr` |
+| `hive finalize TARGET` | Refresh PR body and mark the draft PR ready. | `hive finalize <slug> --from 6-review` |
+| `hive archive TARGET` | Move finalized work to `8-done/`. | `hive archive <slug> --from 7-finalize` |
 
 The workflow verbs promote then run when the task is at the previous stage. If the task is already at the target stage, they only run that stage.
 
@@ -80,7 +80,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Every machine-callable command supports `--json` and emits a single typed envelope with `ok: true` on success or `ok: false` on failure. `hive tui` is the only surface that rejects `--json`. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), and daemon control all support `--json` and emit a single typed envelope with `ok: true` on success or `ok: false` on failure. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `init`, `new`, `migrate`, `forget`, `prune`) are still text-only.
 
 ## Exit Codes
 

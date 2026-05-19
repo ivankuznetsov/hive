@@ -44,7 +44,7 @@ The project checkout holds code. `.hive-state/` holds durable Hive state on the 
 `-- logs/<slug>/<stage>-<UTC-ts>.log
 ```
 
-Each stage has one state file: `idea.md`, `brainstorm.md`, `plan.md`, `task.md`, or `pr.md`. `worktree.yml` points from Hive state to the feature worktree created during execute. The xbookmark walkthrough shows a finished tree in [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
+Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstorm), `plan.md` (3-plan), `task.md` (shared across 4-execute, 6-review, 8-done), `pr.md` (shared across 5-open-pr and 7-finalize), or `summary.md` (7-finalize). `worktree.yml` points from Hive state to the feature worktree created during execute. The xbookmark walkthrough captures a mid-run tree in [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
 
 ## Agents
 
@@ -59,7 +59,7 @@ Hive's prompts invoke skills inside the chosen agent. `hive doctor` checks the c
 | Stage | Default invocation | Install for claude | Install for codex |
 |---|---|---|---|
 | `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
-| `3-plan` | `/plan` | a user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | a skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
+| `3-plan` | `/plan` | a user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/ivankuznetsov/agent-plugins) or write one inline) | a skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
 
 | Reviewer | Default skill | Agent | Install target |
 |---|---|---|---|
@@ -85,7 +85,7 @@ registered_projects:
     hive_state_path: /home/you/Dev/your-project/.hive-state
 ```
 
-Per-project config lives at `<project>/.hive-state/config.yml`:
+Per-project config lives at `<project>/.hive-state/config.yml`. The block below is an annotated example; see [`templates/project_config.yml.erb`](../templates/project_config.yml.erb) for the full live template (it ships extra inline comments and ERB-resolved defaults, including a `gh.network_timeout_sec` knob):
 
 ```yaml
 project_name: your-project
@@ -159,7 +159,7 @@ rebase:
   conflict_resolution_timeout_sec: 2700
 ```
 
-`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks — they read project state and operate on stage folders.
+`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
 
 `HIVE_HOME` changes where Hive reads the global registry. `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, and `HIVE_PI_BIN` override agent binaries for tests or local shims.
 

@@ -21,7 +21,7 @@ Read the model in depth in [docs/concepts.md](docs/concepts.md).
 git clone https://github.com/ivankuznetsov/hive ~/Dev/hive && cd ~/Dev/hive && bundle install && mkdir -p ~/.local/bin && ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 ```
 
-If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is.
+If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. The `-sf` form will overwrite an existing `hive` at the target path; run `command -v hive` first if you already have one installed and don't want to clobber it.
 
 Requires Ruby 3.4, git >= 2.40, `claude` >= 2.1.118, `codex` >= 0.125.0 for the default execute agent, and authenticated `gh`. See [docs/getting-started.md](docs/getting-started.md) for the first run.
 
@@ -29,7 +29,7 @@ Requires Ruby 3.4, git >= 2.40, `claude` >= 2.1.118, `codex` >= 0.125.0 for the 
 
 Paste this into Claude Code or Codex when you want the agent to install Hive for you:
 
-```markdown
+```text
 Install Hive from the canonical GitHub source into ~/Dev/hive and put the hive binary on PATH.
 
 Before changing anything:
@@ -38,6 +38,7 @@ Before changing anything:
 - If `codex` is missing or `codex --version` is older than 0.125.0, stop and report that the default execute agent will not work until Codex is installed.
 - If `gh auth status` fails, stop and ask the user to authenticate GitHub CLI.
 - If ~/.local/bin is not on PATH, stop and ask which PATH directory should receive the symlink, then substitute that directory for ~/.local/bin in the link command below.
+- If <bin-dir>/hive already exists (file, symlink, or another checkout's binary), stop and ask whether to overwrite it or pick a different bin directory before running the link command below.
 
 Run these commands in order (replace <bin-dir> with the chosen PATH directory; default is ~/.local/bin):
 
@@ -53,12 +54,12 @@ Report the installed version and the path returned by `command -v hive`.
 
 ## Quickstart
 
-Replace `your-project` with the registry name you pick at `hive init`.
+Replace `your-project` with the registry name you pick at `hive init`. `hive new` prints the slug to use in the next commands; `hive status` also lists it.
 
 ```bash
 cd ~/Dev/your-project
 hive init .                                      # attach .hive-state to this repo
-hive new your-project "add tag autocomplete"     # create 1-inbox/<slug>/idea.md
+hive new your-project "add tag autocomplete"     # create 1-inbox/<slug>/idea.md (prints <slug>)
 hive status                                      # see the next useful action
 hive brainstorm <slug>                           # write brainstorm.md, then answer questions inline
 hive plan <slug>                                 # write or refine plan.md

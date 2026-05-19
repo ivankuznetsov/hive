@@ -10,7 +10,7 @@ The xbookmark dogfood task started from this idea (typo `conenct` preserved from
 I want to create a service that will conenct to my X (twitter) account and collect all the bookmarks...
 ```
 
-It finished as [xbookmark PR #1](https://github.com/ivankuznetsov/xbookmark/pull/1). The replay transcript is committed at [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt), and the finished state tree is at [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
+It finished as [xbookmark PR #1](https://github.com/ivankuznetsov/xbookmark/pull/1). The replay transcript is committed at [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt), and a mid-run state tree (the task paused in `3-plan/`) is at [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
 
 The workflow shape was:
 
@@ -81,7 +81,33 @@ hive markers clear <slug> --name REVIEW_STALE --project your-project
 hive review <slug> --from 6-review
 ```
 
-If CI caused the stop, use `REVIEW_CI_STALE`. If the runner recorded a phase error, use `REVIEW_ERROR`.
+`--from <stage>` is the retry-safety assertion explained in [docs/architecture.md#markers-and-idempotency](architecture.md#markers-and-idempotency); it is optional when you re-run a stage by hand.
+
+If CI caused the stop, swap the marker name. The same shape works for the other terminal review markers:
+
+```bash
+hive markers clear <slug> --name REVIEW_CI_STALE --project your-project
+hive review <slug> --from 6-review
+```
+
+Use `--name REVIEW_ERROR` when the runner recorded a phase error.
+
+## Recover From EXECUTE_STALE
+
+`EXECUTE_STALE` means execute exhausted its retry budget without leaving a clean implementation commit on the feature worktree. Start by reading what the agent produced:
+
+```bash
+cd ~/Dev/your-project
+hive status
+$EDITOR .hive-state/stages/4-execute/<slug>/task.md
+```
+
+Fix the underlying issue (apply edits in the feature worktree if needed), then clear the marker and re-run execute:
+
+```bash
+hive markers clear <slug> --name EXECUTE_STALE --project your-project
+hive develop <slug> --from 4-execute
+```
 
 ## Hand-Edit Inside A Stage
 

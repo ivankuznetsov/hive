@@ -84,6 +84,7 @@ module Hive
         when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
+        when :idea_preview then idea_preview_message(key: key, row: row)
         when :new_idea_project then new_idea_project_message(key: key, row: row)
         when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
@@ -117,6 +118,7 @@ module Hive
         return Messages::NOOP if row.nil?
 
         return Messages::OpenTaskFolder.new(row: row) if key == "o"
+        return Messages::OpenIdeaPreview.new(row: row) if key == "i"
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 
@@ -367,6 +369,13 @@ module Hive
       # special key returns BACK; the cursor singletons aren't special-
       # cased here because they should also dismiss.
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        Messages::BACK
+      end
+
+      # Idea preview is read-only: every key closes it and returns to
+      # grid, whether Bubble Tea emitted a printable String or a
+      # special-key Symbol.
+      def idea_preview_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         Messages::BACK
       end
 

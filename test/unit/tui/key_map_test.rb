@@ -167,6 +167,19 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_grid_i_with_row_returns_open_idea_preview
+    row = make_row(action_key: "ready_to_plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "i", row: row)
+
+    assert_kind_of Hive::Tui::Messages::OpenIdeaPreview, msg
+    assert_equal row, msg.row
+  end
+
+  def test_grid_i_with_nil_row_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "i", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_new_idea_o_continues_to_emit_text_inserted
     # Mode isolation R7: in :new_idea mode the `o` key still routes
     # through new_idea_message as a printable character, not the new
@@ -176,12 +189,31 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal "o", msg.text
   end
 
+  def test_new_idea_i_continues_to_emit_text_inserted
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: "i", row: nil)
+    assert_kind_of Hive::Tui::Messages::NewIdeaTextInserted, msg
+    assert_equal "i", msg.text
+  end
+
   def test_filter_o_continues_to_emit_char_appended
     # Mode isolation R7: in :filter mode the `o` key still routes
     # through filter_message as a printable character.
     msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: "o", row: nil)
     assert_kind_of Hive::Tui::Messages::FilterCharAppended, msg
     assert_equal "o", msg.char
+  end
+
+  def test_filter_i_continues_to_emit_filter_char_appended
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: "i", row: nil)
+    assert_kind_of Hive::Tui::Messages::FilterCharAppended, msg
+    assert_equal "i", msg.char
+  end
+
+  def test_idea_preview_any_key_returns_back
+    [ "i", "x", :key_enter, :key_escape, "q", :space ].each do |key|
+      msg = Hive::Tui::KeyMap.message_for(mode: :idea_preview, key: key, row: nil)
+      assert_same Hive::Tui::Messages::BACK, msg, "#{key.inspect} must dismiss idea preview"
+    end
   end
 
   def test_triage_o_is_noop
@@ -793,7 +825,8 @@ class TuiKeyMapMessageForTest < Minitest::Test
       [ :triage, :key_down,    make_row(action_key: "review_findings") ],
       [ :log_tail, "q",        make_row(action_key: "agent_running") ],
       [ :log_tail, :key_escape, make_row(action_key: "agent_running") ],
-      [ :filter, :key_escape,  nil ]
+      [ :filter, :key_escape,  nil ],
+      [ :idea_preview, "x",    nil ]
     ]
 
     fixtures.each do |mode, key, row|

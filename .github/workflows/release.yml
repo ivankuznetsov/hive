@@ -5,14 +5,20 @@ on:
     tags:
       - "v*.*.*"
 
+# Default-narrow permissions: only the signing job below needs
+# id-token:write. Build matrix runs `gem install tebako` + bundler,
+# which transitively executes third-party code; keeping the OIDC
+# token out of those jobs limits the blast radius if a build dep is
+# compromised.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +39,30 @@ jobs:
         run: gem install tebako
       - name: Build release artifact
         run: bundle exec rake "build:release[${{ matrix.target }}]"
+      - name: Smoke test built binary
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="$(ls tmp/release/hive-*-"$TARGET".tar.gz | head -n 1)"
+          [[ -s "$archive" ]] || { echo "no archive at tmp/release/hive-*-$TARGET.tar.gz" >&2; exit 1; }
+          workdir="$(mktemp -d)"
+          tar -xzf "$archive" -C "$workdir"
+          bin="$(find "$workdir" -type f -name hive -path '*/bin/hive' | head -n 1)"
+          [[ -x "$bin" ]] || { echo "no executable bin/hive in $archive" >&2; exit 1; }
+          # Brew formula does share.install "share/hive", which assumes the
+          # extracted tarball has share/hive/{templates,examples,wiki} at the
+          # archive root. Verify the layout here so a packager regression is
+          # caught before brew users get a half-installed prefix.
+          extracted="$(dirname "$(dirname "$bin")")"
+          for sub in share/hive/templates share/hive/examples share/hive/wiki; do
+            [[ -d "$extracted/$sub" ]] || { echo "expected $sub under $extracted (brew install layout)" >&2; exit 1; }
+          done
+          # Only run the binary when it matches the host architecture.
+          if [[ "$TARGET" == "linux-aarch64-gnu" && "$(uname -m)" != "aarch64" ]]; then
+            echo "skipping --version run for cross-compiled aarch64 binary"
+          else
+            "$bin" --version || { echo "smoke check failed: hive --version did not exit 0" >&2; exit 1; }
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: hive-${{ matrix.target }}
@@ -43,6 +73,9 @@ jobs:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
     needs: build
+    permissions:
+      contents: write
+      id-token: write
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -60,7 +93,15 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign checksums
-        run: cosign sign-blob --yes --output-signature dist/SHA256SUMS.sig dist/SHA256SUMS
+        # `--output-certificate` writes the fulcio cert blob that
+        # `cosign verify-blob --certificate ... --signature ...` needs
+        # at consumption time (install.sh + the agent prompt both
+        # follow that path).
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,11 +117,22 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           darwin_sha="$(awk '/darwin-arm64/ {print $1}' dist/SHA256SUMS)"
+          # Build the payload via jq so version/sha values can't break
+          # out of the JSON object (a tag like `v0.1","event_type":"x`
+          # injected via string concat would otherwise smuggle keys).
+          payload="$(jq -nc --arg version "$version" --arg sha "$darwin_sha" \
+            '{version: $version, sha256_darwin_arm64: $sha}')"
+          echo "notify-homebrew: dispatching event_type=hive-release version=${version}"
           gh api repos/ivankuznetsov/homebrew-hive/dispatches \
             --method POST \
             --field event_type=hive-release \
-            --raw-field client_payload="{\"version\":\"${version}\",\"sha256_darwin_arm64\":\"${darwin_sha}\"}"
-      - name: Prepare AUR publish payload
+            --raw-field "client_payload=${payload}"
+      - name: Notify Homebrew tap (audit when skipped)
+        if: ${{ env.HOMEBREW_TAP_TOKEN == '' }}
+        run: |
+          echo "notify-homebrew: skipped; HOMEBREW_TAP_TOKEN is not set"
+      - name: AUR publish (placeholder)
         if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
         run: |
           echo "AUR publish is enabled by secret; packaging/aur templates are the source of truth for the publish job."
+          echo "TODO: wire up packaging/aur/PKGBUILD.template publishing here (cosign verify the tarballs before bumping pkgver)."

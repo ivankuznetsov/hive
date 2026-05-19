@@ -37,7 +37,26 @@ tebako press \
   --entry-point "${repo_root}/bin/hive" \
   --output "${stage}/bin/hive"
 
+[[ -s "${stage}/bin/hive" ]] || { echo "tebako produced an empty binary at ${stage}/bin/hive" >&2; exit 70; }
 chmod 0755 "${stage}/bin/hive"
+
+# Smoke check: only run native-target binaries; cross-compiled
+# linux-aarch64-gnu on linux-x86_64-gnu (and vice versa) can't be
+# executed here, so skip the runtime check in that case.
+host_arch="$(uname -m)"
+host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "${target}" in
+  darwin-arm64)        runnable=$([[ "${host_os}" == "darwin" && "${host_arch}" == "arm64" ]] && echo 1 || echo 0) ;;
+  linux-x86_64-gnu)    runnable=$([[ "${host_os}" == "linux"  && ( "${host_arch}" == "x86_64" || "${host_arch}" == "amd64" ) ]] && echo 1 || echo 0) ;;
+  linux-aarch64-gnu)   runnable=$([[ "${host_os}" == "linux"  && ( "${host_arch}" == "aarch64" || "${host_arch}" == "arm64" ) ]] && echo 1 || echo 0) ;;
+  *)                   runnable=0 ;;
+esac
+
+if [[ "${runnable}" == "1" ]]; then
+  "${stage}/bin/hive" --version >/dev/null || { echo "smoke check failed: ${stage}/bin/hive --version did not exit 0" >&2; exit 70; }
+else
+  echo "skipping smoke check: ${target} not executable on ${host_os}/${host_arch}" >&2
+fi
 cp LICENSE README.md "${stage}/"
 cp -R templates "${stage}/share/hive/templates"
 cp -R examples "${stage}/share/hive/examples"

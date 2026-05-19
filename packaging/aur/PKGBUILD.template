@@ -6,6 +6,11 @@ pkgdesc='Folder-as-agent pipeline for autonomous software tasks'
 arch=('x86_64' 'aarch64')
 url='https://github.com/ivankuznetsov/hive'
 license=('MIT')
+# `provides=('hive')` + `conflicts=('hive')` is INTENTIONAL and not a
+# self-conflict. We provide the virtual `hive` capability so consumers
+# can `pacman -S hive`, and conflict with the unrelated `apache-hive`
+# AUR package name `hive` (the SQL-on-Hadoop tool) so pacman blocks
+# the collision before our symlink fallback is needed.
 provides=('hive')
 conflicts=('hive' 'apache-hive')
 install=hive.install
@@ -19,12 +24,15 @@ package() {
   case "${CARCH}" in
     x86_64) target="linux-x86_64-gnu" ;;
     aarch64) target="linux-aarch64-gnu" ;;
-    *) echo "unsupported architecture: ${CARCH}" >&2; return 1 ;;
+    *) echo "unsupported architecture: ${CARCH}" >&2; exit 1 ;;
   esac
 
   install -Dm755 "${srcdir}/hive-${pkgver}-${target}/bin/hive" "${pkgdir}/usr/bin/hive"
   install -Dm644 "${srcdir}/hive-${pkgver}-${target}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-  cp -R "${srcdir}/hive-${pkgver}-${target}/share/hive" "${pkgdir}/usr/share/"
+  install -dm755 "${pkgdir}/usr/share/hive"
+  cp -R --no-preserve=mode "${srcdir}/hive-${pkgver}-${target}/share/hive/." "${pkgdir}/usr/share/hive/"
+  find "${pkgdir}/usr/share/hive" -type d -exec chmod 755 {} +
+  find "${pkgdir}/usr/share/hive" -type f -exec chmod 644 {} +
 
   printf 'aur\n' > "${pkgdir}/usr/share/hive/install-channel"
 }

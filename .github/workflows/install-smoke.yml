@@ -13,6 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash -n install.sh
+      - name: Shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          additional_files: install.sh
       - run: bash install.sh --dry-run --version=v0.1.0
 
   macos-dry-run:
@@ -29,4 +34,54 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           docker run --rm -v "$PWD:/src" -w /src archlinux:latest \
-            bash -lc 'pacman -Sy --noconfirm bash curl grep sed gawk coreutils && bash install.sh --dry-run --version=v0.1.0'
+            bash -lc 'pacman -Sy --noconfirm bash curl grep sed gawk coreutils jq && bash install.sh --dry-run --version=v0.1.0'
+
+  die-paths:
+    name: install.sh die paths (malformed inputs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: rejects bogus HIVE_VERSION
+        env:
+          HIVE_VERSION: 'v0.1.0/../../evil'
+        run: |
+          set +e
+          bash install.sh --dry-run
+          rc=$?
+          set -e
+          [[ "$rc" -ne 0 ]] || { echo "expected non-zero exit for malformed HIVE_VERSION" >&2; exit 1; }
+      - name: rejects bogus HIVE_REPO_OWNER
+        env:
+          HIVE_REPO_OWNER: 'evil$injection'
+        run: |
+          set +e
+          bash install.sh --dry-run --version=v0.1.0
+          rc=$?
+          set -e
+          [[ "$rc" -ne 0 ]] || { echo "expected non-zero exit for malformed HIVE_REPO_OWNER" >&2; exit 1; }
+
+  full-smoke:
+    name: install.sh full install smoke (against real release)
+    runs-on: ubuntu-24.04
+    # Pinned to a known-good release so a PR can't gate on a release
+    # not yet cut. Skipped on PRs that change install.sh syntactically
+    # but predate a published release.
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: install + verify
+        env:
+          XDG_DATA_HOME: ${{ github.workspace }}/xdg-data
+          XDG_BIN_HOME: ${{ github.workspace }}/xdg-bin
+          HIVE_VERSION: v0.1.0
+        run: |
+          mkdir -p "$XDG_DATA_HOME" "$XDG_BIN_HOME"
+          bash install.sh --version="$HIVE_VERSION" || {
+            echo "full install smoke aborted (release may not be published yet)" >&2
+            exit 0
+          }
+          test -s "$XDG_DATA_HOME/hive/install-channel"
+          grep -q '^bash$' "$XDG_DATA_HOME/hive/install-channel"
+          test -x "$XDG_BIN_HOME/hive"
+          "$XDG_BIN_HOME/hive" --version

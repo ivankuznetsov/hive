@@ -18,7 +18,11 @@ class Hive < Formula
   end
 
   def post_install
-    (share/"hive/install-channel").write "brew\n"
+    begin
+      (share/"hive/install-channel").write "brew\n"
+    rescue => e
+      opoo "could not write install-channel marker: #{e.message}; `hive update` will fall back to dev guidance"
+    end
   end
 
   def caveats
@@ -26,6 +30,12 @@ class Hive < Formula
       Run `hive init` inside a project to scaffold .hive-state and register
       the per-user daemon service. If Apache Hive shadows this binary on PATH,
       use `hv`.
+
+      Upgrading via `brew upgrade hive` (or `brew autoupdate`) invalidates the
+      launchd plist that `hive init` installed. After an upgrade, recover with:
+        launchctl unload ~/Library/LaunchAgents/local.hive-daemon.plist
+        rm ~/Library/LaunchAgents/local.hive-daemon.plist
+        hive init    # re-registers and re-loads the plist
     EOS
   end
 

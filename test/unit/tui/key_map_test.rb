@@ -192,6 +192,36 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  # Mirror-pair guard: `o` and `s` are the two row-bound side-effect
+  # gestures in grid mode. The plan documents `s` mirrors `o`; both
+  # must NOOP on the left (scope) pane so an operator who jumped focus
+  # to pick a project cannot accidentally fire either against the row
+  # under the right pane's cursor without first returning focus.
+  def test_grid_o_with_left_pane_focus_is_noop
+    row = make_row(action_key: "ready_to_plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "o", row: row, pane_focus: :left)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  # Regression guard: a MANUAL_STEERING row has no `suggested_command`
+  # (the row is non-actionable in the workflow sense — the agent is the
+  # human steering it). Verb keys on such a row must fall through to the
+  # generic "no action available" flash. Without this assertion, a
+  # future change that wired a command back onto `:manual_steering` in
+  # `TaskAction::ACTIONS` would silently dispatch a workflow verb
+  # against a manually-steered task.
+  def test_grid_verb_on_manual_steering_row_returns_no_action_flash
+    row = make_row(action_key: "manual_steering", action_label: "Manually steered",
+                   marker: "manual_steering", suggested_command: nil)
+    %w[b p d r P F a].each do |key|
+      msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: key, row: row)
+      assert_kind_of Hive::Tui::Messages::Flash, msg,
+        "`#{key}` on a manual_steering row must flash, not dispatch"
+      assert_match(/no action available/, msg.text,
+        "`#{key}` flash on a manual_steering row should be the generic refusal")
+    end
+  end
+
   def test_new_idea_o_continues_to_emit_text_inserted
     # Mode isolation R7: in :new_idea mode the `o` key still routes
     # through new_idea_message as a printable character, not the new

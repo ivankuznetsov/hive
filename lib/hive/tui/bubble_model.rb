@@ -1637,19 +1637,41 @@ module Hive
 
       def open_in_agent(row)
         task = Hive::Task.new(row.folder)
+
+        # Stale-row guard: a snapshot poll that pre-dated a stage advance
+        # can leave `row.folder` pointing at an already-moved folder. We
+        # must reject before reaching `Markers.set`, which creates the
+        # parent dir as a side effect and would otherwise resurrect the
+        # moved stage folder while the real task is active elsewhere.
+        unless File.directory?(row.folder.to_s)
+          return [ flashed("no task folder for #{row.slug}"), nil ]
+        end
+
+        # Cheap-check the worktree first so stage-3 rows without a
+        # worktree don't pay the version-probe / preflight subprocess
+        # cost just to be refused. `profile.check_version!` shells out
+        # under a per-agent timeout; running it before the cheap
+        # filesystem check makes the refusal flash non-deterministic in
+        # latency.
+        worktree_path = task.worktree_path
+        unless worktree_path && File.directory?(worktree_path)
+          return [ flashed("no worktree for #{row.slug} — run `hive develop #{row.slug}` first"), nil ]
+        end
+
         cfg = Hive::Config.load(task.project_root)
         agent_name = cfg.dig("execute", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(agent_name, cfg: cfg)
         profile.check_version!
         profile.preflight!
 
-        worktree_path = task.worktree_path
-        unless worktree_path && File.directory?(worktree_path)
-          return [ flashed("no worktree for #{row.slug}"), nil ]
-        end
-
         context_paths = agent_context_paths(task)
         argv = agent_steer_argv(profile, context_paths)
+        # `agent:` records the logical agent name from config (e.g.
+        # "claude"), not the resolved binary path. If `HIVE_CLAUDE_BIN`
+        # is set the flash will name a different basename than the
+        # marker attr — that divergence is intentional: the marker keys
+        # off the agent profile (for U7 classification), the flash
+        # tells the operator which binary actually spawned.
         Hive::Markers.set(row.state_file, "MANUAL_STEERING", agent: agent_name, started_at: Time.now.utc.iso8601)
 
         callable = lambda do
@@ -1664,13 +1686,12 @@ module Hive
           ))
         end
 
-        flash = "steering #{row.slug} in #{File.basename(profile.bin)} → #{File.basename(worktree_path)}"
+        flash_text = "steering #{row.slug} in #{File.basename(profile.bin)} → #{File.basename(worktree_path)}"
         if context_paths.any? && profile.add_dir_flag.to_s.empty?
-          flash = "#{flash} (no add-dir flag; context not preloaded)"
+          flash_text = "#{flash_text} (no add-dir flag; context not preloaded)"
         end
 
-        [ @hive_model.with(flash: flash, flash_set_at: Time.now),
-          Hive::Tui::Subprocess.foreground_takeover_command(callable) ]
+        [ flashed(flash_text), Hive::Tui::Subprocess.foreground_takeover_command(callable) ]
       rescue Hive::AgentProfiles::UnknownAgent
         [ flashed("unknown agent in config: #{agent_name}"), nil ]
       rescue Hive::ConfigError => e
@@ -1679,6 +1700,13 @@ module Hive
         [ flashed("agent unavailable: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
       rescue Hive::InvalidTaskPath
         [ flashed("no task folder for #{row.slug}"), nil ]
+      rescue SystemCallError, IOError => e
+        # Disk-full marker write, permission-denied state-file write, or
+        # malformed `.hive-state/config.yml` (Psych::SyntaxError is
+        # rescued in Hive::Config and re-raised as ConfigError, but
+        # related IOErrors during YAML load can still surface here).
+        # Sibling `archive_steer` rescues the same pair for symmetry.
+        [ flashed("steer failed for #{row.slug}: #{e.class.name.split('::').last}: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
       end
 
       def agent_context_paths(task)
@@ -1688,6 +1716,14 @@ module Hive
         end
       end
 
+      # Build the argv for the manual-steering takeover. Drops every
+      # `context_path` when `profile.add_dir_flag` is nil — the agent
+      # gets the worktree (via `chdir:`) but no stage-folder context.
+      # Assumes context preloading is a CLI-flag affordance only; an
+      # agent that wants context via env vars or stdin would need a
+      # new profile field (none today). The conditional flash in
+      # `open_in_agent` already warns the operator when this branch
+      # silently drops paths.
       def agent_steer_argv(profile, context_paths)
         argv = [ profile.bin ]
         add_dir_flag = profile.add_dir_flag
@@ -1713,20 +1749,35 @@ module Hive
       rescue Hive::InvalidTaskPath
         [ flashed("manual archive failed for #{message.slug}: invalid task folder"), nil ]
       rescue SystemCallError, IOError => e
-        [ flashed("manual archive failed for #{message.slug}: #{e.class.name.split('::').last}"), nil ]
+        # Include the sanitized truncated message so the operator has a
+        # breadcrumb (path, errno text) — `EACCES` alone leaves no clue
+        # whether it was the archived-manual/ permissions, a stale fd,
+        # or a cross-fs rename.
+        klass = e.class.name.split("::").last
+        msg = Hive::Tui::Text.sanitize(e.message)[0, 120]
+        [ flashed("manual archive failed for #{message.slug}: #{klass}: #{msg}"), nil ]
       end
+
+      # @api private
+      # Upper bound on the suffix collision probe in `manual_archive_target`.
+      # Sized large enough to absorb pathological hand-archiving but small
+      # enough that a runaway "create `<slug>-N` for every N" script can
+      # never hot-loop the main TUI thread inside a single Update tick.
+      MANUAL_ARCHIVE_SUFFIX_CEILING = 999
 
       def manual_archive_target(archived_root, slug)
         target = File.join(archived_root, slug)
         return target unless File.exist?(target)
 
-        suffix = 2
-        loop do
+        (2..MANUAL_ARCHIVE_SUFFIX_CEILING).each do |suffix|
           candidate = File.join(archived_root, "#{slug}-#{suffix}")
           return candidate unless File.exist?(candidate)
-
-          suffix += 1
         end
+
+        # Fail loudly so the rescue in `archive_steer` surfaces the
+        # exhaustion as a flash — better than spinning forever or
+        # silently overwriting a pre-existing archive.
+        raise Errno::EEXIST, "archived-manual/#{slug}-2..#{MANUAL_ARCHIVE_SUFFIX_CEILING} all taken"
       end
 
       def manual_archive_flash(slug, target, exit_code, collision)
@@ -1735,8 +1786,19 @@ module Hive
           return "archived #{slug} → archived-manual/ (shipped)" unless collision
 
           "archived #{slug} → archived-manual/#{target_name}/ (collision)"
+        elsif exit_code.to_i == 127
+          # Exit 127 from `run_takeover_child_sync` means the shell could
+          # not invoke the agent binary at all — the cached `check_version!`
+          # found it but it disappeared (uninstall, PATH change) between
+          # the cache and the spawn. Distinguishing this in the flash
+          # avoids the operator chasing a "real" agent run that returned
+          # 127.
+          dest = collision ? "archived-manual/#{target_name}/" : "archived-manual/"
+          "agent binary not found (exit 127); archived #{slug} → #{dest}"
+        elsif collision
+          "agent exited #{exit_code}; archived #{slug} → archived-manual/#{target_name}/ (collision)"
         else
-          "agent exited #{exit_code}; archived #{slug} anyway"
+          "agent exited #{exit_code}; archived #{slug} → archived-manual/"
         end
       end
 

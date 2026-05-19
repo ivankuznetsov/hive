@@ -3215,6 +3215,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
       captured_lookup_cfg = nil
 
       with_agent_profile_lookup_stub(->(name, cfg:) {
+        # Raise on an unexpected agent name so an accidental change to
+        # the cfg.dig("execute", "agent") resolution surfaces as a stub
+        # failure rather than a silent pass on the captured-arg assertion
+        # below.
+        raise "unexpected agent lookup: #{name.inspect}" unless name == "claude"
+
         captured_lookup_name = name
         captured_lookup_cfg = cfg
         profile
@@ -3246,12 +3252,17 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       assert_equal "claude", captured_lookup_name
       assert_equal "claude", captured_lookup_cfg.dig("execute", "agent")
-      expected_contexts = %w[1-inbox 3-plan 4-execute].map do |stage|
+      # Derive the expected context ordering from Hive::Stages::DIRS (the
+      # SSOT) rather than a hard-coded list, so a future shuffle of the
+      # stage order surfaces here even when the fixture happens to create
+      # stages in the same order. The fixture preloads three stage dirs;
+      # we filter DIRS to the ones present so the comparison is stable.
+      present_stages = %w[1-inbox 3-plan 4-execute]
+      expected_contexts = Hive::Stages::DIRS.select { |d| present_stages.include?(d) }.map do |stage|
         File.join(hive_state, "stages", stage, "manual-task")
       end
-      assert_equal [ "codex", "--add-dir", expected_contexts[0],
-                     "--add-dir", expected_contexts[1],
-                     "--add-dir", expected_contexts[2] ], captured_argv
+      expected_argv = [ "codex" ] + expected_contexts.flat_map { |path| [ "--add-dir", path ] }
+      assert_equal expected_argv, captured_argv
       assert_equal worktree_path, captured_chdir
       assert_equal 1, @messages.length
       assert_kind_of Hive::Tui::Messages::AgentSteerExited, @messages.first
@@ -3355,8 +3366,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       target = File.join(hive_state, "stages", "archived-manual", row.slug)
       assert File.directory?(target), "non-zero agent exits still archive the task"
+      # Flash must name both the exit code AND the archive target so the
+      # operator who just hit Ctrl-C has a breadcrumb back to where the
+      # task landed — earlier the flash said "archived ... anyway" with
+      # no path.
       assert_match(/agent exited 130/, @model.hive_model.flash)
-      assert_match(/archived failed-manual-task anyway/, @model.hive_model.flash)
+      assert_match(/archived failed-manual-task → archived-manual\//, @model.hive_model.flash)
     end
   end
 

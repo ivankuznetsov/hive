@@ -192,8 +192,10 @@ module Hive
 
       # `s` in grid mode — suspend the TUI and open the focused row's
       # configured development agent in the feature worktree. BubbleModel
-      # owns the marker flip, foreground takeover, and archive-on-exit
-      # side effects.
+      # owns the marker flip and the foreground takeover here; the
+      # follow-up `AgentSteerExited` message (dispatched by the takeover
+      # callable after the agent process exits) is what owns the
+      # archive-on-exit side effect.
       OpenInAgent = Data.define(:row)
 
       # Enter on a completed 7-finalize row — browse the final summary

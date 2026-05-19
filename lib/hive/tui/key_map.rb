@@ -116,7 +116,13 @@ module Hive
 
         return Messages::NOOP if row.nil?
 
-        return Messages::OpenTaskFolder.new(row: row) if key == "o"
+        # `o` and `s` are the row-bound browse/steer gestures and behave
+        # as a mirror pair: both require right-pane focus (where the row
+        # under the cursor is). Gating `o` matches the `s` gate the plan
+        # called out; without it, an operator on the left (scope) pane
+        # could fire `o` against a row whose cursor they are not visually
+        # tracking.
+        return Messages::OpenTaskFolder.new(row: row) if key == "o" && pane_focus == :right
         return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)

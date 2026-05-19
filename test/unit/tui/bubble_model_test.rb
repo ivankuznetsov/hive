@@ -3241,6 +3241,27 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_idea_preview_roundtrip_open_then_any_key_dismisses
+    with_tmp_dir do |dir|
+      write_idea_md(dir, original_text: "Roundtrip idea")
+      row = make_task_row(folder: dir)
+
+      _, open_cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil open_cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_equal "Roundtrip idea", @model.hive_model.idea_preview_text
+
+      _, dismiss_cmd = @model.update(Bubbletea::KeyMessage.new(key_type: 0, runes: [ "x".ord ]))
+
+      assert_nil dismiss_cmd
+      assert_equal :grid, @model.hive_model.mode
+      assert_nil @model.hive_model.idea_preview_text
+      assert_nil @model.hive_model.idea_preview_slug
+      assert_empty @messages
+    end
+  end
+
   # ---- max_passes-hit REVIEW_STALE → open_review_stale_file ----
 
   def test_recover_review_stale_max_passes_opens_focal_escalations_file

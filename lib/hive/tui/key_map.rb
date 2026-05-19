@@ -387,6 +387,7 @@ module Hive
         return Messages::NEW_IDEA_CURSOR_RIGHT if key == :key_right
         return Messages::NEW_IDEA_CURSOR_HOME if key == :key_home || key == :key_ctrl_a
         return Messages::NEW_IDEA_CURSOR_END if key == :key_end || key == :key_ctrl_e
+        return Messages::NewIdeaPasteRequested.new(raw_text: "") if key == :key_ctrl_v
         return Messages::NewIdeaTextInserted.new(text: " ") if key == :space
         return Messages::NewIdeaTextInserted.new(text: key) if printable_filter_char?(key)
 

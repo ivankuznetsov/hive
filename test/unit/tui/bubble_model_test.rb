@@ -198,9 +198,35 @@ class HiveTuiBubbleModelTest < Minitest::Test
       Bubbletea::KeyMessage::KEY_END => :key_end,
       Bubbletea::KeyMessage::KEY_DELETE => :key_delete,
       Bubbletea::KeyMessage::KEY_CTRL_A => :key_ctrl_a,
-      Bubbletea::KeyMessage::KEY_CTRL_E => :key_ctrl_e
+      Bubbletea::KeyMessage::KEY_CTRL_E => :key_ctrl_e,
+      Bubbletea::KeyMessage::KEY_CTRL_V => :key_ctrl_v
     }.each do |key_type, expected|
       assert_equal expected, @model.send(:bubble_key_to_keymap, key_message(key_type))
+    end
+  end
+
+  def test_translate_ctrl_v_keymessage_requests_new_idea_paste_probe
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(:translate_key, key_message(Bubbletea::KeyMessage::KEY_CTRL_V))
+
+    assert_kind_of Hive::Tui::Messages::NewIdeaPasteRequested, msg
+    assert_equal "", msg.raw_text
+  end
+
+  def test_translate_ctrl_v_keymessage_is_noop_outside_new_idea
+    %i[grid filter].each do |mode|
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: mode),
+        dispatch: @dispatch
+      )
+
+      msg = @model.send(:translate_key, key_message(Bubbletea::KeyMessage::KEY_CTRL_V))
+
+      assert_same Hive::Tui::Messages::NOOP, msg
     end
   end
 

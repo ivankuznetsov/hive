@@ -243,6 +243,22 @@ class TuiKeyMapMessageForTest < Minitest::Test
       Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_ctrl_e, row: nil)
   end
 
+  def test_new_idea_ctrl_v_emits_paste_requested_with_empty_text
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_ctrl_v, row: nil)
+    assert_kind_of Hive::Tui::Messages::NewIdeaPasteRequested, msg
+    assert_equal "", msg.raw_text
+  end
+
+  def test_grid_ctrl_v_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_ctrl_v, row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  def test_filter_ctrl_v_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :filter, key: :key_ctrl_v, row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_new_idea_delete_routes_to_forward_delete
     msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_delete, row: nil)
     assert_same Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD, msg

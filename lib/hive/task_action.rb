@@ -302,13 +302,14 @@ module Hive
     # The diagnostic shape exists for ALL three recovery action keys per
     # ADR-027 and wiki/commands/status.md — recover_review, error, AND
     # recover_execute (EXECUTE_STALE). The TUI's red_status_detail view
-    # doesn't yet render recover_execute rows (no autofix branch in
-    # key_map.rb#red_detail_row?), but bot, daemon, and external agent
-    # consumers reading `hive status --json` rely on the field to
-    # explain why an execute_stale task is stuck. Emitting `nil` here
-    # would make EXECUTE_STALE invisible to those consumers — defeating
-    # the diagnose-then-act feature for one of the three red states it
-    # was meant to cover.
+    # renders all three; recover_execute deliberately omits the [Enter]
+    # autofix affordance because EXECUTE_STALE has no auto-retry recipe
+    # (see red_status_detail.rb#FOOTER_NO_ENTER and
+    # suggested_next_action_payload below — manual_fix / command:null).
+    # Bot, daemon, and external `--json` consumers also rely on this
+    # field for EXECUTE_STALE rows the autofix path cannot resolve;
+    # emitting nil would defeat the diagnose-then-act feature for one
+    # of the three red states it covers.
     def diagnostic_action?
       %w[recover_execute recover_review error].include?(key.to_s)
     end
@@ -670,18 +671,29 @@ module Hive
 
       real = File.realpath(path)
       diagnostic_roots.any? { |root| path_inside?(real, root) }
-    rescue SystemCallError
+    rescue Errno::ENOENT
+      false
+    rescue SystemCallError => e
+      # EACCES / ELOOP / ENAMETOOLONG / EIO: the artifact may exist but
+      # we cannot determine its realpath. Returning false silently
+      # invisibles a paid-for agent verdict (operator sees "no diagnostic
+      # available" while the file exists). Surface via $stderr so support
+      # threads have a breadcrumb; still return false so the local-marker
+      # fallback wins and the snapshot does not crash.
+      warn "[diagnose] cannot realpath #{path}: #{e.class}: #{e.message}"
       false
     end
 
     def diagnostic_roots
-      project_root = realpath_or_expand(task.project_root)
-      ([ task.folder ] + log_dirs).filter_map do |root|
-        real = realpath_or_expand(root)
-        next if project_root && !path_inside?(real, project_root)
-
-        real
-      end.uniq
+      # task.folder + any log_dirs are the legitimate roots an artifact
+      # may live under. We deliberately do NOT add a project_root
+      # containment filter: when .hive-state is a symlink to a separate
+      # volume (a legitimate deployment pattern), task.folder.realpath
+      # lands outside project_root.realpath and every diagnostic gets
+      # silently dropped. The symlink-escape guard is already provided
+      # by checking that the artifact's realpath is inside the (also
+      # realpath'd) task.folder / log_dir.
+      ([ task.folder ] + log_dirs).filter_map { |root| realpath_or_expand(root) }.uniq
     end
 
     def realpath_or_expand(path)

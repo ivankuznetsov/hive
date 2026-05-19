@@ -132,8 +132,10 @@ module Hive
         # whose first clear+rerun is still in flight refuses with a
         # flash instead of double-firing the recovery sequence. Cleared
         # in the spawn-thread's `ensure` so retries unblock once the
-        # first pass settles. Reuses @healed_folders_mutex so the four
-        # background-thread bookkeeping fields share a single lock.
+        # first pass settles. Reuses @healed_folders_mutex so all
+        # background-thread bookkeeping fields (@healed_folders,
+        # @heal_threads, @review_recovery_inflight, @error_recovery_inflight,
+        # @diagnosis_inflight) share a single lock.
         @error_recovery_inflight = Set.new
         @diagnosis_inflight = Set.new
         # Once-per-session latch (reset in #stage_image on success).
@@ -1019,12 +1021,15 @@ module Hive
       def manual_fix_candidate(row)
         task = Hive::Task.new(row.folder.to_s)
         task.worktree_path.to_s
-      rescue Hive::Error, SystemCallError, Psych::SyntaxError, Psych::DisallowedClass
-        # Hive::Error covers InvalidTaskPath, ConfigError, WorktreeError —
-        # any of which Task#worktree_path may raise via the config-load
-        # path. A bubbletea Update thread that lets one of these escape
-        # crashes the runner; the manual-fix path is best-effort browse,
-        # so swallowing-to-empty is the right shape.
+      rescue Hive::InvalidTaskPath, Hive::ConfigError, Hive::WorktreeError,
+             SystemCallError, Psych::SyntaxError, Psych::DisallowedClass => e
+        # Narrow rescue: only the classes Task#worktree_path may
+        # legitimately raise via the config-load + worktree-yml path.
+        # The previous Hive::Error umbrella swallowed every Hive-namespaced
+        # error to ""; future subclasses would silently inherit the
+        # collapse. Log via Debug so the operator-visible "worktree not
+        # found" flash still has a breadcrumb in the debug log.
+        Hive::Tui::Debug.log("manual_fix_candidate", "#{row.slug}: #{e.class.name}: #{e.message}") if defined?(Hive::Tui::Debug)
         ""
       end
 

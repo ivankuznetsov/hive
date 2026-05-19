@@ -319,6 +319,37 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_diagnostic_artifact_resolves_through_symlinked_hive_state
+    # Deployment pattern: .hive-state symlinked to a separate volume
+    # (state on a fast-SSD partition, project on a slower share). The
+    # task.folder.realpath then lands OUTSIDE project_root.realpath
+    # but the artifact is still legitimate. Pre-fix, the project_root
+    # containment guard in diagnostic_roots dropped every artifact in
+    # this layout and the operator silently saw "no diagnostic
+    # available" for paid-for agent verdicts. See PR #84 review C4.
+    Dir.mktmpdir("hive-task-action") do |root|
+      state_volume = File.join(root, "state-volume")
+      FileUtils.mkdir_p(state_volume)
+      symlinked_state = File.join(root, "project", ".hive-state")
+      FileUtils.mkdir_p(File.dirname(symlinked_state))
+      File.symlink(state_volume, symlinked_state)
+
+      slug = "red-260519-symlink"
+      folder = File.join(symlinked_state, "stages", "6-review", slug)
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      File.write(File.join(folder, "reviews", "errors-01.md"), "fix failed\n")
+
+      task = Hive::Task.new(folder)
+      diagnostic = Hive::TaskAction.for(task, marker(:review_error, "phase" => "fix", "pass" => "1")).diagnostic
+
+      refute_nil diagnostic
+      assert_equal "artifact", diagnostic["source"]
+      assert_includes diagnostic["detail"], "fix failed",
+                      "symlinked .hive-state must not invisible legitimate diagnostic artifacts"
+    end
+  end
+
   def test_execute_stale_emits_manual_fix_suggested_next_action
     # EXECUTE_STALE has no auto-retry recipe — the operator must edit
     # findings or lower the pass counter. Emit manual_fix with

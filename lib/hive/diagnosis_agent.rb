@@ -153,18 +153,35 @@ module Hive
     # in parallel. See PR #84 review finding #2 + #11.
     def with_diagnose_lock
       dir = File.join(@task.folder, "diagnostics")
-      FileUtils.mkdir_p(dir)
       lock_path = File.join(dir, LOCK_FILENAME)
-      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
-        unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+      begin
+        FileUtils.mkdir_p(dir)
+        lock_file = File.open(lock_path, File::RDWR | File::CREAT, 0o644)
+      rescue Errno::EACCES, Errno::EROFS, Errno::ENOSPC => e
+        # Same actionable mapping as write_artifact: an unwritable
+        # diagnostics dir surfaces as Hive::Error with a clear path,
+        # not a raw Errno backtrace. See PR #84 review C6.
+        raise Hive::Error,
+              "could not acquire diagnose lock at #{lock_path}: #{e.class.name.split('::').last}: #{e.message}"
+      end
+      begin
+        unless lock_file.flock(File::LOCK_EX | File::LOCK_NB)
           raise DiagnosisInFlight,
                 "another diagnose is already running for this task — retry once it completes"
         end
+        yield
+      ensure
+        # Unlock first, then close, with errors logged but not
+        # propagated. flock unlock on a still-valid fd is virtually
+        # never expected to fail; if it does on an exotic FS we don't
+        # want the ensure-time exception to mask the original error
+        # raised inside the yield. See PR #84 review silent-failure I4.
         begin
-          yield
-        ensure
-          lock.flock(File::LOCK_UN)
+          lock_file.flock(File::LOCK_UN)
+        rescue SystemCallError => e
+          warn "[diagnose] flock unlock on #{lock_path} failed: #{e.class}: #{e.message}"
         end
+        lock_file.close
       end
     end
 
@@ -281,6 +298,20 @@ module Hive
           .gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
     end
 
+    # Atomic write of the diagnose artifact. `Tempfile.create` puts the
+    # tempfile inside the diagnostics dir so the subsequent `File.rename`
+    # is a same-FS move. We also:
+    # - chmod the tempfile to 0644 before rename so downstream readers
+    #   running under a different uid (the daemon, the bot worker) can
+    #   read it — Tempfile defaults to 0600, which would silently make
+    #   the artifact invisible to those consumers.
+    # - fsync the parent directory after rename so a crash window between
+    #   rename(2) and dir-cache flush cannot leave a polled-fresh artifact
+    #   unrecoverable (the artifact IS the freshness gate for every
+    #   subsequent poll; losing it loses the load-bearing record).
+    # - map low-level Errno::EXDEV/EACCES/ENOSPC to a Hive::Error with
+    #   an actionable message so a TTY operator sees "could not write
+    #   red-status.md: <reason>" instead of a raw Errno trace.
     def write_artifact(body)
       dir = File.join(@task.folder, "diagnostics")
       FileUtils.mkdir_p(dir)
@@ -289,9 +320,24 @@ module Hive
         file.write(body)
         file.flush
         file.fsync
+        File.chmod(0o644, file.path)
         File.rename(file.path, path)
       end
+      fsync_dir(dir)
       path
+    rescue Errno::EXDEV, Errno::EACCES, Errno::ENOSPC, Errno::EROFS => e
+      raise Hive::Error,
+            "could not write #{path || File.join(dir, 'red-status.md')}: #{e.class.name.split('::').last}: #{e.message}"
+    end
+
+    def fsync_dir(dir)
+      File.open(dir) { |f| f.fsync }
+    rescue NotImplementedError, SystemCallError
+      # fsync on a directory FD is POSIX but not universally supported
+      # (e.g. some FUSE mounts return ENOSYS). The rename(2) already
+      # gave us the visibility guarantee on a healthy FS; this is a
+      # belt-and-braces durability flush, not a correctness gate.
+      nil
     end
 
     # Marker names that map to a red recovery action_key per
@@ -336,6 +382,10 @@ module Hive
     end
 
     def run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
+      # Queue (not Mutex+Array) because terminate_process_group runs
+      # from trap("INT") / trap("TERM") handlers and Mutex#synchronize
+      # raises ThreadError in trap context. Queue#<< is trap-safe.
+      @kill_threads_queue = Queue.new
       Open3.popen3(*cmd, chdir: cwd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
         feed_stdin(stdin, stdin_data)
         out_reader = Thread.new { read_stream(stdout) }
@@ -365,8 +415,17 @@ module Hive
               raise Interrupt if interrupted
 
               status = wait_thr.value
+              # The child has already exited successfully (or with a
+              # non-zero status); we now just need to drain stdout/stderr
+              # pipes. The runtime `deadline` is for the agent's RUN, not
+              # for the pipe drain — passing it here causes false
+              # timeouts when the child exited at deadline - epsilon and
+              # the reader threads hadn't finished yet. Give the drain
+              # its own small budget (TERMINATE_GRACE_SECONDS) so a
+              # post-exit read of a moderately long buffer can complete.
+              drain_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + TERMINATE_GRACE_SECONDS
               out, err = drain_reader_threads_or_timeout(
-                child_pid, out_reader, err_reader, deadline, timeout_sec
+                child_pid, out_reader, err_reader, drain_deadline, timeout_sec
               )
               raise Hive::Error, error_message(err, status) unless status.success?
 
@@ -384,6 +443,32 @@ module Hive
           trap("INT", old_int || "DEFAULT")
           trap("TERM", old_term || "DEFAULT")
         end
+      end
+    ensure
+      # Wait for every kill_thread spawned by terminate_process_group
+      # to complete its SIGKILL escalation before we return. Without
+      # this join a Ctrl-C / timeout / outer ensure that unwinds run!
+      # before the 5s grace elapses leaves a detached SIGKILL thread
+      # behind, and if the parent process exits (CLI return, _exit,
+      # second Ctrl-C) the thread dies mid-sleep and the SIGKILL is
+      # never delivered — the orphan-pgroup failure mode that the rest
+      # of this function is structured to prevent. See PR #84 review C1.
+      join_kill_threads
+    end
+
+    def join_kill_threads
+      return unless @kill_threads_queue
+
+      loop do
+        t =
+          begin
+            @kill_threads_queue.pop(true)
+          rescue ThreadError
+            nil
+          end
+        break if t.nil?
+
+        t.join(TERMINATE_GRACE_SECONDS + 1)
       end
     end
 
@@ -433,13 +518,20 @@ module Hive
     # blocked for 5 seconds on every cancellation. The bg thread polls
     # Process.waitpid2(-pid, WNOHANG) so it exits early when the child has
     # already reaped — no waste when SIGTERM is enough.
+    #
+    # The thread is registered on @kill_threads so run_with_timeout's
+    # outer ensure can join it before returning. Without that join a
+    # parent unwind (Ctrl-C, ensure cleanup, CLI return) before the 5s
+    # grace elapses would leave the SIGKILL thread detached and a parent
+    # exit could kill it mid-sleep — re-introducing the orphan-pgroup
+    # bug. See PR #84 review C1.
     def terminate_process_group(pid)
       begin
         Process.kill("TERM", -pid)
       rescue Errno::ESRCH
         return
       end
-      Thread.new do
+      kt = Thread.new do
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + TERMINATE_GRACE_SECONDS
         loop do
           begin
@@ -458,6 +550,9 @@ module Hive
           nil
         end
       end
+      # Queue#<< is trap-safe (Queue itself is internally lock-free
+      # from a trap perspective; Mutex would raise ThreadError here).
+      @kill_threads_queue&.<<(kt)
     end
 
     def kill_reader_threads(*threads)

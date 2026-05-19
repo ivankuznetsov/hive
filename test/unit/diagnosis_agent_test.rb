@@ -170,6 +170,44 @@ class DiagnosisAgentTest < Minitest::Test
            "stale-marker abort must NOT leave an artifact behind"
   end
 
+  def test_write_artifact_is_world_readable_for_other_uids
+    # Daemon and bot workers can run under different uids than the CLI
+    # operator that triggered the diagnose. The artifact IS the
+    # freshness gate for every subsequent poll across all consumers;
+    # if Tempfile's default 0600 mode leaks into the rename target,
+    # those consumers silently fail to read it and the operator-visible
+    # symptom is "no diagnostic available" while the file exists. See
+    # PR #84 review C6.
+    Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn).run!
+
+    path = File.join(@folder, "diagnostics", "red-status.md")
+    mode_bits = File.stat(path).mode & 0o777
+    assert_equal 0o644, mode_bits,
+                 "artifact must be world-readable so daemon / bot under other uids can consume it"
+  end
+
+  def test_write_artifact_eaccess_maps_to_actionable_hive_error
+    # Pre-fix, an Errno::EACCES from File.rename propagated raw —
+    # operators on a TTY saw a backtrace instead of a "could not write
+    # red-status.md" message. Drive the rename-fails path by making
+    # the diagnostics dir read-only before run!; Tempfile create or
+    # rename then fails with EACCES which the wrapped rescue maps to
+    # Hive::Error. See PR #84 review C6.
+    FileUtils.mkdir_p(File.join(@folder, "diagnostics"))
+    File.chmod(0o500, File.join(@folder, "diagnostics"))
+    begin
+      error = assert_raises(Hive::Error) do
+        Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn).run!
+      end
+      assert_match(/could not (write|acquire diagnose lock)/, error.message,
+                   "EACCES on rename or lock acquisition must surface as actionable Hive::Error, not raw Errno")
+      refute_match(/Errno::EACCES/, error.class.to_s,
+                   "the raised class must be Hive::Error, not a raw Errno class")
+    ensure
+      File.chmod(0o755, File.join(@folder, "diagnostics"))
+    end
+  end
+
   def test_concurrent_diagnose_on_same_task_raises_diagnosis_in_flight
     # Two concurrent `--diagnose --write` invocations on the same task
     # must not both spawn the configured agent and burn budget in
@@ -358,21 +396,28 @@ class DiagnosisAgentTest < Minitest::Test
     refute spawned, "DiagnosisAgent must not spawn when marker is not red at dispatch"
   end
 
-  def test_run_with_timeout_times_out_when_descendant_keeps_stdio_open
+  def test_run_with_timeout_succeeds_when_descendant_drains_within_grace
+    # Pre-fix this test pinned the false-timeout bug: a descendant
+    # holding stdio open for 2s would trip a timeout even though the
+    # parent had exited successfully and only the pipe drain was
+    # outstanding. The drain phase now uses its own TERMINATE_GRACE
+    # budget rather than the runtime timeout, so a successful parent
+    # whose descendants drain within ~5s returns cleanly. See PR #84
+    # review C3.
     agent = Hive::DiagnosisAgent.new(task: @task)
-    error = assert_raises(Hive::Error) do
-      Timeout.timeout(3) do
-        agent.send(
-          :run_with_timeout,
-          [ RbConfig.ruby, "-e", "fork { sleep 2 }; puts 'done'" ],
-          Dir.pwd,
-          nil,
-          0.5
-        )
-      end
+    out = nil
+    Timeout.timeout(8) do
+      out = agent.send(
+        :run_with_timeout,
+        [ RbConfig.ruby, "-e", "fork { sleep 2 }; puts 'done'" ],
+        Dir.pwd,
+        nil,
+        0.5
+      )
     end
 
-    assert_match(/diagnosis agent timed out/i, error.message)
+    assert_includes out.to_s, "done",
+                    "parent exited successfully — drain must complete and the agent output must surface"
   end
 
   def test_run_with_timeout_redacts_failed_agent_stderr

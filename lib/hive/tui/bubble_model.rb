@@ -30,6 +30,7 @@ require "hive/tui/views/log_tail"
 require "hive/tui/views/red_status_detail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
+require "hive/tui/views/idea_preview"
 require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
 
@@ -227,6 +228,7 @@ module Hive
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
+        when :idea_preview then compose_idea_preview_view
         when :new_idea_project then compose_new_idea_project_view
         when :new_idea then compose_new_idea_view
         else compose_two_pane_view
@@ -2884,6 +2886,11 @@ module Hive
       def compose_filter_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
         compose_two_pane_view(footer: prompt_footer(Views::FilterPrompt.render(@hive_model, width: usable), usable))
+      end
+
+      def compose_idea_preview_view
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(footer: prompt_footer(Views::IdeaPreview.render(@hive_model, width: usable), usable))
       end
 
       # New-idea mode: same composition; footer = the inline prompt with

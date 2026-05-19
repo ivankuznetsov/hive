@@ -288,6 +288,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "/auth"
   end
 
+  def test_view_composes_idea_preview_onto_grid_in_idea_preview_mode
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :idea_preview,
+        idea_preview_slug: "some-slug",
+        idea_preview_text: "original idea"
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "Idea for some-slug:"
+    assert_includes out, "original idea"
+  end
+
   # Regression: paste-truncated / paste-timeout / overflow flashes
   # raised inside :filter mode were invisible because compose_filter_view
   # passed the filter prompt as the footer, replacing default_footer

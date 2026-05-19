@@ -1,3 +1,5 @@
+require "hive/workflows"
+
 module Hive
   module Bot
     module Handlers
@@ -19,6 +21,7 @@ module Hive
           when :callback_clear_and_retry then clear_and_retry(data)
           when :callback_open_laptop then @result_class.new(action: :reply, text: "Open laptop for this one.")
           when :callback_show_details then show_details(data)
+          when :callback_refresh_diagnose then refresh_diagnose(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
           when :callback_path_a_yes then path_a(data)
@@ -64,12 +67,38 @@ module Hive
         end
 
         def show_details(data)
-          _prefix, project, slug = split_callback(data, 3)
+          _prefix, project, slug, stage = split_callback(data, [ 3, 4 ])
+          stage_argv = stage ? [ "--stage", stage ] : []
+          # Replace the previous full-status dump with a targeted
+          # `hive status --diagnose <slug>` so the bot reply renders the
+          # bounded Diagnostic envelope (summary + detail) instead of
+          # the whole snapshot. `--stage` disambiguates duplicate slugs
+          # in the same project. See PR #84 review row 24.
           @result_class.new(
             action: :dispatch_then_reply,
             project: project,
             slug: slug,
-            command_argv: [ "hive", "status", "--json" ]
+            command_argv: [ "hive", "status", "--diagnose", slug,
+                            "--project", project, *stage_argv, "--json" ]
+          )
+        end
+
+        def refresh_diagnose(data)
+          _prefix, project, slug, stage = split_callback(data, [ 3, 4 ])
+          stage_argv = stage ? [ "--stage", stage ] : []
+          # Bot-side parity of the TUI's R keystroke: spawn the
+          # configured execute AgentProfile via --write so a fresh
+          # diagnostic verdict is produced and written to
+          # <task>/diagnostics/red-status.md. The reply renders the
+          # refreshed Diagnostic envelope. --force bypasses the
+          # marker_signature cache so Refresh means "ask again", matching
+          # the TUI R keystroke. Resolves issue #91.
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: project,
+            slug: slug,
+            command_argv: [ "hive", "status", "--diagnose", slug,
+                            "--project", project, *stage_argv, "--write", "--force", "--json" ]
           )
         end
 
@@ -138,7 +167,7 @@ module Hive
         end
 
         def retry_verb_for_stage(stage)
-          {
+          Hive::Workflows.verb_arriving_at(stage) || {
             "4-execute" => "develop",
             "5-review" => "review",
             "6-pr" => "pr"
@@ -146,8 +175,9 @@ module Hive
         end
 
         def split_callback(data, expected)
-          parts = data.split(":", expected)
-          raise ArgumentError, "malformed callback" unless parts.length == expected
+          counts = Array(expected)
+          parts = data.split(":", counts.max)
+          raise ArgumentError, "malformed callback" unless counts.include?(parts.length)
 
           parts
         end

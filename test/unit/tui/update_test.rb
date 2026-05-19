@@ -23,6 +23,25 @@ class HiveTuiUpdateTest < Minitest::Test
     Hive::Tui::Messages::NewIdeaImageAttached.new(attachment: attachment)
   end
 
+  def red_detail_row(marker: "review_error", attrs: { "phase" => "fix", "pass" => "1" },
+                     action_key: "recover_review",
+                     diagnostic: { "summary" => "REVIEW_ERROR", "detail" => "failed" })
+    Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "6-review", slug: "red-task", folder: "/tmp/red-task",
+      state_file: "/tmp/red-task/task.md", marker: marker, attrs: attrs, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: action_key, action_label: "Needs recovery", suggested_command: nil,
+      next_action: nil, diagnostic: diagnostic
+    )
+  end
+
+  def snapshot_with_rows(*rows)
+    project = Hive::Tui::Snapshot::ProjectView.new(
+      name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: rows.freeze
+    ).freeze
+    Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
+  end
+
   # ---------- WindowSized ----------
 
   def test_window_sized_updates_dimensions
@@ -63,7 +82,8 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "alpha", stage: "1-input", slug: "a1", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready", suggested_command: "hive brainstorm a1", next_action: nil
+        action_label: "ready", suggested_command: "hive brainstorm a1", next_action: nil,
+        diagnostic: nil
       ).freeze ].freeze
     ).freeze
     smaller_snap = Hive::Tui::Snapshot.new(generated_at: nil, projects: [ pa ])
@@ -99,6 +119,108 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     assert_equal [ 0, 0 ], new_model.cursor,
       "first snapshot must seed cursor at first visible row instead of leaving it nil"
+  end
+
+  def test_open_red_status_detail_enters_mode_with_marker_signature
+    # Pin the canonical contract: when row.diagnostic carries a
+    # marker_signature (the producer-side SHA256 hex from
+    # TaskAction#marker_signature), the TUI reads that value verbatim
+    # so producer + consumer can never drift. Without diagnostic on the
+    # row, Update falls back to a locally-computed hash so the
+    # freshness gate still detects rotation across snapshots.
+    sig = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+    row = red_detail_row(diagnostic: {
+      "summary" => "REVIEW_ERROR", "detail" => "failed", "marker_signature" => sig
+    })
+    new_model, cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+
+    assert_nil cmd
+    assert_equal :red_status_detail, new_model.mode
+    assert_same row, new_model.red_status_detail_state.row
+    assert_equal sig, new_model.red_status_detail_state.marker_signature,
+                 "TUI must read the canonical marker_signature off row.diagnostic"
+  end
+
+  def test_red_status_marker_signature_falls_back_when_diagnostic_absent
+    row = red_detail_row(diagnostic: nil)
+    sig = Hive::Tui::Update.red_status_marker_signature(row)
+
+    assert_match(/\Ano-diag:[0-9a-f]{64}\z/, sig,
+                 "missing diagnostic must produce a deterministic locally-namespaced digest")
+  end
+
+  def test_snapshot_arrived_closes_red_detail_when_row_recovers
+    row = red_detail_row
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
+        row: row,
+        marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
+      )
+    )
+    recovered = red_detail_row(marker: "review_complete", attrs: {}, action_key: "ready_to_finalize")
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(recovered))
+    )
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.red_status_detail_state
+    assert_match(/recovered/, new_model.flash)
+  end
+
+  def test_snapshot_arrived_updates_red_detail_when_marker_signature_changes
+    row = red_detail_row
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
+        row: row,
+        marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
+      )
+    )
+    changed = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(changed))
+    )
+
+    assert_equal :red_status_detail, new_model.mode
+    assert_same changed, new_model.red_status_detail_state.row
+    assert_match(/marker changed/, new_model.flash)
+  end
+
+  def test_snapshot_arrived_fires_flash_again_on_second_marker_rotation
+    # The "marker changed" flash must fire on EVERY rotation that
+    # hasn't been operator-acknowledged. Previously the state
+    # rebased marker_signature on every poll, so a second rotation
+    # between polls was silently swallowed and the operator never
+    # saw the warning. See PR #84 review finding #7.
+    row = red_detail_row
+    initial_sig = Hive::Tui::Update.red_status_marker_signature(row)
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
+        row: row,
+        marker_signature: initial_sig
+      )
+    )
+
+    rotated_once = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
+    after_first, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_once))
+    )
+    assert_match(/marker changed/, after_first.flash, "first rotation must flash")
+
+    rotated_twice = red_detail_row(attrs: { "phase" => "fix", "pass" => "3" })
+    after_second, _cmd = Hive::Tui::Update.apply(
+      after_first.with(flash: nil, flash_set_at: nil),
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_twice))
+    )
+    assert_match(/marker changed/, after_second.flash,
+                 "second rotation without operator acknowledgement must also flash")
   end
 
   # ---------- PollFailed ----------
@@ -375,7 +497,8 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "alpha", stage: "1-input", slug: "a#{i}", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}", next_action: nil
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm a#{i}",
+        next_action: nil, diagnostic: nil
       ).freeze
     end
     rows_b = (1..3).map do |i|
@@ -383,7 +506,8 @@ class HiveTuiUpdateTest < Minitest::Test
         project_name: "beta", stage: "1-input", slug: "b#{i}", folder: nil,
         state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
         claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
-        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}", next_action: nil
+        action_label: "ready to brainstorm", suggested_command: "hive brainstorm b#{i}",
+        next_action: nil, diagnostic: nil
       ).freeze
     end
     pa = Hive::Tui::Snapshot::ProjectView.new(name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: rows_a.freeze).freeze
@@ -569,6 +693,10 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     starting = model.with(
       mode: :grid,
+      snapshot: snap_with_two_projects_three_rows_each,
+      scope: 1,
+      new_idea_project_name: "old-project",
+      new_idea_project_cursor: 2,
       new_idea_buffer: "leftover-text",
       new_idea_cursor: 4,
       new_idea_attachments: [ attachment ],
@@ -577,11 +705,92 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
     assert_equal [], new_model.new_idea_attachments
     assert_nil new_model.new_idea_staging_dir
     assert_nil new_model.new_idea_staging_tmp_root
+  end
+
+  def test_open_new_idea_from_all_projects_opens_project_picker
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea_project, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
+  def test_open_new_idea_from_all_projects_before_snapshot_opens_project_picker
+    starting = model.with(snapshot: nil, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea_project, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
+  def test_open_new_idea_from_explicit_scope_opens_title_prompt
+    starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 2)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea, new_model.mode
+    assert_nil new_model.new_idea_project_name
+  end
+
+  def test_new_idea_project_picker_selects_project_without_changing_scope
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: snap_with_two_projects_three_rows_each,
+      scope: 0,
+      new_idea_project_cursor: 1
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal :new_idea, new_model.mode
+    assert_equal "beta", new_model.new_idea_project_name
+    assert_equal 0, new_model.scope
+  end
+
+  def test_new_idea_project_picker_enter_without_snapshot_flashes_waiting
+    starting = model.with(mode: :new_idea_project, snapshot: nil, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal :new_idea_project, new_model.mode,
+                 "Enter on a nil-snapshot picker must stay in picker (not advance silently)"
+    assert_nil new_model.new_idea_project_name
+    assert_match(/waiting for snapshot/i, new_model.flash.to_s,
+                 "Enter on a loading picker must acknowledge the keystroke via flash so the mode does not appear frozen")
+  end
+
+  def test_new_idea_project_picker_enter_when_all_unhealthy_flashes_no_healthy
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-19",
+      "projects" => [
+        { "name" => "broken-a", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "broken-b", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    starting = model.with(mode: :new_idea_project, snapshot: snap, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal :new_idea_project, new_model.mode,
+                 "Enter against an all-unhealthy snapshot must stay in picker (not advance to composer with nil project)"
+    assert_nil new_model.new_idea_project_name
+    assert_match(/no healthy projects/i, new_model.flash.to_s,
+                 "must acknowledge the keystroke and explain why selection is impossible")
+  end
+
+  def test_new_idea_project_picker_skips_unhealthy_projects
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-17",
+      "projects" => [
+        { "name" => "broken", "error" => "missing_project_path", "tasks" => [] },
+        { "name" => "hive", "tasks" => [] },
+        { "name" => "writero", "tasks" => [] }
+      ]
+    )
+    starting = model.with(mode: :new_idea_project, snapshot: snap, new_idea_project_cursor: 0)
+    down, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN)
+    assert_equal 1, down.new_idea_project_cursor
+    selected, _cmd = Hive::Tui::Update.apply(down, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal "writero", selected.new_idea_project_name
   end
 
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
@@ -847,6 +1056,8 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     starting = model.with(
       mode: :new_idea,
+      new_idea_project_name: "hive",
+      new_idea_project_cursor: 1,
       new_idea_buffer: "rss feeds",
       new_idea_cursor: 4,
       new_idea_attachments: [ attachment ],
@@ -855,6 +1066,8 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CANCELLED)
     assert_equal :grid, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
     assert_equal [], new_model.new_idea_attachments

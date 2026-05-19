@@ -32,7 +32,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       state_file: state_file, marker: marker, attrs: attrs, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: action_label,
-      suggested_command: suggested_command, next_action: next_action
+      suggested_command: suggested_command, next_action: next_action,
+      diagnostic: nil
     )
   end
 
@@ -540,6 +541,214 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
   end
 
+  def test_refresh_red_status_diagnosis_dispatches_status_diagnose_and_dedups
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      marker: "error",
+      attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "error")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+      dispatch: @dispatch
+    )
+
+    calls = []
+    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+    end
+
+    # --stage disambiguates when the same slug exists in multiple stages
+    # of the same project. TaskResolver raises AmbiguousSlug otherwise,
+    # which the operator sees as "diagnosis failed to start" — silently
+    # losing the refresh signal.
+    #
+    # --force is appended on the R-press path so the CLI's
+    # marker_signature idempotency short-circuit (silent cache reuse)
+    # does NOT fire. Without --force, R-press would flash "refreshed"
+    # while no new agent ran (PR #84 review row 8).
+    expected = [ "hive", "status", "--diagnose", row.slug,
+                 "--project", row.project_name, "--stage", row.stage,
+                 "--write", "--force" ]
+    assert_equal [ expected ], calls
+    assert @model.hive_model.red_status_detail_state.refreshing
+    assert_match(/already in progress/, @model.hive_model.flash)
+  end
+
+  def test_refresh_red_status_diagnosis_short_circuits_when_autofix_inflight
+    # If a recover_review autofix is already running for the row, R-press
+    # must refuse rather than spawn a parallel diagnose. The autofix path
+    # holds the per-task `hive run` lock; a parallel diagnose would fail
+    # at the flock or describe pre-autofix state. See PR #84 review row 13.
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      marker: "review_error",
+      attrs: { "phase" => "fix", "pass" => "1" },
+      suggested_command: nil
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch
+    )
+    # Simulate an in-flight autofix by claiming the recovery slot.
+    inflight = @model.instance_variable_get(:@review_recovery_inflight)
+    inflight.add(row.folder)
+
+    calls = []
+    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+    end
+
+    assert_empty calls,
+                 "diagnose must not dispatch when autofix is already running"
+    assert_match(/autofix already running/i, @model.hive_model.flash)
+  end
+
+  def test_refresh_red_status_diagnosis_short_circuits_when_error_autofix_inflight
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      marker: "error",
+      attrs: { "exit_code" => "70" },
+      suggested_command: nil
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch
+    )
+    inflight = @model.instance_variable_get(:@error_recovery_inflight)
+    inflight.add(row.folder)
+
+    calls = []
+    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+    end
+
+    assert_empty calls,
+                 "diagnose must not dispatch when error autofix is already running"
+    assert_match(/autofix already running/i, @model.hive_model.flash)
+  end
+
+  def test_refresh_red_status_diagnosis_short_circuits_on_agent_running_row
+    # action_key=='agent_running' means the row is currently being
+    # processed by a workflow agent (claude/codex). Same refuse-then-flash
+    # contract as the autofix-inflight branch.
+    row = make_task_row(
+      action_key: "agent_running",
+      action_label: "Agent running",
+      marker: "agent_working",
+      attrs: { "pid" => "12345" },
+      suggested_command: nil
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch
+    )
+    calls = []
+    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+    end
+
+    assert_empty calls,
+                 "diagnose must not dispatch when action_key is agent_running"
+    assert_match(/autofix already running/i, @model.hive_model.flash)
+  end
+
+  def test_diagnose_subprocess_exit_success_flashes_and_evicts_inflight
+    # success case: exit_code zero → "refreshed" flash, slot evicted so
+    # a subsequent R-press can run. See PR #84 review row 14.
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      marker: "error",
+      attrs: {},
+      suggested_command: nil
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "sig", refreshing: true)
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+      dispatch: @dispatch
+    )
+    inflight = @model.instance_variable_get(:@diagnosis_inflight)
+    inflight.add(row.folder)
+
+    @model.update(
+      Hive::Tui::Messages::SubprocessExited.new(verb: "status", exit_code: 0, folder: row.folder)
+    )
+
+    refute_includes inflight, row.folder,
+                    "successful diagnose exit must evict the inflight slot"
+    assert_match(/refreshed/, @model.hive_model.flash)
+    refute @model.hive_model.red_status_detail_state.refreshing,
+           "refreshing flag must clear on subprocess exit"
+  end
+
+  def test_diagnose_subprocess_exit_failure_flashes_and_evicts_inflight
+    # failure case: non-zero exit → operator-actionable failure flash
+    # AND the slot is evicted so a retry is possible.
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      marker: "error",
+      attrs: {},
+      suggested_command: nil
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "sig", refreshing: true)
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+      dispatch: @dispatch
+    )
+    inflight = @model.instance_variable_get(:@diagnosis_inflight)
+    inflight.add(row.folder)
+
+    @model.update(
+      Hive::Tui::Messages::SubprocessExited.new(verb: "status", exit_code: 1, folder: row.folder)
+    )
+
+    refute_includes inflight, row.folder,
+                    "failed diagnose exit must STILL evict the inflight slot (retry must be possible)"
+    refute @model.hive_model.red_status_detail_state.refreshing,
+           "refreshing flag must clear on subprocess exit (even on failure)"
+    refute_nil @model.hive_model.flash
+  end
+
+  def test_open_manual_fix_opens_task_worktree_without_changing_marker
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "manual-fix-260516-aaaa"
+      folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      worktree = File.join(project_root, "worktrees", slug)
+      FileUtils.mkdir_p(folder)
+      FileUtils.mkdir_p(worktree)
+      marker_path = File.join(folder, "task.md")
+      marker_body = "<!-- REVIEW_ERROR phase=fix pass=1 -->\n"
+      File.write(marker_path, marker_body)
+      File.write(File.join(folder, "worktree.yml"), { "path" => worktree }.to_yaml)
+      row = make_task_row(
+        action_key: "error",
+        action_label: "Error",
+        stage: "6-review",
+        slug: slug,
+        folder: folder,
+        state_file: marker_path,
+        marker: "error",
+        attrs: { "reason" => "exit_code", "exit_code" => "1" },
+        suggested_command: nil
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+
+      _model, cmd = @model.update(Hive::Tui::Messages::OpenManualFix.new(row: row))
+
+      refute_nil cmd
+      assert_match(/opening worktree/, @model.hive_model.flash)
+      assert_equal marker_body, File.read(marker_path)
+    end
+  end
+
   def with_clipboard_probe_stub(stub_proc)
     sentinel = @model.instance_variable_get(:@clipboard_probe)
     @model.instance_variable_set(:@clipboard_probe, stub_proc)
@@ -575,7 +784,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, scope: 0, new_idea_buffer: "rss feeds"
+        mode: :new_idea, snapshot: snap, scope: 0,
+        new_idea_project_name: "hive", new_idea_buffer: "rss feeds"
       ),
       dispatch: @dispatch
     )
@@ -916,6 +1126,72 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "mixed-error set must point at re-init or per-name `hive forget`")
   end
 
+  # new_idea_project_name points to a project that exists in the
+  # snapshot but has an error — the picker chose it before the snapshot
+  # poll dropped its health. Submission must flash the per-project error
+  # + "choose another project" rather than dispatch against a broken project.
+  def test_new_idea_submission_with_chosen_project_now_unhealthy_flashes_choose_another
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-06",
+      "projects" => [
+        { "name" => "alpha", "tasks" => [] },
+        { "name" => "beta", "error" => "not_initialised", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0,
+        new_idea_project_name: "beta", new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "must NOT dispatch when the chosen project went unhealthy under us"
+    assert_match(/"beta".*not initialised.*choose another project/i, @model.hive_model.flash.to_s,
+                 "flash must name the chosen project, the specific error, and steer to a new pick")
+    assert_equal :new_idea_project, @model.hive_model.mode,
+                 "must bounce back to the picker so operator can re-pick without retyping"
+    assert_nil @model.hive_model.new_idea_project_name,
+               "stale project name must be cleared on bounce"
+    assert_equal "an idea", @model.hive_model.new_idea_buffer,
+                 "typed buffer must survive the bounce so the re-pick doesn't cost retyping"
+  end
+
+  # new_idea_project_name points to a name no longer in the snapshot
+  # (project was removed between picker selection and submit). Submission
+  # must flash "is not available — choose another".
+  def test_new_idea_submission_with_chosen_project_missing_from_snapshot_flashes_unavailable
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-06",
+      "projects" => [
+        { "name" => "alpha", "tasks" => [] }
+      ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea, snapshot: snap, scope: 0,
+        new_idea_project_name: "ghost", new_idea_buffer: "an idea"
+      ),
+      dispatch: @dispatch
+    )
+    spawn_count = 0
+    with_run_quiet_stub(->(_argv) { spawn_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+    assert_equal 0, spawn_count, "must NOT dispatch when the chosen project disappeared from snapshot"
+    assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s,
+                 "flash must say the chosen name is not available and steer to a new pick")
+    assert_equal :new_idea_project, @model.hive_model.mode,
+                 "must bounce back to the picker so operator can re-pick without retyping"
+    assert_nil @model.hive_model.new_idea_project_name,
+               "stale project name must be cleared on bounce"
+    assert_equal "an idea", @model.hive_model.new_idea_buffer,
+                 "typed buffer must survive the bounce so the re-pick doesn't cost retyping"
+  end
+
   def test_new_idea_submission_with_no_projects_flashes_and_does_not_dispatch
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01", "projects" => []
@@ -948,7 +1224,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, new_idea_buffer: "rss feeds"
+        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
+        new_idea_buffer: "rss feeds"
       ),
       dispatch: @dispatch
     )
@@ -970,7 +1247,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, new_idea_buffer: "an idea"
+        mode: :new_idea, snapshot: snap, new_idea_project_name: "hive",
+        new_idea_buffer: "an idea"
       ),
       dispatch: @dispatch
     )
@@ -991,6 +1269,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       hive_model: Hive::Tui::Model.initial.with(
         mode: :new_idea,
         snapshot: snap,
+        new_idea_project_name: "hive",
         new_idea_buffer: "see [image1]",
         new_idea_cursor: 12
       ),
@@ -1084,6 +1363,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
           hive_model: Hive::Tui::Model.initial.with(
             mode: :new_idea,
             snapshot: snap,
+            new_idea_project_name: "ghost",
             new_idea_buffer: "see [image1]",
             new_idea_cursor: 12,
             new_idea_attachments: [ attachment ],
@@ -1126,6 +1406,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       hive_model: Hive::Tui::Model.initial.with(
         mode: :new_idea,
         snapshot: snap,
+        new_idea_project_name: "hive",
         new_idea_buffer: "title [image1]",
         new_idea_cursor: 14,
         new_idea_attachments: [ attachment ],
@@ -3965,7 +4246,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       project_name: "demo", stage: "6-review", slug: slug, folder: folder,
       state_file: nil, marker: "error", attrs: { "reason" => reason, "exit_code" => exit_code.to_s },
       mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
+      action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil,
+      diagnostic: nil
     )
   end
 
@@ -4251,7 +4533,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil
+        action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil,
+        diagnostic: nil
       )
 
       # Must not raise — must convert NoLogFiles into a flashed model
@@ -4281,7 +4564,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: nil, attrs: nil,
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "agent_running", action_label: "Agent running", suggested_command: nil, next_action: nil
+        action_key: "agent_running", action_label: "Agent running", suggested_command: nil, next_action: nil,
+        diagnostic: nil
       )
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))
@@ -4304,7 +4588,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         project_name: File.basename(project_root), stage: "6-review", slug: slug,
         folder: task_folder, state_file: nil, marker: "review_stale", attrs: { "pass" => "4" },
         mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil, next_action: nil
+        action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil, next_action: nil,
+        diagnostic: nil
       )
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: row))

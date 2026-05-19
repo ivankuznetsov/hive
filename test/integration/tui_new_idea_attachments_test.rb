@@ -23,6 +23,7 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
         mode: :new_idea,
         snapshot: snapshot_for(project),
         scope: 0,
+        new_idea_project_name: project,
         new_idea_buffer: buffer,
         new_idea_cursor: buffer.length,
         new_idea_attachments: attachments,

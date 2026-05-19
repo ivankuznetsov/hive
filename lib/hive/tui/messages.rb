@@ -42,7 +42,18 @@ module Hive
       # time — Update doesn't re-derive it. `exit_code` carries the
       # POSIX-shell-convention status (0 success; 128+signo for signal
       # kills; 127 command-not-found).
-      SubprocessExited = Data.define(:verb, :exit_code)
+      #
+      # `folder` is optional — present only when the dispatcher wrapped
+      # @dispatch to thread per-row context through the reaper Thread
+      # (today: `refresh_red_status_diagnosis`, so the diagnose-subprocess
+      # exit handler can evict the right slot from @diagnosis_inflight).
+      # Default nil keeps every existing call site (workflow-verb spawns,
+      # takeover-command spawns) unchanged.
+      SubprocessExited = Data.define(:verb, :exit_code, :folder) do
+        def initialize(verb:, exit_code:, folder: nil)
+          super
+        end
+      end
 
       # Cooperative shutdown signal — set by the SIGHUP trap (via
       # `runner.send`) and by `q`-keystroke dispatch in grid mode.
@@ -151,6 +162,22 @@ module Hive
       # uniform "Enter to retry" gesture across recoverable failures.
       RecoverError = Data.define(:row)
 
+      # Enter on a gated red row — open the diagnosis/action view
+      # without clearing markers or dispatching recovery.
+      OpenRedStatusDetail = Data.define(:row)
+
+      # Enter inside the red-status detail view — run the same
+      # recovery handler the grid row used to run directly.
+      RedStatusAutofix = Data.define(:row)
+
+      # `f` inside the red-status detail view — open the task worktree
+      # in $EDITOR for manual edits. This never clears markers.
+      OpenManualFix = Data.define(:row)
+
+      # `R` inside the red-status detail view — ask Hive to refresh the
+      # durable headless diagnosis artifact for this row.
+      RefreshRedStatusDiagnosis = Data.define(:row)
+
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or
       # revise inline questions before re-running the stage.
@@ -257,9 +284,23 @@ module Hive
       # Mirror the FilterChar* shape so Update can be unit-tested against
       # the full message set without dependency on view code.
 
-      # `n` from :grid — open the inline new-idea prompt (mode → :new_idea).
+      # `n` from :grid — open the inline new-idea prompt, or a project
+      # picker first when scope is ★ All projects.
       OpenNewIdeaPrompt = Class.new
       OPEN_NEW_IDEA_PROMPT = OpenNewIdeaPrompt.new.freeze
+
+      # Project picker cursor movement for the pre-new-idea selection
+      # shown when the operator starts from ★ All projects.
+      NewIdeaProjectCursorDown = Class.new
+      NEW_IDEA_PROJECT_CURSOR_DOWN = NewIdeaProjectCursorDown.new.freeze
+
+      NewIdeaProjectCursorUp = Class.new
+      NEW_IDEA_PROJECT_CURSOR_UP = NewIdeaProjectCursorUp.new.freeze
+
+      # Enter in the project picker — lock the highlighted project as
+      # the target and continue into the normal new-idea prompt.
+      NewIdeaProjectSelected = Class.new
+      NEW_IDEA_PROJECT_SELECTED = NewIdeaProjectSelected.new.freeze
 
       # User inserted text into the new-idea buffer at the cursor. This
       # is the primary path for both printable characters and paste.

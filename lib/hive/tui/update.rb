@@ -1,3 +1,4 @@
+require "digest"
 require "hive"
 require "hive/tui/model"
 require "hive/tui/messages"
@@ -75,6 +76,8 @@ module Hive
           [ apply_show_help(model), nil ]
         when Messages::OpenFilterPrompt
           [ apply_open_filter_prompt(model), nil ]
+        when Messages::OpenRedStatusDetail
+          [ apply_open_red_status_detail(model, message), nil ]
         when Messages::Back
           [ apply_back(model), nil ]
         when Messages::ProjectScope
@@ -85,6 +88,12 @@ module Hive
           [ apply_pane_focus_changed(model, message), nil ]
         when Messages::OpenNewIdeaPrompt
           [ apply_open_new_idea_prompt(model), nil ]
+        when Messages::NewIdeaProjectCursorDown
+          [ apply_new_idea_project_cursor_down(model), nil ]
+        when Messages::NewIdeaProjectCursorUp
+          [ apply_new_idea_project_cursor_up(model), nil ]
+        when Messages::NewIdeaProjectSelected
+          [ apply_new_idea_project_selected(model), nil ]
         when Messages::NewIdeaTextInserted
           [ apply_new_idea_text_inserted(model, message), nil ]
         when Messages::NewIdeaImageAttached
@@ -151,10 +160,72 @@ module Hive
       # user's selection on every benign poll).
       def apply_snapshot_arrived(model, msg)
         new_model = model.with(snapshot: msg.snapshot, last_error: nil)
+        if model.mode == :red_status_detail && model.red_status_detail_state
+          return apply_red_status_detail_snapshot(new_model, model.red_status_detail_state)
+        end
+
         visible = visible_snapshot(new_model)
         return new_model if visible.nil?
 
         new_model.with(cursor: reclamp_cursor(visible, new_model.cursor))
+      end
+
+      def apply_red_status_detail_snapshot(model, state)
+        row = find_row_for_detail(model.snapshot, state.row)
+        unless row
+          return close_red_detail(
+            model,
+            flash: "#{state.row.slug} no longer in this project"
+          )
+        end
+
+        unless red_status_row?(row)
+          return close_red_detail(
+            model,
+            flash: "#{row.slug} recovered — status updated"
+          )
+        end
+
+        signature = red_status_marker_signature(row)
+        # Preserve the operator-visible "Refreshing diagnosis..." flag
+        # across snapshot polls. The 1Hz poll lands while a headless
+        # diagnose subprocess can run up to 600s; the indicator must
+        # survive snapshots and only clear on SubprocessExited (see
+        # BubbleModel#diagnose_subprocess_exit).
+        #
+        # marker_signature follows the live row; acknowledged_marker_signature
+        # only moves on explicit operator actions. Comparing against the
+        # acknowledged value means a second marker rotation still flashes
+        # the "marker changed" warning even when the first rotation
+        # already updated state.marker_signature. See PR #84 review #7.
+        next_state = state.with(row: row, marker_signature: signature)
+        if signature != state.acknowledged_marker_signature
+          return model.with(
+            red_status_detail_state: next_state,
+            flash: "marker changed since you opened this view — refresh (R)",
+            flash_set_at: Time.now
+          )
+        end
+
+        model.with(red_status_detail_state: next_state)
+      end
+
+      # Close the red-status detail view and return to grid. Recompute
+      # the cursor against the post-close snapshot so a row that
+      # disappeared while the operator was in the detail view doesn't
+      # leave the cursor pointing at a hidden row (which would silently
+      # wedge j/k navigation).
+      def close_red_detail(model, flash:)
+        closed = model.with(
+          mode: :grid,
+          red_status_detail_state: nil,
+          flash: flash,
+          flash_set_at: Time.now
+        )
+        visible = visible_snapshot(closed)
+        return closed if visible.nil?
+
+        closed.with(cursor: reclamp_cursor(visible, closed.cursor))
       end
 
       # Keep the cursor coords if they still point at an existing row
@@ -413,8 +484,12 @@ module Hive
       # plus a flash payload.
 
       def apply_open_new_idea_prompt(model)
+        mode = model.scope.zero? ? :new_idea_project : :new_idea
+
         model.with(
-          mode: :new_idea,
+          mode: mode,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -422,6 +497,46 @@ module Hive
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           new_idea_broken_labels: []
+        )
+      end
+
+      def apply_new_idea_project_cursor_down(model)
+        choices = new_idea_project_choices(model)
+        return model if choices.empty?
+
+        cursor = [ model.new_idea_project_cursor.to_i + 1, choices.size - 1 ].min
+        model.with(new_idea_project_cursor: cursor)
+      end
+
+      def apply_new_idea_project_cursor_up(model)
+        choices = new_idea_project_choices(model)
+        return model if choices.empty?
+
+        cursor = [ model.new_idea_project_cursor.to_i - 1, 0 ].max
+        model.with(new_idea_project_cursor: cursor)
+      end
+
+      def apply_new_idea_project_selected(model)
+        # Enter pressed in the picker while no snapshot has arrived yet,
+        # or every project in the snapshot is unhealthy. Acknowledge the
+        # keystroke with a flash instead of silently swallowing it — the
+        # alternative makes the picker feel frozen.
+        if model.snapshot.nil?
+          return model.with(flash: "waiting for snapshot — Esc cancels", flash_set_at: Time.now)
+        end
+
+        choices = new_idea_project_choices(model)
+        if choices.empty?
+          return model.with(flash: "no healthy projects — Esc cancels", flash_set_at: Time.now)
+        end
+
+        project = choices[model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)]
+        return model if project.nil?
+
+        model.with(
+          mode: :new_idea,
+          new_idea_project_name: project.name,
+          new_idea_project_cursor: model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)
         )
       end
 
@@ -517,6 +632,8 @@ module Hive
       def apply_new_idea_cancelled(model)
         model.with(
           mode: :grid,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -618,6 +735,16 @@ module Hive
         model.with(mode: :filter, filter_buffer: model.filter.to_s)
       end
 
+      def apply_open_red_status_detail(model, msg)
+        model.with(
+          mode: :red_status_detail,
+          red_status_detail_state: Model::RedStatusDetailState.new(
+            row: msg.row,
+            marker_signature: red_status_marker_signature(msg.row)
+          )
+        )
+      end
+
       # Esc / `q` from a sub-mode returns to grid. Clears triage_state
       # and tail_state on exit so the next entry starts clean. Help
       # overlay dismisses to grid; filter mode goes through
@@ -627,9 +754,18 @@ module Hive
         case model.mode
         when :triage then model.with(mode: :grid, triage_state: nil)
         when :log_tail then model.with(mode: :grid, tail_state: nil)
+        when :red_status_detail
+          closed = model.with(mode: :grid, red_status_detail_state: nil)
+          visible = visible_snapshot(closed)
+          visible.nil? ? closed : closed.with(cursor: reclamp_cursor(visible, closed.cursor))
         when :help, :filter then model.with(mode: :grid)
+        when :new_idea_project then apply_new_idea_cancelled(model)
         else model
         end
+      end
+
+      def new_idea_project_choices(model)
+        Array(model.snapshot&.projects).select { |project| project.error.nil? }
       end
 
       # `n == 0` clears scope (all projects). Out-of-range still flips
@@ -650,6 +786,42 @@ module Hive
         return nil if snap.nil?
 
         snap.scope_to_project_index(model.scope).filter_by_slug(model.filter)
+      end
+
+      def find_row_for_detail(snapshot, original_row)
+        return nil if snapshot.nil? || original_row.nil?
+
+        snapshot.rows.find { |row| row.folder == original_row.folder } ||
+          snapshot.rows.find { |row| row.project_name == original_row.project_name && row.slug == original_row.slug && row.stage == original_row.stage }
+      end
+
+      def red_status_row?(row)
+        %w[recover_review recover_execute error].include?(row.action_key.to_s)
+      end
+
+      # Read the canonical marker_signature off the diagnostic payload
+      # rather than recomputing locally. TaskAction#marker_signature is
+      # the producer (the SHA256-hex value emitted into the status JSON
+      # and into the diagnostics/red-status.md artifact frontmatter); the
+      # TUI is a consumer. Recomputing here with a different algorithm
+      # (the prior `\\0`-joined raw concat) meant the freshness compare
+      # could never match the hex stored in row.diagnostic, so the
+      # "marker changed since you opened this view" banner fired on
+      # every poll regardless of marker state.
+      #
+      # Fallback (rarely hit): when row.diagnostic is nil — e.g., the
+      # row is no longer red, or the JSON producer's schema_version
+      # predates the field — fall back to a deterministic local digest
+      # so the live-update gate still compares against a stable value
+      # across snapshots. The local digest is namespaced with a
+      # "no-diag:" prefix so it cannot collide with a real signature.
+      def red_status_marker_signature(row)
+        sig = row.diagnostic && row.diagnostic["marker_signature"]
+        return sig.to_s if sig && !sig.to_s.empty?
+
+        attrs = (row.attrs || {}).sort_by { |key, _value| key.to_s }
+                                 .map { |key, value| "#{key}=#{value}" }
+        "no-diag:" + Digest::SHA256.hexdigest(([ row.marker.to_s ] + attrs).join("\n"))
       end
 
       def next_non_empty_project_idx(visible, start_idx)

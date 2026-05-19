@@ -24,7 +24,7 @@ group :development, :test do
   gem "minitest", "~> 6.0"
   gem "rake", "~> 13.0"
   gem "json_schemer", "~> 2.5", require: false
-  gem "rubocop", "~> 1.60", require: false
+  gem "rubocop", "~> 1.86", require: false
   gem "rubocop-rails-omakase", "~> 1.1", require: false
   gem "brakeman", "~> 8.0", require: false
   gem "bundler-audit", "~> 0.9", require: false

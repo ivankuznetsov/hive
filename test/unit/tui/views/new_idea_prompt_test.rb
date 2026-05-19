@@ -25,25 +25,25 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     )
   end
 
-  def test_renders_prompt_label_with_resolved_project
+  def test_renders_prompt_label_with_chosen_project
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
-      scope: 0, new_idea_buffer: "rss feeds"
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss feeds"
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_includes out, "New idea (project="
-    assert_includes out, "hive", "★ All scope must resolve to first registered project"
+    assert_includes out, "hive", "chosen project must be shown before submission"
     assert_includes out, "rss feeds", "buffer text must surface verbatim"
   end
 
-  def test_label_indicates_star_fallback_when_scope_zero
+  def test_label_indicates_unresolved_project_when_scope_zero
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
       scope: 0
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
-    assert_includes out, "★→hive",
-                    "scope=0 should be labeled with ★→<first> so the operator sees the fallback"
+    assert_includes out, "(choose project)",
+                    "scope=0 must not silently label or submit to the first project"
   end
 
   def test_label_uses_explicit_project_when_scope_n
@@ -53,7 +53,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_includes out, "myapp"
-    refute_includes out, "★→", "explicit scope must NOT carry the ★→ fallback prefix"
+    refute_includes out, "choose project", "explicit scope must NOT look unresolved"
   end
 
   def test_label_handles_nil_snapshot
@@ -75,11 +75,18 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
   end
 
-  def test_resolve_project_name_returns_first_project_when_scope_zero
+  def test_resolve_project_name_returns_nil_when_scope_zero_without_choice
     model = Hive::Tui::Model.initial.with(
       snapshot: make_snapshot(%w[alpha beta]), scope: 0
     )
-    assert_equal "alpha", Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
+    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
+  end
+
+  def test_resolve_project_name_returns_chosen_project_under_scope_zero
+    model = Hive::Tui::Model.initial.with(
+      snapshot: make_snapshot(%w[alpha beta]), scope: 0, new_idea_project_name: "beta"
+    )
+    assert_equal "beta", Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
   end
 
   def test_resolve_project_name_returns_nth_project_when_scope_n
@@ -98,16 +105,16 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   # ---- project_label decoration logic ----
   # The render path covers these transitively, but a direct test pins
-  # the ★→ fallback marker, the explicit-scope path, and the empty-
+  # the unresolved ★ All marker, the explicit-scope path, and the empty-
   # snapshot placeholder so a regression in the decoration logic
   # surfaces independently of the prompt layout.
 
-  def test_project_label_marks_star_fallback_with_arrow_prefix
+  def test_project_label_marks_scope_zero_without_choice
     model = Hive::Tui::Model.initial.with(
       snapshot: make_snapshot(%w[hive myapp]), scope: 0
     )
-    assert_equal "★→hive", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
-                 "scope=0 fallback must be visually distinguished from explicit selection"
+    assert_equal "(choose project)", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
+                 "scope=0 must ask for a concrete target instead of falling back"
   end
 
   def test_project_label_returns_plain_name_when_scope_n
@@ -115,7 +122,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       snapshot: make_snapshot(%w[hive myapp]), scope: 2
     )
     assert_equal "myapp", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
-                 "explicit scope must NOT carry the ★→ fallback marker"
+                 "explicit scope must NOT look unresolved"
   end
 
   def test_project_label_handles_no_projects_gracefully
@@ -133,7 +140,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     long = ("a" * 60) + ("z" * 60) # 120 chars
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: long, new_idea_cursor: long.length, cols: 50
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: long, new_idea_cursor: long.length, cols: 50
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     refute_includes out, ("a" * 60),
@@ -145,7 +152,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   def test_buffer_within_cols_renders_in_full
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: "rss feeds", cols: 100
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss feeds", cols: 100
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_includes out, "rss feeds", "short buffer must render verbatim"
@@ -156,6 +163,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       mode: :new_idea,
       snapshot: make_snapshot(%w[hive]),
       scope: 0,
+      new_idea_project_name: "hive",
       new_idea_buffer: "hi [image1]",
       new_idea_cursor: "hi [image1]".length,
       new_idea_attachments: [ attachment("image1") ],
@@ -172,6 +180,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       mode: :new_idea,
       snapshot: make_snapshot(%w[hive]),
       scope: 0,
+      new_idea_project_name: "hive",
       new_idea_buffer: "[image1][image2][image3]",
       new_idea_cursor: 24,
       new_idea_attachments: [ attachment("image1"), attachment("image2"), attachment("image3") ],
@@ -188,6 +197,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       mode: :new_idea,
       snapshot: make_snapshot(%w[hive]),
       scope: 0,
+      new_idea_project_name: "hive",
       new_idea_buffer: "hi [image1]",
       new_idea_cursor: "hi [image1]".length,
       new_idea_attachments: [ attachment("image1") ],
@@ -205,6 +215,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       mode: :new_idea,
       snapshot: make_snapshot(%w[hive]),
       scope: 0,
+      new_idea_project_name: "hive",
       new_idea_buffer: "hi",
       new_idea_attachments: [],
       cols: 100
@@ -230,6 +241,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       mode: :new_idea,
       snapshot: make_snapshot(%w[hive]),
       scope: 0,
+      new_idea_project_name: "hive",
       new_idea_buffer: "see [image1]",
       new_idea_cursor: "see [image1]".length,
       new_idea_broken_labels: [ "image1" ],
@@ -244,7 +256,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   def test_explicit_width_kwarg_clamps_independently_of_cols
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: "x" * 80, cols: 200
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "x" * 80, cols: 200
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model, width: 30)
     refute_match(/x{80}/, out, "width: kwarg must clamp regardless of model.cols")
@@ -256,7 +268,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     long = "abcdef" * 30 # 180 chars
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: long, cols: 80
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: long, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert out.lines.count > 1, "180-char buffer at cols=80 must wrap onto multiple rows"
@@ -270,11 +282,11 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   def test_continuation_rows_align_to_label_column
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: "a" * 200, cols: 80
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "a" * 200, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     rows = out.lines.map { |l| l.chomp.gsub(/\e\[[\d;]*m/, "") }
-    label_col = "New idea (project=★→hive): ".length
+    label_col = "New idea (project=hive): ".length
     rows[1..].each do |row|
       assert row.start_with?(" " * label_col),
              "continuation row must start with label-width padding (got #{row.inspect})"
@@ -284,7 +296,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
   def test_buffer_within_first_row_capacity_renders_single_line
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: "rss", cols: 80
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "rss", cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_equal 1, out.lines.count, "short buffer must NOT wrap"
@@ -295,7 +307,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     # MAX_VISIBLE_ROWS so the prompt doesn't push the panes off-screen.
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: "x" * 2000, cols: 80
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: "x" * 2000, cols: 80
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_operator out.lines.count, :<=, Hive::Tui::Views::NewIdeaPrompt::MAX_VISIBLE_ROWS
@@ -347,7 +359,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     buffer = "abcdefghij" * 10
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive]),
-      scope: 0, new_idea_buffer: buffer, new_idea_cursor: 4, cols: 45
+      scope: 0, new_idea_project_name: "hive", new_idea_buffer: buffer, new_idea_cursor: 4, cols: 45
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
 
@@ -357,7 +369,7 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   # ---- Unhealthy-project resolution ----
 
-  def test_resolve_project_name_skips_unhealthy_projects_under_star_all
+  def test_resolve_project_name_refuses_unhealthy_chosen_project
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-04",
       "projects" => [
@@ -365,9 +377,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
         { "name" => "alpha", "tasks" => [] }
       ]
     )
-    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0)
-    assert_equal "alpha", Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model),
-                 "★ All fallback must skip projects with `error:` and pick the first HEALTHY one"
+    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, new_idea_project_name: "broken")
+    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model),
+               "chosen project must be revalidated against the latest snapshot before dispatch"
   end
 
   def test_resolve_project_name_returns_nil_when_explicit_scope_is_unhealthy

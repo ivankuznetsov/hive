@@ -20,13 +20,15 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea
+      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea_project / :new_idea
       :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
       :cursor,           # [project_idx, row_idx] (or nil for empty grid)
       :filter,           # String or nil — committed substring filter
       :filter_buffer,    # String — typed text in :filter mode
       :scope,            # Integer — 0 means all projects; 1..N selects Nth
       :pane_focus,       # Symbol: :left | :right (v2 two-pane layout)
+      :new_idea_project_name, # String or nil — explicit target chosen from ★ All
+      :new_idea_project_cursor, # Integer — selection cursor in :new_idea_project mode
       :new_idea_buffer,  # String — typed text in :new_idea mode
       :new_idea_cursor,  # Integer — character index within new_idea_buffer
       :new_idea_attachments, # Array<Model::Attachment> — staged image refs for :new_idea
@@ -42,6 +44,7 @@ module Hive
       :flash_set_at,     # Time or nil — flash decay timestamp
       :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
       :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
+      :red_status_detail_state, # Model::RedStatusDetailState or nil — :red_status_detail mode only
       :cols,             # Integer — terminal width (set on WindowSized)
       :rows,             # Integer — terminal height
       :last_error        # Exception or nil — last poll failure
@@ -82,6 +85,19 @@ module Hive
       end
     end
 
+    Model::RedStatusDetailState = Data.define(:row, :marker_signature, :acknowledged_marker_signature, :refreshing) do
+      # `marker_signature` is the most-recently observed value from the
+      # row's diagnostic; it follows the producer in real time.
+      # `acknowledged_marker_signature` is only updated on operator
+      # actions (open detail view, press R, dispatch autofix) so a
+      # marker that rotates multiple times between polls still fires
+      # the "marker changed" flash once per acknowledgement window
+      # rather than only on the first poll. See PR #84 review #7.
+      def initialize(row:, marker_signature:, acknowledged_marker_signature: marker_signature, refreshing: false)
+        super
+      end
+    end
+
     class Model
       # Boot state. App.run constructs the runner with this Model.
       # `pane_focus` defaults to `:right` so the table is the first
@@ -97,6 +113,8 @@ module Hive
           filter_buffer: "",
           scope: 0,
           pane_focus: :right,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -108,6 +126,7 @@ module Hive
           flash_set_at: nil,
           triage_state: nil,
           tail_state: nil,
+          red_status_detail_state: nil,
           cols: cols,
           rows: rows,
           last_error: nil

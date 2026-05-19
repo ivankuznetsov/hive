@@ -25,9 +25,11 @@ require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
 require "hive/tui/views/triage"
 require "hive/tui/views/log_tail"
+require "hive/tui/views/red_status_detail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
 require "hive/tui/views/new_idea_prompt"
+require "hive/tui/views/new_idea_project_picker"
 
 module Hive
   module Tui
@@ -130,9 +132,12 @@ module Hive
         # whose first clear+rerun is still in flight refuses with a
         # flash instead of double-firing the recovery sequence. Cleared
         # in the spawn-thread's `ensure` so retries unblock once the
-        # first pass settles. Reuses @healed_folders_mutex so the four
-        # background-thread bookkeeping fields share a single lock.
+        # first pass settles. Reuses @healed_folders_mutex so all
+        # background-thread bookkeeping fields (@healed_folders,
+        # @heal_threads, @review_recovery_inflight, @error_recovery_inflight,
+        # @diagnosis_inflight) share a single lock.
         @error_recovery_inflight = Set.new
+        @diagnosis_inflight = Set.new
         # Once-per-session latch (reset in #stage_image on success).
         @clipboard_tool_hint_shown = false
         # Consecutive `wl-paste`/`xclip` timeouts: a single timeout
@@ -217,8 +222,10 @@ module Hive
         when :grid then compose_two_pane_view
         when :triage then Views::Triage.render(@hive_model)
         when :log_tail then Views::LogTail.render(@hive_model)
+        when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
+        when :new_idea_project then compose_new_idea_project_view
         when :new_idea then compose_new_idea_view
         else compose_two_pane_view
         end
@@ -250,7 +257,7 @@ module Hive
       # on stale-pid rows and to synthesize argv from suggested_command.
       def translate_key(key_message)
         key = bubble_key_to_keymap(key_message)
-        row = current_row
+        row = @hive_model.mode == :red_status_detail ? @hive_model.red_status_detail_state&.row : current_row
         Hive::Tui::KeyMap.message_for(
           mode: @hive_model.mode,
           key: key,
@@ -363,6 +370,12 @@ module Hive
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
           recover_error(message.row)
+        when Hive::Tui::Messages::RedStatusAutofix
+          red_status_autofix(message.row)
+        when Hive::Tui::Messages::OpenManualFix
+          open_manual_fix(message.row)
+        when Hive::Tui::Messages::RefreshRedStatusDiagnosis
+          refresh_red_status_diagnosis(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
@@ -653,12 +666,37 @@ module Hive
       # `Update.apply_subprocess_exited` keeps its existing default
       # flash behavior.
       def diagnose_subprocess_exit(msg)
+        if msg.verb.to_s == "status"
+          # Evict EXACTLY the completing folder (passed through by
+          # refresh_red_status_diagnosis's dispatcher wrap). Clearing
+          # the whole Set on every status exit cascaded across rows:
+          # a finish on folder A wiped B's inflight slot while B was
+          # still running, letting a second R-press on B spawn a
+          # duplicate agent.
+          evict_diagnosis_attempt(msg.folder) if msg.folder
+          model = clear_detail_refreshing(@hive_model)
+          if msg.exit_code.to_i.zero?
+            return [ model.with(flash: "red-status diagnosis refreshed", flash_set_at: Time.now), nil ]
+          end
+
+          diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
+          text = diagnostic || "`status --diagnose` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess.log_path}"
+          return [ model.with(flash: text, flash_set_at: Time.now), nil ]
+        end
+
         return nil if msg.exit_code.nil? || msg.exit_code.zero?
 
         diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
         return nil if diagnostic.nil?
 
         [ @hive_model.with(flash: diagnostic, flash_set_at: Time.now), nil ]
+      end
+
+      def clear_detail_refreshing(model)
+        state = model.red_status_detail_state
+        return model if state.nil?
+
+        model.with(red_status_detail_state: state.with(refreshing: false))
       end
 
       # Scan a fresh snapshot for tasks whose `:error` marker came from
@@ -832,6 +870,167 @@ module Hive
       rescue StandardError => e
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         evict_heal_attempt(row.folder)
+      end
+
+      def red_status_autofix(row)
+        case row.action_key.to_s
+        when "recover_review"
+          recover_review(row, force: red_status_autofix_force?(row))
+        when "error"
+          recover_error(row)
+        else
+          [ flashed("no autofix action available for #{row.slug}"), nil ]
+        end
+      end
+
+      # The `r` grid-mode gesture (PR #72) sets force: true ONLY for
+      # max_passes-hit REVIEW_STALE — the case where the operator has
+      # presumably edited reviews/escalations-NN.md and wants to retry
+      # immediately. The detail-view Enter mirrors that contract: only
+      # max_passes-hit REVIEW_STALE rows get force: true. Other
+      # review_stale shapes (wall_clock, incomplete-triage) keep the
+      # default force: false so retryable_review_stale? still gates them.
+      # Non-REVIEW_STALE markers (REVIEW_ERROR, REVIEW_CI_STALE) never
+      # need force; they always pass the gate.
+      def red_status_autofix_force?(row)
+        Hive::TaskAction.max_passes_review_stale_with_escalations?(
+          folder: row.folder, marker_name: row.marker, attrs: row.attrs
+        )
+      end
+
+      # Returns true if a per-row autofix (recover_review / recover_error)
+      # is currently in flight. Used by refresh_red_status_diagnosis to
+      # refuse R-press while autofix is running — the autofix path
+      # acquires the per-task lock via `hive run`, and a parallel
+      # diagnose would either fail at the flock or write an artifact that
+      # describes pre-autofix state. See PR #84 review row 13.
+      def autofix_in_flight?(row)
+        @healed_folders_mutex.synchronize do
+          @review_recovery_inflight.include?(row.folder) ||
+            @error_recovery_inflight.include?(row.folder)
+        end
+      rescue StandardError
+        false
+      end
+
+      def register_diagnosis_attempt(folder)
+        @healed_folders_mutex.synchronize do
+          return false if @diagnosis_inflight.include?(folder)
+
+          @diagnosis_inflight.add(folder)
+          true
+        end
+      end
+
+      def evict_diagnosis_attempt(folder)
+        @healed_folders_mutex.synchronize { @diagnosis_inflight.delete(folder) }
+      end
+
+      def refresh_red_status_diagnosis(row)
+        return [ flashed("diagnosis unavailable: task folder missing"), nil ] if row.folder.to_s.empty?
+        # Refuse to spawn a second diagnose if autofix is already running
+        # against this row — the autofix path acquires the per-task lock
+        # via `hive run` and a parallel diagnose would either fail at the
+        # flock or write an artifact that describes pre-autofix state.
+        # Surface the operator-visible reason rather than a generic
+        # "in progress" flash so the operator knows which gesture to
+        # wait on. See PR #84 review row 13.
+        if row.action_key.to_s == "agent_running" || autofix_in_flight?(row)
+          return [ flashed("autofix already running for #{row.slug}; wait or press q to abort"), nil ]
+        end
+        return [ flashed("diagnosis already in progress for #{row.slug}"), nil ] unless register_diagnosis_attempt(row.folder)
+
+        argv = [ "hive", "status", "--diagnose", row.slug ]
+        argv += [ "--project", row.project_name ] if row.project_name.to_s != ""
+        # Disambiguate when the same slug lives in multiple stages of the
+        # same project (TaskResolver raises AmbiguousSlug otherwise).
+        argv += [ "--stage", row.stage ] if row.stage.to_s != ""
+        argv << "--write"
+        # An explicit operator R-press signals "show me a fresh verdict";
+        # the idempotency short-circuit (cache hit on matching
+        # marker_signature) would otherwise return the previous artifact
+        # silently and the TUI would flash "refreshed" without any
+        # new agent run. --force bypasses the short-circuit. See PR #84
+        # review row 8.
+        argv << "--force"
+
+        folder = row.folder
+        # Wrap the dispatcher so the SubprocessExited message arriving
+        # from the reaper Thread carries the originating folder. This
+        # is what lets diagnose_subprocess_exit evict EXACTLY the
+        # completing folder from @diagnosis_inflight; without the wrap
+        # we either evicted the whole Set (cross-task cascade letting
+        # duplicates through) or we'd need the SubprocessRegistry to
+        # track per-pid folders.
+        wrapped_dispatch = lambda do |msg|
+          if msg.is_a?(Hive::Tui::Messages::SubprocessExited)
+            msg = Hive::Tui::Messages::SubprocessExited.new(
+              verb: msg.verb, exit_code: msg.exit_code, folder: folder
+            )
+          end
+          @dispatch.call(msg)
+        end
+
+        Hive::Tui::Subprocess.dispatch_background(argv, dispatch: wrapped_dispatch)
+        state = @hive_model.red_status_detail_state
+        # Pressing R is an explicit operator acknowledgement of the
+        # current marker_signature — re-baseline so a subsequent
+        # snapshot-poll marker rotation re-fires the "marker changed"
+        # flash. See PR #84 review finding #7.
+        next_state =
+          if state
+            state.with(refreshing: true,
+                       acknowledged_marker_signature: state.marker_signature)
+          end
+        model = next_state ? @hive_model.with(red_status_detail_state: next_state) : @hive_model
+        [ model.with(flash: "refreshing diagnosis for #{row.slug}", flash_set_at: Time.now), nil ]
+      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
+        evict_diagnosis_attempt(folder)
+        [ flashed("diagnosis failed to start: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      end
+
+      def open_manual_fix(row)
+        path = manual_fix_path(row)
+        return [ flashed("worktree not found for #{row.slug}: #{manual_fix_candidate(row)}"), nil ] if path.empty?
+
+        argv = editor_argv
+        callable = lambda do
+          run_editor(argv, path)
+          clear_terminal_for_takeover
+        end
+
+        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
+        [
+          @hive_model.with(
+            flash: "opening worktree for #{row.slug} in #{File.basename(argv.first)}",
+            flash_set_at: Time.now
+          ),
+          cmd
+        ]
+      rescue ArgumentError => e
+        [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def manual_fix_path(row)
+        candidate = manual_fix_candidate(row)
+        return "" if candidate.to_s.empty?
+
+        File.directory?(candidate) ? candidate : ""
+      end
+
+      def manual_fix_candidate(row)
+        task = Hive::Task.new(row.folder.to_s)
+        task.worktree_path.to_s
+      rescue Hive::InvalidTaskPath, Hive::ConfigError, Hive::WorktreeError,
+             SystemCallError, Psych::SyntaxError, Psych::DisallowedClass => e
+        # Narrow rescue: only the classes Task#worktree_path may
+        # legitimately raise via the config-load + worktree-yml path.
+        # The previous Hive::Error umbrella swallowed every Hive-namespaced
+        # error to ""; future subclasses would silently inherit the
+        # collapse. Log via Debug so the operator-visible "worktree not
+        # found" flash still has a breadcrumb in the debug log.
+        Hive::Tui::Debug.log("manual_fix_candidate", "#{row.slug}: #{e.class.name}: #{e.message}") if defined?(Hive::Tui::Debug)
+        ""
       end
 
       # Enter-driven review recovery. Review-stage recovery markers are
@@ -2157,9 +2356,10 @@ module Hive
       #   so the success `puts` lines do NOT corrupt the alt-screen
       #   render.
       #
-      # Project is resolved from `model.scope` (0 = first registered
-      # project per the v2 brainstorm decision; N = nth registered
-      # project). Empty title or no-projects-registered states flash an
+      # Project is resolved from either the explicit chooser target
+      # (`new_idea_project_name`, set when `n` starts from ★ All
+      # projects) or from a concrete project scope. Empty title or
+      # no-projects-registered states flash an
       # error and return to :grid without spawning a child.
       #
       # Staging cleanup policy: every exit path either runs
@@ -2193,6 +2393,26 @@ module Hive
         project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
         if project.nil?
           flash = new_idea_resolution_flash(@hive_model)
+          # If the operator had picked a concrete project via the picker
+          # and it later went stale (snapshot poll dropped it or marked
+          # it unhealthy), bounce back to the picker with the typed
+          # buffer preserved — the flash advises "choose another
+          # project", and Esc still cleanly discards everything. The
+          # plain "no-projects" / "no scope" cases (no chosen name in
+          # play) fall through to `reset_to_grid_with_flash` because
+          # there's nothing to re-pick.
+          chosen = @hive_model.new_idea_project_name.to_s
+          if !chosen.empty? && @hive_model.scope.zero?
+            return [
+              @hive_model.with(
+                mode: :new_idea_project,
+                new_idea_project_name: nil,
+                flash: flash,
+                flash_set_at: Time.now
+              ),
+              nil
+            ]
+          end
           # `reset_to_grid_with_flash` clears `new_idea_staging_dir`
           # on the model; clean the on-disk dir first so orphaned
           # files don't leak after we drop the reference.
@@ -2275,6 +2495,22 @@ module Hive
         if project.nil?
           preserve_staging = true
           flash = new_idea_resolution_flash(@hive_model)
+          # Mirror the plain-text path: if the operator's picked project
+          # went stale mid-compose, bounce back to the picker so they
+          # can re-pick without losing the staged images. The flash
+          # tells them what happened; Esc still cleans everything.
+          chosen = @hive_model.new_idea_project_name.to_s
+          if !chosen.empty? && @hive_model.scope.zero?
+            return [
+              @hive_model.with(
+                mode: :new_idea_project,
+                new_idea_project_name: nil,
+                flash: flash,
+                flash_set_at: Time.now
+              ),
+              nil
+            ]
+          end
           return [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
         end
 
@@ -2494,6 +2730,8 @@ module Hive
       def reset_to_grid_with_flash(text)
         @hive_model.with(
           mode: :grid,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -2507,8 +2745,12 @@ module Hive
       end
 
       # Build a flash for the case where new-idea resolution returned
-      # nil. Distinguishes three reasons:
+      # nil. Distinguishes five reasons:
       # - no registered projects at all → "run `hive init <path>`"
+      # - chosen project (via picker) now unhealthy → name the error +
+      #   "choose another project" (caller bounces back to picker)
+      # - chosen project name no longer present in snapshot → "is not
+      #   available" + "choose another project" (caller bounces back)
       # - explicit scope onto an unhealthy project → name the error
       # - scope=0 (★ All) but every registered project is unhealthy
       # so the operator sees the actual cause rather than a generic
@@ -2517,6 +2759,15 @@ module Hive
       def new_idea_resolution_flash(model)
         snap = model.snapshot
         return "no projects — run `hive init <path>` first" if snap.nil? || snap.projects.empty?
+
+        chosen = model.new_idea_project_name.to_s
+        unless chosen.empty?
+          project = snap.projects.find { |p| p.name == chosen }
+          if project&.error
+            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — choose another project or re-init it"
+          end
+          return "project #{chosen.inspect} is not available — choose another project" if project.nil?
+        end
 
         if model.scope.between?(1, snap.projects.size)
           project = snap.projects[model.scope - 1]
@@ -2574,12 +2825,20 @@ module Hive
         compose_two_pane_view(footer: prompt_footer(Views::NewIdeaPrompt.render(@hive_model, width: usable), usable))
       end
 
+      def compose_new_idea_project_view
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(
+          footer: prompt_footer(Views::NewIdeaProjectPicker.render(@hive_model, width: usable), usable)
+        )
+      end
+
       # Stack an active flash above the prompt strip so error states
-      # raised inside `:new_idea` / `:filter` mode (paste truncated,
-      # title too long, decoder overflow, paste timed out) reach the
-      # operator. Without this the flash sets `model.flash` but the
-      # prompt-mode views replace `default_footer` entirely, so the
-      # flash never renders.
+      # raised inside any prompt mode (`:new_idea`, `:new_idea_project`,
+      # `:filter`) — paste truncated, title too long, decoder overflow,
+      # paste timed out, waiting-for-snapshot, no-healthy-projects —
+      # reach the operator. Without this the flash sets `model.flash`
+      # but the prompt-mode views replace `default_footer` entirely, so
+      # the flash never renders.
       def prompt_footer(prompt_strip, usable_width)
         flash = active_flash_line(usable_width)
         flash ? "#{flash}\n#{prompt_strip}" : prompt_strip

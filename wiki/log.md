@@ -2,6 +2,53 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T12:41:25Z] review — PR #84 follow-up contract hardening
+
+**Action:** Documented the follow-up PR #84 fixes that tightened the red-status diagnostic contract after code review. Bot diagnose callbacks now carry `--stage`, refresh uses `--force`, and child completion replies render the `hive-status-diagnose` envelope instead of a generic completion message. `DiagnosisAgent` now validates worktree pointers before `chdir`, bounds inherited-stdio timeout hangs, redacts failed-agent stderr, and refuses custom execute profiles whose `generated_by` value is outside `Hive::Schemas::DIAGNOSTIC_GENERATORS`. `TaskAction` now rejects symlink-escaped diagnostic artifacts before tailing them.
+
+**Refreshed pages:**
+- [[commands/status]] — `generated_by` closed enum, validated diagnose cwd, and custom-profile rejection.
+- [[modules/diagnosis_agent]] — validated cwd, schema-listed generators, and `--force` TUI refresh command.
+- [[modules/task_action]] — artifact realpath containment and schema-listed generator trust.
+- `docs/solutions/architecture-patterns/red-status-diagnose-then-act-2026-05-16.md` — generated_by trust rule.
+
+## [2026-05-19T00:00:00Z] tui — keep All projects idea picker open while loading
+
+**Action:** Documented the follow-up behavior that `n` from `★ All projects` enters the concrete project picker even before the first status snapshot arrives. The picker now uses a loading state instead of falling through to the title composer without a selected project.
+
+**Refreshed pages:**
+- [[commands/tui]] — clarified the picker loading state before projects are available.
+
+## [2026-05-19T00:00:00Z] review — ce-code-review row fixes for PR #84
+
+**Action:** Applied 14 rows from the post-merge ce-code-review. Highlights: redact-before-truncate ordering for diagnostic summary/detail (row 1, prevents boundary-straddling secrets escaping); SIGINT/SIGTERM trap inside `DiagnosisAgent#run_with_timeout` so Ctrl-C kills the child pgroup instead of orphaning the agent (row 3); `StaleMarker` and `DiagnosisInFlight` now override `exit_code` → `Hive::ExitCodes::TEMPFAIL` (75) so wrappers branch on retry (row 4); diagnose error envelope grows a separate `StatusDiagnoseErrorKind` enum with `stale_marker` / `in_flight` / `slug_not_found` / `ambiguous_slug`; background-thread terminate_process_group avoids blocking the main thread for 5s on every cancellation (row 6); R-press path now passes `--force` so the marker_signature short-circuit cannot silently skip the spawn (row 8); refresh-during-autofix now refuses with operator-visible flash (row 13); marker-rotation-to-`agent_working` mid-spawn aborts at the dispatch-time freshness gate (row 12); `marker_signature` lifted to `Hive::TaskAction.marker_signature` class method, `DiagnosisAgent` delegates instead of duplicating (row 16); `red_status_detail` footer drops [Enter] for `recover_execute` rows (row 25); bot recovery notification appends `diagnostic.summary` inline (row 23); bot show-details callback uses `hive status --diagnose <slug>` for bounded reply instead of full snapshot (row 24); schema tests pin cross-schema Diagnostic equivalence + `generated_by` enum agreement with `Hive::Schemas::DIAGNOSTIC_GENERATORS` (row 17).
+
+## [2026-05-17T00:55:00Z] tui — require project choice for new ideas from All projects
+
+**Action:** Updated the TUI new-idea behavior so `n` from `★ All projects` opens a concrete project picker before the title composer. The old implicit first-registered-project fallback could land ideas in the wrong repo while the header still read All projects. The chosen project is carried only for that new idea, so the dashboard can remain scoped to All while `hive new <project> "<title>"` targets the explicit selection.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the project picker and removed the old `★ All` first-project fallback wording.
+
+## [2026-05-17T00:00:00Z] review — deferred-finding fixes for PR #84
+
+**Action:** Resolved the 14 deferred findings from PR #84's multi-agent code review. P1s: gate `--write` on red-state tasks (#1), add cross-process flock in `Hive::DiagnosisAgent#run!` raising `DiagnosisInFlight` on contention (#2 + #11), extend `pem_private_key` regex to block-form `/m` and add `password_assignment` / `bearer_token` / `session_cookie` patterns (#3), coerce `tail_file` and `SecretPatterns.redact` to UTF-8 with invalid-byte replacement so one corrupt log byte no longer aborts `hive status --json` (#4). P2s/P3: added `tasks[].worktree_path` to v2 schema as an agent-callable primitive for the manual-fix path (#8); `recover_execute` rows now emit `suggested_next_action.kind = "manual_fix"` (#9) and open the TUI red-status detail view (#10); consolidated three near-identical max_passes-with-escalations predicates into `Hive::TaskAction.max_passes_review_stale_with_escalations?` (#17); split `marker_signature` into observed-vs-acknowledged so a second marker rotation between polls fires the flash again (#7); added `Hive::SecretPatterns.redact` shared helper replacing the two duplicate inline redactors in `TaskAction` and `DiagnosisAgent` (#13); added `--force` to `hive status --diagnose --write` for the idempotency short-circuit when a fresh artifact already covers the marker (#21).
+
+Skipped per product direction: schema versioning #5 (product unreleased, in-place additions to v2 are policy-permitted). Deferred: subprocess timeout helper consolidation #18 (`DiagnosisAgent#run_with_timeout` vs `Hive::Tui::Subprocess#bounded_capture3` — they have legitimately different signatures (chdir, stdin_data), low-value cleanup for a separate change).
+
+**Refreshed pages:**
+- [[modules/secret_patterns]] — `redact` API, four new patterns, block-form PEM, binary-input coercion.
+
+## [2026-05-16T00:00:00Z] review — red-status diagnostics wiki refresh
+
+**Action:** Captured the new `Hive::DiagnosisAgent` module (lib/hive/diagnosis_agent.rb, ~307 lines) and `Hive::TaskAction#diagnostic` public surface from PR #84. Adds a dedicated wiki/modules/diagnosis_agent.md covering invariants (no marker writes, no task lock, ADR-019 nonce wrap, pgroup+SIGTERM cleanup, freshness gate, atomic write), the on-disk artifact contract, and consumers. Refreshes wiki/modules/task_action.md to document the new `#diagnostic` method, its bounded-extraction caps (`DIAGNOSTIC_SUMMARY_MAX=120`, `DIAGNOSTIC_DETAIL_MAX=4000`, `ARTIFACT_PATHS_MAX=20`), the `marker_signature` SHA256 freshness key shared with `DiagnosisAgent` and the TUI live-update gate, the `recover_execute` JSON-emission-without-TUI-detail-view rationale, and the `suggested_next_action` retry-recipe contract.
+
+**Refreshed pages:**
+- [[modules/diagnosis_agent]] — new page covering the headless diagnose-spawn module.
+- [[modules/task_action]] — added `#diagnostic` to Public surface, new Red-status diagnostic section, backlinks to [[modules/diagnosis_agent]] / [[modules/secret_patterns]] / ADR-025 / ADR-027.
+- [[index]] — page count 59 → 60, added [[modules/diagnosis_agent]] entry.
+- [[cli]] — `hive status` command table row updated to document `--diagnose`, `--write`, `--force`, `--project`, `--stage` options.
+
 ## [2026-05-14T23:30:00Z] brainstorm — tmux interactive runtime (U1–U8)
 
 **Action:** Documented the new interactive tmux runtime for 2-brainstorm. The stage can now spawn the agent inside a detached tmux session (U3) via the `Stages::BrainstormTmux` runner, with U2's interactive Claude wrapper, U4's stop-hook install, U5's tmux sentinel fallback, U7's hardened preflight/teardown, and U8's operator notes. `lib/hive/tmux_runner.rb` (U1) is the shared runtime primitive. Selection is gated by a per-project config flag (U6) surfaced through `templates/project_config.yml.erb`. `hive doctor` (U7) preflights `tmux` availability + version and reports stale brainstorm sessions; the brainstorm stage cleans them up on completion. Wiki refresh in b67096c updated the brainstorm stage, doctor command, and state-model pages.
@@ -1498,3 +1545,35 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 
 **Refreshed pages:**
 - `wiki/stages/index.md`, `wiki/stages/open-pr.md`, `wiki/stages/review.md`, `wiki/stages/finalize.md`, `wiki/state-model.md`, `wiki/architecture.md`, `wiki/commands/stage_action.md`, `wiki/commands/run.md`, `wiki/decisions.md`.
+
+## [2026-05-15T15:55:00Z] daemon — plan WAITING rows auto-advance for daemon-enabled projects
+
+**Action:** Fixed the daemon scheduler treating every `needs_input` row
+as a user-edit wait. The symptom was a generated plan sitting in
+`3-plan` with `<!-- WAITING -->` and "Needs your input" while the daemon
+logged `skipped` every tick with `in_flight=0`; manually running
+`hive run --json` flipped the marker to `complete`, after which the
+daemon immediately dispatched `hive develop ... --from 3-plan`.
+Root cause: `Hive::Daemon::Policy` only saw `action=needs_input`, so it
+applied the mtime-baseline/debounce path meant for brainstorm answers,
+execute questions, and review decisions. `Policy.decide` now accepts
+the status row's `stage`; `3-plan` + `needs_input` dispatches
+immediately because a plan WAITING marker is an approval pause, not a
+Q&A file. Other `needs_input` stages keep the existing edit debounce.
+Tests: added policy and dispatcher pins for first-sight plan WAITING
+dispatch while preserving first-sight brainstorm baseline behavior.
+
+**Refreshed pages:**
+- `wiki/modules/daemon.md` — documents the stage-aware policy exception.
+- `wiki/decisions.md` — ADR-024 now calls out `3-plan`/`:waiting` as
+  daemon-auto-approved by `daemon.enabled: true`.
+
+## [2026-05-16T00:00:00Z] red status — diagnose-then-act recovery details
+
+**Action:** Added bounded red-row diagnostics to `hive status --json`, plus `hive status --diagnose <task>` for local inspection and `--write` for an agent-written `diagnostics/red-status.md` artifact. The TUI now opens a Q&A red-status detail view for ambiguous recovery/error rows, showing why the row is red, which artifacts were used, and explicit choices for autofix, manual worktree editing, or refreshed diagnosis.
+
+**Refreshed pages:**
+- `wiki/commands/status.md` — documented the required nullable `diagnostic` JSON field, diagnostic artifact selection, marker-signature freshness, and `--diagnose`.
+- `wiki/commands/tui.md` — documented red-status detail mode, keybindings, snapshot refresh behavior, and preserved direct recovery exceptions.
+- `wiki/decisions.md` — ADR-027 records the diagnose-then-act policy and its relationship to ADR-025.
+- `wiki/index.md` — bumped refresh date.

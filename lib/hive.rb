@@ -9,6 +9,7 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 2,
+      "hive-status-diagnose" => 1,
       "hive-run" => 2,
       "hive-approve" => 2,
       "hive-findings" => 1,
@@ -25,6 +26,12 @@ module Hive
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1
     }.freeze
+
+    # Closed enum of Diagnostic.generated_by values accepted by the
+    # published status schemas. This is deliberately narrower than
+    # AgentProfiles.registered_names because custom profiles are a
+    # runtime extension point, while generated_by is a wire contract.
+    DIAGNOSTIC_GENERATORS = %w[local claude codex pi].freeze
 
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a
@@ -149,6 +156,23 @@ module Hive
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze
       ERROR    = "error".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive status --diagnose --json`.
+    # Superset of StatusErrorKind — diagnose has additional retryable failure
+    # modes (stale marker mid-spawn, concurrent diagnose in flight) that agent
+    # callers branch on, plus slug-resolution errors surfaced through the
+    # TaskResolver path. The schema (schemas/hive-status-diagnose.v1.json)
+    # mirrors this enum.
+    module StatusDiagnoseErrorKind
+      CONFIG          = "config".freeze
+      INTERNAL        = "internal".freeze
+      ERROR           = "error".freeze
+      STALE_MARKER    = "stale_marker".freeze
+      IN_FLIGHT       = "in_flight".freeze
+      SLUG_NOT_FOUND  = "slug_not_found".freeze
+      AMBIGUOUS_SLUG  = "ambiguous_slug".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
 

@@ -84,7 +84,7 @@ class HiveBotScenarioQueueTest < Minitest::Test
       row(slug: "brainstorm-a", action: "needs_input", marker: "waiting"),
       row(slug: "brainstorm-b", action: "needs_input", marker: "waiting"),
       row(slug: "review-a", action: "needs_input", marker: "review_waiting"),
-      row(slug: "pr-a", action: "ready_for_pr", marker: "complete"),
+      row(slug: "pr-a", action: "ready_to_finalize", marker: "complete"),
       row(slug: "archived-a", action: "archived", marker: nil)
     ]
   end

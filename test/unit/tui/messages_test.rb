@@ -71,6 +71,14 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_red_status_detail_messages_carry_row
+    row = Object.new
+    assert_same row, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row).row
+    assert_same row, Hive::Tui::Messages::RedStatusAutofix.new(row: row).row
+    assert_same row, Hive::Tui::Messages::OpenManualFix.new(row: row).row
+    assert_same row, Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row).row
+  end
+
   def test_terminate_requested_singleton
     # Parameterless messages use a frozen singleton so callers don't
     # allocate per-trigger and so identity comparisons work.
@@ -186,6 +194,9 @@ class HiveTuiMessagesTest < Minitest::Test
     assert Hive::Tui::Messages::NEW_IDEA_CURSOR_END.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP.frozen?
+    assert Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_SUBMITTED.frozen?
     assert Hive::Tui::Messages::NEW_IDEA_CANCELLED.frozen?
   end
@@ -203,6 +214,12 @@ class HiveTuiMessagesTest < Minitest::Test
                    Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED
     assert_kind_of Hive::Tui::Messages::NewIdeaCharDeletedForward,
                    Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD
+    assert_kind_of Hive::Tui::Messages::NewIdeaProjectCursorDown,
+                   Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN
+    assert_kind_of Hive::Tui::Messages::NewIdeaProjectCursorUp,
+                   Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP
+    assert_kind_of Hive::Tui::Messages::NewIdeaProjectSelected,
+                   Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED
     assert_kind_of Hive::Tui::Messages::NewIdeaSubmitted,
                    Hive::Tui::Messages::NEW_IDEA_SUBMITTED
     assert_kind_of Hive::Tui::Messages::NewIdeaCancelled,

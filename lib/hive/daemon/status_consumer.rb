@@ -11,6 +11,7 @@ module Hive
     class StatusConsumer
       Row = Struct.new(:project, :slug, :stage, :marker, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
+                       :diagnostic,
                        keyword_init: true)
       Result = Struct.new(:ok, :rows, :error, keyword_init: true)
 
@@ -71,7 +72,8 @@ module Hive
               state_file_mtime: parse_mtime(task["mtime"], task["state_file"]),
               action: task["action"],
               suggested_command: task["suggested_command"],
-              claude_pid_alive: task["claude_pid_alive"]
+              claude_pid_alive: task["claude_pid_alive"],
+              diagnostic: task["diagnostic"]
             )
           end
         end

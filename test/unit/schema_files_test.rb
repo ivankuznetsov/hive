@@ -138,7 +138,8 @@ class SchemaFilesTest < Minitest::Test
       claude_pid_alive: nil,
       action_key: Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
       action_label: "Ready to brainstorm",
-      suggested_command: "hive brainstorm probe --from 1-inbox"
+      suggested_command: "hive brainstorm probe --from 1-inbox",
+      diagnostic: nil
     }
     producer_keys = Hive::Commands::Status.new.task_payload(row).keys.sort
     schema_task_required = doc.dig("$defs", "Task", "required").sort
@@ -204,6 +205,214 @@ class SchemaFilesTest < Minitest::Test
     }
     refute schemer.valid?(payload),
            "schema must reject error_kind values outside StatusErrorKind::ALL"
+  end
+
+  # ── hive-status-diagnose ───────────────────────────────────────────────
+
+  def test_hive_status_diagnose_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-status-diagnose")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-status-diagnose",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_diagnose_schema_is_self_contained_for_jsonschemer
+    # The schema must validate without an external ref registry —
+    # JSONSchemer raises UnknownRef on `urn:` refs unless callers pre-
+    # register the referenced schema, which agent consumers and CI
+    # validators don't. Pinning this guards against a future edit
+    # reintroducing the cross-schema $ref that broke validation in
+    # PR #84's first push.
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    # Minimal-but-real success payload with a Diagnostic block; if any
+    # ref doesn't resolve inside the file, schemer.validate raises.
+    payload = {
+      "schema" => "hive-status-diagnose",
+      "schema_version" => 1,
+      "ok" => true,
+      "slug" => "probe",
+      "task_folder" => "/tmp/probe",
+      "path" => nil,
+      "diagnostic" => {
+        "summary" => "REVIEW_ERROR phase=fix pass=1",
+        "detail" => "fix failed",
+        "source" => "marker",
+        "source_path" => nil,
+        "artifact_paths" => [],
+        "generated_by" => "local",
+        "marker_signature" => Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix"),
+        "suggested_next_action" => {
+          "kind" => "retry",
+          "command" => "hive markers clear /tmp/probe --name REVIEW_ERROR --match-attr pass=1 && hive run /tmp/probe"
+        },
+        "updated_at" => "2026-05-16T00:00:00Z"
+      }
+    }
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors,
+                 "hive-status-diagnose success payload must validate without external refs"
+  end
+
+  def test_hive_status_diagnose_accepts_null_diagnostic_for_non_red_rows
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    payload = {
+      "schema" => "hive-status-diagnose",
+      "schema_version" => 1,
+      "ok" => true,
+      "slug" => "probe",
+      "task_folder" => "/tmp/probe",
+      "diagnostic" => nil,
+      "path" => nil
+    }
+    assert schemer.valid?(payload),
+           "non-red --diagnose target must validate with diagnostic: null " \
+           "(errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+  end
+
+  def test_hive_status_diagnose_error_envelope_validates
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    error = Hive::AmbiguousSlug.new(
+      "ambig", slug: "probe",
+      candidates: [ { project: "alpha", stage: "6-review", folder: "/tmp/alpha/probe" } ]
+    )
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-status-diagnose",
+      error: error,
+      error_kind: Hive::Schemas::StatusErrorKind::ERROR
+    )
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "diagnose error envelope must validate (errors: #{errors.inspect})"
+  end
+
+  # Diagnose-specific error_kind enum: must mirror StatusDiagnoseErrorKind::ALL.
+  # Adding a kind to the producer (Hive::Commands::Status#diagnose_error_kind_for)
+  # without updating the schema fails here. See PR #84 review row 4.
+  def test_hive_status_diagnose_error_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Schemas::StatusDiagnoseErrorKind::ALL.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror " \
+                 "Hive::Schemas::StatusDiagnoseErrorKind::ALL"
+  end
+
+  def test_hive_status_diagnose_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose"))))
+    require "hive/diagnosis_agent"
+    error = Hive::ConfigError.new("HIVE_HOME unreadable")
+    Hive::Schemas::StatusDiagnoseErrorKind::ALL.each do |kind|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-status-diagnose",
+        error: error,
+        error_kind: kind
+      )
+      assert schemer.valid?(payload),
+             "hive-status-diagnose ErrorPayload arm must accept error_kind=#{kind.inspect} " \
+             "(validation errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  # Producer-driven dispatch check for the four diagnose-specific kinds.
+  # Without this, a contributor could add a constant + schema enum value
+  # and never wire it into `Hive::Commands::Status#diagnose_error_kind_for`,
+  # silently dropping it from the dispatch path. See PR #84 review row 4.
+  def test_hive_status_diagnose_dispatch_routes_every_kind
+    require "hive/diagnosis_agent"
+    representatives = {
+      Hive::Schemas::StatusDiagnoseErrorKind::STALE_MARKER =>
+        Hive::DiagnosisAgent::StaleMarker.new("marker rotated"),
+      Hive::Schemas::StatusDiagnoseErrorKind::IN_FLIGHT =>
+        Hive::DiagnosisAgent::DiagnosisInFlight.new("lock held"),
+      Hive::Schemas::StatusDiagnoseErrorKind::AMBIGUOUS_SLUG =>
+        Hive::AmbiguousSlug.new("ambig", slug: "p",
+                                candidates: [ { project: "a", stage: "6-review", folder: "/x" } ]),
+      Hive::Schemas::StatusDiagnoseErrorKind::SLUG_NOT_FOUND =>
+        Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::StatusDiagnoseErrorKind::CONFIG => Hive::ConfigError.new("bad config"),
+      Hive::Schemas::StatusDiagnoseErrorKind::INTERNAL => Hive::InternalError.new("boom"),
+      Hive::Schemas::StatusDiagnoseErrorKind::ERROR => Hive::Error.new("plain")
+    }
+    missing = Hive::Schemas::StatusDiagnoseErrorKind::ALL - representatives.keys
+    assert_empty missing,
+                 "every StatusDiagnoseErrorKind value must have a representative exception " \
+                 "(missing: #{missing.inspect})"
+    status = Hive::Commands::Status.new(diagnose: "any", json: true)
+    representatives.each do |expected_kind, exception|
+      actual = status.send(:diagnose_error_kind_for, exception)
+      assert_equal expected_kind, actual,
+                   "Status#diagnose_error_kind_for(#{exception.class}) must return " \
+                   "#{expected_kind.inspect}, got #{actual.inspect}"
+    end
+  end
+
+  # Cross-schema Diagnostic equivalence: the Diagnostic block is inlined
+  # in BOTH hive-status.v2.json (the per-task tasks[].diagnostic field)
+  # and hive-status-diagnose.v1.json (the --diagnose envelope's
+  # diagnostic field). They must agree on required keys, property types,
+  # enum values, patterns, and maxItems — descriptions may differ. A
+  # contributor changing one without the other silently breaks consumers
+  # that switch between the two envelopes. See PR #84 review row 17.
+  def test_diagnostic_definition_is_equivalent_across_status_schemas
+    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    diag = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+
+    v2_diagnostic = v2.dig("$defs", "Diagnostic")
+    diag_diagnostic = diag.dig("$defs", "Diagnostic")
+    refute_nil v2_diagnostic, "hive-status.v2 must define $defs.Diagnostic"
+    refute_nil diag_diagnostic, "hive-status-diagnose must define $defs.Diagnostic"
+
+    # Pinned property names AND required-key sets agree.
+    assert_equal v2_diagnostic["required"].sort,
+                 diag_diagnostic["required"].sort,
+                 "Diagnostic.required must be identical across schemas"
+    assert_equal v2_diagnostic["properties"].keys.sort,
+                 diag_diagnostic["properties"].keys.sort,
+                 "Diagnostic property keys must be identical across schemas"
+
+    # For each property, compare type/enum/pattern/maxItems/maxLength;
+    # ignore descriptions (purely documentation). Skip nil-vs-nil
+    # comparisons via `assert` on equality so minitest doesn't suggest
+    # assert_nil for absent shared keys.
+    v2_diagnostic["properties"].each do |key, v2_prop|
+      diag_prop = diag_diagnostic["properties"][key]
+      %w[type enum pattern maxItems maxLength].each do |attr|
+        assert v2_prop[attr] == diag_prop[attr],
+               "Diagnostic.#{key}.#{attr} must be identical across schemas " \
+               "(v2=#{v2_prop[attr].inspect}, diagnose=#{diag_prop[attr].inspect})"
+      end
+    end
+  end
+
+  # generated_by enum coverage: both schemas declare the same closed
+  # Diagnostic.generated_by enum as Hive::Schemas::DIAGNOSTIC_GENERATORS.
+  # Custom AgentProfiles are a runtime extension point, but generated_by
+  # is a published wire contract and must not expand implicitly.
+  def test_hive_status_v2_generated_by_enum_matches_schema_constant
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    schema_enum = doc.dig("$defs", "Diagnostic", "properties", "generated_by", "enum").sort
+    expected = Hive::Schemas::DIAGNOSTIC_GENERATORS.sort
+    assert_equal expected, schema_enum,
+                 "hive-status.v2 Diagnostic.generated_by enum must equal " \
+                 "Hive::Schemas::DIAGNOSTIC_GENERATORS"
+  end
+
+  def test_hive_status_diagnose_generated_by_enum_matches_schema_constant
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    schema_enum = doc.dig("$defs", "Diagnostic", "properties", "generated_by", "enum").sort
+    expected = Hive::Schemas::DIAGNOSTIC_GENERATORS.sort
+    assert_equal expected, schema_enum,
+                 "hive-status-diagnose.v1 Diagnostic.generated_by enum must equal " \
+                 "Hive::Schemas::DIAGNOSTIC_GENERATORS"
   end
 
   # ── hive-run ───────────────────────────────────────────────────────────

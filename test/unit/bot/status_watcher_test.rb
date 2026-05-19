@@ -55,7 +55,8 @@ class HiveBotStatusWatcherTest < Minitest::Test
       "action" => action,
       "action_label" => "Needs your input",
       "suggested_command" => "hive brainstorm #{slug} --from 2-brainstorm",
-      "next_action" => nil
+      "next_action" => nil,
+      "diagnostic" => nil
     }
   end
 
@@ -70,6 +71,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "s1", row.slug
       assert_equal "waiting", row.marker
       assert_equal "needs_input", row.action
+      assert_nil row.diagnostic
     end
   end
 

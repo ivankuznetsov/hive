@@ -13,6 +13,11 @@ steps:
   - kind: tui_keys
     keys: "n"
   - kind: tui_expect
+    anchor: "Choose project for new idea"
+    timeout: 3
+  - kind: tui_keys
+    keys: "Enter"
+  - kind: tui_expect
     anchor: "New idea"
     timeout: 3
 

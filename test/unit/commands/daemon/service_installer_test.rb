@@ -81,6 +81,24 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_freebsd_returns_unsupported_with_friendly_skip_message
+    # Tier-3 hosts (BSD, etc.) must skip cleanly with a "run `hive
+    # daemon start` manually" hint rather than crash or silently no-op.
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "freebsd14",
+        home: dir,
+        binary_path: "/tmp/hive",
+        runner: ->(_argv) { true }
+      )
+
+      result = installer.install!(autostart: true)
+      assert_equal :unsupported, result
+      assert installer.messages.any? { |msg| msg.include?("daemon autostart not supported") },
+             "freebsd install should surface a friendly skip message, got: #{installer.messages.inspect}"
+    end
+  end
+
   def test_drifted_existing_unit_is_not_overwritten
     with_tmp_dir do |dir|
       unit = File.join(dir, ".config/systemd/user/hive-daemon.service")

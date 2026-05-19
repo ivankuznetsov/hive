@@ -4,21 +4,6 @@ require "hive/commands/uninstall"
 class UninstallCommandTest < Minitest::Test
   include HiveTestHelper
 
-  def with_xdg_home
-    with_tmp_dir do |dir|
-      old = %w[HOME HIVE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME].to_h { |key| [ key, ENV.fetch(key, nil) ] }
-      ENV["HOME"] = File.join(dir, "home")
-      ENV.delete("HIVE_HOME")
-      ENV["XDG_CONFIG_HOME"] = File.join(dir, "config")
-      ENV["XDG_DATA_HOME"] = File.join(dir, "data")
-      ENV["XDG_STATE_HOME"] = File.join(dir, "state")
-      ENV["XDG_CACHE_HOME"] = File.join(dir, "cache")
-      yield dir
-    ensure
-      old.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-    end
-  end
-
   def setup_install_tree(project)
     FileUtils.mkdir_p(Hive::Paths.config_home)
     FileUtils.mkdir_p(Hive::Paths.cache_home)
@@ -51,6 +36,10 @@ class UninstallCommandTest < Minitest::Test
       refute File.exist?(Hive::Paths.cache_home)
       refute File.exist?(File.join(Hive::Paths.data_home, "v#{Hive::VERSION}"))
       assert File.exist?(Hive::Paths.state_home)
+      # Tighten the invariant: a regression that wipes `projects/work` but
+      # leaves the parent `state_home` stub would slip past a bare-parent
+      # check, so assert on the actual work payload.
+      assert File.exist?(File.join(Hive::Paths.state_home, "projects", "work"))
       assert File.exist?(File.join(project, ".hive-state"))
     end
   end

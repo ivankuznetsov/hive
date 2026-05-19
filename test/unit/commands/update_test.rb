@@ -16,6 +16,7 @@ class UpdateCommandTest < Minitest::Test
     out = StringIO.new
     Hive::Commands::Update.new(dry_run: true, output: out, channel: "bash").call
 
+    assert_includes out.string, "channel: bash"
     assert_includes out.string, "curl -fsSL"
     assert_includes out.string, "install.sh"
   end
@@ -51,5 +52,22 @@ class UpdateCommandTest < Minitest::Test
     end
     assert_equal Hive::ExitCodes::UNAVAILABLE, err.exit_code
     assert_match(/install yay or paru/, err.message)
+  end
+
+  def test_aur_falls_back_to_paru_when_yay_missing
+    with_tmp_dir do |dir|
+      paru = File.join(dir, "paru")
+      File.write(paru, "#!/bin/sh\n")
+      FileUtils.chmod(0755, paru)
+      captured = nil
+
+      Hive::Commands::Update.new(
+        channel: "aur",
+        env: { "PATH" => dir },
+        runner: ->(argv) { captured = argv }
+      ).call
+
+      assert_equal [ paru, "-Syu", "hive-bin" ], captured
+    end
   end
 end

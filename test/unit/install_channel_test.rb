@@ -1,4 +1,5 @@
 require "test_helper"
+require "rbconfig"
 require "hive/install_channel"
 
 class InstallChannelTest < Minitest::Test
@@ -34,6 +35,23 @@ class InstallChannelTest < Minitest::Test
   def test_detect_falls_back_to_dev
     with_tmp_dir do |dir|
       assert_equal "dev", Hive::InstallChannel.detect(marker_paths: [ File.join(dir, "missing") ])
+    end
+  end
+
+  # Exercise the prod resolver `default_marker_paths` directly. Tests
+  # that injected marker_paths previously skipped this branch — a
+  # regression to the OS/Homebrew probe logic could silently return
+  # `dev` without anything catching it.
+  def test_default_marker_paths_includes_xdg_marker
+    paths = Hive::InstallChannel.default_marker_paths
+    assert_includes paths, Hive::InstallChannel.marker_path,
+                    "default probes must include the canonical XDG marker_path"
+    # On non-macOS hosts the brew probes must not appear — preventing
+    # a stray HOMEBREW_PREFIX or /usr/local marker from hijacking
+    # the install channel.
+    unless RbConfig::CONFIG["host_os"] =~ /darwin/i
+      assert paths.none? { |p| p.include?("/opt/homebrew/share/hive") },
+             "non-macOS hosts must not probe /opt/homebrew markers"
     end
   end
 end

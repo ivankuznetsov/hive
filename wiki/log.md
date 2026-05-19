@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T23:20:28Z] tui — Ctrl+V also triggers composer image paste
+
+**Action:** Documented that Ctrl+V in the `:new_idea` composer now runs the same image clipboard probe as an empty bracketed paste, covering terminals that send literal Ctrl+V instead of a bracketed-paste burst for image-only clipboards. The staging convention, `[imageN]` placeholders, and submit rewrite remain unchanged.
+
+**Refreshed pages:**
+- [[commands/tui]] — added Ctrl+V as an additional image-paste trigger in the new-idea composer.
+
 ## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
 
 **Action:** Documented the recovery hardening for `3-plan` rows whose agent is interrupted before producing `plan.md`. Markerless plan rows with a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` proves the plan run started, now classify as `Error` with `PLAN_MISSING_OUTPUT`, so the TUI does not open an empty editor buffer as if user input were required. Freshly promoted `3-plan` folders with no plan output yet remain runnable as `Needs your input`; `PLAN_MISSING_OUTPUT` recovery reruns `hive plan ... --from 3-plan` directly because there is no `ERROR` marker to clear.

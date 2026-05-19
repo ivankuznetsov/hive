@@ -13,6 +13,8 @@ module Hive
         module_function
 
         def render(model, width: model.cols.to_i)
+          return Styles::HINT.render("Loading projects...") if model.snapshot.nil?
+
           projects = choices(model)
           return Styles::FLASH.render("No healthy projects available") if projects.empty?
 

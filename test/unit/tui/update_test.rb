@@ -569,6 +569,8 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     starting = model.with(
       mode: :grid,
+      snapshot: snap_with_two_projects_three_rows_each,
+      scope: 1,
       new_idea_project_name: "old-project",
       new_idea_project_cursor: 2,
       new_idea_buffer: "leftover-text",
@@ -596,6 +598,14 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 0, new_model.new_idea_project_cursor
   end
 
+  def test_open_new_idea_from_all_projects_before_snapshot_opens_project_picker
+    starting = model.with(snapshot: nil, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    assert_equal :new_idea_project, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
   def test_open_new_idea_from_explicit_scope_opens_title_prompt
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 2)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
@@ -614,6 +624,13 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal :new_idea, new_model.mode
     assert_equal "beta", new_model.new_idea_project_name
     assert_equal 0, new_model.scope
+  end
+
+  def test_new_idea_project_picker_enter_without_choices_stays_in_picker
+    starting = model.with(mode: :new_idea_project, snapshot: nil, scope: 0)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+    assert_equal :new_idea_project, new_model.mode
+    assert_nil new_model.new_idea_project_name
   end
 
   def test_new_idea_project_picker_skips_unhealthy_projects

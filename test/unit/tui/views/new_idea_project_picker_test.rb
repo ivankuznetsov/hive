@@ -48,4 +48,10 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
 
     assert_includes Hive::Tui::Views::NewIdeaProjectPicker.render(model), "No healthy projects"
   end
+
+  def test_nil_snapshot_renders_loading_message
+    model = Hive::Tui::Model.initial.with(mode: :new_idea_project, snapshot: nil)
+
+    assert_includes Hive::Tui::Views::NewIdeaProjectPicker.render(model), "Loading projects"
+  end
 end

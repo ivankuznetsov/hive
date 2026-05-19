@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T00:00:00Z] tui — keep All projects idea picker open while loading
+
+**Action:** Documented the follow-up behavior that `n` from `★ All projects` enters the concrete project picker even before the first status snapshot arrives. The picker now uses a loading state instead of falling through to the title composer without a selected project.
+
+**Refreshed pages:**
+- [[commands/tui]] — clarified the picker loading state before projects are available.
+
 ## [2026-05-17T00:55:00Z] tui — require project choice for new ideas from All projects
 
 **Action:** Updated the TUI new-idea behavior so `n` from `★ All projects` opens a concrete project picker before the title composer. The old implicit first-registered-project fallback could land ideas in the wrong repo while the header still read All projects. The chosen project is carried only for that new idea, so the dashboard can remain scoped to All while `hive new <project> "<title>"` targets the explicit selection.

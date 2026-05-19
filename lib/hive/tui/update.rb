@@ -83,16 +83,16 @@ module Hive
           [ apply_pane_focus_toggled(model), nil ]
         when Messages::PaneFocusChanged
           [ apply_pane_focus_changed(model, message), nil ]
-	        when Messages::OpenNewIdeaPrompt
-	          [ apply_open_new_idea_prompt(model), nil ]
-	        when Messages::NewIdeaProjectCursorDown
-	          [ apply_new_idea_project_cursor_down(model), nil ]
-	        when Messages::NewIdeaProjectCursorUp
-	          [ apply_new_idea_project_cursor_up(model), nil ]
-	        when Messages::NewIdeaProjectSelected
-	          [ apply_new_idea_project_selected(model), nil ]
-	        when Messages::NewIdeaTextInserted
-	          [ apply_new_idea_text_inserted(model, message), nil ]
+        when Messages::OpenNewIdeaPrompt
+          [ apply_open_new_idea_prompt(model), nil ]
+        when Messages::NewIdeaProjectCursorDown
+          [ apply_new_idea_project_cursor_down(model), nil ]
+        when Messages::NewIdeaProjectCursorUp
+          [ apply_new_idea_project_cursor_up(model), nil ]
+        when Messages::NewIdeaProjectSelected
+          [ apply_new_idea_project_selected(model), nil ]
+        when Messages::NewIdeaTextInserted
+          [ apply_new_idea_text_inserted(model, message), nil ]
         when Messages::NewIdeaImageAttached
           [ apply_new_idea_image_attached(model, message), nil ]
         when Messages::NewIdeaCursorLeft
@@ -418,50 +418,50 @@ module Hive
       # `reset_to_grid_with_flash` carries the same clearing shape
       # plus a flash payload.
 
-	      def apply_open_new_idea_prompt(model)
-	        mode = model.scope.zero? && new_idea_project_choices(model).any? ? :new_idea_project : :new_idea
+      def apply_open_new_idea_prompt(model)
+        mode = model.scope.zero? ? :new_idea_project : :new_idea
 
-	        model.with(
-	          mode: mode,
-	          new_idea_project_name: nil,
-	          new_idea_project_cursor: 0,
-	          new_idea_buffer: "",
-	          new_idea_cursor: 0,
-	          new_idea_attachments: [],
+        model.with(
+          mode: mode,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
+          new_idea_buffer: "",
+          new_idea_cursor: 0,
+          new_idea_attachments: [],
           new_idea_staging_dir: nil,
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
-	          new_idea_broken_labels: []
-	        )
-	      end
+          new_idea_broken_labels: []
+        )
+      end
 
-	      def apply_new_idea_project_cursor_down(model)
-	        choices = new_idea_project_choices(model)
-	        return model if choices.empty?
+      def apply_new_idea_project_cursor_down(model)
+        choices = new_idea_project_choices(model)
+        return model if choices.empty?
 
-	        cursor = [ model.new_idea_project_cursor.to_i + 1, choices.size - 1 ].min
-	        model.with(new_idea_project_cursor: cursor)
-	      end
+        cursor = [ model.new_idea_project_cursor.to_i + 1, choices.size - 1 ].min
+        model.with(new_idea_project_cursor: cursor)
+      end
 
-	      def apply_new_idea_project_cursor_up(model)
-	        choices = new_idea_project_choices(model)
-	        return model if choices.empty?
+      def apply_new_idea_project_cursor_up(model)
+        choices = new_idea_project_choices(model)
+        return model if choices.empty?
 
-	        cursor = [ model.new_idea_project_cursor.to_i - 1, 0 ].max
-	        model.with(new_idea_project_cursor: cursor)
-	      end
+        cursor = [ model.new_idea_project_cursor.to_i - 1, 0 ].max
+        model.with(new_idea_project_cursor: cursor)
+      end
 
-	      def apply_new_idea_project_selected(model)
-	        choices = new_idea_project_choices(model)
-	        project = choices[model.new_idea_project_cursor.to_i.clamp(0, [ choices.size - 1, 0 ].max)]
-	        return model.with(mode: :new_idea, new_idea_project_name: nil) if project.nil?
+      def apply_new_idea_project_selected(model)
+        choices = new_idea_project_choices(model)
+        project = choices[model.new_idea_project_cursor.to_i.clamp(0, [ choices.size - 1, 0 ].max)]
+        return model if project.nil?
 
-	        model.with(
-	          mode: :new_idea,
-	          new_idea_project_name: project.name,
-	          new_idea_project_cursor: model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)
-	        )
-	      end
+        model.with(
+          mode: :new_idea,
+          new_idea_project_name: project.name,
+          new_idea_project_cursor: model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)
+        )
+      end
 
       def apply_new_idea_text_inserted(model, msg)
         insert_new_idea_text(model, msg.text.to_s)
@@ -552,13 +552,13 @@ module Hive
         model.with(new_idea_attachments: kept)
       end
 
-	      def apply_new_idea_cancelled(model)
-	        model.with(
-	          mode: :grid,
-	          new_idea_project_name: nil,
-	          new_idea_project_cursor: 0,
-	          new_idea_buffer: "",
-	          new_idea_cursor: 0,
+      def apply_new_idea_cancelled(model)
+        model.with(
+          mode: :grid,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
+          new_idea_buffer: "",
+          new_idea_cursor: 0,
           new_idea_attachments: [],
           new_idea_staging_dir: nil,
           new_idea_staging_tmp_root: nil,
@@ -667,17 +667,17 @@ module Hive
         case model.mode
         when :triage then model.with(mode: :grid, triage_state: nil)
         when :log_tail then model.with(mode: :grid, tail_state: nil)
-	        when :help, :filter then model.with(mode: :grid)
-	        when :new_idea_project then apply_new_idea_cancelled(model)
-	        else model
-	        end
-	      end
+        when :help, :filter then model.with(mode: :grid)
+        when :new_idea_project then apply_new_idea_cancelled(model)
+        else model
+        end
+      end
 
-	      def new_idea_project_choices(model)
-	        Array(model.snapshot&.projects).select { |project| project.error.nil? }
-	      end
+      def new_idea_project_choices(model)
+        Array(model.snapshot&.projects).select { |project| project.error.nil? }
+      end
 
-	      # `n == 0` clears scope (all projects). Out-of-range still flips
+      # `n == 0` clears scope (all projects). Out-of-range still flips
       # the scope (Snapshot returns an empty-projects view); cursor
       # resets to the first non-empty project or nil if the scoped grid
       # is empty.

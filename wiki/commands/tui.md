@@ -43,7 +43,8 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
 | Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue; plan rows auto-advance to `develop` (or auto-revise if user added feedback) |
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
-| New idea prompt | `n` | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
+| New idea project picker | `n` from `★ All projects` scope | `Esc` / `q` (cancels) / `Enter` (selects and advances to title prompt) |
+| New idea prompt | `n` (single-project scope), or after picker selection (all-projects scope) | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
 | Help overlay | `?` | any key |
 
 ## Keybindings (default mode)
@@ -77,7 +78,7 @@ In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (a
 
 ## New Idea Prompt Editing
 
-The `n` prompt is a cursor-aware single-line title editor. When the dashboard scope is `★ All projects`, `n` first opens a concrete project picker (`j`/`k` or arrows to move, `Enter` to choose, `Esc` to cancel) so task capture never silently lands in the first registered project. After a project is chosen, printable typing inserts at the title cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
+The `n` prompt is a cursor-aware single-line title editor. When the dashboard scope is `★ All projects`, `n` first opens a concrete project picker (`j`/`k` or arrows to move, `Enter` to choose, `Esc` to cancel) so task capture never silently lands in the first registered project; if the first status snapshot has not arrived yet, the picker stays open in a loading state until projects are available. After a project is chosen, printable typing inserts at the title cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
 
 ### Image paste
 

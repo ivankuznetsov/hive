@@ -83,6 +83,11 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
           writer.write("n")
           writer.flush
+          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("Choose project for new idea") }
+          assert_includes buffer, "Choose project for new idea"
+
+          writer.write("\r")
+          writer.flush
           buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("New idea") }
           assert_includes buffer, "New idea"
 

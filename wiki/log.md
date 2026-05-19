@@ -12,9 +12,23 @@ Append-only log of all wiki operations.
 - [[modules/task_action]] — artifact realpath containment and schema-listed generator trust.
 - `docs/solutions/architecture-patterns/red-status-diagnose-then-act-2026-05-16.md` — generated_by trust rule.
 
+## [2026-05-19T00:00:00Z] tui — keep All projects idea picker open while loading
+
+**Action:** Documented the follow-up behavior that `n` from `★ All projects` enters the concrete project picker even before the first status snapshot arrives. The picker now uses a loading state instead of falling through to the title composer without a selected project.
+
+**Refreshed pages:**
+- [[commands/tui]] — clarified the picker loading state before projects are available.
+
 ## [2026-05-19T00:00:00Z] review — ce-code-review row fixes for PR #84
 
 **Action:** Applied 14 rows from the post-merge ce-code-review. Highlights: redact-before-truncate ordering for diagnostic summary/detail (row 1, prevents boundary-straddling secrets escaping); SIGINT/SIGTERM trap inside `DiagnosisAgent#run_with_timeout` so Ctrl-C kills the child pgroup instead of orphaning the agent (row 3); `StaleMarker` and `DiagnosisInFlight` now override `exit_code` → `Hive::ExitCodes::TEMPFAIL` (75) so wrappers branch on retry (row 4); diagnose error envelope grows a separate `StatusDiagnoseErrorKind` enum with `stale_marker` / `in_flight` / `slug_not_found` / `ambiguous_slug`; background-thread terminate_process_group avoids blocking the main thread for 5s on every cancellation (row 6); R-press path now passes `--force` so the marker_signature short-circuit cannot silently skip the spawn (row 8); refresh-during-autofix now refuses with operator-visible flash (row 13); marker-rotation-to-`agent_working` mid-spawn aborts at the dispatch-time freshness gate (row 12); `marker_signature` lifted to `Hive::TaskAction.marker_signature` class method, `DiagnosisAgent` delegates instead of duplicating (row 16); `red_status_detail` footer drops [Enter] for `recover_execute` rows (row 25); bot recovery notification appends `diagnostic.summary` inline (row 23); bot show-details callback uses `hive status --diagnose <slug>` for bounded reply instead of full snapshot (row 24); schema tests pin cross-schema Diagnostic equivalence + `generated_by` enum agreement with `Hive::Schemas::DIAGNOSTIC_GENERATORS` (row 17).
+
+## [2026-05-17T00:55:00Z] tui — require project choice for new ideas from All projects
+
+**Action:** Updated the TUI new-idea behavior so `n` from `★ All projects` opens a concrete project picker before the title composer. The old implicit first-registered-project fallback could land ideas in the wrong repo while the header still read All projects. The chosen project is carried only for that new idea, so the dashboard can remain scoped to All while `hive new <project> "<title>"` targets the explicit selection.
+
+**Refreshed pages:**
+- [[commands/tui]] — documented the project picker and removed the old `★ All` first-project fallback wording.
 
 ## [2026-05-17T00:00:00Z] review — deferred-finding fixes for PR #84
 

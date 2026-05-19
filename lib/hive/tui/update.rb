@@ -88,6 +88,12 @@ module Hive
           [ apply_pane_focus_changed(model, message), nil ]
         when Messages::OpenNewIdeaPrompt
           [ apply_open_new_idea_prompt(model), nil ]
+        when Messages::NewIdeaProjectCursorDown
+          [ apply_new_idea_project_cursor_down(model), nil ]
+        when Messages::NewIdeaProjectCursorUp
+          [ apply_new_idea_project_cursor_up(model), nil ]
+        when Messages::NewIdeaProjectSelected
+          [ apply_new_idea_project_selected(model), nil ]
         when Messages::NewIdeaTextInserted
           [ apply_new_idea_text_inserted(model, message), nil ]
         when Messages::NewIdeaImageAttached
@@ -478,8 +484,12 @@ module Hive
       # plus a flash payload.
 
       def apply_open_new_idea_prompt(model)
+        mode = model.scope.zero? ? :new_idea_project : :new_idea
+
         model.with(
-          mode: :new_idea,
+          mode: mode,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -487,6 +497,46 @@ module Hive
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           new_idea_broken_labels: []
+        )
+      end
+
+      def apply_new_idea_project_cursor_down(model)
+        choices = new_idea_project_choices(model)
+        return model if choices.empty?
+
+        cursor = [ model.new_idea_project_cursor.to_i + 1, choices.size - 1 ].min
+        model.with(new_idea_project_cursor: cursor)
+      end
+
+      def apply_new_idea_project_cursor_up(model)
+        choices = new_idea_project_choices(model)
+        return model if choices.empty?
+
+        cursor = [ model.new_idea_project_cursor.to_i - 1, 0 ].max
+        model.with(new_idea_project_cursor: cursor)
+      end
+
+      def apply_new_idea_project_selected(model)
+        # Enter pressed in the picker while no snapshot has arrived yet,
+        # or every project in the snapshot is unhealthy. Acknowledge the
+        # keystroke with a flash instead of silently swallowing it — the
+        # alternative makes the picker feel frozen.
+        if model.snapshot.nil?
+          return model.with(flash: "waiting for snapshot — Esc cancels", flash_set_at: Time.now)
+        end
+
+        choices = new_idea_project_choices(model)
+        if choices.empty?
+          return model.with(flash: "no healthy projects — Esc cancels", flash_set_at: Time.now)
+        end
+
+        project = choices[model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)]
+        return model if project.nil?
+
+        model.with(
+          mode: :new_idea,
+          new_idea_project_name: project.name,
+          new_idea_project_cursor: model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)
         )
       end
 
@@ -582,6 +632,8 @@ module Hive
       def apply_new_idea_cancelled(model)
         model.with(
           mode: :grid,
+          new_idea_project_name: nil,
+          new_idea_project_cursor: 0,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -707,8 +759,13 @@ module Hive
           visible = visible_snapshot(closed)
           visible.nil? ? closed : closed.with(cursor: reclamp_cursor(visible, closed.cursor))
         when :help, :filter then model.with(mode: :grid)
+        when :new_idea_project then apply_new_idea_cancelled(model)
         else model
         end
+      end
+
+      def new_idea_project_choices(model)
+        Array(model.snapshot&.projects).select { |project| project.error.nil? }
       end
 
       # `n == 0` clears scope (all projects). Out-of-range still flips

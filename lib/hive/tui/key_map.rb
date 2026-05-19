@@ -84,6 +84,7 @@ module Hive
         when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
+        when :new_idea_project then new_idea_project_message(key: key, row: row)
         when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
         end
@@ -388,6 +389,18 @@ module Hive
         return Messages::NEW_IDEA_CURSOR_END if key == :key_end || key == :key_ctrl_e
         return Messages::NewIdeaTextInserted.new(text: " ") if key == :space
         return Messages::NewIdeaTextInserted.new(text: key) if printable_filter_char?(key)
+
+        Messages::NOOP
+      end
+
+      # Project chooser shown before the title prompt when `n` starts
+      # from ★ All projects. Keep the key surface intentionally narrow:
+      # choose with Enter, move with j/k or arrows, cancel with Esc/q.
+      def new_idea_project_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NEW_IDEA_CANCELLED if ESCAPE_KEYS.include?(key) || key == "q"
+        return Messages::NEW_IDEA_PROJECT_SELECTED if ENTER_KEYS.include?(key)
+        return Messages::NEW_IDEA_PROJECT_CURSOR_DOWN if DOWN_KEYS.include?(key)
+        return Messages::NEW_IDEA_PROJECT_CURSOR_UP if UP_KEYS.include?(key)
 
         Messages::NOOP
       end

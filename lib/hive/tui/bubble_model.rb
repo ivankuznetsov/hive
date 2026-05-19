@@ -1,8 +1,10 @@
 require "bubbletea"
+require "date"
 require "digest"
 require "set"
 require "shellwords"
 require "stringio"
+require "yaml"
 require "hive"
 require "hive/commands/new"
 require "hive/markers"
@@ -380,6 +382,8 @@ module Hive
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
           open_task_folder(message.row)
+        when Hive::Tui::Messages::OpenIdeaPreview
+          open_idea_preview(message.row)
         when Hive::Tui::Messages::OpenSummary
           open_summary(message.row)
         when Hive::Tui::Messages::LogTailPoll
@@ -1622,6 +1626,44 @@ module Hive
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def open_idea_preview(row)
+        return [ flashed("no idea for #{row.slug}"), nil ] if row.folder.to_s.empty?
+
+        idea_path = File.join(row.folder, "idea.md")
+        return [ flashed("no idea.md for #{row.slug}"), nil ] unless File.exist?(idea_path)
+
+        data = idea_frontmatter(File.read(idea_path))
+        original_text = data["original_text"].to_s
+        if original_text.empty?
+          return [ flashed("idea has no original_text for #{row.slug}"), nil ]
+        end
+
+        capped_text = original_text[0, Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS]
+        [
+          @hive_model.with(
+            mode: :idea_preview,
+            idea_preview_text: capped_text,
+            idea_preview_slug: row.slug
+          ),
+          nil
+        ]
+      rescue Errno::ENOENT, Errno::EACCES, Psych::Exception
+        [ flashed("could not read idea for #{row.slug}"), nil ]
+      end
+
+      def idea_frontmatter(contents)
+        match = contents.match(/\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\z)/m)
+        return {} unless match
+
+        parsed = YAML.safe_load(
+          match[1],
+          permitted_classes: [ Time, Date ],
+          permitted_symbols: [],
+          aliases: false
+        ) || {}
+        parsed.is_a?(Hash) ? parsed : {}
       end
 
       def open_summary(row)

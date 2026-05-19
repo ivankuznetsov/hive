@@ -254,6 +254,28 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_diagnostic_rejects_artifact_symlink_escape
+    Dir.mktmpdir("hive-task-action-symlink") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      outside = File.join(root, "..", "outside-secret.md")
+      File.write(outside, "outside diagnostic secret\n")
+      symlink = File.join(reviews, "errors-04.md")
+      File.symlink(outside, symlink)
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "reason" => "timeout", "pass" => "4")
+      ).diagnostic
+
+      refute_equal symlink, diagnostic["source_path"]
+      refute_includes diagnostic["artifact_paths"], symlink
+      refute_includes diagnostic["detail"], "outside diagnostic secret"
+      assert_equal "marker", diagnostic["source"]
+    end
+  end
+
   def test_review_ci_stale_diagnostic_points_at_ci_blocked_artifact
     Dir.mktmpdir("hive-task-action") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

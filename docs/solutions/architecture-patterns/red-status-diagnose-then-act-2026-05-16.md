@@ -49,7 +49,7 @@ The object should be deliberately small and stable:
 - `detail`: bounded evidence tail.
 - `source` / `source_path`: artifact vs marker fallback.
 - `artifact_paths`: exact files inspected.
-- `generated_by`: `local` or the profile that wrote a diagnosis artifact.
+- `generated_by`: `local` or a schema-listed diagnosis generator such as `claude`, `codex`, or `pi`.
 - `updated_at`: when this explanation was sourced.
 
 Use a local extractor first. It should be deterministic, bounded, and safe to run during every status poll.
@@ -92,7 +92,7 @@ diagnosed_at: 2026-05-16T00:00:00Z
 
 Normal status should trust the artifact only if:
 
-- `generated_by` is `local` or a registered profile name;
+- `generated_by` is in the published diagnostic-generator enum;
 - `marker_signature` matches the current marker;
 - the frontmatter parses.
 

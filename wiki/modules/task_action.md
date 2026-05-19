@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-05-16
+updated: 2026-05-19
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -25,7 +25,9 @@ action.payload     # { "key", "label", "command", "next_action" } for JSON emiss
 
 `#diagnostic` returns a Hash matching the `Diagnostic` shape under both `hive-status.v2` (`tasks[].diagnostic`) and `hive-status-diagnose.v1` (`SuccessPayload.diagnostic`). It is non-nil for exactly three action keys: `recover_review`, `recover_execute`, and `error` (see `#diagnostic_action?`). Every other row returns `nil`.
 
-The payload is the local-extraction fallback. When a fresh agent-written `<task.folder>/diagnostics/red-status.md` exists (frontmatter `marker_signature` matches the current marker's SHA256), `diagnostic_generated_by` returns the producing AgentProfile name (`claude`/`codex`/`pi`) and the artifact body becomes the source of truth. Otherwise it bounds the output via `DIAGNOSTIC_SUMMARY_MAX` (120 chars), `DIAGNOSTIC_DETAIL_MAX` (4000 chars), and `ARTIFACT_PATHS_MAX` (20 paths). All summary/detail text passes through `redact` (using `Hive::SecretPatterns`) before emission.
+The payload is the local-extraction fallback. When a fresh agent-written `<task.folder>/diagnostics/red-status.md` exists (frontmatter `marker_signature` matches the current marker's SHA256 and `generated_by` is in `Hive::Schemas::DIAGNOSTIC_GENERATORS`), `diagnostic_generated_by` returns the producing generator name (`claude`/`codex`/`pi`) and the artifact body becomes the source of truth. Otherwise it bounds the output via `DIAGNOSTIC_SUMMARY_MAX` (120 chars), `DIAGNOSTIC_DETAIL_MAX` (4000 chars), and `ARTIFACT_PATHS_MAX` (20 paths). All summary/detail text passes through `redact` (using `Hive::SecretPatterns`) before emission.
+
+Diagnostic artifacts are resolved with `File.realpath` and accepted only when they remain inside the project-controlled task/log roots, so a symlink under `reviews/`, `logs/`, or `diagnostics/` cannot make `hive status --json` tail arbitrary host files.
 
 `marker_signature` is the SHA256 hex of `marker.name + sorted(attrs)` joined by newline. It's the freshness key shared with `Hive::DiagnosisAgent` (which validates it pre-write) and the TUI live-update gate (`Hive::Tui::Update#red_status_marker_signature`); producer + both consumers compute identical bytes.
 

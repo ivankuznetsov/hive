@@ -393,30 +393,26 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  # generated_by enum coverage: both schemas declare a `generated_by`
-  # enum that the producer (Hive::TaskAction#diagnostic_generated_by)
-  # promises equals `["local"] + AgentProfiles.registered_names`. Without
-  # this check, registering a new agent profile in Hive::AgentProfiles
-  # without updating the schema enum silently makes the JSON envelope
-  # invalid for the new profile's output. See PR #84 review row 17.
-  def test_hive_status_v2_generated_by_enum_matches_registered_profiles
-    require "hive/agent_profiles"
+  # generated_by enum coverage: both schemas declare the same closed
+  # Diagnostic.generated_by enum as Hive::Schemas::DIAGNOSTIC_GENERATORS.
+  # Custom AgentProfiles are a runtime extension point, but generated_by
+  # is a published wire contract and must not expand implicitly.
+  def test_hive_status_v2_generated_by_enum_matches_schema_constant
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_enum = doc.dig("$defs", "Diagnostic", "properties", "generated_by", "enum").sort
-    expected = ([ "local" ] + Hive::AgentProfiles.registered_names.map(&:to_s)).sort
+    expected = Hive::Schemas::DIAGNOSTIC_GENERATORS.sort
     assert_equal expected, schema_enum,
                  "hive-status.v2 Diagnostic.generated_by enum must equal " \
-                 "['local'] + AgentProfiles.registered_names"
+                 "Hive::Schemas::DIAGNOSTIC_GENERATORS"
   end
 
-  def test_hive_status_diagnose_generated_by_enum_matches_registered_profiles
-    require "hive/agent_profiles"
+  def test_hive_status_diagnose_generated_by_enum_matches_schema_constant
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
     schema_enum = doc.dig("$defs", "Diagnostic", "properties", "generated_by", "enum").sort
-    expected = ([ "local" ] + Hive::AgentProfiles.registered_names.map(&:to_s)).sort
+    expected = Hive::Schemas::DIAGNOSTIC_GENERATORS.sort
     assert_equal expected, schema_enum,
                  "hive-status-diagnose.v1 Diagnostic.generated_by enum must equal " \
-                 "['local'] + AgentProfiles.registered_names"
+                 "Hive::Schemas::DIAGNOSTIC_GENERATORS"
   end
 
   # ── hive-run ───────────────────────────────────────────────────────────

@@ -272,7 +272,7 @@ module Hive
     def diagnostic
       return nil unless diagnostic_action?
 
-      artifacts = diagnostic_artifacts.select { |path| path && File.exist?(path) }
+      artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
       primary = artifacts.first
       updated_at = diagnostic_updated_at(primary)
       detail = primary ? artifact_detail(primary) : marker_detail
@@ -333,6 +333,7 @@ module Hive
     def fresh_diagnosis_artifact
       path = task_artifact("diagnostics", "red-status.md")
       return [] unless File.exist?(path)
+      return [] unless safe_diagnostic_artifact?(path)
 
       metadata = diagnostic_frontmatter(path)
       return [] unless trusted_diagnostic_generator?(metadata["generated_by"])
@@ -533,8 +534,7 @@ module Hive
     end
 
     def trusted_diagnostic_generator?(name)
-      allowed = [ "local", *Hive::AgentProfiles.registered_names.map(&:to_s) ]
-      allowed.include?(name.to_s)
+      Hive::Schemas::DIAGNOSTIC_GENERATORS.include?(name.to_s)
     end
 
     public
@@ -663,6 +663,37 @@ module Hive
       File.mtime(path)
     rescue SystemCallError
       nil
+    end
+
+    def safe_diagnostic_artifact?(path)
+      return false if path.nil? || path.to_s.empty? || !File.file?(path)
+
+      real = File.realpath(path)
+      diagnostic_roots.any? { |root| path_inside?(real, root) }
+    rescue SystemCallError
+      false
+    end
+
+    def diagnostic_roots
+      project_root = realpath_or_expand(task.project_root)
+      ([ task.folder ] + log_dirs).filter_map do |root|
+        real = realpath_or_expand(root)
+        next if project_root && !path_inside?(real, project_root)
+
+        real
+      end.uniq
+    end
+
+    def realpath_or_expand(path)
+      return nil if path.nil? || path.to_s.empty?
+
+      File.realpath(path)
+    rescue Errno::ENOENT
+      File.expand_path(path)
+    end
+
+    def path_inside?(path, root)
+      path == root || path.start_with?(root + File::SEPARATOR)
     end
 
     def redact(text)

@@ -27,6 +27,12 @@ module Hive
       "hive-bot-reload" => 1
     }.freeze
 
+    # Closed enum of Diagnostic.generated_by values accepted by the
+    # published status schemas. This is deliberately narrower than
+    # AgentProfiles.registered_names because custom profiles are a
+    # runtime extension point, while generated_by is a wire contract.
+    DIAGNOSTIC_GENERATORS = %w[local claude codex pi].freeze
+
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a
     # schema; external consumers validate emitted documents with any

@@ -608,6 +608,31 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/autofix already running/i, @model.hive_model.flash)
   end
 
+  def test_refresh_red_status_diagnosis_short_circuits_when_error_autofix_inflight
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      marker: "error",
+      attrs: { "exit_code" => "70" },
+      suggested_command: nil
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch
+    )
+    inflight = @model.instance_variable_get(:@error_recovery_inflight)
+    inflight.add(row.folder)
+
+    calls = []
+    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
+    end
+
+    assert_empty calls,
+                 "diagnose must not dispatch when error autofix is already running"
+    assert_match(/autofix already running/i, @model.hive_model.flash)
+  end
+
   def test_refresh_red_status_diagnosis_short_circuits_on_agent_running_row
     # action_key=='agent_running' means the row is currently being
     # processed by a workflow agent (claude/codex). Same refuse-then-flash

@@ -14,7 +14,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   def setup
     @handlers = Hive::Bot::Handlers::CallbackHandlers.new(
       pending_ideas: {},
-      set_last_project: ->(_) {},
+      set_last_project: ->(_) { },
       conversation_store: nil,
       result_class: Result
     )
@@ -42,21 +42,57 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
+  def test_show_details_passes_stage_when_callback_carries_it
+    result = @handlers.handle(:callback_show_details, update("details:alpha:red-task-260518-stage:6-review"))
+
+    assert_equal(
+      [ "hive", "status", "--diagnose", "red-task-260518-stage",
+        "--project", "alpha", "--stage", "6-review", "--json" ],
+      result.command_argv,
+      "show_details must pass --stage so duplicate slugs in the same project resolve"
+    )
+  end
+
   def test_refresh_diagnose_dispatches_diagnose_write_for_fresh_agent_verdict
     # Bot-side parity of the TUI R keystroke (issue #91). The Refresh
     # diagnosis button must spawn the configured execute AgentProfile
     # via --write, not just re-read the cached artifact. The argv
     # shape is pinned so a future tweak cannot silently turn the
     # write-path back into a read-only fetch.
-    result = @handlers.handle(:callback_refresh_diagnose, update("refresh_diagnose:alpha:red-task-260518-bbbb"))
+    result = @handlers.handle(:callback_refresh_diagnose, update("refresh_diagnose:alpha:red-task-260518-bbbb:6-review"))
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal "alpha", result.project
     assert_equal "red-task-260518-bbbb", result.slug
     assert_equal(
-      [ "hive", "status", "--diagnose", "red-task-260518-bbbb", "--project", "alpha", "--write", "--json" ],
+      [ "hive", "status", "--diagnose", "red-task-260518-bbbb",
+        "--project", "alpha", "--stage", "6-review", "--write", "--force", "--json" ],
       result.command_argv,
-      "refresh_diagnose must invoke --diagnose --write so the LLM verdict refreshes (not just re-reads the artifact)"
+      "refresh_diagnose must invoke --diagnose --write --force so the LLM verdict refreshes"
+    )
+  end
+
+  def test_refresh_diagnose_keeps_legacy_callback_shape_supported
+    result = @handlers.handle(:callback_refresh_diagnose, update("refresh_diagnose:alpha:red-task-260518-legacy"))
+
+    assert_equal(
+      [ "hive", "status", "--diagnose", "red-task-260518-legacy",
+        "--project", "alpha", "--write", "--force", "--json" ],
+      result.command_argv,
+      "existing Telegram buttons without a stage must keep working until they expire"
+    )
+  end
+
+  def test_clear_and_retry_uses_current_review_stage_name
+    result = @handlers.handle(
+      :callback_clear_and_retry,
+      update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
+    )
+
+    assert_equal(
+      [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ],
+      result.commands.last,
+      "clear-and-retry must dispatch the current review-stage verb, not a retired stage map"
     )
   end
 

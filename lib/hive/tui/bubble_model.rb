@@ -902,7 +902,8 @@ module Hive
       # describes pre-autofix state. See PR #84 review row 13.
       def autofix_in_flight?(row)
         @healed_folders_mutex.synchronize do
-          @review_recovery_inflight.include?(row.folder)
+          @review_recovery_inflight.include?(row.folder) ||
+            @error_recovery_inflight.include?(row.folder)
         end
       rescue StandardError
         false

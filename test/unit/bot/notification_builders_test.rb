@@ -30,6 +30,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  notification.keyboard.first.first[:callback_data])
   end
 
+  def test_ready_to_open_pr_builds_current_open_pr_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_open_pr", marker: "execute_complete", stage: "4-execute")
+    )
+
+    assert_match(/Ready for open-pr/, notification.text)
+    assert_equal "approve:open-pr:hive:slug-260514-abcd:4-execute",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
   def test_waiting_builds_brainstorm_answer_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "waiting")
@@ -88,10 +98,11 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ "Open laptop", "Show details", "Refresh diagnosis" ], labels
   end
 
-  def test_refresh_diagnosis_button_carries_callback_with_project_and_slug
+  def test_refresh_diagnosis_button_carries_callback_with_project_slug_and_stage
     # The button data must round-trip through the router's callback_intent
-    # regex (\Arefresh_diagnose:/) and split cleanly into prefix:project:slug
-    # for CallbackHandlers#refresh_diagnose. Pin the exact callback shape.
+    # regex (\Arefresh_diagnose:/) and split cleanly into
+    # prefix:project:slug:stage for CallbackHandlers#refresh_diagnose.
+    # Pin the exact callback shape.
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "recover_review", marker: "review_error",
           attrs: { "phase" => "fix", "reason" => "timeout" })
@@ -103,9 +114,22 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert raw.start_with?("refresh_diagnose:"),
            "Refresh diagnosis callback must use the refresh_diagnose: prefix; got #{raw.inspect}"
     parts = raw.split(":")
-    assert_equal 3, parts.length,
-                 "callback data must be refresh_diagnose:<project>:<slug>"
-    assert_equal "refresh_diagnose", parts[0]
+    assert_equal(
+      [ "refresh_diagnose", "hive", "slug-260514-abcd", "2-brainstorm" ],
+      parts,
+      "callback data must be refresh_diagnose:<project>:<slug>:<stage>"
+    )
+  end
+
+  def test_show_details_button_carries_stage_for_disambiguation
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "phase" => "fix", "reason" => "timeout" }, stage: "6-review")
+    )
+    details_btn = notification.keyboard.flatten.find { |b| b[:text] == "Show details" }
+
+    assert_equal "details:hive:slug-260514-abcd:6-review",
+                 Hive::Bot::NotificationBuilders.resolve_callback(details_btn[:callback_data])
   end
 
   def test_recovery_notification_appends_diagnostic_summary_when_present

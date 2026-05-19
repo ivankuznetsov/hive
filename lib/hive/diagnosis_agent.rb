@@ -11,6 +11,7 @@ require "hive/markers"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/task_action"
+require "hive/worktree"
 
 module Hive
   # Headless one-shot spawn of the project's configured development agent
@@ -38,6 +39,7 @@ module Hive
     POLL_INTERVAL = 0.05
     TERMINATE_GRACE_SECONDS = 5
     TERMINATE_POLL_INTERVAL = 0.1
+    ERROR_MESSAGE_TAIL_BYTES = 4_000
 
     # Raised when the marker's signature changes between dispatch and
     # write — the agent's verdict would describe stale state. Retryable
@@ -82,6 +84,8 @@ module Hive
       with_diagnose_lock do
         cfg = Hive::Config.load(@task.project_root)
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        ensure_supported_diagnostic_generator!(profile)
+        cwd = diagnose_cwd(cfg)
         unless @injected_spawn
           profile.check_version!
           profile.preflight!
@@ -105,8 +109,8 @@ module Hive
 
         output = @spawn.call(
           profile: profile,
-          prompt: prompt_for(marker, nonce: nonce),
-          cwd: @task.worktree_path || @task.project_root,
+          prompt: prompt_for(marker, nonce: nonce, worktree_path: cwd),
+          cwd: cwd,
           add_dirs: [ @task.folder ],
           timeout_sec: cfg.dig("timeout_sec", "diagnose") || DEFAULT_TIMEOUT_SECONDS,
           max_budget_usd: cfg.dig("budget_usd", "diagnose") || DEFAULT_BUDGET_USD
@@ -173,7 +177,7 @@ module Hive
     # without knowing the per-spawn nonce. SecretPatterns redaction
     # additionally scrubs values BEFORE interpolation so a credential
     # captured in a marker attr never leaves the host.
-    def prompt_for(marker, nonce:)
+    def prompt_for(marker, nonce:, worktree_path:)
       open_tag = "<#{nonce}>"
       close_tag = "</#{nonce}>"
       <<~PROMPT
@@ -196,7 +200,7 @@ module Hive
         Marker name: #{open_tag}#{redact(marker.name.to_s)}#{close_tag}
         Marker attrs: #{open_tag}#{redact(marker_attrs_text(marker))}#{close_tag}
         Task folder: #{open_tag}#{redact(@task.folder.to_s)}#{close_tag}
-        Worktree: #{open_tag}#{redact(@task.worktree_path.to_s)}#{close_tag}
+        Worktree: #{open_tag}#{redact(worktree_path.to_s)}#{close_tag}
 
         Local diagnostic:
         #{open_tag}
@@ -209,6 +213,27 @@ module Hive
       (marker.attrs || {}).sort_by { |key, _value| key.to_s }
                           .map { |key, value| "#{key}=#{value}" }
                           .join(" ")
+    end
+
+    def ensure_supported_diagnostic_generator!(profile)
+      return if Hive::Schemas::DIAGNOSTIC_GENERATORS.include?(profile.name.to_s)
+
+      raise Hive::ConfigError,
+            "diagnosis generated_by #{profile.name.inspect} is not in the " \
+            "published schema enum (#{Hive::Schemas::DIAGNOSTIC_GENERATORS.join(', ')})"
+    end
+
+    def diagnose_cwd(cfg)
+      pointer = @task.worktree_path
+      return @task.project_root if pointer.to_s.empty?
+
+      Hive::Worktree.validate_pointer_path(pointer, worktree_root_for(cfg))
+    end
+
+    def worktree_root_for(cfg)
+      File.expand_path(
+        cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(@task.project_root)}.worktrees")
+      )
     end
 
     def local_diagnostic_text
@@ -316,6 +341,7 @@ module Hive
         out_reader = Thread.new { read_stream(stdout) }
         err_reader = Thread.new { read_stream(stderr) }
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        deadline = started + timeout_sec.to_f
         # Ctrl-C / SIGINT during the popen3 block unwinds the body and
         # Ruby's popen3 ensure calls wait_thr.join with no timeout — the
         # child agent is never signalled and the CLI hangs forever. Trap
@@ -339,15 +365,15 @@ module Hive
               raise Interrupt if interrupted
 
               status = wait_thr.value
-              out = out_reader.value
-              err = err_reader.value
+              out, err = drain_reader_threads_or_timeout(
+                child_pid, out_reader, err_reader, deadline, timeout_sec
+              )
               raise Hive::Error, error_message(err, status) unless status.success?
 
               return out
             end
 
-            elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-            next if elapsed < timeout_sec
+            next if Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
 
             terminate_process_group(child_pid)
             kill_reader_threads(out_reader, err_reader)
@@ -359,6 +385,28 @@ module Hive
           trap("TERM", old_term || "DEFAULT")
         end
       end
+    end
+
+    def drain_reader_threads_or_timeout(child_pid, out_reader, err_reader, deadline, timeout_sec)
+      until reader_threads_done?(out_reader, err_reader)
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        break if now >= deadline
+
+        sleep [ TERMINATE_POLL_INTERVAL, deadline - now ].min
+      end
+
+      unless reader_threads_done?(out_reader, err_reader)
+        terminate_process_group(child_pid)
+        kill_reader_threads(out_reader, err_reader)
+        raise Hive::Error,
+              "diagnosis agent timed out after #{timeout_sec}s"
+      end
+
+      [ out_reader.value.to_s, err_reader.value.to_s ]
+    end
+
+    def reader_threads_done?(*threads)
+      threads.none?(&:alive?)
     end
 
     def feed_stdin(stdin, stdin_data)
@@ -419,7 +467,10 @@ module Hive
     end
 
     def error_message(stderr, status)
-      tail = stderr.to_s.strip
+      tail = stderr.to_s
+      tail = tail.byteslice(-ERROR_MESSAGE_TAIL_BYTES, ERROR_MESSAGE_TAIL_BYTES) if tail.bytesize > ERROR_MESSAGE_TAIL_BYTES
+      tail = tail.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
+      tail = sanitize_control_bytes(redact(tail.strip))
       tail = "exit #{status.exitstatus}" if tail.empty?
       "diagnosis agent failed: #{tail}"
     end

@@ -1,8 +1,11 @@
 require "test_helper"
 require "digest"
 require "fileutils"
+require "rbconfig"
 require "tmpdir"
+require "timeout"
 require "yaml"
+require "hive/agent_profile"
 require "hive/diagnosis_agent"
 require "hive/markers"
 require "hive/task_action"
@@ -353,5 +356,87 @@ class DiagnosisAgentTest < Minitest::Test
       Hive::DiagnosisAgent.new(task: @task, spawn: no_spawn).run!
     end
     refute spawned, "DiagnosisAgent must not spawn when marker is not red at dispatch"
+  end
+
+  def test_run_with_timeout_times_out_when_descendant_keeps_stdio_open
+    agent = Hive::DiagnosisAgent.new(task: @task)
+    error = assert_raises(Hive::Error) do
+      Timeout.timeout(3) do
+        agent.send(
+          :run_with_timeout,
+          [ RbConfig.ruby, "-e", "fork { sleep 2 }; puts 'done'" ],
+          Dir.pwd,
+          nil,
+          0.5
+        )
+      end
+    end
+
+    assert_match(/diagnosis agent timed out/i, error.message)
+  end
+
+  def test_run_with_timeout_redacts_failed_agent_stderr
+    token = "ghp_#{'a' * 40}"
+    agent = Hive::DiagnosisAgent.new(task: @task)
+
+    error = assert_raises(Hive::Error) do
+      agent.send(
+        :run_with_timeout,
+        [ RbConfig.ruby, "-e", "warn ARGV.fetch(0); exit 2", token ],
+        Dir.pwd,
+        nil,
+        2
+      )
+    end
+
+    refute_includes error.message, token
+    assert_includes error.message, "[REDACTED:github_token]"
+  end
+
+  def test_run_rejects_worktree_pointer_outside_configured_root
+    worktree_root = File.join(@tmp, "worktrees")
+    FileUtils.mkdir_p(worktree_root)
+    File.write(
+      File.join(@project_root, ".hive-state", "config.yml"),
+      YAML.dump("worktree_root" => worktree_root)
+    )
+    @task.worktree_path = File.join(@tmp, "outside-worktree")
+    spawned = false
+
+    assert_raises(Hive::WorktreeError) do
+      Hive::DiagnosisAgent.new(task: @task, spawn: lambda { |**_kwargs| spawned = true; "agent body" }).run!
+    end
+    refute spawned, "DiagnosisAgent must validate worktree.yml before spawning"
+  end
+
+  def test_run_rejects_custom_generated_by_not_in_published_schema_enum
+    originals = Hive::AgentProfiles.registered_names.to_h do |name|
+      [ name, Hive::AgentProfiles.lookup(name) ]
+    end
+    Hive::AgentProfiles.register(
+      :custom,
+      Hive::AgentProfile.new(
+        name: :custom,
+        bin_default: "custom-agent",
+        headless_flag: "--headless",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}"
+      )
+    )
+    File.write(
+      File.join(@project_root, ".hive-state", "config.yml"),
+      YAML.dump("execute" => { "agent" => "custom" })
+    )
+    spawned = false
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::DiagnosisAgent.new(task: @task, spawn: lambda { |**_kwargs| spawned = true; "agent body" }).run!
+    end
+
+    assert_match(/generated_by/, error.message)
+    refute spawned, "unsupported diagnostic generator must fail before spawning"
+  ensure
+    Hive::AgentProfiles.reset_for_tests!
+    originals&.each { |name, profile| Hive::AgentProfiles.register(name, profile) }
   end
 end

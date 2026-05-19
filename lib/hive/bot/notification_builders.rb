@@ -11,6 +11,7 @@ module Hive
         ready_to_brainstorm
         ready_to_plan
         ready_to_develop
+        ready_to_open_pr
         ready_for_review
         ready_for_pr
         ready_to_archive
@@ -74,7 +75,7 @@ module Hive
           Notification.new(
             text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
             keyboard: [
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ],
+              [ button("Show details", details_callback(row)) ],
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
             ]
           )
@@ -99,7 +100,7 @@ module Hive
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
             keyboard: [
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+              [ button("Show details", details_callback(row)) ]
             ]
           )
         end
@@ -111,7 +112,7 @@ module Hive
               button("Accept all", "findings:accept_all:#{row.project}:#{row.slug}:#{row.stage}"),
               button("Reject all", "findings:reject_all:#{row.project}:#{row.slug}:#{row.stage}")
             ],
-            [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+            [ button("Show details", details_callback(row)) ]
           ]
         )
       end
@@ -119,12 +120,12 @@ module Hive
       def recovery(row)
         # The "Refresh diagnosis" button is the bot-side parity of the
         # TUI's R keystroke: dispatches `hive status --diagnose <slug>
-        # --write --json` so the configured execute AgentProfile
+        # --write --force --json` so the configured execute AgentProfile
         # produces a fresh diagnostic verdict. Pairs with Show details
         # (which just reads the current verdict). Resolves issue #91.
         details_row = [
-          button("Show details", "details:#{row.project}:#{row.slug}"),
-          button("Refresh diagnosis", "refresh_diagnose:#{row.project}:#{row.slug}")
+          button("Show details", details_callback(row)),
+          button("Refresh diagnosis", refresh_diagnose_callback(row))
         ]
         keyboard =
           if open_laptop_only_recovery?(row)
@@ -169,11 +170,27 @@ module Hive
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
       end
 
+      def details_callback(row)
+        callback_with_stage("details", row)
+      end
+
+      def refresh_diagnose_callback(row)
+        callback_with_stage("refresh_diagnose", row)
+      end
+
+      def callback_with_stage(prefix, row)
+        parts = [ prefix, row.project, row.slug ]
+        stage = row.respond_to?(:stage) ? row.stage.to_s : ""
+        parts << stage unless stage.empty?
+        parts.join(":")
+      end
+
       def verb_for_action(action)
         {
           "ready_to_brainstorm" => "brainstorm",
           "ready_to_plan" => "plan",
           "ready_to_develop" => "develop",
+          "ready_to_open_pr" => "open-pr",
           "ready_for_review" => "review",
           "ready_for_pr" => "pr",
           "ready_to_archive" => "archive"

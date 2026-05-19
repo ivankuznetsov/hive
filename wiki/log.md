@@ -4,7 +4,7 @@ Append-only log of all wiki operations.
 
 ## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
 
-**Action:** Documented the recovery hardening for `3-plan` rows whose agent is interrupted before producing `plan.md`. Markerless plan rows with a missing or zero-byte `plan.md` now classify as `Error` with `PLAN_MISSING_OUTPUT`, so the TUI does not open an empty editor buffer as if user input were required.
+**Action:** Documented the recovery hardening for `3-plan` rows whose agent is interrupted before producing `plan.md`. Markerless plan rows with a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` proves the plan run started, now classify as `Error` with `PLAN_MISSING_OUTPUT`, so the TUI does not open an empty editor buffer as if user input were required. Freshly promoted `3-plan` folders with no plan output yet remain runnable as `Needs your input`; `PLAN_MISSING_OUTPUT` recovery reruns `hive plan ... --from 3-plan` directly because there is no `ERROR` marker to clear.
 
 **Refreshed pages:**
 - [[stages/plan]] — explains the interrupted-plan missing-output state and rerun path.
@@ -12,6 +12,8 @@ Append-only log of all wiki operations.
 ## [2026-05-19T22:00:00Z] finalize — missing PR metadata surfaces as error
 
 **Action:** Documented the recovery hardening for `7-finalize` rows missing `pr.md`. `Stages::Finalize` now records `ERROR reason=missing_pr_md` / `missing_pr_url` instead of exiting before the state file exists, and `TaskAction` classifies a markerless `7-finalize` folder without `pr.md` as `Error` so the TUI does not open an empty editor buffer.
+
+Status also no longer treats any `7-finalize` `COMPLETE` marker as archive-ready. The marker must carry `is_draft=false` and a `pr_url` matching `pr.md` frontmatter; carried-over `5-open-pr` markers with `is_draft=true` stay ready to finalize, and missing/mismatched PR metadata becomes a red diagnostic.
 
 **Refreshed pages:**
 - [[stages/finalize]] — preconditions and marker-action table now mention missing PR metadata error markers.

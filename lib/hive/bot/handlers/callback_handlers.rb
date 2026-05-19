@@ -54,9 +54,10 @@ module Hive
         def clear_and_retry(data)
           _prefix, project, slug, stage, marker = split_callback(data, 5)
           verb = retry_verb_for_stage(stage)
-          commands = [
-            [ "hive", "markers", "clear", slug, "--name", marker.upcase, "--project", project, "--json" ]
-          ]
+          commands = []
+          unless marker.to_s.casecmp("none").zero?
+            commands << [ "hive", "markers", "clear", slug, "--name", marker.upcase, "--project", project, "--json" ]
+          end
           commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ] if verb
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands)
         end

@@ -2241,6 +2241,67 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/running.*hive run/, final_flash, "async flash must announce the rerun")
   end
 
+  def test_red_status_autofix_dispatches_markerless_diagnostic_retry_without_marker_clear
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      slug: "plan-task-260519-abcd",
+      stage: "3-plan",
+      marker: "none",
+      attrs: {},
+      suggested_command: nil
+    )
+    diagnostic = {
+      "summary" => "PLAN_MISSING_OUTPUT",
+      "suggested_next_action" => {
+        "kind" => "retry",
+        "command" => "hive plan plan-task-260519-abcd --from 3-plan"
+      }
+    }
+    row = row.with(diagnostic: diagnostic)
+    clear_count = 0
+    run_argv = nil
+
+    with_run_quiet_stub(->(_argv) { clear_count += 1; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RedStatusAutofix.new(row: row))
+      end
+    end
+
+    assert_equal 0, clear_count, "markerless synthetic errors must not try to clear ERROR"
+    assert_equal [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan" ], run_argv
+    assert_match(/running.*hive plan.*plan-task-260519-abcd/, @model.hive_model.flash)
+  end
+
+  def test_red_status_autofix_refuses_markerless_manual_fix
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      slug: "finalize-task-260519-abcd",
+      stage: "7-finalize",
+      marker: "none",
+      attrs: {},
+      suggested_command: nil
+    )
+    row = row.with(
+      diagnostic: {
+        "summary" => "FINALIZE_MISSING_PR_MD",
+        "suggested_next_action" => {
+          "kind" => "manual_fix",
+          "command" => nil
+        }
+      }
+    )
+    clear_count = 0
+
+    with_run_quiet_stub(->(_argv) { clear_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::RedStatusAutofix.new(row: row))
+    end
+
+    assert_equal 0, clear_count
+    assert_match(/no autofix action available/, @model.hive_model.flash)
+  end
+
   def test_recover_error_does_not_rerun_when_marker_clear_fails
     row = make_task_row(
       action_key: "error", action_label: "Error",

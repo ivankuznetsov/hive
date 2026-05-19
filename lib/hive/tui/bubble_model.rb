@@ -873,6 +873,10 @@ module Hive
       end
 
       def red_status_autofix(row)
+        if row.action_key.to_s == "error" && row.marker.to_s != "error"
+          return dispatch_diagnostic_retry(row)
+        end
+
         case row.action_key.to_s
         when "recover_review"
           recover_review(row, force: red_status_autofix_force?(row))
@@ -881,6 +885,31 @@ module Hive
         else
           [ flashed("no autofix action available for #{row.slug}"), nil ]
         end
+      end
+
+      def dispatch_diagnostic_retry(row)
+        command = diagnostic_retry_command(row)
+        return [ flashed("no autofix action available for #{row.slug}"), nil ] if command.nil?
+
+        if command.match?(/[;&|]/)
+          return [ flashed("diagnostic retry command is not directly dispatchable; use the shell command from details"), nil ]
+        end
+
+        argv = Shellwords.split(command)
+        return [ flashed("diagnostic retry command is empty"), nil ] if argv.empty?
+
+        dispatch_command(Hive::Tui::Messages::DispatchCommand.new(argv: argv, verb: argv[1]))
+      rescue ArgumentError => e
+        [ flashed("diagnostic retry command is malformed: #{Hive::Tui::Text.sanitize(e.message)[0, 80]}"), nil ]
+      end
+
+      def diagnostic_retry_command(row)
+        suggested = row.diagnostic && row.diagnostic["suggested_next_action"]
+        return nil unless suggested.is_a?(Hash)
+        return nil unless suggested["kind"].to_s == "retry"
+
+        command = suggested["command"].to_s.strip
+        command.empty? ? nil : command
       end
 
       # The `r` grid-mode gesture (PR #72) sets force: true ONLY for

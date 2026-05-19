@@ -133,6 +133,7 @@ class RunFinalizeTest < Minitest::Test
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, _pr_md = setup_finalize_task(dir)
         FileUtils.rm_f(File.join(task_dir, "pr.md"))
+        ENV["HIVE_FAKE_GH_AUTH_EXIT"] = "1"
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
 
@@ -141,6 +142,8 @@ class RunFinalizeTest < Minitest::Test
         marker = Hive::Markers.current(File.join(task_dir, "pr.md"))
         assert_equal :error, marker.name
         assert_equal "missing_pr_md", marker.attrs["reason"]
+        assert_equal "", gh_argv_log,
+                     "missing pr.md must short-circuit before gh auth, push, or agent spawn"
       end
     end
   end
@@ -159,6 +162,7 @@ class RunFinalizeTest < Minitest::Test
 
           <!-- COMPLETE is_draft=true -->
         MD
+        ENV["HIVE_FAKE_GH_AUTH_EXIT"] = "1"
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
 
@@ -167,6 +171,8 @@ class RunFinalizeTest < Minitest::Test
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "missing_pr_url", marker.attrs["reason"]
+        assert_equal "", gh_argv_log,
+                     "missing pr_url must short-circuit before gh auth, push, or agent spawn"
       end
     end
   end

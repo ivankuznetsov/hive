@@ -30,7 +30,7 @@ tags: [stage, plan, ce-plan]
 
 Agent must not modify any file other than `plan.md`. Must not execute code in the project (execution happens in 4-execute).
 
-If a daemon stop or killed agent leaves `plan.md` missing or zero-byte with no marker, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. That state means the agent never produced a reviewable plan; rerun `hive plan ... --from 3-plan` after clearing the error.
+If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 
 ## Marker → commit action mapping (`Stages::Plan.action_for`)
 

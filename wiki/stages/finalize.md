@@ -29,6 +29,7 @@ tags: [stage, finalize, pr, github]
 ## Marker → commit action
 
 - `:complete` → `pr_finalized`.
+- Status only treats a `7-finalize` `:complete` marker as archive-ready when it carries `is_draft=false` and a `pr_url` matching `pr.md` frontmatter. A carried-over `5-open-pr` marker with `is_draft=true` remains ready to run finalize, not ready to archive.
 - Missing `pr.md` / missing `pr_url`, dirty worktree, or unpushed state writes an `ERROR` marker and commits the corresponding error state.
 
 ## Backlinks

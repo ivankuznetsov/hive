@@ -96,6 +96,20 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
+  def test_clear_and_retry_none_marker_skips_marker_clear_and_runs_stage
+    result = @handlers.handle(
+      :callback_clear_and_retry,
+      update("clear_retry:alpha:plan-task-260519-abcd:3-plan:NONE")
+    )
+
+    assert_equal :dispatch_commands, result.action
+    assert_equal(
+      [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
+      result.commands,
+      "markerless synthetic errors must retry the stage directly instead of clearing a non-existent ERROR marker"
+    )
+  end
+
   def test_refresh_diagnose_rejects_malformed_callback_data
     # Defense against malformed callback round-trips. Any non-3-part
     # callback (legacy data, manual postback fuzzing) should fall back

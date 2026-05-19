@@ -133,6 +133,12 @@ module Hive
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
               details_row
             ]
+          elsif markerless_retry_recovery?(row)
+            [
+              [ button("Retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:NONE") ],
+              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+              details_row
+            ]
           else
             [
               [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
@@ -155,9 +161,26 @@ module Hive
 
       def open_laptop_only_recovery?(row)
         attrs = row.attrs.to_h.transform_keys(&:to_s)
-        row.marker.to_s == "review_error" &&
-          attrs["phase"] == "fix" &&
-          attrs["reason"] == "fix_tampered"
+        diagnostic_manual_fix?(row) ||
+          row.marker.to_s == "review_error" &&
+            attrs["phase"] == "fix" &&
+            attrs["reason"] == "fix_tampered"
+      end
+
+      def markerless_retry_recovery?(row)
+        row.marker.to_s == "none" && diagnostic_suggested_action(row)["kind"].to_s == "retry"
+      end
+
+      def diagnostic_manual_fix?(row)
+        diagnostic_suggested_action(row)["kind"].to_s == "manual_fix"
+      end
+
+      def diagnostic_suggested_action(row)
+        diagnostic = row.diagnostic
+        return {} unless diagnostic.is_a?(Hash)
+
+        suggested = diagnostic["suggested_next_action"]
+        suggested.is_a?(Hash) ? suggested : {}
       end
 
       def header(row)

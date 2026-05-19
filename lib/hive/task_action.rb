@@ -275,10 +275,18 @@ module Hive
     end
 
     def finalize_action
-      return ACTIONS.fetch(:finalize_complete) if marker.name == :complete
       return ACTIONS.fetch(:error) if finalize_missing_pr_md?
+      return finalize_complete_action if marker.name == :complete
 
       ACTIONS.fetch(:finalize_waiting)
+    end
+
+    def finalize_complete_action
+      return ACTIONS.fetch(:error) if finalize_missing_pr_url?
+      return ACTIONS.fetch(:error) if finalize_pr_url_mismatch?
+      return ACTIONS.fetch(:finalize_complete) if marker.attrs["is_draft"].to_s == "false"
+
+      ACTIONS.fetch(:review_complete)
     end
 
     public
@@ -287,7 +295,7 @@ module Hive
       return nil unless diagnostic_action?
 
       artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
-      primary = artifacts.first
+      primary = incomplete_plan_artifact? ? nil : artifacts.first
       updated_at = diagnostic_updated_at(primary)
       detail = primary ? artifact_detail(primary) : marker_detail
       generator = diagnostic_generated_by(primary)
@@ -329,7 +337,7 @@ module Hive
     end
 
     def diagnostic_artifacts
-      return generic_error_artifacts if incomplete_plan_artifact?
+      return latest_log_artifacts if incomplete_plan_artifact?
 
       case marker.name
       when :review_error
@@ -487,6 +495,8 @@ module Hive
     def marker_summary
       return "PLAN_MISSING_OUTPUT" if incomplete_plan_artifact?
       return "FINALIZE_MISSING_PR_MD" if finalize_missing_pr_md?
+      return "FINALIZE_MISSING_PR_URL" if finalize_missing_pr_url?
+      return "FINALIZE_PR_URL_MISMATCH" if finalize_pr_url_mismatch?
 
       attrs = marker.attrs.map { |key, value| "#{key}=#{value}" }.join(" ")
       marker_name = marker.name.to_s.upcase
@@ -507,6 +517,22 @@ module Hive
           "FINALIZE_MISSING_PR_MD",
           "Finalize cannot run because #{task.state_file} is missing.",
           "Move the task back to 5-open-pr or recreate pr.md with pr_url frontmatter."
+        ].join("\n")
+      end
+
+      if finalize_missing_pr_url?
+        return [
+          "FINALIZE_MISSING_PR_URL",
+          "Finalize cannot archive because #{task.state_file} is missing pr_url metadata.",
+          "Repair pr.md or move the task back to 5-open-pr so the PR metadata can be recreated."
+        ].join("\n")
+      end
+
+      if finalize_pr_url_mismatch?
+        return [
+          "FINALIZE_PR_URL_MISMATCH",
+          "Finalize cannot archive because the COMPLETE marker pr_url does not match pr.md frontmatter.",
+          "Rerun finalize or repair pr.md so both PR URLs match."
         ].join("\n")
       end
 
@@ -608,8 +634,9 @@ module Hive
     # external consumers don't have to re-derive the next move from
     # marker shape alone. `kind` mirrors the operator gesture:
     #   - "retry" — Enter-in-detail-view runs the existing recover_review
-    #     / recover_error path (clear marker + re-run); `command` is the
-    #     copy-paste shell form.
+    #     / recover_error path, or a markerless synthetic-error direct
+    #     rerun such as PLAN_MISSING_OUTPUT; `command` is the copy-
+    #     paste shell form.
     #   - "manual_fix" — max_passes-hit REVIEW_STALE; the operator must
     #     edit `reviews/escalations-NN.md` before retry. command stays
     #     null because there's nothing safe to dispatch.
@@ -618,6 +645,18 @@ module Hive
     #     through retry or manual_fix.
     def suggested_next_action_payload
       return nil unless diagnostic_action?
+
+      if incomplete_plan_artifact?
+        return { "kind" => "retry", "command" => workflow_command("plan") }
+      end
+
+      if finalize_missing_pr_md? || finalize_missing_metadata_error?
+        return { "kind" => "manual_fix", "command" => nil }
+      end
+
+      if finalize_missing_pr_url? || finalize_pr_url_mismatch?
+        return { "kind" => "manual_fix", "command" => nil }
+      end
 
       if max_passes_review_stale_with_escalations?
         return { "kind" => "manual_fix", "command" => nil }
@@ -693,6 +732,13 @@ module Hive
       []
     end
 
+    def workflow_command(verb)
+      parts = [ "hive", verb, task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts.concat([ "--from", stage_dir ])
+      parts.shelljoin
+    end
+
     def safe_mtime(path)
       return nil if path.nil? || path.to_s.empty?
 
@@ -766,11 +812,57 @@ module Hive
         !File.exist?(task.state_file)
     end
 
+    def finalize_missing_pr_url?
+      task.stage_name == "finalize" &&
+        marker.name == :complete &&
+        task.state_file.to_s.end_with?("/pr.md") &&
+        frontmatter_pr_url.empty?
+    end
+
+    def finalize_pr_url_mismatch?
+      task.stage_name == "finalize" &&
+        marker.name == :complete &&
+        task.state_file.to_s.end_with?("/pr.md") &&
+        !frontmatter_pr_url.empty? &&
+        marker.attrs["pr_url"].to_s != frontmatter_pr_url
+    end
+
+    def finalize_missing_metadata_error?
+      task.stage_name == "finalize" &&
+        marker.name == :error &&
+        %w[missing_pr_md missing_pr_url].include?(marker.attrs["reason"].to_s)
+    end
+
+    def frontmatter_pr_url
+      @frontmatter_pr_url ||= begin
+        parsed = state_file_frontmatter
+        parsed.fetch("pr_url", "").to_s
+      end
+    end
+
+    def state_file_frontmatter
+      return {} unless File.exist?(task.state_file)
+
+      content = File.read(task.state_file)
+      match = content.match(/\A---\s*\n(.*?)\n---\s*\n/m)
+      return {} unless match
+
+      parsed = YAML.safe_load(match[1]) || {}
+      parsed.is_a?(Hash) ? parsed.transform_keys(&:to_s) : {}
+    rescue Psych::Exception, SystemCallError
+      {}
+    end
+
     def incomplete_plan_artifact?
       task.stage_name == "plan" &&
         marker.name == :none &&
         task.state_file.to_s.end_with?("/plan.md") &&
-        (!File.exist?(task.state_file) || File.zero?(task.state_file))
+        ((File.exist?(task.state_file) && File.zero?(task.state_file)) ||
+          (!File.exist?(task.state_file) && plan_run_started?))
+    end
+
+    def plan_run_started?
+      log_dirs.any? { |dir| Dir[File.join(dir, "plan-*.log")].any? }
     end
 
     # Workflow verbs (brainstorm/plan/develop/pr/archive) use --from for

@@ -71,11 +71,28 @@ module HiveTestHelper
   def with_tmp_global_config
     dir = Dir.mktmpdir("hive-global")
     old_hive_home = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = dir
+    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+    begin
+      yield(dir)
+    ensure
+      old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
+      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
+      # tmpdir invoke `hive`/git subprocesses that can leave the tree
+      # mid-rename.
+      FileUtils.rm_rf(dir)
+    end
+  end
+
+  # Variant that also overrides HOME — needed by tests that exercise
+  # daemon ServiceInstaller, which anchors on the real user home for
+  # launchd/systemd paths and would otherwise write units to the
+  # developer's actual $HOME.
+  def with_tmp_global_config_and_home
+    dir = Dir.mktmpdir("hive-global")
+    old_hive_home = ENV["HIVE_HOME"]
     old_home = ENV["HOME"]
     ENV["HIVE_HOME"] = dir
-    # HOME tracks HIVE_HOME so daemon ServiceInstaller (which anchors on
-    # the real user home for launchd/systemd paths) writes units inside
-    # the sandbox instead of the developer's real $HOME.
     ENV["HOME"] = dir
     File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
     begin

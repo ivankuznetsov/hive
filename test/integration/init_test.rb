@@ -5,7 +5,11 @@ class InitTest < Minitest::Test
   include HiveTestHelper
 
   def test_initializes_project_with_orphan_branch_and_global_registration
-    with_tmp_global_config do |home|
+    # `with_tmp_global_config_and_home` overrides HOME alongside
+    # HIVE_HOME so ServiceInstaller (which writes launchd/systemd units
+    # under the real user home, not HIVE_HOME) lands the unit inside
+    # the sandbox.
+    with_tmp_global_config_and_home do |home|
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
 

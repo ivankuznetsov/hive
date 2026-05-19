@@ -37,6 +37,7 @@ class InitPromptsTest < Minitest::Test
   def all_defaults
     {
       "planning_agent" => "claude",
+      "brainstorm_runtime" => "headless",
       "development_agent" => "codex",
       "enabled_reviewers" => REVIEWER_NAMES,
       "triage_bias" => "courageous",
@@ -52,18 +53,27 @@ class InitPromptsTest < Minitest::Test
 
   # Helper to build an interactive input string. The flow asks:
   #   1. planning agent
-  #   2. development agent
-  #   3. reviewer multi-select
-  #   4. triage bias
-  #   5-13. nine limit prompts (brainstorm, plan, execute_implementation,
+  #   2. brainstorm runtime, only when planning agent is claude
+  #   3. development agent
+  #   4. reviewer multi-select
+  #   5. triage bias
+  #   6-14. nine limit prompts (brainstorm, plan, execute_implementation,
   #         open_pr, finalize, review_ci, review_triage, review_fix,
   #         review_browser)
-  #  14. daemon enable Y/n            (added under ADR-024)
-  #  15. confirmation Y/n
+  #  15. daemon enable Y/n            (added under ADR-024)
+  #  16. confirmation Y/n
   # Each line is one answer; blank line = accept default.
-  def interactive_input(planning: "", development: "", reviewers: "",
+  def interactive_input(planning: "", brainstorm_runtime: "", development: "", reviewers: "",
                         triage_bias: "", limits: ([ "" ] * 9), daemon: "", confirm: "")
-    [ planning, development, reviewers, triage_bias, *limits, daemon, confirm ].map { |a| "#{a}\n" }.join
+    answers = [ planning ]
+    answers << brainstorm_runtime if claude_planning_choice_for_helper?(planning)
+    answers.concat([ development, reviewers, triage_bias, *limits, daemon, confirm ])
+    answers.map { |a| "#{a}\n" }.join
+  end
+
+  def claude_planning_choice_for_helper?(planning)
+    answer = planning.to_s.strip
+    answer.empty? || answer.casecmp("claude").zero? || answer == "1"
   end
 
   # --- non-TTY: short-circuit to defaults ----------------------------------
@@ -83,6 +93,7 @@ class InitPromptsTest < Minitest::Test
     summary = summary_io.string
     assert_match(/hive: using defaults/, summary)
     assert_match(/planning=claude/, summary)
+    assert_match(/brainstorm_runtime=headless/, summary)
     assert_match(/dev=codex/, summary)
     assert_match(/reviewers=all3/, summary)
     assert_match(/triage=courageous/, summary)
@@ -138,10 +149,10 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_planning_agent_unknown_reprompts_then_accepts
     # First answer is invalid → re-prompt; second answer is valid.
-    # 16 reads total: planning (invalid + retry) + dev + reviewers
-    # + triage bias + 9 limits + daemon + confirm. Each blank line
+    # 17 reads total: planning (invalid + retry) + brainstorm runtime
+    # + dev + reviewers + triage bias + 9 limits + daemon + confirm. Each blank line
     # accepts the default.
-    raw = ([ "nonexistent", "claude" ] + ([ "" ] * 14)).join("\n") + "\n"
+    raw = ([ "nonexistent", "claude" ] + ([ "" ] * 15)).join("\n") + "\n"
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "claude", answers["planning_agent"]
@@ -149,11 +160,53 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_planning_agent_index_out_of_range_reprompts
-    raw = ([ "7", "claude" ] + ([ "" ] * 14)).join("\n") + "\n"
+    raw = ([ "7", "claude" ] + ([ "" ] * 15)).join("\n") + "\n"
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "claude", answers["planning_agent"]
     assert_match(/unknown agent "7"/, output.string)
+  end
+
+  # --- brainstorm runtime: claude-only, name, index, validation ----------
+
+  def test_interactive_brainstorm_runtime_blank_defaults_to_headless
+    prompts, _output = make_prompts(interactive_input(brainstorm_runtime: ""))
+    answers = prompts.collect
+    assert_equal "headless", answers["brainstorm_runtime"]
+  end
+
+  def test_interactive_brainstorm_runtime_by_name
+    prompts, _output = make_prompts(interactive_input(brainstorm_runtime: "tmux_interactive"))
+    answers = prompts.collect
+    assert_equal "tmux_interactive", answers["brainstorm_runtime"]
+  end
+
+  def test_interactive_brainstorm_runtime_by_index
+    prompts, _output = make_prompts(interactive_input(brainstorm_runtime: "2"))
+    answers = prompts.collect
+    assert_equal "tmux_interactive", answers["brainstorm_runtime"]
+  end
+
+  def test_interactive_brainstorm_runtime_unknown_reprompts
+    raw = ([ "", "warm_pool", "2" ] + ([ "" ] * 14)).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(raw)
+    answers = prompts.collect
+    assert_equal "tmux_interactive", answers["brainstorm_runtime"]
+    assert_match(/unknown brainstorm runtime "warm_pool"/, output.string)
+  end
+
+  def test_interactive_brainstorm_runtime_skipped_for_non_claude_planning_agent
+    prompts, output = make_prompts(interactive_input(planning: "codex", brainstorm_runtime: "tmux_interactive"))
+    answers = prompts.collect
+    assert_equal "codex", answers["planning_agent"]
+    assert_equal "headless", answers["brainstorm_runtime"]
+    refute_match(/Brainstorm runtime/, output.string)
+  end
+
+  def test_interactive_brainstorm_runtime_summary_shows_choice
+    prompts, output = make_prompts(interactive_input(brainstorm_runtime: "tmux_interactive"))
+    prompts.collect
+    assert_match(/brainstorm_runtime\s+= tmux_interactive/, output.string)
   end
 
   # --- reviewer multi-select: indices, names, mixed ------------------------
@@ -189,7 +242,7 @@ class InitPromptsTest < Minitest::Test
     # Build the input manually since interactive_input doesn't allow
     # multi-line reviewer answers cleanly. Trailing values are triage
     # bias, nine limits, daemon, and confirm.
-    input = ([ "", "", "7", "1,2" ] + ([ "" ] * 12)).join("\n") + "\n"
+    input = ([ "", "", "", "7", "1,2" ] + ([ "" ] * 12)).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
     assert_equal %w[claude-ce-code-review codex-ce-code-review], answers["enabled_reviewers"]
@@ -197,7 +250,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_reviewers_unknown_name_reprompts
-    input = ([ "", "", "nope", "1" ] + ([ "" ] * 12)).join("\n") + "\n"
+    input = ([ "", "", "", "nope", "1" ] + ([ "" ] * 12)).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
     assert_equal %w[claude-ce-code-review], answers["enabled_reviewers"]
@@ -231,7 +284,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_triage_bias_unknown_reprompts
-    input = ([ "", "", "", "bad", "2" ] + ([ "" ] * 11)).join("\n") + "\n"
+    input = ([ "", "", "", "", "bad", "2" ] + ([ "" ] * 11)).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
     assert_equal "safetyist", answers["triage_bias"]
@@ -278,7 +331,7 @@ class InitPromptsTest < Minitest::Test
   def test_interactive_limits_zero_budget_reprompts
     # First answer 0,300 fails validation → re-prompt; second answer 10,600 accepted.
     # Trailing pair is daemon + confirm (both blank → daemon enabled, confirm yes).
-    input = ([ "", "", "", "", "0,300", "10,600" ] + ([ "" ] * 10)).join("\n") + "\n"
+    input = ([ "", "", "", "", "", "0,300", "10,600" ] + ([ "" ] * 10)).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
     assert_equal 10, answers["budgets"]["brainstorm"]
@@ -288,7 +341,7 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_limits_malformed_format_reprompts
     # "30" without comma fails the <budget>,<timeout> shape → re-prompt
-    input = ([ "", "", "", "", "30", "30,900" ] + ([ "" ] * 10)).join("\n") + "\n"
+    input = ([ "", "", "", "", "", "30", "30,900" ] + ([ "" ] * 10)).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
     assert_equal 30, answers["budgets"]["brainstorm"]
@@ -341,7 +394,7 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_daemon_unknown_reprompts
     # First answer "maybe" is unrecognised → re-prompt; second answer y → enabled.
-    # interactive_input feeds 14 reads (9 limits + daemon + confirm); add one
+    # interactive_input feeds the full default transcript; add one
     # more "y\n" before the final confirm? No — the daemon prompt is BEFORE
     # confirm, and re-prompting on bad input consumes one extra read at the
     # daemon slot. interactive_input(daemon: "maybe") provides "maybe" + "" (confirm).
@@ -465,7 +518,7 @@ class InitPromptsTest < Minitest::Test
     # Truncate the input transcript right before confirmation. read_line
     # must distinguish nil-from-gets (EOF) from an empty line and bubble
     # Aborted up the stack rather than silently confirming.
-    inputs = ([ "" ] * 14).join("\n") + "\n"  # 14 blank reads, then EOF
+    inputs = ([ "" ] * 15).join("\n") + "\n"  # 15 blank reads, then EOF
     prompts, _output, _summary = make_prompts(inputs)
     assert_raises(Hive::Commands::Init::Prompts::Aborted) { prompts.collect }
   end
@@ -494,7 +547,7 @@ class InitPromptsTest < Minitest::Test
   # validate_reviewers! rejects on the next `hive run`. Re-prompt instead.
   def test_reviewers_comma_only_reprompts
     # Trailing values are triage bias, nine limits, daemon, and confirm.
-    input = ([ "", "", ",", "1" ] + ([ "" ] * 12)).join("\n") + "\n"
+    input = ([ "", "", "", ",", "1" ] + ([ "" ] * 12)).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
     assert_equal %w[claude-ce-code-review], answers["enabled_reviewers"]
@@ -502,7 +555,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_reviewers_whitespace_only_reprompts
-    input = ([ "", "", "  ,  ,  ", "2" ] + ([ "" ] * 12)).join("\n") + "\n"
+    input = ([ "", "", "", "  ,  ,  ", "2" ] + ([ "" ] * 12)).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
     assert_equal %w[codex-ce-code-review], answers["enabled_reviewers"]

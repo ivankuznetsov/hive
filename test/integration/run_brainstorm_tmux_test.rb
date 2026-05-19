@@ -241,6 +241,9 @@ class RunBrainstormTmuxTest < Minitest::Test
         exit 0
       end
 
+      puts "Claude Code v2.1.118"
+      puts "❯"
+      STDOUT.flush
       STDIN.gets
       stage_dir = ENV.fetch("HIVE_TASK_STAGE_DIR")
       state_file = File.join(stage_dir, "brainstorm.md")

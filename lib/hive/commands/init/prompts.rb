@@ -25,6 +25,7 @@ module Hive
 
         DEFAULT_PLANNING_AGENT = "claude".freeze
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
+        DEFAULT_BRAINSTORM_RUNTIME = "headless".freeze
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
 
@@ -91,6 +92,7 @@ module Hive
         # Returns the answers hash with shape:
         #   {
         #     "planning_agent"    => String,           # one of @registered_agents
+        #     "brainstorm_runtime"=> String,           # headless | tmux_interactive
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "triage_bias"       => String,           # courageous | safetyist
@@ -104,6 +106,7 @@ module Hive
 
           intro
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
+          brainstorm_runtime = prompt_brainstorm_runtime(planning)
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
           triage_bias = prompt_triage_bias
@@ -112,6 +115,7 @@ module Hive
 
           answers = {
             "planning_agent" => planning,
+            "brainstorm_runtime" => brainstorm_runtime,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
             "triage_bias" => triage_bias,
@@ -138,6 +142,7 @@ module Hive
         def non_interactive_defaults
           answers = {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
+            "brainstorm_runtime" => DEFAULT_BRAINSTORM_RUNTIME,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
@@ -149,6 +154,7 @@ module Hive
           # `summary=$(hive init)` capture has a parseable single line.
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
+            "brainstorm_runtime=#{DEFAULT_BRAINSTORM_RUNTIME}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled"
@@ -200,6 +206,38 @@ module Hive
             return nil
           end
           @registered_agents.find { |a| a.casecmp(answer).zero? }
+        end
+
+        def prompt_brainstorm_runtime(planning_agent)
+          return DEFAULT_BRAINSTORM_RUNTIME unless planning_agent == "claude"
+
+          @output.puts ""
+          @output.puts "Brainstorm runtime — choose how Claude runs 2-brainstorm:"
+          @output.puts "  1) headless         - non-interactive `claude -p`"
+          @output.puts "  2) tmux_interactive - attachable tmux pane using your logged-in Claude session"
+          loop do
+            @output.print "Brainstorm runtime [#{DEFAULT_BRAINSTORM_RUNTIME}]: "
+            @output.flush
+            answer = read_line
+            return DEFAULT_BRAINSTORM_RUNTIME if answer.empty?
+
+            resolved = resolve_brainstorm_runtime_choice(answer)
+            return resolved if resolved
+
+            @output.puts "  unknown brainstorm runtime #{answer.inspect}; pick " \
+                         "#{Hive::Config::BRAINSTORM_RUNTIMES.join('/')} " \
+                         "or 1..#{Hive::Config::BRAINSTORM_RUNTIMES.size}"
+          end
+        end
+
+        def resolve_brainstorm_runtime_choice(answer)
+          if answer =~ /\A\d+\z/
+            idx = answer.to_i
+            return Hive::Config::BRAINSTORM_RUNTIMES[idx - 1] if idx.between?(1, Hive::Config::BRAINSTORM_RUNTIMES.size)
+
+            return nil
+          end
+          Hive::Config::BRAINSTORM_RUNTIMES.find { |runtime| runtime.casecmp(answer).zero? }
         end
 
         def prompt_reviewers
@@ -356,6 +394,7 @@ module Hive
           @output.puts ""
           @output.puts "Summary:"
           @output.puts "  planning_agent    = #{answers['planning_agent']}"
+          @output.puts "  brainstorm_runtime = #{answers['brainstorm_runtime']}"
           @output.puts "  development_agent = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"

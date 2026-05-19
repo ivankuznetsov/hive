@@ -19,11 +19,9 @@ hive_state_path: .hive-state
 brainstorm:
   agent: <%= planning_agent %>
   # skill: /compound-engineering:ce-brainstorm
-  # Runtime defaults to the existing headless `claude -p` path. To run
-  # brainstorm in an attachable tmux pane billed against your logged-in
-  # Claude Pro/Max subscription instead, set:
-  # runtime: tmux_interactive
-  # runtime: headless
+  # Runtime choices: headless (`claude -p`) or tmux_interactive
+  # (attachable tmux pane using your logged-in Claude session).
+  runtime: <%= brainstorm_runtime %>
 plan:
   agent: <%= planning_agent %>
   # skill: /plan

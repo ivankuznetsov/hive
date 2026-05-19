@@ -2,6 +2,21 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T19:15:00Z] init — prompt for Claude brainstorm runtime
+
+**Action:** Documented the `hive init` prompt addition for `brainstorm.runtime`. Fresh projects now render the selected runtime into `.hive-state/config.yml`: `headless` by default, or `tmux_interactive` when the planning agent is Claude and the operator chooses the tmux path. If planning is not Claude, init keeps `headless` because the tmux runtime hardcodes the Claude binary.
+
+**Refreshed pages:**
+- [[commands/init]] — prompt order, non-TTY summary, runtime choices, and test coverage notes.
+- [[stages/brainstorm]] — notes that runtime can be selected during init.
+
+## [2026-05-19T18:30:00Z] brainstorm — harden tmux interactive live prompt path
+
+**Action:** Documented the live-smoke fix for `brainstorm.runtime: tmux_interactive`. Hive now waits for Claude's interactive prompt before pasting, auto-confirms Claude's first-run folder-trust prompt for the task folder, launches interactive Claude with `--permission-mode bypassPermissions` plus `--allowedTools Read,Write,Edit,LS` so task-folder reads and `brainstorm.md` writes do not block on approval prompts while Bash stays unavailable, and uses a short paste-to-Enter delay so Claude Code's input box receives the prompt before submission. The defensive orphan sweep now uses `pgrep/pkill --` before a POSIX-compatible `--add-dir...` regex so process matching does not parse the pattern as an option.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — tmux runtime prompt-readiness, trust confirmation, bypass-permissions/read-write tool restriction, and paste-submit delay.
+
 ## [2026-05-19T00:00:00Z] tui — keep All projects idea picker open while loading
 
 **Action:** Documented the follow-up behavior that `n` from `★ All projects` enters the concrete project picker even before the first status snapshot arrives. The picker now uses a loading state instead of falling through to the title composer without a selected project.

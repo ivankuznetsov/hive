@@ -176,7 +176,7 @@ A starter shape is committed at `config.example.yml` for reference.
 
 ### Per-project: `<project>/.hive-state/config.yml`
 
-Created by `hive init` from `templates/project_config.yml.erb`. On TTY `hive init` opens an interactive prompt for the per-stage agents and limits; on non-TTY (CI, pipes, scripted callers) it falls through to recommended defaults (`claude` for planning, `codex` for development, all three default reviewers, generous limits). See `wiki/commands/init.md` for the full prompt flow.
+Created by `hive init` from `templates/project_config.yml.erb`. On TTY `hive init` opens an interactive prompt for the per-stage agents, Claude brainstorm runtime, and limits; on non-TTY (CI, pipes, scripted callers) it falls through to recommended defaults (`claude` for planning, `headless` brainstorm runtime, `codex` for development, all three default reviewers, generous limits). See `wiki/commands/init.md` for the full prompt flow.
 
 ```yaml
 project_name: your-project
@@ -188,6 +188,7 @@ hive_state_path: .hive-state
 # Hand-edit any of these later to override what you picked at init.
 brainstorm:
   agent: claude
+  runtime: headless                # or tmux_interactive for attachable Claude tmux mode
 plan:
   agent: claude
 execute:

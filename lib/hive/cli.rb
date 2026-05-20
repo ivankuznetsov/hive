@@ -519,7 +519,7 @@ module Hive
       ).call
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / enable / disable)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -530,6 +530,10 @@ module Hive
         reload [--json]                   Send SIGHUP to reload config.
                                           --json emits hive-daemon-reload.v1.
         tail                              Stream daemon.log.
+        install [--force]                 (Re)write the platform-native unit
+                                          file. --force overwrites an existing
+                                          unit (the previous file is saved as
+                                          <path>.bak) and restarts the daemon.
         enable  PROJECT|--all [--json]    Set daemon.enabled: true in
                                           <project>/.hive-state/config.yml.
                                           --all = every registered project;
@@ -564,6 +568,8 @@ module Hive
                      desc: "log dispatch decisions without spawning real children"
     option :all, type: :boolean, default: false,
                  desc: "for enable/disable: apply to every registered project"
+    option :force, type: :boolean, default: false,
+                   desc: "for install: overwrite an existing unit (saves <path>.bak)"
     def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
       # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
@@ -591,7 +597,8 @@ module Hive
         detach: options[:detach],
         dry_run: options[:dry_run],
         all: options[:all],
-        json: options[:json]
+        json: options[:json],
+        force: options[:force]
       ).call
     end
 

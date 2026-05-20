@@ -25,10 +25,16 @@ module Hive
           @messages = []
         end
 
-        def install!(autostart:)
+        # `force:` overwrites an existing unit whose content differs from
+        # the current template. The previous content is preserved as
+        # `<path>.bak` so a user's hand-edits aren't lost silently. On
+        # Linux with autostart, force also triggers a `restart` instead
+        # of `enable --now` — restart is the only way to pick up new
+        # Environment= lines from an already-running unit.
+        def install!(autostart:, force: false)
           case platform
-          when :macos then install_macos!(autostart: autostart)
-          when :linux then install_linux!(autostart: autostart)
+          when :macos then install_macos!(autostart: autostart, force: force)
+          when :linux then install_linux!(autostart: autostart, force: force)
           when :unsupported_host
             @messages << "daemon autostart not supported on this platform; run `hive daemon start` manually."
             :unsupported
@@ -44,9 +50,9 @@ module Hive
 
         private
 
-        def install_macos!(autostart:)
+        def install_macos!(autostart:, force:)
           path = target_path
-          write_result = write_if_safe(path, render_launchd)
+          write_result = write_if_safe(path, render_launchd, force: force)
           return :drifted if write_result == :drifted
 
           if autostart
@@ -56,19 +62,29 @@ module Hive
               return :failed
             end
           end
-          :ok
+          write_result == :upgraded ? :upgraded : :ok
         end
 
-        def install_linux!(autostart:)
+        def install_linux!(autostart:, force:)
           path = target_path
-          write_result = write_if_safe(path, render_systemd)
+          write_result = write_if_safe(path, render_systemd, force: force)
           return :drifted if write_result == :drifted
 
           if autostart
             if systemctl_available?
               ok_reload = @runner.call(%w[systemctl --user daemon-reload])
-              ok_enable = @runner.call(%w[systemctl --user enable --now hive-daemon])
-              unless ok_reload && ok_enable
+              # Force-upgrade restarts the running unit so new
+              # Environment= lines take effect; first-time install
+              # uses `enable --now` which both enables on boot and
+              # starts immediately. `:unchanged` writes need neither.
+              start_argv =
+                if write_result == :upgraded
+                  %w[systemctl --user restart hive-daemon]
+                elsif write_result == :written
+                  %w[systemctl --user enable --now hive-daemon]
+                end
+              ok_start = start_argv.nil? || @runner.call(start_argv)
+              unless ok_reload && ok_start
                 @messages << "systemctl --user enable failed; run `systemctl --user enable --now hive-daemon` manually"
                 return :failed
               end
@@ -76,16 +92,24 @@ module Hive
               @messages << "systemd not detected; enable systemd in WSL or run `hive daemon start` manually."
             end
           end
-          :ok
+          write_result == :upgraded ? :upgraded : :ok
         end
 
-        def write_if_safe(path, content)
+        def write_if_safe(path, content, force: false)
           if File.exist?(path)
             existing = File.read(path)
             return :unchanged if existing == content
 
-            @messages << "daemon service already exists at #{path}; leaving user-customized file untouched. Remove it and re-run `hive init` to install the current template."
-            return :drifted
+            unless force
+              @messages << "daemon service already exists at #{path}; leaving user-customized file untouched. Re-run with `hive daemon install --force` to overwrite (the previous file will be backed up to #{path}.bak)."
+              return :drifted
+            end
+
+            backup_path = "#{path}.bak"
+            File.write(backup_path, existing)
+            File.write(path, content)
+            @messages << "upgraded existing unit at #{path}; previous content backed up to #{backup_path}"
+            return :upgraded
           end
 
           FileUtils.mkdir_p(File.dirname(path))
@@ -99,7 +123,9 @@ module Hive
           # resolved binary path so whitespace, `%`, or other special
           # characters don't produce a malformed unit.
           escaped = Shellwords.escape(resolved_binary)
-          template.sub(/^ExecStart=.*$/, "ExecStart=#{escaped} daemon start")
+          template
+            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} daemon start")
+            .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
         end
 
         def render_launchd

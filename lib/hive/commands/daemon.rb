@@ -28,7 +28,7 @@ module Hive
     class Daemon
       include Hive::Schemas::EnvelopeEmitter
 
-      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable].freeze
+      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install].freeze
 
       # USAGE-class error specific to enable/disable. Carries an
       # error_kind drawn from Hive::Schemas::EnrollErrorKind so the
@@ -45,13 +45,15 @@ module Hive
       end
 
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
-                     all: false, json: false, hive_home: Hive::Paths.state_home)
+                     all: false, json: false, force: false,
+                     hive_home: Hive::Paths.state_home)
         @subcommand = subcommand
         @target = target
         @detach = detach
         @dry_run = dry_run
         @all = all
         @json = json
+        @force = force
         @hive_home = hive_home
       end
 
@@ -68,6 +70,7 @@ module Hive
         when "status"           then status_daemon
         when "reload"           then reload_daemon
         when "tail"             then tail_daemon
+        when "install"          then install_daemon
         when "enable", "disable" then call_with_envelope { do_call }
         end
       end
@@ -382,6 +385,33 @@ module Hive
         end
       rescue Interrupt
         # Ctrl-C → exit cleanly
+      end
+
+      # `hive daemon install [--force]` — (re)write the platform-native
+      # unit file (systemd-user on Linux, launchd plist on macOS) and
+      # restart the service. Default behavior matches `hive init`: refuse
+      # to touch an existing unit so user hand-edits are preserved.
+      # `--force` overwrites the existing unit and saves the prior
+      # content to `<path>.bak`; on Linux it restarts the running daemon
+      # so new Environment= lines take effect.
+      def install_daemon
+        warn_unsupported_json_flag if @json
+        require "hive/commands/daemon/service_installer"
+        installer = Hive::Commands::Daemon::ServiceInstaller.new
+        result = installer.install!(autostart: true, force: @force)
+        installer.messages.each { |line| warn "hive: #{line}" }
+        case result
+        when :ok, :written, :upgraded, :unchanged
+          # success outcomes; messages above describe what happened
+        when :drifted
+          raise Hive::Error,
+                "daemon unit at #{installer.target_path} differs from the current template. " \
+                "Run `hive daemon install --force` to overwrite (a .bak will be saved)."
+        when :failed
+          raise Hive::Error, "daemon service install reported a failure; see messages above"
+        when :unsupported
+          # already messaged
+        end
       end
 
       def envelope_schema

@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-20T00:12:57Z] TUI image paste mode boundary
+
+**Action:** Clarified that Ctrl+V is inert outside the `:new_idea` composer, including while the help overlay is visible. This preserves the image-paste boundary documented for the composer and keeps overlays from closing on an image-paste probe.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — documented the Ctrl+V no-op behavior outside `:new_idea`.
+
 ## [2026-05-19T23:20:28Z] tui — Ctrl+V also triggers composer image paste
 
 **Action:** Documented that Ctrl+V in the `:new_idea` composer now runs the same image clipboard probe as an empty bracketed paste, covering terminals that send literal Ctrl+V instead of a bracketed-paste burst for image-only clipboards. The staging convention, `[imageN]` placeholders, and submit rewrite remain unchanged.
@@ -1607,10 +1614,3 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 - `wiki/commands/tui.md` — documented red-status detail mode, keybindings, snapshot refresh behavior, and preserved direct recovery exceptions.
 - `wiki/decisions.md` — ADR-027 records the diagnose-then-act policy and its relationship to ADR-025.
 - `wiki/index.md` — bumped refresh date.
-
-## [2026-05-20T00:12:57Z] TUI image paste mode boundary
-
-**Action:** Clarified that Ctrl+V is inert outside the `:new_idea` composer, including while the help overlay is visible. This preserves the image-paste boundary documented for the composer and keeps overlays from closing on an image-paste probe.
-
-**Refreshed pages:**
-- `wiki/commands/tui.md` — documented the Ctrl+V no-op behavior outside `:new_idea`.

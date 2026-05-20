@@ -181,13 +181,9 @@ install_hint() {
 # crashing mid-curl / mid-gem-install with a confusing trace.
 installer_preflight() {
   local dep missing=0
-  for dep in curl jq ruby gem; do
+  for dep in curl jq; do
     if ! command -v "$dep" >/dev/null 2>&1; then
-      case "$dep" in
-        ruby|gem) hint="install Ruby 3.4 with rbenv / mise / asdf, or your OS package manager" ;;
-        *) hint="$(install_hint "$dep")" ;;
-      esac
-      warn "missing installer prerequisite '${dep}' (${hint})"
+      warn "missing installer prerequisite '${dep}' ($(install_hint "$dep"))"
       missing=1
     fi
   done
@@ -198,9 +194,22 @@ installer_preflight() {
   if [[ "$missing" -ne 0 ]]; then
     die "install aborted: required installer prerequisites missing — fix the warnings above and re-run"
   fi
-  # Ruby 3.4+ is required by hive.gemspec; gem install will refuse
-  # otherwise. Probe here so we fail with a clear message rather than
-  # a noisy gem-level error mid-install.
+}
+
+# Ruby 3.4+ is required by hive.gemspec; gem install will refuse
+# otherwise. Skipped under --dry-run because dry-run is a preview /
+# argument-shape lint and CI runners often pin older system Rubies.
+ruby_preflight() {
+  local dep missing=0
+  for dep in ruby gem; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+      warn "missing installer prerequisite '${dep}' (install Ruby 3.4 with rbenv / mise / asdf, or your OS package manager)"
+      missing=1
+    fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+    die "install aborted: Ruby 3.4 is required — fix the warnings above and re-run"
+  fi
   if ! ruby -e 'exit(RUBY_VERSION.to_f >= 3.4)' 2>/dev/null; then
     die "Ruby 3.4+ required; found $(ruby -e 'print RUBY_VERSION' 2>/dev/null || echo unknown)"
   fi
@@ -254,6 +263,10 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   runtime_preflight
   exit 0
 fi
+
+# Probe Ruby/gem now that we know this is not a dry-run; the gem
+# install path requires Ruby 3.4 on PATH.
+ruby_preflight
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT

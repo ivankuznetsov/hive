@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added — install channels
+
+- Added the v0.1.0 install surface: GitHub Release tarballs, Homebrew tap formula template, AUR `hive-bin` template, `install.sh`, and `install.md` for agent-assisted installs.
+- Added XDG path resolution, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint for Apache Hive PATH collisions.
+- `hive init` now writes the per-user daemon service unit and asks whether to enable and start it immediately.
+
 ### Added — opt-in interactive tmux brainstorm runtime
 
 - `brainstorm.runtime: tmux_interactive` runs stage `2-brainstorm` in a fresh per-task tmux session (`hive-2-brainstorm-<slug>`) with interactive `claude`, while preserving the existing `brainstorm.md` WAITING/COMPLETE marker contract.

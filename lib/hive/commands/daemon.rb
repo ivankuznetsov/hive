@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "yaml"
 require "hive/config"
+require "hive/paths"
 require "hive/lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
@@ -44,7 +45,7 @@ module Hive
       end
 
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
-                     all: false, json: false, hive_home: Hive::Config.hive_home)
+                     all: false, json: false, hive_home: Hive::Paths.state_home)
         @subcommand = subcommand
         @target = target
         @detach = detach

@@ -1,0 +1,220 @@
+name: Install smoke
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  shell:
+    name: Shell checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh
+      - name: Shellcheck
+        uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
+        with:
+          scandir: '.'
+          additional_files: install.sh
+      - run: bash install.sh --dry-run --version=v0.1.0
+
+  macos-dry-run:
+    name: macOS dry run
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash install.sh --dry-run --version=v0.1.0
+
+  arch-dry-run:
+    name: Arch dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker run --rm -v "$PWD:/src" -w /src archlinux:latest \
+            bash -lc 'pacman -Sy --noconfirm bash curl grep sed gawk coreutils jq && bash install.sh --dry-run --version=v0.1.0'
+
+  die-paths:
+    name: install.sh die paths (malformed inputs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: rejects bogus HIVE_VERSION
+        env:
+          HIVE_VERSION: 'v0.1.0/../../evil'
+        run: |
+          set +e
+          bash install.sh --dry-run
+          rc=$?
+          set -e
+          [[ "$rc" -ne 0 ]] || { echo "expected non-zero exit for malformed HIVE_VERSION" >&2; exit 1; }
+      - name: rejects bogus HIVE_REPO_OWNER
+        env:
+          HIVE_REPO_OWNER: 'evil$injection'
+        run: |
+          set +e
+          bash install.sh --dry-run --version=v0.1.0
+          rc=$?
+          set -e
+          [[ "$rc" -ne 0 ]] || { echo "expected non-zero exit for malformed HIVE_REPO_OWNER" >&2; exit 1; }
+
+  full-smoke:
+    name: install.sh full install smoke (against real release)
+    runs-on: ubuntu-24.04
+    # Pinned to a known-good release so a PR can't gate on a release
+    # not yet cut. Skipped on PRs that change install.sh syntactically
+    # but predate a published release.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check pinned release exists
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HIVE_VERSION: v0.1.0
+        run: |
+          if gh release view "$HIVE_VERSION" --repo ivankuznetsov/hive >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "full install smoke skipped: ${HIVE_VERSION} is not published yet" >&2
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: install + verify
+        if: ${{ steps.release.outputs.exists == 'true' }}
+        env:
+          XDG_DATA_HOME: ${{ github.workspace }}/xdg-data
+          XDG_BIN_HOME: ${{ github.workspace }}/xdg-bin
+          HIVE_VERSION: v0.1.0
+        run: |
+          mkdir -p "$XDG_DATA_HOME" "$XDG_BIN_HOME"
+          bash install.sh --version="$HIVE_VERSION"
+          test -s "$XDG_DATA_HOME/hive/install-channel"
+          grep -q '^bash$' "$XDG_DATA_HOME/hive/install-channel"
+          test -x "$XDG_BIN_HOME/hive"
+          "$XDG_BIN_HOME/hive" --version
+
+  installer-fixtures:
+    name: install.sh fixture regressions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: checksum mismatch fails clearly
+        run: |
+          set -euo pipefail
+          fixtures="$(mktemp -d)"
+          fakebin="$(mktemp -d)"
+          printf 'not the archive\n' > "$fixtures/hive-0.1.0-linux-x86_64-gnu.tar.gz"
+          printf '%064d  hive-0.1.0-linux-x86_64-gnu.tar.gz\n' 0 > "$fixtures/SHA256SUMS"
+          : > "$fixtures/SHA256SUMS.sig"
+          : > "$fixtures/SHA256SUMS.pem"
+          cat > "$fakebin/curl" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          out=""
+          url=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o) out="$2"; shift 2 ;;
+              -w) shift 2 ;;
+              -*) shift ;;
+              *) url="$1"; shift ;;
+            esac
+          done
+          case "$url" in
+            *SHA256SUMS.sig) cp "$FIXTURES/SHA256SUMS.sig" "$out" ;;
+            *SHA256SUMS.pem) cp "$FIXTURES/SHA256SUMS.pem" "$out" ;;
+            *SHA256SUMS) cp "$FIXTURES/SHA256SUMS" "$out" ;;
+            *.tar.gz) cp "$FIXTURES/hive-0.1.0-linux-x86_64-gnu.tar.gz" "$out" ;;
+            *) echo "unexpected url: $url" >&2; exit 22 ;;
+          esac
+          printf '200'
+          SH
+          chmod +x "$fakebin/curl"
+          printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/cosign"
+          chmod +x "$fakebin/cosign"
+          set +e
+          FIXTURES="$fixtures" PATH="$fakebin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/out" 2>"$fixtures/err"
+          rc=$?
+          set -e
+          [[ "$rc" -ne 0 ]] || { echo "expected checksum mismatch to fail" >&2; exit 1; }
+          grep -q "checksum mismatch" "$fixtures/err"
+      - name: PATH collision creates hv fallback
+        run: |
+          set -euo pipefail
+          fixtures="$(mktemp -d)"
+          fakebin="$(mktemp -d)"
+          payload="$fixtures/payload/hive-0.1.0-linux-x86_64-gnu"
+          mkdir -p "$payload/bin"
+          cat > "$payload/bin/hive" <<'SH'
+          #!/usr/bin/env bash
+          echo "0.1.0"
+          SH
+          chmod +x "$payload/bin/hive"
+          tar -C "$fixtures/payload" -czf "$fixtures/hive-0.1.0-linux-x86_64-gnu.tar.gz" "hive-0.1.0-linux-x86_64-gnu"
+          sha256sum "$fixtures/hive-0.1.0-linux-x86_64-gnu.tar.gz" | awk '{print $1 "  hive-0.1.0-linux-x86_64-gnu.tar.gz"}' > "$fixtures/SHA256SUMS"
+          : > "$fixtures/SHA256SUMS.sig"
+          : > "$fixtures/SHA256SUMS.pem"
+          cat > "$fakebin/curl" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          out=""
+          url=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o) out="$2"; shift 2 ;;
+              -w) shift 2 ;;
+              -*) shift ;;
+              *) url="$1"; shift ;;
+            esac
+          done
+          case "$url" in
+            *SHA256SUMS.sig) cp "$FIXTURES/SHA256SUMS.sig" "$out" ;;
+            *SHA256SUMS.pem) cp "$FIXTURES/SHA256SUMS.pem" "$out" ;;
+            *SHA256SUMS) cp "$FIXTURES/SHA256SUMS" "$out" ;;
+            *.tar.gz) cp "$FIXTURES/hive-0.1.0-linux-x86_64-gnu.tar.gz" "$out" ;;
+            *) echo "unexpected url: $url" >&2; exit 22 ;;
+          esac
+          printf '200'
+          SH
+          chmod +x "$fakebin/curl"
+          printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/cosign"
+          chmod +x "$fakebin/cosign"
+          apache_bin="$fixtures/apache-bin"
+          xdg_bin="$fixtures/xdg-bin"
+          xdg_data="$fixtures/xdg-data"
+          mkdir -p "$apache_bin" "$xdg_bin" "$xdg_data"
+          printf '#!/usr/bin/env bash\necho "Apache Hive 3.1.0"\n' > "$apache_bin/hive"
+          chmod +x "$apache_bin/hive"
+          FIXTURES="$fixtures" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0
+          test -L "$xdg_bin/hv"
+          "$xdg_bin/hv" --version | grep -q '^0\.1\.0$'
+
+  unsupported-platforms:
+    name: install.sh unsupported platform messages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Alpine/musl exits tier-3
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:latest \
+            sh -lc 'apk add --no-cache bash >/dev/null && set +e && bash install.sh --dry-run --version=v0.1.0 2>/tmp/hive-install.err; rc=$?; set -e; test "$rc" -ne 0; grep -q "musl Linux is tier-3" /tmp/hive-install.err'
+      - name: Unknown Linux architecture exits clearly
+        run: |
+          set -euo pipefail
+          fakebin="$(mktemp -d)"
+          cat > "$fakebin/uname" <<'SH'
+          #!/usr/bin/env bash
+          case "$1" in
+            -s) echo Linux ;;
+            -m) echo sparc64 ;;
+            *) /usr/bin/uname "$@" ;;
+          esac
+          SH
+          chmod +x "$fakebin/uname"
+          set +e
+          PATH="$fakebin:$PATH" bash install.sh --dry-run --version=v0.1.0 2>"$fakebin/err"
+          rc=$?
+          set -e
+          [[ "$rc" -ne 0 ]] || { echo "expected unsupported architecture to fail" >&2; exit 1; }
+          grep -q "unsupported Linux architecture: sparc64" "$fakebin/err"

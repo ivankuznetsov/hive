@@ -259,6 +259,11 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_help_ctrl_v_is_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :help, key: :key_ctrl_v, row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_new_idea_delete_routes_to_forward_delete
     msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_delete, row: nil)
     assert_same Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD, msg

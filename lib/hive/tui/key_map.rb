@@ -362,11 +362,11 @@ module Hive
         key.is_a?(String) && key.length == 1
       end
 
-      # Help overlay dismisses on any key — matches the curses-era
-      # `Render::HelpOverlay#show` behaviour. Any printable char or
-      # special key returns BACK; the cursor singletons aren't special-
-      # cased here because they should also dismiss.
+      # Help overlay dismisses on any key except Ctrl+V, which remains
+      # inert outside the new-idea composer instead of closing overlays.
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NOOP if key == :key_ctrl_v
+
         Messages::BACK
       end
 

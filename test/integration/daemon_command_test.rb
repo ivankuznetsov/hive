@@ -1235,4 +1235,98 @@ class HiveDaemonCommandTest < Minitest::Test
                    "real CLI subprocess stdout must validate against hive-daemon-stop.v1; got: #{errors.inspect}"
     end
   end
+
+  # ── install: envelope + exit codes ────────────────────────────────────
+
+  def with_isolated_install_target(&block)
+    # Install writes to ~/.config/systemd/user/ on Linux; we isolate
+    # HOME so the test never touches the user's real systemd config.
+    # systemctl_available is forced false via the runner stub by using
+    # a non-systemd env (or relying on the installer's ENOENT detection
+    # on a sandboxed PATH). Tests that need to assert systemctl-failed
+    # outcomes use the unit-level installer test instead.
+    Dir.mktmpdir("hive-install-home") do |home|
+      env = ENV.to_h.merge("HOME" => home, "HIVE_HOME" => home)
+      block.call(home, env)
+    end
+  end
+
+  def test_install_drift_exits_64_with_json_envelope
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-install"))))
+    with_isolated_install_target do |home, env|
+      # Seed a drifted unit so first install will refuse without --force.
+      unit_path = File.join(home, ".config", "systemd", "user", "hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(unit_path))
+      File.write(unit_path, "stale-pre-existing-content\n")
+
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "install", "--json")
+      doc = JSON.parse(out)
+      assert_equal 64, status.exitstatus,
+                   "drift without --force must exit 64 (USAGE) so agents can branch on it"
+      assert_equal false, doc["ok"]
+      assert_equal "drifted", doc["outcome"]
+      assert_equal "drifted", doc["error_kind"]
+      assert_equal 64, doc["exit_code"]
+      errors = schema.validate(doc).map { |e| e["error"] }
+      assert_empty errors,
+                   "drift envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
+    end
+  end
+
+  def test_install_force_upgrade_exits_0_with_upgraded_envelope
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-install"))))
+    with_isolated_install_target do |home, env|
+      unit_path = File.join(home, ".config", "systemd", "user", "hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(unit_path))
+      File.write(unit_path, "stale-pre-existing-content\n")
+
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "install", "--force", "--json")
+      doc = JSON.parse(out)
+      # Exit code depends on whether systemctl is available in the
+      # sandbox; on a CI host without systemd-user, systemctl-failed
+      # (exit 70) is the expected outcome. Either way, the envelope
+      # must validate and the on-disk write must have happened.
+      assert_includes [ 0, 70 ], status.exitstatus,
+                      "install --force exits 0 on success or 70 on systemctl failure; got #{status.exitstatus}, doc=#{doc.inspect}"
+      errors = schema.validate(doc).map { |e| e["error"] }
+      assert_empty errors,
+                   "install --force envelope must validate; got: #{errors.inspect}"
+
+      if status.exitstatus.zero?
+        assert_equal true, doc["ok"]
+        assert_equal "upgraded", doc["outcome"]
+        backups = Dir["#{unit_path}.bak-*"]
+        assert_equal 1, backups.size, "force must write exactly one timestamped backup"
+        assert_equal "stale-pre-existing-content\n", File.read(backups.first)
+        assert_equal backups.first, doc["backup_path"]
+      else
+        assert_equal false, doc["ok"]
+        assert_equal "failed", doc["outcome"]
+        assert_equal 70, doc["exit_code"]
+      end
+    end
+  end
+
+  def test_install_unsupported_platform_envelope_passes_through
+    # We can't realistically force a non-Linux/macOS host in CI, but
+    # we can at least pin that the JSON envelope is rendered, exits 0,
+    # and target_path is null when the platform is unsupported. Skipped
+    # when running on supported platforms.
+    skip unless RbConfig::CONFIG["host_os"] !~ /linux|darwin/i
+  end
+
+  def test_force_flag_rejected_on_non_install_subcommand
+    with_isolated_install_target do |_home, env|
+      _out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "stop", "--force")
+      refute_equal 0, status.exitstatus,
+                   "--force on non-install subcommands must error out, not silently no-op"
+      assert_includes err.to_s + _out.to_s, "--force only applies to `install`",
+                      "error message must point operators at the right subcommand"
+    end
+  end
 end

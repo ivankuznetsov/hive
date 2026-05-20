@@ -8,7 +8,7 @@ module Hive
   module Commands
     class Daemon
       class ServiceInstaller
-        attr_reader :messages
+        attr_reader :messages, :last_backup_path, :last_restart_invoked
 
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
                        systemctl_available: nil)
@@ -23,21 +23,35 @@ module Hive
           @runner = runner || ->(argv) { system(*argv) }
           @systemctl_available = systemctl_available
           @messages = []
+          @last_backup_path = nil
+          @last_restart_invoked = false
         end
 
         # `force:` overwrites an existing unit whose content differs from
-        # the current template. The previous content is preserved as
-        # `<path>.bak` so a user's hand-edits aren't lost silently. On
-        # Linux with autostart, force also triggers a `restart` instead
-        # of `enable --now` — restart is the only way to pick up new
-        # Environment= lines from an already-running unit.
+        # the current template. The previous content is preserved as a
+        # timestamped `<path>.bak-<timestamp>` so user hand-edits aren't
+        # lost silently. On Linux with autostart, force also triggers a
+        # `restart` instead of `enable --now` — restart is the only way
+        # to pick up new Environment= lines from an already-running unit.
         def install!(autostart:, force: false)
+          @last_backup_path = nil
+          @last_restart_invoked = false
           case platform
           when :macos then install_macos!(autostart: autostart, force: force)
           when :linux then install_linux!(autostart: autostart, force: force)
           when :unsupported_host
             @messages << "daemon autostart not supported on this platform; run `hive daemon start` manually."
             :unsupported
+          end
+        end
+
+        # Wire-friendly platform key for the install envelope. Mirrors
+        # the schema's `platform` enum (`linux` / `macos` / `unsupported`).
+        def envelope_platform
+          case platform
+          when :linux then "linux"
+          when :macos then "macos"
+          else "unsupported"
           end
         end
 
@@ -62,6 +76,7 @@ module Hive
               # ignored. Unload first (best-effort: plist may not be
               # currently loaded), then load the refreshed file.
               @runner.call([ "launchctl", "unload", path ])
+              @last_restart_invoked = true
             end
             ok = @runner.call([ "launchctl", "load", path ])
             unless ok
@@ -88,6 +103,15 @@ module Hive
               # matches the template.
               start_argv =
                 if write_result == :upgraded
+                  @last_restart_invoked = true
+                  # The unit's TimeoutStopSec=900 means restart can
+                  # block the caller up to ~15 minutes if children are
+                  # still draining. Surface the worst case BEFORE the
+                  # blocking call so operators don't Ctrl-C halfway
+                  # through and leave the upgrade half-applied.
+                  @messages << "restarting hive-daemon; if the running daemon is mid-tick with " \
+                               "active children, this can block up to TimeoutStopSec (900s by " \
+                               "default) before returning"
                   %w[systemctl --user restart hive-daemon]
                 else
                   %w[systemctl --user enable --now hive-daemon]
@@ -117,6 +141,7 @@ module Hive
             backup_path = "#{path}.bak-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}"
             atomic_write(backup_path, existing)
             atomic_write(path, content)
+            @last_backup_path = backup_path
             @messages << "upgraded existing unit at #{path}; previous content backed up to #{backup_path}"
             return :upgraded
           end

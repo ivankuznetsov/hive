@@ -392,26 +392,94 @@ module Hive
       # restart the service. Default behavior matches `hive init`: refuse
       # to touch an existing unit so user hand-edits are preserved.
       # `--force` overwrites the existing unit and saves the prior
-      # content to `<path>.bak`; on Linux it restarts the running daemon
-      # so new Environment= lines take effect.
+      # content to `<path>.bak-<timestamp>`; on Linux it restarts the
+      # running daemon so new Environment= lines take effect.
+      #
+      # With --json: emits a `hive-daemon-install.v1` envelope on every
+      # outcome. Drift without --force exits 64 (USAGE — retry with
+      # --force). Service-manager failure exits 70 (SOFTWARE). Success
+      # outcomes (`written` / `upgraded` / `unchanged` / `unsupported`)
+      # exit 0.
       def install_daemon
-        warn_unsupported_json_flag if @json
         require "hive/commands/daemon/service_installer"
         installer = Hive::Commands::Daemon::ServiceInstaller.new
         result = installer.install!(autostart: true, force: @force)
-        installer.messages.each { |line| warn "hive: #{line}" }
-        case result
-        when :ok, :upgraded
-          # success outcomes; messages above describe what happened
-        when :drifted
-          raise Hive::Error,
-                "daemon unit at #{installer.target_path} differs from the current template. " \
-                "Run `hive daemon install --force` to overwrite (a timestamped .bak will be saved)."
-        when :failed
-          raise Hive::Error, "daemon service install reported a failure; see messages above"
-        when :unsupported
-          # already messaged via installer.messages
+        installer.messages.each { |line| warn "hive: #{line}" } unless @json
+        emit_install_outcome(installer, result)
+      end
+
+      def emit_install_outcome(installer, result)
+        outcome_str =
+          case result
+          when :ok       then "written"
+          when :upgraded then "upgraded"
+          when :written  then "written"
+          when :unchanged then "unchanged"
+          when :unsupported then "unsupported"
+          when :drifted then "drifted"
+          when :failed  then "failed"
+          end
+        success = %w[written upgraded unchanged unsupported].include?(outcome_str)
+
+        if @json
+          if success
+            puts JSON.generate(install_envelope(installer, outcome: outcome_str))
+          else
+            install_emit_error_envelope(installer, outcome: outcome_str)
+          end
         end
+
+        case result
+        when :drifted
+          msg = "daemon unit at #{installer.target_path} differs from the current template. " \
+                "Re-run with `hive daemon install --force` to overwrite (a timestamped .bak " \
+                "will be saved)."
+          raise Hive::DaemonInstallDriftError, msg
+        when :failed
+          raise Hive::DaemonInstallFailed,
+                "daemon service install reported a failure; see messages above"
+        end
+      end
+
+      def install_envelope(installer, outcome:)
+        restarted = outcome == "upgraded" ? installer.last_restart_invoked : false
+        backup_path = outcome == "upgraded" ? installer.last_backup_path : nil
+        target = outcome == "unsupported" ? nil : installer.target_path
+        {
+          "schema" => "hive-daemon-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
+          "ok" => true,
+          "outcome" => outcome,
+          "platform" => installer.envelope_platform,
+          "target_path" => target,
+          "backup_path" => backup_path,
+          "restarted" => restarted,
+          "messages" => installer.messages.dup
+        }
+      end
+
+      def install_emit_error_envelope(installer, outcome:)
+        error_class = outcome == "drifted" ? "DaemonInstallDriftError" : "DaemonInstallFailed"
+        exit_code = outcome == "drifted" ? Hive::ExitCodes::USAGE : Hive::ExitCodes::SOFTWARE
+        message =
+          if outcome == "drifted"
+            "daemon unit at #{installer.target_path} differs from the current template; retry with --force."
+          else
+            "daemon service install reported a failure; see messages"
+          end
+        puts JSON.generate(
+          "schema" => "hive-daemon-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
+          "ok" => false,
+          "error_class" => error_class,
+          "error_kind" => outcome,
+          "exit_code" => exit_code,
+          "message" => message,
+          "outcome" => outcome,
+          "platform" => installer.envelope_platform,
+          "target_path" => installer.target_path,
+          "messages" => installer.messages.dup
+        )
       end
 
       def envelope_schema

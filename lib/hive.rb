@@ -22,6 +22,7 @@ module Hive
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
       "hive-daemon-reload" => 1,
+      "hive-daemon-install" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1
@@ -390,6 +391,24 @@ module Hive
   # CLI's top-level rescue. Translates to SOFTWARE (70) so wrappers can
   # treat it like other internal failures rather than the generic 1.
   class InternalError < Error
+    def exit_code
+      ExitCodes::SOFTWARE
+    end
+  end
+
+  # `hive daemon install` outcome split (PR #113 follow-up): drift is a
+  # recoverable USAGE error (re-run with --force) while a service-manager
+  # failure (systemctl reload/restart, launchctl load) is SOFTWARE. Two
+  # error classes so the top-level rescue maps each outcome to a stable
+  # exit code (64 / 70) that automation can branch on without parsing
+  # the JSON envelope.
+  class DaemonInstallDriftError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class DaemonInstallFailed < Error
     def exit_code
       ExitCodes::SOFTWARE
     end

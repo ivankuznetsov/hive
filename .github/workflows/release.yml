@@ -39,9 +39,11 @@ jobs:
           gem_file="$(ls hive-cli-*.gem | head -n 1)"
           [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem in workspace" >&2; exit 1; }
           sandbox="$(mktemp -d)/gem-sandbox"
-          GEM_HOME="$sandbox" gem install "$gem_file" \
-            --no-document \
+          mkdir -p "$sandbox"
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" gem install "$gem_file" \
+            --install-dir "$sandbox" \
             --bindir "$sandbox/bin" \
+            --no-document \
             --source https://rubygems.org
           GEM_HOME="$sandbox" GEM_PATH="$sandbox" "$sandbox/bin/hive" --version
       - uses: actions/upload-artifact@v4

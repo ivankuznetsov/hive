@@ -49,7 +49,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, limits=defaults
+        hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`

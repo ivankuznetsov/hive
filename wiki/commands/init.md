@@ -67,7 +67,7 @@ Reordering either is a **breaking change for scripted automation** that uses ind
 When `$stdin.tty?` is false the prompt module skips every question and emits exactly one line to `$stdout`:
 
 ```
-hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, limits=defaults
+hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 ```
 
 Piped input is **not** consumed — `printf 'codex\n...' | hive init` ignores the piped data and uses defaults. Document this contract for any automation that wants to set non-default values: use `--force` plus an explicitly-edited YAML rather than expecting heredoc piping to populate answers.

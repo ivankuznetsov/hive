@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added — install channels
 
-- Added the v0.1.0 install surface: GitHub Release tarballs, Homebrew tap formula template, AUR `hive-bin` template, `install.sh`, and `install.md` for agent-assisted installs.
+- Hive now ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. The Homebrew tap formula, AUR `hive-bin` template, and `install.sh` all download the same signed `.gem` and `gem install` it. The earlier tebako/static-binary build path was dropped — Hive already requires Ruby 3.4 on the user's machine, so bundling a Ruby runtime into a single binary added build-pipeline complexity for no user gain.
 - Added XDG path resolution, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint for Apache Hive PATH collisions.
 - `hive init` now writes the per-user daemon service unit and asks whether to enable and start it immediately.
 

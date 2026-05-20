@@ -17,7 +17,7 @@ Read the model in depth in [docs/concepts.md](docs/concepts.md) — folder-as-ag
 
 ## Install
 
-Tier-1 installs use signed GitHub Release artifacts and register the daemon as a per-user service automatically.
+Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. All three channels below download the same `.gem`, verify the signature, and run `gem install` against it. After install, `hive init .` in any project writes the systemd-user (Linux) or launchd (macOS) daemon unit so the daemon survives reboots.
 
 | Platform | Channel |
 |----------|---------|
@@ -25,9 +25,9 @@ Tier-1 installs use signed GitHub Release artifacts and register the daemon as a
 | Arch Linux x86_64/aarch64 | `yay -S hive-bin` |
 | Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 
-Prerequisites: Ruby 3.4, git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, and authenticated `gh`. The bash installer reports its own runtime prereqs (`curl`, `jq`, `tar`, checksum tool) on first run.
+Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, and authenticated `gh`. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `gem`, checksum tool) on first run.
 
-After install, `hive init .` in any project writes the systemd-user (Linux) or launchd (macOS) daemon unit for you, so the daemon survives reboots and graceful restarts without further setup. Full install matrix, XDG paths, Apache Hive collision behavior (`hv` shim), update, uninstall, and autostart details live in [wiki/operating.md#install](wiki/operating.md#install) and [wiki/operating.md#autostart](wiki/operating.md#autostart).
+The vendored gems land under `${XDG_DATA_HOME:-~/.local/share}/hive/gems/` so the install is self-contained and uninstall is a clean `rm -rf`. Full install matrix, XDG paths, Apache Hive collision behavior (`hv` shim), update, uninstall, and autostart details live in [wiki/operating.md#install](wiki/operating.md#install) and [wiki/operating.md#autostart](wiki/operating.md#autostart).
 
 ### From a development clone
 

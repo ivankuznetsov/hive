@@ -11,7 +11,18 @@ usage() {
   cat <<USAGE
 usage: install.sh [--dry-run] [--prefix=<dir>] [--version=<tag>]
 
-Installs hive from GitHub Releases into XDG user paths.
+Installs hive as a rubygem (\`hive-cli\`) from GitHub Releases. The .gem
+is signed with cosign keyless attestation against this repo's release
+workflow; verification fails closed when cosign is available.
+
+After install the \`hive\` and \`hv\` executables are symlinked into
+\${XDG_BIN_HOME:-~/.local/bin}. The gem and its runtime dependencies
+(bubbletea, lipgloss, thor, telegram-bot-ruby) live under
+\${HIVE_PREFIX:-~/.local/share}/hive/gems so an uninstall is a clean
+\`rm -rf\` plus symlink removal.
+
+Requires Ruby 3.4 already on PATH; the installer reports its own
+prereqs (\`curl\`, \`jq\`, checksum tool) on first run.
 USAGE
 }
 
@@ -66,22 +77,21 @@ done
 
 validate_inputs
 
-detect_target() {
+# musl Linux and NixOS rejected at this layer because precompiled
+# bubbletea / lipgloss gems for musl are sparser than for glibc and
+# NixOS's read-only /nix store interacts badly with `gem install`.
+# Both routes need separate operational guidance; see wiki/operating.md.
+detect_platform() {
   local os arch
   os="$(uname -s)"
   arch="$(uname -m)"
 
   case "$os" in
     Darwin)
-      [[ "$arch" == "arm64" ]] || die "unsupported platform: macOS ${arch}; tier-1 binary is darwin-arm64"
+      [[ "$arch" == "arm64" ]] || die "unsupported platform: macOS ${arch}; tier-1 target is darwin-arm64"
       printf 'darwin-arm64\n'
       ;;
     Linux)
-      # Detect musl by probing for the dynamic linker symlink — `ldd`
-      # is missing on minimal containers (distroless, CI bases) where
-      # glibc is still present, so absent-ldd should not by itself
-      # poison the tier-1 result. The presence of `/lib/ld-musl-*`
-      # (or any musl interpreter) is the authoritative signal.
       if compgen -G "/lib/ld-musl-*" >/dev/null 2>&1 || compgen -G "/lib64/ld-musl-*" >/dev/null 2>&1; then
         die "unsupported platform: musl Linux is tier-3; see wiki/operating.md"
       fi
@@ -95,7 +105,7 @@ detect_target() {
       esac
       ;;
     *)
-      die "unsupported platform: ${os}; tier-1 targets are macOS arm64, Ubuntu 22.04+, and Arch Linux"
+      die "unsupported platform: ${os}; tier-1 targets are macOS arm64 and glibc Linux"
       ;;
   esac
 }
@@ -168,12 +178,10 @@ install_hint() {
 
 # Hard checks for tools the installer itself needs. Run BEFORE any
 # download attempt so we fail with an actionable message instead of
-# crashing mid-curl / mid-tar with a confusing trace. `tar`, `mktemp`,
-# `mv`, `rm`, and `ln` come from coreutils and are assumed present.
-# `sha256sum`/`shasum` is probed separately via `sha256_cmd`.
+# crashing mid-curl / mid-gem-install with a confusing trace.
 installer_preflight() {
   local dep missing=0
-  for dep in curl jq tar; do
+  for dep in curl jq; do
     if ! command -v "$dep" >/dev/null 2>&1; then
       warn "missing installer prerequisite '${dep}' ($(install_hint "$dep"))"
       missing=1
@@ -188,11 +196,30 @@ installer_preflight() {
   fi
 }
 
-# Warn-only check for runtime tools the installed binary uses at run
-# time (`hive run`, `hive doctor`, agent CLIs). Per plan U2 these are
-# never auto-installed; missing them does NOT fail the installer —
-# the binary on disk is already valid and `hive --version`,
-# `hive doctor`, and `hive update` keep working.
+# Ruby 3.4+ is required by hive.gemspec; gem install will refuse
+# otherwise. Skipped under --dry-run because dry-run is a preview /
+# argument-shape lint and CI runners often pin older system Rubies.
+ruby_preflight() {
+  local dep missing=0
+  for dep in ruby gem; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+      warn "missing installer prerequisite '${dep}' (install Ruby 3.4 with rbenv / mise / asdf, or your OS package manager)"
+      missing=1
+    fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+    die "install aborted: Ruby 3.4 is required — fix the warnings above and re-run"
+  fi
+  if ! ruby -e 'exit(RUBY_VERSION.to_f >= 3.4)' 2>/dev/null; then
+    die "Ruby 3.4+ required; found $(ruby -e 'print RUBY_VERSION' 2>/dev/null || echo unknown)"
+  fi
+}
+
+# Warn-only check for runtime tools the installed CLI uses at run time
+# (`hive run`, `hive doctor`, agent CLIs). Per plan U2 these are never
+# auto-installed; missing them does NOT fail the installer — the gem
+# is already on disk and `hive --version`, `hive doctor`, and
+# `hive update` keep working.
 runtime_preflight() {
   local dep
   for dep in git bash claude gh; do
@@ -202,45 +229,49 @@ runtime_preflight() {
   done
 }
 
-target="$(detect_target)"
+platform="$(detect_platform)"
 # Hard-fail BEFORE any network call when the installer itself is
-# missing required tools — `latest_version` shells out to jq, the
-# download path shells out to tar / sha256sum, etc.
+# missing required tools.
 installer_preflight
 version="${VERSION:-$(latest_version)}"
 [[ -n "$version" ]] || die "could not resolve a hive release version"
 
 data_base="${PREFIX:-${XDG_DATA_HOME:-${HOME}/.local/share}}"
 data_home="${data_base%/}/hive"
+gem_home="${data_home}/gems"
 bin_home="${XDG_BIN_HOME:-${HOME}/.local/bin}"
-archive_name="hive-${version#v}-${target}.tar.gz"
+gem_file="hive-cli-${version#v}.gem"
 release_base="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${version}"
-archive_url="${release_base}/${archive_name}"
+gem_url="${release_base}/${gem_file}"
 checksums_url="${release_base}/SHA256SUMS"
 sig_url="${release_base}/SHA256SUMS.sig"
 cert_url="${release_base}/SHA256SUMS.pem"
-install_dir="${data_home}/${version}"
-installed_bin="${install_dir}/bin/hive"
+installed_bin="${gem_home}/bin/hive"
 link_path="${bin_home}/hive"
 hv_path="${bin_home}/hv"
 
 log "hive install"
-log "  version: ${version}"
-log "  target:  ${target}"
-log "  install: ${install_dir}"
-log "  binary:  ${link_path}"
+log "  version:  ${version}"
+log "  platform: ${platform}"
+log "  gems:     ${gem_home}"
+log "  binary:   ${link_path}"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  log "dry run: would download ${archive_url}"
+  log "dry run: would download ${gem_url}"
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
+  log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
   runtime_preflight
   exit 0
 fi
 
+# Probe Ruby/gem now that we know this is not a dry-run; the gem
+# install path requires Ruby 3.4 on PATH.
+ruby_preflight
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-download_with_status "$archive_url" "${tmpdir}/${archive_name}" "release tarball"
+download_with_status "$gem_url" "${tmpdir}/${gem_file}" "release gem"
 download_with_status "$checksums_url" "${tmpdir}/SHA256SUMS" "SHA256SUMS"
 
 # Cosign verify SHA256SUMS when both the signature blob and the
@@ -268,46 +299,58 @@ else
 fi
 
 # Strict line match: optional `./` prefix, sha digest, two-space sep,
-# exact archive_name, optional CR. `|| true` so a no-match under
-# `set -e` reaches the explicit die below instead of exiting with
-# grep's exit 1 and an empty error.
-expected_line="$(grep -E "^[a-f0-9]{64}  (\./)?${archive_name}[[:space:]]*$" "${tmpdir}/SHA256SUMS" || true)"
-[[ -n "$expected_line" ]] || die "SHA256SUMS does not contain ${archive_name}"
+# exact gem_file, optional CR. `|| true` so a no-match under `set -e`
+# reaches the explicit die below instead of exiting with grep's exit
+# 1 and an empty error.
+expected_line="$(grep -E "^[a-f0-9]{64}  (\./)?${gem_file}[[:space:]]*$" "${tmpdir}/SHA256SUMS" || true)"
+[[ -n "$expected_line" ]] || die "SHA256SUMS does not contain ${gem_file}"
 
-actual="$($(sha256_cmd) "${tmpdir}/${archive_name}" | awk '{print $1}')"
+actual="$($(sha256_cmd) "${tmpdir}/${gem_file}" | awk '{print $1}')"
 expected="$(printf '%s\n' "$expected_line" | awk '{print $1}')"
-[[ "$actual" == "$expected" ]] || die "checksum mismatch for ${archive_name}"
+[[ "$actual" == "$expected" ]] || die "checksum mismatch for ${gem_file}"
 
-mkdir -p "$bin_home" "$data_home"
-tar -xzf "${tmpdir}/${archive_name}" -C "$tmpdir"
-extracted="${tmpdir}/hive-${version#v}-${target}"
-[[ -x "${extracted}/bin/hive" ]] || die "release archive does not contain executable bin/hive"
+mkdir -p "$bin_home" "$gem_home"
 
-# Stage under `${install_dir}.new` (sibling of the live install dir so
-# the renames stay on the same fs), rotate the live directory under
-# `.old`, then rename `.new` → live and reap `.old`. A concurrent `hive`
-# invocation never sees a partially-extracted directory.
-staged_dir="${install_dir}.new"
-old_dir="${install_dir}.old"
-rm -rf "$staged_dir" "$old_dir"
-mkdir -p "$(dirname "$install_dir")"
-mv "$extracted" "$staged_dir"
-if [[ -e "$install_dir" ]]; then
-  mv "$install_dir" "$old_dir"
-fi
-mv "$staged_dir" "$install_dir"
-rm -rf "$old_dir"
+# Install into a dedicated GEM_HOME under ${data_home}/gems. Runtime
+# deps (bubbletea, lipgloss, thor, telegram-bot-ruby) are pulled from
+# rubygems.org with platform-correct precompiled binaries. --no-document
+# skips rdoc/ri generation (saves ~30s on first install).
+GEM_HOME="$gem_home" gem install \
+  "${tmpdir}/${gem_file}" \
+  --install-dir "$gem_home" \
+  --bindir "${gem_home}/bin" \
+  --no-document \
+  --source https://rubygems.org \
+  || die "gem install failed for ${gem_file}"
 
-if [[ "$(uname -s)" == "Darwin" ]] && command -v xattr >/dev/null 2>&1; then
-  # Treat any xattr failure as benign — Gatekeeper quarantine removal
-  # is best-effort and not all entries carry the attribute.
-  xattr -d com.apple.quarantine "$installed_bin" || true
-fi
+[[ -x "$installed_bin" ]] || die "gem install completed but no executable at ${installed_bin}"
+
+# Write a wrapper at ${gem_home}/bin/hive that sets GEM_HOME/GEM_PATH
+# before delegating to the real ruby script. The shim that
+# `gem install --bindir` writes uses `require 'rubygems'; gem
+# 'hive-cli'` which fails when the user's default GEM_PATH does not
+# include $gem_home (which is our common case under XDG_DATA_HOME/hive).
+# We replace the shim with a tiny bash wrapper that exports the right
+# GEM_PATH before exec'ing the ruby shim under a sub-bindir. This
+# keeps the gem-installed scripts intact for `hive update` to refresh.
+mkdir -p "${gem_home}/shims"
+mv "${gem_home}/bin/hive" "${gem_home}/shims/hive"
+mv "${gem_home}/bin/hv" "${gem_home}/shims/hv"
+cat > "${gem_home}/bin/hive" <<WRAPPER
+#!/usr/bin/env bash
+export GEM_HOME="${gem_home}"
+export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+exec "${gem_home}/shims/hive" "\$@"
+WRAPPER
+cat > "${gem_home}/bin/hv" <<WRAPPER
+#!/usr/bin/env bash
+export GEM_HOME="${gem_home}"
+export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+exec "${gem_home}/shims/hv" "\$@"
+WRAPPER
+chmod +x "${gem_home}/bin/hive" "${gem_home}/bin/hv"
 
 existing_hive="$(command -v hive 2>/dev/null || true)"
-# Use realpath to compare canonical locations without `cd`, which under
-# set -e would abort the script if the directory of the colliding
-# binary became unreadable mid-install.
 existing_canon=""
 if [[ -n "$existing_hive" ]]; then
   existing_canon="$(readlink -f "$existing_hive" 2>/dev/null || true)"
@@ -336,21 +379,21 @@ if [[ -n "$PREFIX" ]]; then
     printf '%s\n' "$PREFIX" > "${xdg_data_home}/install-prefix"
   fi
 fi
-ln -sfn "$installed_bin" "$link_path"
+ln -sfn "${gem_home}/bin/hive" "$link_path"
 
-if [[ -n "$existing_hive" ]] && [[ -n "$existing_canon" ]] && [[ "$existing_canon" != "$link_canon" ]] && [[ "$existing_canon" != "$(readlink -f "$installed_bin" 2>/dev/null || echo "$installed_bin")" ]]; then
-  ln -sfn "$installed_bin" "$hv_path"
+if [[ -n "$existing_hive" ]] && [[ -n "$existing_canon" ]] && [[ "$existing_canon" != "$link_canon" ]] && [[ "$existing_canon" != "$(readlink -f "${gem_home}/bin/hive" 2>/dev/null || echo "${gem_home}/bin/hive")" ]]; then
+  ln -sfn "${gem_home}/bin/hv" "$hv_path"
   warn "existing hive on PATH at ${existing_hive}; installed hv fallback at ${hv_path}"
 else
   # Always refresh hv when we already own it so stale symlinks from
   # earlier installs don't dangle.
   if [[ -L "$hv_path" ]]; then
-    ln -sfn "$installed_bin" "$hv_path"
+    ln -sfn "${gem_home}/bin/hv" "$hv_path"
   fi
 fi
 
 runtime_preflight
 
-log "installed hive ${version} for ${target}"
+log "installed hive ${version} (hive-cli rubygem)"
 log "next: run 'hive --version', then 'hive init' in a project"
 log "agent skills are installed separately; see install.md"

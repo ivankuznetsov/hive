@@ -4,7 +4,7 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 ## Goal
 
-Install the latest stable Hive release, verify `hive --version`, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (`curl`, `jq`, `tar`, checksum tool) when that channel is used.
+Install the latest stable Hive release, verify `hive --version`, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; all three channels (Homebrew, AUR, install.sh) download the same signed `.gem` and run `gem install` against it.
 
 ## Detect
 

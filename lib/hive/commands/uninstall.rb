@@ -24,7 +24,7 @@ module Hive
         remove_user_symlinks
         cleanup_project_state(projects)
         @output.puts "hive: core uninstall cleanup complete"
-        @output.puts "hive: remove the binary with your install channel (brew uninstall hive, yay -R hive-bin, or remove the versioned payload at ~/.local/share/hive/<version>/ and ~/.local/bin/hive)"
+        @output.puts "hive: remove the binary with your install channel (brew uninstall hive, yay -R hive-bin, or remove the gem payload at ~/.local/share/hive/gems/ and ~/.local/bin/hive)"
         @output.puts "hive: skills are managed by your agent marketplace; remove them with claude/codex/pi plugin commands"
         0
       end

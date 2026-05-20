@@ -170,6 +170,46 @@ module Hive
       ).call
     end
 
+    desc "update", "Update hive via the install channel that installed it"
+    long_desc <<~DESC
+      Reads the install-channel marker written by the installer and delegates
+      to the native updater:
+
+        brew  → brew upgrade ivankuznetsov/hive/hive
+        aur   → yay -Syu hive-bin (or paru when yay is unavailable)
+        bash  → download the pinned install.sh to a tempfile, then run it
+        dev   → prints git pull && bundle install guidance
+
+      Hive never swaps its own binary in place and never guesses across
+      channels.
+    DESC
+    option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
+    def update
+      require "hive/commands/update"
+      Hive::Commands::Update.new(dry_run: options[:dry_run]).call
+    end
+
+    desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
+    long_desc <<~DESC
+      Stops and deregisters the per-user daemon service, removes hive config
+      and cache directories, and removes versioned bash-install payloads.
+      It preserves accumulated work under XDG state and project .hive-state
+      directories by default.
+
+      --purge is non-interactive for CI but still preserves accumulated work.
+      --force-purge-state is the explicit destructive escape hatch.
+    DESC
+    option :purge, type: :boolean, default: false, desc: "non-interactive cleanup; still preserves state"
+    option :force_purge_state, type: :boolean, default: false,
+                               desc: "also remove XDG state and registered project .hive-state directories"
+    def uninstall
+      require "hive/commands/uninstall"
+      Hive::Commands::Uninstall.new(
+        purge: options[:purge],
+        force_purge_state: options[:force_purge_state]
+      ).call
+    end
+
     desc "migrate [PROJECT_PATH]", "Rename in-flight task folders from the pre-open-pr stage layout"
     def migrate(project_path = Dir.pwd)
       require "hive/commands/migrate"

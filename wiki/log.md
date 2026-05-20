@@ -25,6 +25,13 @@ Status also no longer treats any `7-finalize` `COMPLETE` marker as archive-ready
 **Refreshed pages:**
 - [[stages/finalize]] — preconditions and marker-action table now mention missing PR metadata error markers.
 
+## [2026-05-19T21:40:00Z] install — avoid remote-script pipe in bash channel
+
+**Action:** Follow-up from review fix-guardrail inspection. `hive update` now downloads the pinned `install.sh` into a temporary directory and runs that file instead of using a remote-script pipe. The agent installer prompt and operating guide now show the same download-then-run flow for glibc Linux installs, while still pinning to the release tag.
+
+**Refreshed pages:**
+- [[operating]] — bash install channel example now uses a tempfile download before execution.
+
 ## [2026-05-19T16:00:00Z] status — surface legacy stage dirs in JSON + text + TUI (PR #93)
 
 **Action:** `hive status` now detects task folders left behind by a stage rename in `Hive::Stages::DIRS` and surfaces them on every operator surface, instead of silently truncating them out of view. `Status#detect_legacy_stage_dirs` scans `<hive_state>/stages/` for directories outside `Hive::Stages::DIRS` containing slug-shaped subfolders (per the new `Hive::Stages.task_slug?` predicate — single source of truth shared with `Hive::Commands::Migrate`, so the count matches what `hive migrate` would actually move). The JSON payload's `Project` entry now always carries an additive `legacy_stage_dirs` array (`[]` when clean, otherwise `[{stage_dir, task_count}, ...]` sorted alphabetically). Text output prints a `⚠ N task(s) hidden in legacy stage dirs: ...` warning + `run hive migrate` hint under the project header; the TUI projects pane prefixes the affected project with `⚠` and a `legacy dirs — run hive migrate` hint by extending `ProjectView` with the new field. Schema `urn:hive:schema:status:v2` gains the optional `legacy_stage_dirs` property on `Project` without bumping `SCHEMA_VERSIONS["hive-status"]` (additive-optional policy in `lib/hive.rb`, precedent in PR #69's `rebase` block).
@@ -1496,6 +1503,20 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 - `wiki/testing.md` — updated the e2e starter scenario count to six.
 - `wiki/commands/tui.md` — documented bounded quiet subprocesses and truncated retained spawn captures.
 
+## [2026-05-15T00:00:00Z] release — v0.1.0 artifact workflow
+
+**Action:** Added the v0.1.0 release artifact scaffold: `rake build:release[<target>]`, Tebako-backed `packaging/build/release.sh`, a spike helper under `packaging/spike/`, and a tag-triggered GitHub Actions workflow that builds tier-1 tarballs, writes `SHA256SUMS`, signs the checksum file with cosign keyless, and publishes the GitHub Release. Recorded ADR-027 in [[decisions]] so the chosen packager and fallback point are explicit.
+
+**Refreshed pages:**
+- `wiki/decisions.md` — ADR-027 (Tebako release artifact strategy).
+
+## [2026-05-15T01:00:00Z] install — channels, XDG paths, prompt installer
+
+**Action:** Added the user-facing install surface for v0.1.0: `install.sh`, `install.md`, Homebrew/AUR templates, XDG path docs, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint. `hive init` now writes the per-user daemon service unit and records whether the user chose to start it immediately.
+
+**Refreshed pages:**
+- `wiki/operating.md` — install channels, tier matrix, XDG layout, update/uninstall, skills marketplace command shapes.
+
 ## [2026-05-05T18:00:00Z] architecture — TUI/MVU pipeline
 
 **Action:** Documented the TUI MVU pipeline (`BubbleModel ↔ Update ↔ KeyMap ↔ PasteAwareRunner ↔ InputDecoder`) in `wiki/architecture.md`, including the side-effect seam in `BubbleModel#handle_side_effect`, the paste-routing-by-mode contract for `RawTextInput`, decoder reset on cancel, and the GVL-yielding `YieldTick`. Hardened `InputDecoder` against unmapped C0 bytes (Ctrl+C now decodes to `KEY_CTRL_C`; other unmapped bytes are silently dropped), added 4 KiB `@pending` and 1 MiB `@paste_buffer` caps with truncation flashes, a 5 s paste-timeout flush, stray `\e[201~` consumption, ESC+CR/LF cancel-gesture absorption, and C0 stripping in `normalize_paste`. `PasteAwareRunner` now resets the decoder on transitions out of `:new_idea` / `:filter` and asserts `Bubbletea::VERSION == "0.1.4"` at load. Removed the dead `Messages::NewIdeaCharAppended` path; consolidated paste normalization on the decoder; switched the new-idea over-limit branch from drop-everything to partial-fit with a truncation flash; raised `input_timeout` from 1 ms to 5 ms to absorb fragmented paste markers; pinned bubbletea to `= 0.1.4` in the Gemfile.
@@ -1607,3 +1628,12 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 - `wiki/commands/tui.md` — documented red-status detail mode, keybindings, snapshot refresh behavior, and preserved direct recovery exceptions.
 - `wiki/decisions.md` — ADR-027 records the diagnose-then-act policy and its relationship to ADR-025.
 - `wiki/index.md` — bumped refresh date.
+
+## [2026-05-20T00:00:00Z] install — v0.1.0 release-surface review fixes
+
+**Action:** Tightened the v0.1.0 install surface after review pass 2. The bash installer now keeps runtime dependency checks warn-only, writes prefix sidecars for `hive update`, pins cosign verification to the repository identity, and is covered by checksum, PATH-collision, and unsupported-platform smoke fixtures. `hive init` now passes the invoked Hive binary to daemon service registration; Homebrew macOS units resolve to the stable Homebrew `bin/hive` symlink. The AUR publisher remains deferred but the release workflow now fails loudly if its secret is configured before real publishing exists.
+
+**Refreshed pages:**
+- `wiki/operating.md` — documented prefix update behavior, tier-3 macOS x86_64 install.sh status, `--force-purge-state`, AUR `hv` caveat, and skills-package deferral.
+- `wiki/decisions.md` — updated ADR-024 and ADR-027 for Homebrew stable daemon paths and release-workflow Tebako validation.
+- `wiki/gaps.md` — added AUR publish, Rosetta/macOS x86_64, and skills-package follow-ups.

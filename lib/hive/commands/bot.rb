@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/lock"
 require "hive/bot/supervisor"
 require "hive/bot/logger"
+require "hive/paths"
 
 module Hive
   module Commands
@@ -13,7 +14,7 @@ module Hive
       VALID_SUBCOMMANDS = %w[start stop status reload tail].freeze
 
       def initialize(subcommand, detach: false, dry_run: false, json: false,
-                     hive_home: Hive::Config.hive_home)
+                     hive_home: Hive::Paths.state_home)
         @subcommand = subcommand
         @detach = detach
         @dry_run = dry_run

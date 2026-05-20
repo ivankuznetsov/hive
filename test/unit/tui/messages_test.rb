@@ -71,6 +71,14 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_red_status_detail_messages_carry_row
+    row = Object.new
+    assert_same row, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row).row
+    assert_same row, Hive::Tui::Messages::RedStatusAutofix.new(row: row).row
+    assert_same row, Hive::Tui::Messages::OpenManualFix.new(row: row).row
+    assert_same row, Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row).row
+  end
+
   def test_terminate_requested_singleton
     # Parameterless messages use a frozen singleton so callers don't
     # allocate per-trigger and so identity comparisons work.

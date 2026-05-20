@@ -14,7 +14,24 @@ module Hive
     class Snapshot
       # `error` is nil for healthy projects and the JSON's "error" string
       # ("missing_project_path" / "not_initialised") otherwise.
-      ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows)
+      # `legacy_stage_dirs` carries the JSON's `legacy_stage_dirs` array
+      # verbatim ([] when the project is clean) so the renderer can flag
+      # projects with task folders stuck under a renamed stage directory
+      # without re-walking the filesystem. `legacy_migrate_command`
+      # carries the JSON's `legacy_migrate_command` string verbatim
+      # ("hive migrate" when legacy_stage_dirs is non-empty; nil
+      # otherwise) — agent-facing parity of the text recovery hint.
+      ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
+                                :legacy_stage_dirs, :legacy_migrate_command) do
+        # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
+        # to nil so existing test factories (predating the fields) can keep
+        # building ProjectView with the original 5-keyword shape.
+        # Production callers in this file always pass them explicitly.
+        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil, **rest)
+          super(legacy_stage_dirs: legacy_stage_dirs,
+                legacy_migrate_command: legacy_migrate_command, **rest)
+        end
+      end
 
       # Mirrors `Hive::Commands::Status#task_payload` 1:1 plus a
       # `project_name` back-reference so a flat row list stays attributable
@@ -27,6 +44,7 @@ module Hive
         :slug,
         :folder,
         :state_file,
+        :worktree_path,
         :marker,
         :attrs,
         :mtime,
@@ -36,8 +54,17 @@ module Hive
         :action_key,
         :action_label,
         :suggested_command,
-        :next_action
-      )
+        :next_action,
+        :diagnostic
+      ) do
+        # worktree_path defaults to nil so existing test factories that
+        # predate PR #84 finding #8 can keep their existing Row.new
+        # calls; production code in build_row always passes the value
+        # explicitly. New tests should pass it explicitly too.
+        def initialize(worktree_path: nil, **rest)
+          super(worktree_path: worktree_path, **rest)
+        end
+      end
 
       attr_reader :generated_at, :projects
 
@@ -78,7 +105,9 @@ module Hive
           path: payload["path"],
           hive_state_path: payload["hive_state_path"],
           error: payload["error"],
-          rows: sorted.freeze
+          rows: sorted.freeze,
+          legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
+          legacy_migrate_command: payload["legacy_migrate_command"]
         ).freeze
       end
 
@@ -90,6 +119,7 @@ module Hive
           slug: payload["slug"],
           folder: payload["folder"],
           state_file: payload["state_file"],
+          worktree_path: payload["worktree_path"],
           marker: payload["marker"],
           attrs: payload["attrs"],
           mtime: payload["mtime"],
@@ -99,7 +129,8 @@ module Hive
           action_key: payload["action"],
           action_label: payload["action_label"],
           suggested_command: payload["suggested_command"],
-          next_action: payload["next_action"]
+          next_action: payload["next_action"],
+          diagnostic: payload["diagnostic"]
         ).freeze
       end
 
@@ -124,7 +155,9 @@ module Hive
             path: project.path,
             hive_state_path: project.hive_state_path,
             error: project.error,
-            rows: matched.freeze
+            rows: matched.freeze,
+            legacy_stage_dirs: project.legacy_stage_dirs,
+            legacy_migrate_command: project.legacy_migrate_command
           ).freeze
         end
         self.class.new(generated_at: @generated_at, projects: filtered)

@@ -447,16 +447,47 @@ module Hive
       end
 
       def reply_for_child(child)
-        text = if child.exit_code == Hive::ExitCodes::WRONG_STAGE
-                 "Already advanced by another device"
-        elsif child.exit_code == Hive::ExitCodes::TEMPFAIL
-                 "Try again - another run holds the lock"
-        elsif child.exit_code.zero?
-                 "Command completed"
-        else
-                 "Command failed with exit #{child.exit_code}; see #{child.log_path}"
-        end
+        text = diagnose_reply_for_child(child) || child_completion_text(child)
         @telegram.send_message(chat_id: child.chat_id, text: text)
+      end
+
+      def diagnose_reply_for_child(child)
+        envelope = child.json_envelope
+        return nil unless envelope.is_a?(Hash) && envelope["schema"] == "hive-status-diagnose"
+
+        if envelope["ok"] == true
+          diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
+          lines = []
+          summary = diagnostic["summary"].to_s.strip
+          detail = diagnostic["detail"].to_s.strip
+          path = envelope["path"].to_s.strip
+          lines << summary unless summary.empty?
+          lines << detail unless detail.empty? || detail == summary
+          lines << "Path: #{path}" unless path.empty?
+          return lines.join("\n\n") unless lines.empty?
+
+          return "No diagnostic available for #{envelope['slug'] || child.slug}."
+        end
+
+        kind = envelope["error_kind"].to_s.strip
+        message = envelope["message"].to_s.strip
+        exit_code = envelope["exit_code"] || child.exit_code
+        prefix = "Diagnosis failed"
+        prefix += " (#{kind})" unless kind.empty?
+        text = "#{prefix}: #{message.empty? ? "exit #{exit_code}" : message}"
+        child.log_path ? "#{text}; see #{child.log_path}" : text
+      end
+
+      def child_completion_text(child)
+        if child.exit_code == Hive::ExitCodes::WRONG_STAGE
+          "Already advanced by another device"
+        elsif child.exit_code == Hive::ExitCodes::TEMPFAIL
+          "Try again - another run holds the lock"
+        elsif child.exit_code == 0
+          "Command completed"
+        else
+          "Command failed with exit #{child.exit_code || 'unknown'}; see #{child.log_path}"
+        end
       end
 
       QUEUE_DISPLAY_CAP = 10
@@ -484,10 +515,17 @@ module Hive
           buttons = Array(notification&.keyboard).flatten
           primary = buttons.find { |button| button[:callback_data].to_s !~ /\Aopen_laptop:|details:/ } ||
             buttons.first ||
-            { text: "Details", callback_data: "details:#{row.project}:#{row.slug}" }
+            { text: "Details", callback_data: details_callback_for(row) }
           [ [ { text: "#{primary[:text]}: #{row.project}/#{row.slug}",
                 callback_data: primary[:callback_data] } ] ]
         end
+      end
+
+      def details_callback_for(row)
+        parts = [ "details", row.project, row.slug ]
+        stage = row.respond_to?(:stage) ? row.stage.to_s : ""
+        parts << stage unless stage.empty?
+        parts.join(":")
       end
 
       def render_details(rows, project, slug)

@@ -28,8 +28,10 @@ module Hive
       # Task-folder names follow this slug pattern (see Task::PATH_RE).
       # Any entry under a legacy stage directory that doesn't look like a
       # task slug is left in place — never silently mv'd into the new
-      # stage dir.
-      SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
+      # stage dir. Re-exported here for back-compat with existing callers;
+      # `Hive::Stages::SLUG_RE` is the single source of truth shared with
+      # `Hive::Commands::Status#detect_legacy_stage_dirs`.
+      SLUG_RE = Hive::Stages::SLUG_RE
 
       def initialize(project_path = Dir.pwd)
         @project_path = File.expand_path(project_path)
@@ -84,7 +86,7 @@ module Hive
           Dir.children(old_dir).sort.each do |entry|
             # Skip any non-slug entry (including .gitkeep, .DS_Store,
             # stray .lock, etc.). Only task-folder slugs migrate.
-            next unless SLUG_RE.match?(entry)
+            next unless Hive::Stages.task_slug?(entry)
 
             src = File.join(old_dir, entry)
             next unless File.directory?(src)

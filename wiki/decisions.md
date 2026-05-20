@@ -3,18 +3,27 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-15
+updated: 2026-05-20
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows.
 
-## ADR-024: PR-first workflow and finalize rename
+## ADR-027: Release artifacts are Tebako-packed binaries
 
 **Status:** Active
-**Context:** Opening the GitHub PR only after autonomous review made human intervention awkward: a person had to find the task under `.hive-state/stages/6-review/` and edit local files instead of using `gh pr checkout`.
-**Decision:** Insert `5-open-pr` between execute and review. It pushes the branch and opens a draft PR. Rename the old PR stage to `7-finalize`; it now verifies the reviewed branch is pushed, refreshes the PR description, writes `summary.md`, and flips the PR from draft to ready-for-review. The full stage order is `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-finalize → 8-done`.
-**Consequences:** Review runs against an already-open draft PR. Reviewer files remain authoritative locally, but the review orchestrator mirrors each reviewer/escalation file to the PR as a comment for human visibility. Existing in-flight tasks on old stage names require explicit `hive migrate`; hive does not silently rename task folders.
+**Context:** The v0.1.0 install plan requires tier-1 channel installers to consume a self-contained `hive` artifact rather than asking end users to install Ruby and run from a clone. The high-risk gems are the TUI bindings (`bubbletea` 0.1.4 and `lipgloss` 0.2.x), because they use native components and `Hive::Tui::PasteAwareRunner` depends on private Bubble Tea runner state.
+**Decision:** Release artifacts are built by `packaging/build/release.sh`, called via `rake build:release[<target>]`, and the GitHub tag workflow installs Tebako before producing `hive-<version>-<target>.tar.gz` for `darwin-arm64`, `linux-x86_64-gnu`, and `linux-aarch64-gnu`. Local Tebako packageability validation is deferred to the release workflow; no local CI-equivalent Tebako run exists for this worktree yet. The `v0.1.0-rc.0` release workflow run is required before cutting the real `v0.1.0` release.
+**Consequences:** Install channels share one artifact shape and one checksum file. A failed Tebako build fails the release before any channel metadata is published. If Tebako cannot support the pinned native gems in CI, the replacement point is `packaging/build/release.sh`; installers and update/uninstall behavior remain unchanged because they only depend on the tarball contract.
+
+**Known gap — release-tag trust:** `gh release create --verify-tag` only checks the tag *format*, not its cryptographic provenance. We sign `SHA256SUMS` keyless via cosign + Fulcio, which protects the artifacts users download, but the underlying git tag itself is not signed. An attacker who pushes a malicious tag to the release branch could trigger the workflow and have it mint a signed artifact under their tag. Mitigation today is GitHub branch protection on the release branch and a maintainer-only allowlist for tag pushes; a future hardening pass should add `git tag --verify` against a published maintainer key before the build step runs.
+
+## ADR-024: PR-first workflow, finalize rename, and daemon autonomy
+
+**Status:** Active
+**Context:** Opening the GitHub PR only after autonomous review made human intervention awkward: a person had to find the task under `.hive-state/stages/6-review/` and edit local files instead of using `gh pr checkout`. At the same time, the daemon needed a deterministic install surface — manual launchd/systemd cp+edit recipes drift across platforms and become stale doc the moment `hive init` learns to install a unit on its own.
+**Decision:** Insert `5-open-pr` between execute and review. It pushes the branch and opens a draft PR. Rename the old PR stage to `7-finalize`; it now verifies the reviewed branch is pushed, refreshes the PR description, writes `summary.md`, and flips the PR from draft to ready-for-review. The full stage order is `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-finalize → 8-done`. In parallel, `hive init` now installs the platform daemon unit on disk by default via `Hive::Commands::Daemon::ServiceInstaller`: the unit (launchd plist on macOS, systemd-user service on Linux) is written unconditionally, while `launchctl load` / `systemctl --user enable --now` are only invoked when the user opts in at the `daemon_autostart` prompt. Drifted/customised units are detected by content hash and left untouched.
+**Consequences:** Review runs against an already-open draft PR. Reviewer files remain authoritative locally, but the review orchestrator mirrors each reviewer/escalation file to the PR as a comment for human visibility. Existing in-flight tasks on old stage names require explicit `hive migrate`; hive does not silently rename task folders. For daemon registration: users who previously hand-installed a service unit see the "already exists; leaving user-customized file untouched" warning instead of a silent overwrite. Homebrew-installed macOS units point at the stable `${HOMEBREW_PREFIX}/bin/hive` symlink rather than a versioned Cellar realpath, so `brew upgrade hive` keeps the daemon binary path current; customized drifted plists still require explicit removal and `hive init` re-registration.
 
 ## ADR-001: Folder-as-task, not single markdown file
 
@@ -287,6 +296,28 @@ Path B is the default: the operator reads the question and replies in Telegram; 
 - No new persistence sidecar is introduced for conversations. `brainstorm.md` is the source of truth; after a bot restart, parsing the file identifies the next unanswered question.
 - The bot token is environment-only (`HIVE_TELEGRAM_BOT_TOKEN`); it is never stored in config or logged.
 - Cloud relay/webhook mode is deferred. The same long-poll process can run on the laptop or on an always-on host.
+
+## ADR-027: Red status rows use diagnose-then-act, not checkbox-gated escalation
+
+**Status:** Active (shipped with plan `docs/plans/2026-05-16-001-feat-red-status-diagnostics-and-actions-plan.md`)
+
+**Context:** Review/recovery rows were technically actionable but operationally opaque. A row could say `Needs recovery` or `ERROR exit_code=1`, while the real explanation lived in a review artifact, a log tail, or the marker attrs. The user had to infer whether Enter would retry, whether manual work was needed, or whether the system should already have enough context to fix itself. Checkbox-only escalations made that worse: a checked or unchecked line did not explain which question was being asked, which context was already available, or why automation stopped.
+
+**Decision:** Red rows expose a Q&A-shaped diagnostic surface before user choice. `hive status --json` carries a required nullable `diagnostic` field on every task row; ordinary rows emit `null`, while `recover_execute`, `recover_review`, and `error` rows emit a bounded, redacted diagnostic built by `Hive::TaskAction`. `hive status --diagnose <task>` reads that same local diagnosis, and `--write` asks the configured development agent to write `diagnostics/red-status.md`. Status only trusts that artifact when `generated_by` is an allowed local/profile name and `marker_signature` matches the current marker.
+
+The TUI applies "auto-fix first, manual only when needed." Grid Enter opens red-status detail for ambiguous review recovery rows and non-kill-class errors. The detail view answers:
+
+1. Why is this red?
+2. What can Hive do next?
+
+Then it offers three explicit gestures: `Enter` for the existing autofix/retry path, `f` for manual worktree editing, and `R` for fresh headless diagnosis. Existing deterministic paths stay direct: wall-clock review stale retries, max-passes review stale with an escalations file opens that file for browse/edit, and kill-class errors open the log tail while auto-heal runs.
+
+**Consequences:**
+- Operators see the concrete artifact/log/marker explanation before retrying.
+- Agents and bots can consume the same `diagnostic` payload instead of scraping TUI text.
+- The schema follows ADR-025: `diagnostic` is required and nullable rather than optional.
+- A stale `diagnostics/red-status.md` cannot explain a new marker because the marker signature must match.
+- The diagnosis agent is intentionally outside the workflow lock/marker lifecycle; it writes one artifact and does not claim, clear, or advance the task.
 
 ## Source
 

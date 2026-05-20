@@ -11,8 +11,9 @@ module Hive
         ready_to_brainstorm
         ready_to_plan
         ready_to_develop
+        ready_to_open_pr
         ready_for_review
-        ready_for_pr
+        ready_to_finalize
         ready_to_archive
       ].freeze
 
@@ -74,7 +75,7 @@ module Hive
           Notification.new(
             text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
             keyboard: [
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ],
+              [ button("Show details", details_callback(row)) ],
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
             ]
           )
@@ -99,7 +100,7 @@ module Hive
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
             keyboard: [
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+              [ button("Show details", details_callback(row)) ]
             ]
           )
         end
@@ -111,36 +112,75 @@ module Hive
               button("Accept all", "findings:accept_all:#{row.project}:#{row.slug}:#{row.stage}"),
               button("Reject all", "findings:reject_all:#{row.project}:#{row.slug}:#{row.stage}")
             ],
-            [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+            [ button("Show details", details_callback(row)) ]
           ]
         )
       end
 
       def recovery(row)
+        # The "Refresh diagnosis" button is the bot-side parity of the
+        # TUI's R keystroke: dispatches `hive status --diagnose <slug>
+        # --write --force --json` so the configured execute AgentProfile
+        # produces a fresh diagnostic verdict. Pairs with Show details
+        # (which just reads the current verdict). Resolves issue #91.
+        details_row = [
+          button("Show details", details_callback(row)),
+          button("Refresh diagnosis", refresh_diagnose_callback(row))
+        ]
         keyboard =
           if open_laptop_only_recovery?(row)
             [
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+              details_row
+            ]
+          elsif markerless_retry_recovery?(row)
+            [
+              [ button("Retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:NONE") ],
+              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+              details_row
             ]
           else
             [
               [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
               [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              [ button("Show details", "details:#{row.project}:#{row.slug}") ]
+              details_row
             ]
           end
-        Notification.new(
-          text: header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}",
-          keyboard: keyboard
-        )
+        # Append the bounded diagnostic summary so the operator sees the
+        # one-line "why is this red" without an extra round-trip through
+        # the Show-details callback. StatusWatcher::Row carries the
+        # diagnostic hash from `hive status --json`; nil when the row is
+        # green or the snapshot pre-dates the schema. See PR #84 review
+        # row 23.
+        text = header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}"
+        if row.diagnostic.is_a?(Hash) && !row.diagnostic["summary"].to_s.empty?
+          text += "\n\n#{row.diagnostic['summary']}"
+        end
+        Notification.new(text: text, keyboard: keyboard)
       end
 
       def open_laptop_only_recovery?(row)
         attrs = row.attrs.to_h.transform_keys(&:to_s)
-        row.marker.to_s == "review_error" &&
-          attrs["phase"] == "fix" &&
-          attrs["reason"] == "fix_tampered"
+        diagnostic_manual_fix?(row) ||
+          row.marker.to_s == "review_error" &&
+            attrs["phase"] == "fix" &&
+            attrs["reason"] == "fix_tampered"
+      end
+
+      def markerless_retry_recovery?(row)
+        row.marker.to_s == "none" && diagnostic_suggested_action(row)["kind"].to_s == "retry"
+      end
+
+      def diagnostic_manual_fix?(row)
+        diagnostic_suggested_action(row)["kind"].to_s == "manual_fix"
+      end
+
+      def diagnostic_suggested_action(row)
+        diagnostic = row.diagnostic
+        return {} unless diagnostic.is_a?(Hash)
+
+        suggested = diagnostic["suggested_next_action"]
+        suggested.is_a?(Hash) ? suggested : {}
       end
 
       def header(row)
@@ -153,13 +193,29 @@ module Hive
         attrs.empty? ? row.marker : "#{row.marker} #{attrs}"
       end
 
+      def details_callback(row)
+        callback_with_stage("details", row)
+      end
+
+      def refresh_diagnose_callback(row)
+        callback_with_stage("refresh_diagnose", row)
+      end
+
+      def callback_with_stage(prefix, row)
+        parts = [ prefix, row.project, row.slug ]
+        stage = row.respond_to?(:stage) ? row.stage.to_s : ""
+        parts << stage unless stage.empty?
+        parts.join(":")
+      end
+
       def verb_for_action(action)
         {
           "ready_to_brainstorm" => "brainstorm",
           "ready_to_plan" => "plan",
           "ready_to_develop" => "develop",
+          "ready_to_open_pr" => "open-pr",
           "ready_for_review" => "review",
-          "ready_for_pr" => "pr",
+          "ready_to_finalize" => "finalize",
           "ready_to_archive" => "archive"
         }[action]
       end

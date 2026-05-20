@@ -28,7 +28,8 @@ module Hive
         pointer = worktree_pointer_or_exit(task)
         worktree_path = pointer.fetch("path")
         branch = pointer["branch"] || task.slug
-        pr_url = pr_url_or_exit(task)
+        pr_url, pr_error = pr_url_or_error(task)
+        return pr_error if pr_error
 
         # Authenticate first so an auth-related push failure surfaces
         # as a clear "gh not authenticated" hard-fail (Plan R5)
@@ -106,18 +107,24 @@ module Hive
         pointer
       end
 
-      def pr_url_or_exit(task)
+      def pr_url_or_error(task)
         pr_md = File.join(task.folder, "pr.md")
         unless File.exist?(pr_md)
           warn "hive: finalize entered without 5-open-pr's pr.md; re-create via hive run on a 5-open-pr task or move back"
-          exit 1
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "missing_pr_md",
+                            detail: "finalize requires pr.md from 5-open-pr")
+          return [ nil, { commit: "finalize_missing_pr_md", status: :error } ]
         end
 
         url = Hive::Gh.pr_frontmatter(pr_md)["pr_url"]
-        return url unless url.to_s.empty?
+        return [ url, nil ] unless url.to_s.empty?
 
         warn "hive: finalize entered with pr.md missing pr_url; move back to 5-open-pr or repair pr.md"
-        exit 1
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "missing_pr_url",
+                          detail: "finalize requires pr_url frontmatter from 5-open-pr")
+        [ nil, { commit: "finalize_missing_pr_url", status: :error } ]
       end
 
       def verify_state!(task, worktree_path, branch, cfg)

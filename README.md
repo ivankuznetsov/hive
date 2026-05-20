@@ -1,299 +1,115 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="Hive" width="96" height="96">
+</p>
+
 # Hive
 
-[![CI](https://github.com/ivankuznetsov/hive/actions/workflows/ci.yml/badge.svg)](https://github.com/ivankuznetsov/hive/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Ruby](https://img.shields.io/badge/ruby-3.4-red.svg)](.ruby-version)
+Hive turns a rough software idea into a merge-ready pull request through a multi-agent pipeline you can watch as it works. You sketch an idea in a few sentences, open the `hive tui` dashboard, and watch the work move forward: brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent.
 
-Hive is a local, folder-based pipeline for taking a software idea from rough note to pull request. Each task is a directory, and the directory's location is the task's stage:
+The mental model is folders. Every task is a directory; the folder's location is the task state. Moving a task from `2-brainstorm/` to `3-plan/` is the approval gesture, and every stage writes a durable artefact the next stage can trust. That practice — making each step's output strong enough for the next one to run autonomously — is called *compound engineering*. It's how Hive carries work from rough idea to merged PR while letting humans drop in on their own terms instead of a chat thread's.
 
 ```text
-1-inbox -> 2-brainstorm -> 3-plan -> 4-execute -> 5-open-pr -> 6-review -> 7-finalize -> 8-done
+1-inbox  ->  2-brainstorm  ->  3-plan  ->  4-execute  ->  5-open-pr  ->  6-review  ->  7-finalize  ->  8-done
+capture       refine           design      build          draft PR       harden        publish         archive
 ```
 
-Stage agents run as `claude -p` subprocesses. They read the task folder, write their result back into that folder, and exit. You stay in control at each stage by approving the next move.
-
-No web UI. No tracker. The filesystem is the queue, markdown is the source of truth, and the CLI is a small wrapper around ordinary folder moves and git commits. An optional auto-advancing daemon (ADR-024) drives the pipeline forward up to human-input gates — opt in per project; the manual `mv` workflow keeps working unchanged when it's off.
-
-**Status:** local single-user pilot. The original `mv` workflow still works, but the current CLI also includes agent-callable commands for the common handoff points:
-
-- `hive status` shows current slugs grouped by the next useful action.
-- `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive finalize`, and `hive archive` move-or-run tasks by slug.
-- `hive approve` remains the lower-level move command with marker checks, locking, retries, and JSON output.
-- `hive daemon` (opt-in, ADR-024) auto-advances enrolled projects through the pipeline. Enable on existing projects via `hive daemon enable PROJECT` (or `--all`); install the autostart unit per `wiki/operating.md` (sample systemd-user unit at `examples/systemd/`, sample launchd plist at `examples/launchd/`).
-- `hive findings`, `hive accept-finding`, and `hive reject-finding` replace hand-editing review checkboxes.
-- `hive run`, `hive status`, `hive approve`, and findings commands have stable machine-readable contracts for agent callers.
+Read the model in depth in [docs/concepts.md](docs/concepts.md) — folder-as-agent, the marker protocol that lets stages negotiate handoff, the eight stages in detail, and the trade-offs that come with making everything a file.
 
 ## Install
 
+Tier-1 installs use signed GitHub Release artifacts and register the daemon as a per-user service automatically.
+
+| Platform | Channel |
+|----------|---------|
+| macOS arm64 | `brew install ivankuznetsov/hive/hive` |
+| Arch Linux x86_64/aarch64 | `yay -S hive-bin` |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+
+Prerequisites: Ruby 3.4, git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, and authenticated `gh`. The bash installer reports its own runtime prereqs (`curl`, `jq`, `tar`, checksum tool) on first run.
+
+After install, `hive init .` in any project writes the systemd-user (Linux) or launchd (macOS) daemon unit for you, so the daemon survives reboots and graceful restarts without further setup. Full install matrix, XDG paths, Apache Hive collision behavior (`hv` shim), update, uninstall, and autostart details live in [wiki/operating.md#install](wiki/operating.md#install) and [wiki/operating.md#autostart](wiki/operating.md#autostart).
+
+### From a development clone
+
+If you're hacking on Hive itself, install from a clone instead:
+
 ```bash
-git clone <this repo> ~/Dev/hive
+git clone https://github.com/ivankuznetsov/hive ~/Dev/hive
 cd ~/Dev/hive
 bundle install
-ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive   # or add bin/ to PATH
+mkdir -p ~/.local/bin
+ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 ```
 
-### Requirements
+If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Verify with `hive --version` and `hive doctor`. The dev-clone path skips the signed-release verification and the daemon-unit registration — set up systemd yourself from [examples/systemd/hive-daemon.service](examples/systemd/hive-daemon.service) if you want auto-restart.
 
-| Tool | Min version | Why |
-|------|-------------|-----|
-| Ruby | 3.4 | the runtime |
-| `claude` CLI | 2.1.118 | every active stage by default; verified at runtime |
-| `gh` CLI | recent | `5-open-pr` and `7-finalize`; must be authenticated |
-| `git` | 2.40 | worktrees, orphan branches |
+### Install via a coding agent
 
-Optional: [`qmd`](https://qmd.dev) for semantic search over `wiki/` (ripgrep works as fallback).
-
-### Required slash-commands / skills
-
-The brainstorm, plan, and 6-review stages instruct their agents to invoke specific slash-commands inside their prompts. Hive's shipped defaults assume the corresponding skills are installed alongside the agent CLI:
-
-**Stage skills** (single-agent stages):
-
-| Stage | Default invocation | Install for claude | Install for codex |
-|-------|--------------------|--------------------|-------------------|
-| `2-brainstorm` | `/compound-engineering:ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
-| `3-plan` | `/plan` | A user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/aikuznetsov/agent-plugins) or write one inline) | A skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
-
-**Reviewer skills** (6-review stage's recommended-default reviewer set, written by `hive init`):
-
-| Reviewer name | Default skill | Install for claude | Install for codex |
-|---|---|---|---|
-| `claude-ce-code-review` | `/ce-code-review` | `~/.claude/skills/ce-code-review/SKILL.md` (or set `skill: compound-engineering:ce-code-review` in config to use the plugin form explicitly) | n/a (this row uses claude) |
-| `codex-ce-code-review` | `/ce-code-review` | n/a (this row uses codex) | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
-| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude plugin install <pr-review-toolkit-marketplace>` | n/a (this row uses claude) |
-
-Pi has its own skill model with a different invocation form. Pi resolves skills as `/skill:<name>` (not bare `/<name>`); hive's pi profile sets `skill_syntax_format: "/skill:%{skill}"` so the formatted invocation matches. Pi's discovery paths: user-level `~/.pi/agent/skills/` (recursive, plus root-level `<name>.md`) and `~/.agents/skills/` (recursive, cross-agent); project-level `<project>/.pi/skills/` (recursive) plus every ancestor `<dir>/.agents/skills/` up to the nearest `.git` checkout; `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` (`skills` and `packages` entries, each jailed under the settings dir / `$HOME` / project root); pi packages installed via `pi install <source>` (`npm root -g`, `~/.pi/npm/node_modules/*/skills/`, `~/.pi/agent/git/<host>/<user>/<repo>/skills/`); plus any package whose `package.json` declares a `pi.skills` path (jailed under the package root). `hive doctor` walks all of these and reports per-row.
-
-To verify your install:
-
-```bash
-hive doctor              # tabular status of each (stage, agent, skill) triple PLUS each review.reviewer
-hive doctor --json       # machine-readable envelope (hive-doctor.v1; checks[].kind = "stage" | "reviewer")
-```
-
-Exit codes: `0` all present or not applicable; `65` at least one skill missing; `78` config error.
-
-`hive init` runs the same doctor as a non-fatal preflight at end-of-bootstrap. Any missing-skill warnings are emitted to **stderr** (so `hive init | …` pipelines stay clean) and init still exits `0` — install gaps surface but don't block bootstrap. Look for `hive: doctor pre-flight — found N issue(s):` after the initialized summary.
-
-To override a stage's skill per-project, set `<stage>.skill` in `<project>/.hive-state/config.yml`:
-
-```yaml
-plan:
-  skill: /compound-engineering:ce-plan   # opt out of /plan, use the CE skill directly
-```
+To have Claude Code, Codex, or another agent CLI install Hive for you (with OS detection, channel selection, Apache Hive collision handling, and `hive init` follow-up), paste the prompt at [install.md](install.md) into the agent. It's the canonical source for agent-driven install — keep it pinned in your agent's context if you reinstall often.
 
 ## Quickstart
 
+Hive is driven through a terminal dashboard (`hive tui`) that polls every task in every registered project once a second and dispatches stage commands on a single keystroke. New users should start there.
+
+Attach Hive to a project and open the dashboard:
+
 ```bash
 cd ~/Dev/your-project
-hive init .                                     # bootstrap orphan hive/state branch + .hive-state worktree
-hive new your-project 'add tag autocomplete'    # task lands in 1-inbox/<slug>/
-hive status                                     # shows slugs grouped by next action
-
-# start brainstorm
-hive brainstorm <slug>
-
-# answer questions inline in brainstorm.md, save, re-run
-hive brainstorm <slug>
-
-# plan
-hive plan <slug>
-
-# develop
-hive develop <slug>
-
-# review findings, accept the ones to fix, then re-run execute
-hive findings <slug>
-hive accept-finding <slug> 1 3                  # or --severity high / --all
-hive develop <slug>
-
-# open a draft PR, run review, then finalize after review passes
-hive open-pr <slug>
-hive review <slug>
-hive finalize <slug>
-
-# after the PR merges: archive
-hive archive <slug>                             # prints worktree-cleanup commands
+hive init .                     # creates .hive-state/, registers the project, writes the daemon unit
+hive tui                        # opens the two-pane dashboard
 ```
 
-You can still move folders by hand when you want the lowest-level control. The CLI commands exist so agents and scripts can do the same work with predictable errors and JSON output.
+You see a left pane listing your registered projects (with `★ All projects` on top) and a right pane showing tasks as a compact table — icon, slug, stage, status, age. From there everything is keystrokes:
 
-## Daily usage
+| Key | What it does |
+|---|---|
+| `n` | Capture a new idea. The prompt accepts plain text, pasted screenshots, and dragged image paths. |
+| `Enter` | Drive the highlighted task's next action — open its input file for brainstorm/plan/review answers, tail its agent log, or run the suggested recovery on a red row. |
+| `b` / `p` / `d` / `P` / `r` / `F` / `a` | Run brainstorm / plan / develop / open-PR / review / finalize / archive on the highlighted task. |
+| `o` | Open the task's `.hive-state/stages/<n>-<stage>/<slug>/` folder in your editor for read-only browsing. |
+| `/` | Filter the visible rows. |
+| `Tab` / `Shift+Tab` | Toggle focus between the projects pane and the tasks pane. |
+| `?` | Help overlay. |
+| `q` | Quit. |
 
-| Command | What it does |
-|---------|--------------|
-| `hive new <project> '<text>'` | Capture an idea in `1-inbox/<slug>/idea.md` and commit it on `hive/state`. |
-| `hive status` | Show current slugs grouped by next action, with suggested commands. Read-only. |
-| `hive brainstorm <slug>` | Move an inbox task into brainstorm, or re-run an existing brainstorm task. |
-| `hive plan <slug>` | Move a completed brainstorm into plan, or re-run an existing plan task. |
-| `hive develop <slug>` | Move a completed plan into execute, or re-run an existing execute task. |
-| `hive open-pr <slug>` | Move a completed execute task into draft-PR creation, or re-run an existing open-pr task. |
-| `hive review <slug>` | Move an opened draft PR into autonomous review, or re-run an existing review task. |
-| `hive finalize <slug>` | Move a completed review into final PR wrap-up, or re-run an existing finalize task. |
-| `hive archive <slug>` | Move a finalized PR task into done, or re-run an existing done task. |
-| `hive run <target>` | Lower-level dispatcher for a slug or task folder. Safe to re-run. |
-| `hive approve <slug>` | Move a task to the next stage and commit the move on `hive/state`. Use `--from <stage>` for retry-safe automation, `--to <stage>` for explicit moves or recovery, `--force` when you intentionally bypass a marker check, and `--json` for agents. |
-| `hive findings <slug>` | List review findings from the latest `reviews/ce-review-NN.md`. Use `--pass N` for an older pass and `--json` for agents. |
-| `hive accept-finding <slug> ID...` | Mark selected findings as accepted (`[x]`) so the next execute pass fixes them. Select by IDs, `--severity high`, or `--all`. |
-| `hive reject-finding <slug> ID...` | Clear selected accepted findings back to unchecked (`[ ]`). Same selectors as `accept-finding`. |
-| `mv` between stage folders | The original low-level approval gesture. Still supported. |
+Workflow keystrokes are non-blocking: dispatching `b` (brainstorm) on one task while another task's agent is still running is fine — both processes run in their own pgroup and the dashboard keeps polling. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full layout, every mode (findings triage, red-status detail, log tail, new-idea composer with image paste), and the keybinding map per mode.
 
-## How it stays out of the way
+## Drive Hive From Your Coding Agent
 
-Your default branch (`master` or `main`) never receives `.hive-state/` content. The `.hive-state/` directory is a worktree of an orphan branch `hive/state` — its commits don't pollute the code branch, don't trigger CI, and aren't pushed by default. Feature worktrees branch from the default branch and contain no hive artefacts. `git log` on the default branch stays code-only.
+Hive's other primary surface is a coding agent — Claude Code, Codex, Gemini, Pi, or anything that can read terminal output and run shell commands. You describe intent in natural language ("brainstorm the bookmark service idea", "run review on the failing task and report the findings"), the agent translates that into `hive <verb>` calls, and you watch the result in the TUI or read the markdown artefacts directly. Every workflow verb supports `--json` and emits a typed envelope (schemas under [schemas/](schemas/), contract in [docs/cli.md#json-output](docs/cli.md#json-output)), so agent-side parsing is structured rather than scraped.
 
-## Stage cheat sheet
+Useful prompt shapes once Hive is installed:
 
-| Stage | State file | Writes code? | Marker outcomes |
-|-------|------------|--------------|-----------------|
-| `1-inbox` | `idea.md` | no — `hive run` is inert here | — |
-| `2-brainstorm` | `brainstorm.md` | no | `WAITING` (your turn) / `COMPLETE` |
-| `3-plan` | `plan.md` | no | `WAITING` / `COMPLETE` |
-| `4-execute` | `task.md` (+ `reviews/`, `worktree.yml`) | yes — in the feature worktree | `EXECUTE_WAITING` / `EXECUTE_COMPLETE` / `EXECUTE_STALE` |
-| `5-open-pr` | `pr.md` | no code edits — pushes branch + opens a draft PR | `COMPLETE` / `ERROR` |
-| `6-review` | `task.md` (+ `reviews/`) | yes — review fixes in the feature worktree | `REVIEW_WAITING` / `REVIEW_COMPLETE` / recovery markers |
-| `7-finalize` | `pr.md`, `summary.md` | no code edits — refreshes PR body + marks ready | `COMPLETE` |
-| `8-done` | `task.md` | no — prints cleanup commands | `COMPLETE` |
+- *Capture an idea:* `Run hive new your-project "<title>" and report the slug it printed.`
+- *Triage what's waiting:* `Run hive status --json and tell me which tasks are waiting for me (any row whose action_key is needs_input or review_findings).`
+- *Drive a task through one stage:* `Run hive review <slug> --json and summarize the resulting envelope, including any waiting markers.`
+- *Watch a long-running task:* `Run hive status --json --project <name> every 30 seconds and stop when the task at <slug> reaches a needs_input or completed action_key.`
 
-Markers are HTML comments at end-of-file; the last one wins. The common vocabulary: `<!-- WAITING -->`, `<!-- COMPLETE -->`, `<!-- AGENT_WORKING pid=… started=… -->` (set while `claude -p` is running, replaced on exit), `<!-- ERROR reason=… -->`, plus execute/review-specific markers such as `EXECUTE_COMPLETE` and `REVIEW_COMPLETE`. `hive status` renders 🤖 on a live `AGENT_WORKING`, ⚠ on a stale one.
+The `--json` envelope is stable across versions (schemas live under [schemas/](schemas/)), so agent prompts can rely on field shapes without scraping. `hive tui` is intentionally human-only and rejects `--json` — use the CLI verbs and `hive status --json` for programmatic use. For installation via an agent, point it at [install.md](install.md).
 
-## Configuration
+## Power-User / Scripting CLI
 
-### Global: `~/Dev/hive/config.yml`
+The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but every workflow verb is also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Each verb supports `--json` and returns a typed envelope.
 
-Auto-managed by `hive init`. Tracks the registry of installed projects:
+| Group | Verbs | What it's for |
+|---|---|---|
+| Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive finalize`, `hive archive`, `hive run`, `hive approve` | Drive a single stage of a single task by hand. `--from <stage>` lets you re-run a stage in place. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
+| Findings triage | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
+| Daemon | `hive daemon enable/start/status/tail/stop/disable` | Run the per-project daemon that polls `hive status --json` and auto-dispatches workflow verbs for tasks that can advance. Opt-in; read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
+| Diagnostics | `hive status`, `hive doctor`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect task state, validate configured stage/reviewer skills, check whether the next run would auto-rebase, clear a recovery marker by name, or report fix-agent rollback rate. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
+| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade to the latest release, remove the installed CLI, prune the global registry, rename old stage folders, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
 
-```yaml
-registered_projects:
-  - name: your-project
-    path: /home/you/Dev/your-project
-    hive_state_path: /home/you/Dev/your-project/.hive-state
-```
-
-`HIVE_HOME` env var overrides the default `~/Dev/hive` location.
-
-A starter shape is committed at `config.example.yml` for reference.
-
-### Per-project: `<project>/.hive-state/config.yml`
-
-Created by `hive init` from `templates/project_config.yml.erb`. On TTY `hive init` opens an interactive prompt for the per-stage agents, Claude brainstorm runtime, and limits; on non-TTY (CI, pipes, scripted callers) it falls through to recommended defaults (`claude` for planning, `headless` brainstorm runtime, `codex` for development, all three default reviewers, generous limits). See `wiki/commands/init.md` for the full prompt flow.
-
-```yaml
-project_name: your-project
-default_branch: master            # detected at init
-worktree_root: /home/you/Dev/your-project.worktrees
-hive_state_path: .hive-state
-
-# Stage-level agents — each value must be one of: claude, codex, pi.
-# Hand-edit any of these later to override what you picked at init.
-brainstorm:
-  agent: claude
-  runtime: headless                # or tmux_interactive for attachable Claude tmux mode
-plan:
-  agent: claude
-execute:
-  agent: codex                    # rendered template recommends codex; runtime fallback is claude
-open_pr:
-  agent: claude
-finalize:
-  agent: claude
-
-budget_usd:                       # generous sanity caps, NOT cost targets — bumped ~5x in ADR-023
-  brainstorm: 50
-  plan: 100
-  execute_implementation: 500
-  open_pr: 50
-  finalize: 50
-  review_ci: 100
-  review_triage: 75
-  review_fix: 500
-  review_browser: 100
-timeout_sec:
-  brainstorm: 1800
-  plan: 3600
-  execute_implementation: 14400
-  open_pr: 1800
-  finalize: 1800
-  review_ci: 3600
-  review_triage: 1800
-  review_fix: 14400
-  review_browser: 3600
-```
-
-Override individual keys; deep-merge keeps the rest at defaults. The deprecated `execute_review` key was dropped in ADR-023 — 6-review owns reviewer budgets now (`review_ci`, `review_triage`, `review_fix`, `review_browser`).
-
-## Troubleshooting
-
-- **`already initialized`** — `hive/state` branch already exists for this project. Skip `hive init`. (Exit code 2.)
-- **`not a git repository`** — run `git init` first.
-- **`uncommitted modifications to tracked files`** at init — commit/stash tracked changes, or pass `hive init --force`. Untracked files alone don't block init.
-- **`plan.md missing`** in 4-execute — task didn't pass through `3-plan/`. Move it back, run plan, then forward again.
-- **`no worktree pointer`** in 5-open-pr or 7-finalize — task didn't pass through `4-execute/`. Move it back through execute first.
-- **`worktree pointer present but worktree missing`** — `git -C <project> worktree prune`, delete `worktree.yml`, then re-run.
-- **`slug ... is ambiguous`** — the same slug exists in multiple projects or stages. Pass `--project <name>` for cross-project ambiguity, `--from <stage>` on workflow verbs, `--stage <stage>` on `run`/`findings`, or a full task folder path.
-- **`no finding with id=...`** — run `hive findings <slug>` again and use the IDs from the current review file. IDs are assigned by document order.
-- **`no findings selected`** — `accept-finding` / `reject-finding` need at least one selector: explicit IDs, `--severity <name>`, or `--all`.
-- **Stale `.lock`** — auto-cleared on next `hive run` when the recorded PID is dead. PID-reuse false positives are defended against by cross-checking `/proc/<pid>/stat` start time (Linux only).
-- **`REVIEW_STALE`** in `task.md` — max review passes (default 2) hit. Inspect/edit the highest-pass review or `reviews/escalations-NN.md`, clear it with `hive markers clear <folder> --name REVIEW_STALE`, then `hive run` again.
-- **`reviewer_tampered`** in `task.md` — the reviewer agent edited `plan.md` or `worktree.yml` (it shouldn't). SHA-256 mismatch detected. Inspect the worktree, restore from git, re-run.
-- **Concurrent `hive run`** — `ConcurrentRunError`. Per-task `.lock` is held for the entire run. Wait or kill the other process first.
-
-## Layout
-
-```
-~/Dev/hive/
-├── bin/hive                          # executable entry
-├── lib/hive/                         # library code (CLI, commands, stages, modules)
-├── templates/                        # ERB prompt + config templates
-├── test/                             # minitest unit + integration suites
-├── docs/                             # planning docs (brainstorms, plans)
-├── wiki/                             # LLM-maintained knowledge base — start here
-├── config.example.yml                # global-config schema reference
-├── Gemfile / Gemfile.lock / Rakefile # standard Ruby project bones
-└── .rubocop.yml
-```
-
-In a project after `hive init`:
-
-```
-~/Dev/your-project/
-├── .gitignore                        # contains /.hive-state/
-└── .hive-state/                      # worktree of orphan branch hive/state
-    ├── config.yml                    # per-project config
-    ├── stages/                       # task folders, organised by stage
-    └── logs/<slug>/<stage>-<ts>.log  # per-agent invocation logs
-```
-
-Plus a feature worktree per active execute task at `~/Dev/your-project.worktrees/<slug>/` (sibling of the main checkout).
+Full per-command reference, every flag, every envelope field, and every exit code lives in [docs/cli.md](docs/cli.md).
 
 ## Documentation
 
-- **`wiki/index.md`** — start here. Catalog of every wiki page.
-- **`wiki/architecture.md`** — layer cake, process model, agent contract.
-- **`wiki/state-model.md`** — directory layout, marker grammar, config schemas.
-- **`wiki/cli.md`** — full command surface.
-- **`wiki/decisions.md`** — 13 ADRs (orphan branch, two-level locking, prompt-injection policy, etc).
-- **`wiki/stages/`** — one page per pipeline stage.
-- **`wiki/modules/`** — one page per Ruby module/class.
-- **`wiki/gaps.md`** — known gaps and open questions.
-
-If `qmd` is installed:
-
-```bash
-qmd query 'EXECUTE_STALE recovery' --collection hive
-qmd search 'worktree pointer' --collection hive
-```
-
-The wiki is auto-refreshed by `.git/hooks/post-commit` when relevant files change (state-model, CLI, stages, dependencies, docs).
-
-## Development
-
-```bash
-bundle exec rake test          # run all unit + integration tests (Minitest)
-bundle exec rubocop            # lint
-bundle exec rubocop -a         # autocorrect
-```
-
-`HIVE_CLAUDE_BIN` env var overrides the `claude` binary — used by tests with `test/fixtures/fake-claude` and `test/fixtures/fake-gh` to avoid spending real budget.
-
-`HIVE_HOME` env var overrides the global config location — used by `test/test_helper.rb#with_tmp_global_config` so tests never touch the real registry.
+- **[install.md](install.md)** — The canonical agent-installer prompt: OS/arch detection, channel selection (brew / yay / install.sh), Apache Hive collision handling, `hive init` follow-up, and optional skills package wiring. Paste this into your agent CLI when you want it to install or upgrade Hive for you.
+- **[docs/concepts.md](docs/concepts.md)** — The conceptual deep-dive: folder-as-agent, the eight stages in detail, the marker protocol that lets stages negotiate handoff, and what compound engineering looks like in practice. Read this when you want to understand *why* Hive is shaped the way it is, or before extending a stage and needing to know what the artefact contract is.
+- **[docs/getting-started.md](docs/getting-started.md)** — A five-minute first-run walkthrough against a real project, from prerequisites through capturing an idea, watching brainstorm work, and promoting to plan. Read this on day one; come back if you ever forget the `hive init` → `hive new` → `hive brainstorm` shape.
+- **[wiki/commands/tui.md](wiki/commands/tui.md)** — The TUI deep reference: the two-pane layout, every mode (findings triage, red-status detail, log tail, new-idea composer with image paste), the per-mode keybinding map, the terminal-hostility contract (resize, SIGTSTP, SIGHUP, non-tty rejection), and the subprocess-dispatch model. Read this when the TUI does something surprising or you want the full keystroke surface.
+- **[docs/architecture.md](docs/architecture.md)** — The user-facing architecture: the three trees (project checkout, `.hive-state/` orphan branch, feature worktree), the storage layout `hive init` creates, and how stages, agents, configs, and worktrees compose. Read this when you want to know where files live and which process owns what.
+- **[docs/cli.md](docs/cli.md)** — The full command surface exposed by `bin/hive`: every verb, every flag, every `--json` envelope contract, and every exit code. Read this when you're scripting Hive or wiring it into an agent that needs the full CLI map.
+- **[wiki/operating.md](wiki/operating.md)** — Day-2 operations: install matrix, XDG paths, autostart (systemd-user on Linux, launchd on macOS), enrolling existing projects, the mandatory `--dry-run` shakedown, bot setup, tuning concurrency, cost-runaway response, troubleshooting. Read this before running the daemon live and any time you operate Hive across more than one project.
+- **[docs/recipes.md](docs/recipes.md)** — Concrete end-to-end workflows, including the xbookmark dogfood replay (linked to the real PR and a committed transcript of the run). Read this when you want to see what a complete idea-to-PR run looks like before trying it yourself.
+- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why opt-in daemon, why no built-in web UI. Read this when you hit a surprise or want to know "why is it like this?".
+- **[wiki/index.md](wiki/index.md)** — The catalog of the LLM-maintained engineering wiki under `wiki/`, which is the deepest source of reference material for every command, module, and stage. Read this when the user-facing docs above don't have the depth you need.

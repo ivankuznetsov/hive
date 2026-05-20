@@ -1,4 +1,6 @@
 require "test_helper"
+require "fileutils"
+require "hive/task"
 require "hive/task_action"
 require "hive/markers"
 
@@ -48,6 +50,39 @@ class TaskActionTest < Minitest::Test
   def test_plan_complete_is_ready_to_develop
     task = fake_task(stage_name: "plan", stage_index: 3)
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
+  end
+
+  def test_plan_missing_or_empty_output_is_error_not_needs_input
+    Dir.mktmpdir("task-action-plan") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "3-plan", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = Hive::Task.new(folder)
+
+      missing = Hive::TaskAction.for(task, marker(:none))
+      assert_equal "needs_input", missing.key,
+                   "freshly approved plan-stage folders start without plan.md and must remain runnable"
+      assert_equal "hive plan demo-260426-aaaa --from 3-plan", missing.command
+
+      FileUtils.mkdir_p(File.join(dir, ".hive-state", "logs", task.slug))
+      File.write(File.join(dir, ".hive-state", "logs", task.slug, "plan-20260519T221007Z.log"), "spawned\n")
+      interrupted = Hive::TaskAction.for(task, marker(:none))
+      assert_equal "error", interrupted.key
+      assert_nil interrupted.command
+      assert_match(/Plan is incomplete because .*plan\.md is missing or empty/,
+                   interrupted.diagnostic["detail"])
+
+      FileUtils.rm_rf(File.join(dir, ".hive-state", "logs", task.slug))
+      File.write(task.state_file, "")
+      empty = Hive::TaskAction.for(task, marker(:none))
+      assert_equal "error", empty.key
+      assert_nil empty.command
+      assert_match(/PLAN_MISSING_OUTPUT/, empty.diagnostic["summary"])
+      assert_match(/Rerun the plan stage to regenerate plan\.md/, empty.diagnostic["detail"])
+      assert_equal "marker", empty.diagnostic["source"]
+      assert_equal "retry", empty.diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_equal "hive plan demo-260426-aaaa --from 3-plan",
+                   empty.diagnostic.fetch("suggested_next_action").fetch("command")
+    end
   end
 
   def test_execute_complete_is_ready_to_open_pr
@@ -128,8 +163,122 @@ class TaskActionTest < Minitest::Test
   end
 
   def test_finalize_complete_is_ready_to_archive
-    task = fake_task(stage_name: "finalize", stage_index: 7)
-    assert_equal "ready_to_archive", Hive::TaskAction.for(task, marker(:complete)).key
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+      File.write(task.state_file, <<~MD)
+        ---
+        pr_url: https://example.com/pr/9
+        ---
+
+        <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+      MD
+
+      assert_equal "ready_to_archive",
+                   Hive::TaskAction.for(
+                     task,
+                     marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false")
+                   ).key
+    end
+  end
+
+  def test_finalize_complete_requires_final_pr_metadata_before_archive
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+
+      File.write(task.state_file, "<!-- COMPLETE is_draft=false -->\n")
+      missing_url = Hive::TaskAction.for(task, marker(:complete, "is_draft" => "false"))
+      assert_equal "error", missing_url.key
+      assert_match(/FINALIZE_MISSING_PR_URL/, missing_url.diagnostic["summary"])
+
+      File.write(task.state_file, <<~MD)
+        ---
+        pr_url: https://example.com/pr/9
+        ---
+
+        <!-- COMPLETE pr_url=https://example.com/pr/other is_draft=false -->
+      MD
+      mismatch = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/other", "is_draft" => "false")
+      )
+      assert_equal "error", mismatch.key
+      assert_match(/FINALIZE_PR_URL_MISMATCH/, mismatch.diagnostic["summary"])
+
+      open_pr_marker = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "true")
+      )
+      assert_equal "ready_to_finalize", open_pr_marker.key,
+                   "open-pr's is_draft=true COMPLETE marker must not look archive-ready"
+      assert_equal "hive finalize demo-260426-aaaa --from 7-finalize", open_pr_marker.command
+    end
+  end
+
+  def test_finalize_missing_pr_md_is_error_not_needs_input
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+
+      action = Hive::TaskAction.for(task, marker(:none))
+
+      assert_equal "error", action.key
+      assert_equal "Error", action.label
+      assert_nil action.command
+      assert_match(/Finalize cannot run because .*pr\.md is missing/, action.diagnostic["detail"])
+    end
+  end
+
+  def test_finalize_missing_metadata_error_is_manual_fix_not_retry
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+
+      %w[missing_pr_md missing_pr_url].each do |reason|
+        diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => reason)).diagnostic
+        suggested = diagnostic.fetch("suggested_next_action")
+
+        assert_equal "manual_fix", suggested.fetch("kind"), "reason=#{reason}"
+        assert_nil suggested["command"], "reason=#{reason}"
+      end
+    end
   end
 
   def test_done_is_archived_with_no_command
@@ -218,6 +367,381 @@ class TaskActionTest < Minitest::Test
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
     assert_equal %w[command key label next_action].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
+  end
+
+  def test_non_recovery_rows_do_not_emit_diagnostic
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:complete))
+
+    assert_nil action.diagnostic
+  end
+
+  def test_review_error_diagnostic_points_at_relevant_artifact_and_redacts_secrets
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      artifact = File.join(reviews, "fix-guardrail-04.md")
+      token = "ghp_#{'a' * 40}"
+      File.write(artifact, "Fix guardrail failed with #{token}\n")
+
+      action = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "reason" => "fix_guardrail", "pass" => "4")
+      )
+      diagnostic = action.diagnostic
+
+      assert_equal "artifact", diagnostic["source"]
+      assert_equal artifact, diagnostic["source_path"]
+      assert_includes diagnostic["artifact_paths"], artifact
+      assert_includes diagnostic["summary"], "REVIEW_ERROR"
+      assert_includes diagnostic["summary"], "reason=fix_guardrail"
+      assert_includes diagnostic["detail"], "[REDACTED:github_token]"
+      refute_includes diagnostic["detail"], token
+      assert_equal "local", diagnostic["generated_by"]
+    end
+  end
+
+  def test_diagnostic_rejects_artifact_symlink_escape
+    Dir.mktmpdir("hive-task-action-symlink") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      outside = File.join(root, "..", "outside-secret.md")
+      File.write(outside, "outside diagnostic secret\n")
+      symlink = File.join(reviews, "errors-04.md")
+      File.symlink(outside, symlink)
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "reason" => "timeout", "pass" => "4")
+      ).diagnostic
+
+      refute_equal symlink, diagnostic["source_path"]
+      refute_includes diagnostic["artifact_paths"], symlink
+      refute_includes diagnostic["detail"], "outside diagnostic secret"
+      assert_equal "marker", diagnostic["source"]
+    end
+  end
+
+  def test_review_ci_stale_diagnostic_points_at_ci_blocked_artifact
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      ci_blocked = File.join(reviews, "ci-blocked.md")
+      File.write(ci_blocked, "CI failed on bundle exec rake test\n")
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_ci_stale, "attempts" => "3")
+      ).diagnostic
+
+      assert_equal "artifact", diagnostic["source"]
+      assert_equal ci_blocked, diagnostic["source_path"]
+      assert_includes diagnostic["summary"], "REVIEW_CI_STALE"
+      assert_includes diagnostic["detail"], "bundle exec rake test"
+    end
+  end
+
+  def test_execute_stale_recovery_emits_diagnostic_for_external_consumers
+    # ADR-027 and wiki/commands/status.md commit to emitting bounded
+    # diagnostics for ALL three red action_keys (recover_review, error,
+    # recover_execute). Bot / daemon / external-agent consumers reading
+    # `hive status --json` need the diagnostic to explain why an
+    # EXECUTE_STALE task is stuck — even though the TUI red_status_detail
+    # view doesn't yet render this case. Without the diagnostic, the
+    # whole class of execute-stalled tasks becomes invisible to those
+    # consumers.
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "ce-review-02.md"), "P1 finding remains unresolved\n")
+
+      diagnostic = Hive::TaskAction.for(task, marker(:execute_stale, "pass" => "2")).diagnostic
+
+      refute_nil diagnostic, "EXECUTE_STALE must emit a diagnostic for non-TUI consumers"
+      assert_includes diagnostic["summary"], "EXECUTE_STALE"
+      assert_includes diagnostic["detail"], "P1 finding remains unresolved"
+    end
+  end
+
+  def test_diagnostic_artifact_resolves_through_symlinked_hive_state
+    # Deployment pattern: .hive-state symlinked to a separate volume
+    # (state on a fast-SSD partition, project on a slower share). The
+    # task.folder.realpath then lands OUTSIDE project_root.realpath
+    # but the artifact is still legitimate. Pre-fix, the project_root
+    # containment guard in diagnostic_roots dropped every artifact in
+    # this layout and the operator silently saw "no diagnostic
+    # available" for paid-for agent verdicts. See PR #84 review C4.
+    Dir.mktmpdir("hive-task-action") do |root|
+      state_volume = File.join(root, "state-volume")
+      FileUtils.mkdir_p(state_volume)
+      symlinked_state = File.join(root, "project", ".hive-state")
+      FileUtils.mkdir_p(File.dirname(symlinked_state))
+      File.symlink(state_volume, symlinked_state)
+
+      slug = "red-260519-symlink"
+      folder = File.join(symlinked_state, "stages", "6-review", slug)
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      File.write(File.join(folder, "reviews", "errors-01.md"), "fix failed\n")
+
+      task = Hive::Task.new(folder)
+      diagnostic = Hive::TaskAction.for(task, marker(:review_error, "phase" => "fix", "pass" => "1")).diagnostic
+
+      refute_nil diagnostic
+      assert_equal "artifact", diagnostic["source"]
+      assert_includes diagnostic["detail"], "fix failed",
+                      "symlinked .hive-state must not invisible legitimate diagnostic artifacts"
+    end
+  end
+
+  def test_execute_stale_emits_manual_fix_suggested_next_action
+    # EXECUTE_STALE has no auto-retry recipe — the operator must edit
+    # findings or lower the pass counter. Emit manual_fix with
+    # command: null so agent consumers see an explicit "do not auto-
+    # retry" signal rather than absence of data. See PR #84 review
+    # finding #9.
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+
+      diagnostic = Hive::TaskAction.for(task, marker(:execute_stale, "pass" => "2")).diagnostic
+
+      refute_nil diagnostic
+      suggested = diagnostic["suggested_next_action"]
+      refute_nil suggested,
+                 "EXECUTE_STALE must emit a suggested_next_action so agents see an explicit do-not-retry signal"
+      assert_equal "manual_fix", suggested["kind"]
+      assert_nil suggested["command"], "manual_fix carries no shell recipe"
+    end
+  end
+
+  def test_diagnostic_redacts_before_truncating_so_boundary_secrets_dont_leak
+    # PR #84 review row 1: a secret straddling the truncation boundary
+    # (summary 120 / detail 4000 chars) used to escape redaction because
+    # truncate ran first, splitting the credential and hiding only the
+    # trailing half. Re-ordered to redact-then-truncate; pin the invariant
+    # so a future contributor cannot flip the call order silently.
+    Dir.mktmpdir("hive-task-action-redact") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+
+      # Use a github_token-shaped credential (no \b prefix requirement)
+      # so the marker-built string actually matches a redaction pattern
+      # when interpolated next to other word characters. Place the token
+      # so that the truncation boundary (DIAGNOSTIC_SUMMARY_MAX) lands in
+      # the middle of the credential — pre-redaction truncation would
+      # leave the leading half intact in the emitted summary.
+      gh_token = "ghp_#{'A' * 40}"
+      summary_max = Hive::TaskAction::DIAGNOSTIC_SUMMARY_MAX
+      # The marker_summary is "REVIEW_ERROR phase=fix pass=4 reason=<padding><token>".
+      # We need the cut point to fall inside the token bytes — choose a
+      # padding that leaves the token spanning the cut.
+      prefix = "REVIEW_ERROR phase=fix pass=4 reason="
+      padding_len = summary_max - prefix.length - 10  # cut ~10 chars into the token
+      padding = " x" * (padding_len / 2)              # spaces give SecretPatterns a clean boundary
+      reason = "#{padding}#{gh_token}"
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "4", "reason" => reason)
+      ).diagnostic
+
+      # Negative invariants: the original token bytes (and any leading
+      # half thereof) MUST NOT appear in the emitted summary or detail.
+      # Pre-fix code would emit `ghp_AAAAAAA…` (leading half + ellipsis)
+      # because truncate fired before redact and split the token.
+      refute_includes diagnostic["summary"], gh_token,
+                      "summary must not contain the raw GitHub token (redact-then-truncate)"
+      refute_match(/ghp_A{4,}/, diagnostic["summary"],
+                   "summary must not leak ANY leading half of the token — " \
+                   "truncate-after-redact ordering is load-bearing for boundary secrets")
+      refute_includes diagnostic["detail"], gh_token,
+                      "detail must not contain the raw GitHub token"
+      refute_match(/ghp_A{4,}/, diagnostic["detail"],
+                   "detail must not leak ANY leading half of the token")
+    end
+  end
+
+  # Two-gate trust check: fresh_diagnosis_artifact rejects on EITHER
+  # marker_signature mismatch OR unknown generated_by. Pinning both
+  # rejection paths so a future refactor cannot drop one gate silently
+  # (the artifact would then describe stale state OR be authored by an
+  # untrusted profile).
+  def test_fresh_diagnosis_artifact_rejected_when_marker_signature_stale
+    Dir.mktmpdir("hive-task-action-stale") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      # Plant an artifact whose frontmatter pins a DIFFERENT marker
+      # signature than the current marker. Trust gate must reject.
+      stale_signature = Digest::SHA256.hexdigest("review_error\npass=999\nphase=stale")
+      File.write(File.join(diagnostics, "red-status.md"), <<~MD)
+        ---
+        generated_by: claude
+        marker_signature: #{stale_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        stale verdict body
+      MD
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      refute_equal "artifact", diagnostic["source"],
+                   "stale-signature artifact must NOT be surfaced as the diagnostic source"
+      refute_includes diagnostic["detail"], "stale verdict body",
+                      "stale artifact body must not leak into the diagnostic detail"
+      assert_equal "local", diagnostic["generated_by"],
+                   "rejected artifact falls back to local extraction (generated_by: 'local')"
+    end
+  end
+
+  def test_fresh_diagnosis_artifact_rejected_when_generator_unknown
+    Dir.mktmpdir("hive-task-action-evil") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      # Plant an artifact whose generated_by is NOT in the registered
+      # AgentProfiles registry. Even with a matching marker_signature,
+      # the trust gate must reject — a malicious actor with write access
+      # to diagnostics/ should not be able to inject arbitrary
+      # diagnostic text under a profile they invented.
+      current_signature = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+      File.write(File.join(diagnostics, "red-status.md"), <<~MD)
+        ---
+        generated_by: evil-profile
+        marker_signature: #{current_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        evil verdict body
+      MD
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      refute_equal "evil-profile", diagnostic["generated_by"],
+                   "untrusted generator must not surface as generated_by"
+      refute_includes diagnostic["detail"], "evil verdict body",
+                      "untrusted artifact body must not leak into the diagnostic detail"
+    end
+  end
+
+  # marker_signature is SHA-256(marker_name + sorted_attr_pairs) so a
+  # red → green → same-shape red rotation cycle produces an IDENTICAL
+  # signature across episodes. The signature check alone cannot tell
+  # them apart. fresh_diagnosis_artifact rejects when the artifact mtime
+  # predates the state_file mtime (every marker rotation touches the
+  # state_file). See issue #89.
+  def test_fresh_diagnosis_artifact_rejected_when_predates_state_file
+    Dir.mktmpdir("hive-task-action-rotation") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      # Write the state_file FIRST and capture its mtime; the artifact
+      # we plant will have an earlier mtime, simulating a stale
+      # diagnosis from a previous red-episode in the same rotation
+      # cycle.
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      current_signature = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+      artifact = File.join(diagnostics, "red-status.md")
+      File.write(artifact, <<~MD)
+        ---
+        generated_by: claude
+        marker_signature: #{current_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        verdict from a previous red episode (cycle collision)
+      MD
+      # Roll the artifact mtime back so it visibly predates the
+      # state_file. 60s is well above any filesystem mtime granularity.
+      File.utime(Time.now - 120, Time.now - 120, artifact)
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      refute_equal "artifact", diagnostic["source"],
+                   "artifact older than state_file must NOT be surfaced (rotation-cycle collision)"
+      refute_includes diagnostic["detail"], "previous red episode",
+                      "stale-rotation artifact body must not leak into diagnostic detail"
+      assert_equal "local", diagnostic["generated_by"],
+                   "rejected stale-rotation artifact falls back to local extraction"
+    end
+  end
+
+  def test_fresh_diagnosis_artifact_accepted_when_artifact_newer_than_state_file
+    # Inverse of the rotation-cycle case: a fresh artifact written
+    # AFTER the most recent marker rotation must still be trusted.
+    # Regression guard so the mtime check doesn't accidentally reject
+    # legitimate freshly-written diagnoses.
+    Dir.mktmpdir("hive-task-action-fresh-mtime") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      File.utime(Time.now - 120, Time.now - 120, task.state_file)
+      diagnostics = File.join(task.folder, "diagnostics")
+      FileUtils.mkdir_p(diagnostics)
+      current_signature = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
+      artifact = File.join(diagnostics, "red-status.md")
+      File.write(artifact, <<~MD)
+        ---
+        generated_by: claude
+        marker_signature: #{current_signature}
+        diagnosed_at: 2026-05-16T00:00:00Z
+        ---
+        # Red Status Diagnosis
+
+        fresh-after-rotation verdict
+      MD
+      # artifact mtime defaults to now (newer than state_file's -120s).
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "fix", "pass" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      assert_equal "artifact", diagnostic["source"],
+                   "fresh artifact (mtime newer than state_file) must be accepted"
+      assert_equal "claude", diagnostic["generated_by"]
+    end
+  end
+
+  def test_recovery_diagnostic_falls_back_to_marker_when_artifacts_are_missing
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=triage pass=7 -->\n")
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:review_error, "phase" => "triage", "pass" => "7")
+      ).diagnostic
+
+      assert_equal "marker", diagnostic["source"]
+      assert_nil diagnostic["source_path"]
+      assert_empty diagnostic["artifact_paths"]
+      assert_includes diagnostic["detail"], "No diagnostic artifact"
+    end
   end
 
   # ── closed enum membership ─────────────────────────────────────────────

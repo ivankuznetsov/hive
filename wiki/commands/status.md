@@ -3,11 +3,11 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-05-13
-tags: [command, status, observability, json]
+updated: 2026-05-19
+tags: [command, status, observability, json, diagnostics, legacy-dirs]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker, and prints slugs grouped by the next useful action. Read-only; takes no args. Pass `--json` for a single machine-readable document on stdout (schema `hive-status`, version per `Hive::SCHEMA_VERSIONS`).
+**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory, reads each task's marker, and prints slugs grouped by the next useful action. Normal status is read-only and takes no args. Pass `--json` for a single machine-readable document on stdout (schema `hive-status`, version per `Hive::SCHEMA_VERSIONS`). Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
 
 ## Output shape
 
@@ -21,7 +21,23 @@ tags: [command, status, observability, json]
     🤖 add-cache-260424-9a8b          agent_working pid=1234   hive develop add-cache-260424-9a8b 5m ago
 ```
 
-`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits.
+`hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows.
+
+## Legacy stage directories (`legacy_stage_dirs`)
+
+Every Project entry in `hive status --json` carries a `legacy_stage_dirs` array — `[]` for healthy projects, otherwise a list of `{ "stage_dir": "<name>", "task_count": <N> }` entries (sorted alphabetically by `stage_dir`). The field is populated by `Status#detect_legacy_stage_dirs`, which scans `<hive_state>/stages/` for directories that are **not** in `Hive::Stages::DIRS` and contain at least one slug-shaped task subfolder (per `Hive::Stages.task_slug?`, the same predicate `hive migrate` uses to decide which entries it is allowed to mv — so the count reflects what `hive migrate` would actually move). Stray non-slug siblings (`logs/`, `.gitkeep`, `.DS_Store`) are ignored.
+
+When the field is non-empty, the text output prints a warning under the project header:
+
+```
+<project_name>
+  ⚠ 2 tasks hidden in legacy stage dirs: 5-review (1), 6-pr (1)
+    run `hive migrate` to move them into the current layout
+```
+
+The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
+
+The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hive:schema:status:v2` (see [[schemas]] and the policy comment in `lib/hive.rb` — additive optional fields do **not** bump `SCHEMA_VERSIONS["hive-status"]`).
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -51,15 +67,51 @@ For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute
 
 Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
 
+## Red-row diagnostics
+
+`TaskAction#diagnostic` is the local source for red status rows. It returns:
+
+- `summary` — marker name plus marker attrs, truncated and secret-redacted.
+- `detail` — the tail of the best matching artifact, or marker fallback text when no artifact exists.
+- `source` / `source_path` — whether the detail came from an artifact or marker fallback.
+- `artifact_paths` — every relevant artifact discovered for this marker.
+- `generated_by` — `local` for bounded extraction, or one of the schema-listed diagnose generators (`claude`, `codex`, `pi`) that wrote a fresh diagnosis artifact.
+- `updated_at` — mtime of the source artifact or marker state file.
+
+Artifact discovery is marker-specific. Review errors prefer `diagnostics/red-status.md` when it matches the current marker, then pass-specific files such as `reviews/errors-NN.md`, `reviews/fix-guardrail-NN.md`, `reviews/escalations-NN.md`, marker `files=...` entries, phase logs, and latest logs. `review_ci_stale` includes `reviews/ci-blocked.md` and CI-fix logs. `review_stale` includes the pass escalations/reviewer files. `execute_stale` includes review files and logs. Generic `ERROR` includes recent logs and the task state file.
+
+Fresh agent-written diagnostics live at `<task>/diagnostics/red-status.md`. Normal status trusts that file only when:
+
+- frontmatter parses;
+- `generated_by` is in `Hive::Schemas::DIAGNOSTIC_GENERATORS` (`local`, `claude`, `codex`, `pi`);
+- `marker_signature` matches the current marker name plus sorted attrs.
+
+That signature check prevents a stale diagnosis from explaining a new failure after the marker changes.
+
+## `--diagnose`
+
+```
+hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] [--json]
+hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] --write [--json]
+```
+
+Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and prints the same local diagnostic payload used by `hive status --json`. This is read-only.
+
+With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (`execute.agent` via `Hive::Stages::Base.stage_profile`) to produce a concise markdown diagnosis, then atomically writes `<task>/diagnostics/red-status.md`. Defaults are `timeout_sec.diagnose || 600` and `budget_usd.diagnose || 5`. The agent gets the task folder as an add-dir and runs from the task worktree when one exists, otherwise the project root. The worktree pointer is validated against the configured worktree root before it is used as cwd. Custom execute profiles are rejected for diagnose unless their `generated_by` value has first been added to `Hive::Schemas::DIAGNOSTIC_GENERATORS` and the published schemas. The command does not claim the task lock and does not write workflow markers.
+
+JSON output uses schema `hive-status-diagnose`, version `1`, and returns `slug`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
+
 ## Read-only
 
-`status` does not mutate filesystem state, does not commit, does not spawn agents, and does not touch locks. Safe to run while other `hive run` commands are in flight.
+Normal `status` and `status --diagnose` without `--write` do not mutate filesystem state, do not commit, do not spawn agents, and do not touch locks. `status --diagnose --write` is the explicit mutation path: it spawns the configured development agent and writes only `diagnostics/red-status.md`.
 
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
+- `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
+- `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[commands/approve]]
-- [[modules/markers]] · [[modules/task]] · [[modules/config]]
+- [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/config]]

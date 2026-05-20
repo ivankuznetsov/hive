@@ -1,0 +1,19 @@
+xbookmark/.hive-state/
+|-- config.yml
+|-- logs/
+|   `-- i-want-to-create-a-260504-1253/
+|       |-- brainstorm-20260504T105230Z.log
+|       `-- plan-20260504T112045Z.log
+`-- stages/
+    |-- 1-inbox/
+    |-- 2-brainstorm/
+    |-- 3-plan/
+    |   `-- i-want-to-create-a-260504-1253/
+    |       |-- idea.md
+    |       |-- brainstorm.md
+    |       `-- plan.md
+    |-- 4-execute/
+    |-- 5-open-pr/
+    |-- 6-review/
+    |-- 7-finalize/
+    `-- 8-done/

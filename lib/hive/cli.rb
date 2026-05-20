@@ -171,6 +171,46 @@ module Hive
       ).call
     end
 
+    desc "update", "Update hive via the install channel that installed it"
+    long_desc <<~DESC
+      Reads the install-channel marker written by the installer and delegates
+      to the native updater:
+
+        brew  → brew upgrade ivankuznetsov/hive/hive
+        aur   → yay -Syu hive-bin (or paru when yay is unavailable)
+        bash  → download the pinned install.sh to a tempfile, then run it
+        dev   → prints git pull && bundle install guidance
+
+      Hive never swaps its own binary in place and never guesses across
+      channels.
+    DESC
+    option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
+    def update
+      require "hive/commands/update"
+      Hive::Commands::Update.new(dry_run: options[:dry_run]).call
+    end
+
+    desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
+    long_desc <<~DESC
+      Stops and deregisters the per-user daemon service, removes hive config
+      and cache directories, and removes versioned bash-install payloads.
+      It preserves accumulated work under XDG state and project .hive-state
+      directories by default.
+
+      --purge is non-interactive for CI but still preserves accumulated work.
+      --force-purge-state is the explicit destructive escape hatch.
+    DESC
+    option :purge, type: :boolean, default: false, desc: "non-interactive cleanup; still preserves state"
+    option :force_purge_state, type: :boolean, default: false,
+                               desc: "also remove XDG state and registered project .hive-state directories"
+    def uninstall
+      require "hive/commands/uninstall"
+      Hive::Commands::Uninstall.new(
+        purge: options[:purge],
+        force_purge_state: options[:force_purge_state]
+      ).call
+    end
+
     desc "migrate [PROJECT_PATH]", "Rename in-flight task folders from the pre-open-pr stage layout"
     def migrate(project_path = Dir.pwd)
       require "hive/commands/migrate"
@@ -279,9 +319,53 @@ module Hive
     end
 
     desc "status", "Show all active tasks across registered projects"
+    long_desc <<~DESC
+      Default: prints a grouped table of every task across registered
+      projects, ordered by stage. Combine with --json to emit the
+      `hive-status` envelope (schema v2); every row carries a required
+      nullable `diagnostic` field — null for green rows, populated with
+      a bounded summary + artifact tail + marker signature for red
+      recovery/error rows.
+
+      --diagnose <slug>: switch to the `hive-status-diagnose` envelope
+      (schema v1) and emit the diagnostic for a single task. Useful
+      for agents that want to inspect one row without paying the
+      full snapshot cost. Pair with --project / --stage to disambiguate
+      when the same slug exists across multiple projects or stages.
+
+      --diagnose <slug> --write: spawn the project's configured execute
+      AgentProfile to write `<task.folder>/diagnostics/red-status.md`,
+      then return the path. The agent run is bounded (default 600s,
+      $5 budget) and does NOT claim the task lock or touch markers.
+      A freshness gate (marker_signature SHA256) refuses to write
+      stale diagnoses when the marker rotates mid-spawn.
+
+      --write requires --diagnose AND a task in a red recovery state
+      (recover_review / error / recover_execute); green tasks emit a
+      structured error rather than burning agent budget on a healthy
+      row. When a previous agent-written artifact already matches the
+      current marker_signature, --write short-circuits and returns
+      the existing path without re-spawning; pass --force to bypass
+      that idempotency check. Empty --diagnose values are rejected.
+    DESC
+    option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
+    option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
+    option :stage, type: :string, enum: APPROVE_TO_ENUM,
+                   desc: "scope --diagnose slug lookup to one stage"
+    option :write, type: :boolean, default: false,
+                   desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
+    option :force, type: :boolean, default: false,
+                   desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     def status
       require "hive/commands/status"
-      Hive::Commands::Status.new(json: options[:json]).call
+      Hive::Commands::Status.new(
+        json: options[:json],
+        diagnose: options[:diagnose],
+        project: options[:project],
+        stage: options[:stage],
+        write: options[:write],
+        force: options[:force]
+      ).call
     end
 
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"

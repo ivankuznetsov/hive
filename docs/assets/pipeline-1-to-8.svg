@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 130" role="img" aria-labelledby="title desc">
+  <title id="title">Hive pipeline from inbox to done</title>
+  <desc id="desc">Eight stage boxes connected left to right: inbox, brainstorm, plan, execute, open-pr, review, finalize, done.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+  <g font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <rect x="20" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="77.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">1-inbox</text>
+    <text x="77.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">capture</text>
+    <line x1="143" y1="64" x2="178" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="185" y="25" width="130" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="250" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">2-brainstorm</text>
+    <text x="250" y="81" text-anchor="middle" fill="#6b7280" font-size="13">refine</text>
+    <line x1="323" y1="64" x2="358" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="365" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="422.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">3-plan</text>
+    <text x="422.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">design</text>
+    <line x1="488" y1="64" x2="523" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="530" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="587.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">4-execute</text>
+    <text x="587.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">build</text>
+    <line x1="653" y1="64" x2="688" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="695" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="752.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">5-open-pr</text>
+    <text x="752.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">draft PR</text>
+    <line x1="818" y1="64" x2="853" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="860" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="917.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">6-review</text>
+    <text x="917.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">harden</text>
+    <line x1="983" y1="64" x2="1018" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="1025" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1082.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">7-finalize</text>
+    <text x="1082.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">publish</text>
+    <line x1="1148" y1="64" x2="1183" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="1190" y="25" width="80" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1230" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">8-done</text>
+    <text x="1230" y="81" text-anchor="middle" fill="#6b7280" font-size="13">archive</text>
+  </g>
+</svg>

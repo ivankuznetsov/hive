@@ -5,7 +5,11 @@ class InitTest < Minitest::Test
   include HiveTestHelper
 
   def test_initializes_project_with_orphan_branch_and_global_registration
-    with_tmp_global_config do
+    # `with_tmp_global_config_and_home` overrides HOME alongside
+    # HIVE_HOME so ServiceInstaller (which writes launchd/systemd units
+    # under the real user home, not HIVE_HOME) lands the unit inside
+    # the sandbox.
+    with_tmp_global_config_and_home do |home|
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
 
@@ -36,6 +40,12 @@ class InitTest < Minitest::Test
 
         projects = Hive::Config.registered_projects
         assert(projects.any? { |p| p["path"] == File.expand_path(dir) })
+
+        assert File.exist?(File.join(home, ".config/systemd/user/hive-daemon.service")),
+               "init should register the per-user daemon service unit"
+        global = YAML.safe_load(File.read(File.join(home, "config.yml")))
+        assert_equal false, global.dig("daemon", "autostart"),
+                     "non-TTY init writes the service unit but does not start it by default"
       end
     end
   end
@@ -211,12 +221,14 @@ class InitTest < Minitest::Test
     # Order matches Prompts#collect. Choosing codex for planning skips
     # the Claude-only brainstorm runtime prompt, so the transcript continues
     # with development, reviewers, triage bias, 9 limit prompts, daemon-enable,
-    # and confirm. Choose codex for both, safetyist triage, only first + third
-    # reviewer, override `plan` budget/timeout, accept the rest.
+    # daemon-autostart, and confirm. Choose codex for both, safetyist triage,
+    # only first + third reviewer, override `plan` budget/timeout, accept the
+    # rest (daemon defaults to enabled, autostart defaults to disabled on
+    # blank, confirm defaults to yes on blank).
     inputs = [
       "codex", "2", "1,3", "safetyist",
       "", "30,900", "", "", "", "", "", "", "",
-      "", ""
+      "", "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -246,7 +258,10 @@ class InitTest < Minitest::Test
   end
 
   def test_init_with_tmux_brainstorm_runtime_writes_matching_config
-    inputs = ([ "", "2", "", "", "" ] + ([ "" ] * 9) + [ "", "" ]).join("\n") + "\n"
+    # planning=blank(claude), brainstorm_runtime="2"(tmux), dev=blank,
+    # reviewers=blank, triage=blank, 9 limit blanks, daemon-enable=blank,
+    # daemon-autostart=blank, confirm=blank.
+    inputs = ([ "", "2", "", "", "" ] + ([ "" ] * 9) + [ "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -261,7 +276,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    inputs = (([ "" ] * 14) + [ "n", "" ]).join("\n") + "\n"
+    # 14 blanks: planning (claude), brainstorm runtime, dev, reviewers,
+    # triage bias, 9 limits. Then "n" for daemon-enable, blank for
+    # daemon-autostart, blank for confirm.
+    inputs = (([ "" ] * 14) + [ "n", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -276,9 +294,9 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # 15 blanks: planning, brainstorm runtime, dev, reviewers, triage bias,
-    # 9 limits, daemon-enable.
-    inputs = (([ "" ] * 15) + [ "n" ]).join("\n") + "\n"
+    # 16 blanks: planning (claude), brainstorm runtime, dev, reviewers,
+    # triage bias, 9 limits, daemon-enable, daemon-autostart.
+    inputs = (([ "" ] * 16) + [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -326,6 +344,22 @@ class InitTest < Minitest::Test
         assert_includes err, "already initialized"
         assert_equal "crash-on-this-input", input.gets&.chomp,
                      "no input should have been consumed by the second init"
+      end
+    end
+  end
+
+  def test_current_binary_path_uses_invoked_hive_binary
+    with_tmp_dir do |dir|
+      hive = File.join(dir, "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(hive))
+      File.write(hive, "#!/bin/sh\n")
+      FileUtils.chmod(0755, hive)
+      old_program_name = $PROGRAM_NAME
+      begin
+        $PROGRAM_NAME = hive
+        assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+      ensure
+        $PROGRAM_NAME = old_program_name
       end
     end
   end

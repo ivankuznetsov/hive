@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-20T09:11:00Z] brainstorm — read-only Stop-hook + bounded trust loop
+
+**Action:** Documented two safety fixes on `fix/brainstorm-tmux-interactive-live-smoke`. `Hive::StopHookInstaller` now `chmod 0o444`s the installed `.claude/settings.json` (dropping it first for idempotency) so a prompt-injected `idea.md` cannot rewrite the Stop hook command and execute arbitrary shell on graceful exit. `BrainstormTmux#prepare_claude_session!`'s trust-prompt branch now respects `claude_ready_wait_timeout` instead of looping Enter forever when the trust strings persist. The dead `--allowed-tools` kebab alias was removed from `interactive_claude_wrapper.sh`; only `--allowedTools` is wired up.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — Stop-hook installer chmod + bounded trust-prompt loop noted in the runtime description.
+
 ## [2026-05-20T00:00:00Z] README rewritten with TUI-first framing
 
 **Action:** Restructured `README.md` so the user-facing entry point is the `hive tui` dashboard, the second-tier entry point is "Drive Hive From Your Coding Agent" (folding in the existing install-prompt block plus day-to-day operate-via-agent guidance), and direct CLI use is demoted to a Power-User / Scripting CLI summary that links out to `docs/cli.md` instead of duplicating the per-command table. The hero now explains what Hive does and the folder-as-agent + compound-engineering mental model before any install line. The Documentation section replaces bare bullet links with 1–3 sentence prose descriptions per linked doc.

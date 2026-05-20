@@ -2,12 +2,26 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-20T00:12:57Z] TUI image paste mode boundary
+
+**Action:** Clarified that Ctrl+V is inert outside the `:new_idea` composer, including while the help overlay is visible. This preserves the image-paste boundary documented for the composer and keeps overlays from closing on an image-paste probe.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — documented the Ctrl+V no-op behavior outside `:new_idea`.
+
 ## [2026-05-20T00:00:00Z] README rewritten with TUI-first framing
 
 **Action:** Restructured `README.md` so the user-facing entry point is the `hive tui` dashboard, the second-tier entry point is "Drive Hive From Your Coding Agent" (folding in the existing install-prompt block plus day-to-day operate-via-agent guidance), and direct CLI use is demoted to a Power-User / Scripting CLI summary that links out to `docs/cli.md` instead of duplicating the per-command table. The hero now explains what Hive does and the folder-as-agent + compound-engineering mental model before any install line. The Documentation section replaces bare bullet links with 1–3 sentence prose descriptions per linked doc.
 
 **Refreshed pages:**
 - None — README sits outside `wiki/`. This entry logs the rewrite for traceability with the rest of the docs surface.
+
+## [2026-05-19T23:20:28Z] tui — Ctrl+V also triggers composer image paste
+
+**Action:** Documented that Ctrl+V in the `:new_idea` composer now runs the same image clipboard probe as an empty bracketed paste, covering terminals that send literal Ctrl+V instead of a bracketed-paste burst for image-only clipboards. The staging convention, `[imageN]` placeholders, and submit rewrite remain unchanged.
+
+**Refreshed pages:**
+- [[commands/tui]] — added Ctrl+V as an additional image-paste trigger in the new-idea composer.
 
 ## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
 

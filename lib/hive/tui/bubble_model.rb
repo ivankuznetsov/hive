@@ -318,6 +318,8 @@ module Hive
                               km.key_type == Bubbletea::KeyMessage::KEY_CTRL_A
         return :key_ctrl_e if defined?(Bubbletea::KeyMessage::KEY_CTRL_E) &&
                               km.key_type == Bubbletea::KeyMessage::KEY_CTRL_E
+        return :key_ctrl_v if defined?(Bubbletea::KeyMessage::KEY_CTRL_V) &&
+                              km.key_type == Bubbletea::KeyMessage::KEY_CTRL_V
         # Bubbletea-Ruby v0.1.4 exposes KEY_SHIFT_TAB as a constant but
         # not a `shift_tab?` predicate; compare key_type directly so the
         # v2 two-pane Shift+Tab focus-cycle binding fires. The

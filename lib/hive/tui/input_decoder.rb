@@ -39,7 +39,8 @@ module Hive
         "\x7f".b => Bubbletea::KeyMessage::KEY_BACKSPACE,
         "\x01".b => Bubbletea::KeyMessage::KEY_CTRL_A,
         "\x03".b => Bubbletea::KeyMessage::KEY_CTRL_C,
-        "\x05".b => Bubbletea::KeyMessage::KEY_CTRL_E
+        "\x05".b => Bubbletea::KeyMessage::KEY_CTRL_E,
+        "\x16".b => Bubbletea::KeyMessage::KEY_CTRL_V
       }.freeze
 
       # Hard caps so a missing PASTE_END marker, a wedged escape prefix,

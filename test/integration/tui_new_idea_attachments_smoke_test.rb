@@ -193,4 +193,71 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
       end
     end
   end
+
+  def test_ctrl_v_stages_clipboard_image_and_submit_persists_asset
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        project_prefix = project[0, 12]
+
+        env = {
+          "TERM" => "xterm-256color",
+          "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png",
+          "HIVE_TUI_TEST_CLIPBOARD_BASE" => File.expand_path("../fixtures/composer", __dir__),
+          "HIVE_TUI_TEST_CLIPBOARD_STRICT" => "1"
+        }
+        PTY.spawn(env, "ruby", "-I", HIVE_LIB, HIVE_BIN, "tui") do |reader, writer, pid|
+          reader.winsize = [ 30, 120 ]
+
+          buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?(project_prefix) }
+          assert_includes buffer, project_prefix
+
+          writer.write("n")
+          writer.flush
+          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("Choose project for new idea") }
+          assert_includes buffer, "Choose project for new idea"
+
+          writer.write("\r")
+          writer.flush
+          buffer = read_until(reader, deadline_seconds: 5.0) { |buf| buf.include?("New idea") }
+          assert_includes buffer, "New idea"
+
+          writer.write("ctrl v image ")
+          writer.write("\x16")
+          writer.flush
+
+          badge_buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?("1 image") }
+          assert_includes badge_buffer, "1 image",
+            "composer prompt badge must show `[1 image]` after Ctrl-V"
+
+          writer.write("\r")
+          writer.flush
+          grid_buffer = read_until(reader, deadline_seconds: 10.0) { |buf| buf.include?("ctrl-v-image") }
+          assert_includes grid_buffer, "ctrl-v-image",
+            "post-submit grid must show the ctrl-v-image slug row"
+
+          writer.write("q")
+          writer.flush
+          status = wait_for_pid_exit(pid, deadline_seconds: 3.0)
+          refute_nil status
+          assert_equal 0, status.exitstatus
+        rescue Errno::EIO
+          # Linux PTY drain after the child exits can raise once the
+          # slave end closes. The post-block filesystem assertions
+          # below still prove the submit path completed.
+        end
+
+        task = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "ctrl-v-image-*")].first
+        refute_nil task, "Ctrl-V image submit must create an inbox task"
+        idea = File.read(File.join(task, "idea.md"))
+        assert_includes idea, "ctrl v image ![](assets/bug-1.png)"
+
+        expected = File.binread(File.join(__dir__, "..", "fixtures", "composer", "screenshot-1.png"))
+        asset = File.join(task, "assets", "bug-1.png")
+        assert File.size?(asset), "Ctrl-V image submit must persist a non-empty PNG asset"
+        assert_equal expected, File.binread(asset)
+      end
+    end
+  end
 end

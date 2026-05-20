@@ -38,7 +38,13 @@ jobs:
       - name: Install Tebako
         run: gem install tebako
       - name: Build release artifact
-        run: bundle exec rake "build:release[${{ matrix.target }}]"
+        # `tebako` is installed via system `gem install` (not in the bundle), so
+        # invoke rake without `bundle exec` — the bundle context would hide the
+        # tebako executable and the rake task fails with
+        # "can't find executable tebako for gem tebako".
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rake "build:release[$TARGET]"
       - name: Smoke test built binary
         env:
           TARGET: ${{ matrix.target }}

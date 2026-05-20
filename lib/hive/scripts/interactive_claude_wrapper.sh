@@ -37,9 +37,9 @@ while [ "$remaining" -gt 0 ]; do
       shift
       remaining=$((remaining - 1))
       ;;
-    --allowedTools|--allowed-tools)
+    --allowedTools)
       [ "$remaining" -ge 1 ] || usage
-      set -- "$@" "$arg" "$1"
+      set -- "$@" "--allowedTools" "$1"
       shift
       remaining=$((remaining - 1))
       ;;

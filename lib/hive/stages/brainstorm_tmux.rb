@@ -217,6 +217,7 @@ module Hive
           if claude_trust_prompt?(last_tail)
             runner.send_keys("Enter")
             sleep CLAUDE_READY_POLL_INTERVAL_SEC
+            break if Time.now >= deadline
             next
           end
 

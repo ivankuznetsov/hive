@@ -86,6 +86,27 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     assert_equal [ "Enter" ], runner.sent_keys
   end
 
+  def test_prepare_claude_session_trust_prompt_branch_respects_deadline
+    runner = FakeInteractiveRunner.new(
+      "hive-2-brainstorm-test",
+      [
+        "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm",
+        "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm"
+      ],
+      []
+    )
+    original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:claude_ready_wait_timeout)
+    Hive::Stages::BrainstormTmux.define_singleton_method(:claude_ready_wait_timeout) { 0.01 }
+
+    err = assert_raises(Hive::AgentError) do
+      Hive::Stages::BrainstormTmux.prepare_claude_session!(runner)
+    end
+    assert_match(/did not become ready/, err.message)
+    refute_empty runner.sent_keys, "should have sent at least one Enter before timing out"
+  ensure
+    Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :claude_ready_wait_timeout, original) if original
+  end
+
   def test_prepare_claude_session_does_not_treat_permission_prompt_as_ready
     runner = FakeInteractiveRunner.new(
       "hive-2-brainstorm-test",

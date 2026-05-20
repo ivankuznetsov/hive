@@ -21,6 +21,9 @@ class CommandsStatusTest < Minitest::Test
       slugs = payload.fetch("projects").first.fetch("tasks").map { |task| task.fetch("slug") }
       assert_includes slugs, "active-task"
       refute_includes slugs, "manual-task"
+      assert_equal [], payload.fetch("projects").first.fetch("legacy_stage_dirs"),
+                   "archived-manual is an intentional status-private sibling, not a legacy stage"
+      assert_nil payload.fetch("projects").first.fetch("legacy_migrate_command")
     end
   end
 end

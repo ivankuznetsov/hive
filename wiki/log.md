@@ -1681,3 +1681,11 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 **Refreshed pages:**
 - [[commands/tui]] — added keybinding, subprocess/manual-steering behavior, and status icon notes.
 - [[operating]] — added the stuck-task manual takeover path for daemon operators.
+
+## [2026-05-20T00:00:00Z] manual steering — run/status skip contracts
+
+**Action:** Tightened the manual-steering escape hatch. `hive run` now stops before auto-rebase and stage dispatch when the state file carries `MANUAL_STEERING`, and `hive status` treats `.hive-state/stages/archived-manual/` as an intentional status-private sibling rather than a legacy stage directory.
+
+**Refreshed pages:**
+- [[commands/run]] — documented the manual-steering pre-run skip and JSON rebase reason.
+- [[commands/status]] — documented status-private stage siblings for legacy-stage detection.

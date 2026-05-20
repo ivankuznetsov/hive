@@ -70,17 +70,60 @@ module HiveTestHelper
 
   def with_tmp_global_config
     dir = Dir.mktmpdir("hive-global")
-    old = ENV["HIVE_HOME"]
+    old_hive_home = ENV["HIVE_HOME"]
     ENV["HIVE_HOME"] = dir
     File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
     begin
       yield(dir)
     ensure
-      ENV["HIVE_HOME"] = old
+      old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
       # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
       # tmpdir invoke `hive`/git subprocesses that can leave the tree
       # mid-rename.
       FileUtils.rm_rf(dir)
+    end
+  end
+
+  # Variant that also overrides HOME — needed by tests that exercise
+  # daemon ServiceInstaller, which anchors on the real user home for
+  # launchd/systemd paths and would otherwise write units to the
+  # developer's actual $HOME.
+  def with_tmp_global_config_and_home
+    dir = Dir.mktmpdir("hive-global")
+    old_hive_home = ENV["HIVE_HOME"]
+    old_home = ENV["HOME"]
+    ENV["HIVE_HOME"] = dir
+    ENV["HOME"] = dir
+    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+    begin
+      yield(dir)
+    ensure
+      old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
+      old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
+      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
+      # tmpdir invoke `hive`/git subprocesses that can leave the tree
+      # mid-rename.
+      FileUtils.rm_rf(dir)
+    end
+  end
+
+  # Set up a sandboxed XDG_*/HOME environment for tests that exercise
+  # the XDG path resolvers (paths_test, uninstall_test, etc). Yields the
+  # sandbox root.
+  def with_xdg_home
+    with_tmp_dir do |dir|
+      keys = %w[HOME HIVE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_BIN_HOME]
+      old = keys.to_h { |key| [ key, ENV.fetch(key, nil) ] }
+      ENV["HOME"] = File.join(dir, "home")
+      ENV.delete("HIVE_HOME")
+      ENV["XDG_CONFIG_HOME"] = File.join(dir, "config")
+      ENV["XDG_DATA_HOME"] = File.join(dir, "data")
+      ENV["XDG_STATE_HOME"] = File.join(dir, "state")
+      ENV["XDG_CACHE_HOME"] = File.join(dir, "cache")
+      ENV.delete("XDG_BIN_HOME")
+      yield dir
+    ensure
+      old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     end
   end
 

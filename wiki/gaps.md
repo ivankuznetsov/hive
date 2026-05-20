@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-04-30
+updated: 2026-05-20
 tags: [gap, todo]
 ---
 
@@ -48,6 +48,12 @@ tags: [gap, todo]
 6. **E2E surface matrix** — `bin/hive-e2e run` is green locally on Linux with tmux 3.6a, but the follow-up matrix across macOS and a different tmux minor version is still open.
 7. ~~**Asciinema local verification**~~ — closed 2026-04-30. `/usr/bin/asciinema` 3.2.0 is visible on this shell's PATH, and a smoke run created an asciicast v2 file. `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema` remains the fallback for installs outside PATH.
 8. **R2 misdiagnosis artifact validation** — e2e artifacts exist, but the "fresh agent course-corrects from a wrong first diagnosis" case needs the first organic failure or a third-party synthetic failure.
+
+## Release install follow-ups
+
+1. **AUR publish automation deferred to v0.1.x.** v0.1.0 keeps `packaging/aur/PKGBUILD.template` and checksum inputs ready for manual maintainer bootstrap, but the GitHub release workflow intentionally fails loudly if `AUR_SSH_PRIVATE_KEY` is configured before real AUR publishing exists. External decisions remain: maintainer account ownership, deploy-key provisioning, first `hive-bin.git` bootstrap, and retry semantics.
+2. **macOS x86_64 install.sh support deferred to v0.1.x.** v0.1.0 treats macOS x86_64 as tier-3 for the bash installer rather than attempting an untested Rosetta path. A future follow-up can add best-effort Rosetta behavior once the release smoke matrix covers it.
+3. **Hive skills package deferred to a companion-package follow-up.** The intended marketplace slugs are documented in `install.md` and [[operating]], but agents must not run those commands until `ivankuznetsov/hive-skills` is actually published.
 
 ## Patterns detected in code but not yet documented
 

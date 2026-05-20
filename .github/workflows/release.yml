@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Default-narrow permissions: the build job only reads source. The
+# publish job needs `contents: write` to create the GitHub Release and
+# `id-token: write` for cosign keyless signing of SHA256SUMS.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build hive-cli gem
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Build gem
+        # Hive ships as a rubygem (`hive-cli`) attached to the GitHub
+        # Release; install channels (install.sh, brew, AUR) download
+        # the .gem and run `gem install` on it. No native build chain
+        # (tebako/dwarfs/Boost) — the user provides Ruby 3.4 already
+        # because the rest of the toolchain needs it.
+        run: gem build hive.gemspec
+      - name: Smoke test built gem
+        # Confirm the gemspec is well-formed and the `hive`/`hv`
+        # executables resolve before we attach the artifact to a
+        # release. Installs into a throwaway $HOME-scoped gem prefix
+        # so the runner's default gem env stays clean.
+        run: |
+          gem_file="$(ls hive-cli-*.gem | head -n 1)"
+          [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem in workspace" >&2; exit 1; }
+          sandbox="$(mktemp -d)/gem-sandbox"
+          mkdir -p "$sandbox"
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" gem install "$gem_file" \
+            --install-dir "$sandbox" \
+            --bindir "$sandbox/bin" \
+            --no-document \
+            --source https://rubygems.org
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" "$sandbox/bin/hive" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hive-cli-gem
+          path: hive-cli-*.gem
+          if-no-files-found: error
+
+  release-finalize:
+    name: Publish GitHub release
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hive-cli-gem
+          path: dist
+      - name: Build checksums
+        run: |
+          cd dist
+          sha256sum hive-cli-*.gem > SHA256SUMS
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign checksums
+        # `--output-certificate` writes the fulcio cert blob that
+        # `cosign verify-blob --certificate ... --signature ...` needs
+        # at consumption time (install.sh + the agent prompt both
+        # follow that path).
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$REF_NAME" dist/* \
+            --title "$REF_NAME" \
+            --notes "Hive $REF_NAME" \
+            --verify-tag
+      - name: Notify Homebrew tap
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="${REF_NAME#v}"
+          gem_sha="$(awk '/hive-cli-/ {print $1}' dist/SHA256SUMS)"
+          # Build the payload via jq so version/sha values can't break
+          # out of the JSON object (a tag like `v0.1","event_type":"x`
+          # injected via string concat would otherwise smuggle keys).
+          payload="$(jq -nc --arg version "$version" --arg sha "$gem_sha" \
+            '{version: $version, sha256_gem: $sha}')"
+          echo "notify-homebrew: dispatching event_type=hive-release version=${version}"
+          gh api repos/ivankuznetsov/homebrew-hive/dispatches \
+            --method POST \
+            --field event_type=hive-release \
+            --raw-field "client_payload=${payload}"
+      - name: Notify Homebrew tap (audit when skipped)
+        if: ${{ env.HOMEBREW_TAP_TOKEN == '' }}
+        run: |
+          echo "notify-homebrew: skipped; HOMEBREW_TAP_TOKEN is not set"
+      - name: AUR publish (placeholder)
+        if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
+        run: |
+          echo "AUR publish is enabled by secret; packaging/aur templates are the source of truth for the publish job."
+          echo "TODO: wire up packaging/aur/PKGBUILD.template publishing here (cosign verify the .gem before bumping pkgver)."
+          echo "Failing loudly so a configured AUR secret cannot be mistaken for a real publish." >&2
+          exit 1

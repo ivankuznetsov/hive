@@ -1,0 +1,56 @@
+# Maintainer: Hive maintainers <maintainers@users.noreply.github.com>
+pkgname=hive-bin
+pkgver=<%= version %>
+pkgrel=1
+pkgdesc='Folder-as-agent pipeline for autonomous software tasks'
+arch=('any')
+url='https://github.com/ivankuznetsov/hive'
+license=('MIT')
+depends=('ruby')
+makedepends=('ruby-rubygems')
+# `provides=('hive')` + `conflicts=('hive')` is INTENTIONAL and not a
+# self-conflict. We provide the virtual `hive` capability so consumers
+# can `pacman -S hive`, and conflict with the unrelated `apache-hive`
+# AUR package name `hive` (the SQL-on-Hadoop tool) so pacman blocks
+# the collision before our symlink fallback is needed.
+provides=('hive')
+conflicts=('hive' 'apache-hive')
+install=hive.install
+source=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-cli-${pkgver}.gem")
+sha256sums=('<%= sha256_gem %>')
+noextract=("hive-cli-${pkgver}.gem")
+
+package() {
+  local gem_home="${pkgdir}/usr/share/hive/gems"
+  install -dm755 "${gem_home}"
+
+  # `gem install --install-dir` requires the .gem file path, not the
+  # extracted source. `noextract` keeps the .gem intact during
+  # makepkg's source preparation step.
+  gem install \
+    --install-dir "${gem_home}" \
+    --bindir "${gem_home}/bin" \
+    --no-document \
+    --ignore-dependencies=false \
+    "${srcdir}/hive-cli-${pkgver}.gem"
+
+  # User-facing wrappers under /usr/bin that set GEM_PATH before
+  # exec'ing the gem-installed bin. Without this, `hive` would only
+  # work when the user's default GEM_PATH includes the vendored gem
+  # home.
+  install -dm755 "${pkgdir}/usr/bin"
+  for name in hive hv; do
+    cat > "${pkgdir}/usr/bin/${name}" <<WRAPPER
+#!/usr/bin/env bash
+export GEM_HOME="/usr/share/hive/gems"
+export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+exec "/usr/share/hive/gems/bin/${name}" "\$@"
+WRAPPER
+    chmod 755 "${pkgdir}/usr/bin/${name}"
+  done
+
+  install -Dm644 "${gem_home}/gems/hive-cli-${pkgver}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+  printf 'aur\n' > "${pkgdir}/usr/share/hive/install-channel"
+}

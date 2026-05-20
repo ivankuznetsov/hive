@@ -5,6 +5,7 @@ require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
+require "hive/daemon/stale_agent_healer"
 require "hive/daemon/logger"
 
 module Hive
@@ -43,6 +44,17 @@ module Hive
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
+        # Grace window for AGENT_WORKING markers with no PID attribute
+        # (placeholders stamped on stage entry). Within this window the
+        # dispatcher is presumed to be mid-spawn; past it, the marker
+        # is healed to ERROR reason=agent_orphaned. 5 minutes is
+        # comfortably longer than worst-case dispatch latency under load.
+        agent_marker_grace_sec = @daemon_cfg.fetch("agent_marker_grace_sec", 300)
+        @stale_agent_healer = StaleAgentHealer.new(
+          controller: @controller,
+          logger: @logger,
+          grace_sec: agent_marker_grace_sec
+        )
 
         @shutdown = false
         @reload = false
@@ -107,6 +119,13 @@ module Hive
         refresh_active_agent_snapshot(result.rows)
 
         observe_external_running_rows(result.rows)
+
+        # Heal AGENT_WORKING markers whose backing agent isn't alive
+        # BEFORE per-row dispatch — a healed row classifies as :error on
+        # the next status read, and we don't want the dispatcher to try
+        # to advance the stage on the same tick that just learned the
+        # agent died.
+        @stale_agent_healer.heal(result.rows, legacy_layout_projects: @legacy_layout_projects)
 
         # 3. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +

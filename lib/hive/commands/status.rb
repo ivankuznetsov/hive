@@ -391,7 +391,9 @@ module Hive
             marker_from_row(row),
             project_name: project["name"],
             project_count: project_count,
-            stage_collision: slug_counts[row[:slug]] > 1
+            stage_collision: slug_counts[row[:slug]] > 1,
+            pid_alive: row[:claude_pid_alive],
+            state_file_mtime: row[:mtime]
           )
           row.merge(
             action_key: action.key,

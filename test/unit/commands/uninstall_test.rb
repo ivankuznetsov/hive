@@ -63,28 +63,31 @@ class UninstallCommandTest < Minitest::Test
   end
 
   def test_hive_home_collapse_skips_config_cache_and_state_deletes
-    with_tmp_dir do |dir|
-      old = ENV["HIVE_HOME"]
-      begin
-        ENV["HIVE_HOME"] = File.join(dir, "collapsed")
-        FileUtils.mkdir_p(ENV.fetch("HIVE_HOME"))
-        File.write(Hive::Config.global_config_path, { "registered_projects" => [] }.to_yaml)
-        FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "projects", "work"))
+    # `with_xdg_home` (not the bare `with_tmp_dir`) is load-bearing here:
+    # `Hive::Paths.bin_home` intentionally ignores HIVE_HOME, so without
+    # the HOME / XDG_BIN_HOME isolation that `with_xdg_home` sets up,
+    # `Uninstall#remove_user_symlinks` would resolve `bin_home` to the
+    # real `~/.local/bin/` and unlink the user's actual hive/hv
+    # symlinks during `rake test`. Every other Uninstall test in this
+    # file uses `with_xdg_home` for that reason; this one is the lone
+    # path that needs to override HIVE_HOME after entering the sandbox.
+    with_xdg_home do |dir|
+      ENV["HIVE_HOME"] = File.join(dir, "collapsed")
+      FileUtils.mkdir_p(ENV.fetch("HIVE_HOME"))
+      File.write(Hive::Config.global_config_path, { "registered_projects" => [] }.to_yaml)
+      FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "projects", "work"))
 
-        out = StringIO.new
-        Hive::Commands::Uninstall.new(
-          purge: true,
-          output: out,
-          runner: ->(_argv) { true },
-          host_os: "freebsd"
-        ).call
+      out = StringIO.new
+      Hive::Commands::Uninstall.new(
+        purge: true,
+        output: out,
+        runner: ->(_argv) { true },
+        host_os: "freebsd"
+      ).call
 
-        assert File.exist?(Hive::Paths.config_home)
-        assert File.exist?(File.join(Hive::Paths.state_home, "projects", "work"))
-        assert_match(/HIVE_HOME collapses/, out.string)
-      ensure
-        old.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old
-      end
+      assert File.exist?(Hive::Paths.config_home)
+      assert File.exist?(File.join(Hive::Paths.state_home, "projects", "work"))
+      assert_match(/HIVE_HOME collapses/, out.string)
     end
   end
 

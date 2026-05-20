@@ -76,6 +76,28 @@ class PathsTest < Minitest::Test
     end
   end
 
+  def test_legacy_registry_migration_preserves_non_empty_legacy_dir
+    with_tmp_dir do |dir|
+      home = File.join(dir, "home")
+      legacy_dir = File.join(home, ".hive-state")
+      sibling = File.join(legacy_dir, "daemon.log")
+      FileUtils.mkdir_p(legacy_dir)
+      File.write(File.join(legacy_dir, "registry.yml"), { "registered_projects" => [] }.to_yaml)
+      File.write(sibling, "keep\n")
+
+      with_env(
+        "HOME" => home,
+        "HIVE_HOME" => nil,
+        "XDG_CONFIG_HOME" => File.join(dir, "config")
+      ) do
+        capture_io { Hive::Paths.ensure_migrated! }
+        assert File.exist?(File.join(dir, "config", "hive", "config.yml"))
+        assert File.exist?(sibling), "non-registry legacy content must not be reaped"
+        refute File.exist?(File.join(legacy_dir, "registry.yml"))
+      end
+    end
+  end
+
   def test_ensure_migrated_is_idempotent
     with_tmp_dir do |dir|
       home = File.join(dir, "home")

@@ -14,6 +14,7 @@ candidates=(
   "${XDG_BIN_HOME:-${HOME}/.local/bin}/hive"
   "${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive"
   "/usr/local/bin/hive"
+  "/usr/bin/hive"
   "/opt/hive/bin/hive"
 )
 
@@ -28,6 +29,7 @@ for candidate in "${candidates[@]}"; do
   exec "$candidate" "$@"
 done
 
-echo "hv: hive binary not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or /opt/hive/bin" >&2
+echo "hv: hive binary not found in ${XDG_BIN_HOME:-${HOME}/.local/bin}, ${HOMEBREW_PREFIX:-/opt/homebrew}/bin, /usr/local/bin, /usr/bin, or /opt/hive/bin" >&2
 echo "hv: set HIVE_BIN_OVERRIDE=<path> to point at a custom install location" >&2
+echo "hv: install with 'brew install ivankuznetsov/hive/hive', 'yay -S hive-bin', or the pinned install.sh from install.md" >&2
 exit 127

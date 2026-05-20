@@ -321,4 +321,20 @@ class InitTest < Minitest::Test
       end
     end
   end
+
+  def test_current_binary_path_uses_invoked_hive_binary
+    with_tmp_dir do |dir|
+      hive = File.join(dir, "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(hive))
+      File.write(hive, "#!/bin/sh\n")
+      FileUtils.chmod(0755, hive)
+      old_program_name = $PROGRAM_NAME
+      begin
+        $PROGRAM_NAME = hive
+        assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+      ensure
+        $PROGRAM_NAME = old_program_name
+      end
+    end
+  end
 end

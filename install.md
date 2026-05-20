@@ -4,7 +4,7 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 ## Goal
 
-Install the latest stable Hive release, verify `hive --version`, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, `jq`, or agent CLIs.
+Install the latest stable Hive release, verify `hive --version`, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (`curl`, `jq`, `tar`, checksum tool) when that channel is used.
 
 ## Detect
 
@@ -42,15 +42,13 @@ Arch Linux:
 
 ```bash
 if command -v yay >/dev/null 2>&1; then
-  yay -S hive-bin
+  yay -S --noconfirm --needed hive-bin
 elif command -v paru >/dev/null 2>&1; then
-  paru -S hive-bin
+  paru -S --noconfirm --needed hive-bin
 else
-  # `return 69` keeps the agent's parent shell alive (using `exit 69`
-  # here would terminate the calling session). The agent should treat
-  # status 69 as "user must install yay or paru first" and abort.
+  # The agent should treat status 69 as "user must install yay or paru first" and abort.
   echo "Install yay or paru first, then run: yay -S hive-bin"
-  return 69 2>/dev/null || exit 69
+  exit 69
 fi
 ```
 
@@ -59,6 +57,7 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
+# Release maintainers: bump v0.1.0 in both installer URLs when cutting a new stable release.
 curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
@@ -68,6 +67,7 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
+# Release maintainers: bump v0.1.0 in both installer URLs when cutting a new stable release.
 curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
@@ -78,7 +78,14 @@ bash "$tmpdir/hive-install.sh"
 Run:
 
 ```bash
-hive --version || hv --version
+if hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  hive --version
+elif hv --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  hv --version
+else
+  echo "verify failed: expected Hive CLI version X.Y.Z from hive or hv" >&2
+  exit 1
+fi
 ```
 
 If `hive` is shadowed by Apache Hive, try `hv --version` and tell the user to use `hv` or adjust PATH.
@@ -96,7 +103,7 @@ During `hive init`, keep the user's prompt choices. If this is non-interactive, 
 
 ## Optional Skills
 
-The Hive skills package is forward-looking and may still be unpublished for v0.1.0. Treat the slugs below as the intended marketplace identifiers — running them today against an unpublished package returns an error from the agent's plugin registry. If/when the package is published, offer the matching command:
+The Hive skills package is deferred to a v0.1.x follow-up (tracked in `wiki/gaps.md`). DO NOT RUN these commands until that package is published; treat the slugs below as the intended marketplace identifiers. If/when the package is published, offer the matching command:
 
 ```bash
 claude plugin install ivankuznetsov/hive-skills

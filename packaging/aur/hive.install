@@ -12,6 +12,7 @@ post_upgrade() {
 post_remove() {
   cat <<'MSG'
 hive-bin removed.
-Project .hive-state directories and accumulated work are preserved.
+pacman -R hive-bin alone does not touch project .hive-state directories.
+Use `hive uninstall` flags deliberately for user config/cache or state cleanup.
 MSG
 }

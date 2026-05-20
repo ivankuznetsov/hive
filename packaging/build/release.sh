@@ -40,6 +40,34 @@ tebako press \
 [[ -s "${stage}/bin/hive" ]] || { echo "tebako produced an empty binary at ${stage}/bin/hive" >&2; exit 70; }
 chmod 0755 "${stage}/bin/hive"
 
+size_bytes="$(wc -c < "${stage}/bin/hive" | tr -d '[:space:]')"
+[[ "${size_bytes}" -ge 1048576 ]] || {
+  echo "tebako produced an unexpectedly small binary (${size_bytes} bytes) at ${stage}/bin/hive" >&2
+  exit 70
+}
+
+file_info="$(file -b "${stage}/bin/hive")"
+case "${target}" in
+  darwin-arm64)
+    [[ "${file_info}" == *"Mach-O"* && "${file_info}" == *"arm64"* ]] || {
+      echo "tebako output has wrong file signature for ${target}: ${file_info}" >&2
+      exit 70
+    }
+    ;;
+  linux-x86_64-gnu)
+    [[ "${file_info}" == *"ELF"* && ( "${file_info}" == *"x86-64"* || "${file_info}" == *"x86_64"* ) ]] || {
+      echo "tebako output has wrong file signature for ${target}: ${file_info}" >&2
+      exit 70
+    }
+    ;;
+  linux-aarch64-gnu)
+    [[ "${file_info}" == *"ELF"* && ( "${file_info}" == *"aarch64"* || "${file_info}" == *"ARM aarch64"* ) ]] || {
+      echo "tebako output has wrong file signature for ${target}: ${file_info}" >&2
+      exit 70
+    }
+    ;;
+esac
+
 # Smoke check: only run native-target binaries; cross-compiled
 # linux-aarch64-gnu on linux-x86_64-gnu (and vice versa) can't be
 # executed here, so skip the runtime check in that case.

@@ -1,17 +1,20 @@
 require "hive"
 require "hive/install_channel"
+require "shellwords"
 
 module Hive
   module Commands
     class Update
       # Centralised org+repo + brew tap so a future rename of the
       # repository is a one-diff change. The installer URL pins to the
-      # current release tag (Hive::VERSION) rather than `main` so
-      # `hive update` doesn't keep re-running an unpinned script.
+      # default branch so older bash-channel installs can fetch the
+      # newest installer rather than re-running their own vX.Y.Z script
+      # forever. The script is downloaded to a tmpfile before execution;
+      # no pipe-to-bash path is used here.
       REPO_OWNER = "ivankuznetsov".freeze
       REPO_NAME = "hive".freeze
       BREW_TAP = "#{REPO_OWNER}/#{REPO_NAME}/hive".freeze
-      INSTALL_URL = "https://raw.githubusercontent.com/#{REPO_OWNER}/#{REPO_NAME}/v#{Hive::VERSION}/install.sh".freeze
+      INSTALL_URL = "https://raw.githubusercontent.com/#{REPO_OWNER}/#{REPO_NAME}/main/install.sh".freeze
 
       def initialize(dry_run: false, output: $stdout, runner: nil, env: ENV, channel: nil)
         @dry_run = dry_run
@@ -23,7 +26,8 @@ module Hive
 
       def call
         channel = @channel || Hive::InstallChannel.detect
-        argv = command_for(channel)
+        prefix = @channel.nil? && channel == "bash" ? Hive::InstallChannel.detected_prefix : nil
+        argv = command_for(channel, prefix: prefix)
         if argv.nil?
           @output.puts "channel: dev"
           @output.puts "suggested action: git pull && bundle install"
@@ -41,24 +45,25 @@ module Hive
 
       private
 
-      def command_for(channel)
+      def command_for(channel, prefix: nil)
         case channel
         when "brew" then [ "brew", "upgrade", BREW_TAP ]
         when "aur" then aur_command
-        when "bash" then bash_installer_command
+        when "bash" then bash_installer_command(prefix: prefix)
         when "dev" then nil
         else
           raise Hive::ConfigError, "unknown hive install channel #{channel.inspect}"
         end
       end
 
-      def bash_installer_command
+      def bash_installer_command(prefix: nil)
+        prefix_arg = prefix ? " --prefix=#{Shellwords.escape(prefix)}" : ""
         script = [
           "set -euo pipefail",
           'tmpdir="$(mktemp -d)"',
           'trap \'rm -rf "$tmpdir"\' EXIT',
           "curl -fsSL #{INSTALL_URL} -o \"$tmpdir/install.sh\"",
-          'bash "$tmpdir/install.sh"'
+          "bash \"$tmpdir/install.sh\"#{prefix_arg}"
         ].join("; ")
         [ "bash", "-c", script ]
       end

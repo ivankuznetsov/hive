@@ -28,9 +28,10 @@ module Hive
       File.expand_path(env_or_blank("XDG_BIN_HOME") || File.join(home, ".local/bin"))
     end
 
-    # True when HIVE_HOME collapses every XDG directory onto one path —
-    # used by uninstall to refuse destructive deletes that would wipe a
-    # shared parent (state_home == config_home).
+    # True when HIVE_HOME collapses every XDG directory onto one path:
+    # state_home == config_home == data_home == cache_home. Uninstall uses
+    # this to refuse deletes like `rm_rf(config_home)`, which would also
+    # wipe state and accumulated work.
     def hive_home_collapsed?
       !hive_home_override.nil?
     end

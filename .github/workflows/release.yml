@@ -136,3 +136,5 @@ jobs:
         run: |
           echo "AUR publish is enabled by secret; packaging/aur templates are the source of truth for the publish job."
           echo "TODO: wire up packaging/aur/PKGBUILD.template publishing here (cosign verify the tarballs before bumping pkgver)."
+          echo "Failing loudly so a configured AUR secret cannot be mistaken for a real publish." >&2
+          exit 1

@@ -23,7 +23,7 @@ Tier-1 installs use the same signed GitHub Release artifacts:
 |----------|---------------------|
 | macOS arm64 | `brew install ivankuznetsov/hive/hive` |
 | Arch Linux x86_64/aarch64 | `yay -S hive-bin` |
-| Ubuntu 22.04+ x86_64/aarch64 | `curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh \| bash` |
+| Ubuntu 22.04+ x86_64/aarch64 | `tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"` |
 
 Agent-assisted install prompt: [install.md](install.md).
 

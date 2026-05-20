@@ -1,5 +1,6 @@
 require "cgi"
 require "fileutils"
+require "hive/install_channel"
 require "rbconfig"
 require "shellwords"
 
@@ -45,7 +46,9 @@ module Hive
 
         def install_macos!(autostart:)
           path = target_path
-          write_if_safe(path, render_launchd)
+          write_result = write_if_safe(path, render_launchd)
+          return :drifted if write_result == :drifted
+
           if autostart
             ok = @runner.call([ "launchctl", "load", path ])
             unless ok
@@ -58,7 +61,9 @@ module Hive
 
         def install_linux!(autostart:)
           path = target_path
-          write_if_safe(path, render_systemd)
+          write_result = write_if_safe(path, render_systemd)
+          return :drifted if write_result == :drifted
+
           if autostart
             if systemctl_available?
               ok_reload = @runner.call(%w[systemctl --user daemon-reload])
@@ -79,7 +84,7 @@ module Hive
             existing = File.read(path)
             return :unchanged if existing == content
 
-            @messages << "daemon service already exists at #{path}; leaving user-customized file untouched."
+            @messages << "daemon service already exists at #{path}; leaving user-customized file untouched. Remove it and re-run `hive init` to install the current template."
             return :drifted
           end
 
@@ -114,8 +119,41 @@ module Hive
         end
 
         def resolved_binary
-          path = @binary_path || which("hive") || File.expand_path("../../../../bin/hive", __dir__)
-          File.exist?(path) ? File.realpath(path) : path
+          if (brew_binary = homebrew_stable_binary)
+            return File.expand_path(brew_binary)
+          end
+
+          path = @binary_path || which("hive")
+          if path
+            return File.expand_path(path) if @binary_path && path == @binary_path
+
+            return File.exist?(path) ? File.realpath(path) : path
+          end
+
+          fallback = File.expand_path("../../../../bin/hive", __dir__)
+          @messages << "hive binary not found on PATH; falling back to #{fallback}. Re-run `hive init` from the installed hive binary if this is not intended."
+          File.exist?(fallback) ? File.realpath(fallback) : fallback
+        end
+
+        def homebrew_stable_binary
+          return nil unless platform == :macos
+          return nil unless install_channel == "brew"
+
+          homebrew_prefixes.each do |prefix|
+            path = File.join(prefix, "bin", "hive")
+            return path if File.file?(path) && File.executable?(path)
+          end
+          nil
+        end
+
+        def homebrew_prefixes
+          [ ENV["HOMEBREW_PREFIX"], "/opt/homebrew", "/usr/local" ].compact.uniq
+        end
+
+        def install_channel
+          Hive::InstallChannel.detect
+        rescue Hive::ConfigError
+          nil
         end
 
         def which(name)

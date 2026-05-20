@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-15
+updated: 2026-05-20
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -21,8 +21,8 @@ that installed the binary.
 | Tier | Platforms | Status |
 |------|-----------|--------|
 | Tier 1 | macOS arm64, Ubuntu 22.04+ x86_64/aarch64, Arch Linux x86_64/aarch64 | Release tarballs and channel docs ship in v1 |
-| Tier 2 | macOS x86_64, Debian 12+, Fedora 40+, WSL2 | Best effort through `install.sh`; no dedicated tap/AUR row |
-| Tier 3 | Alpine/musl, NixOS, BSD | Unsupported; installer exits with a clear message |
+| Tier 2 | Debian 12+, Fedora 40+, WSL2 | Best effort through `install.sh`; no dedicated tap/AUR row |
+| Tier 3 | macOS x86_64 for `install.sh` v0.1.0, Alpine/musl, NixOS, BSD | Unsupported; installer exits with a clear message |
 
 Channels:
 
@@ -45,7 +45,7 @@ bash "$tmpdir/hive-install.sh"
 | Flag / env | Purpose |
 |------------|---------|
 | `--dry-run` | Resolve target + version + URLs and run the runtime preflight without downloading or writing anything. |
-| `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Stage the versioned payload + `install-channel` marker under `<dir>/hive/…` instead of `${XDG_DATA_HOME}/hive`. `hive update` probes the prefix marker after the XDG marker, so subsequent updates re-use the same channel. |
+| `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Stage the versioned payload + prefix marker under `<dir>/hive/…` and mirror `install-channel`/`install-prefix` under `${XDG_DATA_HOME}/hive`, so `hive update` can re-use the prefix without re-exporting `HIVE_PREFIX`. |
 | `--version=<tag>` (or `HIVE_VERSION=<tag>`) | Skip the GitHub API call and install a specific `vX.Y.Z` tag. |
 | `HIVE_REPO_OWNER` / `HIVE_REPO_NAME` | Override the upstream owner/repo (for forks or mirror staging). Inputs are shape-validated. |
 | `HIVE_BIN_OVERRIDE` (read by `hv` wrapper) | Point `hv` at a custom install path when Apache Hive shadows it. |
@@ -71,8 +71,8 @@ work.
 
 Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
 bash installer creates `hv` when another `hive` is already earlier on PATH. The
-AUR package declares `conflicts=('hive' 'apache-hive')`, so pacman blocks the
-collision before fallback aliasing is possible.
+AUR package does not ship `hv`; its `conflicts=('hive' 'apache-hive')` metadata
+blocks the parallel install before fallback aliasing is possible.
 
 Updates and uninstall:
 
@@ -83,10 +83,15 @@ hive update --dry-run     # prints the would-be brew/yay/paru/bash command for t
 hive update               # delegates to the installing channel
 hive uninstall            # removes registrations/config/cache, preserves work
 hive uninstall --purge    # non-interactive; still preserves work
+hive uninstall --force-purge-state
+                          # destructive: removes accumulated hive state and
+                          # registered project .hive-state directories
 ```
 
 Skills package marketplace commands are documented for the optional companion
-package. If the package is not published yet, Hive core install still succeeds:
+package, but the package is deferred to a v0.1.x follow-up. Do not run these
+commands until `ivankuznetsov/hive-skills` is published; Hive core install
+still succeeds without it:
 
 | Agent | Command shape |
 |-------|---------------|
@@ -224,7 +229,9 @@ doesn't load your shell's rc files.
 
 `hive init` writes the resolved plist at
 `~/Library/LaunchAgents/local.hive-daemon.plist` with your real `hive`
-binary path already substituted. The recipe below is the manual
+binary path already substituted. Homebrew installs use the stable
+`${HOMEBREW_PREFIX}/bin/hive` symlink so `brew upgrade hive` keeps the daemon
+path current. The recipe below is the manual
 fallback (uses the placeholder filename `hive-daemon.plist` so it can
 sit alongside the auto-generated `local.hive-daemon.plist`); edit the
 absolute paths first (replace `/Users/YOU/...` with your real paths —

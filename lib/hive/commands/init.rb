@@ -107,7 +107,7 @@ module Hive
 
       def register_daemon_service!(autostart:)
         record_daemon_autostart!(autostart)
-        installer = Hive::Commands::Daemon::ServiceInstaller.new
+        installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: current_binary_path)
         result = installer.install!(autostart: autostart)
         installer.messages.each { |line| write_warn("hive: #{line}") }
         if result == :failed
@@ -125,6 +125,25 @@ module Hive
         data["daemon"] = {} unless data["daemon"].is_a?(Hash)
         data["daemon"]["autostart"] = autostart ? true : false
         Hive::Config.write_global_config!(data)
+      end
+
+      def current_binary_path
+        raw = $PROGRAM_NAME.to_s
+        return nil unless File.basename(raw) == "hive"
+
+        if raw.include?(File::SEPARATOR)
+          File.expand_path(raw)
+        else
+          which("hive")
+        end
+      end
+
+      def which(name)
+        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
+          path = File.join(dir, name)
+          return path if File.file?(path) && File.executable?(path)
+        end
+        nil
       end
 
       def print_summary(entry:, ops:)

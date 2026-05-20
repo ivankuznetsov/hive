@@ -9,7 +9,7 @@ class UpdateCommandTest < Minitest::Test
     Hive::Commands::Update.new(dry_run: true, output: out, channel: "brew").call
 
     assert_includes out.string, "channel: brew"
-    assert_includes out.string, "brew upgrade ivankuznetsov/hive/hive"
+    assert_includes out.string, "brew upgrade #{Hive::Commands::Update::BREW_TAP}"
   end
 
   def test_bash_dry_run_prints_installer
@@ -41,6 +41,28 @@ class UpdateCommandTest < Minitest::Test
       assert_includes captured[2], '-o "$tmpdir/install.sh"'
       assert_includes captured[2], 'bash "$tmpdir/install.sh"'
       refute_match(/\|\s*bash/, captured[2])
+    end
+  end
+
+  def test_bash_channel_preserves_prefix_from_install_marker
+    with_xdg_home do |dir|
+      prefix = File.join(dir, "prefix")
+      marker_home = Hive::Paths.data_home
+      FileUtils.mkdir_p(marker_home)
+      File.write(File.join(marker_home, "install-channel"), "bash\n")
+      File.write(File.join(marker_home, "install-prefix"), "#{prefix}\n")
+      curl = File.join(dir, "curl")
+      File.write(curl, "#!/bin/sh\n")
+      FileUtils.chmod(0755, curl)
+      captured = nil
+
+      Hive::Commands::Update.new(
+        env: { "PATH" => dir },
+        runner: ->(argv) { captured = argv }
+      ).call
+
+      assert_includes captured[2], "raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh"
+      assert_includes captured[2], "--prefix=#{Shellwords.escape(prefix)}"
     end
   end
 
@@ -92,5 +114,21 @@ class UpdateCommandTest < Minitest::Test
 
       assert_equal [ paru, "-Syu", "hive-bin" ], captured
     end
+  end
+
+  def test_brew_missing_helper_raises_unavailable
+    err = assert_raises(Hive::UnavailableError) do
+      Hive::Commands::Update.new(channel: "brew", env: { "PATH" => "" }).call
+    end
+
+    assert_match(/required helper 'brew' not found/, err.message)
+  end
+
+  def test_bash_missing_curl_raises_unavailable
+    err = assert_raises(Hive::UnavailableError) do
+      Hive::Commands::Update.new(channel: "bash", env: { "PATH" => "" }).call
+    end
+
+    assert_match(/required helper 'curl' not found/, err.message)
   end
 end

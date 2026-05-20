@@ -27,12 +27,32 @@ module Hive
       "dev"
     end
 
+    def detected_prefix(marker_paths: default_marker_paths)
+      marker_paths.each do |path|
+        channel = safe_read(path)
+        next unless channel
+
+        return read_prefix(path)
+      end
+      nil
+    end
+
     def read(path)
       return nil unless path && File.exist?(path)
 
       channel = File.read(path).strip
       validate!(channel)
       channel
+    end
+
+    def read_prefix(marker_path)
+      path = File.join(File.dirname(marker_path), "install-prefix")
+      return nil unless File.exist?(path)
+
+      prefix = File.read(path).strip
+      return nil if prefix.empty?
+
+      File.expand_path(prefix)
     end
 
     def marker_path
@@ -95,14 +115,15 @@ module Hive
       raise Hive::ConfigError, "unknown hive install channel #{channel.inspect} (expected: #{VALID.join(', ')})"
     end
 
-    # Surface a malformed marker as an actionable error rather than a
-    # Ruby stacktrace from `validate!`; `detect` swallows the path and
-    # moves on so a single corrupt marker doesn't brick `hive update`.
+    # Surface a malformed marker as an actionable, fail-closed error.
+    # A corrupt high-priority marker must not silently fall through to a
+    # stale lower-priority marker and route `hive update` to the wrong
+    # channel.
     def safe_read(path)
       read(path)
     rescue Hive::ConfigError => e
-      warn "hive: skipping invalid install-channel marker at #{path} (#{e.message}); remove it and re-install to fix"
-      nil
+      raise Hive::ConfigError,
+            "invalid install-channel marker at #{path}: #{e.message}; remove it and re-install to fix"
     end
   end
 end

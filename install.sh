@@ -283,21 +283,19 @@ tar -xzf "${tmpdir}/${archive_name}" -C "$tmpdir"
 extracted="${tmpdir}/hive-${version#v}-${target}"
 [[ -x "${extracted}/bin/hive" ]] || die "release archive does not contain executable bin/hive"
 
-# Atomic swap: stage under `${install_dir}.new` (sibling of the live
-# install dir so the rename is a directory-rename on the same fs),
-# move the live one out of the way under `.old`, then rename
-# `.new` → live and reap `.old`. A concurrent `hive` invocation
-# always sees either the previous or the next install_dir tree, never
-# a partially-extracted directory.
+# Stage under `${install_dir}.new` (sibling of the live install dir so
+# the renames stay on the same fs), rotate the live directory under
+# `.old`, then rename `.new` → live and reap `.old`. A concurrent `hive`
+# invocation never sees a partially-extracted directory.
 staged_dir="${install_dir}.new"
 old_dir="${install_dir}.old"
 rm -rf "$staged_dir" "$old_dir"
 mkdir -p "$(dirname "$install_dir")"
 mv "$extracted" "$staged_dir"
 if [[ -e "$install_dir" ]]; then
-  mv -T "$install_dir" "$old_dir"
+  mv "$install_dir" "$old_dir"
 fi
-mv -T "$staged_dir" "$install_dir"
+mv "$staged_dir" "$install_dir"
 rm -rf "$old_dir"
 
 if [[ "$(uname -s)" == "Darwin" ]] && command -v xattr >/dev/null 2>&1; then

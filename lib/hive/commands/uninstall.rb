@@ -45,16 +45,23 @@ module Hive
           plist = File.expand_path("~/Library/LaunchAgents/local.hive-daemon.plist")
           if File.exist?(plist)
             ok = @runner.call([ "launchctl", "unload", plist ])
-            @output.puts "hive: warning: launchctl unload failed for #{plist}" unless ok
+            unless ok
+              @output.puts "hive: warning: launchctl unload failed for #{plist}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
+              return
+            end
             safe_unlink(plist)
           end
         when /linux/i
           unit = File.expand_path("~/.config/systemd/user/hive-daemon.service")
           if File.exist?(unit)
             ok = @runner.call(%w[systemctl --user disable --now hive-daemon])
-            @output.puts "hive: warning: systemctl --user disable failed for hive-daemon" unless ok
+            unless ok
+              @output.puts "hive: warning: systemctl --user disable failed for hive-daemon; leaving #{unit} in place. Fix systemd state and re-run `hive uninstall`."
+              return
+            end
             safe_unlink(unit)
-            @runner.call(%w[systemctl --user daemon-reload])
+            ok_reload = @runner.call(%w[systemctl --user daemon-reload])
+            @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{unit}; run it manually" unless ok_reload
           end
         end
       end

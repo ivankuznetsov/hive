@@ -1,3 +1,12 @@
+PATH
+  remote: .
+  specs:
+    hive-cli (0.1.0)
+      bubbletea (= 0.1.4)
+      lipgloss (~> 0.2.2)
+      telegram-bot-ruby (~> 2.7)
+      thor (~> 1.3)
+
 GEM
   remote: https://rubygems.org/
   specs:
@@ -153,16 +162,13 @@ PLATFORMS
 
 DEPENDENCIES
   brakeman (~> 8.0)
-  bubbletea (= 0.1.4)
   bundler-audit (~> 0.9)
+  hive-cli!
   json_schemer (~> 2.5)
-  lipgloss (~> 0.2.2)
   minitest (~> 6.0)
   rake (~> 13.0)
   rubocop (~> 1.86)
   rubocop-rails-omakase (~> 1.1)
-  telegram-bot-ruby (~> 2.7)
-  thor (~> 1.3)
 
 RUBY VERSION
    ruby 3.4.7p58

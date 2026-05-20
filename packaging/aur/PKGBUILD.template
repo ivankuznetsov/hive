@@ -3,9 +3,11 @@ pkgname=hive-bin
 pkgver=<%= version %>
 pkgrel=1
 pkgdesc='Folder-as-agent pipeline for autonomous software tasks'
-arch=('x86_64' 'aarch64')
+arch=('any')
 url='https://github.com/ivankuznetsov/hive'
 license=('MIT')
+depends=('ruby')
+makedepends=('ruby-rubygems')
 # `provides=('hive')` + `conflicts=('hive')` is INTENTIONAL and not a
 # self-conflict. We provide the virtual `hive` capability so consumers
 # can `pacman -S hive`, and conflict with the unrelated `apache-hive`
@@ -14,25 +16,41 @@ license=('MIT')
 provides=('hive')
 conflicts=('hive' 'apache-hive')
 install=hive.install
-source_x86_64=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-${pkgver}-linux-x86_64-gnu.tar.gz")
-source_aarch64=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-${pkgver}-linux-aarch64-gnu.tar.gz")
-sha256sums_x86_64=('<%= sha256_linux_x86_64_gnu %>')
-sha256sums_aarch64=('<%= sha256_linux_aarch64_gnu %>')
+source=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-cli-${pkgver}.gem")
+sha256sums=('<%= sha256_gem %>')
+noextract=("hive-cli-${pkgver}.gem")
 
 package() {
-  local target
-  case "${CARCH}" in
-    x86_64) target="linux-x86_64-gnu" ;;
-    aarch64) target="linux-aarch64-gnu" ;;
-    *) echo "unsupported architecture: ${CARCH}" >&2; exit 1 ;;
-  esac
+  local gem_home="${pkgdir}/usr/share/hive/gems"
+  install -dm755 "${gem_home}"
 
-  install -Dm755 "${srcdir}/hive-${pkgver}-${target}/bin/hive" "${pkgdir}/usr/bin/hive"
-  install -Dm644 "${srcdir}/hive-${pkgver}-${target}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-  install -dm755 "${pkgdir}/usr/share/hive"
-  cp -R --no-preserve=mode "${srcdir}/hive-${pkgver}-${target}/share/hive/." "${pkgdir}/usr/share/hive/"
-  find "${pkgdir}/usr/share/hive" -type d -exec chmod 755 {} +
-  find "${pkgdir}/usr/share/hive" -type f -exec chmod 644 {} +
+  # `gem install --install-dir` requires the .gem file path, not the
+  # extracted source. `noextract` keeps the .gem intact during
+  # makepkg's source preparation step.
+  gem install \
+    --install-dir "${gem_home}" \
+    --bindir "${gem_home}/bin" \
+    --no-document \
+    --ignore-dependencies=false \
+    "${srcdir}/hive-cli-${pkgver}.gem"
+
+  # User-facing wrappers under /usr/bin that set GEM_PATH before
+  # exec'ing the gem-installed bin. Without this, `hive` would only
+  # work when the user's default GEM_PATH includes the vendored gem
+  # home.
+  install -dm755 "${pkgdir}/usr/bin"
+  for name in hive hv; do
+    cat > "${pkgdir}/usr/bin/${name}" <<WRAPPER
+#!/usr/bin/env bash
+export GEM_HOME="/usr/share/hive/gems"
+export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+exec "/usr/share/hive/gems/bin/${name}" "\$@"
+WRAPPER
+    chmod 755 "${pkgdir}/usr/bin/${name}"
+  done
+
+  install -Dm644 "${gem_home}/gems/hive-cli-${pkgver}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 
   printf 'aur\n' > "${pkgdir}/usr/share/hive/install-channel"
 }

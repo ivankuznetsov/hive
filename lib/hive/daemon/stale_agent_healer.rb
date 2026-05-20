@@ -30,24 +30,39 @@ module Hive
     #     advance these)
     #   - placeholder marker still within grace (slow but normal dispatch)
     class StaleAgentHealer
-      def initialize(controller:, logger:, grace_sec: 300, clock: Time)
+      # Closed set of reason= attribute values the healer writes onto
+      # ERROR markers. Consumers (TaskAction's synthetic diagnostic,
+      # bot/notification rendering, future docs) can reference this
+      # constant instead of hard-coding the literal strings.
+      REASONS = %i[agent_died agent_orphaned].freeze
+
+      def initialize(controller:, logger:, grace_sec: 300)
         @controller = controller
         @logger = logger
         @grace_sec = grace_sec
-        @clock = clock
       end
 
       # Walk the row set, heal stale agent_working markers in place.
       # `legacy_layout_projects` is a Set/Hash of project names whose
       # status payload reported half-migrated stage dirs — we refuse to
-      # touch markers in those projects.
-      def heal(rows, legacy_layout_projects: {})
+      # touch markers in those projects. `now:` matches the convention
+      # used by every other daemon component (Dispatcher#tick,
+      # PrMergeWatcher#tick, ChildSupervisor#reap_all) so a single tick
+      # observes one frozen `now` across every subsystem.
+      #
+      # Filter keys off the on-disk marker name (`row.marker`), not the
+      # in-memory `row.action`. TaskAction now reclassifies stale
+      # agent_working rows as `:error` immediately (the U4 belt-and-
+      # suspenders) which would otherwise hide them from this heal pass
+      # via `row.action == "error"`. The on-disk marker is unchanged
+      # until *we* rewrite it, so it's the authoritative signal here.
+      def heal(rows, now: Time.now, legacy_layout_projects: {})
         rows.each do |row|
-          next unless row.action == "agent_running"
+          next unless row.marker.to_s == "agent_working"
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
-          reason = classify_stale(row)
+          reason = classify_stale(row, now: now)
           next unless reason
 
           heal_row(row, reason: reason)
@@ -56,7 +71,7 @@ module Hive
 
       private
 
-      def classify_stale(row)
+      def classify_stale(row, now:)
         case row.claude_pid_alive
         when false
           :agent_died
@@ -64,7 +79,7 @@ module Hive
           mtime = row.state_file_mtime
           return nil unless mtime
 
-          (@clock.now - mtime) > @grace_sec ? :agent_orphaned : nil
+          (now - mtime) > @grace_sec ? :agent_orphaned : nil
         else
           # true → live agent; nothing to heal
           nil

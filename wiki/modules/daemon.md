@@ -49,14 +49,26 @@ without spinning up the whole stack.
 
 ## Trust boundary
 
-The daemon adds NO new approval logic. Forward-advance safety is
-delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
+The daemon adds NO new forward-advance approval logic. Workflow-verb
+safety is delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
 (`%i[complete execute_complete review_complete]`). The daemon is a
-subprocess caller; it never writes markers, never `File.rename`s task
-folders, never touches per-task `.lock` files directly. Any
-misclassification at the `Policy` level surfaces as `Hive::WrongStage`
-(exit 4) at the workflow-verb level, not as a silent advance past a
-human gate. See ADR-024.
+subprocess caller; it never `File.rename`s task folders or touches
+per-task `.lock` files directly. Any misclassification at the `Policy`
+level surfaces as `Hive::WrongStage` (exit 4) at the workflow-verb
+level, not as a silent advance past a human gate. See ADR-024.
+
+The one place the daemon does rewrite a marker on disk is the
+`Hive::Daemon::StaleAgentHealer` (PR #113): on every tick, it scans
+`AGENT_WORKING` markers whose backing agent isn't actually alive
+(dead `claude_pid` or a placeholder marker stamped at stage entry
+that no agent ever attached to, older than
+`daemon.agent_marker_grace_sec`, default 300s) and rewrites them to
+`ERROR reason=agent_died` / `reason=agent_orphaned`. This is healing,
+not advancing — the marker's stage doesn't move and no workflow verb
+fires. The healer skips rows whose project has a half-migrated
+layout (`legacy_stage_dirs`) and rows for which the
+`ConcurrencyController` has a live in-flight slot. Heal/skip events
+are logged as `marker_healed` / `marker_heal_failed`.
 
 `3-plan`/`needs_input` is the policy exception to the generic
 edit-resume debounce. A generated plan in `WAITING` is an approval

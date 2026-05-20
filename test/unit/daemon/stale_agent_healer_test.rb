@@ -35,26 +35,18 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  # Frozen clock — Time.now is stubbed by passing the class itself; we
-  # use a struct so the healer can call .now.
-  class FixedClock
-    def initialize(t)
-      @t = t
-    end
-
-    def now
-      @t
-    end
-  end
-
   NOW = Time.utc(2026, 5, 20, 12, 0, 0)
 
   def setup
     @logger = FakeLogger.new
     @controller = FakeController.new
     @healer = Hive::Daemon::StaleAgentHealer.new(
-      controller: @controller, logger: @logger, grace_sec: 300, clock: FixedClock.new(NOW)
+      controller: @controller, logger: @logger, grace_sec: 300
     )
+  end
+
+  def heal(rows, **opts)
+    @healer.heal(rows, now: NOW, **opts)
   end
 
   def with_marker_file
@@ -65,8 +57,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  # Realistic default: post-U4, status.rb classifies stale agent_working
+  # rows with action="error". The healer keys off row.marker (the
+  # on-disk marker name), not row.action, so we use the production-
+  # accurate combo by default. Tests can override via the action: kwarg.
   def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
-               marker: "agent_working", action: "agent_running")
+               marker: "agent_working", action: "error")
     Row.new(
       project: project, slug: slug, stage: stage,
       marker: marker, folder: File.dirname(state_file), state_file: state_file,
@@ -82,7 +78,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       # healer keys off claude_pid_alive, which the status command
       # computes from the .lock file).
       row = make_row(state_file, pid_alive: false)
-      @healer.heal([ row ])
+      heal([ row ])
 
       heal_event = @logger.events.find { |name, _| name == :marker_healed }
       assert heal_event, "expected a marker_healed event, got: #{@logger.events.inspect}"
@@ -94,7 +90,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_heals_pidless_placeholder_when_older_than_grace
     with_marker_file do |state_file|
       row = make_row(state_file, pid_alive: nil, mtime: NOW - 600)
-      @healer.heal([ row ])
+      heal([ row ])
 
       heal_event = @logger.events.find { |name, _| name == :marker_healed }
       assert heal_event, "expected agent_orphaned heal, got: #{@logger.events.inspect}"
@@ -106,7 +102,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_leaves_pidless_placeholder_within_grace
     with_marker_file do |state_file|
       row = make_row(state_file, pid_alive: nil, mtime: NOW - 60)
-      @healer.heal([ row ])
+      heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed },
              "row inside grace window must not be healed; events: #{@logger.events.inspect}"
@@ -117,7 +113,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_leaves_live_pid_untouched
     with_marker_file do |state_file|
       row = make_row(state_file, pid_alive: true)
-      @healer.heal([ row ])
+      heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
       assert_match(/AGENT_WORKING/, File.read(state_file))
@@ -132,10 +128,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       # itself when it completes).
       @controller = FakeController.new(running_pairs: [ [ "p", "s" ] ])
       @healer = Hive::Daemon::StaleAgentHealer.new(
-        controller: @controller, logger: @logger, grace_sec: 300, clock: FixedClock.new(NOW)
+        controller: @controller, logger: @logger, grace_sec: 300
       )
       row = make_row(state_file, pid_alive: false)
-      @healer.heal([ row ])
+      heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed },
              "controller-managed dispatches must not be healed mid-flight"
@@ -146,21 +142,21 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_skips_rows_in_half_migrated_projects
     with_marker_file do |state_file|
       row = make_row(state_file, pid_alive: false)
-      @healer.heal([ row ], legacy_layout_projects: { "p" => true })
+      heal([ row ], legacy_layout_projects: { "p" => true })
 
       refute @logger.events.any? { |name, _| name == :marker_healed },
              "half-migrated projects must be left alone — advancing on top of a renamed stage dir would silently lose work"
     end
   end
 
-  def test_skips_rows_whose_action_is_not_agent_running
+  def test_skips_rows_whose_marker_is_not_agent_working
     with_marker_file do |state_file|
-      # A row with a stale agent_working marker on disk but whose
-      # action key is already something else (e.g., the status snapshot
-      # was taken mid-rewrite). Healer keys off the row's action so it
-      # stays a no-op.
-      row = make_row(state_file, pid_alive: false, action: "ready_to_finalize")
-      @healer.heal([ row ])
+      # Healer keys off the on-disk marker name. A row whose marker is
+      # already something else (review_error, complete, error, etc.)
+      # is out of scope — the marker has already moved past
+      # AGENT_WORKING and a different recovery affordance applies.
+      row = make_row(state_file, pid_alive: false, marker: "review_error", action: "error")
+      heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
     end
@@ -190,7 +186,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
           make_row(bad_state, pid_alive: false, project: "p", slug: "bad"),
           make_row(good_state, pid_alive: false, project: "p", slug: "good")
         ]
-        @healer.heal(rows)
+        heal(rows)
 
         failures = @logger.events.select { |name, _| name == :marker_heal_failed }
         heals = @logger.events.select { |name, _| name == :marker_healed }
@@ -200,7 +196,11 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         assert_equal 1, heals.size, "good row must still be healed after bad row's failure"
         assert_equal "good", heals.first[1][:slug]
       ensure
-        Hive::Markers.define_singleton_method(:set, original)
+        # Restore via explicit &block coercion so the stub doesn't leak
+        # to later tests in the same process — relying on Method-as-
+        # block coercion is documented but the explicit form is more
+        # readable and version-stable.
+        Hive::Markers.define_singleton_method(:set, &original)
       end
     end
   end

@@ -592,6 +592,14 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
         )
       end
+      if options[:force] && subcommand != "install"
+        emit_daemon_argv_error(
+          subcommand: subcommand,
+          message: "hive daemon #{subcommand}: --force only applies to `install`; " \
+                   "drop it or use `hive daemon install --force`",
+          error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+        )
+      end
       Hive::Commands::Daemon.new(
         subcommand, targets.first,
         detach: options[:detach],

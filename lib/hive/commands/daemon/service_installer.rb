@@ -56,6 +56,13 @@ module Hive
           return :drifted if write_result == :drifted
 
           if autostart
+            if write_result == :upgraded
+              # launchd does not pick up a rewritten plist while the
+              # service is loaded; new EnvironmentVariables would be
+              # ignored. Unload first (best-effort: plist may not be
+              # currently loaded), then load the refreshed file.
+              @runner.call([ "launchctl", "unload", path ])
+            end
             ok = @runner.call([ "launchctl", "load", path ])
             unless ok
               @messages << "launchctl load failed for #{path}; run `launchctl load #{path}` manually"
@@ -74,16 +81,18 @@ module Hive
             if systemctl_available?
               ok_reload = @runner.call(%w[systemctl --user daemon-reload])
               # Force-upgrade restarts the running unit so new
-              # Environment= lines take effect; first-time install
-              # uses `enable --now` which both enables on boot and
-              # starts immediately. `:unchanged` writes need neither.
+              # Environment= lines take effect. `:written` and
+              # `:unchanged` use `enable --now` which is idempotent on
+              # an already-enabled-and-running unit and restores retry-
+              # after-failed-enable semantics when the file already
+              # matches the template.
               start_argv =
                 if write_result == :upgraded
                   %w[systemctl --user restart hive-daemon]
-                elsif write_result == :written
+                else
                   %w[systemctl --user enable --now hive-daemon]
                 end
-              ok_start = start_argv.nil? || @runner.call(start_argv)
+              ok_start = @runner.call(start_argv)
               unless ok_reload && ok_start
                 @messages << "systemctl --user enable failed; run `systemctl --user enable --now hive-daemon` manually"
                 return :failed
@@ -101,20 +110,35 @@ module Hive
             return :unchanged if existing == content
 
             unless force
-              @messages << "daemon service already exists at #{path}; leaving user-customized file untouched. Re-run with `hive daemon install --force` to overwrite (the previous file will be backed up to #{path}.bak)."
+              @messages << "daemon service already exists at #{path}; leaving user-customized file untouched. Re-run with `hive daemon install --force` to overwrite (the previous file will be backed up to #{path}.bak-<timestamp>)."
               return :drifted
             end
 
-            backup_path = "#{path}.bak"
-            File.write(backup_path, existing)
-            File.write(path, content)
+            backup_path = "#{path}.bak-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}"
+            atomic_write(backup_path, existing)
+            atomic_write(path, content)
             @messages << "upgraded existing unit at #{path}; previous content backed up to #{backup_path}"
             return :upgraded
           end
 
           FileUtils.mkdir_p(File.dirname(path))
-          File.write(path, content)
+          atomic_write(path, content)
           :written
+        end
+
+        # Tempfile + rename in the same directory. Either the target has
+        # the old content or the new content; no torn-write window can
+        # leave it truncated or partially written. Mirrors the pattern
+        # `Hive::Markers#write_atomic` uses for state files.
+        def atomic_write(path, content)
+          FileUtils.mkdir_p(File.dirname(path))
+          tmp = "#{path}.tmp.#{Process.pid}.#{rand(1_000_000)}"
+          begin
+            File.write(tmp, content)
+            File.rename(tmp, path)
+          ensure
+            File.unlink(tmp) if File.exist?(tmp)
+          end
         end
 
         def render_systemd

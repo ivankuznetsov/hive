@@ -268,11 +268,38 @@ class DaemonServiceInstallerTest < Minitest::Test
 
       result = installer.install!(autostart: false, force: true)
       assert_equal :upgraded, result
-      assert_equal "previous-stale-content\n", File.read("#{unit}.bak"),
-                   "force must preserve prior content as .bak so user hand-edits aren't silently destroyed"
+      backups = Dir["#{unit}.bak-*"]
+      assert_equal 1, backups.size,
+                   "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed and a second --force doesn't clobber the original backup"
+      assert_equal "previous-stale-content\n", File.read(backups.first)
       refute_equal "previous-stale-content\n", File.read(unit)
       assert_includes File.read(unit), "ExecStart=/tmp/hive daemon start"
       assert installer.messages.any? { |msg| msg.include?("upgraded existing unit") }
+    end
+  end
+
+  def test_force_rotates_backups_so_repeated_upgrades_do_not_lose_original
+    with_tmp_dir do |dir|
+      unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "user-hand-edited\n")
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux", home: dir, binary_path: "/tmp/hive-a",
+        systemctl_available: false
+      )
+      installer.install!(autostart: false, force: true)
+      # Tiny sleep so the timestamp suffix differs.
+      sleep 1.1
+      installer2 = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux", home: dir, binary_path: "/tmp/hive-b",
+        systemctl_available: false
+      )
+      installer2.install!(autostart: false, force: true)
+
+      backups = Dir["#{unit}.bak-*"].sort
+      assert_equal 2, backups.size, "second force must not clobber the first backup"
+      assert_equal "user-hand-edited\n", File.read(backups.first),
+                   "first backup must preserve the original user hand-edits"
     end
   end
 
@@ -318,8 +345,8 @@ class DaemonServiceInstallerTest < Minitest::Test
       installer2.install!(autostart: false, force: true)
 
       unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
-      refute File.exist?("#{unit}.bak"),
-             "force should not write a .bak when the existing unit already matches"
+      assert_empty Dir["#{unit}.bak-*"],
+                   "force should not write a .bak when the existing unit already matches"
     end
   end
 

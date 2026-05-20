@@ -385,6 +385,7 @@ module Hive
 
       def annotate_actions(rows, project, project_count, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
+        grace_sec = agent_marker_grace_sec_from_config
         rows.map do |row|
           action = Hive::TaskAction.for(
             row[:task],
@@ -393,7 +394,8 @@ module Hive
             project_count: project_count,
             stage_collision: slug_counts[row[:slug]] > 1,
             pid_alive: row[:claude_pid_alive],
-            state_file_mtime: row[:mtime]
+            state_file_mtime: row[:mtime],
+            agent_marker_grace_sec: grace_sec
           )
           row.merge(
             action_key: action.key,
@@ -402,6 +404,21 @@ module Hive
             next_action: action.next_action,
             diagnostic: with_diagnostic ? action.diagnostic : nil
           )
+        end
+      end
+
+      # Memoize per status call. The daemon's StaleAgentHealer reads the
+      # same key from the same global config so both surfaces classify
+      # rows with one threshold; if this fetch raises (corrupted YAML,
+      # missing file), fall back to the TaskAction constant so status
+      # never crashes over a config edge case.
+      def agent_marker_grace_sec_from_config
+        @agent_marker_grace_sec_from_config ||= begin
+          daemon_cfg = Hive::Config.load_global_daemon
+          Integer(daemon_cfg.fetch("agent_marker_grace_sec",
+                                   Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC))
+        rescue StandardError
+          Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
         end
       end
 

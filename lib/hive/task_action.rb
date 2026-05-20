@@ -393,9 +393,9 @@ module Hive
 
       {
         "summary" => summary,
-        "detail" => "AGENT_WORKING marker is stale; daemon will heal to ERROR reason=#{reason} on next tick. Run `hive markers clear #{task.slug} --name AGENT_WORKING` to recover manually.",
+        "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, recover via `hive markers clear #{task.slug} --name ERROR` or the standard red-status flow. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
         "source" => "marker",
-        "source_path" => task.state_file,
+        "source_path" => nil,
         "artifact_paths" => [],
         "generated_by" => "local",
         "marker_signature" => marker_signature,

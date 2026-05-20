@@ -401,16 +401,16 @@ module Hive
         result = installer.install!(autostart: true, force: @force)
         installer.messages.each { |line| warn "hive: #{line}" }
         case result
-        when :ok, :written, :upgraded, :unchanged
+        when :ok, :upgraded
           # success outcomes; messages above describe what happened
         when :drifted
           raise Hive::Error,
                 "daemon unit at #{installer.target_path} differs from the current template. " \
-                "Run `hive daemon install --force` to overwrite (a .bak will be saved)."
+                "Run `hive daemon install --force` to overwrite (a timestamped .bak will be saved)."
         when :failed
           raise Hive::Error, "daemon service install reported a failure; see messages above"
         when :unsupported
-          # already messaged
+          # already messaged via installer.messages
         end
       end
 

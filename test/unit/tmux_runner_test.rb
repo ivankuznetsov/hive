@@ -58,6 +58,7 @@ class TmuxRunnerTest < Minitest::Test
         bytes = Integer(ARGV[1])
         data = STDIN.read(bytes)
         File.binwrite(ARGV[0], data)
+        sleep 1
       RUBY
       runner = runner(name: unique_name("prompt"), cwd: dir)
       runner.start_detached(command: [ "ruby", "-e", reader, out_path, payload.bytesize.to_s ])
@@ -89,6 +90,45 @@ class TmuxRunnerTest < Minitest::Test
       assert_includes tail, "uvwxyz"
     ensure
       runner&.kill_session
+    end
+  end
+
+  def test_capture_pane_tail_scrubs_invalid_utf8
+    with_tmp_dir do |dir|
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/usr/bin/env ruby
+        if ARGV.first == "capture-pane"
+          STDOUT.binmode
+          STDOUT.write("ok\\xC3bad")
+          exit 0
+        end
+        exit 0
+      SH
+      runner = Hive::TmuxRunner.new(name: unique_name("invalid"), cwd: dir, tmux_bin: fake)
+
+      tail = runner.capture_pane_tail(bytes: 100)
+
+      assert_predicate tail, :valid_encoding?
+      assert_includes tail, "ok"
+      assert_includes tail, "bad"
+    end
+  end
+
+  def test_capture_pane_tail_scrubs_after_byte_slice
+    with_tmp_dir do |dir|
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/usr/bin/env ruby
+        if ARGV.first == "capture-pane"
+          print "abcé"
+          exit 0
+        end
+        exit 0
+      SH
+      runner = Hive::TmuxRunner.new(name: unique_name("slice"), cwd: dir, tmux_bin: fake)
+
+      tail = runner.capture_pane_tail(bytes: 1)
+
+      assert_predicate tail, :valid_encoding?
     end
   end
 

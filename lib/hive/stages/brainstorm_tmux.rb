@@ -16,6 +16,8 @@ module Hive
       DONE_POLL_INTERVAL_SEC = 0.5
       SENTINEL_POLL_INTERVAL_SEC = 5
       SENTINEL_CAPTURE_BYTES = 8192
+      CLAUDE_READY_WAIT_TIMEOUT_SEC = 30
+      CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
       MIN_TMUX_VERSION = "3.0"
       TERMINAL_MARKERS = %i[waiting complete error].freeze
 
@@ -55,6 +57,7 @@ module Hive
           runner.start_detached(command: wrapper_command(task, profile))
           wait_until_session_exists!(runner)
           record_claude_pid(task, runner)
+          prepare_claude_session!(runner)
           runner.send_prompt(prompt)
           marker = wait_for_terminal_marker(task, runner, timeout_sec(cfg))
           { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
@@ -158,6 +161,8 @@ module Hive
           File.expand_path("../scripts/interactive_claude_wrapper.sh", __dir__),
           "--cwd", task.folder,
           "--add-dir", task.folder,
+          "--permission-mode", "bypassPermissions",
+          "--allowedTools", "Read,Write,Edit,LS",
           "--bin", profile.bin
         ]
       end
@@ -201,6 +206,44 @@ module Hive
         Hive::Lock.update_task_lock(task.folder, "claude_pid" => pid)
       rescue Hive::TmuxError
         nil
+      end
+
+      def prepare_claude_session!(runner)
+        deadline = Time.now + claude_ready_wait_timeout
+        last_tail = ""
+        loop do
+          last_tail = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
+
+          if claude_trust_prompt?(last_tail)
+            runner.send_keys("Enter")
+            sleep CLAUDE_READY_POLL_INTERVAL_SEC
+            break if Time.now >= deadline
+            next
+          end
+
+          return true if claude_ready_prompt?(last_tail)
+
+          break if Time.now >= deadline
+
+          sleep CLAUDE_READY_POLL_INTERVAL_SEC
+        end
+
+        raise Hive::AgentError,
+              "claude interactive prompt did not become ready in tmux session #{runner.name}; " \
+              "last pane tail: #{last_tail.byteslice(-500, 500).to_s.scrub.inspect}"
+      rescue Hive::TmuxError => e
+        raise Hive::AgentError, "could not inspect claude tmux session #{runner.name}: #{e.message}"
+      end
+
+      def claude_trust_prompt?(pane)
+        pane.include?("Quick safety check") && pane.include?("Yes, I trust this folder")
+      end
+
+      def claude_ready_prompt?(pane)
+        return false if claude_trust_prompt?(pane)
+        return false if pane.include?("Do you want to")
+
+        pane.include?("Claude Code") && pane.include?("❯")
       end
 
       def wait_for_terminal_marker(task, runner, timeout)
@@ -266,6 +309,10 @@ module Hive
         Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", READY_WAIT_TIMEOUT_SEC.to_s))
       end
 
+      def claude_ready_wait_timeout
+        Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC", CLAUDE_READY_WAIT_TIMEOUT_SEC.to_s))
+      end
+
       def session_ready_wait_timeout
         Float(ENV.fetch("HIVE_BRAINSTORM_TMUX_SESSION_READY_WAIT_TIMEOUT_SEC",
                         ENV.fetch("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", READY_WAIT_TIMEOUT_SEC.to_s)))
@@ -291,13 +338,15 @@ module Hive
       # log instead of getting swallowed when, e.g., task.folder is a
       # substring of another concurrent task's folder.
       #
-      # The regex anchors the trailing edge with `(?:[[:space:]]|$)` so
+      # The regex anchors the trailing edge with `([[:space:]]|$)` so
       # a prefix sibling (task-a-extra vs. task-a) cannot match a longer
       # concurrent task's `--add-dir` value and get pkill'd. Without
       # the anchor the substring match would silently kill the sibling.
+      # Keep the grouping POSIX-ERE-compatible: GNU/BSD `pgrep` do not
+      # accept Ruby's non-capturing `(?:...)` syntax.
       def sweep_orphan_processes(task)
-        pattern = "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}(?:[[:space:]]|$)"
-        matches, pgrep_err, pgrep_status = Open3.capture3("pgrep", "-fa", pattern)
+        pattern = orphan_sweep_pattern(task)
+        matches, pgrep_err, pgrep_status = Open3.capture3("pgrep", "-fa", "--", pattern)
         # `pgrep -fa` exit 1 with empty stdout means "no matches" — the
         # happy path. Any other non-zero (e.g. procps without `-a` on
         # minimal Alpine images) is a real failure: log a warning so it
@@ -308,10 +357,14 @@ module Hive
         end
         return if matches.strip.empty?
 
-        out, err, status = Open3.capture3("pkill", "-f", pattern)
+        out, err, status = Open3.capture3("pkill", "-f", "--", pattern)
         log_orphan_sweep(task, matches, out, err, status)
       rescue Errno::ENOENT
         nil
+      end
+
+      def orphan_sweep_pattern(task)
+        "--add-dir[[:space:]]+#{Regexp.escape(task.folder)}([[:space:]]|$)"
       end
 
       def log_orphan_sweep(task, matches, out, err, status)

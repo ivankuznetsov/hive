@@ -146,6 +146,8 @@ class InitTest < Minitest::Test
 
         assert_equal "claude", cfg.dig("brainstorm", "agent"),
                      "brainstorm.agent must default to claude"
+        assert_equal "headless", cfg.dig("brainstorm", "runtime"),
+                     "brainstorm.runtime must default to the headless Claude path"
         assert_equal "claude", cfg.dig("plan", "agent"),
                      "plan.agent must default to claude"
         assert_equal "codex",  cfg.dig("execute", "agent"),
@@ -216,10 +218,12 @@ class InitTest < Minitest::Test
   end
 
   def test_init_with_piped_user_choices_writes_matching_config
-    # Order matches Prompts#collect: planning, development, reviewers,
-    # triage bias, 9 limit prompts, daemon-enable, daemon-autostart, confirm. Choose codex
-    # for both, safetyist triage, only first + third reviewer, override
-    # `plan` budget/timeout, accept the rest (daemon defaults to enabled on
+    # Order matches Prompts#collect. Choosing codex for planning skips
+    # the Claude-only brainstorm runtime prompt, so the transcript continues
+    # with development, reviewers, triage bias, 9 limit prompts, daemon-enable,
+    # daemon-autostart, and confirm. Choose codex for both, safetyist triage,
+    # only first + third reviewer, override `plan` budget/timeout, accept the
+    # rest (daemon defaults to enabled, autostart defaults to disabled on
     # blank, confirm defaults to yes on blank).
     inputs = [
       "codex", "2", "1,3", "safetyist",
@@ -233,6 +237,7 @@ class InitTest < Minitest::Test
 
         cfg = Hive::Config.load(dir)
         assert_equal "codex", cfg.dig("brainstorm", "agent")
+        assert_equal "headless", cfg.dig("brainstorm", "runtime")
         assert_equal "codex", cfg.dig("plan", "agent")
         assert_equal "codex", cfg.dig("execute", "agent")
         assert_equal "safetyist", cfg.dig("review", "triage", "bias")
@@ -252,9 +257,29 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_with_tmux_brainstorm_runtime_writes_matching_config
+    # planning=blank(claude), brainstorm_runtime="2"(tmux), dev=blank,
+    # reviewers=blank, triage=blank, 9 limit blanks, daemon-enable=blank,
+    # daemon-autostart=blank, confirm=blank.
+    inputs = ([ "", "2", "", "", "" ] + ([ "" ] * 9) + [ "", "", "" ]).join("\n") + "\n"
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        prompts = make_tty_prompts(inputs)
+        capture_io { Hive::Commands::Init.new(dir, prompts: prompts).call }
+
+        cfg = Hive::Config.load(dir)
+        assert_equal "claude", cfg.dig("brainstorm", "agent")
+        assert_equal "tmux_interactive", cfg.dig("brainstorm", "runtime")
+      end
+    end
+  end
+
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    inputs = (([ "" ] * 13) + [ "n", "", "" ]).join("\n") + "\n"
+    # 14 blanks: planning (claude), brainstorm runtime, dev, reviewers,
+    # triage bias, 9 limits. Then "n" for daemon-enable, blank for
+    # daemon-autostart, blank for confirm.
+    inputs = (([ "" ] * 14) + [ "n", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -269,8 +294,9 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # 15 blanks: planning, dev, reviewers, triage bias, 9 limits, daemon-enable, daemon-autostart.
-    inputs = (([ "" ] * 15) + [ "n" ]).join("\n") + "\n"
+    # 16 blanks: planning (claude), brainstorm runtime, dev, reviewers,
+    # triage bias, 9 limits, daemon-enable, daemon-autostart.
+    inputs = (([ "" ] * 16) + [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)

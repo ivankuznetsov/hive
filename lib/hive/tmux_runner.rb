@@ -19,6 +19,7 @@ module Hive
 
     DEFAULT_COLS = 200
     DEFAULT_ROWS = 50
+    DEFAULT_PROMPT_SUBMIT_DELAY_SEC = 0.2
 
     attr_reader :name, :cwd, :env
 
@@ -67,10 +68,20 @@ module Hive
         # cap on long-lived daemons. Explicitly delete the buffer in
         # `ensure` so a failed paste does not leak it.
         run_tmux("paste-buffer", "-d", "-b", buffer_name, "-t", target_pane)
-        run_tmux("send-keys", "-t", target_pane, "Enter")
+        sleep prompt_submit_delay_sec
+        begin
+          send_keys("Enter")
+        rescue NoServerRunning
+          nil
+        end
       ensure
         delete_buffer(buffer_name)
       end
+      true
+    end
+
+    def send_keys(*keys)
+      run_tmux("send-keys", "-t", target_pane, *keys)
       true
     end
 
@@ -82,8 +93,9 @@ module Hive
 
     def capture_pane_tail(bytes:)
       lines = [ (bytes.to_i / 80.0).ceil, 100 ].max
-      out = run_tmux("capture-pane", "-t", target_pane, "-p", "-S", "-#{lines}").rstrip
-      out.bytesize > bytes ? out.byteslice(-bytes, bytes) : out
+      out = run_tmux("capture-pane", "-t", target_pane, "-p", "-S", "-#{lines}").scrub.rstrip
+      tail = out.bytesize > bytes ? out.byteslice(-bytes, bytes) : out
+      tail.scrub
     end
 
     # Active pane's process PID. The wrapper script execs into claude
@@ -105,6 +117,10 @@ module Hive
     end
 
     private
+
+    def prompt_submit_delay_sec
+      Float(ENV.fetch("HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC", DEFAULT_PROMPT_SUBMIT_DELAY_SEC.to_s))
+    end
 
     def target_pane
       @name

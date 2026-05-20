@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-20T09:11:00Z] brainstorm — read-only Stop-hook + bounded trust loop
+
+**Action:** Documented two safety fixes on `fix/brainstorm-tmux-interactive-live-smoke`. `Hive::StopHookInstaller` now `chmod 0o444`s the installed `.claude/settings.json` (dropping it first for idempotency) so a prompt-injected `idea.md` cannot rewrite the Stop hook command and execute arbitrary shell on graceful exit. `BrainstormTmux#prepare_claude_session!`'s trust-prompt branch now respects `claude_ready_wait_timeout` instead of looping Enter forever when the trust strings persist. The dead `--allowed-tools` kebab alias was removed from `interactive_claude_wrapper.sh`; only `--allowedTools` is wired up.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — Stop-hook installer chmod + bounded trust-prompt loop noted in the runtime description.
+
 ## [2026-05-20T00:12:57Z] TUI image paste mode boundary
 
 **Action:** Clarified that Ctrl+V is inert outside the `:new_idea` composer, including while the help overlay is visible. This preserves the image-paste boundary documented for the composer and keeps overlays from closing on an image-paste probe.
@@ -45,6 +52,21 @@ Status also no longer treats any `7-finalize` `COMPLETE` marker as archive-ready
 
 **Refreshed pages:**
 - [[operating]] — bash install channel example now uses a tempfile download before execution.
+
+## [2026-05-19T19:15:00Z] init — prompt for Claude brainstorm runtime
+
+**Action:** Documented the `hive init` prompt addition for `brainstorm.runtime`. Fresh projects now render the selected runtime into `.hive-state/config.yml`: `headless` by default, or `tmux_interactive` when the planning agent is Claude and the operator chooses the tmux path. If planning is not Claude, init keeps `headless` because the tmux runtime hardcodes the Claude binary.
+
+**Refreshed pages:**
+- [[commands/init]] — prompt order, non-TTY summary, runtime choices, and test coverage notes.
+- [[stages/brainstorm]] — notes that runtime can be selected during init.
+
+## [2026-05-19T18:30:00Z] brainstorm — harden tmux interactive live prompt path
+
+**Action:** Documented the live-smoke fix for `brainstorm.runtime: tmux_interactive`. Hive now waits for Claude's interactive prompt before pasting, auto-confirms Claude's first-run folder-trust prompt for the task folder, launches interactive Claude with `--permission-mode bypassPermissions` plus `--allowedTools Read,Write,Edit,LS` so task-folder reads and `brainstorm.md` writes do not block on approval prompts while Bash stays unavailable, and uses a short paste-to-Enter delay so Claude Code's input box receives the prompt before submission. The defensive orphan sweep now uses `pgrep/pkill --` before a POSIX-compatible `--add-dir...` regex so process matching does not parse the pattern as an option.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — tmux runtime prompt-readiness, trust confirmation, bypass-permissions/read-write tool restriction, and paste-submit delay.
 
 ## [2026-05-19T16:00:00Z] status — surface legacy stage dirs in JSON + text + TUI (PR #93)
 

@@ -32,13 +32,14 @@ module Hive
       `<project>/.hive-state/`, scaffolds stage folders, ignores
       `.hive-state/` on master, and registers the project globally.
 
-      On a TTY, init asks the operator four questions before writing
+      On a TTY, init asks the operator five questions before writing
       anything to disk:
 
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
-        2. Development agent (drives 4-execute)                  — default codex
-        3. Review agents (multi-select over 3 default reviewers) — default all
-        4. Per-stage budget+timeout (8 stage/role pairs)         — default generous
+        2. Brainstorm runtime for Claude                         — default headless
+        3. Development agent (drives 4-execute)                  — default codex
+        4. Review agents (multi-select over 3 default reviewers) — default all
+        5. Per-stage budget+timeout (9 stage/role pairs)         — default generous
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -48,7 +49,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, dev=codex, reviewers=all3, limits=defaults
+        hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`

@@ -15,6 +15,14 @@ module Hive
           return :disabled unless enabled?(cfg)
           return :missing_body unless File.exist?(body_path)
 
+          file_body = File.read(body_path)
+          # Reviewers that found nothing still write the High/Medium/Nit
+          # section headers (see templates/reviewer_*_ce_code_review.md.erb).
+          # Posting that as a PR comment is pure noise — the absence of a
+          # `Reviewer: X - Pass NN` comment already conveys "nothing to
+          # report". `publish_escalations` already has the same guard.
+          return :no_findings unless file_body =~ /^\s*-\s+\[[ xX]\]\s+/
+
           pr_url = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"].to_s
           if pr_url.empty?
             warn "hive: review GitHub publish skipped; no pr_url in #{File.join(task.folder, 'pr.md')}"
@@ -22,7 +30,7 @@ module Hive
           end
 
           header = "### Reviewer: #{reviewer_name} - Pass #{format('%02d', pass)}"
-          body = "#{header}\n\n#{File.read(body_path)}"
+          body = "#{header}\n\n#{file_body}"
           if (hits = Hive::SecretPatterns.scan(body)).any?
             warn "hive: review GitHub publish skipped for pass=#{format('%02d', pass)} reviewer=#{reviewer_name}; " \
                  "secret patterns=#{hits.map { |h| h[:name].to_s }.uniq.first(3).join(',')}"

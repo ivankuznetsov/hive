@@ -2,6 +2,21 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-19T23:51:41Z] review — reviewer prompts prefer origin/default as the compare ref
+
+**Action:** Fixed a stale-local-main review failure mode: review prompts now compare against `origin/<default_branch>` when the remote-tracking ref exists, falling back to the configured/default local branch only when the remote ref is absent. This keeps long-lived operator checkouts from feeding reviewers `git diff main..HEAD` when local `main` is behind `origin/main`, which previously produced phantom findings for already-merged upstream changes.
+
+**Refreshed pages:**
+- `wiki/stages/review.md` — documents the remote-first compare ref used by reviewer prompts.
+
+## [2026-05-19T23:35:54Z] rebase — conflict helper uses development-agent exit-code contract
+
+**Action:** Fixed `Hive::Rebase` conflict-resolution spawns to keep using the configured development agent (`cfg.execute.agent`) while forcing `status_mode: :exit_code_only`. The helper's correctness signal is not a reviewer artifact file; it is the development agent exiting successfully followed by the orchestrator's existing checks for rebase state, conflict markers, and `git rebase --continue`. Without this override, Codex's profile default (`:output_file_exists`) could report `agent_failed` after a successful conflict-resolution attempt because the rebase helper intentionally does not pass `expected_output`. The failure path now also prints the agent error detail before the fail-soft abort/reset.
+
+**Refreshed pages:**
+- [[modules/rebase]] — conflict-resolution spawn now documents the `:exit_code_only` status contract for development agents.
+- [[commands/run]] — auto-rebase conflict-agent bullets now include the status-mode override.
+
 ## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
 
 **Action:** Documented the recovery hardening for `3-plan` rows whose agent is interrupted before producing `plan.md`. Markerless plan rows with a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` proves the plan run started, now classify as `Error` with `PLAN_MISSING_OUTPUT`, so the TUI does not open an empty editor buffer as if user input were required. Freshly promoted `3-plan` folders with no plan output yet remain runnable as `Needs your input`; `PLAN_MISSING_OUTPUT` recovery reruns `hive plan ... --from 3-plan` directly because there is no `ERROR` marker to clear.

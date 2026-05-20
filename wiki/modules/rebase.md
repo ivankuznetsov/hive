@@ -3,7 +3,7 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb
 created: 2026-05-14
-updated: 2026-05-14T12:00:00Z
+updated: 2026-05-19T23:35:54Z
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
@@ -61,6 +61,7 @@ When `git rebase <origin/default>` raises `Hive::RebaseConflict`:
       - `cwd: task.worktree_path` — git rebase state lives in the worktree.
       - `add_dirs: []` — security boundary; agent physically cannot reach `task.folder` (`plan.md`, `worktree.yml`, `task.md` are unreachable regardless of prompt content).
       - `timeout_sec: cfg.rebase.conflict_resolution_timeout_sec` (default `2700`).
+      - `status_mode: :exit_code_only` — success is the agent process exiting cleanly; the rebase runner then validates git state and conflict-marker bytes. This is required for development agents such as Codex whose profile default is artifact-based (`:output_file_exists`) in reviewer contexts.
       - `max_budget_usd: cfg.budget_usd.execute_implementation || 500`.
       - `prompt:` rendered from `templates/rebase_conflict_resolution.md.erb` with the commit message + conflict file paths + file contents inside a per-spawn `<user_supplied_<hex>>` nonce block (ADR-008/019).
    4. After the agent returns:

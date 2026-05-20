@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-05-13T23:00:00Z
+updated: 2026-05-19T23:51:41Z
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -50,7 +50,7 @@ Runs `cfg.review.ci.command` (e.g., `bin/ci`) once on entry. The subprocess is l
 
 ## Phase 2 — reviewers (`Hive::Reviewers::Agent`)
 
-For each spec in `cfg.review.reviewers`, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`.
+For each spec in `cfg.review.reviewers`, sequentially: dispatch via `Hive::Reviewers.dispatch(spec, ctx)`, run through `Hive::Agent.run!` with the spec's profile, write `reviews/<output_basename>-<NN>.md`. Reviewer prompts compare against `origin/<default_branch>` when that remote-tracking ref exists, falling back to the configured/default local branch only when the remote ref is absent; this keeps long-lived local `main` checkouts from making reviewers report already-merged changes as current-task findings.
 
 After each reviewer file is written, `Review::GithubPublisher.publish!` posts a PR-level comment headed `### Reviewer: <name> - Pass NN` when `review.github_publish.enabled` is true. It reads `pr_url` from `pr.md`, skips duplicate headers on retry, scans for secrets before posting, and degrades to a stderr warning on GitHub failures so local files remain the source of truth.
 

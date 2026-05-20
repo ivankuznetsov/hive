@@ -298,6 +298,49 @@ class HiveRebaseTest < Minitest::Test
     teardown_dirs(worktree, folder)
   end
 
+  def test_conflict_agent_uses_development_agent_with_exit_code_status
+    # Rebase conflict resolution is development work in the task worktree.
+    # It must use cfg.execute.agent, but success is NOT an output artifact:
+    # the rebase runner validates git conflict state and marker bytes after
+    # the agent exits. Pin :exit_code_only so Codex's profile default
+    # (:output_file_exists) cannot turn a successful conflict resolution into
+    # `agent_failed` just because no expected_output path was supplied.
+    worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    File.write(File.join(worktree, "a.txt"), "resolved\n")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [ "a.txt" ], [] ]
+    git.rebase_continue_outcomes = [ :ok ]
+
+    dispatched_with = nil
+    original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+      dispatched_with = kwargs
+      { status: :ok }
+    end
+
+    begin
+      stub_gitops!(git) do
+        result = Hive::Rebase.perform(task, base_cfg("execute" => { "agent" => "codex" }))
+        assert result.succeeded
+      end
+    ensure
+      Hive::Stages::Base.singleton_class.define_method(:spawn_agent, original)
+    end
+
+    refute_nil dispatched_with, "conflict-resolution agent must be dispatched"
+    assert_equal :codex, dispatched_with[:profile].name,
+                 "rebase helper must use the configured development agent"
+    assert_equal :exit_code_only, dispatched_with[:status_mode],
+                 "rebase helper must judge development-agent success by exit code"
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   # ---- Failure paths (abort + reset --hard) ----
 
   def test_agent_failure_aborts_and_returns_failed

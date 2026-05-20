@@ -45,6 +45,12 @@ module Hive
       raise GitError, "git -C #{@project_root} merge-base --is-ancestor failed: #{err}"
     end
 
+    def ref_exists?(ref)
+      _out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                          "rev-parse", "--verify", "--quiet", ref)
+      status.success?
+    end
+
     def hive_state_branch_exists?
       out, _err, status = Open3.capture3("git", "-C", @project_root, "show-ref", "--verify",
                                          "refs/heads/#{HIVE_BRANCH}")

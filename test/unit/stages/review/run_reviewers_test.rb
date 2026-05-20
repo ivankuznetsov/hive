@@ -25,6 +25,45 @@ class RunReviewersTest < Minitest::Test
     )
   end
 
+  class FakeOps
+    def initialize(default_branch:, refs:)
+      @default_branch = default_branch
+      @refs = refs
+    end
+
+    attr_reader :default_branch
+
+    def ref_exists?(ref)
+      @refs.include?(ref)
+    end
+  end
+
+  def test_reviewer_compare_ref_prefers_origin_default_branch_when_available
+    ops = FakeOps.new(default_branch: "main", refs: [ "origin/main" ])
+
+    assert_equal "origin/main", Hive::Stages::Review.reviewer_compare_ref({}, ops)
+  end
+
+  def test_reviewer_compare_ref_falls_back_to_local_default_when_origin_ref_missing
+    ops = FakeOps.new(default_branch: "main", refs: [])
+
+    assert_equal "main", Hive::Stages::Review.reviewer_compare_ref({}, ops)
+  end
+
+  def test_reviewer_compare_ref_honors_configured_default_branch
+    ops = FakeOps.new(default_branch: "main", refs: [ "origin/trunk" ])
+    cfg = { "default_branch" => "trunk" }
+
+    assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
+  end
+
+  def test_reviewer_compare_ref_preserves_explicit_remote_ref
+    ops = FakeOps.new(default_branch: "main", refs: [ "origin/main" ])
+    cfg = { "default_branch" => "origin/main" }
+
+    assert_equal "origin/main", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
+  end
+
   # A reviewer whose run! raises mid-phase. The orchestrator must
   # convert this to :error, write the stub finding, and continue with
   # the next reviewer.

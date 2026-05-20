@@ -48,6 +48,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 **Conflict-resolution agent:** when `git rebase` halts with conflicts, `Hive::Rebase` dispatches the project's `cfg.execute.agent` profile via `Hive::Stages::Base.spawn_agent` with:
 - `cwd: task.worktree_path` (the rebase state lives in the worktree)
 - `add_dirs: []` (the agent is isolated from `task.folder` — it physically cannot touch `plan.md`/`worktree.yml`/`task.md`)
+- `status_mode: :exit_code_only` (conflict resolution is development work, not a reviewer artifact; Hive validates git state and marker bytes after the agent exits)
 - `timeout_sec: cfg.rebase.conflict_resolution_timeout_sec` (default 2700)
 - prompt rendered from `templates/rebase_conflict_resolution.md.erb` with the conflict files wrapped in a per-spawn `<user_supplied_<hex>>` nonce block (ADR-008/019)
 - bounded by `Hive::Rebase::MAX_CONFLICT_RESOLUTIONS = 5` agent dispatches per rebase invocation (not configurable; projects with persistent high-conflict branches should investigate the drift, not raise the cap)

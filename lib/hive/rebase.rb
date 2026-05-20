@@ -214,6 +214,8 @@ module Hive
 
         result = dispatch_conflict_agent(task, cfg, profile, git, unmerged)
         unless result[:status] == :ok
+          detail = result[:error_message] || result[:status]
+          warn "[hive] rebase conflict-resolution agent failed: #{detail}" if detail
           return abort_with(git, :agent_failed,
                             commits_behind, attempts - 1, resolved_files)
         end
@@ -301,7 +303,8 @@ module Hive
         add_dirs: [],
         cwd: task.worktree_path,
         log_label: "rebase_conflict",
-        profile: profile
+        profile: profile,
+        status_mode: :exit_code_only
       )
     end
 

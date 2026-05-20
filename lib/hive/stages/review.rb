@@ -124,8 +124,8 @@ module Hive
           exit 1
         end
 
-        ops = Hive::GitOps.new(task.project_root)
-        default_branch = ops.default_branch
+        ops = Hive::GitOps.new(worktree_path)
+        default_branch = reviewer_compare_ref(cfg, ops)
 
         ctx = Hive::Stages::Review::Context.new(
           worktree_path: worktree_path,
@@ -563,6 +563,15 @@ module Hive
 
       def canonical_worktree_root(task, cfg)
         cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(task.project_root)}.worktrees")
+      end
+
+      def reviewer_compare_ref(cfg, ops)
+        configured = cfg["default_branch"].to_s.strip
+        default_branch = configured.empty? ? ops.default_branch : configured
+        return default_branch if default_branch.start_with?("origin/")
+
+        remote_ref = "origin/#{default_branch}"
+        ops.ref_exists?(remote_ref) ? remote_ref : default_branch
       end
 
       def mark_working(task, phase:, pass:)

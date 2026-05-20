@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-20T00:00:00Z] README rewritten with TUI-first framing
+
+**Action:** Restructured `README.md` so the user-facing entry point is the `hive tui` dashboard, the second-tier entry point is "Drive Hive From Your Coding Agent" (folding in the existing install-prompt block plus day-to-day operate-via-agent guidance), and direct CLI use is demoted to a Power-User / Scripting CLI summary that links out to `docs/cli.md` instead of duplicating the per-command table. The hero now explains what Hive does and the folder-as-agent + compound-engineering mental model before any install line. The Documentation section replaces bare bullet links with 1–3 sentence prose descriptions per linked doc.
+
+**Refreshed pages:**
+- None — README sits outside `wiki/`. This entry logs the rewrite for traceability with the rest of the docs surface.
+
 ## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
 
 **Action:** Documented the recovery hardening for `3-plan` rows whose agent is interrupted before producing `plan.md`. Markerless plan rows with a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` proves the plan run started, now classify as `Error` with `PLAN_MISSING_OUTPUT`, so the TUI does not open an empty editor buffer as if user input were required. Freshly promoted `3-plan` folders with no plan output yet remain runnable as `Needs your input`; `PLAN_MISSING_OUTPUT` recovery reruns `hive plan ... --from 3-plan` directly because there is no `ERROR` marker to clear.

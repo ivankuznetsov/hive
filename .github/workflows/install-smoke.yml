@@ -99,13 +99,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
       - name: checksum mismatch fails clearly
         run: |
           set -euo pipefail
           fixtures="$(mktemp -d)"
           fakebin="$(mktemp -d)"
-          printf 'not the archive\n' > "$fixtures/hive-0.1.0-linux-x86_64-gnu.tar.gz"
-          printf '%064d  hive-0.1.0-linux-x86_64-gnu.tar.gz\n' 0 > "$fixtures/SHA256SUMS"
+          printf 'not the gem\n' > "$fixtures/hive-cli-0.1.0.gem"
+          printf '%064d  hive-cli-0.1.0.gem\n' 0 > "$fixtures/SHA256SUMS"
           : > "$fixtures/SHA256SUMS.sig"
           : > "$fixtures/SHA256SUMS.pem"
           cat > "$fakebin/curl" <<'SH'
@@ -125,7 +128,7 @@ jobs:
             *SHA256SUMS.sig) cp "$FIXTURES/SHA256SUMS.sig" "$out" ;;
             *SHA256SUMS.pem) cp "$FIXTURES/SHA256SUMS.pem" "$out" ;;
             *SHA256SUMS) cp "$FIXTURES/SHA256SUMS" "$out" ;;
-            *.tar.gz) cp "$FIXTURES/hive-0.1.0-linux-x86_64-gnu.tar.gz" "$out" ;;
+            *.gem) cp "$FIXTURES/hive-cli-0.1.0.gem" "$out" ;;
             *) echo "unexpected url: $url" >&2; exit 22 ;;
           esac
           printf '200'
@@ -144,15 +147,34 @@ jobs:
           set -euo pipefail
           fixtures="$(mktemp -d)"
           fakebin="$(mktemp -d)"
-          payload="$fixtures/payload/hive-0.1.0-linux-x86_64-gnu"
-          mkdir -p "$payload/bin"
-          cat > "$payload/bin/hive" <<'SH'
-          #!/usr/bin/env bash
-          echo "0.1.0"
+          # Build a minimal hive-cli-0.1.0.gem with stub hive/hv bins so
+          # install.sh's `gem install` step has a real, well-formed
+          # artifact to consume.
+          gemroot="$fixtures/gemroot"
+          mkdir -p "$gemroot/bin"
+          cat > "$gemroot/bin/hive" <<'SH'
+          #!/usr/bin/env ruby
+          puts "0.1.0"
           SH
-          chmod +x "$payload/bin/hive"
-          tar -C "$fixtures/payload" -czf "$fixtures/hive-0.1.0-linux-x86_64-gnu.tar.gz" "hive-0.1.0-linux-x86_64-gnu"
-          sha256sum "$fixtures/hive-0.1.0-linux-x86_64-gnu.tar.gz" | awk '{print $1 "  hive-0.1.0-linux-x86_64-gnu.tar.gz"}' > "$fixtures/SHA256SUMS"
+          cat > "$gemroot/bin/hv" <<'SH'
+          #!/usr/bin/env ruby
+          puts "0.1.0"
+          SH
+          chmod +x "$gemroot/bin/hive" "$gemroot/bin/hv"
+          cat > "$gemroot/hive-cli.gemspec" <<'RUBY'
+          Gem::Specification.new do |s|
+            s.name = "hive-cli"
+            s.version = "0.1.0"
+            s.summary = "fixture stub"
+            s.author = "fixture"
+            s.bindir = "bin"
+            s.executables = ["hive", "hv"]
+            s.files = Dir["bin/*"]
+          end
+          RUBY
+          ( cd "$gemroot" && gem build hive-cli.gemspec )
+          cp "$gemroot/hive-cli-0.1.0.gem" "$fixtures/"
+          sha256sum "$fixtures/hive-cli-0.1.0.gem" | awk '{print $1 "  hive-cli-0.1.0.gem"}' > "$fixtures/SHA256SUMS"
           : > "$fixtures/SHA256SUMS.sig"
           : > "$fixtures/SHA256SUMS.pem"
           cat > "$fakebin/curl" <<'SH'
@@ -172,7 +194,7 @@ jobs:
             *SHA256SUMS.sig) cp "$FIXTURES/SHA256SUMS.sig" "$out" ;;
             *SHA256SUMS.pem) cp "$FIXTURES/SHA256SUMS.pem" "$out" ;;
             *SHA256SUMS) cp "$FIXTURES/SHA256SUMS" "$out" ;;
-            *.tar.gz) cp "$FIXTURES/hive-0.1.0-linux-x86_64-gnu.tar.gz" "$out" ;;
+            *.gem) cp "$FIXTURES/hive-cli-0.1.0.gem" "$out" ;;
             *) echo "unexpected url: $url" >&2; exit 22 ;;
           esac
           printf '200'

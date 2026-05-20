@@ -14,13 +14,17 @@ log inspection, and how to disable automation mid-flight.
 
 ## Install
 
-Hive v0.1.0 installs from pinned GitHub Release artifacts. All channels write
-an `install-channel` marker so `hive update` delegates to the same channel
-that installed the binary.
+Hive v0.1.0 ships as the `hive-cli` rubygem attached to each GitHub Release,
+signed with cosign keyless attestation. All channels download the same `.gem`,
+verify the signature, run `gem install` against it, and write an
+`install-channel` marker so `hive update` delegates back to the same channel.
+Runtime deps (bubbletea, lipgloss, thor, telegram-bot-ruby) come from
+rubygems.org with precompiled platform binaries — no native build chain on
+the user's machine.
 
 | Tier | Platforms | Status |
 |------|-----------|--------|
-| Tier 1 | macOS arm64, Ubuntu 22.04+ x86_64/aarch64, Arch Linux x86_64/aarch64 | Release tarballs and channel docs ship in v1 |
+| Tier 1 | macOS arm64, Ubuntu 22.04+ x86_64/aarch64, Arch Linux x86_64/aarch64 | `.gem` artifact and channel docs ship in v1 |
 | Tier 2 | Debian 12+, Fedora 40+, WSL2 | Best effort through `install.sh`; no dedicated tap/AUR row |
 | Tier 3 | macOS x86_64 for `install.sh` v0.1.0, Alpine/musl, NixOS, BSD | Unsupported; installer exits with a clear message |
 

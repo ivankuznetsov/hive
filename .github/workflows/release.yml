@@ -5,74 +5,49 @@ on:
     tags:
       - "v*.*.*"
 
-# Default-narrow permissions: only the signing job below needs
-# id-token:write. Build matrix runs `gem install tebako` + bundler,
-# which transitively executes third-party code; keeping the OIDC
-# token out of those jobs limits the blast radius if a build dep is
-# compromised.
+# Default-narrow permissions: the build job only reads source. The
+# publish job needs `contents: write` to create the GitHub Release and
+# `id-token: write` for cosign keyless signing of SHA256SUMS.
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
+    name: Build hive-cli gem
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: darwin-arm64
-            runner: macos-15
-          - target: linux-x86_64-gnu
-            runner: ubuntu-24.04
-          - target: linux-aarch64-gnu
-            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
           bundler-cache: true
-      - name: Install Tebako
-        run: gem install tebako
-      - name: Build release artifact
-        # `tebako` is installed via system `gem install` (not in the bundle), so
-        # invoke rake without `bundle exec` — the bundle context would hide the
-        # tebako executable and the rake task fails with
-        # "can't find executable tebako for gem tebako".
-        env:
-          TARGET: ${{ matrix.target }}
-        run: rake "build:release[$TARGET]"
-      - name: Smoke test built binary
-        env:
-          TARGET: ${{ matrix.target }}
+      - name: Build gem
+        # Hive ships as a rubygem (`hive-cli`) attached to the GitHub
+        # Release; install channels (install.sh, brew, AUR) download
+        # the .gem and run `gem install` on it. No native build chain
+        # (tebako/dwarfs/Boost) — the user provides Ruby 3.4 already
+        # because the rest of the toolchain needs it.
+        run: gem build hive.gemspec
+      - name: Smoke test built gem
+        # Confirm the gemspec is well-formed and the `hive`/`hv`
+        # executables resolve before we attach the artifact to a
+        # release. Installs into a throwaway $HOME-scoped gem prefix
+        # so the runner's default gem env stays clean.
         run: |
-          archive="$(ls tmp/release/hive-*-"$TARGET".tar.gz | head -n 1)"
-          [[ -s "$archive" ]] || { echo "no archive at tmp/release/hive-*-$TARGET.tar.gz" >&2; exit 1; }
-          workdir="$(mktemp -d)"
-          tar -xzf "$archive" -C "$workdir"
-          bin="$(find "$workdir" -type f -name hive -path '*/bin/hive' | head -n 1)"
-          [[ -x "$bin" ]] || { echo "no executable bin/hive in $archive" >&2; exit 1; }
-          # Brew formula does share.install "share/hive", which assumes the
-          # extracted tarball has share/hive/{templates,examples,wiki} at the
-          # archive root. Verify the layout here so a packager regression is
-          # caught before brew users get a half-installed prefix.
-          extracted="$(dirname "$(dirname "$bin")")"
-          for sub in share/hive/templates share/hive/examples share/hive/wiki; do
-            [[ -d "$extracted/$sub" ]] || { echo "expected $sub under $extracted (brew install layout)" >&2; exit 1; }
-          done
-          # Only run the binary when it matches the host architecture.
-          if [[ "$TARGET" == "linux-aarch64-gnu" && "$(uname -m)" != "aarch64" ]]; then
-            echo "skipping --version run for cross-compiled aarch64 binary"
-          else
-            "$bin" --version || { echo "smoke check failed: hive --version did not exit 0" >&2; exit 1; }
-          fi
+          gem_file="$(ls hive-cli-*.gem | head -n 1)"
+          [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem in workspace" >&2; exit 1; }
+          sandbox="$(mktemp -d)/gem-sandbox"
+          GEM_HOME="$sandbox" gem install "$gem_file" \
+            --no-document \
+            --bindir "$sandbox/bin" \
+            --source https://rubygems.org
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" "$sandbox/bin/hive" --version
       - uses: actions/upload-artifact@v4
         with:
-          name: hive-${{ matrix.target }}
-          path: tmp/release/hive-*.tar.gz
+          name: hive-cli-gem
+          path: hive-cli-*.gem
           if-no-files-found: error
 
   release-finalize:
@@ -89,13 +64,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: hive-*
+          name: hive-cli-gem
           path: dist
-          merge-multiple: true
       - name: Build checksums
         run: |
           cd dist
-          sha256sum hive-*.tar.gz > SHA256SUMS
+          sha256sum hive-cli-*.gem > SHA256SUMS
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign checksums
@@ -111,23 +85,25 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Hive ${GITHUB_REF_NAME}" \
+          gh release create "$REF_NAME" dist/* \
+            --title "$REF_NAME" \
+            --notes "Hive $REF_NAME" \
             --verify-tag
       - name: Notify Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         env:
           GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          darwin_sha="$(awk '/darwin-arm64/ {print $1}' dist/SHA256SUMS)"
+          version="${REF_NAME#v}"
+          gem_sha="$(awk '/hive-cli-/ {print $1}' dist/SHA256SUMS)"
           # Build the payload via jq so version/sha values can't break
           # out of the JSON object (a tag like `v0.1","event_type":"x`
           # injected via string concat would otherwise smuggle keys).
-          payload="$(jq -nc --arg version "$version" --arg sha "$darwin_sha" \
-            '{version: $version, sha256_darwin_arm64: $sha}')"
+          payload="$(jq -nc --arg version "$version" --arg sha "$gem_sha" \
+            '{version: $version, sha256_gem: $sha}')"
           echo "notify-homebrew: dispatching event_type=hive-release version=${version}"
           gh api repos/ivankuznetsov/homebrew-hive/dispatches \
             --method POST \
@@ -141,6 +117,6 @@ jobs:
         if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
         run: |
           echo "AUR publish is enabled by secret; packaging/aur templates are the source of truth for the publish job."
-          echo "TODO: wire up packaging/aur/PKGBUILD.template publishing here (cosign verify the tarballs before bumping pkgver)."
+          echo "TODO: wire up packaging/aur/PKGBUILD.template publishing here (cosign verify the .gem before bumping pkgver)."
           echo "Failing loudly so a configured AUR secret cannot be mistaken for a real publish." >&2
           exit 1

@@ -67,7 +67,13 @@ module Hive
         # buffer loaded — accumulating against tmux's default 50-buffer
         # cap on long-lived daemons. Explicitly delete the buffer in
         # `ensure` so a failed paste does not leak it.
-        run_tmux("paste-buffer", "-d", "-b", buffer_name, "-t", target_pane)
+        #
+        # `-r` disables tmux's default LF→CR translation: each LF in a
+        # multi-line prompt would otherwise be delivered as ENTER, which
+        # would submit Claude Code's input box on the first line break
+        # instead of keeping the prompt multi-line. The explicit
+        # send_keys("Enter") below is the single, intended submit.
+        run_tmux("paste-buffer", "-d", "-r", "-b", buffer_name, "-t", target_pane)
         sleep prompt_submit_delay_sec
         begin
           send_keys("Enter")

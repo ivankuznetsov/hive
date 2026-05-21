@@ -84,6 +84,7 @@ module Hive
         when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
+        when :idea_preview then idea_preview_message(key: key, row: row)
         when :new_idea_project then new_idea_project_message(key: key, row: row)
         when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
@@ -116,13 +117,13 @@ module Hive
 
         return Messages::NOOP if row.nil?
 
-        # `o` and `s` are the row-bound browse/steer gestures and behave
-        # as a mirror pair: both require right-pane focus (where the row
-        # under the cursor is). Gating `o` matches the `s` gate the plan
-        # called out; without it, an operator on the left (scope) pane
-        # could fire `o` against a row whose cursor they are not visually
-        # tracking.
+        # `o`, `i`, and `s` are row-bound browse/preview/steer gestures
+        # that require right-pane focus (where the row under the cursor
+        # is). Without the gate, an operator on the left (scope) pane
+        # could fire any of these against a row whose cursor they are
+        # not visually tracking.
         return Messages::OpenTaskFolder.new(row: row) if key == "o" && pane_focus == :right
+        return Messages::OpenIdeaPreview.new(row: row) if key == "i" && pane_focus == :right
         return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
@@ -374,6 +375,13 @@ module Hive
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         return Messages::NOOP if key == :key_ctrl_v
 
+        Messages::BACK
+      end
+
+      # Idea preview is read-only: every key closes it and returns to
+      # grid, whether Bubble Tea emitted a printable String or a
+      # special-key Symbol.
+      def idea_preview_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         Messages::BACK
       end
 

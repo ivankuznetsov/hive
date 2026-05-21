@@ -62,7 +62,7 @@ class TuiHelpTest < Minitest::Test
   end
 
   def test_modes_are_drawn_from_a_known_set
-    expected_modes = %i[grid triage log_tail red_status_detail filter new_idea_project new_idea].to_set
+    expected_modes = %i[grid triage log_tail red_status_detail filter idea_preview new_idea_project new_idea].to_set
     actual_modes = Hive::Tui::Help::BINDINGS.map { |b| b[:mode] }.to_set
     extra = actual_modes - expected_modes
     assert_empty extra, "unexpected modes in BINDINGS: #{extra.inspect}"
@@ -115,8 +115,9 @@ class TuiHelpTest < Minitest::Test
   def test_no_grid_mode_binding_references_a_nonexistent_verb
     known_non_verb_actions = %i[
       cursor_down cursor_up cursor_jump_top cursor_jump_bottom
-      open_contextual open_task_folder filter project_scope help quit
-      open_in_agent pane_focus_toggle pane_focus_left pane_focus_right new_idea
+      open_contextual open_task_folder open_idea_preview open_in_agent
+      filter project_scope help quit
+      pane_focus_toggle pane_focus_left pane_focus_right new_idea
       drop_missing
     ]
     Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|
@@ -131,5 +132,21 @@ class TuiHelpTest < Minitest::Test
         flunk "BINDINGS references unknown action: #{action.inspect} (key=#{entry[:key]})"
       end
     end
+  end
+
+  def test_binding_for_i_exists_in_grid_mode
+    entry = Hive::Tui::Help::BINDINGS.find { |b| b[:mode] == :grid && b[:key] == "i" }
+
+    refute_nil entry, "expected a grid-mode binding for `i`"
+    assert_equal :open_idea_preview, entry[:action]
+    assert_match(/original idea/i, entry[:description])
+  end
+
+  def test_idea_preview_mode_has_a_dismiss_entry
+    entry = Hive::Tui::Help::BINDINGS.find { |b| b[:mode] == :idea_preview && b[:key] == "any" }
+
+    refute_nil entry, "expected an idea-preview dismissal binding"
+    assert_equal :back, entry[:action]
+    assert_match(/dismiss/i, entry[:description])
   end
 end

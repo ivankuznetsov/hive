@@ -1,10 +1,12 @@
 require "bubbletea"
+require "date"
 require "digest"
 require "fileutils"
 require "set"
 require "shellwords"
 require "stringio"
 require "time"
+require "yaml"
 require "hive"
 require "hive/agent_profiles"
 require "hive/config"
@@ -33,6 +35,7 @@ require "hive/tui/views/log_tail"
 require "hive/tui/views/red_status_detail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
+require "hive/tui/views/idea_preview"
 require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
 
@@ -230,6 +233,7 @@ module Hive
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
+        when :idea_preview then compose_idea_preview_view
         when :new_idea_project then compose_new_idea_project_view
         when :new_idea then compose_new_idea_view
         else compose_two_pane_view
@@ -387,6 +391,8 @@ module Hive
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
           open_task_folder(message.row)
+        when Hive::Tui::Messages::OpenIdeaPreview
+          open_idea_preview(message.row)
         when Hive::Tui::Messages::OpenInAgent
           open_in_agent(message.row)
         when Hive::Tui::Messages::AgentSteerExited
@@ -1633,6 +1639,44 @@ module Hive
         ]
       rescue ArgumentError => e
         [ flashed("editor command invalid: #{e.message}"), nil ]
+      end
+
+      def open_idea_preview(row)
+        return [ flashed("no idea for #{row.slug}"), nil ] if row.folder.to_s.empty?
+
+        idea_path = File.join(row.folder, "idea.md")
+        return [ flashed("no idea.md for #{row.slug}"), nil ] unless File.exist?(idea_path)
+
+        data = idea_frontmatter(File.read(idea_path))
+        original_text = data["original_text"].to_s
+        if original_text.empty?
+          return [ flashed("idea has no original_text for #{row.slug}"), nil ]
+        end
+
+        capped_text = original_text[0, Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS]
+        [
+          @hive_model.with(
+            mode: :idea_preview,
+            idea_preview_text: capped_text,
+            idea_preview_slug: row.slug
+          ),
+          nil
+        ]
+      rescue Errno::ENOENT, Errno::EACCES, Psych::Exception
+        [ flashed("could not read idea for #{row.slug}"), nil ]
+      end
+
+      def idea_frontmatter(contents)
+        match = contents.match(/\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\z)/m)
+        return {} unless match
+
+        parsed = YAML.safe_load(
+          match[1],
+          permitted_classes: [ Time, Date ],
+          permitted_symbols: [],
+          aliases: false
+        ) || {}
+        parsed.is_a?(Hash) ? parsed : {}
       end
 
       def open_in_agent(row)
@@ -3020,6 +3064,11 @@ module Hive
       def compose_filter_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
         compose_two_pane_view(footer: prompt_footer(Views::FilterPrompt.render(@hive_model, width: usable), usable))
+      end
+
+      def compose_idea_preview_view
+        usable = [ @hive_model.cols.to_i - 1, 1 ].max
+        compose_two_pane_view(footer: prompt_footer(Views::IdeaPreview.render(@hive_model, width: usable), usable))
       end
 
       # New-idea mode: same composition; footer = the inline prompt with

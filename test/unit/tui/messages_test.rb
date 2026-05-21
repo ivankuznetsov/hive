@@ -59,6 +59,14 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_open_idea_preview_carries_row
+    row = Object.new
+    msg = Hive::Tui::Messages::OpenIdeaPreview.new(row: row)
+
+    assert_same row, msg.row
+    assert_includes Hive::Tui::Messages::OpenIdeaPreview.members, :row
+  end
+
   def test_open_in_agent_carries_row
     row = Object.new
     msg = Hive::Tui::Messages::OpenInAgent.new(row: row)

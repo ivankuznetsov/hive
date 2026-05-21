@@ -48,6 +48,28 @@ class HiveTuiBubbleModelTest < Minitest::Test
     old_editor.nil? ? ENV.delete("EDITOR") : ENV["EDITOR"] = old_editor
   end
 
+  def write_idea_md(dir, original_text:)
+    indented_original = original_text.lines.map { |line| "  #{line.chomp}" }
+    body = [
+      "---",
+      "slug: some-slug",
+      "created_at: 2026-05-20T00:00:00Z",
+      "original_text: |",
+      *indented_original,
+      "---",
+      "",
+      "# some-slug",
+      "",
+      original_text,
+      "",
+      "<!-- WAITING -->",
+      ""
+    ].join("\n")
+    path = File.join(dir, "idea.md")
+    File.write(path, body)
+    path
+  end
+
   # ---- Construction / init ----
 
   def test_init_returns_self_and_yield_tick
@@ -290,6 +312,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     out = @model.view
     assert_includes out, "/auth"
+  end
+
+  def test_view_composes_idea_preview_onto_grid_in_idea_preview_mode
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :idea_preview,
+        idea_preview_slug: "some-slug",
+        idea_preview_text: "original idea"
+      ),
+      dispatch: @dispatch
+    )
+    out = @model.view
+    assert_includes out, "Idea for some-slug:"
+    assert_includes out, "original idea"
   end
 
   # Regression: paste-truncated / paste-timeout / overflow flashes
@@ -3202,6 +3238,120 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     assert_empty @messages,
       "OpenTaskFolder must not dispatch any follow-up message — no auto-continue, no InputEditorExited"
+  end
+
+  # ---- OpenIdeaPreview → bottom-strip preview (read-only) ----
+
+  def test_open_idea_preview_reads_original_text_and_enters_preview_mode
+    with_tmp_dir do |dir|
+      write_idea_md(dir, original_text: "Build task from user note")
+      row = make_task_row(folder: dir, slug: "some-slug")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_equal "Build task from user note", @model.hive_model.idea_preview_text
+      assert_equal "some-slug", @model.hive_model.idea_preview_slug
+    end
+  end
+
+  def test_open_idea_preview_flashes_when_folder_empty
+    row = make_task_row(folder: "")
+
+    _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+    assert_nil cmd
+    assert_equal :grid, @model.hive_model.mode
+    assert_match(/no idea for some-slug/, @model.hive_model.flash.to_s)
+  end
+
+  def test_open_idea_preview_flashes_when_idea_md_missing
+    with_tmp_dir do |dir|
+      row = make_task_row(folder: dir)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :grid, @model.hive_model.mode
+      assert_match(/no idea\.md for some-slug/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_open_idea_preview_flashes_when_original_text_missing
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "idea.md"), "---\nslug: some-slug\n---\n")
+      row = make_task_row(folder: dir)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :grid, @model.hive_model.mode
+      assert_match(/idea has no original_text for some-slug/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_open_idea_preview_flashes_on_unreadable_idea_md
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "idea.md"), "---\noriginal_text: [broken\n---\n")
+      row = make_task_row(folder: dir)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :grid, @model.hive_model.mode
+      assert_match(/could not read idea for some-slug/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_open_idea_preview_does_not_dispatch_or_mutate_marker
+    with_tmp_dir do |dir|
+      idea_path = write_idea_md(dir, original_text: "Read only")
+      before = File.read(idea_path)
+      row = make_task_row(folder: dir)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_empty @messages
+      assert_equal before, File.read(idea_path)
+    end
+  end
+
+  def test_open_idea_preview_truncates_oversized_original_text
+    with_tmp_dir do |dir|
+      original = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS + 20)
+      write_idea_md(dir, original_text: original)
+      row = make_task_row(folder: dir)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS,
+                   @model.hive_model.idea_preview_text.length
+    end
+  end
+
+  def test_idea_preview_roundtrip_open_then_any_key_dismisses
+    with_tmp_dir do |dir|
+      write_idea_md(dir, original_text: "Roundtrip idea")
+      row = make_task_row(folder: dir)
+
+      _, open_cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil open_cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_equal "Roundtrip idea", @model.hive_model.idea_preview_text
+
+      _, dismiss_cmd = @model.update(Bubbletea::KeyMessage.new(key_type: 0, runes: [ "x".ord ]))
+
+      assert_nil dismiss_cmd
+      assert_equal :grid, @model.hive_model.mode
+      assert_nil @model.hive_model.idea_preview_text
+      assert_nil @model.hive_model.idea_preview_slug
+      assert_empty @messages
+    end
   end
 
   # ---- OpenInAgent → configured agent foreground takeover ----

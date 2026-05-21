@@ -34,6 +34,17 @@ class StopHookInstallerTest < Minitest::Test
     end
   end
 
+  def test_install_marks_settings_read_only
+    with_tmp_dir do |dir|
+      path = Hive::StopHookInstaller.install(stage_dir: dir)
+
+      assert_equal 0o444, File.stat(path).mode & 0o777,
+                   "settings.json must be read-only so a prompt-injected " \
+                   "brainstorm cannot overwrite the Stop hook command"
+      assert_raises(Errno::EACCES) { File.write(path, "tampered") }
+    end
+  end
+
   def test_stop_hook_writes_result_json_and_done
     with_tmp_dir do |dir|
       payload = %({"session_id":"abc","transcript_path":"/tmp/transcript.jsonl"})

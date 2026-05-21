@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-14
+updated: 2026-05-20
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -11,6 +11,97 @@ tags: [operating, daemon, bot, systemd, launchd, install]
 Covers per-project daemon enrollment, bot token/allowlist setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, and how to disable automation mid-flight.
+
+## Install
+
+Hive v0.1.0 ships as the `hive-cli` rubygem attached to each GitHub Release,
+signed with cosign keyless attestation. All channels download the same `.gem`,
+verify the signature, run `gem install` against it, and write an
+`install-channel` marker so `hive update` delegates back to the same channel.
+Runtime deps (bubbletea, lipgloss, thor, telegram-bot-ruby) come from
+rubygems.org with precompiled platform binaries — no native build chain on
+the user's machine.
+
+| Tier | Platforms | Status |
+|------|-----------|--------|
+| Tier 1 | macOS arm64, Ubuntu 22.04+ x86_64/aarch64, Arch Linux x86_64/aarch64 | `.gem` artifact and channel docs ship in v1 |
+| Tier 2 | Debian 12+, Fedora 40+, WSL2 | Best effort through `install.sh`; no dedicated tap/AUR row |
+| Tier 3 | macOS x86_64 for `install.sh` v0.1.0, Alpine/musl, NixOS, BSD | Unsupported; installer exits with a clear message |
+
+Channels:
+
+```bash
+# macOS arm64
+brew install ivankuznetsov/hive/hive
+
+# Arch Linux
+yay -S hive-bin
+
+# glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh"
+bash "$tmpdir/hive-install.sh"
+```
+
+`install.sh` accepts:
+
+| Flag / env | Purpose |
+|------------|---------|
+| `--dry-run` | Resolve target + version + URLs and run the runtime preflight without downloading or writing anything. |
+| `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Stage the versioned payload + prefix marker under `<dir>/hive/…` and mirror `install-channel`/`install-prefix` under `${XDG_DATA_HOME}/hive`, so `hive update` can re-use the prefix without re-exporting `HIVE_PREFIX`. |
+| `--version=<tag>` (or `HIVE_VERSION=<tag>`) | Skip the GitHub API call and install a specific `vX.Y.Z` tag. |
+| `HIVE_REPO_OWNER` / `HIVE_REPO_NAME` | Override the upstream owner/repo (for forks or mirror staging). Inputs are shape-validated. |
+| `HIVE_BIN_OVERRIDE` (read by `hv` wrapper) | Point `hv` at a custom install path when Apache Hive shadows it. |
+
+For an agent-assisted install, paste the repository-root `install.md` into
+Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
+verifies `hive --version`, offers `hive init`, and treats the skills package as
+optional marketplace content.
+
+Fresh installs use XDG locations:
+
+| Purpose | Default |
+|---------|---------|
+| Config / registry | `~/.config/hive/config.yml` |
+| Installed bash payloads and channel marker | `~/.local/share/hive/` |
+| Daemon/bot runtime state and logs | `~/.local/state/hive/` |
+| Cache | `~/.cache/hive/` |
+| User binary symlink | `~/.local/bin/hive` |
+
+`HIVE_HOME` remains a legacy/test override. Project state stays at
+`<project>/.hive-state/`; install and uninstall do not move completed pipeline
+work.
+
+Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
+bash installer creates `hv` when another `hive` is already earlier on PATH. The
+AUR package does not ship `hv`; its `conflicts=('hive' 'apache-hive')` metadata
+blocks the parallel install before fallback aliasing is possible.
+
+Updates and uninstall:
+
+```bash
+hive update --dry-run     # prints the would-be brew/yay/paru/bash command for the channel
+                          # (the `dev` channel has no executable equivalent; it emits a
+                          # `suggested action` line pointing at `git pull && bundle install`)
+hive update               # delegates to the installing channel
+hive uninstall            # removes registrations/config/cache, preserves work
+hive uninstall --purge    # non-interactive; still preserves work
+hive uninstall --force-purge-state
+                          # destructive: removes accumulated hive state and
+                          # registered project .hive-state directories
+```
+
+Skills package marketplace commands are documented for the optional companion
+package, but the package is deferred to a v0.1.x follow-up. Do not run these
+commands until `ivankuznetsov/hive-skills` is published; Hive core install
+still succeeds without it:
+
+| Agent | Command shape |
+|-------|---------------|
+| Claude Code | `claude plugin install ivankuznetsov/hive-skills` |
+| Codex | `codex plugin install ivankuznetsov/hive-skills` |
+| Pi | `pi install ivankuznetsov/hive-skills` |
 
 ## Prerequisites
 
@@ -27,7 +118,7 @@ Once per workstation:
   Verify: `ls /proc/$$ >/dev/null && echo OK` or `command -v ps`.
 - **Telegram bot token** if using `hive bot`. Create the bot with
   BotFather, export `HIVE_TELEGRAM_BOT_TOKEN`, and add your numeric
-  `chat_id` to `bot.chat_id_allowlist` in `~/Dev/hive/config.yml`.
+  `chat_id` to `bot.chat_id_allowlist` in `~/.config/hive/config.yml`.
 
 ## Enrolling existing projects
 
@@ -70,21 +161,21 @@ hive daemon status                  # verify running
 hive daemon tail                    # ctrl-C to leave; daemon keeps running
 ```
 
-Inspect `~/Dev/hive/logs/daemon.log` (one JSON document per line):
+Inspect `~/.local/state/hive/logs/daemon.log` (one JSON document per line):
 
 ```bash
 # What WOULD have been dispatched, by project
 jq -r 'select(.event=="dispatched") | "\(.project)/\(.slug): \(.command)"' \
-   ~/Dev/hive/logs/daemon.log | sort -u
+   ~/.local/state/hive/logs/daemon.log | sort -u
 
 # Things skipped — the `reason` field tells you why
 jq -r 'select(.event=="skipped") | "\(.project)/\(.slug): action=\(.action) reason=\(.reason // "—")"' \
-   ~/Dev/hive/logs/daemon.log | sort -u
+   ~/.local/state/hive/logs/daemon.log | sort -u
 
 # Anything blocked by caps (means at least one cap is too tight, or
 # expected throttling under load)
 jq -r 'select(.event=="blocked") | "\(.project)/\(.slug): \(.reason)"' \
-   ~/Dev/hive/logs/daemon.log | sort -u
+   ~/.local/state/hive/logs/daemon.log | sort -u
 ```
 
 Once the would-be dispatches look right, swap to live mode:
@@ -96,9 +187,17 @@ hive daemon start --detach
 
 ## Autostart
 
+`hive init` writes the platform daemon unit for you (see ADR-024).
+On Linux it lands at `~/.config/systemd/user/hive-daemon.service`; on
+macOS at `~/Library/LaunchAgents/local.hive-daemon.plist`. The recipes
+below are the manual fallback for environments where `hive init` could
+not write the unit (read-only home, restricted user, custom layout) or
+for migrating an existing install onto a newer template.
+
 ### Linux (systemd-user)
 
-A sample unit ships at `examples/systemd/hive-daemon.service`. Install:
+A sample unit ships at `examples/systemd/hive-daemon.service`. Install
+manually only if `hive init` could not write it for you:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -132,9 +231,15 @@ doesn't load your shell's rc files.
 
 ### macOS (launchd)
 
-A sample plist ships at `examples/launchd/hive-daemon.plist`.
-Edit the absolute paths first (replace `/Users/YOU/...` with your
-real paths — `which hive` shows the binary), then:
+`hive init` writes the resolved plist at
+`~/Library/LaunchAgents/local.hive-daemon.plist` with your real `hive`
+binary path already substituted. Homebrew installs use the stable
+`${HOMEBREW_PREFIX}/bin/hive` symlink so `brew upgrade hive` keeps the daemon
+path current. The recipe below is the manual
+fallback (uses the placeholder filename `hive-daemon.plist` so it can
+sit alongside the auto-generated `local.hive-daemon.plist`); edit the
+absolute paths first (replace `/Users/YOU/...` with your real paths —
+`which hive` shows the binary), then:
 
 ```bash
 mkdir -p ~/Library/LaunchAgents
@@ -151,7 +256,7 @@ launchctl load   ~/Library/LaunchAgents/hive-daemon.plist
 
 launchd captures stdout/stderr to the paths declared in the plist
 (`~/Library/Logs/hive-daemon.{out,err}.log` by default). The daemon's
-own structured log (`~/Dev/hive/logs/daemon.log`) is independent and
+own structured log (`~/.local/state/hive/logs/daemon.log`) is independent and
 preferred for parsing — the launchd capture is mostly empty.
 
 `KeepAlive` with `SuccessfulExit: false` means launchd respawns on
@@ -170,7 +275,7 @@ normally. If you customise `ProgramArguments`, keep the precheck.
 
 ## Bot setup
 
-The bot is global and uses the registry in `~/Dev/hive/config.yml`.
+The bot is global and uses the registry in `~/.config/hive/config.yml`.
 Minimum config:
 
 ```yaml
@@ -188,10 +293,10 @@ hive bot start --dry-run
 
 `--dry-run` is useful for first shakedown: inbound command parsing and
 status notifications run, but state-changing child commands are not
-spawned. The bot log is `~/Dev/hive/logs/bot.log`:
+spawned. The bot log is `~/.local/state/hive/logs/bot.log`:
 
 ```bash
-jq -r '.event' ~/Dev/hive/logs/bot.log | sort | uniq -c
+jq -r '.event' ~/.local/state/hive/logs/bot.log | sort | uniq -c
 ```
 
 Unauthorized chat IDs are logged once and receive no reply. Missing
@@ -229,14 +334,14 @@ drain path when you are not using systemd/launchd.
 |-----------------------------------------------|-------------------------------------------------------|
 | Status + uptime                               | `hive daemon status` (`--json` for envelope)          |
 | Follow the structured log                     | `hive daemon tail`                                    |
-| Reload caps without restart                   | edit `~/Dev/hive/config.yml` → `hive daemon reload`   |
+| Reload caps without restart                   | edit `~/.config/hive/config.yml` → `hive daemon reload` |
 | Disable a project mid-flight                  | `hive daemon disable PROJECT` → `hive daemon reload`* |
 | Enable a project mid-flight                   | `hive daemon enable PROJECT` → `hive daemon reload`*  |
 | Drain + stop                                  | `hive daemon stop` (graceful TERM, ≤ `shutdown_grace_sec`) |
 | Force-stop after a hang                       | `hive daemon stop` then check PID; the stop CLI escalates to KILL |
 | Bot status / uptime                           | `hive bot status` (`--json` for envelope)          |
 | Follow bot log                                | `hive bot tail`                                    |
-| Reload bot allowlist / polling config         | edit `~/Dev/hive/config.yml` → `hive bot reload`   |
+| Reload bot allowlist / polling config         | edit `~/.config/hive/config.yml` → `hive bot reload` |
 | Drain + stop bot                              | `hive bot stop`                                    |
 
 \* `hive daemon reload` clears the per-tick enable cache, but the
@@ -271,7 +376,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | `log_max_bytes`                 | 10 MB   | Rotation threshold.                                         |
 | `log_max_files`                 | 5       | 5 × 10 MB = 50 MB log budget.                               |
 
-To override, edit `~/Dev/hive/config.yml`:
+To override, edit `~/.config/hive/config.yml`:
 
 ```yaml
 registered_projects:
@@ -308,7 +413,7 @@ images). Mount `/proc`, install `procps`, or run the daemon in an
 environment where one of the two is reachable.
 
 **`hive daemon status` says "not running" but I just started it.**
-Check `~/Dev/hive/.daemon.pid`. If it's missing, the daemon failed
+Check `~/.local/state/hive/.daemon.pid`. If it's missing, the daemon failed
 during startup — check `journalctl --user -u hive-daemon` (Linux) or
 the launchd `~/Library/Logs/hive-daemon.err.log` (macOS) for the
 crash reason.

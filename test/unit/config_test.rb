@@ -1352,6 +1352,18 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_non_boolean_daemon_autostart
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          autostart: sometimes
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daemon.autostart.*must be a boolean/, err.message)
+    end
+  end
+
   # PR-40 review P1 #2: load_global_daemon merges the operator's
   # ~/Dev/hive/config.yml `daemon:` overrides over Config::DEFAULTS,
   # so `hive daemon start` actually honours configured caps.

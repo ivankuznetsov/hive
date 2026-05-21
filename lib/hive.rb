@@ -298,6 +298,7 @@ module Hive
     TASK_IN_ERROR = 3
     WRONG_STAGE = 4
     USAGE = 64
+    UNAVAILABLE = 69
     SOFTWARE = 70
     TEMPFAIL = 75
     CONFIG = 78
@@ -369,6 +370,12 @@ module Hive
   class ConfigError < Error
     def exit_code
       ExitCodes::CONFIG
+    end
+  end
+
+  class UnavailableError < Error
+    def exit_code
+      ExitCodes::UNAVAILABLE
     end
   end
 

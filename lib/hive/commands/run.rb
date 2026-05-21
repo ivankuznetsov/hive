@@ -58,6 +58,13 @@ module Hive
         cfg = Hive::Config.load(task.project_root)
 
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
+          marker = Hive::Markers.current(task.state_file)
+          if marker.name == :manual_steering
+            @rebase_result = manual_steering_rebase_result
+            report(task, { commit: nil, status: :manual_steering })
+            return
+          end
+
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
           result = runner.call(task, cfg)
@@ -118,6 +125,12 @@ module Hive
           warn "[hive] rebase attempt failed (#{result.reason}); continuing with stale base. Manual rebase recommended: " \
                "cd #{task.worktree_path} && git rebase origin/<default-branch>"
         end
+      end
+
+      def manual_steering_rebase_result
+        require "hive/rebase"
+
+        Hive::Rebase::Result.skipped(:manual_steering)
       end
 
       def pick_runner(task)
@@ -309,6 +322,8 @@ module Hive
             "instructions" => "fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, " \
                               "then re-run",
             "markers_to_clear" => [ "review_ci_stale" ] }
+        when :manual_steering
+          { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "manual_steering" }
         when :error
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
         when :review_error
@@ -380,6 +395,8 @@ module Hive
                "otherwise edit/rename highest-pass review files, remove REVIEW_STALE, then re-run"
         when :review_ci_stale
           puts "  next: fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, then re-run"
+        when :manual_steering
+          puts "  next: manual steering active; automated run skipped"
         when :error, :review_error
           warn "  status: ERROR (#{marker.attrs.inspect})"
           if marker.name == :review_error

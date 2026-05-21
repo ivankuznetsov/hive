@@ -80,6 +80,14 @@ class TuiHelpTest < Minitest::Test
     assert_match(/\$EDITOR|editor/i, entry[:description])
   end
 
+  def test_lowercase_s_opens_task_in_agent_in_grid_mode
+    entry = Hive::Tui::Help::BINDINGS.find { |b| b[:mode] == :grid && b[:key] == "s" }
+    refute_nil entry, "expected a grid-mode binding for `s`"
+    assert_equal :open_in_agent, entry[:action]
+    assert_match(/agent/i, entry[:description])
+    assert_match(/MANUAL_STEERING/, entry[:description])
+  end
+
   def test_capital_p_is_open_pr_lowercase_p_is_plan
     grid = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid }
     by_key = grid.each_with_object({}) { |b, h| h[b[:key]] = b[:action] }
@@ -107,7 +115,8 @@ class TuiHelpTest < Minitest::Test
   def test_no_grid_mode_binding_references_a_nonexistent_verb
     known_non_verb_actions = %i[
       cursor_down cursor_up cursor_jump_top cursor_jump_bottom
-      open_contextual open_task_folder open_idea_preview filter project_scope help quit
+      open_contextual open_task_folder open_idea_preview open_in_agent
+      filter project_scope help quit
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
       drop_missing
     ]

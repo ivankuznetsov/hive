@@ -247,6 +247,7 @@
             "recover_review",
             "agent_running",
             "archived",
+            "manual_steering",
             "error"
           ]
         },

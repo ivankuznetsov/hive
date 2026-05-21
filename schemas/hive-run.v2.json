@@ -83,6 +83,7 @@
             "review_stale",
             "review_complete",
             "review_error",
+            "manual_steering",
             "error"
           ]
         },
@@ -170,6 +171,7 @@
                 null,
                 "disabled",
                 "cli_override",
+                "manual_steering",
                 "no_worktree",
                 "pre_existing_rebase",
                 "dirty_worktree",

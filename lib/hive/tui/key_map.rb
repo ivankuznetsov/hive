@@ -117,8 +117,14 @@ module Hive
 
         return Messages::NOOP if row.nil?
 
-        return Messages::OpenTaskFolder.new(row: row) if key == "o"
-        return Messages::OpenIdeaPreview.new(row: row) if key == "i"
+        # `o`, `i`, and `s` are row-bound browse/preview/steer gestures
+        # that require right-pane focus (where the row under the cursor
+        # is). Without the gate, an operator on the left (scope) pane
+        # could fire any of these against a row whose cursor they are
+        # not visually tracking.
+        return Messages::OpenTaskFolder.new(row: row) if key == "o" && pane_focus == :right
+        return Messages::OpenIdeaPreview.new(row: row) if key == "i" && pane_focus == :right
+        return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 

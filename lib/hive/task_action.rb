@@ -131,6 +131,11 @@ module Hive
         label: "Archived",
         command: nil
       },
+      manual_steering: {
+        key: Hive::Schemas::TaskActionKind::MANUAL_STEERING,
+        label: "Manually steered",
+        command: nil
+      },
       agent_running: {
         # Marker is `:agent_working` — a `hive run` is in flight. Surfacing
         # a workflow command here would send the user (or an agent loop)
@@ -204,6 +209,7 @@ module Hive
       # state-machine would otherwise produce.
       return ACTIONS.fetch(:agent_running) if marker.name == :agent_working
       return ACTIONS.fetch(:error) if marker.name == :error
+      return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
 
       case task.stage_name
       when "inbox"

@@ -77,6 +77,26 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_manual_steering_round_trip
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      Hive::Markers.set(file, "MANUAL_STEERING", agent: "claude", started_at: "2026-05-15T12:00:00Z")
+
+      state = Hive::Markers.current(file)
+      assert_equal :manual_steering, state.name
+      assert_equal "claude", state.attrs["agent"]
+      assert_equal "2026-05-15T12:00:00Z", state.attrs["started_at"]
+    end
+  end
+
+  def test_unknown_manual_steering_typo_raises
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      err = assert_raises(ArgumentError) { Hive::Markers.set(file, "MANUAL_STEERINGS") }
+      assert_equal "unknown marker MANUAL_STEERINGS", err.message
+    end
+  end
+
   # Regression from smoke: when an agent uses an in-place Edit tool (rather
   # than a full-file Write), the AGENT_WORKING marker hive set before spawn
   # remains at the top of the file, with the agent's terminal marker (e.g.,

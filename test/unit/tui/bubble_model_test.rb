@@ -811,6 +811,72 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def with_run_takeover_stub(stub_proc)
+    sentinel = Hive::Tui::Subprocess.method(:run_takeover_child_sync)
+    Hive::Tui::Subprocess.define_singleton_method(:run_takeover_child_sync, &stub_proc)
+    yield
+  ensure
+    Hive::Tui::Subprocess.define_singleton_method(:run_takeover_child_sync, sentinel) if sentinel
+  end
+
+  def with_agent_profile_lookup_stub(stub_proc)
+    sentinel = Hive::AgentProfiles.method(:lookup)
+    Hive::AgentProfiles.define_singleton_method(:lookup, &stub_proc)
+    yield
+  ensure
+    Hive::AgentProfiles.define_singleton_method(:lookup, sentinel) if sentinel
+  end
+
+  ManualProfileStub = Struct.new(:bin, :add_dir_flag, :version_checked, :preflight_checked, keyword_init: true) do
+    def check_version!
+      self.version_checked = true
+    end
+
+    def preflight!
+      self.preflight_checked = true
+    end
+  end
+
+  def with_manual_task_context(stage: "4-execute", slug: "manual-task",
+                               worktree: true, context_stages: %w[1-inbox 3-plan 4-execute],
+                               config: nil)
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      stages_root = File.join(hive_state, "stages")
+      FileUtils.mkdir_p(stages_root)
+      File.write(File.join(hive_state, "config.yml"), config.to_yaml) if config
+
+      (context_stages | [ stage ]).each do |stage_dir|
+        stage_name = stage_dir.split("-", 2).last
+        folder = File.join(stages_root, stage_dir, slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, Hive::Task::STATE_FILES.fetch(stage_name))
+        File.write(state_file, "# #{stage_name}\n") unless File.exist?(state_file)
+      end
+
+      folder = File.join(stages_root, stage, slug)
+      stage_name = stage.split("-", 2).last
+      state_file = File.join(folder, Hive::Task::STATE_FILES.fetch(stage_name))
+      worktree_path = File.join(project_root, "worktrees", slug)
+      if worktree
+        FileUtils.mkdir_p(worktree_path)
+        File.write(File.join(folder, "worktree.yml"), { "path" => worktree_path }.to_yaml)
+      end
+
+      row = make_task_row(
+        action_key: "needs_input",
+        action_label: "Needs your input",
+        slug: slug,
+        stage: stage,
+        folder: folder,
+        state_file: state_file,
+        marker: "none",
+        attrs: {}
+      )
+      yield(project_root, hive_state, folder, state_file, worktree_path, row)
+    end
+  end
+
   def with_clipboard_probe_stub(stub_proc)
     sentinel = @model.instance_variable_get(:@clipboard_probe)
     @model.instance_variable_set(:@clipboard_probe, stub_proc)
@@ -3285,6 +3351,198 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_nil @model.hive_model.idea_preview_text
       assert_nil @model.hive_model.idea_preview_slug
       assert_empty @messages
+    end
+  end
+
+  # ---- OpenInAgent → configured agent foreground takeover ----
+
+  def test_open_in_agent_marks_manual_steering_and_spawns_in_worktree_with_context_dirs
+    with_manual_task_context do |_project_root, hive_state, _folder, state_file, worktree_path, row|
+      profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
+      captured_argv = nil
+      captured_chdir = nil
+      captured_lookup_name = nil
+      captured_lookup_cfg = nil
+
+      with_agent_profile_lookup_stub(->(name, cfg:) {
+        # Raise on an unexpected agent name so an accidental change to
+        # the cfg.dig("execute", "agent") resolution surfaces as a stub
+        # failure rather than a silent pass on the captured-arg assertion
+        # below.
+        raise "unexpected agent lookup: #{name.inspect}" unless name == "claude"
+
+        captured_lookup_name = name
+        captured_lookup_cfg = cfg
+        profile
+      }) do
+        with_run_takeover_stub(->(argv, chdir: nil) {
+          captured_argv = argv
+          captured_chdir = chdir
+          0
+        }) do
+          _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+          assert_kind_of Bubbletea::SequenceCommand, cmd
+          assert_equal(
+            [ Bubbletea::ExitAltScreenCommand, Bubbletea::ExecCommand, Bubbletea::EnterAltScreenCommand ],
+            cmd.commands.map(&:class)
+          )
+          assert_match(/steering manual-task in codex/, @model.hive_model.flash)
+
+          marker = Hive::Markers.current(state_file)
+          assert_equal :manual_steering, marker.name
+          assert_equal "claude", marker.attrs["agent"]
+          refute_empty marker.attrs["started_at"].to_s
+          assert_equal true, profile.version_checked
+          assert_equal true, profile.preflight_checked
+
+          cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+        end
+      end
+
+      assert_equal "claude", captured_lookup_name
+      assert_equal "claude", captured_lookup_cfg.dig("execute", "agent")
+      # Derive the expected context ordering from Hive::Stages::DIRS (the
+      # SSOT) rather than a hard-coded list, so a future shuffle of the
+      # stage order surfaces here even when the fixture happens to create
+      # stages in the same order. The fixture preloads three stage dirs;
+      # we filter DIRS to the ones present so the comparison is stable.
+      present_stages = %w[1-inbox 3-plan 4-execute]
+      expected_contexts = Hive::Stages::DIRS.select { |d| present_stages.include?(d) }.map do |stage|
+        File.join(hive_state, "stages", stage, "manual-task")
+      end
+      expected_argv = [ "codex" ] + expected_contexts.flat_map { |path| [ "--add-dir", path ] }
+      assert_equal expected_argv, captured_argv
+      assert_equal worktree_path, captured_chdir
+      assert_equal 1, @messages.length
+      assert_kind_of Hive::Tui::Messages::AgentSteerExited, @messages.first
+      assert_equal "manual-task", @messages.first.slug
+      assert_equal worktree_path, @messages.first.worktree
+      assert_equal 0, @messages.first.exit_code
+    end
+  end
+
+  def test_open_in_agent_without_add_dir_flag_spawns_without_context_pairs_and_flashes_warning
+    with_manual_task_context do |_project_root, _hive_state, _folder, _state_file, _worktree_path, row|
+      profile = ManualProfileStub.new(bin: "pi", add_dir_flag: nil)
+      captured_argv = nil
+
+      with_agent_profile_lookup_stub(->(_name, cfg:) { profile }) do
+        with_run_takeover_stub(->(argv, chdir: nil) { captured_argv = argv; 0 }) do
+          _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+          assert_kind_of Bubbletea::SequenceCommand, cmd
+          assert_match(/no add-dir flag/, @model.hive_model.flash)
+
+          cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+        end
+      end
+
+      assert_equal [ "pi" ], captured_argv
+    end
+  end
+
+  def test_open_in_agent_refuses_when_worktree_missing_without_flipping_marker
+    with_manual_task_context(stage: "3-plan", worktree: false) do |_project_root, _hive_state, _folder, state_file, _worktree_path, row|
+      profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
+
+      with_agent_profile_lookup_stub(->(_name, cfg:) { profile }) do
+        _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+        assert_nil cmd
+        assert_match(/no worktree for manual-task/, @model.hive_model.flash)
+        assert_equal :none, Hive::Markers.current(state_file).name
+      end
+    end
+  end
+
+  def test_open_in_agent_refuses_unknown_config_agent_without_flipping_marker
+    config = { "execute" => { "agent" => "ghost" } }
+    with_manual_task_context(config: config) do |_project_root, _hive_state, _folder, state_file, _worktree_path, row|
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+      assert_nil cmd
+      assert_match(/ghost/, @model.hive_model.flash)
+      assert_equal :none, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_open_in_agent_refuses_profile_preflight_failure_without_flipping_marker
+    with_manual_task_context do |_project_root, _hive_state, _folder, state_file, _worktree_path, row|
+      profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
+      profile.define_singleton_method(:check_version!) { raise Hive::AgentError, "codex missing" }
+
+      with_agent_profile_lookup_stub(->(_name, cfg:) { profile }) do
+        _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+        assert_nil cmd
+        assert_match(/codex missing/, @model.hive_model.flash)
+        assert_equal :none, Hive::Markers.current(state_file).name
+      end
+    end
+  end
+
+  # ---- AgentSteerExited → archived-manual move ----
+
+  def test_agent_steer_exited_archives_folder_on_zero_exit
+    with_manual_task_context do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug,
+        folder: folder,
+        exit_code: 0,
+        worktree: worktree_path
+      )
+
+      _, cmd = @model.update(message)
+
+      target = File.join(hive_state, "stages", "archived-manual", row.slug)
+      assert_nil cmd
+      refute File.exist?(folder), "source stage folder must be moved out of active stages"
+      assert File.directory?(target), "manual archive target must exist"
+      assert_match(/archived manual-task/, @model.hive_model.flash)
+      assert_match(/shipped/, @model.hive_model.flash)
+    end
+  end
+
+  def test_agent_steer_exited_archives_folder_on_nonzero_exit
+    with_manual_task_context(slug: "failed-manual-task") do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug,
+        folder: folder,
+        exit_code: 130,
+        worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      target = File.join(hive_state, "stages", "archived-manual", row.slug)
+      assert File.directory?(target), "non-zero agent exits still archive the task"
+      # Flash must name both the exit code AND the archive target so the
+      # operator who just hit Ctrl-C has a breadcrumb back to where the
+      # task landed — earlier the flash said "archived ... anyway" with
+      # no path.
+      assert_match(/agent exited 130/, @model.hive_model.flash)
+      assert_match(/archived failed-manual-task → archived-manual\//, @model.hive_model.flash)
+    end
+  end
+
+  def test_agent_steer_exited_uses_numeric_suffix_on_archive_collision
+    with_manual_task_context do |_project_root, hive_state, folder, _state_file, worktree_path, row|
+      archived_root = File.join(hive_state, "stages", "archived-manual")
+      FileUtils.mkdir_p(File.join(archived_root, row.slug))
+
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug,
+        folder: folder,
+        exit_code: 0,
+        worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      assert File.directory?(File.join(archived_root, row.slug)), "existing archive must be preserved"
+      assert File.directory?(File.join(archived_root, "#{row.slug}-2")), "collision must use -2 suffix"
+      assert_match(/archived-manual\/manual-task-2/, @model.hive_model.flash)
+      assert_match(/collision/, @model.hive_model.flash)
     end
   end
 

@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-05-14T00:00:00Z
+updated: 2026-05-20
 tags: [command, dispatcher, stages, json, rebase]
 ---
 
@@ -24,11 +24,12 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 
 1. Resolve `TARGET` via `Hive::TaskResolver` and load merged config via `Hive::Config.load(task.project_root)`.
 2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
-3. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see "Auto-rebase pre-step" below.
-4. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,OpenPr,Review,Finalize,Done}.method(:run!)`. Unknown stage → `StageError`.
-5. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
-6. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
-7. `report`: print the current marker, the state file path, and a stage-aware next step.
+3. If the current marker is `MANUAL_STEERING`, skip before auto-rebase or runner dispatch and report `marker=manual_steering` with `next_action.kind=no_op`. JSON sets `rebase.reason="manual_steering"`.
+4. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see "Auto-rebase pre-step" below.
+5. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,OpenPr,Review,Finalize,Done}.method(:run!)`. Unknown stage → `StageError`.
+6. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
+7. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
+8. `report`: print the current marker, the state file path, and a stage-aware next step.
 
 ## Auto-rebase pre-step (`Hive::Rebase.perform`)
 
@@ -96,6 +97,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `detached_head` | Worktree HEAD is detached; nothing to rebase |
 | `no_default_branch` | Default branch couldn't be resolved from cfg or git |
 | `fetch_failed` | `git fetch origin <default>` failed (network/auth/timeout) |
+| `manual_steering` | The task carries `MANUAL_STEERING`; `hive run` skipped before rebase and runner dispatch |
 | `no_conflict_agent_configured` | `cfg.execute.agent` is missing (sanity guard) |
 | `agent_failed` | Conflict-resolution agent returned non-OK status |
 | `markers_remaining` | Agent finished but left conflict markers in a resolved file (also: read error reading the file — fails closed) |
@@ -121,6 +123,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `:review_waiting reason=reviewer_partial_failure` | `next: one or more reviewers failed for this pass; either re-run hoping for recovery or `hive markers clear <folder> --name REVIEW_WAITING` to accept the partial coverage, then re-run`. JSON envelope: `target = <folder>/reviews/errors-NN.md`. |
 | `:review_ci_stale` | `next: fix CI, edit reviews/ci-blocked.md, remove REVIEW_CI_STALE marker, re-run` |
 | `:review_stale` | `next: if highest-pass reviewer files lack escalations-NN.md, remove REVIEW_STALE and re-run to retry that pass; otherwise edit/rename highest-pass review files, remove REVIEW_STALE, re-run` |
+| `:manual_steering` | `next: manual steering active; automated run skipped`. JSON uses `next_action.kind="no_op"` and `reason="manual_steering"`. |
 | `:review_error` | `next: investigate <reason>, then `hive markers clear FOLDER --name REVIEW_ERROR`, then re-run`. JSON: `next_action.kind = "review_error"` with `phase`, `reason`, and the full marker `attrs` surfaced so polling agents can branch without re-parsing the marker. Raises `Hive::TaskInErrorState` → exit 3 (`TASK_IN_ERROR`) after the JSON payload is emitted. |
 | `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. |
 

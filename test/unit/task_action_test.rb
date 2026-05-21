@@ -302,6 +302,24 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_manual_steering_marker_is_non_actionable_in_execute_stage
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:manual_steering, "agent" => "claude"))
+
+    assert_equal "manual_steering", action.key
+    assert_equal "Manually steered", action.label
+    assert_nil action.command, "manual steering rows must not expose a workflow command"
+  end
+
+  def test_manual_steering_marker_overrides_early_stage_classification
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:manual_steering, "agent" => "codex"))
+
+    assert_equal "manual_steering", action.key
+    assert_equal "Manually steered", action.label
+    assert_nil action.command
+  end
+
   def test_error_marker_overrides_every_stage
     %w[brainstorm plan execute open-pr review finalize].each do |stage|
       task = fake_task(stage_name: stage, stage_index: 2)

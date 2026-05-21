@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added XDG path resolution, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint for Apache Hive PATH collisions.
 - `hive init` now writes the per-user daemon service unit and asks whether to enable and start it immediately.
 
+### Added — `hive tui` manual steering
+
+- `hive tui` now binds `s` to open the focused task in the configured development agent inside its feature worktree, mark it `MANUAL_STEERING` so automation skips it, and archive it under `archived-manual/` when the agent exits.
+
 ### Added — opt-in interactive tmux brainstorm runtime
 
 - `brainstorm.runtime: tmux_interactive` runs stage `2-brainstorm` in a fresh per-task tmux session (`hive-2-brainstorm-<slug>`) with interactive `claude`, while preserving the existing `brainstorm.md` WAITING/COMPLETE marker contract.

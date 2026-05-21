@@ -200,6 +200,18 @@ class HiveDaemonPolicyTest < Minitest::Test
                                command: nil)
   end
 
+  def test_manual_steering_skips
+    assert_equal :skip, decide(action: "manual_steering",
+                               command: nil)
+  end
+
+  def test_manual_steering_skips_even_after_state_file_edit
+    assert_equal :skip, decide(action: "manual_steering",
+                               command: nil,
+                               state_file_mtime: T0 - 60,
+                               last_dispatched_state_file_mtime: T0 - 600)
+  end
+
   def test_archived_skips
     # 8-done with :complete marker: terminal, no further work.
     assert_equal :skip, decide(action: "archived",

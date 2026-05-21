@@ -16,6 +16,7 @@ module Hive
         waiting: "⏸",
         complete: "✓",
         agent_working: "🤖",
+        manual_steering: "🛠",
         execute_waiting: "⏸",
         execute_complete: "✓",
         execute_stale: "⚠",
@@ -144,12 +145,15 @@ module Hive
       # the number — the same predicate `Hive::Commands::Migrate` uses to
       # decide what it is allowed to mv, so the count matches what
       # `hive migrate` would actually move.
+      STATUS_PRIVATE_STAGE_DIRS = %w[archived-manual].freeze
+
       def detect_legacy_stage_dirs(hive_state)
         stages_root = File.join(hive_state, "stages")
         return [] unless File.directory?(stages_root)
 
         Dir.children(stages_root).filter_map do |basename|
           next if Hive::Stages::DIRS.include?(basename)
+          next if STATUS_PRIVATE_STAGE_DIRS.include?(basename)
 
           dir = File.join(stages_root, basename)
           next unless File.directory?(dir)
@@ -375,6 +379,7 @@ module Hive
         "Ready to finalize",
         "Ready to archive",
         "Archived",
+        "Manually steered",
         "Error"
       ].freeze
 

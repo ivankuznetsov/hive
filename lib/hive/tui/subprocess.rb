@@ -167,11 +167,11 @@ module Hive
       # job instead of leaving the parent alive in wait2 with a stopped
       # child. Original handlers are restored before return so a Ctrl-C
       # at the dashboard quits the TUI normally.
-      def run_takeover_child_sync(argv)
-        Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect}")
+      def run_takeover_child_sync(argv, chdir: nil)
+        Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect} chdir=#{chdir.inspect}")
         spawn_id = generate_correlation_id
         stamp_subprocess_log("BEGIN(interactive)", argv, id: spawn_id)
-        pid = Process.spawn(*argv)
+        pid = chdir ? Process.spawn(*argv, chdir: chdir) : Process.spawn(*argv)
         with_parent_terminal_signals_quiesced do
           _, status = Process.wait2(pid)
           exit_code = translate_status(status)

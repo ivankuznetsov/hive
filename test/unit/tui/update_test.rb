@@ -1339,23 +1339,41 @@ class HiveTuiUpdateTest < Minitest::Test
   end
 
   def test_back_from_idea_preview_clears_text_and_returns_to_grid
+    state = Hive::Tui::Model::InfoPanelState.new(
+      slug: "some-slug",
+      stage: "2-brainstorm",
+      created_at: nil,
+      original_text: "original idea",
+      folder_path: "/tmp/hive/some-slug",
+      latest_log_path: nil,
+      stage_extra: nil
+    )
     starting = model.with(
       mode: :idea_preview,
       idea_preview_text: "original idea",
-      idea_preview_slug: "some-slug"
+      idea_preview_slug: "some-slug",
+      info_panel_state: state
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
 
     assert_equal :grid, new_model.mode
     assert_nil new_model.idea_preview_text
     assert_nil new_model.idea_preview_slug
+    assert_nil new_model.info_panel_state
   end
 
   def test_back_from_idea_preview_preserves_cursor_and_scope
     starting = model.with(
       mode: :idea_preview,
-      idea_preview_text: "original idea",
-      idea_preview_slug: "some-slug",
+      info_panel_state: Hive::Tui::Model::InfoPanelState.new(
+        slug: "some-slug",
+        stage: "2-brainstorm",
+        created_at: nil,
+        original_text: "original idea",
+        folder_path: "/tmp/hive/some-slug",
+        latest_log_path: nil,
+        stage_extra: nil
+      ),
       cursor: [ 1, 2 ],
       scope: 2
     )

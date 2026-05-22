@@ -870,22 +870,35 @@ class TuiKeyMapMessageForTest < Minitest::Test
     end
   end
 
-  # `X` is the registry-cleanup escape hatch for projects that show as
-  # `(missing)`. KeyMap emits a payload-free singleton; the gate
-  # ("only when project.error == 'missing_project_path'") is enforced
-  # in BubbleModel#drop_scoped_project_if_missing because KeyMap has
-  # no snapshot/scope reference. The unit contract is just: X in grid
-  # mode produces DROP_SCOPED_PROJECT_IF_MISSING regardless of row.
-  def test_grid_capital_x_emits_drop_scoped_project_singleton
+  def test_grid_capital_x_emits_drop_focused_task_for_right_pane_row
     row = make_row(action_key: "ready_to_brainstorm")
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: row)
-    assert_same Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING, msg
+
+    assert_kind_of Hive::Tui::Messages::DropFocusedTask, msg
+    assert_same row, msg.row
   end
 
-  def test_grid_capital_x_works_with_no_row
+  def test_grid_capital_x_requires_right_pane_focus
+    row = make_row(action_key: "ready_to_brainstorm")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: row, pane_focus: :left)
+
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_equal "focus the tasks pane first (Tab or l)", msg.text
+  end
+
+  def test_grid_capital_x_with_no_row_flashes_selection_hint
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: nil)
-    assert_same Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING, msg,
-                "X is a global grid binding (resolved before the row check) so an empty grid still emits the message"
+
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_equal "select a task first; press / to filter or 1-9 to scope", msg.text
+  end
+
+  def test_grid_capital_x_refuses_archived_row
+    row = make_row(action_key: "archived", stage: "9-done")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: row)
+
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_equal "task is archived; nothing to drop", msg.text
   end
 
   def test_grid_lowercase_x_is_not_bound_to_drop
@@ -894,6 +907,6 @@ class TuiKeyMapMessageForTest < Minitest::Test
     # also leaves lowercase x available for future bindings.
     row = make_row(action_key: "ready_to_brainstorm")
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "x", row: row)
-    refute_same Hive::Tui::Messages::DROP_SCOPED_PROJECT_IF_MISSING, msg
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 end

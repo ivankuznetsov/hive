@@ -1201,9 +1201,8 @@ class ConfigTest < Minitest::Test
   end
 
   # P3 #21: a hand-edited row with `name: 42` (Integer) used to be
-  # invisible to `hive forget 42` because String != Integer, but the
-  # TUI X-key (which compared name-strings end-to-end) could drop it.
-  # Stringify both sides so the two surfaces stay in sync.
+  # invisible to `hive forget 42` because String != Integer. Stringify
+  # both sides so CLI registry cleanup can still target it.
   def test_unregister_project_matches_integer_named_entry_via_string_coercion
     with_tmp_global_config do |home|
       File.write(

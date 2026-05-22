@@ -404,8 +404,8 @@ module Hive
         when Hive::Tui::Messages::NewIdeaCancelled
           cleanup_new_idea_staging
           nil
-        when Hive::Tui::Messages::DropScopedProjectIfMissing
-          drop_scoped_project_if_missing
+        when Hive::Tui::Messages::DropFocusedTask
+          drop_focused_task(message.row)
         end
       end
 
@@ -599,43 +599,16 @@ module Hive
         Hive::Tui::Debug.log("new_idea_staging", "cleanup failed: #{e.class}: #{e.message}")
       end
 
-      # Handler for the grid-mode `X` keystroke. Resolves the target
-      # project from `model.scope` against `snapshot.projects` and
-      # deregisters it via `Hive::Config.unregister_project` IFF the
-      # project's `error == "missing_project_path"`. Healthy or
-      # not-initialised projects are intentionally NOT droppable from
-      # the TUI — the `X` key is a registry-cleanup escape hatch for
-      # `mktemp -d` test entries whose paths are gone, not a
-      # project-uninstall verb. Use `hive forget NAME` from the shell
-      # for the broader case.
-      #
-      # After a successful drop, scope resets to 0 (★ All) so the
-      # cursor doesn't hang on a now-vanished entry; the next 1Hz
-      # snapshot poll repopulates the projects pane.
-      def drop_scoped_project_if_missing
-        snap = @hive_model.snapshot
-        scope = @hive_model.scope
+      # Handler for the grid-mode `X` keystroke. The destructive work is
+      # delegated to the shared CLI command so TUI and shell drops share
+      # one cleanup implementation and one JSON/error surface.
+      def drop_focused_task(row)
+        return [ flashed("select a task first; press / to filter or 1-9 to scope"), nil ] if row.nil?
 
-        if scope.zero?
-          return [ flashed("select a project on the left first (use 1-9 or focus the projects pane)"), nil ]
-        end
-        return [ @hive_model, nil ] if snap.nil?
-
-        idx = scope - 1
-        project = snap.projects[idx]
-        return [ @hive_model, nil ] if project.nil?
-
-        if project.error != "missing_project_path"
-          return [ flashed("only missing projects can be dropped from the TUI; use `hive forget #{project.name}`"), nil ]
-        end
-
-        removed = Hive::Config.unregister_project(name: project.name)
-        message = removed ? "dropped #{removed['name']}" : "no entry named #{project.name} in registry"
-        new_model = @hive_model.with(scope: 0, cursor: [ 0, 0 ], flash: message, flash_set_at: Time.now)
-        [ new_model, nil ]
-      rescue Hive::ConfigError => e
-        Hive::Tui::Debug.log("drop_project", "ConfigError: #{e.message}")
-        [ flashed("drop failed: #{e.message[0, 80]}"), nil ]
+        argv = [ "hive", "drop", row.slug, "--project", row.project_name, "--from", row.stage, "--json" ]
+        message = Hive::Tui::Messages::DispatchCommand.new(argv: argv, verb: "drop")
+        model, cmd = dispatch_command(message)
+        [ model.with(flash: "dropping #{row.slug}...", flash_set_at: Time.now), cmd ]
       end
 
       def close_tail_if_log_tail
@@ -2836,21 +2809,21 @@ module Hive
         if model.scope.between?(1, snap.projects.size)
           project = snap.projects[model.scope - 1]
           if project.error
-            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init, press X to drop, or `hive forget`"
+            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init, `hive forget #{project.name}`, or `hive prune`"
           end
         end
 
         # scope=0 with all-unhealthy projects, or scope out-of-range.
-        # The recovery hint depends on the actual error mix: X-key and
-        # `hive prune` only work for `missing_project_path` rows, so
-        # pointing at them when every broken project is `not_initialised`
-        # would steer the operator at refusal flashes. Branch on the
-        # error set so the suggested action matches what's drop-eligible.
+        # The recovery hint depends on the actual error mix: `hive prune`
+        # only works for `missing_project_path` rows, so pointing at it
+        # when every broken project is `not_initialised` would steer the
+        # operator at a refusal. Branch on the error set so the suggested
+        # action matches what's cleanup-eligible.
         broken = snap.projects.select(&:error)
         return "no projects — run `hive init <path>` first" if broken.size != snap.projects.size
 
         if broken.all? { |p| p.error == "missing_project_path" }
-          "all registered projects are unhealthy — press X (or `hive prune`) to drop missing entries"
+          "all registered projects are unhealthy — run `hive prune` to drop missing entries"
         else
           "all registered projects are unhealthy — re-init the broken ones or `hive forget` per-name"
         end

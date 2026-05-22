@@ -44,7 +44,7 @@ module Hive
         { mode: :grid, key: "/",         action: :filter,             description: "open filter prompt" },
         { mode: :grid, key: "1-9",       action: :project_scope,      description: "scope to the Nth registered project" },
         { mode: :grid, key: "0",         action: :project_scope,      description: "clear project scope (★ All projects)" },
-        { mode: :grid, key: "X",         action: :drop_missing,       description: "drop the scoped project from the registry (same as `hive forget`) — only when shown as `(missing)`; healthy projects are refused" },
+        { mode: :grid, key: "X",         action: :drop_task,          description: "drop the focused task: kill agent, remove folder(s)/worktree/branch, close draft PR - no undo, no confirmation beyond Shift" },
         { mode: :grid, key: "?",         action: :help,               description: "this help overlay" },
         { mode: :grid, key: "q",         action: :quit,               description: "quit" },
         # Log-tail mode.

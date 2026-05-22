@@ -78,6 +78,14 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_raises(ArgumentError) { Hive::Tui::Messages::OpenInAgent.new }
   end
 
+  def test_drop_focused_task_carries_row
+    row = Object.new
+    msg = Hive::Tui::Messages::DropFocusedTask.new(row: row)
+
+    assert_same row, msg.row
+    assert msg.frozen?, "Data.define records must be frozen"
+  end
+
   def test_agent_steer_exited_carries_exit_context
     msg = Hive::Tui::Messages::AgentSteerExited.new(
       slug: "manual-task",

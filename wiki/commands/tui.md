@@ -70,7 +70,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
 | `0` | scope back to `★ All projects` |
-| `X` | deregister the scoped project — gated to entries whose status is `(missing)` (i.e. `error: "missing_project_path"`); healthy / not-initialised projects refuse with a flash that points at `hive forget`. Bulk version: `hive prune`. See [[commands/forget]] / [[commands/prune]]. |
+| `X` | drop the focused task with `hive drop <slug> --project <project> --from <stage> --json`: kill its agent, remove task folder(s), worktree, branch, locks, logs, and any draft PR. No undo and no confirmation beyond Shift. Lowercase `x` is unbound. Registry cleanup stays in the shell via [[commands/forget]] / [[commands/prune]]. |
 | `?` | help overlay |
 | `q` | quit (default mode) |
 | `Esc` | back to default mode (any sub-mode) |

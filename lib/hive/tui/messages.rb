@@ -330,16 +330,10 @@ module Hive
       NewIdeaCancelled = Class.new
       NEW_IDEA_CANCELLED = NewIdeaCancelled.new.freeze
 
-      # `X` in grid mode — drop the currently scoped project from the
-      # global registry, gated to entries whose `error ==
-      # "missing_project_path"`. Payload-free singleton: BubbleModel's
-      # handler resolves the target by `model.scope` against
-      # `snapshot.projects` rather than trusting a stale row, and flashes
-      # a refusal when the gate fails (no project selected, scope == ★
-      # All, or the project is healthy and shouldn't be silently
-      # deregistered).
-      DropScopedProjectIfMissing = Class.new
-      DROP_SCOPED_PROJECT_IF_MISSING = DropScopedProjectIfMissing.new.freeze
+      # `X` in grid mode — hard-drop the focused task. BubbleModel owns
+      # the subprocess dispatch so the shared `hive drop` implementation
+      # handles process/worktree/branch cleanup.
+      DropFocusedTask = Data.define(:row)
 
       # Recurring tick that drains new bytes from the active log_tail.
       # `Tail#poll!` is only meaningful while the user is in :log_tail

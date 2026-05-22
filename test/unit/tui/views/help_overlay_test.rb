@@ -19,7 +19,6 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
   def test_renders_every_mode_header_with_bindings
     out = Hive::Tui::Views::HelpOverlay.render(model)
     assert_includes out, "Grid mode"
-    assert_includes out, "Triage mode"
     assert_includes out, "Log tail mode"
     assert_includes out, "Filter prompt"
     assert_includes out, "Idea preview (i)"
@@ -51,20 +50,13 @@ class HiveTuiViewsHelpOverlayTest < Minitest::Test
     end
   end
 
-  def test_includes_triage_rebindings
-    out = Hive::Tui::Views::HelpOverlay.render(model)
-    assert_includes out, "toggle accept/reject"
-    assert_includes out, "bulk accept"
-    assert_includes out, "bulk reject"
-  end
-
   def test_build_lines_groups_bindings_by_mode
     lines = Hive::Tui::Views::HelpOverlay.build_lines
     grid_idx = lines.index { |l| l.include?("Grid mode") }
-    triage_idx = lines.index { |l| l.include?("Triage mode") }
+    log_tail_idx = lines.index { |l| l.include?("Log tail mode") }
     refute_nil grid_idx
-    refute_nil triage_idx
-    assert grid_idx < triage_idx, "Grid section must precede Triage section"
+    refute_nil log_tail_idx
+    assert grid_idx < log_tail_idx, "Grid section must precede Log tail section"
   end
 
   def test_renders_inside_a_bordered_box

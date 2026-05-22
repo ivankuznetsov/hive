@@ -44,12 +44,6 @@ class TuiHelpTest < Minitest::Test
                  "grid-mode key column must have no duplicates: #{grid_keys.tally.select { |_, c| c > 1 }.inspect}"
   end
 
-  def test_triage_mode_keys_are_unique
-    triage_keys = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :triage }.map { |b| b[:key] }
-    assert_equal triage_keys.uniq.size, triage_keys.size,
-                 "triage-mode key column must have no duplicates"
-  end
-
   def test_each_entry_has_required_fields
     Hive::Tui::Help::BINDINGS.each do |entry|
       assert entry[:mode], "entry missing :mode field: #{entry.inspect}"

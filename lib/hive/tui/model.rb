@@ -20,7 +20,7 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,             # Symbol: :grid / :triage / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview
+      :mode,             # Symbol: :grid / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview / :red_status_detail
       :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
       :cursor,           # [project_idx, row_idx] (or nil for empty grid)
       :filter,           # String or nil — committed substring filter
@@ -44,7 +44,6 @@ module Hive
       :idea_preview_slug, # String or nil — slug captured when the preview opened
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
-      :triage_state,     # Hive::Tui::TriageState or nil — :triage mode only
       :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
       :red_status_detail_state, # Model::RedStatusDetailState or nil — :red_status_detail mode only
       :cols,             # Integer — terminal width (set on WindowSized)
@@ -128,7 +127,6 @@ module Hive
           idea_preview_slug: nil,
           flash: nil,
           flash_set_at: nil,
-          triage_state: nil,
           tail_state: nil,
           red_status_detail_state: nil,
           cols: cols,

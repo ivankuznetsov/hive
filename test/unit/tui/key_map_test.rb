@@ -10,7 +10,7 @@ require "hive/tui/snapshot"
 # Message shapes directly. The discriminative-power audit (ADV-2 from
 # the doc review) focuses on branches where the same key produces
 # different shapes based on row state: agent_running's three sub-paths,
-# stale-lock escape hatch, triage-d's verb caching.
+# stale-lock escape hatch, contextual Enter dispatch.
 class TuiKeyMapMessageForTest < Minitest::Test
   include HiveTestHelper
 
@@ -40,18 +40,6 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_kind_of Hive::Tui::Messages::DispatchCommand, msg
     assert_equal "plan", msg.verb, "verb must be argv[1] cached at construction"
     assert_equal [ "hive", "plan", "some-slug", "--from", "2-brainstorm" ], msg.argv
-  end
-
-  def test_triage_d_returns_payload_free_singleton
-    # Triage `d` is a payload-free singleton; BubbleModel resolves the
-    # develop argv from triage_state so a snapshot poll re-pointing the
-    # cursor mid-triage can't dispatch develop on a different task.
-    # The argv-shape contract is pinned in TriageState's develop_command
-    # test, not here.
-    row = make_row(action_key: "review_findings", suggested_command: nil,
-                   folder: "/abs/.hive-state/stages/4-execute/some-slug")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "d", row: row)
-    assert_same Hive::Tui::Messages::TRIAGE_DEVELOP, msg
   end
 
   # -------- Agent_running's three sub-paths (ADV-2 discriminative coverage) --------
@@ -277,27 +265,11 @@ class TuiKeyMapMessageForTest < Minitest::Test
     end
   end
 
-  def test_triage_o_is_noop
-    # Mode isolation R7: in :triage mode the `o` key falls through
-    # to the case-else NOOP (only d/a/r/Space/j/k/arrows/Esc are bound).
-    # Pins the assumption that :triage doesn't accidentally inherit
-    # the grid-mode `o` branch.
-    row = make_row(action_key: "review_findings", suggested_command: nil)
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "o", row: row)
-    assert_same Hive::Tui::Messages::NOOP, msg
-  end
-
   def test_log_tail_o_is_noop
     # Mode isolation R7: in :log_tail mode the `o` key falls through
     # to NOOP (only q/Esc are bound — back to grid). Pins that
     # :log_tail doesn't accidentally route `o` to grid-mode dispatch.
     msg = Hive::Tui::KeyMap.message_for(mode: :log_tail, key: "o", row: nil)
-    assert_same Hive::Tui::Messages::NOOP, msg
-  end
-
-  def test_triage_s_is_noop
-    row = make_row(action_key: "review_findings", suggested_command: nil)
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "s", row: row)
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
@@ -548,14 +520,6 @@ class TuiKeyMapMessageForTest < Minitest::Test
 
   # -------- Enter sub-mode dispatch --------
 
-  def test_enter_on_review_findings_returns_open_findings_with_row
-    row = make_row(action_key: "review_findings", action_label: "Review findings",
-                   suggested_command: nil)
-    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
-    assert_kind_of Hive::Tui::Messages::OpenFindings, msg
-    assert_same row, msg.row
-  end
-
   # Plan U8: Enter on a completed 7-finalize row routes to `OpenSummary`
   # so the operator can browse `summary.md` from the TUI without falling
   # out to a shell. The branch in KeyMap#enter_message gates on
@@ -781,63 +745,6 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal [ "hive", "plan", "some-slug", "--project", "alpha", "--from", "3-plan" ], msg.argv
   end
 
-  # -------- Triage rebindings --------
-
-  def test_triage_a_returns_bulk_accept_singleton
-    # Bulk a/r are payload-free singletons; BubbleModel routes them
-    # against triage_state, not the live row's slug.
-    row = make_row(action_key: "review_findings", slug: "auth-fix-260101-a1b2")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "a", row: row)
-    assert_same Hive::Tui::Messages::BULK_ACCEPT, msg
-  end
-
-  def test_triage_r_returns_bulk_reject_singleton
-    row = make_row(action_key: "review_findings", slug: "auth-fix-260101-a1b2")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "r", row: row)
-    assert_same Hive::Tui::Messages::BULK_REJECT, msg
-  end
-
-  def test_triage_space_returns_toggle_finding_with_row
-    row = make_row(action_key: "review_findings")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: " ", row: row)
-    assert_kind_of Hive::Tui::Messages::ToggleFinding, msg
-    assert_same row, msg.row
-  end
-
-  def test_triage_esc_returns_back_singleton
-    row = make_row(action_key: "review_findings")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: :key_escape, row: row)
-    assert_same Hive::Tui::Messages::BACK, msg
-  end
-
-  # Triage-mode cursor must NOT emit grid-mode CURSOR_DOWN/UP — those
-  # singletons drive `model.cursor` (grid coord) and would not move the
-  # finding cursor that lives on `triage_state`. F1 fix from
-  # /ce-code-review walk-through.
-  def test_triage_j_returns_triage_cursor_down_singleton
-    row = make_row(action_key: "review_findings")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "j", row: row)
-    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_DOWN, msg
-  end
-
-  def test_triage_key_down_returns_triage_cursor_down_singleton
-    row = make_row(action_key: "review_findings")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: :key_down, row: row)
-    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_DOWN, msg
-  end
-
-  def test_triage_k_returns_triage_cursor_up_singleton
-    row = make_row(action_key: "review_findings")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: "k", row: row)
-    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_UP, msg
-  end
-
-  def test_triage_key_up_returns_triage_cursor_up_singleton
-    row = make_row(action_key: "review_findings")
-    msg = Hive::Tui::KeyMap.message_for(mode: :triage, key: :key_up, row: row)
-    assert_same Hive::Tui::Messages::TRIAGE_CURSOR_UP, msg
-  end
-
   # -------- Sub-mode q/Esc → back --------
 
   def test_log_tail_q_returns_back
@@ -905,17 +812,10 @@ class TuiKeyMapMessageForTest < Minitest::Test
       [ :grid, "j",            make_row(action_key: "ready_to_brainstorm") ],
       [ :grid, "k",            make_row(action_key: "ready_to_brainstorm") ],
       [ :grid, "b",            make_row(action_key: "ready_to_brainstorm") ],
-      [ :grid, :key_enter,     make_row(action_key: "review_findings", suggested_command: nil) ],
       [ :grid, :key_enter,     make_row(action_key: "agent_running", claude_pid_alive: true, suggested_command: nil) ],
       [ :grid, "p",            make_row(action_key: "agent_running", claude_pid_alive: true, suggested_command: nil) ],
       [ :grid, "p",            make_row(action_key: "archived", suggested_command: nil, action_label: "Archived") ],
       [ :grid, "Z",            make_row(action_key: "ready_to_brainstorm") ],
-      [ :triage, " ",          make_row(action_key: "review_findings") ],
-      [ :triage, "d",          make_row(action_key: "review_findings") ],
-      [ :triage, "a",          make_row(action_key: "review_findings") ],
-      [ :triage, "r",          make_row(action_key: "review_findings") ],
-      [ :triage, :key_escape,  make_row(action_key: "review_findings") ],
-      [ :triage, :key_down,    make_row(action_key: "review_findings") ],
       [ :log_tail, "q",        make_row(action_key: "agent_running") ],
       [ :log_tail, :key_escape, make_row(action_key: "agent_running") ],
       [ :filter, :key_escape,  nil ],

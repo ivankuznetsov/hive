@@ -221,9 +221,9 @@ class TuiSnapshotTest < Minitest::Test
   # spans multiple action_labels lets the cursor highlight one row while
   # Enter / verb-keystrokes act on another (issue #10).
   def test_build_project_view_sorts_rows_by_action_label_order
-    review = sample_task(slug: "fix-stuff")
-    review["action"] = "review_findings"
-    review["action_label"] = "Review findings"
+    develop = sample_task(slug: "fix-stuff")
+    develop["action"] = "ready_to_develop"
+    develop["action_label"] = "Ready to develop"
 
     brainstorm = sample_task(slug: "brand-new")
     # Already labelled "Ready to brainstorm" by sample_task.
@@ -238,7 +238,7 @@ class TuiSnapshotTest < Minitest::Test
                                  "path" => "/tmp/alpha",
                                  "hive_state_path" => "/tmp/alpha/.hive-state",
                                  # Deliberately NOT in ACTION_LABEL_ORDER sequence:
-                                 "tasks" => [ review, brainstorm, needs_input ]
+                                 "tasks" => [ develop, brainstorm, needs_input ]
                                }
                              ])
 
@@ -248,7 +248,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "Ready to brainstorm", rows[0].action_label,
                  "first row must be the highest-ranked label per ACTION_LABEL_ORDER"
     assert_equal "Needs your input", rows[1].action_label
-    assert_equal "Review findings", rows[2].action_label
+    assert_equal "Ready to develop", rows[2].action_label
   end
 
   def test_build_project_view_preserves_json_order_within_action_label_group

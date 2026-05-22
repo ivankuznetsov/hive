@@ -115,8 +115,8 @@ module Hive
       # the `(mode, key, row)` triple `KeyMap.message_for` expects, then
       # routes the resulting Message either through Update.apply (pure
       # state transitions) or through BubbleModel's side-effect handlers
-      # (DispatchCommand → takeover_command, OpenFindings → file I/O,
-      # Bulk* / ToggleFinding → run_quiet!).
+      # (DispatchCommand → takeover_command, OpenLogTail / OpenInputEditor
+      # → file I/O).
 
       # Dispatch a workflow verb subprocess. `argv` is the full command
       # array (`["hive", "plan", "slug", "--from", "2-brainstorm"]`),
@@ -127,9 +127,6 @@ module Hive
       # Status-line flash. `text` is the literal message; renderer
       # decides styling.
       Flash = Data.define(:text)
-
-      # Enter on a `review_findings` row — push triage mode for `row`.
-      OpenFindings = Data.define(:row)
 
       # Enter on an `agent_running` row — push log-tail mode for `row`.
       OpenLogTail = Data.define(:row)
@@ -220,34 +217,6 @@ module Hive
       # the task folder out of the active stage tree.
       AgentSteerExited = Data.define(:slug, :folder, :exit_code, :worktree)
 
-      # Triage Space — toggle accept/reject on the current finding.
-      # `row` is the parent task row from grid mode, used by the
-      # triage subloop to derive slug + finding context.
-      ToggleFinding = Data.define(:row)
-
-      # Triage `a` — bulk-accept all findings on the task currently
-      # under triage. Payload-free singleton: `BubbleModel`'s handler
-      # reads `triage_state` (which captures the slug + folder at the
-      # moment triage was opened) instead of trusting the live grid
-      # row, which a 1Hz snapshot poll could have re-pointed at a
-      # different task before the keystroke landed.
-      BulkAccept = Class.new
-      BULK_ACCEPT = BulkAccept.new.freeze
-
-      # Triage `r` — bulk-reject all findings on the task currently
-      # under triage. Same shape as BulkAccept; see that comment for
-      # the no-payload rationale.
-      BulkReject = Class.new
-      BULK_REJECT = BulkReject.new.freeze
-
-      # Triage `d` — dispatch `hive develop` against the task currently
-      # under triage. Payload-free for the same race-tolerance reason:
-      # the handler resolves the develop argv from `triage_state`'s
-      # captured folder, never the live grid row that may have drifted
-      # under concurrent snapshot polls.
-      TriageDevelop = Class.new
-      TRIAGE_DEVELOP = TriageDevelop.new.freeze
-
       # `1`–`9` scope to the Nth registered project; `0` clears scope.
       ProjectScope = Data.define(:n)
 
@@ -280,16 +249,6 @@ module Hive
       # left; last row of last non-empty project on right).
       CursorJumpBottom = Class.new
       CURSOR_JUMP_BOTTOM = CursorJumpBottom.new.freeze
-
-      # Triage-mode `j` / KEY_DOWN. Distinct from grid-mode `CursorDown`
-      # so Update can route to `TriageState#cursor_down` instead of
-      # mutating `model.cursor` (which is the grid coord).
-      TriageCursorDown = Class.new
-      TRIAGE_CURSOR_DOWN = TriageCursorDown.new.freeze
-
-      # Triage-mode `k` / KEY_UP.
-      TriageCursorUp = Class.new
-      TRIAGE_CURSOR_UP = TriageCursorUp.new.freeze
 
       # ---- Pane focus messages (v2 two-pane layout) ----
 

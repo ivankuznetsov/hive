@@ -12,6 +12,23 @@ Covers per-project daemon enrollment, bot token/allowlist setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, and how to disable automation mid-flight.
 
+## Worktree-first workflow
+
+All new feature, bugfix, or refactor work on `hive` itself starts in
+an isolated git worktree — never the main checkout. Two paths:
+
+- **Delegated tasks (recommended for agents):** invoke the `Agent`
+  tool with `isolation: "worktree"`. The harness creates a scratch
+  worktree, runs the task, and only persists changes when the agent
+  produced a diff.
+- **Direct work:** `git worktree add ../hive-feature-name <branch>`,
+  do the work there, then push/PR from the worktree.
+
+The main checkout (`~/Dev/hive/`) stays clean so parallel reviews,
+spot checks, and the LLM-maintained `wiki/` index reflect a stable
+HEAD. Don't mutate it for non-trivial changes. The policy is
+codified in `CLAUDE.md`'s `## Workflow` section.
+
 ## Install
 
 Hive v0.1.0 ships as the `hive-cli` rubygem attached to each GitHub Release,

@@ -1768,3 +1768,35 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - `examples/systemd/hive-daemon.service` — extended the inline comment to explain why both `HIVE_BIN=` and `Environment=PATH=` are installer-managed (the PATH now carries Ruby-manager shim discovery on top of the minimal shell-out coverage).
+
+## [2026-05-22T17:00:00Z] tui — remove orphaned findings triage mode
+
+**Note:** This entry recorded an intermediate decision. See the 18:00 entry below — the back-compat carve-out was reversed and the `REVIEW_FINDINGS` constant + schema enum value were dropped in place. The umbrella comment update mentioned here was also reverted. The "Refreshed pages" list below is otherwise accurate.
+
+**Action:** Removed the TUI `:triage` sub-mode (Enter on a `review_findings` row → Space toggle accept/reject → bulk `a`/`r` → `d` re-dispatch develop). The mode was unreachable in the live pipeline: no producer in current 4-execute or 6-review writes the `findings_count=` marker attr that `TaskAction#execute_action` keyed on. The chain `findings_count > 0` → `:execute_findings` → `REVIEW_FINDINGS` action key → `KeyMap#enter_message` `"review_findings"` branch → `Messages::OpenFindings` → triage view was dead.
+
+Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/triage.rb`, the `OpenFindings` / `ToggleFinding` / `BulkAccept` / `BulkReject` / `TriageDevelop` / `TriageCursorDown/Up` `Messages::*` definitions, the `:triage` arms in `KeyMap.message_for` / `Update.apply` / `Update.apply_back` / `BubbleModel#view` / `BubbleModel#handle_side_effect`, `Model.triage_state`, and the help-overlay Triage section. Producer-side: `:execute_findings` action def + `findings_count` predicate dropped from `TaskAction`. Stale references scrubbed from `Styles::ACTION_KEY_COLORS` + `_STYLES`, `Views::TasksPane::ICONS`, `Bot::NotificationBuilders::SKIP_ACTIONS`, `Commands::Status::ACTION_LABEL_ORDER`, `Daemon::Policy` + `ConcurrencyController` comments, and `hive tui --help` text.
+
+**Workflow policy:** Added `## Workflow` section to `CLAUDE.md` requiring all new feature/bugfix/refactor work to start in an isolated git worktree.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — dropped Findings-triage Modes row, scrubbed Enter binding, removed bulk-rebinding paragraph, scrubbed `review_findings` color row.
+- `wiki/architecture.md` — fixed Bubble Tea side-effect message lists (removed `OpenFindings`, `BulkAccept`, `ToggleFinding`).
+- `wiki/modules/task_action.md` — dropped `execute_findings` ACTIONS table row.
+- `wiki/commands/daemon.md` — dropped `review_findings` dispatch table row.
+- `wiki/modules/markers.md` — corrected the "findings_count still parsed for compatibility" claim to clarify no live consumer reads it.
+- `wiki/decisions.md` — added ADR-028. (Rewritten by the 18:00 entry below to record the in-place schema edit instead of the original back-compat carve-out.)
+- `wiki/operating.md` — added Worktree-first workflow section mirroring the CLAUDE.md policy.
+
+## [2026-05-22T18:00:00Z] schemas — drop `review_findings` from hive-status / hive-stage-action v2 enums
+
+**Action:** Follow-up to the 17:00 entry. Resolved the deferral question (issue #123) by editing `schemas/hive-status.v2.json` and `schemas/hive-stage-action.v2.json` in place to remove the orphaned `review_findings` enum value. Dropped `Hive::Schemas::TaskActionKind::REVIEW_FINDINGS`. Kept `SCHEMA_VERSIONS["hive-status"]` at 2 — hive has no external production consumers yet, so the published-schema-stability invariant has no downstream cost. Historical v1 schemas left untouched.
+
+**Refreshed pages:**
+- `wiki/decisions.md` — ADR-028 rewritten to record the in-place edit (was previously "retain as vestigial"). Notes the pre-1.0 affordance vs. post-1.0 convention difference.
+
+## [2026-05-22T18:30:00Z] status — preserve legacy findings recovery without review_findings enum
+
+**Action:** Follow-up to ADR-028 after PR #122 review. Kept `review_findings` removed from v2 schemas, but remapped legacy `EXECUTE_WAITING findings_count>0` markers to the existing `recover_execute` action surface instead of generic `needs_input`. Those pinned state folders now emit `hive findings <slug>` and a manual-fix diagnostic, while ordinary execute waits keep their structured edit `next_action`.
+
+**Docs:** Refreshed README, [[commands/tui]], [[modules/task_action]], and [[decisions]] so they describe the shell/agent findings workflow and the `recover_execute` legacy compatibility path, not the deleted TUI triage mode.

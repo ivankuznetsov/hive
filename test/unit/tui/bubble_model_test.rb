@@ -4,8 +4,6 @@ require "hive/tui/bubble_model"
 # Pin the BubbleModel adapter's translation/dispatch contract:
 # framework messages → Hive Messages, KeyMessage → KeyMap.message_for,
 # DispatchCommand → takeover_command, sub-mode entries set state.
-# Excludes the side-effect handlers that need real subprocesses
-# (toggle_finding/bulk_*) — those are exercised by integration tests.
 class HiveTuiBubbleModelTest < Minitest::Test
   include HiveTestHelper
 

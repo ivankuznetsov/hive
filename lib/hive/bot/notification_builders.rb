@@ -27,7 +27,6 @@ module Hive
       SKIP_ACTIONS = %w[
         agent_running
         archived
-        review_findings
       ].freeze
 
       def build(row)

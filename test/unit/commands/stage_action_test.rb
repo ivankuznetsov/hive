@@ -1,0 +1,83 @@
+require "test_helper"
+require "hive/commands/stage_action"
+
+class CommandsStageActionTest < Minitest::Test
+  def test_call_wraps_unexpected_errors_and_emits_json_error_envelope
+    command = Hive::Commands::StageAction.new("plan", "some-slug", json: true)
+    command.define_singleton_method(:do_call) do
+      raise NoMethodError, "synthetic boom"
+    end
+
+    out, _err = capture_io do
+      @error = assert_raises(Hive::InternalError) { command.call }
+    end
+
+    assert_match(/internal error: NoMethodError: synthetic boom/, @error.message)
+    payload = JSON.parse(out)
+    assert_equal "hive-stage-action", payload.fetch("schema")
+    assert_equal false, payload.fetch("ok")
+    assert_equal "plan", payload.fetch("verb")
+    assert_equal "error", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+  end
+
+  def test_call_wraps_unexpected_errors_without_json_envelope
+    command = Hive::Commands::StageAction.new("plan", "some-slug", json: false)
+    command.define_singleton_method(:do_call) do
+      raise ArgumentError, "bad argument"
+    end
+
+    out, _err = capture_io do
+      @error = assert_raises(Hive::InternalError) { command.call }
+    end
+
+    assert_empty out
+    assert_match(/internal error: ArgumentError: bad argument/, @error.message)
+  end
+
+  def test_wrong_stage_reports_actual_stage_when_current_stage_is_not_source_or_target
+    task = Struct.new(:slug, :folder).new("some-slug", "/tmp/some-slug")
+    command = Hive::Commands::StageAction.new("plan", "some-slug")
+    command.define_singleton_method(:resolve_task) { task }
+    command.define_singleton_method(:stage_dir) { |_task| "4-execute" }
+
+    err = assert_raises(Hive::WrongStage) { command.call }
+
+    assert_match(/plan expects 2-brainstorm or 3-plan/, err.message)
+    assert_equal "4-execute", err.current_stage
+    assert_equal "3-plan", err.target_stage
+  end
+
+  def test_resolve_task_reraises_invalid_path_without_from_filter
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) do
+      raise Hive::InvalidTaskPath, "missing task"
+    end
+    original = Hive::TaskResolver.method(:new)
+    Hive::TaskResolver.define_singleton_method(:new) { |*_args, **_kwargs| resolver }
+    command = Hive::Commands::StageAction.new("plan", "some-slug")
+
+    err = assert_raises(Hive::InvalidTaskPath) { command.send(:resolve_task) }
+
+    assert_equal "missing task", err.message
+  ensure
+    Hive::TaskResolver.define_singleton_method(:new, original) if original
+  end
+
+  def test_error_kind_for_maps_typed_stage_action_errors
+    command = Hive::Commands::StageAction.new("plan", "some-slug")
+    cases = {
+      Hive::AmbiguousSlug.new("ambiguous", slug: "s", candidates: []) => "ambiguous_slug",
+      Hive::DestinationCollision.new("collision", path: "/tmp/dest") => "destination_collision",
+      Hive::FinalStageReached.new("final", stage: "8-done") => "final_stage",
+      Hive::WrongStage.new("wrong", current_stage: "1-inbox") => "wrong_stage",
+      Hive::RollbackFailed.new("rollback failed") => "rollback_failed",
+      Hive::InvalidTaskPath.new("invalid") => "invalid_task_path",
+      Hive::Error.new("generic") => "error"
+    }
+
+    cases.each do |error, expected|
+      assert_equal expected, command.send(:error_kind_for, error), error.message
+    end
+  end
+end

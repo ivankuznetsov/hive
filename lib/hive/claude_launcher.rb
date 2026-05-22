@@ -344,11 +344,18 @@ module Hive
       nil
     end
 
-    def wait_for_expected_output(_task, _runner, timeout, expected_output, log_label)
+    def wait_for_expected_output(task, runner, timeout, expected_output, log_label)
       deadline = Time.now + timeout
       loop do
         if File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
-          return { status: :ok, log_label: log_label }
+          return { status: :ok, log_label: log_label } if File.exist?(done_path(task))
+
+          begin
+            pane = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
+            return { status: :ok, log_label: log_label } if claude_ready_prompt?(pane)
+          rescue Hive::TmuxError
+            nil
+          end
         end
 
         if Time.now >= deadline

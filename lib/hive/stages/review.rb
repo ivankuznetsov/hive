@@ -3,6 +3,7 @@ require "fileutils"
 require "open3"
 require "time"
 require "hive/events"
+require "hive/config"
 require "hive/protected_files"
 require "hive/claude_launcher"
 require "hive/stages/base"
@@ -869,61 +870,109 @@ module Hive
         end
 
         statuses = []
-        specs.each do |spec|
-          if started_at && max_wall_clock_sec &&
-             wall_clock_exceeded?(started_at, max_wall_clock_sec)
-            return :wall_clock_exceeded
-          end
+        if shared_claude_reviewer_session?(cfg, specs)
+          Hive::ClaudeLauncher.with_shared_session(
+            task: task,
+            cfg: cfg,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{ctx.pass}", task),
+            cwd: ctx.worktree_path,
+            add_dirs: [ ctx.task_folder ],
+            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+          ) do |handle|
+            specs.each do |spec|
+              result = run_reviewer_spec(cfg, ctx, spec, deadline,
+                                         started_at: started_at,
+                                         max_wall_clock_sec: max_wall_clock_sec,
+                                         handle: claude_tmux_reviewer?(cfg, spec) ? handle : nil)
+              return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-          adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
-          # Wrap adapter.run! so a single reviewer raising (spawn-time
-          # SystemCallError, network timeout in a custom adapter, …)
-          # doesn't abort the whole reviewers phase. Treat as :error,
-          # record the failure in errors-NN.md, and continue with the
-          # next reviewer.
-          # Feature-detect whether the adapter accepts a `deadline:`
-          # kwarg via Method#parameters so we don't have to discriminate
-          # ArgumentError-by-message at the rescue site. The previous
-          # form (`rescue ArgumentError; adapter.run!`) silently swallowed
-          # real adapter bugs that happened to raise ArgumentError from
-          # the body (config parsing, Integer() coercion, etc.).
-          accepts_deadline = adapter.method(:run!).parameters.any? do |type, name|
-            name == :deadline && %i[key keyreq keyrest].include?(type)
-          end
-          result =
-            begin
-              if accepts_deadline
-                adapter.run!(deadline: deadline)
-              else
-                adapter.run!
-              end
-            rescue StandardError => e
-              Hive::Reviewers::Result.new(
-                name: spec["name"],
-                output_path: adapter.output_path,
-                status: :error,
-                error_message: "#{e.class}: #{e.message}"
-              )
+              statuses << result.status
+              handle_reviewer_result(task, cfg, ctx, spec, result)
             end
-          statuses << result.status
+          end
+        else
+          specs.each do |spec|
+            result = run_reviewer_spec(cfg, ctx, spec, deadline,
+                                       started_at: started_at,
+                                       max_wall_clock_sec: max_wall_clock_sec)
+            return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-          if result.error?
-            # Guarantee the failed adapter leaves no reviewer file
-            # behind, even if the adapter
-            # raised (Agent#run!'s own final-failure cleanup doesn't
-            # run on the rescue path, and custom adapters may not
-            # implement it). Deleting unconditionally on the
-            # orchestrator side covers both paths uniformly.
-            output_path = result.output_path
-            File.delete(output_path) if output_path && File.exist?(output_path)
-
-            record_reviewer_infra_error(ctx, spec, result)
-          else
-            publish_review_file(task, cfg, ctx.pass, spec["name"] || result.name, result.output_path)
+            statuses << result.status
+            handle_reviewer_result(task, cfg, ctx, spec, result)
           end
         end
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)
+        if started_at && max_wall_clock_sec &&
+           wall_clock_exceeded?(started_at, max_wall_clock_sec)
+          return :wall_clock_exceeded
+        end
+
+        adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
+        # Wrap adapter.run! so a single reviewer raising (spawn-time
+        # SystemCallError, network timeout in a custom adapter, …)
+        # doesn't abort the whole reviewers phase. Treat as :error,
+        # record the failure in errors-NN.md, and continue with the
+        # next reviewer.
+        # pr-review-toolkit round-4 silent-failure-hunter C2 —
+        # feature-detect whether the adapter accepts a `deadline:`
+        # kwarg via Method#parameters so we don't have to discriminate
+        # ArgumentError-by-message at the rescue site. The previous
+        # form (`rescue ArgumentError; adapter.run!`) silently swallowed
+        # real adapter bugs that happened to raise ArgumentError from
+        # the body (config parsing, Integer() coercion, etc.).
+        accepts_deadline = adapter.method(:run!).parameters.any? do |type, name|
+          name == :deadline && %i[key keyreq keyrest].include?(type)
+        end
+        result =
+          begin
+            if handle
+              adapter.run_in_session!(handle: handle, deadline: deadline)
+            elsif accepts_deadline
+              adapter.run!(deadline: deadline)
+            else
+              adapter.run!
+            end
+          rescue StandardError => e
+            Hive::Reviewers::Result.new(
+              name: spec["name"],
+              output_path: adapter.output_path,
+              status: :error,
+              error_message: "#{e.class}: #{e.message}"
+            )
+          end
+        result
+      end
+
+      def handle_reviewer_result(task, cfg, ctx, spec, result)
+        if result.error?
+          # ce-review round-3 P2 #6 — guarantee the failed adapter
+          # leaves no reviewer file behind, even if the adapter
+          # raised (Agent#run!'s own final-failure cleanup doesn't
+          # run on the rescue path, and custom adapters may not
+          # implement it). Deleting unconditionally on the
+          # orchestrator side covers both paths uniformly.
+          output_path = result.output_path
+          File.delete(output_path) if output_path && File.exist?(output_path)
+
+          record_reviewer_infra_error(ctx, spec, result)
+        else
+          publish_review_file(task, cfg, ctx.pass, spec["name"] || result.name, result.output_path)
+        end
+      end
+
+      def shared_claude_reviewer_session?(cfg, specs)
+        Hive::Config.claude_mode(cfg) == :tmux &&
+          specs.any? { |spec| claude_tmux_reviewer?(cfg, spec) }
+      end
+
+      def claude_tmux_reviewer?(cfg, spec)
+        Hive::Config.claude_mode(cfg) == :tmux &&
+          (spec["kind"] || "agent").to_s == "agent" &&
+          spec["agent"].to_s == "claude"
       end
 
       # NOTE: no outer rescue here — `GithubPublisher.publish!` has

@@ -3017,7 +3017,7 @@ module Hive
       end
 
       def footer_hint
-        "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q] quit"
+        "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [i] info  [q] quit"
       end
 
       # Compute pane widths and join horizontally. Left pane is clamped

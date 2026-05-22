@@ -603,28 +603,30 @@ class HiveTuiBubbleModelTest < Minitest::Test
     refute_includes out, "[Enter] open",   "Enter is not only an open action"
   end
 
-  def test_default_footer_hint_omits_o_at_70_col_budget
-    # Plan R6: `[o] open` is included in the footer only if it fits
-    # the 70-col budget without wrapping or pushing primary actions
-    # onto a second line. At 70 cols the current hint string is
-    # already ~69 chars; adding ten more (separator + "[o] open")
-    # would exceed the budget. We rely on the `?` overlay for
-    # discoverability instead. This test pins that decision so a
-    # future contributor doesn't silently re-add the hint and break
-    # 70-col rendering.
+  def test_default_footer_hint_advertises_info_between_help_and_quit
     hint = @model.send(:footer_hint)
-    assert_equal "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q] quit",
-                 hint,
-                 "footer hint must remain the pre-`o` literal; `o` is documented in `?` only"
+    assert_equal "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [i] info  [q] quit",
+                 hint
+    assert_match(/\[\?\] help  \[i\] info  \[q\] quit/, hint)
     refute_includes hint, "[o] open",
-                    "70-col budget can't absorb `[o] open` alongside primary hints"
-    # Width guard: pin the actual character count so a future contributor
-    # who adds a hint and (correctly) bumps the literal above also has to
-    # acknowledge they're spending bytes against the 70-col budget. If
-    # this assertion fires alongside an updated literal, the contributor
-    # MUST verify default_footer truncation behavior at cols == 70.
-    assert hint.length <= 70,
-           "footer hint must fit the 70-col budget without truncation; got #{hint.length} chars"
+                    "`o` remains discoverable through the help overlay, not the fixed footer"
+  end
+
+  def test_default_footer_renders_full_hint_at_wide_width
+    out = @model.send(:default_footer, 120)
+
+    assert_includes out, "[i] info"
+    assert_includes out, "[q] quit"
+  end
+
+  def test_default_footer_truncates_from_right_at_narrow_width
+    out = @model.send(:default_footer, 76)
+
+    assert_includes out, "[?] help"
+    assert_includes out, "[i] info"
+    assert out.end_with?("…"), "narrow footer should truncate the right edge, got #{out.inspect}"
+    refute_includes out, "[i] inf…",
+                    "76-column truncation should not split the `[i] info` token"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols

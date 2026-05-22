@@ -565,16 +565,41 @@ module Hive
         cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(task.project_root)}.worktrees")
       end
 
+      # Resolve the ref reviewers diff against, preferring an explicit
+      # configured value, then falling back to the project's origin
+      # default branch (derived from origin/HEAD or origin/main/master).
+      # Fails preflight when no explicit config and no trusted source —
+      # silently falling back to the worktree's current branch would
+      # make reviewers diff the task branch against itself (zero or
+      # phantom findings).
+      #
+      # Remote-tracking ref existence is probed via the full
+      # `refs/remotes/origin/<branch>` path so a tag named e.g.
+      # `origin/main` cannot satisfy the check.
       def reviewer_compare_ref(cfg, ops)
         configured = cfg["default_branch"].to_s.strip
-        default_branch = configured.empty? ? ops.default_branch : configured
-        return default_branch if default_branch.start_with?("origin/")
+        unless configured.empty?
+          return configured if configured.start_with?("origin/")
 
-        remote_ref = "origin/#{default_branch}"
-        return remote_ref if ops.ref_exists?(remote_ref)
+          return resolve_remote_or_local(ops, configured)
+        end
 
-        warn "[hive] #{remote_ref} not found in worktree; reviewers will compare against local #{default_branch} (diffs may be stale)"
-        default_branch
+        origin = ops.origin_default_branch
+        if origin.nil?
+          warn "hive: reviewer compare ref unavailable — set `default_branch` in .hive-state/config.yml " \
+               "or run `git -C <project_root> remote set-head origin --auto` so origin/HEAD points at " \
+               "the project's default branch (refusing to fall back to the worktree's current branch)"
+          exit 1
+        end
+
+        resolve_remote_or_local(ops, origin)
+      end
+
+      def resolve_remote_or_local(ops, branch)
+        return "origin/#{branch}" if ops.ref_exists?("refs/remotes/origin/#{branch}")
+
+        warn "[hive] origin/#{branch} not found in worktree; reviewers will compare against local #{branch} (diffs may be stale)"
+        branch
       end
 
       def mark_working(task, phase:, pass:)

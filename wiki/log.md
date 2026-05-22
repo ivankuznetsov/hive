@@ -2,6 +2,28 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-22T13:30:00Z] rebase / review — close three post-merge follow-up gaps from PR #104 review
+
+**Action:** Documented three follow-up fixes after the initial PR #104 review pass surfaced sharper failure modes than the first round caught.
+
+1. **Rebase post-loop dirty guard.** The conflict-resolution loop's success path now runs `git.dirty?` before returning `Result.succeeded`. Without this, an agent that staged its resolution AND left untracked scratch files produced a "succeeded" envelope with a contaminated worktree, and later stages silently absorbed the cruft. The new `:dirty_after_success` reason runs the standard fail-soft sequence (abort + reset to ORIG_HEAD + clean), undoing the rebase rather than carrying the contamination forward. The agent-called-continue-itself branch already required `!dirty?` (PR #69 B9); the post-loop guard extends the same contract to the orchestrator-driven path.
+
+2. **Review preflight refuses untrusted compare ref source.** `Hive::Stages::Review.reviewer_compare_ref` previously fell back to `Hive::GitOps#detect_default_branch` even when its result came from `git rev-parse --abbrev-ref HEAD` — which in a worktree is the task branch. When `origin/HEAD` was unset AND neither `origin/main` nor `origin/master` existed, reviewers ended up diffing the task branch against itself. The new `Hive::GitOps#origin_default_branch` returns the default branch only when derived from a trusted remote source (origin/HEAD symref or a remote-tracking branch probe), otherwise `nil`. `reviewer_compare_ref` uses this stricter method and exits 1 with the two remediation paths named when no trusted source exists.
+
+3. **Ref existence probe uses full ref path.** `ref_exists?("origin/main")` was ambiguous with a tag named `origin/main` (rev-parse short-form resolves both). Callers now pass the full `refs/remotes/origin/<branch>` path so a like-named tag cannot satisfy a remote-tracking ref check.
+
+**Refreshed pages:**
+- [[modules/rebase]] — new `:dirty_after_success` reason and the post-loop contamination guard documented under "Post-loop contamination guard."
+- [[modules/git_ops]] — `origin_default_branch` introduced as the trusted-source primitive; `detect_default_branch` rewired to call it first; `ref_exists?` doc clarifies the full-path requirement for remote-tracking checks.
+- [[stages/review]] — Phase 2 prose now describes the preflight refusal path when no trusted compare-ref source is available.
+
+## [2026-05-22T13:30:00Z] git_ops — default_branch probes origin/main and origin/master before HEAD fallback
+
+**Action:** Documented the `detect_default_branch` ordering fix and the new `ref_exists?` helper. `Hive::GitOps.new(worktree_path).default_branch` previously returned the worktree's task branch when `origin/HEAD` was unset (common after `git worktree add`), defeating the same stale-base hardening PR #104 introduced for reviewer compare refs. The probe step inserts before the `git rev-parse --abbrev-ref HEAD` fallback so worktrees without `origin/HEAD` still resolve to the project default. Also covers `ref_exists?` as a public primitive shared with [[stages/review]].
+
+**Refreshed pages:**
+- [[modules/git_ops]] — new probe step in `detect_default_branch` ordering; `ref_exists?` added to the public API surface.
+
 ## [2026-05-19T23:51:41Z] review — reviewer prompts prefer origin/default as the compare ref
 
 **Action:** Fixed a stale-local-main review failure mode: review prompts now compare against `origin/<default_branch>` when the remote-tracking ref exists, falling back to the configured/default local branch only when the remote ref is absent. This keeps long-lived operator checkouts from feeding reviewers `git diff main..HEAD` when local `main` is behind `origin/main`, which previously produced phantom findings for already-merged upstream changes.

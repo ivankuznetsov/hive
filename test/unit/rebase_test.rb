@@ -298,6 +298,48 @@ class HiveRebaseTest < Minitest::Test
     teardown_dirs(worktree, folder)
   end
 
+  def test_dirty_worktree_after_successful_rebase_aborts_and_resets
+    # The agent's status is :ok, the rebase_continue loop drains
+    # cleanly, but the agent left scratch files (untracked) or modified
+    # files outside the conflict set. Treat the contamination as
+    # rebase failure: aborting and resetting to ORIG_HEAD undoes the
+    # rebase rather than letting later stages absorb the cruft.
+    worktree, folder = make_worktree_and_folder
+    FileUtils.mkdir_p(worktree)
+    File.write(File.join(worktree, "a.txt"), "merged content (no markers)\n")
+
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [ "a.txt" ], [] ]
+    git.rebase_continue_outcomes = [ :ok ]
+
+    # Pre-rebase dirty? is checked before rebase_onto fires (preflight),
+    # the agent-continued branch's dirty? check is reached only if the
+    # agent calls `rebase --continue` itself (we test the orchestrator
+    # path), and the new post-loop dirty? guard is the third call.
+    # Sequence cleanliness so the preflight passes but the post-loop
+    # contamination guard trips.
+    dirty_calls = 0
+    git.define_singleton_method(:dirty?) do
+      dirty_calls += 1
+      dirty_calls >= 2 # clean for preflight, dirty for post-loop guard
+    end
+
+    stub_gitops!(git) do
+      stub_spawn_agent(result_status: :ok) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        refute result.succeeded
+        assert_equal :dirty_after_success, result.reason
+        assert git.reset_hard_called,
+               "dirty-after-success guard must reset to ORIG_HEAD to drop both the rebase and the cruft"
+      end
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   def test_conflict_agent_uses_development_agent_with_exit_code_status
     # Rebase conflict resolution is development work in the task worktree.
     # It must use cfg.execute.agent, but success is NOT an output artifact:
@@ -368,6 +410,37 @@ class HiveRebaseTest < Minitest::Test
                  "operator-visible diagnostic must name the agent failure before fail-soft abort")
     assert_match(/synthetic agent fail/, err,
                  "diagnostic must forward the agent's error_message detail")
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_agent_failure_warn_falls_back_to_status_symbol_when_error_message_missing
+    # When the agent dispatch produces a non-:ok result with no
+    # error_message (e.g. status: :timeout from spawn_agent's preflight),
+    # the operator-visible warn must still fire and surface the status
+    # symbol — the `detail = error_message || status` fallback is the
+    # only signal of WHY the rebase aborted.
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [ "a.txt" ] ]
+
+    result = nil
+    _out, err = capture_io do
+      stub_gitops!(git) do
+        stub_spawn_agent(result_status: :timeout, error_message: nil) do
+          result = Hive::Rebase.perform(task, base_cfg)
+        end
+      end
+    end
+
+    refute result.succeeded
+    assert_equal :agent_failed, result.reason
+    assert_match(/rebase conflict-resolution agent failed/, err)
+    assert_match(/timeout/, err,
+                 "warn must surface the status symbol when error_message is absent")
   ensure
     teardown_dirs(worktree, folder)
   end

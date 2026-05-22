@@ -3,7 +3,7 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb
 created: 2026-05-14
-updated: 2026-05-19T23:35:54Z
+updated: 2026-05-22T13:30:00Z
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
@@ -72,6 +72,12 @@ When `git rebase <origin/default>` raises `Hive::RebaseConflict`:
    5. `rebase_continue` advances to the next commit; if it raises `RebaseConflict`, loop. If it raises `GitError` / `SystemCallError` / `IOError`, abort with `:rebase_continue_failed`.
 
 `MAX_CONFLICT_RESOLUTIONS` exceeded → `:max_attempts_exceeded`.
+
+### Post-loop contamination guard
+
+After the conflict-resolution loop exits cleanly (the last `rebase_continue` drained without raising `RebaseConflict`), the orchestrator does one final `git.dirty?` check before returning success. If the agent staged its conflict resolution AND left untracked scratch files (or modified files outside the conflict set), git treats the rebase as complete while the worktree carries contamination that later stages would silently absorb (e.g. a subsequent `git add .` would commit cruft). In that case `abort_with(:dirty_after_success)` runs the standard fail-soft sequence (`rebase --abort` + `reset --hard ORIG_HEAD` + `clean -fd`), undoing the rebase rather than carrying the contaminated tree forward.
+
+The agent-called-continue-itself branch already required `!git.dirty?` before accepting the agent's result (PR #69 review B9); the post-loop guard extends the same contract to the normal path where the orchestrator drives `rebase_continue` itself.
 
 ### Abort path
 

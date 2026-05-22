@@ -283,6 +283,21 @@ module Hive
         end
       end
 
+      # Post-loop contamination guard. The agent-called-continue-itself
+      # branch above already requires `!git.dirty?` before accepting the
+      # result, but the normal path (agent :ok → orchestrator runs
+      # rebase_continue) never checked. If the agent staged its conflict
+      # resolution AND left untracked scratch files (or modified files
+      # outside the conflict set), git treats the rebase as successful
+      # while the worktree carries contamination that later stages
+      # would silently absorb. Fail-soft: abort and reset to ORIG_HEAD
+      # so the next stage runs against the (stale) pre-rebase base
+      # rather than the contaminated post-rebase tree.
+      if git.dirty?
+        return abort_with(git, :dirty_after_success,
+                          commits_behind, attempts, resolved_files)
+      end
+
       warnings = []
       update_execute_base_head!(task, git, warnings)
       Result.succeeded(commits_behind: commits_behind,

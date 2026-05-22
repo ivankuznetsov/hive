@@ -150,9 +150,8 @@ module Hive
     end
 
     def detect_default_branch
-      out, _err, status = Open3.capture3("git", "-C", @project_root,
-                                         "symbolic-ref", "refs/remotes/origin/HEAD")
-      return out.strip.sub(%r{\Arefs/remotes/origin/}, "") if status.success? && !out.strip.empty?
+      origin = origin_default_branch
+      return origin if origin
 
       out, _err, status = Open3.capture3("git", "-C", @project_root,
                                          "rev-parse", "--abbrev-ref", "HEAD")
@@ -163,6 +162,28 @@ module Hive
       return branch unless branch.empty?
 
       "master"
+    end
+
+    # Returns the project default branch when it can be derived from a
+    # trusted remote source: either the origin/HEAD symref, or a probe
+    # for the conventional origin/main / origin/master remote-tracking
+    # refs. Returns nil when neither is available — callers that must
+    # not fall back to the worktree's current branch (e.g. reviewer
+    # compare ref resolution) check the nil and fail preflight instead.
+    #
+    # Both probes use the full `refs/remotes/origin/<branch>` path so a
+    # tag named `origin/main` cannot satisfy the check (rev-parse
+    # short-form `origin/main` is ambiguous with `refs/tags/origin/main`).
+    def origin_default_branch
+      out, _err, status = Open3.capture3("git", "-C", @project_root,
+                                         "symbolic-ref", "refs/remotes/origin/HEAD")
+      return out.strip.sub(%r{\Arefs/remotes/origin/}, "") if status.success? && !out.strip.empty?
+
+      %w[main master].each do |candidate|
+        return candidate if ref_exists?("refs/remotes/origin/#{candidate}")
+      end
+
+      nil
     end
 
     def run_git!(*args)

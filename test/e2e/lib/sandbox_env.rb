@@ -53,6 +53,7 @@ module Hive
           "BUNDLE_GEMFILE" => File.join(sandbox_dir, "Gemfile"),
           "HIVE_HOME" => run_home,
           "HIVE_CLAUDE_BIN" => File.expand_path(fake_claude_path),
+          "HIVE_CODEX_BIN" => File.expand_path(fake_claude_path),
           "TERM" => "xterm-256color",
           "PATH" => path_parts.reject(&:empty?).join(":")
         }

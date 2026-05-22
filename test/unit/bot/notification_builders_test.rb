@@ -42,6 +42,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  notification.keyboard.first.first[:callback_data]
   end
 
+  def test_ready_to_artifacts_builds_artifacts_approval_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "ready_to_artifacts", marker: "review_complete", stage: "6-review")
+    )
+
+    assert_match(/Ready for artifacts/, notification.text)
+    assert_equal "approve:artifacts:hive:slug-260514-abcd:6-review",
+                 notification.keyboard.first.first[:callback_data]
+  end
+
   def test_ready_to_finalize_builds_finalize_approval_keyboard
     # ready_to_finalize replaced ready_for_pr after the rename in
     # bfbaaad / hive.rb. The bot's READY_ACTIONS and verb_for_action
@@ -49,12 +59,12 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     # through `build()` and gets NO Telegram notification. See PR #84
     # review C2.
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "ready_to_finalize", marker: "review_complete", stage: "6-review")
+      row(action: "ready_to_finalize", marker: "complete", stage: "7-artifacts")
     )
 
     refute_nil notification, "ready_to_finalize must produce a notification (not silently fall through)"
     assert_match(/Ready for finalize/, notification.text)
-    assert_equal "approve:finalize:hive:slug-260514-abcd:6-review",
+    assert_equal "approve:finalize:hive:slug-260514-abcd:7-artifacts",
                  notification.keyboard.first.first[:callback_data]
   end
 
@@ -66,6 +76,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                     "ready_for_pr was renamed to ready_to_finalize in bfbaaad"
     assert_nil Hive::Bot::NotificationBuilders.verb_for_action("ready_for_pr"),
                "verb_for_action must not resolve the legacy ready_for_pr key"
+    assert_equal "artifacts", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_artifacts")
     assert_equal "finalize", Hive::Bot::NotificationBuilders.verb_for_action("ready_to_finalize")
   end
 

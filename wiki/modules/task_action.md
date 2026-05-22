@@ -52,7 +52,9 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `execute_stale` | `RECOVER_EXECUTE` | "Needs recovery" | findings |
 | `review_ready` | `READY_FOR_REVIEW` | "Ready for review" | review |
 | `review_waiting` | `NEEDS_INPUT` | "Needs your input" | review |
-| `review_complete` | `READY_TO_FINALIZE` | "Ready to finalize" | finalize |
+| `review_complete` | `READY_TO_ARTIFACTS` | "Ready to collect artifacts" | artifacts |
+| `artifacts_ready` | `READY_TO_ARTIFACTS` | "Ready to collect artifacts" | artifacts |
+| `artifacts_complete` | `READY_TO_FINALIZE` | "Ready to finalize" | finalize |
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
 | `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
@@ -73,7 +75,7 @@ Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This m
 
 ## Command emission
 
-Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
+Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`artifacts`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
 
 Generic verbs (`findings`/`accept-finding`/`reject-finding`) include `--stage <stage>` only when slug-stage ambiguity actually exists (`stage_collision: true`).
 

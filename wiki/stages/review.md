@@ -20,7 +20,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 
 | Marker / State | Action |
 |----------------|--------|
-| `:review_complete` | print "already complete; mv this folder to 7-finalize/", return |
+| `:review_complete` | print "already complete; run `hive artifacts` or move this folder to 7-artifacts/", return |
 | `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
 | `:review_stale` | warn; user clears/re-runs if highest pass lacks `escalations-NN.md`, otherwise trims `reviews/` then clears/re-runs |
 | `:review_error` | warn with attrs; user investigates then `hive markers clear FOLDER --name REVIEW_ERROR` and re-runs |

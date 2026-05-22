@@ -302,7 +302,15 @@ module Hive
       run_stage_action("review", target)
     end
 
-    desc "finalize TARGET", "Move a completed review task into finalize, or run an existing finalize task"
+    desc "artifacts TARGET", "Move a completed review task into artifacts, or run an existing artifacts task"
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def artifacts(target)
+      run_stage_action("artifacts", target)
+    end
+
+    desc "finalize TARGET", "Move a completed artifacts task into finalize, or run an existing finalize task"
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; use to disambiguate same-slug tasks"
     option :project, type: :string, desc: "scope slug lookup to one registered project"

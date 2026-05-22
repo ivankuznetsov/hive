@@ -36,9 +36,14 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive open-pr slug-a --from 4-execute")
   end
 
+  def test_ready_to_artifacts_dispatches
+    assert_equal :dispatch, decide(action: "ready_to_artifacts",
+                                   command: "hive artifacts slug-a --from 6-review")
+  end
+
   def test_ready_to_finalize_dispatches
     assert_equal :dispatch, decide(action: "ready_to_finalize",
-                                   command: "hive finalize slug-a --from 6-review")
+                                   command: "hive finalize slug-a --from 7-artifacts")
   end
 
   # ── merge wait: hand off to PrMergeWatcher ─────────────────────────────

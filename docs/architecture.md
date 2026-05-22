@@ -39,12 +39,13 @@ The project checkout holds code. `.hive-state/` holds durable Hive state on the 
 |   |-- 4-execute/<slug>/
 |   |-- 5-open-pr/<slug>/
 |   |-- 6-review/<slug>/
-|   |-- 7-finalize/<slug>/
-|   `-- 8-done/<slug>/
+|   |-- 7-artifacts/<slug>/
+|   |-- 8-finalize/<slug>/
+|   `-- 9-done/<slug>/
 `-- logs/<slug>/<stage>-<UTC-ts>.log
 ```
 
-Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstorm), `plan.md` (3-plan), `task.md` (shared across 4-execute, 6-review, 8-done), `pr.md` (shared across 5-open-pr and 7-finalize), or `summary.md` (7-finalize). `worktree.yml` points from Hive state to the feature worktree created during execute. The xbookmark walkthrough captures a mid-run tree in [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
+Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstorm), `plan.md` (3-plan), `task.md` (shared across 4-execute, 6-review, 9-done), `artifact.md` (7-artifacts), `pr.md` (shared across 5-open-pr and 8-finalize), or `summary.md` (8-finalize). `worktree.yml` points from Hive state to the feature worktree created during execute. The xbookmark walkthrough captures a mid-run tree in [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
 
 ## Agents
 

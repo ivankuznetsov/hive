@@ -168,7 +168,7 @@ Once per workstation:
   unchanged. Verify: `claude --version`.
 - **`gh` authenticated.** The daemon's PR-merge watcher (ADR-024)
   polls `gh pr view --json state` to detect `MERGED` and auto-archive
-  7-finalize → 8-done. Verify: `gh auth status`.
+  8-finalize → 9-done. Verify: `gh auth status`.
 - **`/proc` mounted OR `ps` available.** The daemon refuses to start
   if it can't read its own `process_start_time` (PID-reuse defense).
   Verify: `ls /proc/$$ >/dev/null && echo OK` or `command -v ps`.

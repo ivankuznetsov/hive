@@ -119,14 +119,10 @@ module Hive
         label: "Ready to finalize",
         command: "finalize"
       },
-      # Placeholder action for a task that landed in 7-artifacts before the
-      # U2 runner ships. There is nothing to wait on; the daemon and humans
-      # should advance via `hive finalize`. Once U2 lands, this entry's key
-      # flips to NEEDS_INPUT / RECOVER_* as needed.
-      artifacts_waiting: {
-        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
-        label: "Ready to finalize",
-        command: "finalize"
+      artifacts_ready: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
+        label: "Ready to collect artifacts",
+        command: "artifacts"
       },
       finalize_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
@@ -330,13 +326,10 @@ module Hive
       ACTIONS.fetch(:artifacts_complete)
     end
 
-    # No U1 runner: a task arrives in 7-artifacts via `hive artifacts`
-    # (or a manual mv) with no marker, and there's no agent to mark it
-    # :complete. Either way the only forward path is `hive finalize`, so
-    # collapse both marker shapes onto the same action. When the U2
-    # runner ships, split this into waiting / complete proper.
+    # Markerless 7-artifacts rows still need their stage runner to write
+    # artifact.md and the terminal marker before finalize is allowed.
     def artifacts_action
-      marker.name == :complete ? ACTIONS.fetch(:artifacts_complete) : ACTIONS.fetch(:artifacts_waiting)
+      marker.name == :complete ? ACTIONS.fetch(:artifacts_complete) : ACTIONS.fetch(:artifacts_ready)
     end
 
     # Returns :agent_died, :agent_orphaned, or nil. Mirrors

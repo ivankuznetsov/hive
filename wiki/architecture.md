@@ -7,7 +7,7 @@ updated: 2026-05-14
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor control plane over an eight-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. There is still no database; durable state is the filesystem plus global YAML config.
+**TLDR**: Hive is a Ruby 3.4 / Thor control plane over a nine-stage filesystem state machine. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, and `hive bot` turns human-input gates into Telegram interactions. There is still no database; durable state is the filesystem plus global YAML config.
 
 ## Layer cake
 
@@ -107,7 +107,7 @@ stateDiagram-v2
 ## Key external integrations
 
 - **`claude` CLI** ≥ 2.1.118 — verified via `claude --version` at agent spawn time (`Hive::Agent.check_version!`).
-- **`gh` CLI** — used by `5-open-pr`, review comment mirroring, and `7-finalize`.
+- **`gh` CLI** — used by `5-open-pr`, review comment mirroring, and `8-finalize`.
 - **`git`** ≥ 2.40 — uses `worktree add --no-checkout --detach`, `worktree list --porcelain`, `worktree remove`, `commit`, `show-ref`, `symbolic-ref`. All invoked through `Open3.capture3` array form (no shell).
 
 ## TUI / MVU pipeline

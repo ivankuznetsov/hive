@@ -140,7 +140,7 @@ review:
 # human-input gates. When `enabled: true`, `hive daemon start` polls
 # every project's status and dispatches workflow verbs on tasks ready
 # to advance. Stops at `:waiting` / `:review_waiting` / recovery markers
-# (where a human is needed) and at 7-finalize while the PR is open on GitHub
+# (where a human is needed) and at 8-finalize while the PR is open on GitHub
 # (auto-archives once `gh pr view --json state` returns `MERGED`).
 # Disable per-project by flipping this flag and running `hive daemon reload`.
 daemon:

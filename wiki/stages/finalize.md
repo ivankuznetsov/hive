@@ -1,5 +1,5 @@
 ---
-title: 7-finalize stage
+title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
@@ -7,7 +7,7 @@ updated: 2026-05-13
 tags: [stage, finalize, pr, github]
 ---
 
-**TLDR**: Wraps up an already-open draft PR after 6-review completes. It verifies the worktree is clean and pushed, refreshes the PR body, writes `summary.md`, and flips the PR from draft to ready-for-review.
+**TLDR**: Wraps up an already-open draft PR after 7-artifacts completes. It verifies the worktree is clean and pushed, refreshes the PR body, writes `summary.md`, and flips the PR from draft to ready-for-review.
 
 ## Preconditions
 
@@ -29,7 +29,7 @@ tags: [stage, finalize, pr, github]
 ## Marker → commit action
 
 - `:complete` → `pr_finalized`.
-- Status only treats a `7-finalize` `:complete` marker as archive-ready when it carries `is_draft=false` and a `pr_url` matching `pr.md` frontmatter. A carried-over `5-open-pr` marker with `is_draft=true` remains ready to run finalize, not ready to archive.
+- Status only treats an `8-finalize` `:complete` marker as archive-ready when it carries `is_draft=false` and a `pr_url` matching `pr.md` frontmatter. A carried-over `5-open-pr` marker with `is_draft=true` remains ready to run finalize, not ready to archive.
 - Missing `pr.md` / missing `pr_url`, dirty worktree, or unpushed state writes an `ERROR` marker and commits the corresponding error state.
 
 ## Backlinks

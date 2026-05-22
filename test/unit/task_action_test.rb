@@ -106,12 +106,17 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive artifacts demo-260426-aaaa --from 6-review", action.command
   end
 
-  # A task that lands in 7-artifacts (manual mv or `hive artifacts`) with
-  # no runner yet should surface as ready_to_finalize so the daemon and
-  # humans have a single forward verb. Re-classifies when U2 ships.
-  def test_artifacts_is_ready_to_finalize
+  def test_markerless_artifacts_is_ready_to_collect_artifacts
     task = fake_task(stage_name: "artifacts", stage_index: 7)
     action = Hive::TaskAction.for(task, marker(:none))
+    assert_equal "ready_to_artifacts", action.key
+    assert_equal "Ready to collect artifacts", action.label
+    assert_equal "hive artifacts demo-260426-aaaa --from 7-artifacts", action.command
+  end
+
+  def test_complete_artifacts_is_ready_to_finalize
+    task = fake_task(stage_name: "artifacts", stage_index: 7)
+    action = Hive::TaskAction.for(task, marker(:complete))
     assert_equal "ready_to_finalize", action.key
     assert_equal "hive finalize demo-260426-aaaa --from 7-artifacts", action.command
   end
@@ -966,7 +971,8 @@ class TaskActionTest < Minitest::Test
     "develop" => :complete,        # 3-plan finishes with :complete
     "open-pr" => :execute_complete, # 4-execute finishes with :execute_complete
     "review" => :complete,          # 5-open-pr finishes with :complete
-    "finalize" => :review_complete, # 6-review finishes with :review_complete
+    "artifacts" => :review_complete, # 6-review finishes with :review_complete
+    "finalize" => :complete,        # 7-artifacts finishes with :complete
     "archive" => :complete          # 8-finalize finishes with :complete
   }.freeze
 
@@ -988,7 +994,7 @@ class TaskActionTest < Minitest::Test
   # Pin: every workflow advance verb's `terminal_marker?` whitelist
   # accepts the corresponding stage-terminal marker. This is the test
   # that would have caught the U11 dogfood bug — `:review_complete`
-  # was missing from `terminal_marker?`, so `hive finalize --from 6-review`
+  # was missing from `terminal_marker?`, so `hive artifacts --from 6-review`
   # rejected its only valid pre-advance marker.
   def test_stage_action_terminal_marker_accepts_every_advance_marker
     require "hive/commands/stage_action"

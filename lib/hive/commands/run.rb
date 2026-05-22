@@ -153,6 +153,9 @@ module Hive
         when "review"
           require "hive/stages/review"
           Hive::Stages::Review.method(:run!)
+        when "artifacts"
+          require "hive/stages/artifacts"
+          Hive::Stages::Artifacts.method(:run!)
         when "finalize"
           require "hive/stages/finalize"
           Hive::Stages::Finalize.method(:run!)

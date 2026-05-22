@@ -3,11 +3,11 @@ title: Workflow verbs
 type: command
 source: lib/hive/commands/stage_action.rb, lib/hive/workflows.rb
 created: 2026-04-26
-updated: 2026-05-13
+updated: 2026-05-22
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
-**TLDR**: Seven Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `finalize`, and `archive`.
+**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive`.
 
 ## Usage
 
@@ -17,8 +17,9 @@ hive plan <slug>                          # promote 2-brainstorm → 3-plan, run
 hive develop <slug>                       # promote 3-plan → 4-execute, run develop
 hive open-pr <slug>                       # promote 4-execute → 5-open-pr, open draft PR
 hive review <slug>                        # promote 5-open-pr → 6-review, run review
-hive finalize <slug>                      # promote 6-review → 7-finalize, finalize PR
-hive archive <slug>                       # promote 7-finalize → 8-done, run archive
+hive artifacts <slug>                     # promote 6-review → 7-artifacts, collect artifacts
+hive finalize <slug>                      # promote 7-artifacts → 8-finalize, finalize PR
+hive archive <slug>                       # promote 8-finalize → 9-done, run archive
 
 hive plan <slug> --from 2-brainstorm      # idempotency assertion for retry
 hive plan <slug> --project NAME           # multi-project disambiguation
@@ -29,7 +30,7 @@ hive plan <slug> --json                   # machine-readable hive-stage-action e
 
 1. Resolve TARGET via `Hive::TaskResolver` (path or slug). When `--from` is set, the resolver narrows to that stage.
 2. **`--from` retry-after-success rescue**: if the resolver fails with `InvalidTaskPath` AND `--from` was set, re-resolve without `stage_filter` and raise `WrongStage` (4) with the actual stage. Mirrors the pattern in `Hive::Commands::Approve` so a retry after a successful advance returns a meaningful `WRONG_STAGE` instead of "no task folder" (64).
-3. **Archive idempotency check**: if the verb is `archive` AND the task is already at `8-done` with `:complete` marker, emit a `noop` payload and return.
+3. **Archive idempotency check**: if the verb is `archive` AND the task is already at `9-done` with `:complete` marker, emit a `noop` payload and return.
 4. **At-target branch**: if the task is already at the verb's target stage, just run the stage's agent via `Hive::Commands::Run`. Phase: `ran`.
 5. **Wrong-stage guard**: if the task is at neither source nor target, raise `WrongStage` with the verb's expected source/target.
 6. **Marker validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `StageAction::ADVANCE_VERBS_TO_TERMINAL_MARKERS`). The `brainstorm` verb has `force_source: true` and skips this check.

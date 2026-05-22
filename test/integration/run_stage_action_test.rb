@@ -327,6 +327,40 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
+  def test_artifacts_moves_review_complete_to_artifacts_and_runs
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        review = File.join(dir, ".hive-state", "stages", "6-review", slug)
+        FileUtils.mkdir_p(File.dirname(review))
+        FileUtils.mv(inbox, review)
+        File.write(File.join(review, "task.md"), "# task\n<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
+        artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
+
+        capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
+
+        assert File.directory?(artifacts), "artifacts must promote 6-review -> 7-artifacts"
+        refute File.directory?(review), "source 6-review folder must be gone after promote"
+        assert_equal :complete, Hive::Markers.current(File.join(artifacts, "artifact.md")).name
+      end
+    end
+  end
+
+  def test_artifacts_at_target_marks_markerless_artifact_complete
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
+        FileUtils.mkdir_p(File.dirname(artifacts))
+        FileUtils.mv(inbox, artifacts)
+
+        capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
+
+        assert_equal :complete, Hive::Markers.current(File.join(artifacts, "artifact.md")).name
+      end
+    end
+  end
+
   def test_develop_moves_complete_plan_to_execute_and_runs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

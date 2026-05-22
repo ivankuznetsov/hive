@@ -14,6 +14,7 @@ class E2ESandboxEnvTest < Minitest::Test
 
         assert_equal File.join(sandbox, "Gemfile"), yielded["BUNDLE_GEMFILE"]
         assert_equal home, yielded["HIVE_HOME"]
+        assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_CODEX_BIN"]
         assert_equal "xterm-256color", yielded["TERM"]
         refute_includes yielded.keys, "BUNDLE_PATH"
         refute_includes yielded.keys, "RUBYOPT"

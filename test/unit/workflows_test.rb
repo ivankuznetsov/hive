@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/cli"
 require "hive/workflows"
 
 # Direct coverage for Hive::Workflows. The workflow verb map is the
@@ -12,6 +13,14 @@ class WorkflowsTest < Minitest::Test
                  Hive::Workflows::VERBS.keys,
                  "VERBS must list the canonical workflow verbs"
     assert_equal 8, Hive::Workflows::VERBS.size
+  end
+
+  def test_every_workflow_verb_has_thor_command
+    missing = Hive::Workflows::VERBS.keys.reject do |verb|
+      Hive::CLI.all_commands.key?(verb) || Hive::CLI.map.key?(verb)
+    end
+    assert_empty missing,
+                 "workflow verbs must be callable through the Thor CLI"
   end
 
   def test_open_pr_verb_source_and_target

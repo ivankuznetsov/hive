@@ -390,4 +390,198 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     assert_nil Hive::Tui::Subprocess.send(:extract_project, %w[hive pr slug --project]),
       "trailing --project with no value must not raise (returns nil)"
   end
+
+  # ---- helper edge cases ------------------------------------------------
+
+  def test_log_dir_and_path_use_env_override
+    old = ENV["HIVE_TUI_LOG_DIR"]
+    Dir.mktmpdir do |dir|
+      ENV["HIVE_TUI_LOG_DIR"] = dir
+
+      assert_equal dir, Hive::Tui::Subprocess.send(:log_dir)
+      assert_equal File.join(dir, "hive-tui-subprocess.log"), Hive::Tui::Subprocess.log_path
+    end
+  ensure
+    old.nil? ? ENV.delete("HIVE_TUI_LOG_DIR") : ENV["HIVE_TUI_LOG_DIR"] = old
+  end
+
+  def test_spawn_reaper_thread_logs_wait_and_dispatch_failures
+    logs = []
+    dispatch = ->(_msg) { raise "runner gone" }
+
+    with_replaced_singleton_method(Process, :wait2, ->(_pid) { raise Errno::ECHILD }) do
+      with_replaced_singleton_method(Hive::Tui::Debug, :log, ->(*args) { logs << args }) do
+        thread = Hive::Tui::Subprocess.spawn_reaper_thread(12_345, "pr", %w[hive pr slug], dispatch, "deadbeef")
+        thread.join(1)
+        refute thread.alive?
+      end
+    end
+
+    assert logs.any? { |scope, message| scope == "dispatch_background" && message.include?("reaper:") }
+    assert logs.any? { |scope, message| scope == "dispatch_background" && message.include?("reaper-dispatch") }
+  end
+
+  def test_delete_spawn_capture_tolerates_missing_and_logs_other_errors
+    with_log_dir do
+      assert_nil Hive::Tui::Subprocess.send(:delete_spawn_capture, "missing1")
+
+      with_replaced_singleton_method(File, :delete, ->(_path) { raise Errno::EACCES }) do
+        assert_nil Hive::Tui::Subprocess.send(:delete_spawn_capture, "missing2")
+      end
+    end
+  end
+
+  def test_sweep_old_spawn_captures_tolerates_deleted_files_and_glob_failures
+    with_log_dir do |dir|
+      orphan = File.join(dir, "hive-tui-spawn-deadbeef.log")
+      File.write(orphan, "old")
+      File.utime(Time.now - (25 * 60 * 60), Time.now - (25 * 60 * 60), orphan)
+
+      with_replaced_singleton_method(File, :delete, ->(_path) { raise Errno::ENOENT }) do
+        Hive::Tui::Subprocess.send(:sweep_old_spawn_captures!)
+      end
+
+      with_replaced_singleton_method(Dir, :glob, ->(_pattern) { raise "glob failed" }) do
+        assert_nil Hive::Tui::Subprocess.send(:sweep_old_spawn_captures!)
+      end
+    end
+  end
+
+  def test_bound_spawn_capture_noops_missing_files_and_logs_failures
+    with_log_dir do
+      assert_nil Hive::Tui::Subprocess.send(:bound_spawn_capture, "missing")
+
+      spawn_id = "feedbeef"
+      path = Hive::Tui::Subprocess.spawn_capture_path(spawn_id)
+      File.write(path, "x" * (Hive::Tui::Subprocess::SPAWN_CAPTURE_MAX_BYTES + 1))
+      original_size = File.method(:size)
+
+      with_replaced_singleton_method(File, :size, lambda { |candidate|
+        raise "size unavailable" if candidate == path
+
+        original_size.call(candidate)
+      }) do
+        assert_nil Hive::Tui::Subprocess.send(:bound_spawn_capture, spawn_id)
+      end
+    end
+  end
+
+  def test_stamp_subprocess_log_tolerates_write_failures
+    with_log_dir do
+      with_replaced_singleton_method(FileUtils, :mkdir_p, ->(_path) { raise Errno::EACCES }) do
+        assert_nil Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", %w[hive pr slug])
+      end
+    end
+  end
+
+  def test_rotate_subprocess_log_tolerates_permission_errors
+    with_log_dir do
+      path = Hive::Tui::Subprocess.log_path
+      File.write(path, "x" * (Hive::Tui::Subprocess::SUBPROCESS_LOG_MAX_BYTES + 1))
+
+      with_replaced_singleton_method(File, :rename, ->(_from, _to) { raise Errno::EACCES }) do
+        assert_nil Hive::Tui::Subprocess.send(:rotate_subprocess_log_if_needed)
+      end
+    end
+  end
+
+  def test_annotate_label_with_id_leaves_unpaired_labels_unchanged
+    assert_equal "ERRNO Errno::ENOENT",
+      Hive::Tui::Subprocess.send(:annotate_label_with_id, "ERRNO Errno::ENOENT", "deadbeef")
+  end
+
+  def test_diagnose_recent_failure_logs_and_returns_nil_on_parser_error
+    with_isolated_log do |path|
+      File.write(path, "placeholder\n")
+
+      with_replaced_singleton_method(Hive::Tui::Subprocess, :recent_log_section_for, ->(_verb) { raise "parse boom" }) do
+        assert_nil Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+      end
+    end
+  end
+
+  def test_read_spawn_capture_returns_nil_when_file_disappears
+    assert_nil Hive::Tui::Subprocess.send(:read_spawn_capture, "deadbeef", 1024)
+  end
+
+  def test_run_quiet_returns_timeout_sentinel_and_partial_output
+    error = Hive::Tui::Subprocess::TimeoutError.new(stdout: "partial out", stderr: "partial err", elapsed: 1.25)
+
+    with_replaced_singleton_method(Hive::Tui::Subprocess, :bounded_capture3, ->(*_cmd, timeout:) { raise error }) do
+      exit_code, out, err = Hive::Tui::Subprocess.run_quiet!(%w[hive status])
+
+      assert_equal Hive::Tui::Subprocess::COMMAND_TIMEOUT_EXIT, exit_code
+      assert_equal "partial out", out
+      assert_includes err, "command timed out after 1.25s"
+      assert_includes err, "partial err"
+    end
+  end
+
+  def test_read_stream_returns_empty_string_on_ioerror
+    stream = Object.new
+    stream.define_singleton_method(:read) { raise IOError }
+
+    assert_equal "", Hive::Tui::Subprocess.send(:read_stream, stream)
+  end
+
+  def test_terminate_process_group_ignores_missing_group_for_term_and_kill
+    calls = []
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, target|
+      calls << [ signal, target ]
+      raise Errno::ESRCH
+    }) do
+      with_replaced_singleton_method(Hive::Tui::Subprocess, :sleep, ->(_seconds) { }) do
+        assert_nil Hive::Tui::Subprocess.send(:terminate_process_group, 12_345)
+      end
+    end
+
+    assert_equal [ [ "TERM", -12_345 ], [ "KILL", -12_345 ] ], calls
+  end
+
+  def test_safe_thread_value_kills_live_threads_and_rescues_value_errors
+    killed = false
+    live_thread = Object.new
+    live_thread.define_singleton_method(:alive?) { true }
+    live_thread.define_singleton_method(:kill) { killed = true }
+    live_thread.define_singleton_method(:value) { "done" }
+
+    assert_equal "done", Hive::Tui::Subprocess.send(:safe_thread_value, live_thread)
+    assert killed
+
+    broken_thread = Object.new
+    broken_thread.define_singleton_method(:alive?) { raise "status unavailable" }
+
+    assert_equal "", Hive::Tui::Subprocess.send(:safe_thread_value, broken_thread)
+  end
+
+  def test_translate_status_returns_minus_one_when_status_has_no_exit_or_signal
+    status = Object.new
+    status.define_singleton_method(:exitstatus) { nil }
+    status.define_singleton_method(:signaled?) { false }
+
+    assert_equal(-1, Hive::Tui::Subprocess.send(:translate_status, status))
+  end
+
+  def test_parse_argv_from_section_returns_nil_for_unmatched_header
+    assert_nil Hive::Tui::Subprocess.send(:parse_argv_from_section, "not a BEGIN line\n")
+  end
+
+  def with_log_dir
+    old = ENV["HIVE_TUI_LOG_DIR"]
+    Dir.mktmpdir do |dir|
+      ENV["HIVE_TUI_LOG_DIR"] = dir
+      yield dir
+    end
+  ensure
+    old.nil? ? ENV.delete("HIVE_TUI_LOG_DIR") : ENV["HIVE_TUI_LOG_DIR"] = old
+  end
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
+  end
 end

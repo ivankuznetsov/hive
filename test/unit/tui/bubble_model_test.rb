@@ -1040,6 +1040,60 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/image paste failed/i, @model.hive_model.flash.to_s)
   end
 
+
+  def test_cleanup_new_idea_staging_warns_when_guard_refuses_path
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        new_idea_staging_dir: "/outside/tmp",
+        new_idea_staging_tmp_root: Dir.tmpdir
+      ),
+      dispatch: @dispatch
+    )
+    logs = []
+
+    with_singleton_method_stub(Hive::Tui::ComposerStaging, :cleanup!, lambda { |_dir, **_kwargs|
+      raise ArgumentError, "refusing outside tmpdir"
+    }) do
+      with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
+        logs << [ tag, message ]
+      }) do
+        _out, err = capture_io { @model.send(:cleanup_new_idea_staging) }
+        assert_match(/staging cleanup refused/, err)
+      end
+    end
+
+    assert_nil @model.hive_model.new_idea_staging_dir
+    assert_nil @model.hive_model.new_idea_staging_tmp_root
+    assert_equal "new_idea_staging", logs.dig(0, 0)
+    assert_match(/cleanup refused/, logs.dig(0, 1))
+  end
+
+  def test_cleanup_new_idea_staging_warns_when_filesystem_cleanup_fails
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        new_idea_staging_dir: File.join(Dir.tmpdir, "hive-staging-fail"),
+        new_idea_staging_tmp_root: Dir.tmpdir
+      ),
+      dispatch: @dispatch
+    )
+    logs = []
+
+    with_singleton_method_stub(Hive::Tui::ComposerStaging, :cleanup!, lambda { |_dir, **_kwargs|
+      raise Errno::EACCES, "permission denied"
+    }) do
+      with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
+        logs << [ tag, message ]
+      }) do
+        _out, err = capture_io { @model.send(:cleanup_new_idea_staging) }
+        assert_match(/staging cleanup failed/, err)
+      end
+    end
+
+    assert_equal "new_idea_staging", logs.dig(0, 0)
+    assert_match(/cleanup failed/, logs.dig(0, 1))
+  end
+
+
   def test_new_idea_drag_drop_non_image_file_flashes_without_placeholder
     with_tmp_dir do |dir|
       path = File.join(dir, "notes.txt")
@@ -2548,6 +2602,63 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/no automatic recovery/i, @model.hive_model.flash)
     assert_match(/Open in agent/, @model.hive_model.flash)
   end
+
+
+  def test_red_status_autofix_routes_recover_review_error_and_fallback
+    model = @model
+    calls = []
+    @model.define_singleton_method(:red_status_autofix_force?) { |_row| true }
+    @model.define_singleton_method(:recover_review) do |row, force:|
+      calls << [ :review, row.slug, force ]
+      [ model.hive_model, nil ]
+    end
+    @model.define_singleton_method(:recover_error) do |row|
+      calls << [ :error, row.slug ]
+      [ model.hive_model, nil ]
+    end
+
+    review_row = make_task_row(action_key: "recover_review", slug: "review-me", marker: "review_stale")
+    error_row = make_task_row(action_key: "error", slug: "error-me", marker: "error")
+    fallback_row = make_task_row(action_key: "manual", slug: "manual-me", marker: "error")
+
+    @model.send(:red_status_autofix, review_row)
+    @model.send(:red_status_autofix, error_row)
+    fallback_model, = @model.send(:red_status_autofix, fallback_row)
+
+    assert_equal [ [ :review, "review-me", true ], [ :error, "error-me" ] ], calls
+    assert_match(/no automatic recovery/, fallback_model.flash)
+  end
+
+  def test_red_status_autofix_refuses_shell_composed_diagnostic_retry
+    row = make_task_row(action_key: "error", slug: "unsafe-retry", marker: "none").with(
+      diagnostic: {
+        "suggested_next_action" => {
+          "kind" => "retry",
+          "command" => "hive run unsafe-retry; echo bad"
+        }
+      }
+    )
+
+    model, = @model.send(:red_status_autofix, row)
+
+    assert_match(/not directly dispatchable/, model.flash)
+  end
+
+  def test_red_status_autofix_reports_malformed_diagnostic_retry
+    row = make_task_row(action_key: "error", slug: "bad-retry", marker: "none").with(
+      diagnostic: {
+        "suggested_next_action" => {
+          "kind" => "retry",
+          "command" => "hive run 'unterminated"
+        }
+      }
+    )
+
+    model, = @model.send(:red_status_autofix, row)
+
+    assert_match(/diagnostic retry command is malformed/, model.flash)
+  end
+
 
   def test_recover_error_does_not_rerun_when_marker_clear_fails
     row = make_task_row(
@@ -5088,6 +5199,46 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.singleton_class.send(:alias_method, :run_quiet!, :__orig_run_quiet)
     Hive::Tui::Subprocess.singleton_class.send(:remove_method, :__orig_run_quiet)
   end
+
+
+  def test_heal_marker_evicts_cache_when_marker_clear_fails
+    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
+    cache = @model.instance_variable_get(:@healed_folders)
+    cache[row.folder] = Time.now
+    logs = []
+
+    with_run_quiet_stub(->(_argv) { [ 1, "", "clear failed\nmore" ] }) do
+      with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
+        logs << [ tag, message ]
+      }) do
+        @model.send(:heal_marker, row)
+      end
+    end
+
+    refute cache.key?(row.folder)
+    assert_equal "auto_heal", logs.dig(0, 0)
+    assert_match(/clear failed/, logs.dig(0, 1))
+  end
+
+  def test_heal_marker_evicts_cache_when_clear_raises
+    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
+    cache = @model.instance_variable_get(:@healed_folders)
+    cache[row.folder] = Time.now
+    logs = []
+
+    with_run_quiet_stub(->(_argv) { raise RuntimeError, "boom" }) do
+      with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
+        logs << [ tag, message ]
+      }) do
+        @model.send(:heal_marker, row)
+      end
+    end
+
+    refute cache.key?(row.folder)
+    assert_equal "auto_heal", logs.dig(0, 0)
+    assert_match(/RuntimeError: boom/, logs.dig(0, 1))
+  end
+
 
   # ---- SubprocessExited diagnostic interception ----
   #

@@ -43,7 +43,7 @@ class InitDoctorPreflightTest < Minitest::Test
   def test_all_green_emits_no_preflight_output
     with_fake_home do |home|
       install_all_default_skills(home)
-      with_tmp_global_config do
+      with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
           out, err = capture_io { Hive::Commands::Init.new(dir).call }
           assert_includes out, "hive: initialized"
@@ -60,7 +60,7 @@ class InitDoctorPreflightTest < Minitest::Test
       # Remove the brainstorm stage skill so the preflight surfaces it.
       FileUtils.rm_rf("#{home}/.claude/plugins/cache/mp/compound-engineering")
 
-      with_tmp_global_config do
+      with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
           out, err = capture_io { Hive::Commands::Init.new(dir).call }
           assert_includes out, "hive: initialized"
@@ -78,7 +78,7 @@ class InitDoctorPreflightTest < Minitest::Test
       # Only install plan; everything else missing (including reviewers).
       write_file("#{home}/.claude/commands/plan.md")
 
-      with_tmp_global_config do
+      with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
           _, err = capture_io { Hive::Commands::Init.new(dir).call }
           assert_match(/found \d+ issue/, err)
@@ -93,7 +93,7 @@ class InitDoctorPreflightTest < Minitest::Test
   def test_preflight_does_not_change_init_exit_code
     with_fake_home do |home|
       # Nothing installed → multiple missing skills, but init must still succeed.
-      with_tmp_global_config do
+      with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
           # Init relies on `exit` for failure paths; a successful init
           # returns normally. capture_io will just observe stdout/stderr;
@@ -114,8 +114,8 @@ class InitDoctorPreflightTest < Minitest::Test
     # so the doctor's own rescue does NOT catch it and it propagates
     # to init's preflight rescue. Restore around the test so other
     # tests in the suite see the original method.
-    with_fake_home do |_home|
-      with_tmp_global_config do
+    with_fake_home do |home|
+      with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
           original = Hive::Config.method(:load)
           Hive::Config.define_singleton_method(:load) do |_path|
@@ -137,8 +137,8 @@ class InitDoctorPreflightTest < Minitest::Test
     # (returns EXIT_CONFIG_ERROR), init's preflight surfaces a
     # pointer line rather than going silent. This is the case-2 path
     # in run_init_preflight!.
-    with_fake_home do |_home|
-      with_tmp_global_config do
+    with_fake_home do |home|
+      with_tmp_global_config(home: home) do
         with_tmp_git_repo do |dir|
           original = Hive::Config.method(:load)
           Hive::Config.define_singleton_method(:load) do |_path|

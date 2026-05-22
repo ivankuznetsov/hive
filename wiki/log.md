@@ -1823,6 +1823,14 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Refreshed pages:**
 - `examples/systemd/hive-daemon.service` — extended the inline comment to explain why both `HIVE_BIN=` and `Environment=PATH=` are installer-managed (the PATH now carries Ruby-manager shim discovery on top of the minimal shell-out coverage).
 
+## [2026-05-22T00:00:00Z] testing — merged subprocess coverage task
+
+**Action:** Added `bundle exec rake coverage` as an opt-in coverage run using Ruby stdlib `Coverage`. The harness loads source files for honest zero-hit accounting, collects child Ruby subprocess coverage via `test/hive_coverage_boot.rb`, merges per-process result files under `coverage/.resultset/`, and writes `coverage/coverage.json` with line and branch summaries. `with_tmp_global_config(home: nil)` now isolates both `HIVE_HOME` and `HOME` by default while still allowing fake HOME fixtures to be passed explicitly.
+
+**Refreshed pages:**
+- `wiki/testing.md` — documents the coverage task and helper HOME semantics.
+
+
 ## [2026-05-22T17:00:00Z] tui — remove orphaned findings triage mode
 
 **Note:** This entry recorded an intermediate decision. See the 18:00 entry below — the back-compat carve-out was reversed and the `REVIEW_FINDINGS` constant + schema enum value were dropped in place. The umbrella comment update mentioned here was also reverted. The "Refreshed pages" list below is otherwise accurate.

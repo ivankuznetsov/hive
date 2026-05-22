@@ -10,11 +10,14 @@ class RunStageActionTest < Minitest::Test
 
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
+    @prev_codex_bin = ENV["HIVE_CODEX_BIN"]
     ENV["HIVE_CLAUDE_BIN"] = FAKE_BIN
+    ENV["HIVE_CODEX_BIN"] = FAKE_BIN
   end
 
   def teardown
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
+    ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
     %w[HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT].each { |k| ENV.delete(k) }
   end
 

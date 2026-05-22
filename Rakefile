@@ -1,4 +1,5 @@
 require "rake/testtask"
+require "fileutils"
 
 # Default suite — everything under test/{unit,integration}. Self-contained,
 # uses fake-claude / fake-gh, no network or paid API calls.
@@ -7,6 +8,17 @@ Rake::TestTask.new do |t|
   t.libs << "lib"
   t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
   t.warning = false
+end
+
+desc "Run the default suite with stdlib Coverage over lib/**/*.rb"
+task :coverage do
+  root = File.expand_path(__dir__)
+  FileUtils.rm_rf(File.join(root, "coverage", ".resultset"))
+  ENV["HIVE_COVERAGE"] = "1"
+  ENV["HIVE_COVERAGE_ROOT"] = root
+  coverage_rubyopt = "-I#{File.join(root, "test")} -rhive_coverage_boot"
+  ENV["RUBYOPT"] = [coverage_rubyopt, ENV["RUBYOPT"]].compact.join(" ")
+  Rake::Task[:test].invoke
 end
 
 # Smoke suite — opt-in, runs against real `claude` and a tmp git repo. Costs

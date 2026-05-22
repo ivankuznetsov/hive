@@ -1,5 +1,10 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
+if ENV["HIVE_COVERAGE"]
+  require_relative "support/coverage"
+  HiveTestCoverage.start!(root: File.expand_path("..", __dir__))
+end
+
 require "minitest/autorun"
 require "tmpdir"
 require "fileutils"
@@ -8,6 +13,11 @@ require "yaml"
 require "shellwords"
 require "English"
 require "hive"
+
+if ENV["HIVE_COVERAGE"]
+  HiveTestCoverage.install_reporter!
+  HiveTestCoverage.load_all_sources! unless ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+end
 
 module HiveTestStdinIsolation
   # Keep tests hermetic when the suite is launched from a real terminal:
@@ -86,15 +96,18 @@ module HiveTestHelper
     out
   end
 
-  def with_tmp_global_config
+  def with_tmp_global_config(home: nil)
     dir = Dir.mktmpdir("hive-global")
     old_hive_home = ENV["HIVE_HOME"]
+    old_home = ENV["HOME"]
     ENV["HIVE_HOME"] = dir
+    ENV["HOME"] = home || dir
     File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
     begin
       yield(dir)
     ensure
       old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
+      old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
       # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
       # tmpdir invoke `hive`/git subprocesses that can leave the tree
       # mid-rename.

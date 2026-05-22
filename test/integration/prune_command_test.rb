@@ -199,7 +199,7 @@ class PruneCommandTest < Minitest::Test
       Dir.mkdir(live)
       prev_home = ENV["HOME"]
       ENV["HOME"] = fake_home
-      with_tmp_global_config do |home|
+      with_tmp_global_config(home: fake_home) do |home|
         File.write(
           File.join(home, "config.yml"),
           { "registered_projects" => [ { "name" => "live", "path" => "~/live-project" } ] }.to_yaml

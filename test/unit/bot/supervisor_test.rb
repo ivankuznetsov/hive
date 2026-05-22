@@ -658,4 +658,199 @@ class HiveBotSupervisorTest < Minitest::Test
       assert_equal "Question 1 was already answered by another device", @telegram.messages.last.fetch(:text)
     end
   end
+
+  def test_poll_loop_logs_process_update_failure_and_advances_update_id
+    update = Update.new(chat_id: 42, update_id: 77)
+    supervisor = @supervisor
+    poll_args = []
+    @supervisor.instance_variable_set(:@next_update_id, nil)
+    @supervisor.instance_variable_get(:@config)["long_poll_timeout_sec"] = 0
+    @telegram.define_singleton_method(:poll_updates) do |timeout:, since_update_id:|
+      poll_args << [ timeout, since_update_id ]
+      supervisor.request_shutdown!
+      [ update ]
+    end
+    @supervisor.define_singleton_method(:process_update) { |_incoming| raise "process blew up" }
+
+    @supervisor.send(:poll_loop)
+
+    assert_equal [ [ 0, nil ] ], poll_args
+    assert_equal 78, @supervisor.instance_variable_get(:@next_update_id)
+    event = @logger.events.find { |entry| entry.fetch(:payload)[:source] == "process_update" }
+    assert_equal :fatal, event.fetch(:name)
+    assert_equal "process blew up", event.fetch(:payload).fetch(:message)
+  end
+
+  def test_poll_loop_logs_poll_failure_and_sleeps_interruptibly
+    supervisor = @supervisor
+    @supervisor.instance_variable_get(:@config)["long_poll_timeout_sec"] = 0
+    slept = []
+    @telegram.define_singleton_method(:poll_updates) do |timeout:, since_update_id:|
+      supervisor.request_shutdown!
+      raise "telegram offline"
+    end
+    @supervisor.define_singleton_method(:interruptible_sleep) { |seconds| slept << seconds }
+
+    @supervisor.send(:poll_loop)
+
+    event = @logger.events.find { |entry| entry.fetch(:payload)[:source] == "poll_loop" }
+    assert_equal :fatal, event.fetch(:name)
+    assert_equal "telegram offline", event.fetch(:payload).fetch(:message)
+    assert_equal [ 1 ], slept
+  end
+
+  def test_status_loop_logs_tick_failures
+    supervisor = @supervisor
+    @supervisor.define_singleton_method(:status_tick) do
+      supervisor.request_shutdown!
+      raise "status exploded"
+    end
+    @supervisor.define_singleton_method(:interruptible_sleep) { |_seconds| }
+
+    @supervisor.send(:status_loop)
+
+    event = @logger.events.find { |entry| entry.fetch(:payload)[:source] == "status_loop" }
+    assert_equal :fatal, event.fetch(:name)
+    assert_equal "status exploded", event.fetch(:payload).fetch(:message)
+  end
+
+  def test_reaper_loop_logs_reap_failures
+    supervisor = @supervisor
+    @supervisor.define_singleton_method(:reap_children) do
+      supervisor.request_shutdown!
+      raise "reap exploded"
+    end
+    @supervisor.define_singleton_method(:sleep) { |_seconds| }
+
+    @supervisor.send(:reaper_loop)
+
+    event = @logger.events.find { |entry| entry.fetch(:payload)[:source] == "reaper_loop" }
+    assert_equal :fatal, event.fetch(:name)
+    assert_equal "reap exploded", event.fetch(:payload).fetch(:message)
+  end
+
+  def test_execute_result_routes_compound_actions_to_helpers
+    calls = []
+    @supervisor.define_singleton_method(:dispatch_command_sequence) { |result, update| calls << [ :sequence, result, update ] }
+    @supervisor.define_singleton_method(:start_answer) { |result, update| calls << [ :start_answer, result, update ] }
+    @supervisor.define_singleton_method(:execute_answer_write) { |result, update| calls << [ :answer_write, result, update ] }
+    @supervisor.define_singleton_method(:execute_start_codex) { |result, update| calls << [ :start_codex, result, update ] }
+    @supervisor.define_singleton_method(:execute_confirm_codex_draft) { |result, update| calls << [ :confirm_codex, result, update ] }
+    update = Update.new(chat_id: 42, update_id: 88)
+
+    [
+      [ :dispatch_commands, :sequence ],
+      [ :start_answer, :start_answer ],
+      [ :write_answer_then_reply, :answer_write ],
+      [ :start_codex, :start_codex ],
+      [ :confirm_codex_draft, :confirm_codex ]
+    ].each do |action, expected_call|
+      result = FakeRouter::Result.new(action: action)
+      @supervisor.send(:execute_result, result, update)
+      assert_equal expected_call, calls.last.first
+      assert_same result, calls.last[1]
+      assert_same update, calls.last[2]
+    end
+  end
+
+  def test_wait_for_child_success_sleeps_until_child_completes
+    child = child_exit(exit_code: 0, pid: 456)
+    @child_supervisor.reap_batches << [] << [ child ]
+    sleeps = []
+    @supervisor.define_singleton_method(:sleep) { |seconds| sleeps << seconds }
+
+    ok = @supervisor.send(:wait_for_child_success, 456, deadline: Time.now + 1)
+
+    assert_equal true, ok
+    assert_equal [ 0.1 ], sleeps
+    assert_equal "Command completed", @telegram.messages.last.fetch(:text)
+  end
+
+  def test_execute_answer_write_reports_lock_busy
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(
+        action: :write_answer_then_reply,
+        slug: "task",
+        project: "hive",
+        question_n: 1,
+        answer_text: "Build it"
+      )
+
+      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!, ->(**_kwargs) { :lock_busy }) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 23))
+      end
+
+      assert_equal "Try again - another run holds the lock", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_confirm_codex_draft_reports_lock_busy
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_a, project: "hive")
+      @conversation_store.update(chat_id: 42, slug: "task", draft: "Draft", awaiting_confirm: true)
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 1)
+
+      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!, ->(**_kwargs) { :lock_busy }) do
+        @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 44))
+      end
+
+      assert_equal "Try again - another run holds the lock", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_confirm_codex_draft_reports_missing_question
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 99, mode: :path_a, project: "hive")
+      @conversation_store.update(chat_id: 42, slug: "task", draft: "Draft", awaiting_confirm: true)
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 99)
+
+      @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 45))
+
+      assert_equal "Question 99 was not found.", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_codex_conversation_memoizes_default_conversation
+    first = @supervisor.send(:codex_conversation)
+    second = @supervisor.send(:codex_conversation)
+
+    assert_kind_of Hive::Bot::CodexConversation, first
+    assert_same first, second
+  end
+
+  def test_next_unanswered_question_n_parses_brainstorm_file
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      assert_equal 1, @supervisor.send(:next_unanswered_question_n, path)
+    end
+  end
+
+  def test_interruptible_sleep_sleeps_until_flag_changes
+    supervisor = @supervisor
+    sleeps = []
+    @supervisor.define_singleton_method(:sleep) do |seconds|
+      sleeps << seconds
+      supervisor.request_shutdown!
+    end
+
+    @supervisor.send(:interruptible_sleep, 5)
+
+    assert_equal [ 0.5 ], sleeps
+  end
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    singleton = class << receiver; self; end
+    had_method = singleton.method_defined?(name) || singleton.private_method_defined?(name)
+    original = receiver.method(name) if had_method
+    singleton.define_method(name, replacement)
+    yield
+  ensure
+    if had_method
+      singleton.define_method(name, original)
+    else
+      singleton.remove_method(name) if singleton.method_defined?(name) || singleton.private_method_defined?(name)
+    end
+  end
 end

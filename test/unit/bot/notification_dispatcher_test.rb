@@ -119,6 +119,111 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
                  "dedupe entry should expire after the window so the same fingerprint re-notifies"
   end
 
+  def test_rows_without_notification_are_ignored
+    dispatcher.process_rows([ row(action: "agent_running", marker: "agent_working") ])
+
+    assert_empty telegram.messages
+    assert_empty logger.events
+  end
+
+  def test_send_failures_are_logged_without_marking_seen
+    flaky_telegram = FlakyTelegram.new
+    d = Hive::Bot::NotificationDispatcher.new(
+      telegram: flaky_telegram,
+      logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345 ], "notification_dedupe_window_sec" => 300 },
+      now: -> { @clock ||= Time.utc(2026, 5, 14, 12, 0, 0) }
+    )
+
+    d.process_rows([ row ])
+
+    assert_empty flaky_telegram.messages
+    assert_equal :send_failure, logger.events.last.first
+    assert_equal "IOError", logger.events.last.last[:error_class]
+
+    d.process_rows([ row ])
+
+    assert_equal 1, flaky_telegram.messages.size
+    assert_equal :notification_sent, logger.events.last.first
+  end
+
+  def test_ready_action_uses_config_fallback_when_no_daemon_probe
+    projects = []
+    loads = []
+    with_config_stubs(
+      find_project: ->(project) { projects << project; { "path" => "/tmp/hive" } },
+      load: ->(path) { loads << path; { "daemon" => { "enabled" => true } } }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_empty telegram.messages
+    assert_equal [ "hive" ], projects
+    assert_equal [ "/tmp/hive" ], loads
+  end
+
+  def test_ready_action_not_suppressed_when_project_missing_from_config
+    projects = []
+    loads = []
+    with_config_stubs(
+      find_project: ->(project) { projects << project; nil },
+      load: ->(path) { loads << path; raise "Config.load should not be called" }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_equal 1, telegram.messages.size
+    assert_equal [ "hive" ], projects
+    assert_empty loads
+  end
+
+  def test_daemon_config_errors_are_logged_and_do_not_suppress_ready_actions
+    with_config_stubs(
+      find_project: ->(_project) { { "path" => "/tmp/hive" } },
+      load: ->(_path) { raise Hive::ConfigError, "bad config" }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_equal 1, telegram.messages.size
+    event = logger.events.find { |name, _attrs| name == :poll_failure }
+    assert_equal "daemon_check", event.last[:source]
+    assert_equal "hive", event.last[:project]
+    assert_equal "Hive::ConfigError", event.last[:error_class]
+  end
+
+  def with_config_stubs(find_project:, load:)
+    original_find_project = Hive::Config.method(:find_project)
+    original_load = Hive::Config.method(:load)
+    Hive::Config.define_singleton_method(:find_project, &find_project)
+    Hive::Config.define_singleton_method(:load, &load)
+    yield
+  ensure
+    Hive::Config.define_singleton_method(:find_project, original_find_project)
+    Hive::Config.define_singleton_method(:load, original_load)
+  end
+
+  class FlakyTelegram
+    attr_reader :messages
+
+    def initialize
+      @messages = []
+      @fail_next = true
+    end
+
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
+      if @fail_next
+        @fail_next = false
+        raise IOError, "delivery failed"
+      end
+
+      @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
+    end
+  end
+
   class StubTelegram
     attr_reader :messages
 

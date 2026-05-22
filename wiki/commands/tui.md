@@ -39,7 +39,6 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Mode | Entered by | Exited by |
 |------|-----------|-----------|
 | Two-pane dashboard (default) | boot | `q` |
-| Findings triage | `Enter` on a `review_findings` row | `Esc` |
 | Red-status detail | `Enter` on selected red recovery/error rows | `q` / `Esc` |
 | Agent log tail | `Enter` on an `agent_running` row | `q` / `Esc` |
 | Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue; plan rows auto-advance to `develop` (or auto-revise if user added feedback) |
@@ -64,7 +63,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `P` | run `hive open-pr` (capital so it doesn't collide with `plan`) |
 | `F` | run `hive finalize` |
 | `a` | run `hive archive` |
-| `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), triage on `review_findings`, log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), red-status detail on selected review-recovery and non-kill-class `error` rows, direct retry/browse for the legacy review-stale exceptions, and suggested-command dispatch for ready rows |
+| `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), red-status detail on selected review-recovery and non-kill-class `error` rows, direct retry/browse for the legacy review-stale exceptions, and suggested-command dispatch for ready rows |
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `8-done` (or any stage). |
 | `s` | steer the focused task manually: open the configured `execute.agent` in the feature worktree with every existing stage folder for that slug passed as agent context, mark the row `MANUAL_STEERING`, and archive the slug under `archived-manual/` when the agent exits |
 | `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
@@ -76,7 +75,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `q` | quit (default mode) |
 | `Esc` | back to default mode (any sub-mode) |
 
-In findings-triage mode `a` and `r` rebind to *bulk accept* and *bulk reject* (against `hive accept-finding --all` / `hive reject-finding --all`). In red-status detail mode, `Enter` runs the existing autofix/retry path, `f` opens the task worktree in `$VISUAL` / `$EDITOR` / `vi`, `R` runs `hive status --diagnose <slug> --project <project> --write` in the background, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
+For findings triage, use the `hive accept-finding` / `hive reject-finding` CLI commands directly (the in-TUI triage mode was removed once the `review_findings` action key stopped being emitted by the live pipeline; see [[commands/findings]]). In red-status detail mode, `Enter` runs the existing autofix/retry path, `f` opens the task worktree in `$VISUAL` / `$EDITOR` / `vi`, `R` runs `hive status --diagnose <slug> --project <project> --write` in the background, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
 
 ## New Idea Prompt Editing
 
@@ -100,7 +99,7 @@ v2 anchors on a Charm-modern palette with rounded borders and semantic color:
 |---|---|---|
 | `agent_running` | magenta | 🤖 |
 | `error` / `recover_*` | red | ⚠ |
-| `needs_input` / `review_findings` | yellow | ⏸ |
+| `needs_input` | yellow | ⏸ |
 | `ready_*` | blue | ▶ |
 | `archived` | green | ✓ |
 | `manual_steering` | green | 🛠 |

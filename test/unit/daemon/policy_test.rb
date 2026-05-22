@@ -152,10 +152,12 @@ class HiveDaemonPolicyTest < Minitest::Test
   end
 
   def test_review_findings_skips
-    # PR-40 review P2 #5: `Hive::TaskAction` emits `hive findings <slug>`
-    # for this row, which is a read-only listing — auto-dispatching
-    # produces a no-op spawn. Daemon must skip and let the user run
-    # findings/accept-finding/reject-finding manually.
+    # `review_findings` is a vestigial enum value — no live producer
+    # emits it after the TUI triage mode was removed. This test pins the
+    # daemon's forward-compat default branch (`:skip` for unknown /
+    # non-routable actions) so a replayed legacy snapshot or a future
+    # external system synthesizing the value never accidentally
+    # auto-dispatches `hive findings`, which is a read-only listing.
     assert_equal :skip, decide(action: "review_findings",
                                command: "hive findings slug-a",
                                state_file_mtime: T0 - 600,

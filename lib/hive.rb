@@ -107,7 +107,11 @@ module Hive
     # keys) emitted by `hive status --json`. Same self-derived ALL pattern
     # as NextActionKind so adding a new bucket without updating ALL is
     # impossible. Adding a new value is non-breaking by contract; renaming
-    # or removing a value bumps SCHEMA_VERSIONS["hive-status"].
+    # or removing a value bumps SCHEMA_VERSIONS["hive-status"]. A value
+    # that is no longer emitted by any live producer may stay in the enum
+    # without a schema bump — mark it as vestigial back-compat with a
+    # comment naming the now-dead producer chain (see REVIEW_FINDINGS
+    # below).
     module TaskActionKind
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze

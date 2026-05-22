@@ -46,7 +46,6 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `brainstorm_complete` | `READY_TO_PLAN` | "Ready to plan" | plan |
 | `plan_waiting` | `NEEDS_INPUT` | "Needs your input" | plan |
 | `plan_complete` | `READY_TO_DEVELOP` | "Ready to develop" | develop |
-| `execute_findings` | `REVIEW_FINDINGS` | "Review findings" | findings |
 | `execute_waiting` | `NEEDS_INPUT` | "Needs your input" | develop |
 | `execute_complete` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
 | `open_pr_complete` | `READY_FOR_REVIEW` | "Ready for review" | review |

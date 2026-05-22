@@ -425,6 +425,56 @@ class TaskActionTest < Minitest::Test
                  "execute_stale must point at findings (recovery), not develop (would loop)")
   end
 
+  # Generic verbs (`findings` and friends) only carry `--stage` when slug
+  # collision actually exists, so the common single-task command stays
+  # clean. `execute_stale` is the surviving emitter of the `findings`
+  # verb after PR #122 removed the `:execute_findings` action, so it's
+  # the right fixture to pin the collision-aware `--stage` plumbing on.
+  def test_findings_command_uses_stage_only_on_collision
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    no_collision = Hive::TaskAction.for(task, marker(:execute_stale, "max_passes" => 4))
+    assert_equal "hive findings demo-260426-aaaa", no_collision.command,
+                 "findings command must NOT carry --stage absent collision"
+
+    with_collision = Hive::TaskAction.for(task, marker(:execute_stale, "max_passes" => 4),
+                                          stage_collision: true)
+    assert_equal "hive findings demo-260426-aaaa --stage 4-execute", with_collision.command,
+                 "findings command must carry --stage when status.rb flags a slug collision"
+  end
+
+  # Canary for the post-PR #122 invariant: no live producer in
+  # Hive::TaskAction should ever emit the vestigial REVIEW_FINDINGS
+  # action key. A future revert or parallel branch reintroducing a
+  # `findings_count`-bearing EXECUTE_WAITING writer would silently
+  # route through `needs_input` → daemon auto-dispatches `hive develop`
+  # instead of the prior human-gated flow. This canary fails fast.
+  def test_no_live_producer_emits_review_findings
+    stage_markers = [
+      [ "brainstorm",  2, [ :waiting, :complete, :agent_working, :error ] ],
+      [ "plan",        3, [ :waiting, :complete, :agent_working, :error ] ],
+      [ "execute",     4, [ :execute_waiting, :execute_complete, :execute_stale, :agent_working, :error ] ],
+      [ "open-pr",     5, [ :waiting, :complete, :agent_working, :error ] ],
+      [ "review",      6, [ :review_working, :review_waiting, :review_complete, :review_stale, :review_error, :review_ci_stale, :agent_working, :error ] ],
+      [ "finalize",    7, [ :waiting, :complete, :agent_working, :error ] ]
+    ]
+
+    stage_markers.each do |stage_name, stage_index, marker_names|
+      marker_names.each do |marker_name|
+        # Cover both "no attrs" and "findings_count carried as legacy
+        # attr" — the latter is the case that pre-PR #122 routed to
+        # REVIEW_FINDINGS and must now route elsewhere.
+        [ {}, { "findings_count" => 3 } ].each do |attrs|
+          task = fake_task(stage_name: stage_name, stage_index: stage_index)
+          action = Hive::TaskAction.for(task, marker(marker_name, **attrs))
+          refute_equal "review_findings", action.key,
+                       "no producer in the live pipeline may emit REVIEW_FINDINGS " \
+                       "(stage=#{stage_name} marker=#{marker_name} attrs=#{attrs.inspect}); " \
+                       "see ADR-028 in wiki/decisions.md"
+        end
+      end
+    end
+  end
+
   # ── command emission ──────────────────────────────────────────────────
 
   def test_workflow_verbs_always_include_from_for_idempotency

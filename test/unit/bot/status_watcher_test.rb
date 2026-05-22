@@ -5,6 +5,16 @@ require "hive/bot/status_watcher"
 class HiveBotStatusWatcherTest < Minitest::Test
   include HiveTestHelper
 
+  CapturingLogger = Struct.new(:events, keyword_init: true) do
+    def initialize(events: [])
+      super
+    end
+
+    def event(name, **payload)
+      events << { name: name, payload: payload }
+    end
+  end
+
   def with_fake_status(payload, exit_code: 0, stderr_text: "")
     with_tmp_dir do |dir|
       script = File.join(dir, "fake-hive")
@@ -72,6 +82,81 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "waiting", row.marker
       assert_equal "needs_input", row.action
       assert_nil row.diagnostic
+    end
+  end
+
+  def test_tick_fetches_status_rows
+    with_fake_status(JSON.generate(envelope([ task(slug: "tick-task") ]))) do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).tick(now: Time.utc(2026, 1, 1))
+
+      assert result.ok, result.error
+      assert_equal [ "tick-task" ], result.rows.map(&:slug)
+    end
+  end
+
+  def test_fetch_logs_nonzero_status_failure
+    logger = CapturingLogger.new
+
+    with_fake_status("", exit_code: 2, stderr_text: "boom\n") do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+      refute result.ok
+      assert_match(/exited 2/, result.error)
+      assert_equal :poll_failure, logger.events.first.fetch(:name)
+      assert_equal "status", logger.events.first.fetch(:payload).fetch(:source)
+    end
+  end
+
+  def test_fetch_rejects_invalid_envelopes
+    expected_version = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+    cases = {
+      "wrong schema" => [ { "schema" => "other", "ok" => true, "schema_version" => expected_version }, /missing schema/ ],
+      "not ok" => [ { "schema" => "hive-status", "ok" => false, "schema_version" => expected_version,
+                       "message" => "registry unavailable" }, /envelope ok=false: registry unavailable/ ],
+      "wrong version" => [ { "schema" => "hive-status", "ok" => true, "schema_version" => -1 }, /schema_version mismatch/ ]
+    }
+
+    cases.each do |label, (payload, pattern)|
+      with_fake_status(JSON.generate(payload)) do |bin|
+        logger = CapturingLogger.new
+        result = Hive::Bot::StatusWatcher.new(hive_bin: bin, logger: logger).fetch
+
+        refute result.ok, label
+        assert_match pattern, result.error, label
+        assert_equal :poll_failure, logger.events.first.fetch(:name), label
+      end
+    end
+  end
+
+  def test_fetch_skips_project_errors_and_uses_mtime_fallbacks
+    with_tmp_dir do |dir|
+      now = Time.utc(2026, 1, 1, 12, 0, 0)
+      file_time = Time.utc(2026, 1, 1, 10, 0, 0)
+      state_file = File.join(dir, "brainstorm.md")
+      File.write(state_file, "state")
+      File.utime(file_time, file_time, state_file)
+      file_task = task(slug: "file-mtime").merge("mtime" => "", "state_file" => state_file)
+      fallback_task = task(slug: "fallback-mtime").merge(
+        "mtime" => "not-a-time",
+        "state_file" => File.join(dir, "missing.md")
+      )
+      payload = envelope([ file_task, fallback_task ])
+      payload["projects"] << {
+        "name" => "broken",
+        "path" => "/tmp/broken",
+        "hive_state_path" => "/tmp/broken/.hive-state",
+        "error" => "unreadable",
+        "tasks" => [ task(slug: "skip-me") ]
+      }
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch(now: now)
+
+        assert result.ok, result.error
+        assert_equal [ "file-mtime", "fallback-mtime" ], result.rows.map(&:slug)
+        assert_equal file_time.to_i, result.rows.first.state_file_mtime.to_i
+        assert_equal now, result.rows.last.state_file_mtime
+      end
     end
   end
 

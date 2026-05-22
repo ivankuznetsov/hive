@@ -68,6 +68,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     path
   end
 
+  def write_review_doc(path, accepted: false)
+    mark = accepted ? "x" : " "
+    File.write(path, "## High\n- [#{mark}] First finding: useful rationale\n")
+    Hive::Findings::Document.new(path)
+  end
+
   # ---- Construction / init ----
 
   def test_init_returns_self_and_yield_tick
@@ -250,6 +256,17 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_translate_key_with_unknown_mode_returns_noop
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :unknown_mode),
+      dispatch: @dispatch
+    )
+
+    msg = @model.send(:translate_key, key_message(Bubbletea::KeyMessage::KEY_ENTER))
+
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
   def test_raw_text_input_in_new_idea_mode_inserts_at_cursor
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
@@ -377,6 +394,82 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "draft"
     refute_match(/^\s*$/, out.lines.last(2).first.to_s,
                  "no spurious blank flash row when flash is nil")
+  end
+
+  def test_view_renders_triage_mode
+    finding = Hive::Findings::Finding.new(
+      id: 1, severity: "high", accepted: false,
+      title: "Fix issue", justification: "because it matters", line_index: 1
+    )
+    state = Hive::Tui::TriageState.new(
+      slug: "some-slug", folder: "/tmp/some-slug",
+      findings: [ finding ], review_path: "/tmp/ce-review-01.md"
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
+      dispatch: @dispatch
+    )
+
+    out = @model.view
+
+    assert_includes out, "ce-review-01.md"
+    assert_includes out, "#1 Fix issue"
+  end
+
+  def test_view_renders_log_tail_mode
+    tail_state = Struct.new(:path, :claude_pid_alive) do
+      def lines(count)
+        [ "first log line", "second log line" ].first(count)
+      end
+    end.new("/tmp/hive/agent.log", false)
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :log_tail, tail_state: tail_state, cols: 80, rows: 5
+      ),
+      dispatch: @dispatch
+    )
+
+    out = @model.view
+
+    assert_includes out, "/tmp/hive/agent.log"
+    assert_includes out, "first log line"
+    assert_includes out, "stale"
+  end
+
+  def test_view_renders_red_status_detail_mode
+    row = make_task_row(
+      action_key: "error", action_label: "Error", marker: "error",
+      attrs: { "exit_code" => "1" }
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(
+      row: row, marker_signature: "error:1"
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :red_status_detail,
+        red_status_detail_state: state,
+        cols: 100,
+        rows: 12
+      ),
+      dispatch: @dispatch
+    )
+
+    out = @model.view
+
+    assert_includes out, "Red status"
+    assert_includes out, "some-slug"
+    assert_includes out, "Project: demo"
+  end
+
+  def test_view_falls_back_to_grid_for_unknown_mode
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :unknown_mode, cols: 100),
+      dispatch: @dispatch
+    )
+
+    out = @model.view
+
+    assert_includes out, "hive tui"
   end
 
   # ---- v2 two-pane composition ----
@@ -746,11 +839,61 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
   end
 
+  def test_empty_paste_outside_new_idea_short_circuits_without_clipboard_probe
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :grid),
+      dispatch: @dispatch
+    )
+    before = @model.hive_model
+
+    with_clipboard_probe_stub(->(**_kwargs) { flunk "clipboard probe should not run" }) do
+      _, cmd = @model.update(Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: ""))
+      assert_nil cmd
+    end
+
+    assert_equal before, @model.hive_model
+  end
+
+  def test_empty_image_clipboard_probe_flashes_without_placeholder
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+
+    with_clipboard_probe_stub(->(**_kwargs) { Hive::Tui::Clipboard::ProbeResult.empty_image }) do
+      @model.update(Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: ""))
+    end
+
+    assert_equal "", @model.hive_model.new_idea_buffer
+    assert_equal [], @model.hive_model.new_idea_attachments
+    assert_match(/image file is empty/, @model.hive_model.flash.to_s)
+  end
+
+  def test_clipboard_timeout_flashes_on_second_consecutive_timeout
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    timeout = Hive::Tui::Clipboard::ProbeResult.clipboard_timeout
+
+    with_clipboard_probe_stub(->(**_kwargs) { timeout }) do
+      @model.update(Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: ""))
+      refute_match(/clipboard probe timed out/, @model.hive_model.flash.to_s)
+      assert_equal 1, @model.instance_variable_get(:@clipboard_consecutive_timeouts)
+
+      @model.update(Hive::Tui::Messages::NewIdeaPasteRequested.new(raw_text: ""))
+    end
+
+    assert_match(/clipboard probe timed out/, @model.hive_model.flash.to_s)
+    assert_equal 0, @model.instance_variable_get(:@clipboard_consecutive_timeouts)
+  end
+
   # R16: pasting the same image bytes twice in a row must produce
   # two distinct staged files (no dedup). The composer is intentionally
   # additive — a user pasting the same screenshot twice has signalled
   # they want both placeholders in the body, and silently collapsing
   # them would lose buffer-cursor positioning the user typed around.
+
   def test_new_idea_same_image_bytes_pasted_twice_yields_two_distinct_files
     bytes = Hive::Tui::Clipboard::PNG_SIGNATURE + "payload".b
     @model = Hive::Tui::BubbleModel.new(
@@ -1411,6 +1554,101 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "programmer-error path must clear the model's staging_dir " \
       "after the ensure-block cleanup removes the disk tmpdir"
     assert_match(/internal error/, @model.hive_model.flash.to_s)
+  end
+
+  def test_open_findings_enters_triage_from_review_file
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "4-execute", "review-me")
+      reviews_dir = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      review_path = File.join(reviews_dir, "ce-review-01.md")
+      write_review_doc(review_path)
+      row = make_task_row(
+        action_key: "review_findings", slug: "review-me", stage: "4-execute", folder: folder
+      )
+
+      @model.update(Hive::Tui::Messages::OpenFindings.new(row: row))
+
+      assert_equal :triage, @model.hive_model.mode
+      assert_equal "review-me", @model.hive_model.triage_state.slug
+      assert_equal review_path, @model.hive_model.triage_state.review_path
+      assert_equal 1, @model.hive_model.triage_state.findings.size
+    end
+  end
+
+  def test_triage_toggle_and_bulk_actions_use_captured_state
+    with_tmp_dir do |dir|
+      review_path = File.join(dir, "ce-review-01.md")
+      document = write_review_doc(review_path)
+      state = Hive::Tui::TriageState.new(
+        slug: "some-slug", folder: dir,
+        findings: document.findings, review_path: review_path
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
+        dispatch: @dispatch
+      )
+      row = make_task_row(slug: "some-slug", folder: dir)
+      calls = []
+
+      with_run_quiet_stub(->(argv) { calls << argv; [ 0, "", "" ] }) do
+        @model.update(Hive::Tui::Messages::ToggleFinding.new(row: row))
+        @model.update(Hive::Tui::Messages::BULK_ACCEPT)
+        @model.update(Hive::Tui::Messages::BULK_REJECT)
+      end
+
+      assert_equal(
+        [
+          [ "hive", "accept-finding", dir, "1" ],
+          [ "hive", "accept-finding", dir, "--all" ],
+          [ "hive", "reject-finding", dir, "--all" ]
+        ],
+        calls
+      )
+    end
+  end
+
+  def test_triage_develop_dispatches_captured_state_command
+    with_tmp_dir do |dir|
+      review_path = File.join(dir, "ce-review-01.md")
+      document = write_review_doc(review_path)
+      state = Hive::Tui::TriageState.new(
+        slug: "some-slug", folder: dir,
+        findings: document.findings, review_path: review_path
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
+        dispatch: @dispatch
+      )
+      @model.define_singleton_method(:verb_interactive?) { |_verb| false }
+      calls = []
+
+      with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
+        _, cmd = @model.update(Hive::Tui::Messages::TRIAGE_DEVELOP)
+        assert_nil cmd
+      end
+
+      assert_equal [ [ "hive", "develop", dir, "--from", "4-execute" ] ], calls
+      assert_match(/running `hive develop /, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_open_summary_opens_summary_file_with_editor_takeover
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "7-finalize", "some-slug")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "summary.md"), "# Summary\n")
+      row = make_task_row(
+        action_key: "complete", stage: "7-finalize", marker: "complete", folder: folder
+      )
+
+      with_editor_env(visual: nil, editor: "fake-editor") do
+        _, cmd = @model.update(Hive::Tui::Messages::OpenSummary.new(row: row))
+        assert_kind_of Bubbletea::SequenceCommand, cmd
+      end
+
+      assert_match(/opening summary for some-slug in fake-editor/, @model.hive_model.flash.to_s)
+    end
   end
 
   # ---- DispatchCommand → background spawn ----

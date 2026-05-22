@@ -158,13 +158,34 @@ module Hive
         _out, _err, status = Open3.capture3("git", "-C", hive_state, "diff", "--cached", "--quiet")
         return if status.success?
 
-        message =
-          if config_only && moved.empty?
-            "hive: migrate config keys (no tasks moved)"
-          else
-            "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
-          end
+        message = migrate_commit_message(moved, config_only: config_only)
         ops.run_git!("-C", hive_state, "commit", "-m", message)
+      rescue Hive::GitError => e
+        # The mv operations already succeeded — the on-disk layout is
+        # the new one — but git couldn't commit the change (missing
+        # git, dirty index, hook failure, EACCES, etc.). Without this
+        # rescue, a subsequent `hive migrate` sees `already_migrated?`
+        # return true (because legacy dirs are absent) and is a no-op,
+        # so the moves never get committed unless the operator notices
+        # and runs the right git commands manually. Print a concrete
+        # one-liner recovery hint and swallow the error so the rest of
+        # `Migrate#call` (daemon restart, completion message) still
+        # runs against the consistent on-disk layout. ce-code-review
+        # P2 #21.
+        message = migrate_commit_message(moved, config_only: config_only)
+        warn "hive: migrate completed the on-disk mv operations but " \
+             "could not commit them to the hive-state git history: " \
+             "#{e.class}: #{e.message}"
+        warn "hive: recover with:  git -C #{hive_state} add -A && " \
+             "git -C #{hive_state} commit -m '#{message}'"
+      end
+
+      def migrate_commit_message(moved, config_only:)
+        if config_only && moved.empty?
+          "hive: migrate config keys (no tasks moved)"
+        else
+          "hive: migrate stage directories (#{moved.size} task#{moved.size == 1 ? '' : 's'})"
+        end
       end
 
       # Rewrite legacy `pr` budget/timeout keys onto the canonical

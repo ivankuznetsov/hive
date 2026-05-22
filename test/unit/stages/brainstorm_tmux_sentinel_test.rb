@@ -227,7 +227,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       tail = "...assistant: <!-- WAITING -->\n...assistant: <!-- COMPLETE -->\n"
       runner = FakeRunner.new(tail)
 
-      marker = Hive::Stages::BrainstormTmux.marker_from_sentinel_tail(task, runner)
+      marker = Hive::ClaudeLauncher.marker_from_sentinel_tail(task, runner)
 
       refute_nil marker, "should return the state file marker when pane shows the matching name"
       assert_equal :waiting, marker.name
@@ -240,7 +240,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       tail = "...assistant: <!-- COMPLETE -->\n"
       runner = FakeRunner.new(tail)
 
-      assert_nil Hive::Stages::BrainstormTmux.marker_from_sentinel_tail(task, runner)
+      assert_nil Hive::ClaudeLauncher.marker_from_sentinel_tail(task, runner)
     end
   end
 
@@ -248,7 +248,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     with_tmp_task_folder do |task|
       Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
 
-      Hive::Stages::BrainstormTmux.record_claude_pid(task, FakePidRunner.new(12_345))
+      Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
 
       lock = YAML.safe_load(File.read(File.join(task.folder, ".lock")))
       assert_equal 12_345, lock.fetch("claude_pid")
@@ -300,7 +300,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       []
     )
 
-    assert Hive::Stages::BrainstormTmux.prepare_claude_session!(runner)
+    assert Hive::ClaudeLauncher.prepare_claude_session!(runner)
     assert_equal [ "Enter" ], runner.sent_keys
   end
 
@@ -313,16 +313,16 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       ],
       []
     )
-    original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:claude_ready_wait_timeout)
-    Hive::Stages::BrainstormTmux.define_singleton_method(:claude_ready_wait_timeout) { 0.01 }
+    original = Hive::ClaudeLauncher.singleton_class.instance_method(:claude_ready_wait_timeout)
+    Hive::ClaudeLauncher.define_singleton_method(:claude_ready_wait_timeout) { 0.01 }
 
     err = assert_raises(Hive::AgentError) do
-      Hive::Stages::BrainstormTmux.prepare_claude_session!(runner)
+      Hive::ClaudeLauncher.prepare_claude_session!(runner)
     end
     assert_match(/did not become ready/, err.message)
     refute_empty runner.sent_keys, "should have sent at least one Enter before timing out"
   ensure
-    Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :claude_ready_wait_timeout, original) if original
+    Hive::ClaudeLauncher.singleton_class.send(:define_method, :claude_ready_wait_timeout, original) if original
   end
 
   def test_prepare_claude_session_does_not_treat_permission_prompt_as_ready
@@ -334,15 +334,15 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       ],
       []
     )
-    original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:claude_ready_wait_timeout)
-    Hive::Stages::BrainstormTmux.define_singleton_method(:claude_ready_wait_timeout) { 0.01 }
+    original = Hive::ClaudeLauncher.singleton_class.instance_method(:claude_ready_wait_timeout)
+    Hive::ClaudeLauncher.define_singleton_method(:claude_ready_wait_timeout) { 0.01 }
 
     err = assert_raises(Hive::AgentError) do
-      Hive::Stages::BrainstormTmux.prepare_claude_session!(runner)
+      Hive::ClaudeLauncher.prepare_claude_session!(runner)
     end
     assert_match(/did not become ready/, err.message)
   ensure
-    Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :claude_ready_wait_timeout, original) if original
+    Hive::ClaudeLauncher.singleton_class.send(:define_method, :claude_ready_wait_timeout, original) if original
   end
 
   def test_orphan_sweep_passes_double_dash_before_add_dir_pattern
@@ -362,7 +362,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
         end
       end
 
-      Hive::Stages::BrainstormTmux.sweep_orphan_processes(task)
+      Hive::ClaudeLauncher.sweep_orphan_processes(task)
 
       assert_equal "pgrep", calls.fetch(0).fetch(0)
       assert_equal "--", calls.fetch(0).fetch(2)
@@ -378,7 +378,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
   def test_orphan_sweep_pattern_is_valid_pgrep_regex
     with_tmp_task_folder do |task|
-      pattern = Hive::Stages::BrainstormTmux.orphan_sweep_pattern(task)
+      pattern = Hive::ClaudeLauncher.orphan_sweep_pattern(task)
 
       _out, err, status = Open3.capture3("pgrep", "-f", "--", pattern)
 
@@ -390,7 +390,11 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     with_tmp_task_folder do |task|
       profile = Struct.new(:bin).new("/bin/claude")
 
-      command = Hive::Stages::BrainstormTmux.wrapper_command(task, profile)
+      command = Hive::ClaudeLauncher.wrapper_command(
+        cwd: task.folder,
+        add_dirs: [ task.folder ],
+        profile: profile
+      )
 
       mode_index = command.index("--permission-mode")
       refute_nil mode_index

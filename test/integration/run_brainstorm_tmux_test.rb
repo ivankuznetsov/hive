@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
+require "hive/claude_launcher"
 
 class RunBrainstormTmuxTest < Minitest::Test
   include HiveTestHelper
@@ -192,8 +193,8 @@ class RunBrainstormTmuxTest < Minitest::Test
         # wrappers across test runs and across any second monkey-patch
         # in the same process. Using `define_method` with the captured
         # `UnboundMethod` restores the module to its untouched state.
-        original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:wait_for_terminal_marker)
-        Hive::Stages::BrainstormTmux.define_singleton_method(:wait_for_terminal_marker) do |_task, _runner, _timeout|
+        original = Hive::ClaudeLauncher.singleton_class.instance_method(:wait_for_terminal_marker)
+        Hive::ClaudeLauncher.define_singleton_method(:wait_for_terminal_marker) do |_task, _runner, _timeout|
           raise "forced midrun failure"
         end
 
@@ -201,7 +202,7 @@ class RunBrainstormTmuxTest < Minitest::Test
         assert_empty tmux_sessions
       ensure
         if original
-          Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :wait_for_terminal_marker, original)
+          Hive::ClaudeLauncher.singleton_class.send(:define_method, :wait_for_terminal_marker, original)
         end
       end
     end

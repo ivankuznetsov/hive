@@ -271,6 +271,35 @@ module Hive
         ).run!
       end
 
+      def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
+                         add_dirs: [], cwd: nil, log_label: nil,
+                         profile: nil, expected_output: nil, status_mode: nil,
+                         session_name: nil, allowed_tools: nil)
+        require "hive/claude_launcher"
+
+        profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        unless profile.name == :claude
+          raise Hive::AgentError,
+                "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
+        end
+
+        Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: cfg,
+          prompt: prompt,
+          add_dirs: add_dirs,
+          cwd: cwd || task.folder,
+          max_budget_usd: max_budget_usd,
+          timeout_sec: timeout_sec,
+          log_label: log_label,
+          session_name: session_name || Hive::ClaudeLauncher.tmux_session_name(task.stage_name, task),
+          status_mode: status_mode,
+          expected_output: expected_output,
+          profile: profile,
+          allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS
+        )
+      end
+
       class TemplateBindings
         def initialize(values = {})
           values.each do |k, v|

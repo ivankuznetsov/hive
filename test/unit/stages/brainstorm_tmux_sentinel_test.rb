@@ -20,6 +20,19 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
   end
 
+
+  FakeNeverReadyRunner = Struct.new(:name) do
+    def session_exists?
+      false
+    end
+  end
+
+  FakeTmuxErrorRunner = Struct.new(:name) do
+    def capture_pane_tail(bytes:)
+      raise Hive::TmuxError, "pane gone"
+    end
+  end
+
   FakeInteractiveRunner = Struct.new(:name, :tails, :sent_keys) do
     def capture_pane_tail(bytes:)
       tails.shift || tails.last || ""
@@ -36,6 +49,134 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   # include BOTH marker names — earlier versions used `Regexp.last_match`
   # outside `scan`'s block and collapsed every entry to the final match,
   # which masked the non-terminal name.
+
+  def test_run_rejects_tmux_runtime_with_non_claude_agent_before_preflight
+    with_tmp_task_folder do |task|
+      cfg = { "brainstorm" => { "runtime" => "tmux_interactive", "agent" => "codex" } }
+
+      err = assert_raises(Hive::AgentError) do
+        Hive::Stages::BrainstormTmux.run!(task, cfg)
+      end
+
+      assert_match(/requires brainstorm.agent=claude/, err.message)
+    end
+  end
+
+  def test_safe_swallows_teardown_errors
+    result = Hive::Stages::BrainstormTmux.safe do
+      raise "teardown failed"
+    end
+
+    assert_nil result
+  end
+
+  def test_wait_until_session_exists_times_out
+    original = Hive::Stages::BrainstormTmux.singleton_class.instance_method(:session_ready_wait_timeout)
+    Hive::Stages::BrainstormTmux.define_singleton_method(:session_ready_wait_timeout) { 0.01 }
+
+    err = assert_raises(Hive::AgentError) do
+      Hive::Stages::BrainstormTmux.wait_until_session_exists!(FakeNeverReadyRunner.new("missing"))
+    end
+
+    assert_match(/did not start/, err.message)
+  ensure
+    if original
+      Hive::Stages::BrainstormTmux.singleton_class.send(:define_method, :session_ready_wait_timeout, original)
+    end
+  end
+
+  def test_prepare_claude_session_wraps_tmux_errors
+    err = assert_raises(Hive::AgentError) do
+      Hive::Stages::BrainstormTmux.prepare_claude_session!(FakeTmuxErrorRunner.new("broken"))
+    end
+
+    assert_match(/could not inspect claude tmux session broken/, err.message)
+    assert_match(/pane gone/, err.message)
+  end
+
+  def test_marker_from_sentinel_tail_returns_nil_on_tmux_error
+    with_tmp_task_folder do |task|
+      File.write(task.state_file, "## Round\n<!-- WAITING -->\n")
+
+      marker = Hive::Stages::BrainstormTmux.marker_from_sentinel_tail(
+        task, FakeTmuxErrorRunner.new("broken")
+      )
+
+      assert_nil marker
+    end
+  end
+
+  def test_reset_signal_files_removes_done_and_result
+    with_tmp_task_folder do |task|
+      File.write(Hive::Stages::BrainstormTmux.done_path(task), "done")
+      File.write(Hive::Stages::BrainstormTmux.result_path(task), "{}")
+
+      Hive::Stages::BrainstormTmux.reset_signal_files(task)
+
+      refute_path_exists Hive::Stages::BrainstormTmux.done_path(task)
+      refute_path_exists Hive::Stages::BrainstormTmux.result_path(task)
+    end
+  end
+
+  def test_orphan_sweep_logs_warning_when_pgrep_fails
+    with_tmp_task_folder do |task|
+      original = Open3.singleton_class.instance_method(:capture3)
+      failed = fake_status(success: false, exitstatus: 2)
+      Open3.define_singleton_method(:capture3) do |*args|
+        raise "unexpected command: #{args.inspect}" unless args.first == "pgrep"
+
+        [ "", "unsupported flag", failed ]
+      end
+
+      Hive::Stages::BrainstormTmux.sweep_orphan_processes(task)
+
+      log = File.read(Hive::Stages::BrainstormTmux.orphan_sweep_log_path(task))
+      assert_includes log, "WARN: pgrep failed"
+      assert_includes log, "unsupported flag"
+    ensure
+      Open3.singleton_class.send(:define_method, :capture3, original) if original
+    end
+  end
+
+  def test_orphan_sweep_ignores_missing_pgrep
+    with_tmp_task_folder do |task|
+      original = Open3.singleton_class.instance_method(:capture3)
+      Open3.define_singleton_method(:capture3) do |*_args|
+        raise Errno::ENOENT, "pgrep"
+      end
+
+      Hive::Stages::BrainstormTmux.sweep_orphan_processes(task)
+
+      refute_path_exists Hive::Stages::BrainstormTmux.orphan_sweep_log_path(task)
+    ensure
+      Open3.singleton_class.send(:define_method, :capture3, original) if original
+    end
+  end
+
+  def test_rotate_orphan_sweep_log_truncates_oversized_log
+    with_tmp_task_folder do |task|
+      path = Hive::Stages::BrainstormTmux.orphan_sweep_log_path(task)
+      File.write(path, "x" * Hive::Stages::BrainstormTmux::ORPHAN_SWEEP_LOG_MAX_BYTES)
+
+      Hive::Stages::BrainstormTmux.rotate_orphan_sweep_log(path)
+
+      assert_includes File.read(path), "log truncated"
+    end
+  end
+
+  def test_cleanup_scratch_deletes_settings_file_and_empty_dir
+    with_tmp_dir do |dir|
+      scratch = File.join(dir, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(scratch))
+      File.write(scratch, "{}")
+
+      Hive::Stages::BrainstormTmux.cleanup_scratch(scratch)
+
+      refute_path_exists scratch
+      refute_path_exists File.dirname(scratch)
+    end
+  end
+
   def test_sentinel_fallback_matches_terminal_marker_when_pane_contains_both
     with_tmp_task_folder do |task|
       File.write(task.state_file, "## Round\n<!-- WAITING -->\n")

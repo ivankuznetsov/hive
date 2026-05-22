@@ -1,4 +1,5 @@
 require "test_helper"
+require "fileutils"
 require "tmpdir"
 require "hive/markers"
 require "hive/daemon/dispatcher"
@@ -16,6 +17,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   Row = Hive::Daemon::StatusConsumer::Row
   ChildExit = Hive::Daemon::ChildSupervisor::ChildExit
+
+  def setup
+    @row_dirs = []
+  end
+
+  def teardown
+    Array(@row_dirs).each { |dir| FileUtils.rm_rf(dir) }
+  end
 
   # ── fakes ─────────────────────────────────────────────────────────────
 
@@ -130,14 +139,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
-          mtime: T0 - 600, claude_pid_alive: nil, state_file: nil)
+          mtime: T0 - 600, claude_pid_alive: nil, state_file: nil,
+          folder: nil)
+    folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
-      folder: "/tmp/#{project}/#{stage}/#{slug}",
-      state_file: state_file || "/tmp/#{project}/#{stage}/#{slug}/idea.md",
+      folder: folder,
+      state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
       suggested_command: command, claude_pid_alive: claude_pid_alive
     )
+  end
+
+  def make_existing_row_folder(project:, stage:, slug:)
+    root = Dir.mktmpdir([ "hive-dispatcher-row", project, stage, slug ].join("-"))
+    @row_dirs << root
+    root
   end
 
   # ── core dispatch flow ────────────────────────────────────────────────
@@ -149,6 +166,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
+  end
+
+  def test_advance_action_skips_when_task_folder_vanished_after_snapshot
+    missing = File.join(Dir.tmpdir, "hive-dispatcher-missing-#{Process.pid}-#{rand(1_000_000)}")
+    FileUtils.rm_rf(missing)
+    rows = [
+      row(action: "ready_to_plan",
+          command: "hive plan s1 --from 2-brainstorm",
+          folder: missing)
+    ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size, "stale snapshot row must not spawn after drop removed the folder"
+    skipped = logger.events.find { |(name, attrs)| name == :skipped && attrs[:reason] == "folder_missing" }
+    refute_nil skipped, "must log :skipped reason: folder_missing"
+    assert_equal "s1", skipped[1][:slug]
   end
 
   def test_disabled_project_is_skipped

@@ -352,6 +352,13 @@ module Hive
       end
 
       def dispatch_or_block(row, now:, trigger: "advance")
+        unless File.directory?(row.folder.to_s)
+          @logger.event(:skipped, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "folder_missing")
+          return
+        end
+
         gate = @controller.can_dispatch?(
           project: row.project, slug: row.slug, now: now,
           external_global_count: @external_active_agent_total,

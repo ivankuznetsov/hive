@@ -97,13 +97,14 @@ module Hive
         )
       end
 
-      # Archive on a task already at 8-done with :complete is a no-op.
-      # Without this guard, every `hive archive <slug>` invocation re-runs
-      # the Done agent and writes a fresh `hive: 8-done/<slug> archived`
-      # commit to hive/state.
+      # Archive on a task already at the terminal stage with :complete is a
+      # no-op. Without this guard, every `hive archive <slug>` invocation
+      # re-runs the Done agent and writes a fresh `hive: <terminal>/<slug>
+      # archived` commit to hive/state. Stage name derived from the registry
+      # so a future renumber doesn't silently disable the guard.
       def archive_noop?(task, current_stage)
         return false unless @verb == "archive"
-        return false unless current_stage == "8-done"
+        return false unless current_stage == Hive::Stages::DIRS.last
 
         Hive::Markers.current(task.state_file).name == :complete
       end
@@ -172,7 +173,7 @@ module Hive
                                              reason: "already_archived",
                                              marker: marker))
         else
-          puts "hive: noop — #{task.slug} is already at 8-done"
+          puts "hive: noop — #{task.slug} is already at #{Hive::Stages::DIRS.last}"
         end
       end
 

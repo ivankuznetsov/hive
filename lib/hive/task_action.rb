@@ -102,14 +102,31 @@ module Hive
         command: "review"
       },
       review_complete: {
-        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
-        label: "Ready to finalize",
-        command: "finalize"
+        key: Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
+        label: "Ready to collect artifacts",
+        command: "artifacts"
       },
       review_stale: {
         key: Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
         label: "Needs recovery",
         command: nil
+      },
+      # Used both for a real task at 7-artifacts with :complete, and as the
+      # fallback `finalize_complete_action` produces when the finalize stage
+      # left a draft PR — both want "re-run finalize" semantics.
+      artifacts_complete: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
+        label: "Ready to finalize",
+        command: "finalize"
+      },
+      # Placeholder action for a task that landed in 7-artifacts before the
+      # U2 runner ships. There is nothing to wait on; the daemon and humans
+      # should advance via `hive finalize`. Once U2 lands, this entry's key
+      # flips to NEEDS_INPUT / RECOVER_* as needed.
+      artifacts_waiting: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
+        label: "Ready to finalize",
+        command: "finalize"
       },
       finalize_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
@@ -237,6 +254,8 @@ module Hive
         marker.name == :complete ? ACTIONS.fetch(:open_pr_complete) : ACTIONS.fetch(:open_pr_ready)
       when "review"
         review_action
+      when "artifacts"
+        artifacts_action
       when "finalize"
         finalize_action
       when "done"
@@ -303,7 +322,21 @@ module Hive
       return ACTIONS.fetch(:error) if finalize_pr_url_mismatch?
       return ACTIONS.fetch(:finalize_complete) if marker.attrs["is_draft"].to_s == "false"
 
-      ACTIONS.fetch(:review_complete)
+      # Draft PR fallback: re-run finalize. After the artifacts-stage
+      # renumber, :review_complete now routes to "hive artifacts" (the
+      # 6-review → 7-artifacts verb), so we can't reuse it here. The
+      # :artifacts_complete action carries the legacy "Ready to finalize"
+      # semantics this fallback wants.
+      ACTIONS.fetch(:artifacts_complete)
+    end
+
+    # No U1 runner: a task arrives in 7-artifacts via `hive artifacts`
+    # (or a manual mv) with no marker, and there's no agent to mark it
+    # :complete. Either way the only forward path is `hive finalize`, so
+    # collapse both marker shapes onto the same action. When the U2
+    # runner ships, split this into waiting / complete proper.
+    def artifacts_action
+      marker.name == :complete ? ACTIONS.fetch(:artifacts_complete) : ACTIONS.fetch(:artifacts_waiting)
     end
 
     # Returns :agent_died, :agent_orphaned, or nil. Mirrors

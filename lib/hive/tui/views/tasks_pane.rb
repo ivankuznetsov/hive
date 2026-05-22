@@ -50,6 +50,7 @@ module Hive
           "ready_to_develop"    => "▶ ",
           "ready_to_open_pr"    => "▶ ",
           "ready_for_review"    => "▶ ",
+          "ready_to_artifacts"  => "▶ ",
           "ready_to_finalize"   => "▶ ",
           "ready_to_archive"    => "▶ "
         }.freeze

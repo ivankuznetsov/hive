@@ -37,7 +37,7 @@ class RunFinalizeTest < Minitest::Test
   def setup_finalize_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
     slug = "fix-bug-260424-aaaa"
-    task_dir = File.join(dir, ".hive-state", "stages", "7-finalize", slug)
+    task_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
     FileUtils.mkdir_p(task_dir)
     File.write(File.join(task_dir, "plan.md"), "plan content")
     FileUtils.mkdir_p(File.join(task_dir, "reviews"))

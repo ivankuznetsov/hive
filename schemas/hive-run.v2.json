@@ -52,6 +52,7 @@
             "execute",
             "open-pr",
             "review",
+            "artifacts",
             "finalize",
             "done"
           ]
@@ -59,7 +60,7 @@
         "stage_index": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 8
+          "maximum": 9
         },
         "folder": {
           "type": "string"
@@ -118,7 +119,7 @@
           }
         },
         "cleanup_instructions": {
-          "description": "Human-readable cleanup guidance returned by the 8-done stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
+          "description": "Human-readable cleanup guidance returned by the terminal `done` stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
           "type": "array",
           "items": {
             "type": "string"

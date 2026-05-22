@@ -9,10 +9,18 @@ require "hive/stages"
 module Hive
   module Commands
     class Migrate
+      # Each entry maps a legacy stage-directory name to its CURRENT
+      # canonical name in `Hive::Stages::DIRS`. When the canonical layout
+      # shifts (e.g. the 7-artifacts insertion), every entry must re-point
+      # at the new index so a long-dormant project still migrates onto the
+      # current layout in a single `hive migrate` pass — chaining is not
+      # supported (see `Migrate::STAGE_RENAMES` consistency tests).
       STAGE_RENAMES = {
         "5-review" => "6-review",
-        "6-pr" => "7-finalize",
-        "7-done" => "8-done"
+        "6-pr" => "8-finalize",
+        "7-done" => "9-done",
+        "7-finalize" => "8-finalize",
+        "8-done" => "9-done"
       }.freeze
 
       # Legacy `pr` budget/timeout keys are read-through-fallback in

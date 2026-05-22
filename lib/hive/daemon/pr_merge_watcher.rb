@@ -2,10 +2,11 @@ require "open3"
 require "json"
 require "yaml"
 require "time"
+require "hive/workflows"
 
 module Hive
   module Daemon
-    # For tasks at 7-finalize/`:complete`, periodically polls
+    # For tasks at the finalize stage with `:complete`, periodically polls
     # `gh pr view <url> --json state` and tells the dispatcher to fire
     # `hive archive <slug>` once the PR is `MERGED`.
     #
@@ -19,7 +20,13 @@ module Hive
     #                                     enqueued_at, hive_state_path,
     #                                     stage }>
     class PrMergeWatcher
-      ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from 7-finalize --project %<project>s --json".freeze
+      # Derived from the workflow verb map so the artifacts-stage renumber
+      # (or any future stage shuffle) re-points the archive command without
+      # editing this file. Building the format string at class-load time is
+      # safe: `Hive::Workflows::VERBS` is frozen at require time.
+      ARCHIVE_FROM_STAGE = Hive::Workflows::VERBS.fetch("archive").fetch(:source).freeze
+      ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from #{ARCHIVE_FROM_STAGE} " \
+                              "--project %<project>s --json".freeze
 
       # Backoff schedule for consecutive `gh` failures (network /
       # auth / rate limit). After exhaustion, the watcher drops the
@@ -34,7 +41,7 @@ module Hive
         @pending = {}
       end
 
-      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: "7-finalize")
+      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: ARCHIVE_FROM_STAGE)
         key = [ project, slug ]
         return if @pending.key?(key) # idempotent
 

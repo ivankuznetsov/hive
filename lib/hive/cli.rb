@@ -548,7 +548,7 @@ module Hive
 
       The daemon polls `hive status --json` periodically and dispatches
       workflow verbs (`hive plan` / `develop` / `review` / `pr`) on tasks
-      ready to advance, plus auto-archives 7-finalize after PR merge (gated on
+      ready to advance, plus auto-archives the finalize stage after PR merge (gated on
       `gh pr view --json state`). Stops at human-input gates (waiting
       markers, recovery markers).
 

@@ -48,7 +48,7 @@ class HiveDaemonPolicyTest < Minitest::Test
     # daemon does NOT dispatch it directly — it routes to U10
     # PrMergeWatcher which gates on `gh pr view --json state == MERGED`.
     assert_equal :poll_for_merge, decide(action: "ready_to_archive",
-                                         command: "hive archive slug-a --from 7-finalize")
+                                         command: "hive archive slug-a --from 8-finalize")
   end
 
   # ── edit-resume: mtime-debounced re-runs ───────────────────────────────
@@ -216,7 +216,7 @@ class HiveDaemonPolicyTest < Minitest::Test
   end
 
   def test_archived_skips
-    # 8-done with :complete marker: terminal, no further work.
+    # 9-done with :complete marker: terminal, no further work.
     assert_equal :skip, decide(action: "archived",
                                command: nil)
   end

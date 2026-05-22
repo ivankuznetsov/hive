@@ -198,8 +198,9 @@
             "4-execute",
             "5-open-pr",
             "6-review",
-            "7-finalize",
-            "8-done"
+            "7-artifacts",
+            "8-finalize",
+            "9-done"
           ]
         },
         "slug": {
@@ -271,6 +272,7 @@
             "ready_to_develop",
             "ready_to_open_pr",
             "ready_for_review",
+            "ready_to_artifacts",
             "ready_to_finalize",
             "ready_to_archive",
             "needs_input",

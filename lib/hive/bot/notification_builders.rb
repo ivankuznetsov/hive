@@ -13,6 +13,7 @@ module Hive
         ready_to_develop
         ready_to_open_pr
         ready_for_review
+        ready_to_artifacts
         ready_to_finalize
         ready_to_archive
       ].freeze
@@ -226,6 +227,7 @@ module Hive
           "ready_to_develop" => "develop",
           "ready_to_open_pr" => "open-pr",
           "ready_for_review" => "review",
+          "ready_to_artifacts" => "artifacts",
           "ready_to_finalize" => "finalize",
           "ready_to_archive" => "archive"
         }[action]

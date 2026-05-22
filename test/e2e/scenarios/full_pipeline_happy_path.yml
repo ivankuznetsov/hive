@@ -40,15 +40,19 @@ steps:
   - kind: state_assert
     path: "{task_dir:6-review}/task.md"
     marker: { current: REVIEW_COMPLETE }
+  # AC: post-renumber the workflow inserts 7-artifacts between review and
+  # finalize. With no U2 runner yet, traversal is via two `approve` mv hops.
   - kind: cli
-    args: [approve, "{slug}", --from, 6-review, --to, 7-finalize]
+    args: [approve, "{slug}", --from, 6-review, --to, 7-artifacts]
+  - kind: cli
+    args: [approve, "{slug}", --from, 7-artifacts, --to, 8-finalize]
   - kind: write_file
-    path: "{task_dir:7-finalize}/pr.md"
+    path: "{task_dir:8-finalize}/pr.md"
     content: "# PR\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 -->\n"
   - kind: cli
-    args: [archive, "{slug}", --from, 7-finalize]
+    args: [archive, "{slug}", --from, 8-finalize]
   - kind: json_assert
     args: [status, --json]
     schema: hive-status
     pick: [projects, 0, tasks, 0, stage]
-    equals: 8-done
+    equals: 9-done

@@ -56,6 +56,14 @@ module Hive
       VERB_BY_SOURCE[stage_dir]
     end
 
+    # Stage directory that follows stage_dir in the pipeline, or nil at the
+    # terminal stage. Use this instead of hardcoding `"7-artifacts"` /
+    # `"8-finalize"` etc. so a future renumber doesn't strand call sites.
+    def next_dir_after(stage_dir)
+      verb = VERB_BY_SOURCE[stage_dir]
+      verb && VERBS.fetch(verb).fetch(:target)
+    end
+
     # Returns true when the verb is flagged `interactive: true` —
     # used by the TUI to route the dispatch through foreground
     # takeover instead of background spawn. `nil`/missing-verb

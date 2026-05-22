@@ -184,8 +184,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_archive_action_routes_to_merge_watcher
-    rows = [ row(stage: "7-finalize", action: "ready_to_archive",
-                 command: "hive archive s1 --from 7-finalize") ]
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive",
+                 command: "hive archive s1 --from 8-finalize") ]
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
     dispatcher.tick(now: T0)
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
@@ -199,13 +199,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # supervisor + caps just like a regular advance dispatch.
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "7-finalize",
-      command: "hive archive s1 --from 7-finalize --project p1 --json",
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
     assert_equal 1, sup.spawned.size
-    assert_equal "hive archive s1 --from 7-finalize --project p1 --json", sup.spawned.first[:command]
+    assert_equal "hive archive s1 --from 8-finalize --project p1 --json", sup.spawned.first[:command]
   end
 
   def test_merged_pr_archive_skips_when_project_disabled_after_enqueue
@@ -215,8 +215,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       rows: [], with_merge_watcher: true, project_enabled: false
     )
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "7-finalize",
-      command: "hive archive s1 --from 7-finalize --project p1 --json",
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
@@ -241,8 +241,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
 
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "7-finalize",
-      command: "hive archive s1 --from 7-finalize --project p1 --json",
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)

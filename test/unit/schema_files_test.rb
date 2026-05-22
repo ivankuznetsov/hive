@@ -55,8 +55,8 @@ class SchemaFilesTest < Minitest::Test
     v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
     assert_includes v2_dirs, "5-open-pr"
     assert_includes v2_dirs, "6-review"
-    assert_includes v2_dirs, "7-finalize"
-    assert_includes v2_dirs, "8-done"
+    assert_includes v2_dirs, "8-finalize"
+    assert_includes v2_dirs, "9-done"
     refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
   end
 

@@ -99,11 +99,21 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive review demo-260426-aaaa --from 5-open-pr", action.command
   end
 
-  def test_review_complete_is_ready_to_finalize
+  def test_review_complete_is_ready_to_artifacts
     task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:review_complete))
+    assert_equal "ready_to_artifacts", action.key
+    assert_equal "hive artifacts demo-260426-aaaa --from 6-review", action.command
+  end
+
+  # A task that lands in 7-artifacts (manual mv or `hive artifacts`) with
+  # no runner yet should surface as ready_to_finalize so the daemon and
+  # humans have a single forward verb. Re-classifies when U2 ships.
+  def test_artifacts_is_ready_to_finalize
+    task = fake_task(stage_name: "artifacts", stage_index: 7)
+    action = Hive::TaskAction.for(task, marker(:none))
     assert_equal "ready_to_finalize", action.key
-    assert_equal "hive finalize demo-260426-aaaa --from 6-review", action.command
+    assert_equal "hive finalize demo-260426-aaaa --from 7-artifacts", action.command
   end
 
   def test_review_without_marker_is_ready_for_review
@@ -168,11 +178,11 @@ class TaskActionTest < Minitest::Test
 
   def test_finalize_complete_is_ready_to_archive
     Dir.mktmpdir("task-action-finalize") do |dir|
-      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
       task = FakeTask.new(
         stage_name: "finalize",
-        stage_index: 7,
+        stage_index: 8,
         slug: "demo-260426-aaaa",
         project_root: dir,
         project_name: File.basename(dir),
@@ -197,11 +207,11 @@ class TaskActionTest < Minitest::Test
 
   def test_finalize_complete_requires_final_pr_metadata_before_archive
     Dir.mktmpdir("task-action-finalize") do |dir|
-      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
       task = FakeTask.new(
         stage_name: "finalize",
-        stage_index: 7,
+        stage_index: 8,
         slug: "demo-260426-aaaa",
         project_root: dir,
         project_name: File.basename(dir),
@@ -234,17 +244,17 @@ class TaskActionTest < Minitest::Test
       )
       assert_equal "ready_to_finalize", open_pr_marker.key,
                    "open-pr's is_draft=true COMPLETE marker must not look archive-ready"
-      assert_equal "hive finalize demo-260426-aaaa --from 7-finalize", open_pr_marker.command
+      assert_equal "hive finalize demo-260426-aaaa --from 8-finalize", open_pr_marker.command
     end
   end
 
   def test_finalize_missing_pr_md_is_error_not_needs_input
     Dir.mktmpdir("task-action-finalize") do |dir|
-      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
       task = FakeTask.new(
         stage_name: "finalize",
-        stage_index: 7,
+        stage_index: 8,
         slug: "demo-260426-aaaa",
         project_root: dir,
         project_name: File.basename(dir),
@@ -263,11 +273,11 @@ class TaskActionTest < Minitest::Test
 
   def test_finalize_missing_metadata_error_is_manual_fix_not_retry
     Dir.mktmpdir("task-action-finalize") do |dir|
-      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
       task = FakeTask.new(
         stage_name: "finalize",
-        stage_index: 7,
+        stage_index: 8,
         slug: "demo-260426-aaaa",
         project_root: dir,
         project_name: File.basename(dir),
@@ -286,7 +296,7 @@ class TaskActionTest < Minitest::Test
   end
 
   def test_done_is_archived_with_no_command
-    task = fake_task(stage_name: "done", stage_index: 8)
+    task = fake_task(stage_name: "done", stage_index: 9)
     action = Hive::TaskAction.for(task, marker(:complete))
     assert_equal "archived", action.key
     assert_nil action.command, "archived state has no runnable command"
@@ -957,7 +967,7 @@ class TaskActionTest < Minitest::Test
     "open-pr" => :execute_complete, # 4-execute finishes with :execute_complete
     "review" => :complete,          # 5-open-pr finishes with :complete
     "finalize" => :review_complete, # 6-review finishes with :review_complete
-    "archive" => :complete          # 7-finalize finishes with :complete
+    "archive" => :complete          # 8-finalize finishes with :complete
   }.freeze
 
   # Pin the constant <-> map relationship: every marker that a
@@ -1023,7 +1033,7 @@ class TaskActionTest < Minitest::Test
     require "hive/stages"
 
     expected_stage_names = Hive::Stages::DIRS.map { |d| d.split("-", 2).last }
-    classifier_stage_names = %w[inbox brainstorm plan execute open-pr review finalize done]
+    classifier_stage_names = %w[inbox brainstorm plan execute open-pr review artifacts finalize done]
     missing = classifier_stage_names - expected_stage_names
     extra = expected_stage_names - classifier_stage_names
     assert_empty missing,

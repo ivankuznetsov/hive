@@ -98,7 +98,7 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       archive = result.first
       assert_equal "p1", archive[:project]
       assert_equal "s1", archive[:slug]
-      assert_match(/^hive archive s1 --from 7-finalize --project p1/, archive[:command])
+      assert_match(/^hive archive s1 --from 8-finalize --project p1/, archive[:command])
       # Entry removed after dispatch
       refute watcher.watching?(project: "p1", slug: "s1")
     end

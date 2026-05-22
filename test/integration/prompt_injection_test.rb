@@ -217,7 +217,7 @@ class PromptInjectionTest < Minitest::Test
 
   def test_finalize_prompt_wraps_plan_and_reviews
     with_tmp_dir do |dir|
-      task = make_task(dir, "7-finalize")
+      task = make_task(dir, "8-finalize")
       tag = Hive::Stages::Base.user_supplied_tag
       prompt = Hive::Stages::Base.render(
         "finalize_prompt.md.erb",

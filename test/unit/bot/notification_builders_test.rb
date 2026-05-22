@@ -144,7 +144,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       }
     }
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "error", marker: "error", stage: "7-finalize", diagnostic: diagnostic)
+      row(action: "error", marker: "error", stage: "8-finalize", diagnostic: diagnostic)
     )
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }

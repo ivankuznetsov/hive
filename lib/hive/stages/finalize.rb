@@ -5,6 +5,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/protected_files"
 require "hive/secret_patterns"
+require "hive/claude_launcher"
 require "hive/stages"
 require "hive/stages/base"
 require "hive/worktree"
@@ -42,16 +43,7 @@ module Hive
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        Hive::Stages::Base.spawn_agent(
-          task,
-          prompt: prompt,
-          add_dirs: [ task.folder ],
-          cwd: worktree_path,
-          max_budget_usd: finalize_budget(cfg),
-          timeout_sec: finalize_timeout(cfg),
-          log_label: "finalize",
-          profile: profile
-        )
+        spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
         after_sha = Hive::ProtectedFiles.snapshot(task.folder)
         if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
           Hive::Markers.set(task.state_file, :error,
@@ -93,6 +85,30 @@ module Hive
 
         write_summary(task, worktree_path, branch, pr_url)
         { commit: "pr_finalized", status: :complete }
+      end
+
+      def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
+        kwargs = {
+          prompt: prompt,
+          add_dirs: [ task.folder ],
+          cwd: worktree_path,
+          max_budget_usd: finalize_budget(cfg),
+          timeout_sec: finalize_timeout(cfg),
+          log_label: "finalize",
+          profile: profile,
+          status_mode: :state_file_marker
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task),
+            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       def worktree_pointer_or_exit(task)

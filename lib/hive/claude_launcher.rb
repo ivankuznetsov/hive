@@ -151,7 +151,13 @@ module Hive
     end
 
     def tmux_session_name(stage_short_name, task)
-      "hive-#{stage_short_name}-#{task.slug}"[0, 250]
+      "hive-#{stage_short_name}-#{task_slug(task)}"[0, 250]
+    end
+
+    def task_slug(task)
+      return task.slug if task.respond_to?(:slug) && task.slug
+
+      File.basename(task.folder.to_s)
     end
 
     def build_runner(task:, session_name:, cwd:)

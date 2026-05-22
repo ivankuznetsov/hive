@@ -43,6 +43,7 @@ class BrowserTestTest < Minitest::Test
 
   def cfg_with(overrides = {})
     base = {
+      "claude" => { "mode" => "headless" },
       "review" => {
         "browser_test" => {
           "enabled" => true,

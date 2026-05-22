@@ -36,6 +36,7 @@ class RunReviewTest < Minitest::Test
 
   def setup_review_task(dir, with_worktree: true, cfg_overrides: {})
     capture_io { Hive::Commands::Init.new(dir).call }
+    set_project_claude_mode(dir, "headless")
     cfg_path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(cfg_path))
     @local_worktree_root = Dir.mktmpdir("review-wt-root-")

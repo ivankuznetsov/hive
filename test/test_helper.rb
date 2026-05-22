@@ -136,6 +136,37 @@ module HiveTestHelper
     end
   end
 
+  def set_project_claude_mode(project_root, mode)
+    cfg_path = File.join(project_root, ".hive-state", "config.yml")
+    cfg = YAML.safe_load(File.read(cfg_path)) || {}
+    cfg["claude"] ||= {}
+    cfg["claude"]["mode"] = mode.to_s
+    File.write(cfg_path, cfg.to_yaml)
+  end
+
+  # Variant that also overrides HOME - needed by tests that exercise
+  # daemon ServiceInstaller, which anchors on the real user home for
+  # launchd/systemd paths and would otherwise write units to the
+  # developer's actual $HOME.
+  def with_tmp_global_config_and_home
+    dir = Dir.mktmpdir("hive-global")
+    old_hive_home = ENV["HIVE_HOME"]
+    old_home = ENV["HOME"]
+    ENV["HIVE_HOME"] = dir
+    ENV["HOME"] = dir
+    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+    begin
+      yield(dir)
+    ensure
+      old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
+      old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
+      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
+      # tmpdir invoke `hive`/git subprocesses that can leave the tree
+      # mid-rename.
+      FileUtils.rm_rf(dir) if dir
+    end
+  end
+
   # Set up a sandboxed XDG_*/HOME environment for tests that exercise
   # the XDG path resolvers (paths_test, uninstall_test, etc). Yields the
   # sandbox root.

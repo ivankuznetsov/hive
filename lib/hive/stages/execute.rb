@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "date"
 require "yaml"
+require "hive/claude_launcher"
 require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
@@ -195,15 +196,15 @@ module Hive
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        Hive::Stages::Base.spawn_agent(
-          task,
+        profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        kwargs = {
           prompt: prompt,
           add_dirs: [ task.folder ],
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
-          profile: Hive::Stages::Base.stage_profile(cfg, "execute"),
+          profile: profile,
           # Pin :state_file_marker regardless of which profile the user
           # picked: execute's lifecycle contract is "stage runner writes
           # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
@@ -212,7 +213,18 @@ module Hive
           # which would treat a successful run as :error because no
           # explicit expected_output is supplied here.
           status_mode: :state_file_marker
-        )
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task),
+            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       def record_tamper(task, tampered, who:)

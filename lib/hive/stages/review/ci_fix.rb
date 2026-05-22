@@ -3,6 +3,7 @@ require "fileutils"
 require "shellwords"
 require "digest"
 require "hive/agent_profiles"
+require "hive/claude_launcher"
 require "hive/protected_files"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
@@ -345,8 +346,8 @@ module Hive
             )
           )
 
-          Hive::Stages::Base.spawn_agent(
-            synthetic_task(ctx),
+          task = synthetic_task(ctx)
+          kwargs = {
             prompt: prompt,
             add_dirs: [ ctx.task_folder ],
             cwd: ctx.worktree_path,
@@ -355,7 +356,18 @@ module Hive
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
             status_mode: :exit_code_only
-          )
+          }
+          if profile.name == :claude
+            Hive::Stages::Base.spawn_claude!(
+              task,
+              cfg,
+              **kwargs,
+              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task),
+              allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+            )
+          else
+            Hive::Stages::Base.spawn_agent(task, **kwargs)
+          end
         end
 
         def synthetic_task(ctx)

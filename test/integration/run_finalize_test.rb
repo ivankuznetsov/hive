@@ -49,6 +49,7 @@ class RunFinalizeTest < Minitest::Test
 
   def setup_finalize_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
+    set_project_claude_mode(dir, "headless")
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
     FileUtils.mkdir_p(task_dir)

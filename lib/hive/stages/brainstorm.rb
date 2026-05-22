@@ -1,5 +1,6 @@
 require "hive/stages/base"
 require "hive/config"
+require "hive/claude_launcher"
 
 module Hive
   module Stages
@@ -11,8 +12,7 @@ module Hive
         when :headless
           run_headless!(task, cfg)
         when :tmux_interactive
-          require "hive/stages/brainstorm_tmux"
-          Hive::Stages::BrainstormTmux.run!(task, cfg)
+          run_claude!(task, cfg)
         end
       end
 
@@ -65,6 +65,27 @@ module Hive
           # :state_file_marker mode honors. Codex's profile default is
           # :output_file_exists, which would never satisfy this stage.
           status_mode: :state_file_marker
+        )
+        marker = Hive::Markers.current(task.state_file)
+        { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def run_claude!(task, cfg)
+        profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+        prompt = render_prompt(task, cfg, profile: profile)
+        Hive::Stages::Base.spawn_claude!(
+          task,
+          cfg,
+          prompt: prompt,
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
+          timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
+          log_label: "brainstorm",
+          profile: profile,
+          session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task),
+          status_mode: :state_file_marker,
+          allowed_tools: "Read,Write,Edit,LS"
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

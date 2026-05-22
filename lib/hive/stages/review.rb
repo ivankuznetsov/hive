@@ -4,6 +4,7 @@ require "open3"
 require "time"
 require "hive/events"
 require "hive/protected_files"
+require "hive/claude_launcher"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
@@ -1172,8 +1173,7 @@ module Hive
           )
         )
 
-        Hive::Stages::Base.spawn_agent(
-          task,
+        kwargs = {
           prompt: prompt,
           add_dirs: [ ctx.task_folder ],
           cwd: ctx.worktree_path,
@@ -1182,7 +1182,18 @@ module Hive
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           status_mode: :exit_code_only
-        )
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task),
+            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       # The triage bias configured for this run, surfaced into commit

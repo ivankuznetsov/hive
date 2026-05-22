@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/claude_launcher"
 require "hive/protected_files"
 require "hive/reviewers/plan_context"
 require "hive/reviewers/synthetic_task"
@@ -72,8 +73,8 @@ module Hive
           )
 
           before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
-          spawn_result = Hive::Stages::Base.spawn_agent(
-            synthetic_task(ctx),
+          task = synthetic_task(ctx)
+          kwargs = {
             prompt: prompt,
             add_dirs: [ ctx.task_folder ],
             cwd: ctx.worktree_path,
@@ -83,7 +84,19 @@ module Hive
             profile: profile,
             expected_output: escalations,
             status_mode: :output_file_exists
-          )
+          }
+          spawn_result =
+            if profile.name == :claude
+              Hive::Stages::Base.spawn_claude!(
+                task,
+                cfg,
+                **kwargs,
+                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task),
+                allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+              )
+            else
+              Hive::Stages::Base.spawn_agent(task, **kwargs)
+            end
           after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
 
           tampered = Hive::ProtectedFiles.diff(before, after)

@@ -3,6 +3,7 @@ require "hive/gh"
 require "hive/markers"
 require "hive/protected_files"
 require "hive/secret_patterns"
+require "hive/claude_launcher"
 require "hive/stages/base"
 require "hive/worktree"
 
@@ -35,16 +36,7 @@ module Hive
         prompt = render_prompt(task, worktree_path, branch)
         profile = Hive::Stages::Base.stage_profile(cfg, "open_pr")
         before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        Hive::Stages::Base.spawn_agent(
-          task,
-          prompt: prompt,
-          add_dirs: [ task.folder ],
-          cwd: worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "open_pr") || 50,
-          timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
-          log_label: "open-pr",
-          profile: profile
-        )
+        spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path)
         after_sha = Hive::ProtectedFiles.snapshot(task.folder)
         if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
           Hive::Markers.set(task.state_file, :error,
@@ -72,6 +64,30 @@ module Hive
         return validation if validation
 
         { commit: "pr_opened_draft", status: :complete }
+      end
+
+      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path)
+        kwargs = {
+          prompt: prompt,
+          add_dirs: [ task.folder ],
+          cwd: worktree_path,
+          max_budget_usd: cfg.dig("budget_usd", "open_pr") || 50,
+          timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
+          log_label: "open-pr",
+          profile: profile,
+          status_mode: :state_file_marker
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task),
+            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       def worktree_pointer_or_exit(task)

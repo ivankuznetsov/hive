@@ -41,8 +41,16 @@ class ReviewGithubPublisherTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
-  def cfg(enabled: true)
-    { "review" => { "github_publish" => { "enabled" => enabled, "max_attempts" => 1 } } }
+  def cfg(enabled: true, max_attempts: 1)
+    { "review" => { "github_publish" => { "enabled" => enabled, "max_attempts" => max_attempts } } }
+  end
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
   end
 
   def test_posts_review_comment
@@ -142,6 +150,17 @@ class ReviewGithubPublisherTest < Minitest::Test
                    )
     end
   end
+  def test_missing_body_skips_before_reading_pr_context
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "missing.md")
+
+      assert_equal :missing_body,
+                   Hive::Stages::Review::GithubPublisher.publish!(
+                     task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+                   )
+    end
+  end
 
   def test_network_failure_returns_failed_without_raising
     # plan U4 scenario: when gh exits non-zero on every attempt, the
@@ -160,6 +179,44 @@ class ReviewGithubPublisherTest < Minitest::Test
         assert_equal :failed, result
       end
       assert_match(/failed to post reviewer comment.*pass=01.*codex/, err)
+    end
+  end
+  def test_network_failure_retries_with_backoff_and_warns_joined_stderr
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] finding\n")
+      ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+      failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+      sleeps = []
+      calls = []
+      comment_responses = [ [ "", "temporary outage", failed ], [ "", "auth denied", failed ] ]
+
+      with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*args, **_kwargs|
+        calls << args
+        if args[2] == "view"
+          [ '{"comments":[]}', "", ok ]
+        elsif args[2] == "comment"
+          comment_responses.shift
+        else
+          raise "unexpected gh call: #{args.inspect}"
+        end
+      }) do
+        with_replaced_singleton_method(Hive::Stages::Review::GithubPublisher, :sleep, lambda { |seconds|
+          sleeps << seconds
+        }) do
+          _out, err = capture_io do
+            result = Hive::Stages::Review::GithubPublisher.publish!(
+              task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg(max_attempts: 2)
+            )
+            assert_equal :failed, result
+          end
+          assert_match(/temporary outage; auth denied/, err)
+        end
+      end
+
+      assert_equal [ 1 ], sleeps
+      assert_equal 2, calls.count { |args| args[2] == "comment" }
     end
   end
 
@@ -200,6 +257,48 @@ class ReviewGithubPublisherTest < Minitest::Test
       )
 
       assert_equal :posted, result
+    end
+  end
+
+  def test_file_read_error_returns_failed_with_relative_body_path
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] finding\n")
+      original_read = File.method(:read)
+
+      _out, err = with_replaced_singleton_method(File, :read, lambda { |path, *args, **kwargs|
+        raise Errno::EACCES, "blocked" if path == body
+
+        original_read.call(path, *args, **kwargs)
+      }) do
+        capture_io do
+          result = Hive::Stages::Review::GithubPublisher.publish!(
+            task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+          )
+          assert_equal :failed, result
+        end
+      end
+
+      assert_match(%r{local file at reviews/codex-01\.md is authoritative}, err)
+      assert_match(/Errno::EACCES/, err)
+    end
+  end
+
+  def test_already_posted_returns_false_when_view_fails_or_json_is_unusable
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "", "boom", failed ] }) do
+      assert_equal false, Hive::Stages::Review::GithubPublisher.already_posted?("https://example.com/pr/1", "header")
+    end
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "not-json", "", ok ] }) do
+      assert_equal false, Hive::Stages::Review::GithubPublisher.already_posted?("https://example.com/pr/1", "header")
+    end
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "[]", "", ok ] }) do
+      assert_equal false, Hive::Stages::Review::GithubPublisher.already_posted?("https://example.com/pr/1", "header")
     end
   end
 

@@ -1,6 +1,8 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/run"
+require "hive/stages/finalize"
+require "hive/task"
 
 class RunFinalizeTest < Minitest::Test
   include HiveTestHelper
@@ -25,6 +27,7 @@ class RunFinalizeTest < Minitest::Test
     %w[
       HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
       HIVE_FAKE_GH_LOG_DIR HIVE_FAKE_GH_PR_BODY HIVE_FAKE_GH_READY_EXIT
+      HIVE_FAKE_GH_READY_STDERR HIVE_FAKE_GH_EDIT_EXIT HIVE_FAKE_GH_EDIT_STDERR
       HIVE_FAKE_GH_VIEW_EXIT HIVE_FAKE_GH_AUTH_EXIT
     ].each { |k| ENV.delete(k) }
   end
@@ -32,6 +35,16 @@ class RunFinalizeTest < Minitest::Test
   def gh_argv_log
     path = File.join(@gh_log_dir, "fake-gh-argv.log")
     File.exist?(path) ? File.read(path) : ""
+  end
+
+  def with_stubbed_singleton_method(object, name, replacement)
+    original = object.method(name)
+    object.define_singleton_method(name, replacement)
+    yield
+  ensure
+    object.define_singleton_method(name) do |*args, **kwargs, &block|
+      original.call(*args, **kwargs, &block)
+    end
   end
 
   def setup_finalize_task(dir)
@@ -306,6 +319,228 @@ class RunFinalizeTest < Minitest::Test
                      "summary must show max pass derived from filenames")
         assert_match(/Triage bias: courageous\b/, summary,
                      "summary must surface triage bias from triage-NN.md")
+      end
+    end
+  end
+
+  def test_finalize_agent_tampering_sets_error_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(task_dir, "plan.md")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "tampered plan\n"
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "finalize_tampered", marker.attrs["reason"]
+        assert_equal "plan.md", marker.attrs["files"]
+        refute File.exist?(File.join(task_dir, "summary.md"))
+      end
+    end
+  end
+
+  def test_finalize_secret_scan_fetch_failure_sets_error_before_ready
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://example.com/pr/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          api_key sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+        MD
+        ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "secret_scan_fetch_failed", marker.attrs["reason"]
+        refute_empty marker.attrs["patterns"].to_s
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
+  def test_finalize_worktree_pointer_exit_paths
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        FileUtils.rm_f(File.join(task_dir, "worktree.yml"))
+
+        _out, err, status = with_captured_exit do
+          Hive::Stages::Finalize.worktree_pointer_or_exit(task)
+        end
+
+        assert_equal 1, status
+        assert_match(/no worktree pointer/, err)
+
+        File.write(File.join(task_dir, "worktree.yml"), { "path" => worktree_path }.to_yaml)
+        FileUtils.rm_rf(worktree_path)
+
+        _out, err, status = with_captured_exit do
+          Hive::Stages::Finalize.worktree_pointer_or_exit(task)
+        end
+
+        assert_equal 1, status
+        assert_match(/worktree pointer .* no longer exists/, err)
+      end
+    end
+  end
+
+  def test_finalize_verify_state_records_git_status_failure
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        missing_worktree = File.join(dir, "missing-worktree")
+
+        result = Hive::Stages::Finalize.verify_state!(task, missing_worktree, "missing", {})
+
+        assert_equal({ commit: "finalize_git_status_failed", status: :error }, result)
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "git_status_failed", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_finalize_complete_marker_validation_error_paths
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        expected_url = "https://example.com/pr/9"
+
+        File.write(pr_md, "---\npr_url: https://example.com/pr/wrong\n---\n\nbody\n")
+        Hive::Markers.set(pr_md, :complete, pr_url: expected_url, is_draft: "false")
+        result = Hive::Stages::Finalize.validate_complete_marker(
+          task, Hive::Markers.current(pr_md), expected_url
+        )
+        assert_equal({ commit: "finalize_pr_url_tampered", status: :error }, result)
+        assert_equal "https://example.com/pr/wrong", Hive::Markers.current(pr_md).attrs["actual_pr_url"]
+
+        File.write(pr_md, "---\npr_url: #{expected_url}\n---\n\nbody\n")
+        Hive::Markers.set(pr_md, :complete, pr_url: "https://example.com/pr/wrong", is_draft: "false")
+        result = Hive::Stages::Finalize.validate_complete_marker(
+          task, Hive::Markers.current(pr_md), expected_url
+        )
+        assert_equal({ commit: "finalize_pr_url_tampered", status: :error }, result)
+        assert_equal "https://example.com/pr/wrong", Hive::Markers.current(pr_md).attrs["actual_pr_url"]
+
+        File.write(pr_md, "---\npr_url: #{expected_url}\n---\n\nbody\n")
+        Hive::Markers.set(pr_md, :complete, pr_url: expected_url, is_draft: "true")
+        result = Hive::Stages::Finalize.validate_complete_marker(
+          task, Hive::Markers.current(pr_md), expected_url
+        )
+        assert_equal({ commit: "finalize_marker_not_ready", status: :error }, result)
+        assert_equal "finalize_marker_not_ready", Hive::Markers.current(pr_md).attrs["reason"]
+      end
+    end
+  end
+
+  def test_finalize_mark_pr_ready_error_paths
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        pr_url = "https://example.com/pr/9"
+        ENV["HIVE_FAKE_GH_READY_EXIT"] = "1"
+        ENV["HIVE_FAKE_GH_READY_STDERR"] = "Pull request is already ready for review"
+
+        assert_nil Hive::Stages::Finalize.mark_pr_ready(task, pr_url, {})
+
+        ENV["HIVE_FAKE_GH_READY_STDERR"] = "permission denied"
+        result = Hive::Stages::Finalize.mark_pr_ready(task, pr_url, {})
+        assert_equal({ commit: "finalize_pr_ready_failed", status: :error }, result)
+        assert_equal "gh_pr_ready_failed", Hive::Markers.current(pr_md).attrs["reason"]
+        assert_equal "permission denied", Hive::Markers.current(pr_md).attrs["detail"]
+
+        with_stubbed_singleton_method(Hive::Gh, :capture3, lambda { |*_, **_kwargs|
+          raise Hive::GhError, "network down"
+        }) do
+          result = Hive::Stages::Finalize.mark_pr_ready(task, pr_url, {})
+          assert_equal({ commit: "finalize_pr_ready_failed", status: :error }, result)
+          assert_equal "network down", Hive::Markers.current(pr_md).attrs["detail"]
+        end
+      end
+    end
+  end
+
+  def test_finalize_redact_pr_body_error_paths
+    assert_equal :skipped, Hive::Stages::Finalize.redact_pr_body!("", {})
+
+    ENV["HIVE_FAKE_GH_EDIT_EXIT"] = "1"
+    ENV["HIVE_FAKE_GH_EDIT_STDERR"] = "edit denied"
+    result = nil
+    _out, err = capture_io do
+      result = Hive::Stages::Finalize.redact_pr_body!("https://example.com/pr/9", {})
+    end
+    assert_equal :failed, result
+    assert_match(/failed to redact PR body/, err)
+    assert_match(/edit denied/, err)
+
+    with_stubbed_singleton_method(Hive::Gh, :capture3, lambda { |*_, **_kwargs|
+      raise RuntimeError, "boom"
+    }) do
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Finalize.redact_pr_body!("https://example.com/pr/9", {})
+      end
+      assert_equal :failed, result
+      assert_match(/redact_pr_body raised RuntimeError: boom/, err)
+    end
+  end
+
+  def test_finalize_summary_helper_fallbacks
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+
+        assert_equal "Final PR description refreshed.",
+                     Hive::Stages::Finalize.extract_summary(File.join(task_dir, "missing-pr.md"))
+
+        no_summary = File.join(task_dir, "no-summary.md")
+        File.write(no_summary, "## Details\nNo summary section\n")
+        assert_equal "Final PR description refreshed.", Hive::Stages::Finalize.extract_summary(no_summary)
+
+        FileUtils.rm_rf(task.reviews_dir)
+        assert_equal "(no reviews/ directory found)", Hive::Stages::Finalize.build_reviews_summary(task)
+        assert_equal "", Hive::Stages::Finalize.read_optional(task, "missing.md")
+      end
+    end
+  end
+
+  def test_finalize_review_and_escalation_helper_edge_paths
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        File.write(File.join(task.reviews_dir, "notes-extra.md"), "not a numbered review\n")
+
+        assert_match(/Review passes: 1\b/, Hive::Stages::Finalize.review_summary(task))
+
+        missing_escalations = File.join(task.reviews_dir, "escalations-01.md")
+        with_stubbed_singleton_method(Dir, :[], lambda { |pattern|
+          pattern.include?("escalations-*.md") ? [ missing_escalations ] : []
+        }) do
+          result = nil
+          _out, err = capture_io { result = Hive::Stages::Finalize.open_escalations(task) }
+          assert_equal "", result
+          assert_match(/disappeared mid-read/, err)
+        end
       end
     end
   end

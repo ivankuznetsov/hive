@@ -28,7 +28,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │  myapp          │  ⚠  oauth-…       6-review      Needs recovery      1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
-│ Footer: [Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q]│
+│ Footer: [Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [i] info  [q] quit │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,6 +45,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
 | New idea project picker | `n` from `★ All projects` scope | `Esc` / `q` (cancels) / `Enter` (selects and advances to title prompt) |
 | New idea prompt | `n` (single-project scope), or after picker selection (all-projects scope) | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
+| Info panel | `i` on a selected right-pane task | `q` / `Esc` / `i` |
 | Help overlay | `?` | any key |
 
 ## Keybindings (default mode)
@@ -65,6 +66,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `a` | run `hive archive` |
 | `Enter` | from left pane: focus right pane. From right pane: perform the row's contextual action: input editor on `needs_input` (completed brainstorm answer rounds auto-run; plan rows auto-advance to `develop` or auto-revise on user feedback), log tail on `agent_running` (and on `error` rows still in a kill-class auto-heal window), red-status detail on selected review-recovery and non-kill-class `error` rows, direct retry/browse for the legacy review-stale exceptions, and suggested-command dispatch for ready rows |
 | `o` | open the focused row's hive-state task folder in `$VISUAL` / `$EDITOR` / `vi` for read-only browsing — no marker change, no workflow dispatch. Distinct from `Enter` (workflow-contextual) and the verb keys (subprocess dispatch). Useful for revisiting investigation outputs in `9-done` (or any stage). |
+| `i` | open the focused row's in-TUI info panel — no editor handoff, no marker change, no workflow dispatch. |
 | `s` | steer the focused task manually: open the configured `execute.agent` in the feature worktree with every existing stage folder for that slug passed as agent context, mark the row `MANUAL_STEERING`, and archive the slug under `archived-manual/` when the agent exits |
 | `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
 | `/` | open filter prompt |
@@ -135,6 +137,8 @@ The takeover handler reuses `Hive::Tui::Subprocess.foreground_takeover_command` 
 
 Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for read-only browsing — distinct from `Enter` (workflow-contextual: editor on `needs_input`, log tail on `agent_running`, recover+rerun on review/error recovery rows, etc.) and the verb keys (which dispatch a `hive <verb>` subprocess). `o` mutates no marker, dispatches no workflow, and emits no follow-up `Messages::InputEditorExited` — the editor's exit is the user's last word. Useful for revisiting investigation outputs in `9-done` (or any stage) without dropping to a shell. The handler reuses the same `foreground_takeover_command` machinery `Enter`-on-`needs_input` uses, so terminal handoff is identical; only the after-spawn plumbing differs.
 
+Pressing `i` from grid mode opens a full-screen read-only info panel for the focused task. `BubbleModel#open_idea_preview` reads the task's `idea.md` once, builds `Hive::Tui::Model::InfoPanelState`, and the view renders common identity fields (slug, stage, `created_at`, absolute stage folder, latest `.hive-state/logs/<slug>/*.log` path, and original idea text). Stage extras are plain-text snapshots: `brainstorm.md` for `2-brainstorm`, `plan.md` for `3-plan`, the latest execute-log tail for `4-execute`, and no extra block for `1-inbox`. The panel uses the existing `:idea_preview` mode and `OpenIdeaPreview` / `Back` messages; it mutates no files and spawns no subprocess. Only `q`, `Esc`, or `i` closes it, so accidental unmapped keys are no-ops.
+
 Pressing `s` from grid mode is the manual-steering escape hatch. `KeyMap` emits `Messages::OpenInAgent`, and `BubbleModel` resolves the task's project config, looks up `execute.agent`, verifies the feature worktree exists, then writes `MANUAL_STEERING` to the row's state file before handing the terminal to the configured development agent in that worktree. Existing stage folders for the slug are passed in `Hive::Stages::DIRS` order with the agent profile's add-dir flag, so the agent can read the idea, brainstorm, plan, task, logs, reviews, and later-stage artifacts without the operator copying paths by hand. `MANUAL_STEERING` classifies as `manual_steering` with no suggested command, so `hive run`, the daemon policy, and workflow verb keys skip it. When the interactive agent exits, `Messages::AgentSteerExited` moves the active stage folder to `.hive-state/stages/archived-manual/<slug>/` (or a numeric suffix on collision), which makes the slug disappear from `hive status` and the TUI without treating it as an `9-done` pipeline archive.
 
 Execute-stage waiting rows read `row.next_action` from `hive status --json`: `kind=edit` opens the reason-specific target (`worktree`, `plan.md`, or `task.md`), while `kind=run` dispatches the suggested `hive develop ... --from 4-execute` command directly for recovery states like `missing_research_output` where editing a file cannot clear the gate.
@@ -195,7 +199,7 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 
 - `test/integration/tui_command_test.rb` — Thor help-text registration, `--json` rejection, non-tty boundary check.
 - `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
-- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
+- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `IdeaPreview`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
 - `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0.
 

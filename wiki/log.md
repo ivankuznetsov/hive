@@ -49,6 +49,12 @@ The supporting cleanup:
 - `wiki/modules/diagnosis_agent.md` — removed the TUI `R` key entry-point reference; only `hive status --diagnose <slug> --write` remains as the consumer.
 - `wiki/decisions.md` ADR-027 — replaced the three-gesture (`Enter` / `f` / `R`) action surface with the new unified two-action contract.
 - `docs/solutions/architecture-patterns/red-status-diagnose-then-act-2026-05-16.md` — pattern doc Section 5 reflects the two-action contract; refresh-via-headless-agent is now documented as a CLI-only affordance.
+## [2026-05-22T22:34:07Z] tui — `i` opens a full-screen read-only info panel
+
+**Action:** Documented the upgraded grid-mode `i` affordance. The footer now advertises `[i] info`; `OpenIdeaPreview` still enters `:idea_preview`, but the view is now a full-screen read-only info panel instead of a 6-row bottom strip. The panel renders task identity (slug, stage, `created_at`, absolute stage folder, latest `.hive-state/logs/<slug>/*.log` path, original idea text) plus stage-specific plain-text extras (`brainstorm.md`, `plan.md`, or the latest execute-log tail). It performs one read pass at open time, mutates no files, spawns no subprocess, and closes only on `q`, `Esc`, or `i`; other keys are no-ops.
+
+**Refreshed pages:**
+- [[commands/tui]] — footer, mode table, keybinding table, read-only info-panel behavior, and test surface updated.
 
 ## [2026-05-22T13:30:00Z] rebase / review — close three post-merge follow-up gaps from PR #104 review
 

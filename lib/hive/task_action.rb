@@ -61,11 +61,6 @@ module Hive
         label: "Ready to develop",
         command: "develop"
       },
-      execute_findings: {
-        key: Hive::Schemas::TaskActionKind::REVIEW_FINDINGS,
-        label: "Review findings",
-        command: "findings"
-      },
       execute_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
@@ -281,11 +276,7 @@ module Hive
       when :execute_stale
         ACTIONS.fetch(:execute_stale)
       when :execute_waiting
-        if marker.attrs["findings_count"].to_i.positive?
-          ACTIONS.fetch(:execute_findings)
-        else
-          ACTIONS.fetch(:execute_waiting)
-        end
+        ACTIONS.fetch(:execute_waiting)
       else
         ACTIONS.fetch(:execute_waiting)
       end
@@ -883,9 +874,7 @@ module Hive
     end
 
     def execute_waiting_input?
-      task.stage_name == "execute" &&
-        marker.name == :execute_waiting &&
-        marker.attrs["findings_count"].to_i <= 0
+      task.stage_name == "execute" && marker.name == :execute_waiting
     end
 
     def finalize_missing_pr_md?

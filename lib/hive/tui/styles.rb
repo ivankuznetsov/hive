@@ -8,7 +8,7 @@ module Hive
     #   blue    → ready_*       (next action available; calm forward motion)
     #   magenta → agent_running (active work in flight; visually distinct)
     #   red     → error / recover_* (attention required; failure-class)
-    #   yellow  → needs_input / review_findings (user-blocking)
+    #   yellow  → needs_input (user-blocking)
     #   green   → archived       (terminal "done" state)
     #   default → everything else
     #
@@ -38,7 +38,6 @@ module Hive
         "recover_execute" => :red,
         "recover_review"  => :red,
         "needs_input"     => :yellow,
-        "review_findings" => :yellow,
         "archived"        => :green
       }.freeze
 
@@ -63,7 +62,6 @@ module Hive
         "recover_execute" => Lipgloss::Style.new.foreground(color(:red)).freeze,
         "recover_review"  => Lipgloss::Style.new.foreground(color(:red)).freeze,
         "needs_input"     => Lipgloss::Style.new.foreground(color(:yellow)).freeze,
-        "review_findings" => Lipgloss::Style.new.foreground(color(:yellow)).freeze,
         "archived"        => Lipgloss::Style.new.foreground(color(:green)).freeze
       }.freeze
 

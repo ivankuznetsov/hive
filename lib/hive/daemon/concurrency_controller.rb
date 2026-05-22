@@ -64,7 +64,7 @@ module Hive
       # active agent rows already visible in `hive status --json` but not
       # owned by this controller. That lets a daemon restart respect
       # work already in flight while keeping waiting rows (`needs_input`,
-      # `review_findings`, recovery states, etc.) out of the cap.
+      # recovery states, etc.) out of the cap.
       # Returns one of :ok | :global_cap | :project_cap | :daily_cap |
       #   :cooldown | :quarantined | :project_dropped
       def can_dispatch?(project:, slug:, now: Time.now,

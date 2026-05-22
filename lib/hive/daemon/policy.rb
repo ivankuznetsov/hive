@@ -66,12 +66,6 @@ module Hive
       # Actions that mean "the task is in a stage and ready to RE-RUN with
       # fresh user input from the state file". Detection is mtime-debounced
       # so a mid-save partial draft doesn't trigger an early dispatch.
-      #
-      # `review_findings` is deliberately EXCLUDED (PR-40 review P2 #5):
-      # `Hive::TaskAction` emits `hive findings <slug>` for that case,
-      # which is a read-only listing command, not a workflow verb.
-      # Auto-dispatching it would produce a no-op spawn. Treat it as
-      # `:skip` (falls through to the default branch).
       EDIT_RESUME_ACTIONS = %w[
         needs_input
       ].freeze

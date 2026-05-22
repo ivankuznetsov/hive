@@ -30,7 +30,6 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil model.idea_preview_slug
     assert_nil model.flash
     assert_nil model.flash_set_at
-    assert_nil model.triage_state
     assert_nil model.tail_state
     assert_nil model.red_status_detail_state
     assert_nil model.last_error
@@ -131,7 +130,7 @@ class HiveTuiModelTest < Minitest::Test
                   new_idea_project_cursor new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
                   new_idea_broken_labels idea_preview_text idea_preview_slug flash flash_set_at
-                  triage_state tail_state red_status_detail_state
+                  tail_state red_status_detail_state
                   cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end

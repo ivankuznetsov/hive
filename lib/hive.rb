@@ -117,6 +117,10 @@ module Hive
       READY_TO_FINALIZE   = "ready_to_finalize".freeze
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       NEEDS_INPUT         = "needs_input".freeze
+      # REVIEW_FINDINGS is retained as a vestigial enum value for
+      # back-compat with published hive-status.v2.json consumers. No
+      # producer in the live pipeline emits it — the action key was the
+      # entry point to the now-removed TUI triage mode.
       REVIEW_FINDINGS     = "review_findings".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze

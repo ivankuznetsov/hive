@@ -136,16 +136,9 @@ class TaskActionTest < Minitest::Test
       "no command for an in-flight stage — pressing the verb key flashes refusal"
   end
 
-  def test_execute_waiting_with_findings_is_review_findings
+  def test_execute_waiting_is_needs_input
     task = fake_task(stage_name: "execute", stage_index: 4)
-    action = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 3))
-    assert_equal "review_findings", action.key
-    assert_equal "Review findings", action.label
-  end
-
-  def test_execute_waiting_no_findings_is_needs_input
-    task = fake_task(stage_name: "execute", stage_index: 4)
-    action = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 0))
+    action = Hive::TaskAction.for(task, marker(:execute_waiting))
     assert_equal "needs_input", action.key
   end
 
@@ -153,7 +146,7 @@ class TaskActionTest < Minitest::Test
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(
       task,
-      marker(:execute_waiting, "findings_count" => 0, "reason" => "no_worktree_changes")
+      marker(:execute_waiting, "reason" => "no_worktree_changes")
     )
 
     next_action = action.next_action
@@ -447,19 +440,6 @@ class TaskActionTest < Minitest::Test
     task = fake_task(stage_name: "plan", stage_index: 3, project_root: "/proj-a")
     action = Hive::TaskAction.for(task, marker(:complete), project_name: "proj-a", project_count: 3)
     assert_equal "hive develop demo-260426-aaaa --project proj-a --from 3-plan", action.command
-  end
-
-  def test_findings_uses_stage_only_on_collision
-    # Generic verbs (findings) only carry --stage when slug-collision
-    # actually exists, so the common single-task command stays clean.
-    task = fake_task(stage_name: "execute", stage_index: 4)
-    no_collision = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 2))
-    assert_equal "hive findings demo-260426-aaaa", no_collision.command,
-                 "findings command must NOT carry --stage absent collision"
-
-    with_collision = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 2),
-                                          stage_collision: true)
-    assert_equal "hive findings demo-260426-aaaa --stage 4-execute", with_collision.command
   end
 
   def test_command_shellescapes_slug_with_special_characters

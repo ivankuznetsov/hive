@@ -68,10 +68,6 @@ module Hive
           [ apply_cursor_jump_top(model), nil ]
         when Messages::CursorJumpBottom
           [ apply_cursor_jump_bottom(model), nil ]
-        when Messages::TriageCursorDown
-          [ apply_triage_cursor_down(model), nil ]
-        when Messages::TriageCursorUp
-          [ apply_triage_cursor_up(model), nil ]
         when Messages::ShowHelp
           [ apply_show_help(model), nil ]
         when Messages::OpenFilterPrompt
@@ -124,10 +120,9 @@ module Hive
           # Unknown messages flow through unchanged. Future-compat with
           # framework messages we don't yet care about (FocusMessage,
           # BlurMessage, MouseMessage if mouse ever gets enabled).
-          # DispatchCommand / OpenFindings / OpenLogTail / Bulk* /
-          # ToggleFinding intentionally fall through here — they require
-          # I/O or a runner reference and are handled in BubbleModel
-          # before delegating to Update.
+          # DispatchCommand / OpenLogTail / OpenInputEditor intentionally
+          # fall through here — they require I/O or a runner reference
+          # and are handled in BubbleModel before delegating to Update.
           [ model, nil ]
         end
       end
@@ -715,20 +710,6 @@ module Hive
         model.with(mode: :help)
       end
 
-      # TriageState mutates in place (the loop holds a single instance
-      # per triage session), so the model itself is returned unchanged.
-      # No-op when triage_state is nil — defensive guard for keys that
-      # arrive before BubbleModel#open_findings has set the state.
-      def apply_triage_cursor_down(model)
-        model.triage_state&.cursor_down
-        model
-      end
-
-      def apply_triage_cursor_up(model)
-        model.triage_state&.cursor_up
-        model
-      end
-
       # Pre-fill the filter buffer with the active filter so `/` followed
       # by edits feels like in-place editing (curses parity).
       def apply_open_filter_prompt(model)
@@ -745,14 +726,13 @@ module Hive
         )
       end
 
-      # Esc / `q` from a sub-mode returns to grid. Clears triage_state
-      # and tail_state on exit so the next entry starts clean. Help
-      # overlay dismisses to grid; filter mode goes through
-      # FilterCancelled (still routes through Back symmetrically here
-      # for the keystroke that produced this Message).
+      # Esc / `q` from a sub-mode returns to grid. Clears tail_state on
+      # exit so the next entry starts clean. Help overlay dismisses to
+      # grid; filter mode goes through FilterCancelled (still routes
+      # through Back symmetrically here for the keystroke that produced
+      # this Message).
       def apply_back(model)
         case model.mode
-        when :triage then model.with(mode: :grid, triage_state: nil)
         when :log_tail then model.with(mode: :grid, tail_state: nil)
         when :red_status_detail
           closed = model.with(mode: :grid, red_status_detail_state: nil)

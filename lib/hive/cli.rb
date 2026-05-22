@@ -692,9 +692,8 @@ module Hive
         grid (default)
           b/p/d/r/P/F/a dispatch hive brainstorm/plan/develop/review/open-pr/finalize/archive
           j/k or Down/Up cursor up/down (jumps across projects at edges)
-          Enter         contextual: review_findings opens triage,
-                        agent_running opens log tail, recoverable errors rerun,
-                        ready_* dispatches
+          Enter         contextual: agent_running opens log tail,
+                        recoverable errors rerun, ready_* dispatches
           o             open the focused task folder in $EDITOR for browse-only inspection
           s             steer the focused task manually in the configured dev agent;
                         marks MANUAL_STEERING and archives it on agent exit
@@ -703,14 +702,6 @@ module Hive
           1-9           scope to the Nth registered project; 0 clears scope
           ?             open this help overlay
           q             quit
-
-        triage (entered via Enter on a "Review findings" row)
-          j/k or Down/Up move the finding cursor
-          Space         toggle accept/reject on the highlighted finding
-          a             bulk-accept every finding on the task
-          r             bulk-reject every finding on the task
-          d             dispatch hive develop to re-inject accepted findings
-          Esc           back to grid
 
         log_tail (entered via Enter on agent_running / error rows)
           q / Esc       back to grid

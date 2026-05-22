@@ -79,6 +79,26 @@ class WorkflowsTest < Minitest::Test
                "no verb arrives at 1-inbox; tasks are seeded via `hive new`"
   end
 
+  # ── next_dir_after ────────────────────────────────────────────────────
+
+  def test_next_dir_after_6_review_is_7_artifacts
+    assert_equal "7-artifacts", Hive::Workflows.next_dir_after("6-review")
+  end
+
+  def test_next_dir_after_7_artifacts_is_8_finalize
+    assert_equal "8-finalize", Hive::Workflows.next_dir_after("7-artifacts")
+  end
+
+  def test_next_dir_after_terminal_is_nil
+    assert_nil Hive::Workflows.next_dir_after("9-done"),
+               "no stage follows the terminal stage"
+  end
+
+  def test_next_dir_after_unknown_stage_is_nil
+    assert_nil Hive::Workflows.next_dir_after("99-imaginary"),
+               "unknown stage dirs surface as nil so callers can branch on absence"
+  end
+
   # ── workflow_verb? ────────────────────────────────────────────────────
 
   def test_workflow_verb_recognises_review

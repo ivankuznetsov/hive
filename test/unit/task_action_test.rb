@@ -1048,4 +1048,238 @@ class TaskActionTest < Minitest::Test
                  "Stages::DIRS has stage names #{extra.inspect} that TaskAction doesn't classify; " \
                  "tasks at those stages will fall through to ACTIONS[:error]"
   end
+
+  # ── additional helper edge coverage ───────────────────────────────────
+
+  def test_unknown_stage_classifies_as_error
+    task = fake_task(stage_name: "mystery", stage_index: 9)
+    action = Hive::TaskAction.for(task, marker(:waiting))
+
+    assert_equal "error", action.key
+    assert_nil action.command
+  end
+
+  def test_open_pr_waiting_is_ready_to_open_pr
+    task = fake_task(stage_name: "open-pr", stage_index: 5)
+    action = Hive::TaskAction.for(task, marker(:waiting))
+
+    assert_equal "ready_to_open_pr", action.key
+    assert_equal "hive open-pr demo-260426-aaaa --from 5-open-pr", action.command
+  end
+
+  def test_finalize_waiting_when_pr_md_exists
+    Dir.mktmpdir("task-action-finalize-waiting") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "pr.md")
+      File.write(state_file, "---\npr_url: https://example.com/pr/9\n---\n")
+      task = FakeTask.new(stage_name: "finalize", stage_index: 7, slug: "demo-260426-aaaa",
+                          project_root: dir, project_name: File.basename(dir), folder: folder,
+                          state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:none))
+
+      assert_equal "needs_input", action.key
+      assert_equal "hive finalize demo-260426-aaaa --from 7-finalize", action.command
+    end
+  end
+
+  def test_dead_agent_without_recorded_pid_uses_generic_summary
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    diagnostic = Hive::TaskAction.for(task, marker(:agent_working), pid_alive: false).diagnostic
+
+    assert_equal "agent process not alive", diagnostic.fetch("summary")
+  end
+
+  def test_review_stale_diagnostic_uses_pass_artifacts_and_latest_logs
+    Dir.mktmpdir("task-action-review-stale") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      logs = File.join(task.folder, "logs")
+      FileUtils.mkdir_p([ reviews, logs ])
+      escalation = File.join(reviews, "escalations-02.md")
+      review_note = File.join(reviews, "ce-review-02.md")
+      log = File.join(logs, "review-pass-20260522.log")
+      File.write(escalation, "needs user decision\n")
+      File.write(review_note, "review note\n")
+      File.write(log, "latest log\n")
+
+      diagnostic = Hive::TaskAction.for(task, marker(:review_stale, "pass" => "2")).diagnostic
+
+      assert_equal escalation, diagnostic.fetch("source_path")
+      assert_includes diagnostic.fetch("artifact_paths"), review_note
+      assert_includes diagnostic.fetch("artifact_paths"), log
+    end
+  end
+
+  def test_review_phase_logs_cover_browser_reviewers_and_unknown_phases
+    Dir.mktmpdir("task-action-review-logs") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      logs = File.join(task.folder, "logs")
+      FileUtils.mkdir_p(logs)
+      browser = File.join(logs, "review-browser-pass03.log")
+      reviewer = File.join(logs, "review-claude-pass03.log")
+      File.write(browser, "browser log\n")
+      File.write(reviewer, "reviewer log\n")
+      action = Hive::TaskAction.for(task, marker(:review_error, "pass" => "3"))
+
+      assert_equal [ browser ], action.send(:review_phase_logs, "browser", "03")
+      assert_equal [ browser, reviewer ].sort, action.send(:review_phase_logs, "reviewers", "03").sort
+      assert_empty action.send(:review_phase_logs, "unknown", "03")
+    end
+  end
+
+  def test_paths_from_marker_files_filters_unsafe_entries
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(
+      task,
+      marker(:review_error, "files" => "reviews/a.md ../escape /tmp/rooted logs/b.log")
+    )
+
+    assert_equal [ File.join(task.folder, "reviews/a.md"), File.join(task.folder, "logs/b.log") ],
+                 action.send(:paths_from_marker_files)
+  end
+
+  def test_artifact_detail_reports_read_errors
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(task, marker(:review_error))
+    detail = action.send(:artifact_detail, File.join(task.folder, "missing.md"))
+
+    assert_includes detail, "Errno::ENOENT"
+  end
+
+  def test_diagnostic_generated_by_falls_back_when_frontmatter_has_no_generator
+    Dir.mktmpdir("task-action-generator") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      path = File.join(task.folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "---\nmarker_signature: abc\n---\nbody\n")
+      action = Hive::TaskAction.for(task, marker(:review_error))
+
+      assert_equal "local", action.send(:diagnostic_generated_by, path)
+    end
+  end
+
+  def test_diagnostic_frontmatter_returns_empty_on_parse_or_read_errors
+    Dir.mktmpdir("task-action-frontmatter") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      path = File.join(task.folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "---\n: bad\n---\nbody\n")
+      action = Hive::TaskAction.for(task, marker(:review_error))
+
+      assert_equal({}, action.send(:diagnostic_frontmatter, path))
+      assert_equal({}, action.send(:diagnostic_frontmatter, File.join(task.folder, "missing.md")))
+    end
+  end
+
+  def test_review_stale_with_escalations_suggests_manual_fix
+    Dir.mktmpdir("task-action-review-stale-manual") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "escalations-04.md"), "decide\n")
+
+      suggested = Hive::TaskAction.for(task, marker(:review_stale, "pass" => "4")).diagnostic.fetch("suggested_next_action")
+
+      assert_equal "manual_fix", suggested.fetch("kind")
+      assert_nil suggested["command"]
+    end
+  end
+
+  def test_review_stale_and_error_retry_commands_include_priority_match_attrs
+    review_task = fake_task(stage_name: "review", stage_index: 6)
+    review_suggested = Hive::TaskAction.for(
+      review_task,
+      marker(:review_stale, "pass" => "2", "reason" => "wall_clock")
+    ).diagnostic.fetch("suggested_next_action")
+
+    assert_equal "retry", review_suggested.fetch("kind")
+    review_parts = Shellwords.split(review_suggested.fetch("command"))
+    assert_includes review_parts, "--name"
+    assert_includes review_parts, "REVIEW_STALE"
+    assert_includes review_parts, "--match-attr"
+    assert_includes review_parts, "pass=2"
+
+    error_task = fake_task(stage_name: "execute", stage_index: 4)
+    error_suggested = Hive::TaskAction.for(
+      error_task,
+      marker(:error, "exit_code" => "70", "reason" => "agent_failed")
+    ).diagnostic.fetch("suggested_next_action")
+
+    assert_equal "retry", error_suggested.fetch("kind")
+    error_parts = Shellwords.split(error_suggested.fetch("command"))
+    assert_includes error_parts, "--name"
+    assert_includes error_parts, "ERROR"
+    assert_includes error_parts, "--match-attr"
+    assert_includes error_parts, "exit_code=70"
+  end
+
+  def test_incomplete_plan_retry_command_includes_project_when_needed
+    Dir.mktmpdir("task-action-plan-project") do |root|
+      folder = File.join(root, ".hive-state", "stages", "3-plan", "demo-260426-aaaa")
+      state_file = File.join(folder, "plan.md")
+      FileUtils.mkdir_p(folder)
+      File.write(state_file, "")
+      task = FakeTask.new(
+        stage_name: "plan",
+        stage_index: 3,
+        slug: "demo-260426-aaaa",
+        project_root: root,
+        project_name: File.basename(root),
+        folder: folder,
+        state_file: state_file
+      )
+
+      suggested = Hive::TaskAction.for(
+        task,
+        marker(:none),
+        project_name: "demo-project",
+        project_count: 2
+      ).diagnostic.fetch("suggested_next_action")
+
+      assert_includes suggested.fetch("command"), "--project demo-project"
+      assert_includes suggested.fetch("command"), "--from 3-plan"
+    end
+  end
+
+  def test_private_path_helpers_cover_missing_and_empty_inputs
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(task, marker(:review_error))
+
+    assert_nil action.send(:realpath_or_expand, nil)
+    assert_equal File.expand_path(File.join(task.folder, "missing")),
+                 action.send(:realpath_or_expand, File.join(task.folder, "missing"))
+  end
+
+  def test_safe_diagnostic_artifact_handles_realpath_failures
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(task, marker(:review_error))
+    original_file = File.method(:file?)
+    original_realpath = File.method(:realpath)
+
+    with_replaced_singleton_method(File, :file?, ->(_path) { true }) do
+      with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::ENOENT }) do
+        refute action.send(:safe_diagnostic_artifact?, File.join(task.folder, "gone.md"))
+      end
+
+      with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::EACCES }) do
+        _out, err = capture_io do
+          refute action.send(:safe_diagnostic_artifact?, File.join(task.folder, "blocked.md"))
+        end
+        assert_includes err, "cannot realpath"
+      end
+    end
+  ensure
+    File.define_singleton_method(:file?, original_file) if original_file
+    File.define_singleton_method(:realpath, original_realpath) if original_realpath
+  end
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
+  end
 end

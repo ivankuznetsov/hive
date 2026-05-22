@@ -249,6 +249,13 @@ class HiveSkillCheckCodexTest < Minitest::Test
       assert_match(/codex plugin install/, msg)
     end
   end
+
+  def test_malformed_invocation_returns_missing_with_argument_error
+    status, msg = Hive::SkillCheck::Codex.verify("garbage")
+
+    assert_equal :missing, status
+    assert_match(/expected/, msg)
+  end
 end
 
 class HiveSkillCheckPiTest < Minitest::Test
@@ -463,9 +470,103 @@ class HiveSkillCheckPiTest < Minitest::Test
     end
   end
 
+  def test_missing_hint_summarizes_parse_errors
+    inv = Hive::SkillCheck::Invocation.new(plugin: "skill", name: "foo")
+
+    msg = Hive::SkillCheck::Pi.install_hint(inv, parse_errors: [ "one", "two", "three", "four" ])
+
+    assert_match(/failed to parse 4 settings\/manifest file/, msg)
+    assert_match(/one; two; three/, msg)
+    assert_match(/\(and 1 more\)/, msg)
+  end
+
+  def test_global_npm_root_returns_nil_on_timeout
+    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds) { raise Timeout::Error }) do
+      assert_nil Hive::SkillCheck::Pi.global_npm_root
+    end
+  end
+
+  def test_manifest_skill_candidates_expands_jailed_globs
+    with_tmp_dir do |package_root|
+      write_file("#{package_root}/package.json", '{"pi":{"skills":["custom-*"]}}')
+      write_file("#{package_root}/custom-one/foo/SKILL.md")
+
+      paths = Hive::SkillCheck::Pi.manifest_skill_candidates(package_root, "foo")
+
+      assert_includes paths, "#{package_root}/custom-one/foo/SKILL.md"
+    end
+  end
+
+  def test_jail_path_rejects_paths_outside_all_roots
+    assert_nil Hive::SkillCheck::Pi.jail_path("/tmp/outside", [ "/var/hive" ])
+  end
+
+  def test_path_candidates_for_markdown_uses_frontmatter_name
+    with_tmp_dir do |dir|
+      named = File.join(dir, "custom.md")
+      plain = File.join(dir, "plain.md")
+      write_file(named, "---\nname: foo\n---\nbody\n")
+      write_file(plain, "body\n")
+
+      assert_equal [ named ], Hive::SkillCheck::Pi.path_candidates(named, "foo", include_root_md: true)
+      assert_equal [], Hive::SkillCheck::Pi.path_candidates(named, "bar", include_root_md: true)
+      assert_equal [], Hive::SkillCheck::Pi.path_candidates(plain, "foo", include_root_md: true)
+      assert_equal [], Hive::SkillCheck::Pi.path_candidates(File.join(dir, "missing.md"), "foo", include_root_md: true)
+    end
+  end
+
+  def test_absolute_or_relative_path_expands_home_absolute_and_relative_forms
+    with_tmp_dir do |base|
+      home = File.join(base, "home")
+
+      assert_equal home, Hive::SkillCheck::Pi.absolute_or_relative_path("~", base, home: home)
+      assert_equal File.join(home, "skills"), Hive::SkillCheck::Pi.absolute_or_relative_path("~/skills", base, home: home)
+      assert_equal "/var/tmp", Hive::SkillCheck::Pi.absolute_or_relative_path("/var/tmp", base, home: home)
+      assert_equal File.join(base, "local"), Hive::SkillCheck::Pi.absolute_or_relative_path("local", base, home: home)
+    end
+  end
+
+  def test_skill_file_matches_handles_read_errors
+    with_tmp_dir do |dir|
+      path = File.join(dir, "custom.md")
+
+      with_replaced_singleton_method(File, :file?, ->(_path) { true }) do
+        with_replaced_singleton_method(File, :read, ->(_path, _bytes) { raise Errno::EACCES }) do
+          refute Hive::SkillCheck::Pi.skill_file_matches?(path, "foo")
+        end
+      end
+    end
+  end
+
+  def test_read_json_records_parse_errors_and_swallows_read_failures
+    with_tmp_dir do |dir|
+      path = File.join(dir, "settings.json")
+      write_file(path, "{")
+      errors = []
+
+      assert_nil Hive::SkillCheck::Pi.read_json(path, errors: errors)
+      assert_equal 1, errors.size
+      assert_match(/settings\.json:/, errors.first)
+
+      with_replaced_singleton_method(File, :file?, ->(_path) { true }) do
+        with_replaced_singleton_method(File, :read, ->(_path) { raise Errno::EACCES }) do
+          assert_nil Hive::SkillCheck::Pi.read_json(File.join(dir, "blocked.json"), errors: errors)
+        end
+      end
+    end
+  end
+
   def test_returns_missing_for_garbage_invocation
     status, msg = Hive::SkillCheck::Pi.verify("garbage")
     assert_equal :missing, status
     assert_match(/expected/, msg, "malformed invocation surfaces parse error")
+  end
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
   end
 end

@@ -62,10 +62,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeMergeWatcher
     attr_reader :enqueued
-    attr_accessor :next_archives
+    attr_accessor :next_archives, :next_dropped
     def initialize
       @enqueued = []
       @next_archives = []
+      @last_tick_dropped = []
+      @next_dropped = []
     end
 
     def enqueue(project:, slug:, task_folder:)
@@ -75,8 +77,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def tick(now:)
       out = @next_archives
       @next_archives = []
+      @last_tick_dropped = @next_dropped
+      @next_dropped = []
       out
     end
+
+    attr_reader :last_tick_dropped
   end
 
   # ── construction helpers ───────────────────────────────────────────────

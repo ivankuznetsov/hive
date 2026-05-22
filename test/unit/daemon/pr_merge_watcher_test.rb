@@ -173,11 +173,53 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       # Advance well past every backoff window between attempts so each
       # tick actually polls (rather than being gated by next_eligible_at).
       now = Time.now
+      last_tick_dropped = nil
       Hive::Daemon::PrMergeWatcher::GH_MAX_FAILURES.times do |i|
         watcher.tick(now: now + i * 10_000)
+        last_tick_dropped = watcher.last_tick_dropped
       end
       refute watcher.watching?(project: "p1", slug: "s1"),
              "after GH_MAX_FAILURES consecutive errors, watcher must drop the entry"
+
+      # ce-code-review P1 #9: the exhausted-failure drop must surface
+      # in last_tick_dropped so the dispatcher can emit a
+      # :merge_watcher_dropped logger event. Without this signal, a
+      # task whose merged PR couldn't be confirmed silently sat at
+      # ready_to_archive forever.
+      assert_equal 1, last_tick_dropped.size,
+                   "drop must be recorded in last_tick_dropped on the final tick"
+      drop = last_tick_dropped.first
+      assert_equal "p1", drop[:project]
+      assert_equal "s1", drop[:slug]
+      assert_equal "x", drop[:pr_url]
+      assert_equal Hive::Daemon::PrMergeWatcher::GH_MAX_FAILURES, drop[:failure_count]
+      assert_match(/boom/, drop[:last_error].to_s,
+                   "last_error must carry the gh stderr/exit detail")
+    end
+  ensure
+    ENV.delete("HIVE_FAKE_GH_EXIT")
+    ENV.delete("HIVE_FAKE_GH_STDERR")
+  end
+
+  def test_tick_clears_last_tick_dropped_between_ticks
+    with_pr_md(url: "x") do |folder|
+      watcher = make(poll_interval_sec: 0)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+
+      ENV["HIVE_FAKE_GH_EXIT"] = "1"
+      ENV["HIVE_FAKE_GH_STDERR"] = "boom"
+      now = Time.now
+      Hive::Daemon::PrMergeWatcher::GH_MAX_FAILURES.times do |i|
+        watcher.tick(now: now + i * 10_000)
+      end
+      refute_empty watcher.last_tick_dropped
+
+      # No queued entries left to drop, so a subsequent tick must
+      # reset the buffer or downstream emitters would re-log the same
+      # drop on every tick.
+      watcher.tick(now: now + 1_000_000)
+      assert_empty watcher.last_tick_dropped,
+                   "last_tick_dropped must be reset to empty when no new drops occur"
     end
   ensure
     ENV.delete("HIVE_FAKE_GH_EXIT")

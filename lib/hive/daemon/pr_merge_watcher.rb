@@ -39,7 +39,18 @@ module Hive
         @poll_interval_sec = poll_interval_sec
         @gh_bin = gh_bin
         @pending = {}
+        # Buffer of `{project:, slug:, pr_url:, failure_count:, last_error:}`
+        # entries that hit GH_MAX_FAILURES during the most recent #tick.
+        # The dispatcher reads this after every tick to emit
+        # `:merge_watcher_dropped` logger events — without it, exhausted
+        # entries vanished silently and the operator had no signal that
+        # the watcher had given up on a merged PR.
+        @last_tick_dropped = []
       end
+
+      # Drops that hit GH_MAX_FAILURES during the most recent #tick.
+      # Cleared and repopulated on each tick.
+      attr_reader :last_tick_dropped
 
       def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: ARCHIVE_FROM_STAGE)
         key = [ project, slug ]
@@ -72,6 +83,7 @@ module Hive
       def tick(now: Time.now)
         archives = []
         keys_to_drop = []
+        @last_tick_dropped = []
 
         @pending.each do |key, entry|
           # Cadence: respect both the regular poll interval AND any
@@ -92,6 +104,13 @@ module Hive
             entry[:failure_count] += 1
             if entry[:failure_count] >= GH_MAX_FAILURES
               keys_to_drop << key
+              project, slug = key
+              @last_tick_dropped << {
+                project: project, slug: slug,
+                pr_url: entry[:pr_url],
+                failure_count: entry[:failure_count],
+                last_error: error
+              }
             else
               # Schedule the next eligible poll using the backoff
               # schedule (60 → 300 → 900 s). Index is failure_count - 1

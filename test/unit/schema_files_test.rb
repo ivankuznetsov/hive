@@ -55,9 +55,15 @@ class SchemaFilesTest < Minitest::Test
     v2_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
     assert_includes v2_dirs, "5-open-pr"
     assert_includes v2_dirs, "6-review"
+    assert_includes v2_dirs, "7-artifacts",
+                    "v2 widens the enum to include 7-artifacts (plan U1; ADR-029)"
     assert_includes v2_dirs, "8-finalize"
     assert_includes v2_dirs, "9-done"
     refute_includes v2_dirs, "5-pr", "v2 retires the legacy 5-pr enum value"
+    refute_includes v2_dirs, "7-finalize",
+                    "v2 retires the pre-renumber 7-finalize enum value"
+    refute_includes v2_dirs, "8-done",
+                    "v2 retires the pre-renumber 8-done enum value"
   end
 
   def test_hive_approve_success_required_keys_match_producer_emission

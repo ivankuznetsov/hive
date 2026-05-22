@@ -24,6 +24,7 @@ class HiveCommandsDoctorTest < Minitest::Test
 
   def base_config(overrides = {})
     {
+      "claude" => { "mode" => "headless" },
       "brainstorm" => { "agent" => "claude" },
       "plan" => { "agent" => "claude" }
     }.merge(overrides) { |_k, a, b| a.merge(b) }
@@ -92,6 +93,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.pi/agent/skills/wiki-plan/SKILL.md")
       out = StringIO.new
       cfg = {
+        "claude" => { "mode" => "headless" },
         "brainstorm" => { "agent" => "pi" },
         "plan" => { "agent" => "pi" }
       }
@@ -111,6 +113,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
       out = StringIO.new
       cfg = {
+        "claude" => { "mode" => "headless" },
         "brainstorm" => { "agent" => "pi" },
         "plan" => { "agent" => "pi" }
       }
@@ -130,6 +133,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.8.1/skills/ce-brainstorm/SKILL.md")
       out = StringIO.new
       cfg = {
+        "claude" => { "mode" => "headless" },
         "brainstorm" => { "agent" => "codex" },
         "plan" => { "agent" => "codex" }
       }
@@ -150,6 +154,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.8.1/skills/ce-brainstorm/SKILL.md")
       out = StringIO.new
       cfg = {
+        "claude" => { "mode" => "headless" },
         "brainstorm" => { "agent" => "codex" },
         "plan" => { "agent" => "codex", "skill" => "/plan" }
       }
@@ -198,6 +203,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.claude/commands/plan.md")
       out = StringIO.new
       cfg = {
+        "claude" => { "mode" => "headless" },
         "brainstorm" => { "agent" => "claude" },
         "plan" => { "agent" => "claude" }
       }
@@ -234,17 +240,17 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
-  def test_tmux_dependency_row_is_reported_for_interactive_brainstorm_runtime
+  def test_tmux_dependency_row_is_reported_for_global_claude_tmux_mode
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
       write_file("#{home}/.claude/commands/plan.md")
       with_fake_tmux("tmux 3.6a") do
         out = StringIO.new
         cfg = base_config(
+          "claude" => { "mode" => "tmux" },
           "brainstorm" => {
             "agent" => "claude",
-            "skill" => "/compound-engineering:ce-brainstorm",
-            "runtime" => "tmux_interactive"
+            "skill" => "/compound-engineering:ce-brainstorm"
           },
           "plan" => { "agent" => "claude", "skill" => "/plan" }
         )
@@ -252,12 +258,12 @@ class HiveCommandsDoctorTest < Minitest::Test
         exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
         assert_equal 0, exit_code
-        assert_match(%r{2-brainstorm/tmux.*tmux.*✓ present}, out.string)
+        assert_match(%r{claude/tmux.*tmux.*✓ present}, out.string)
       end
     end
   end
 
-  def test_tmux_dependency_row_fails_when_interactive_runtime_cannot_run_tmux
+  def test_tmux_dependency_row_fails_when_global_tmux_mode_cannot_run_tmux
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
       write_file("#{home}/.claude/commands/plan.md")
@@ -265,10 +271,10 @@ class HiveCommandsDoctorTest < Minitest::Test
       ENV["HIVE_TMUX_BIN"] = "missing-tmux-for-hive"
       out = StringIO.new
       cfg = base_config(
+        "claude" => { "mode" => "tmux" },
         "brainstorm" => {
           "agent" => "claude",
-          "skill" => "/compound-engineering:ce-brainstorm",
-          "runtime" => "tmux_interactive"
+          "skill" => "/compound-engineering:ce-brainstorm"
         },
         "plan" => { "agent" => "claude", "skill" => "/plan" }
       )
@@ -276,29 +282,30 @@ class HiveCommandsDoctorTest < Minitest::Test
       exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
       assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
-      assert_match(%r{2-brainstorm/tmux.*✗ missing}, out.string)
+      assert_match(%r{claude/tmux.*✗ missing}, out.string)
       assert_match(/tmux binary not runnable/, out.string)
     ensure
       old.nil? ? ENV.delete("HIVE_TMUX_BIN") : ENV["HIVE_TMUX_BIN"] = old
     end
   end
 
-  def test_tmux_runtime_warns_when_configured_agent_is_not_claude
+  def test_tmux_mode_does_not_warn_for_non_claude_stage_agents
     with_fake_home do |home|
       write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
-      write_file("#{home}/.claude/commands/plan.md")
+      write_file("#{home}/.pi/agent/skills/wiki-plan/SKILL.md")
       with_fake_tmux("tmux 3.6a") do
         out = StringIO.new
         cfg = base_config(
-          "brainstorm" => { "agent" => "pi", "runtime" => "tmux_interactive" },
-          "plan" => { "agent" => "claude", "skill" => "/plan" }
+          "claude" => { "mode" => "tmux" },
+          "brainstorm" => { "agent" => "pi" },
+          "plan" => { "agent" => "pi" }
         )
 
         exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
 
         assert_equal 0, exit_code
-        assert_match(%r{2-brainstorm/tmux.*pi.*! warning}, out.string)
-        assert_match(/hardcodes the claude binary/, out.string)
+        assert_match(%r{claude/tmux.*✓ present}, out.string)
+        refute_match(/! warning/, out.string)
       end
     end
   end
@@ -315,10 +322,10 @@ class HiveCommandsDoctorTest < Minitest::Test
       with_fake_tmux("tmux 3.6a") do
         out = StringIO.new
         cfg = base_config(
+          "claude" => { "mode" => "tmux" },
           "brainstorm" => {
             "agent" => "claude",
-            "skill" => "/compound-engineering:ce-brainstorm",
-            "runtime" => "tmux_interactive"
+            "skill" => "/compound-engineering:ce-brainstorm"
           },
           "plan" => { "agent" => "claude", "skill" => "/plan" }
         )
@@ -337,10 +344,33 @@ class HiveCommandsDoctorTest < Minitest::Test
     old_claude.nil? ? ENV.delete("CLAUDE_API_KEY") : ENV["CLAUDE_API_KEY"] = old_claude
   end
 
+  def test_legacy_brainstorm_runtime_row_warns_to_migrate
+    with_fake_home do |home|
+      write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
+      write_file("#{home}/.claude/commands/plan.md")
+      out = StringIO.new
+      cfg = base_config(
+        "brainstorm" => {
+          "agent" => "claude",
+          "skill" => "/compound-engineering:ce-brainstorm",
+          "runtime" => "tmux_interactive"
+        },
+        "plan" => { "agent" => "claude", "skill" => "/plan" }
+      )
+
+      exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
+
+      assert_equal 0, exit_code
+      assert_match(%r{2-brainstorm/brainstorm\.runtime.*! warning}, out.string)
+      assert_match(/superseded by claude\.mode/, out.string)
+    end
+  end
+
   # ---- Review.reviewers extension (U1/U2/U3) ----
 
   def cfg_with_reviewers(reviewers)
     {
+      "claude" => { "mode" => "headless" },
       "brainstorm" => { "agent" => "claude", "skill" => "/x" }, # parked
       "plan" => { "agent" => "claude", "skill" => "/x" },       # parked
       "review" => { "reviewers" => reviewers }
@@ -424,7 +454,8 @@ class HiveCommandsDoctorTest < Minitest::Test
       [
         cfg_with_reviewers([]),
         cfg_with_reviewers(nil),
-        { "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+        { "claude" => { "mode" => "headless" },
+          "brainstorm" => { "agent" => "claude", "skill" => "/x" },
           "plan" => { "agent" => "claude", "skill" => "/x" } } # `review:` absent
       ].each do |cfg|
         out = StringIO.new

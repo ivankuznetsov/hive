@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/status"
+require "hive/events"
 
 class StatusTest < Minitest::Test
   include HiveTestHelper
@@ -87,6 +88,40 @@ class StatusTest < Minitest::Test
         assert_includes out, "review-ci-stale"
         assert_includes out, "review-complete"
       end
+    end
+  end
+
+  def test_status_json_ignores_events_artifacts
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        slug = "events-ignored-260522-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, "brainstorm.md")
+        File.write(state_file, "## Round 1\n<!-- WAITING -->\n")
+        fixed = Time.utc(2026, 5, 22, 12, 0, 0)
+        File.utime(fixed, fixed, state_file)
+
+        with_fixed_time(fixed) do
+          before, = capture_io { Hive::Commands::Status.new(json: true).call }
+          Hive::Events.emit(task_folder: folder, slug: slug, stage: "2-brainstorm",
+                            event_type: :stage_enter, message: "ignored by status")
+          after, = capture_io { Hive::Commands::Status.new(json: true).call }
+          assert_equal before, after
+        end
+      end
+    end
+  end
+
+  def with_fixed_time(time)
+    Time.singleton_class.alias_method(:__hive_status_test_now, :now)
+    Time.define_singleton_method(:now) { time }
+    yield
+  ensure
+    if Time.singleton_class.method_defined?(:__hive_status_test_now)
+      Time.singleton_class.alias_method(:now, :__hive_status_test_now)
+      Time.singleton_class.remove_method(:__hive_status_test_now)
     end
   end
 end

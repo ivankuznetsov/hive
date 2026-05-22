@@ -51,13 +51,24 @@ StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-# `hive daemon` shells out to `hive status --json` once per tick. systemd
-# user services do NOT inherit your interactive shell's PATH, so we set
-# HIVE_BIN to an absolute path (consumed by lib/hive/daemon/status_consumer.rb)
-# and a minimal PATH for any other shell-outs the daemon performs (git, etc.).
-# `hive init` and `hive daemon install` rewrite HIVE_BIN= to the same absolute
-# path used in ExecStart=. If you copy this template verbatim, the default
-# %h/.local/bin/hive is the option-A install location.
+# `hive daemon` shells out to `hive status --json` once per tick.
+# systemd user services do NOT inherit your interactive shell's
+# PATH, so:
+#   1. HIVE_BIN — absolute path to the binary; the daemon reads
+#      this directly (lib/hive/daemon/status_consumer.rb) instead
+#      of resolving "hive" via PATH.
+#   2. PATH — covers (a) any incidental shell-outs the daemon
+#      performs (git, etc.) and (b) the gem's bin/hive wrapper
+#      whose `#!/usr/bin/env ruby` shebang needs to find a Ruby
+#      with the gem's dependencies. `hive daemon install` detects
+#      mise/rbenv/asdf and prepends the matching shim directory
+#      automatically; otherwise the minimal PATH below covers
+#      system-Ruby installs.
+# `hive init` and `hive daemon install` rewrite HIVE_BIN= and
+# Environment=PATH= to match the resolved binary + Ruby manager
+# detected on the host. If you copy this template verbatim, the
+# default %h/.local/bin/hive is the option-A install location and
+# system Ruby is assumed.
 Environment=HIVE_BIN=%h/.local/bin/hive
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/hive daemon start

@@ -184,6 +184,19 @@ module Hive
           end
         end
 
+        # Per-manager root → shim dir. The keys are checked against
+        # the realpath of the active `ruby` interpreter; the matching
+        # value is the shim directory injected into the unit's
+        # `Environment=PATH=`. All paths use `%h` so systemd expands
+        # them per-user at runtime. chruby and RVM are absent because
+        # they don't use a shim directory — they modify PATH per
+        # shell, which the unit's static Environment= can't replicate.
+        RUBY_SHIM_MANAGERS = {
+          ".local/share/mise" => "%h/.local/share/mise/shims",
+          ".rbenv" => "%h/.rbenv/shims",
+          ".asdf" => "%h/.asdf/shims"
+        }.freeze
+
         def render_systemd
           template = File.read(File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__))
           # systemd .service files are POSIX-shell-ish — escape the
@@ -193,6 +206,41 @@ module Hive
           template
             .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} daemon start")
             .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
+            .sub(/^Environment=PATH=.*$/, build_path_line)
+        end
+
+        # The unit's Environment=PATH= must let `#!/usr/bin/env ruby`
+        # in the gem's bin/hive wrapper resolve to a Ruby that has
+        # the gem's dependencies installed. On stock Linux that's
+        # /usr/bin/ruby + the system gem store, which works. On
+        # workstations using mise / rbenv / asdf to manage Ruby
+        # versions, the system Ruby has none of the project's gems
+        # and the daemon crashes with `cannot load such file -- thor
+        # (LoadError)` the first time it tries to start.
+        #
+        # Detect the active `ruby` interpreter's path and, if it
+        # lives under a known version manager's installs directory,
+        # prepend the matching shim directory to the baked PATH so
+        # `env ruby` picks up the right interpreter when the daemon
+        # forks. If no manager is detected, the minimal PATH
+        # (sufficient for system-Ruby installs) is preserved.
+        def build_path_line
+          base = %w[%h/.local/bin /usr/local/bin /usr/bin /bin]
+          shim = ruby_shim_dir
+          base.insert(1, shim) if shim
+          "Environment=PATH=#{base.join(':')}"
+        end
+
+        def ruby_shim_dir
+          ruby_path = which("ruby")
+          return nil unless ruby_path
+
+          resolved = File.exist?(ruby_path) ? File.realpath(ruby_path) : ruby_path
+          RUBY_SHIM_MANAGERS.each do |root_segment, shim_template|
+            mgr_root = File.join(@home, root_segment)
+            return shim_template if resolved.start_with?("#{mgr_root}/")
+          end
+          nil
         end
 
         def render_launchd

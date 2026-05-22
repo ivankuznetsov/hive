@@ -1755,3 +1755,16 @@ Key contracts:
 
 **Refreshed pages:**
 - `wiki/operating.md` — added a Release Verification section documenting the script's usage, exit codes, and JSON envelope.
+
+## [2026-05-22T14:30:00Z] daemon — auto-detect Ruby manager shim in unit's PATH
+
+**Action:** Fixed a release-blocking daemon failure on workstations running mise / rbenv / asdf to manage Ruby. PR #113 baked `Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin` into the unit, which is sufficient for system-Ruby hosts but causes `bin/hive`'s `#!/usr/bin/env ruby` shebang to resolve to `/usr/bin/ruby` — which has none of the gem's dependencies on a version-manager-driven workstation. The daemon then crashes on every restart with `cannot load such file -- thor (LoadError)` and systemd hits `StartLimitBurst=3 / Result=start-limit-hit`.
+
+`ServiceInstaller#render_systemd` now detects the active Ruby interpreter via `which("ruby")`, walks the realpath against a known-manager set (mise's `~/.local/share/mise`, rbenv's `~/.rbenv`, asdf's `~/.asdf`), and prepends the matching `*/shims` directory to the unit's `Environment=PATH=` so `env ruby` resolves to the manager's shim → the right version with the right gemset. System-Ruby and "no ruby on PATH" cases fall through to the existing minimal PATH unchanged.
+
+chruby and RVM are intentionally not handled — they modify PATH per-shell and don't expose a stable shim directory the unit can hard-code at install time.
+
+**Why CI didn't catch it:** install-smoke's `full-smoke` job runs `hive --version` directly (not through systemd) using `ruby/setup-ruby@v1` which puts Ruby on PATH. `verify-release.sh` from PR #118 validates the install envelope but doesn't actually start the daemon and let it run a tick. Both pass against a release that crashes on the user's actual workstation. Worth a follow-up: integration coverage that exercises the daemon start path against multiple Ruby-manager fixtures.
+
+**Refreshed pages:**
+- `examples/systemd/hive-daemon.service` — extended the inline comment to explain why both `HIVE_BIN=` and `Environment=PATH=` are installer-managed (the PATH now carries Ruby-manager shim discovery on top of the minimal shell-out coverage).

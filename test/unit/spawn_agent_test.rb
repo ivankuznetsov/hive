@@ -38,6 +38,41 @@ class SpawnAgentTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
+  # --- resolve_template_path ----------------------------------------------
+
+  def test_resolve_template_path_rejects_missing_builtin
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Stages::Base.resolve_template_path("missing-template.erb")
+    end
+
+    assert_match(/not found among built-ins/, error.message)
+  end
+
+  def test_resolve_template_path_rejects_custom_without_state_dir
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Stages::Base.resolve_template_path("./custom-prompt.md")
+    end
+
+    assert_match(/custom path but no hive_state_dir/, error.message)
+  end
+
+  def test_resolve_template_path_rejects_symlink_escape
+    with_tmp_dir do |dir|
+      state_dir = File.join(dir, ".hive-state")
+      templates_dir = File.join(state_dir, "templates")
+      FileUtils.mkdir_p(templates_dir)
+      outside = File.join(dir, "outside.md")
+      File.write(outside, "outside prompt\n")
+      File.symlink(outside, File.join(templates_dir, "escape.md"))
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.resolve_template_path("./escape.md", hive_state_dir: state_dir)
+      end
+
+      assert_match(/resolves outside/, error.message)
+    end
+  end
+
   # --- default profile selection ------------------------------------------
 
   def test_default_profile_is_claude
@@ -221,6 +256,24 @@ class SpawnAgentTest < Minitest::Test
         )
       end
       assert_match(/Array/, err.message)
+    end
+  end
+
+  def test_isolation_warning_falls_back_to_stderr_when_log_path_is_unwritable
+    with_tmp_dir do |dir|
+      blocked_log_dir = File.join(dir, "blocked-log-dir")
+      File.write(blocked_log_dir, "not a directory\n")
+      task = Object.new
+      task.define_singleton_method(:log_dir) { blocked_log_dir }
+      profile = Object.new
+      profile.define_singleton_method(:name) { :no_isolation }
+
+      _out, err = capture_io do
+        Hive::Stages::Base.send(:warn_isolation_reduced, task, profile, [ dir ])
+      end
+
+      assert_match(/agent profile :no_isolation has no add_dir_flag/, err)
+      assert_match(/filesystem-isolation boundary is reduced/, err)
     end
   end
 

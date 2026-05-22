@@ -91,8 +91,8 @@ tags: [decisions, adr]
 
 **Status:** Active
 **Context:** Hive commits on every `hive run` shouldn't pollute master's history or trigger CI.
-**Decision:** All hive commits go to `hive/state` (the orphan branch). Only one hive-driven commit ever lands on master: the initial `chore: ignore .hive-state worktree` from `hive init`. Master's CI workflows trigger on `master`/`main` pushes only, so `hive/state` commits never trigger CI; no `[skip ci]` flag needed.
-**Consequences:** `git log master` is clean. Feature worktrees branch from master and contain no hive artefacts. User can `git pull` master without conflicts.
+**Decision:** All task-state commits go to `hive/state` (the orphan branch). `hive init` may make project-setup commits on master/default branch: `chore: ignore .hive-state worktree` and `chore: initialize llm-wiki`. Runtime task movement, agent outputs, reviews, and markers stay on `hive/state`, so normal `hive run` activity never triggers master/main CI workflows.
+**Consequences:** Feature worktrees branch from master and inherit tracked project context such as `AGENTS.md`, `CLAUDE.md`, `.llm-wiki/`, and `wiki/`, while mutable Hive task state remains isolated on `hive/state`. User can `git pull` master without task-state conflicts.
 
 ## ADR-010: One commit per `hive run`, skipped if diff is empty
 

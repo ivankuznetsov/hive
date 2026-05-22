@@ -10,10 +10,10 @@ hive_state_path: .hive-state
 # for development (its edit-mode is more efficient for implementation).
 #
 # `skill` overrides the slash-command the stage's agent invokes inside
-# its prompt. Hive ships expecting llm-wiki (`/plan`) AND
-# compound-engineering (`/compound-engineering:ce-*`) to be installed
-# alongside your agent CLI. Defaults: `plan` → `/plan` (llm-wiki's
-# wiki-research-first Plan wrapper); `brainstorm` →
+# its prompt. Hive ships expecting llm-wiki and compound-engineering to
+# be installed alongside your agent CLI. Plan defaults are agent-aware:
+# claude → `/plan`, codex → `/llm-wiki:wiki-plan`, pi →
+# `/skill:wiki-plan` after profile formatting. Brainstorm defaults to
 # `/compound-engineering:ce-brainstorm`. Override here to pin a
 # different skill per project.
 brainstorm:

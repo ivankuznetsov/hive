@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-05-20
+updated: 2026-05-22
 tags: [gap, todo]
 ---
 
@@ -23,6 +23,7 @@ tags: [gap, todo]
 | `lib/hive/worktree.rb` | ✓ [[modules/worktree]] |
 | `lib/hive/git_ops.rb` | ✓ [[modules/git_ops]] |
 | `lib/hive/agent.rb` | ✓ [[modules/agent]] |
+| `lib/hive/llm_wiki_bootstrap*.rb` | ✓ [[commands/init]] |
 | `lib/hive/commands/init.rb` | ✓ [[commands/init]] |
 | `lib/hive/commands/new.rb` | ✓ [[commands/new]] |
 | `lib/hive/commands/run.rb` | ✓ [[commands/run]] |

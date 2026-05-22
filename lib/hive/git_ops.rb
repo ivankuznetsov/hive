@@ -132,6 +132,33 @@ module Hive
       :added
     end
 
+    def commit_llm_wiki_bootstrap!
+      paths = %w[
+        .llm-wiki/config.json
+        .llm-wiki/refresh-wiki.sh
+        .llm-wiki/post-commit-refresh.sh
+        .claude/settings.json
+        AGENTS.md
+        CLAUDE.md
+        wiki/index.md
+        wiki/log.md
+        wiki/gaps.md
+        wiki/architecture.md
+        wiki/decisions.md
+        wiki/dependencies.md
+        raw/notes/.gitkeep
+      ]
+      existing = paths.select { |path| File.exist?(File.join(@project_root, path)) }
+      return :nothing_to_commit if existing.empty?
+
+      run_git!("-C", @project_root, "add", "--", *existing)
+      _, _, status = Open3.capture3("git", "-C", @project_root, "diff", "--cached", "--quiet")
+      return :nothing_to_commit if status.success?
+
+      run_git!("-C", @project_root, "commit", "-m", "chore: initialize llm-wiki")
+      :committed
+    end
+
     # Scoped add: only stage files under stages/<stage_name>/<slug>/ and the
     # logs/ directory so a crashed prior run's leftover staging cannot cross-
     # contaminate this commit's message.

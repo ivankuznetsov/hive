@@ -30,7 +30,9 @@ module Hive
       Initialises hive in PROJECT_PATH (defaults to the current directory):
       creates the orphan `hive/state` branch, attaches it as a worktree at
       `<project>/.hive-state/`, scaffolds stage folders, ignores
-      `.hive-state/` on master, and registers the project globally.
+      `.hive-state/` on master, bootstraps managed llm-wiki project
+      context with Codex as the headless wiki refresher, and registers
+      the project globally.
 
       On a TTY, init asks the operator five questions before writing
       anything to disk:

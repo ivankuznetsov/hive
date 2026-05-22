@@ -9,8 +9,7 @@ module Hive
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
-        skill = cfg.dig("plan", "skill") ||
-          Hive::Config::DEFAULTS.dig("plan", "skill")
+        skill = Hive::Config.stage_skill(cfg, "plan")
         prompt = Hive::Stages::Base.render(
           "plan_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(

@@ -17,7 +17,7 @@ tags: [cli, api]
 
 | Command | Synopsis | Routes to | Page |
 |---------|----------|-----------|------|
-| `hive init [PROJECT_PATH]` | Bootstrap `.hive-state` orphan branch + worktree in a git project | `Hive::Commands::Init` | [[commands/init]] |
+| `hive init [PROJECT_PATH]` | Bootstrap `.hive-state` orphan branch + worktree plus managed llm-wiki context in a git project | `Hive::Commands::Init` | [[commands/init]] |
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project | `Hive::Commands::New` | [[commands/new]] |
 | `hive status [--diagnose SLUG [--write [--force]] [--project NAME] [--stage STAGE]]` | Action-grouped task list across registered projects. With `--diagnose <slug>`, prints the bounded diagnostic for one task (schema `hive-status-diagnose`). Add `--write` to spawn the configured execute `AgentProfile` and atomically write `<task>/diagnostics/red-status.md` (no lock, no marker mutation; `--force` bypasses the `marker_signature` idempotency short-circuit; green rows are rejected). | `Hive::Commands::Status` (delegates write path to `Hive::DiagnosisAgent`) | [[commands/status]] |
 | `hive tui` | Live, keystroke-driven Charm bubbletea + lipgloss dashboard over `hive status` (human-only; rejects `--json`) | `Hive::Tui` | [[commands/tui]] |

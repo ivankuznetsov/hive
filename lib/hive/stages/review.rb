@@ -571,7 +571,10 @@ module Hive
         return default_branch if default_branch.start_with?("origin/")
 
         remote_ref = "origin/#{default_branch}"
-        ops.ref_exists?(remote_ref) ? remote_ref : default_branch
+        return remote_ref if ops.ref_exists?(remote_ref)
+
+        warn "[hive] #{remote_ref} not found in worktree; reviewers will compare against local #{default_branch} (diffs may be stale)"
+        default_branch
       end
 
       def mark_working(task, phase:, pass:)

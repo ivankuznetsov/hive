@@ -7,7 +7,7 @@ Append-only log of all wiki operations.
 **Action:** Fixed a stale-local-main review failure mode: review prompts now compare against `origin/<default_branch>` when the remote-tracking ref exists, falling back to the configured/default local branch only when the remote ref is absent. This keeps long-lived operator checkouts from feeding reviewers `git diff main..HEAD` when local `main` is behind `origin/main`, which previously produced phantom findings for already-merged upstream changes.
 
 **Refreshed pages:**
-- `wiki/stages/review.md` — documents the remote-first compare ref used by reviewer prompts.
+- [[stages/review]] — documents the remote-first compare ref used by reviewer prompts.
 
 ## [2026-05-19T23:35:54Z] rebase — conflict helper uses development-agent exit-code contract
 

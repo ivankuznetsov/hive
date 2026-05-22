@@ -351,15 +351,23 @@ class HiveRebaseTest < Minitest::Test
     git.rebase_onto_outcome = :conflict
     git.unmerged_files_sequence = [ [ "a.txt" ] ]
 
-    stub_gitops!(git) do
-      stub_spawn_agent(result_status: :error, error_message: "synthetic agent fail") do
-        result = Hive::Rebase.perform(task, base_cfg)
-        refute result.succeeded
-        assert_equal :agent_failed, result.reason
-        assert git.rebase_abort_called
-        assert git.reset_hard_called
+    result = nil
+    _out, err = capture_io do
+      stub_gitops!(git) do
+        stub_spawn_agent(result_status: :error, error_message: "synthetic agent fail") do
+          result = Hive::Rebase.perform(task, base_cfg)
+        end
       end
     end
+
+    refute result.succeeded
+    assert_equal :agent_failed, result.reason
+    assert git.rebase_abort_called
+    assert git.reset_hard_called
+    assert_match(/rebase conflict-resolution agent failed/, err,
+                 "operator-visible diagnostic must name the agent failure before fail-soft abort")
+    assert_match(/synthetic agent fail/, err,
+                 "diagnostic must forward the agent's error_message detail")
   ensure
     teardown_dirs(worktree, folder)
   end

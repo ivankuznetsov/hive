@@ -254,6 +254,31 @@ class PruneCommandTest < Minitest::Test
     end
   end
 
+  def test_prune_removed_entry_without_hive_state_path_defaults_under_project_path
+    with_tmp_global_config do |home|
+      missing = File.join(home, "missing-project")
+      File.write(
+        File.join(home, "config.yml"),
+        { "registered_projects" => [ { "name" => "missing", "path" => missing } ] }.to_yaml
+      )
+
+      out, _err = capture_io { Hive::Commands::Prune.new(json: true).call }
+      removed = JSON.parse(out).fetch("removed").first
+
+      assert_equal missing, removed.fetch("path")
+      assert_equal File.join(missing, ".hive-state"), removed.fetch("hive_state_path")
+    end
+  end
+
+  def test_prune_error_kind_maps_internal_and_unknown_errors_to_internal
+    command = Hive::Commands::Prune.new
+
+    assert_equal Hive::Schemas::PruneErrorKind::INTERNAL,
+                 command.envelope_error_kind(Hive::InternalError.new("boom"))
+    assert_equal Hive::Schemas::PruneErrorKind::INTERNAL,
+                 command.envelope_error_kind(RuntimeError.new("boom"))
+  end
+
   # P3 #25: schema describes `path` / `hive_state_path` as absolute. A
   # hand-edited row carrying `~/foo` or `./foo` must be normalized in
   # the prune success-payload `removed[]` array.

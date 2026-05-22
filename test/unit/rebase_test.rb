@@ -873,4 +873,243 @@ class HiveRebaseTest < Minitest::Test
   ensure
     teardown_dirs(worktree, folder)
   end
+  def test_no_default_branch_returns_skipped
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.default_branch_value = "  "
+    git.define_singleton_method(:fetch_default_branch) do |_ref|
+      raise "fetch must not run without a default branch"
+    end
+
+    stub_gitops!(git) do
+      result = Hive::Rebase.perform(task, base_cfg("default_branch" => nil))
+      assert_equal :no_default_branch, result.reason
+      refute result.attempted
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_unexpected_io_error_returns_failed_result
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    original = Hive::GitOps.singleton_class.instance_method(:new)
+    result = nil
+
+    _out, err = capture_io do
+      Hive::GitOps.define_singleton_method(:new) do |_path|
+        raise IOError, "disk unavailable"
+      end
+      result = Hive::Rebase.perform(task, base_cfg)
+    ensure
+      Hive::GitOps.singleton_class.define_method(:new, original)
+    end
+
+    refute result.succeeded
+    assert_equal :unexpected_io_error, result.reason
+    assert_nil result.commits_behind
+    assert_match(/rebase unexpected I\/O error: IOError: disk unavailable/, err)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_rebase_git_error_returns_failed_without_conflict_agent
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.rebase_onto_outcome = Hive::GitError
+
+    result = nil
+    _out, err = capture_io do
+      stub_gitops!(git) do
+        result = Hive::Rebase.perform(task, base_cfg)
+      end
+    end
+
+    refute result.succeeded
+    assert_equal :rebase_failed, result.reason
+    assert_equal 2, result.commits_behind
+    refute git.rebase_abort_called
+    assert_match(/rebase failed \(Hive::GitError\): synthetic git error/, err)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_no_conflict_agent_profile_aborts
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+
+    stub_gitops!(git) do
+      stub_stage_profile(nil) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert_equal :no_conflict_agent_configured, result.reason
+        assert git.rebase_abort_called
+        assert git.reset_hard_called
+      end
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_empty_unmerged_conflict_state_continues_and_succeeds
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [] ]
+    git.rebase_continue_outcomes = [ :ok ]
+
+    stub_gitops!(git) do
+      result = Hive::Rebase.perform(task, base_cfg)
+      assert result.succeeded
+      assert_equal 1, git.continued
+      assert_empty result.resolved_files
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_empty_unmerged_continue_conflict_retries_next_conflict
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(worktree, "a.txt"), "resolved\n")
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [], [ "a.txt" ], [] ]
+    git.rebase_continue_outcomes = [ :conflict, :ok ]
+
+    stub_gitops!(git) do
+      stub_spawn_agent(result_status: :ok) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert result.succeeded
+        assert_equal 2, git.continued
+        assert_equal [ "a.txt" ], result.resolved_files
+      end
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_empty_unmerged_continue_failure_aborts
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [] ]
+    git.rebase_continue_outcomes = [ :error ]
+
+    stub_gitops!(git) do
+      result = Hive::Rebase.perform(task, base_cfg)
+      assert_equal :rebase_continue_failed, result.reason
+      assert git.rebase_abort_called
+      assert git.reset_hard_called
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_rebase_continue_failure_after_agent_resolution_aborts
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(worktree, "a.txt"), "resolved\n")
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = [ [ "a.txt" ] ]
+    git.rebase_continue_outcomes = [ :error ]
+
+    stub_gitops!(git) do
+      stub_spawn_agent(result_status: :ok) do
+        result = Hive::Rebase.perform(task, base_cfg)
+        assert_equal :rebase_continue_failed, result.reason
+        assert_equal [ "a.txt" ], result.resolved_files
+        assert git.rebase_abort_called
+      end
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_render_conflict_prompt_falls_back_when_message_path_is_unreadable
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.define_singleton_method(:rebase_merge_message_path) do
+      raise IOError, "message missing"
+    end
+
+    prompt = Hive::Rebase.send(:render_conflict_prompt, task, base_cfg, git, [ "a.txt" ])
+
+    assert_match(/commit message unavailable/, prompt)
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_has_conflict_markers_fails_closed_when_file_foreach_raises
+    worktree, folder = make_worktree_and_folder
+    path = File.join(worktree, "conflict.txt")
+    File.write(path, "looks clean\n")
+    original = File.singleton_class.instance_method(:foreach)
+
+    File.define_singleton_method(:foreach) do |target, *_args, &_block|
+      raise IOError, "read failed" if target == path
+
+      original.bind_call(File, target)
+    end
+
+    assert Hive::Rebase.send(:has_conflict_markers?, path)
+  ensure
+    File.singleton_class.define_method(:foreach, original) if original
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_update_execute_base_head_cleans_temp_file_when_rename_fails
+    worktree, folder = make_worktree_and_folder
+    worktree_yml = File.join(folder, "worktree.yml")
+    File.write(worktree_yml, YAML.dump({ "execute_base_head" => "oldsha" }))
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.head_sha_value = "newsha"
+    warnings = []
+    original = File.singleton_class.instance_method(:rename)
+    temp_path = nil
+
+    File.define_singleton_method(:rename) do |from, to|
+      if to == worktree_yml
+        temp_path = from
+        raise Errno::EACCES, "rename denied"
+      end
+
+      original.bind_call(File, from, to)
+    end
+
+    _out, err = capture_io do
+      Hive::Rebase.send(:update_execute_base_head!, task, git, warnings)
+    end
+
+    refute_empty warnings
+    assert_match(/execute_base_head not updated/, err)
+    refute File.exist?(temp_path), "failed rewrite should clean the temporary YAML file"
+  ensure
+    File.singleton_class.define_method(:rename, original) if original
+    teardown_dirs(worktree, folder)
+  end
+
+  def stub_stage_profile(profile)
+    original = Hive::Stages::Base.singleton_class.instance_method(:stage_profile)
+    Hive::Stages::Base.define_singleton_method(:stage_profile) do |_cfg, _stage_name|
+      profile
+    end
+    yield
+  ensure
+    Hive::Stages::Base.singleton_class.define_method(:stage_profile, original)
+  end
 end

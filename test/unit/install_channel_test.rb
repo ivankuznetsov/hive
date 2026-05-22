@@ -78,4 +78,83 @@ class InstallChannelTest < Minitest::Test
              "non-macOS hosts must not probe /opt/homebrew markers"
     end
   end
+def test_detected_prefix_returns_nil_when_no_marker_is_found
+  with_tmp_dir do |dir|
+    assert_nil Hive::InstallChannel.detected_prefix(marker_paths: [ File.join(dir, "missing") ])
+  end
+end
+
+def test_read_prefix_returns_nil_for_missing_or_empty_sidecar
+  with_tmp_dir do |dir|
+    marker = File.join(dir, "install-channel")
+
+    assert_nil Hive::InstallChannel.read_prefix(marker)
+
+    File.write(File.join(dir, "install-prefix"), "\n")
+    assert_nil Hive::InstallChannel.read_prefix(marker)
+  end
+end
+
+def test_prefix_marker_paths_uses_hive_prefix
+  with_tmp_dir do |dir|
+    prefix = File.join(dir, "prefix")
+    old_prefix = ENV["HIVE_PREFIX"]
+    ENV["HIVE_PREFIX"] = prefix
+
+    assert_equal [ File.join(prefix, "hive", "install-channel") ],
+                 Hive::InstallChannel.prefix_marker_paths
+  ensure
+    old_prefix.nil? ? ENV.delete("HIVE_PREFIX") : ENV["HIVE_PREFIX"] = old_prefix
+  end
+end
+
+def test_homebrew_marker_paths_uses_valid_env_prefix_on_macos
+  with_tmp_dir do |dir|
+    prefix = File.join(dir, "homebrew")
+    brew = File.join(prefix, "bin", "brew")
+    FileUtils.mkdir_p(File.dirname(brew))
+    File.write(brew, "#!/bin/sh\n")
+    File.chmod(0o755, brew)
+    old_prefix = ENV["HOMEBREW_PREFIX"]
+    ENV["HOMEBREW_PREFIX"] = prefix
+
+    paths = with_replaced_singleton_method(Hive::InstallChannel, :macos?, -> { true }) do
+      Hive::InstallChannel.homebrew_marker_paths
+    end
+
+    assert_equal File.join(prefix, "share/hive/install-channel"), paths.first
+    assert_includes paths, "/opt/homebrew/share/hive/install-channel"
+    assert_includes paths, "/usr/local/share/hive/install-channel"
+  ensure
+    old_prefix.nil? ? ENV.delete("HOMEBREW_PREFIX") : ENV["HOMEBREW_PREFIX"] = old_prefix
+  end
+end
+
+def test_homebrew_marker_paths_ignores_invalid_env_prefix_on_macos
+  old_prefix = ENV["HOMEBREW_PREFIX"]
+  ENV["HOMEBREW_PREFIX"] = "/tmp/../homebrew"
+
+  paths = with_replaced_singleton_method(Hive::InstallChannel, :macos?, -> { true }) do
+    Hive::InstallChannel.homebrew_marker_paths
+  end
+
+  refute_includes paths, "/tmp/../homebrew/share/hive/install-channel"
+  assert_includes paths, "/opt/homebrew/share/hive/install-channel"
+ensure
+  old_prefix.nil? ? ENV.delete("HOMEBREW_PREFIX") : ENV["HOMEBREW_PREFIX"] = old_prefix
+end
+
+def test_valid_homebrew_prefix_rejects_relative_paths
+  refute Hive::InstallChannel.valid_homebrew_prefix?("relative/homebrew")
+end
+
+private
+
+def with_replaced_singleton_method(receiver, name, replacement)
+  original = receiver.method(name)
+  receiver.define_singleton_method(name, &replacement)
+  yield
+ensure
+  receiver.define_singleton_method(name, original) if original
+end
 end

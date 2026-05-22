@@ -130,6 +130,125 @@ class HiveBotLifecycleTest < Minitest::Test
     end
   end
 
+  def test_unknown_subcommand_returns_usage_error
+    with_bot_home do
+      err = assert_raises(Hive::InvalidTaskPath) { Hive::Commands::Bot.new("frobnicate").call }
+      assert_match(/unknown subcommand/, err.message)
+      assert_equal Hive::ExitCodes::USAGE, err.exit_code
+    end
+  end
+
+  def test_custom_pid_and_log_paths_from_config_are_expanded
+    with_bot_home do |home|
+      custom_pid = File.join(home, "runtime", "bot.pid")
+      custom_log = File.join(home, "runtime", "bot.log")
+      data = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      data["bot"]["pid_file"] = custom_pid
+      data["bot"]["log_file"] = custom_log
+      File.write(File.join(home, "config.yml"), data.to_yaml)
+
+      cmd = Hive::Commands::Bot.new("status")
+
+      assert_equal custom_pid, cmd.pid_file
+      assert_equal custom_log, cmd.log_file
+    end
+  end
+
+  def test_start_refuses_when_pid_file_lock_is_held
+    with_bot_home do |home|
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "test-token"
+      cmd = Hive::Commands::Bot.new("start", dry_run: true)
+      FileUtils.mkdir_p(File.dirname(cmd.pid_file))
+      lock = File.open(cmd.pid_file, File::RDWR | File::CREAT, 0o644)
+      lock.flock(File::LOCK_EX)
+      lock.write({ "pid" => 12_345, "started_at" => Time.now.utc.iso8601 }.to_yaml)
+      lock.flush
+      lock.rewind
+
+      error = assert_raises(Hive::ConcurrentRunError) { cmd.send(:start_bot) }
+      assert_match(/already running/, error.message)
+      assert_equal cmd.pid_file, error.lock_path
+    ensure
+      lock&.flock(File::LOCK_UN)
+      lock&.close
+      ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+    end
+  end
+
+  def test_status_text_reports_running_with_uptime
+    with_bot_home do |home|
+      cmd = Hive::Commands::Bot.new("status")
+      File.write(File.join(home, ".bot.pid"), {
+        "pid" => Process.pid,
+        "started_at" => (Time.now.utc - 5).iso8601
+      }.to_yaml)
+
+      out, _err = capture_io { cmd.call }
+
+      assert_match(/hive bot: running \(pid #{Process.pid}, uptime \d+s\)/, out)
+    end
+  end
+
+  def test_reload_text_sends_hup_to_live_pid
+    with_bot_home do |home|
+      cmd = Hive::Commands::Bot.new("reload")
+      File.write(File.join(home, ".bot.pid"), { "pid" => Process.pid, "started_at" => Time.now.utc.iso8601 }.to_yaml)
+      hup_seen = false
+      old_hup = Signal.trap("HUP") { hup_seen = true }
+
+      out, _err = capture_io { cmd.call }
+
+      assert hup_seen, "reload must send HUP to the live bot pid"
+      assert_match(/bot reload requested/, out)
+    ensure
+      Signal.trap("HUP", old_hup) if old_hup
+    end
+  end
+
+  def test_stop_terminates_live_pid_and_removes_pid_file
+    with_bot_home do |home|
+      pid = fork { sleep 60 }
+      pid_file = File.join(home, ".bot.pid")
+      File.write(pid_file, { "pid" => pid, "started_at" => Time.now.utc.iso8601 }.to_yaml)
+
+      cmd = Hive::Commands::Bot.new("stop")
+      expected_pid = pid
+      alive_checks = 0
+      cmd.define_singleton_method(:pid_alive?) do |checked_pid|
+        raise "unexpected pid #{checked_pid}" unless checked_pid == expected_pid
+
+        alive_checks += 1
+        alive_checks == 1
+      end
+
+      out, _err = capture_io { cmd.call }
+
+      assert_match(/bot stopped \(pid #{pid}\)/, out)
+      refute File.exist?(pid_file)
+      _dead_pid, status = Process.waitpid2(pid)
+      assert status.signaled? || !status.success?
+    ensure
+      begin
+        Process.kill("KILL", pid) if pid
+      rescue Errno::ESRCH, TypeError
+      end
+      Process.wait(pid) rescue nil
+    end
+  end
+
+  def test_corrupted_pid_file_refuses_to_assume_state
+    with_bot_home do |home|
+      File.write(File.join(home, ".bot.pid"), "pid: [\n")
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::Error) { Hive::Commands::Bot.new("status").call }
+        assert_match(/corrupted/, error.message)
+      end
+
+      assert_match(/PID file.*corrupted/, err)
+    end
+  end
+
   private
 
   def wait_until_exists(path, deadline_sec: 3)

@@ -10,18 +10,116 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
                       :intent, keyword_init: true)
+  FakeLogger = Struct.new(:events, keyword_init: true) do
+    def event(name, **payload)
+      events << { name: name, payload: payload }
+    end
+  end
 
   def setup
+    @pending_ideas = {}
+    @last_projects = []
+    @logger = FakeLogger.new(events: [])
     @handlers = Hive::Bot::Handlers::CallbackHandlers.new(
-      pending_ideas: {},
-      set_last_project: ->(_) { },
+      pending_ideas: @pending_ideas,
+      set_last_project: ->(project) { @last_projects << project },
       conversation_store: nil,
-      result_class: Result
+      result_class: Result,
+      logger: @logger
     )
   end
 
   def update(callback_data)
     Struct.new(:callback_data).new(callback_data)
+  end
+
+  def test_simple_reply_callbacks_return_operator_facing_text
+    cases = {
+      callback_reject: ["reject:anything", "Left unchanged."],
+      callback_open_laptop: ["open_laptop:hive:slug", "Open laptop for this one."],
+      callback_codex_edit: ["codex_edit:hive:slug:1", "Send the edited answer as a message."],
+      callback_codex_cancel: ["codex_cancel:hive:slug:1", "Draft cancelled."],
+      unknown: ["unknown:hive:slug", "Bot got confused - please retry from /queue."]
+    }
+
+    cases.each do |intent, (data, text)|
+      result = @handlers.handle(intent, update(data))
+      assert_equal :reply, result.action
+      assert_equal text, result.text
+    end
+  end
+
+  def test_answer_and_path_callbacks_start_expected_answer_modes
+    answer = @handlers.handle(:callback_answer, update("answer:hive:brainstorm-task"))
+    path_a = @handlers.handle(:callback_path_a_yes, update("path_a:hive:brainstorm-task"))
+    path_b = @handlers.handle(:callback_path_a_just_type, update("path_b:hive:brainstorm-task"))
+
+    assert_equal :start_answer, answer.action
+    assert_equal :path_b, answer.mode
+    assert_equal :start_codex, path_a.action
+    assert_equal :path_a, path_a.mode
+    assert_equal :reply, path_b.action
+    assert_equal "Send the answer as a message.", path_b.text
+  end
+
+  def test_idea_project_new_deletes_pending_token_and_replies_with_scope_message
+    @pending_ideas["tok"] = "build this"
+
+    result = @handlers.handle(:callback_idea_project_new, update("idea_project_new:tok"))
+
+    refute @pending_ideas.key?("tok")
+    assert_equal :reply, result.action
+    assert_match(/out of MVP scope/, result.text)
+  end
+
+  def test_idea_project_expired_token_replies_without_dispatch
+    result = @handlers.handle(:callback_idea_project_pick, update("idea_project:hive:missing"))
+
+    assert_equal :reply, result.action
+    assert_match(/picker expired/, result.text)
+  end
+
+  def test_idea_project_dispatches_new_command_and_remembers_project
+    @pending_ideas["tok"] = { text: "ship the thing" }
+
+    result = @handlers.handle(:callback_idea_project_pick, update("idea_project:hive:tok"))
+
+    assert_equal ["hive"], @last_projects
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal "hive", result.project
+    assert_equal ["hive", "new", "hive", "ship the thing", "--json"], result.command_argv
+    refute @pending_ideas.key?("tok")
+  end
+
+  def test_codex_write_validates_question_number
+    ok = @handlers.handle(:callback_codex_write_draft, update("codex_write:hive:slug:12"))
+    bad = @handlers.handle(:callback_codex_write_draft, update("codex_write:hive:slug:not-int"))
+
+    assert_equal :confirm_codex_draft, ok.action
+    assert_equal 12, ok.question_n
+    assert_equal :reply, bad.action
+    assert_match(/bot got confused/i, bad.text)
+    assert_equal :callback_malformed, @logger.events.last.fetch(:name)
+    assert_equal "non_integer_question_n", @logger.events.last.fetch(:payload).fetch(:reason)
+  end
+
+  def test_findings_accept_all_dispatches_toggle_then_retry
+    result = @handlers.handle(:callback_findings_accept_all, update("findings_accept_all:any:hive:slug:6-review"))
+
+    assert_equal :dispatch_commands, result.action
+    assert_equal [
+      ["hive", "accept-finding", "slug", "--all", "--stage", "6-review", "--project", "hive", "--json"],
+      ["hive", "review", "slug", "--from", "6-review", "--project", "hive", "--json"]
+    ], result.commands
+  end
+
+  def test_findings_reject_all_without_retry_stage_only_toggles_findings
+    result = @handlers.handle(:callback_findings_reject_all, update("findings_reject_all:any:hive:slug:unknown-stage"))
+
+    assert_equal :dispatch_commands, result.action
+    assert_equal [
+      ["hive", "reject-finding", "slug", "--all", "--stage", "unknown-stage", "--project", "hive", "--json"]
+    ], result.commands
   end
 
   def test_show_details_dispatches_status_diagnose_for_targeted_envelope
@@ -59,7 +157,10 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     # via --write, not just re-read the cached artifact. The argv
     # shape is pinned so a future tweak cannot silently turn the
     # write-path back into a read-only fetch.
-    result = @handlers.handle(:callback_refresh_diagnose, update("refresh_diagnose:alpha:red-task-260518-bbbb:6-review"))
+    result = @handlers.handle(
+      :callback_refresh_diagnose,
+      update("refresh_diagnose:alpha:red-task-260518-bbbb:6-review")
+    )
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal "alpha", result.project

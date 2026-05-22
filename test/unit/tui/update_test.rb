@@ -170,6 +170,30 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_match(/recovered/, new_model.flash)
   end
 
+  def test_snapshot_arrived_closes_red_detail_when_row_disappears
+    row = red_detail_row
+    starting = model.with(
+      mode: :red_status_detail,
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(row: row)
+    )
+    other = Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "6-review", slug: "other-task", folder: "/tmp/other-task",
+      state_file: "/tmp/other-task/task.md", marker: "review_error", attrs: {}, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "recover_review", action_label: "Needs recovery", suggested_command: nil,
+      next_action: nil, diagnostic: nil
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(other))
+    )
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.red_status_detail_state
+    assert_match(/red-task no longer/, new_model.flash)
+  end
+
   def test_snapshot_arrived_updates_red_detail_row_without_flash
     # The red-status detail screen now exposes only two actions; the
     # "marker changed — refresh (R)" flash relied on R-press which is
@@ -194,6 +218,7 @@ class HiveTuiUpdateTest < Minitest::Test
   end
 
   # ---------- PollFailed ----------
+
 
   def test_poll_failed_records_error_and_keeps_prior_snapshot
     prior_snapshot = Object.new
@@ -308,6 +333,13 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil cmd
   end
 
+  def test_yield_tick_is_noop
+    starting = model.with(flash: "fresh")
+    new_model, cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::YIELD_TICK)
+    assert_same starting, new_model
+    assert_nil cmd
+  end
+
   # ---------- TerminateRequested ----------
 
   def test_terminate_requested_returns_quit_command
@@ -321,6 +353,14 @@ class HiveTuiUpdateTest < Minitest::Test
   def test_terminate_requested_does_not_mutate_model
     new_model, _cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::TERMINATE_REQUESTED)
     assert_same model, new_model
+  end
+
+  def test_terminate_command_returns_sentinel_without_bubbletea
+    bubbletea = Object.send(:remove_const, :Bubbletea) if Object.const_defined?(:Bubbletea)
+
+    assert_equal :__terminate_sentinel__, Hive::Tui::Update.terminate_command
+  ensure
+    Object.const_set(:Bubbletea, bubbletea) if bubbletea
   end
 
   # ---------- FilterCharAppended ----------
@@ -788,6 +828,28 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "writero", selected.new_idea_project_name
   end
 
+  def test_new_idea_project_picker_cursor_up_moves_with_choices
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: snap_with_two_projects_three_rows_each,
+      new_idea_project_cursor: 1
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP)
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
+  def test_new_idea_project_picker_cursor_up_with_no_choices_is_noop
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-22",
+      "projects" => [
+        { "name" => "broken", "error" => "missing_project_path", "tasks" => [] }
+      ]
+    )
+    starting = model.with(mode: :new_idea_project, snapshot: snap, new_idea_project_cursor: 3)
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP)
+    assert_same starting, new_model
+  end
+
   def test_new_idea_text_inserted_in_empty_buffer_advances_cursor
     starting = model.with(mode: :new_idea, new_idea_buffer: "", new_idea_cursor: 0)
     new_model, _cmd = Hive::Tui::Update.apply(
@@ -905,6 +967,24 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "image1", new_model.new_idea_attachments.first.label
     assert_equal "/tmp/hive-tui-composer/image-1.png", new_model.new_idea_attachments.first.staging_path
     assert_equal "png", new_model.new_idea_attachments.first.ext
+  end
+
+  def test_new_idea_backspace_prunes_orphaned_image_attachment
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1", staging_path: "/tmp/image-1.png", ext: "png"
+    )
+    starting = model.with(
+      mode: :new_idea,
+      new_idea_buffer: "[image1]",
+      new_idea_cursor: "[image1]".length,
+      new_idea_attachments: [ attachment ]
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED)
+
+    assert_equal "[image1", new_model.new_idea_buffer
+    assert_equal 7, new_model.new_idea_cursor
+    assert_equal [], new_model.new_idea_attachments
   end
 
   def test_new_idea_image_attached_inserts_at_cursor
@@ -1070,6 +1150,40 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil new_model.new_idea_staging_tmp_root
   end
 
+  def test_back_from_red_status_detail_closes_and_reclamps_cursor
+    row = red_detail_row
+    starting = model.with(
+      mode: :red_status_detail,
+      snapshot: snapshot_with_rows(row),
+      cursor: [ 0, 9 ],
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(row: row)
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.red_status_detail_state
+    assert_equal [ 0, 0 ], new_model.cursor
+  end
+
+  def test_back_from_new_idea_project_cancels_composer_state
+    starting = model.with(
+      mode: :new_idea_project,
+      new_idea_project_name: "alpha",
+      new_idea_project_cursor: 1,
+      new_idea_buffer: "draft",
+      new_idea_cursor: 2
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_equal 0, new_model.new_idea_project_cursor
+    assert_equal "", new_model.new_idea_buffer
+    assert_equal 0, new_model.new_idea_cursor
+  end
+
   def test_cursor_down_under_right_focus_preserves_v1_behaviour
     # Regression guard: v1 cursor row navigation must still work when
     # pane_focus is :right (the default and v1 implicit behaviour).
@@ -1083,6 +1197,34 @@ class HiveTuiUpdateTest < Minitest::Test
 
   def test_cursor_up_clamps_at_top
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, cursor: [ 0, 0 ])
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal [ 0, 0 ], new_model.cursor
+  end
+
+  def test_cursor_up_under_right_focus_decrements_row
+    starting = model.with(
+      snapshot: snap_with_two_projects_three_rows_each,
+      pane_focus: :right,
+      cursor: [ 0, 2 ]
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
+    assert_equal [ 0, 1 ], new_model.cursor
+  end
+
+  def test_cursor_up_under_right_focus_skips_empty_projects
+    row = Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "1-input", slug: "a1", folder: nil,
+      state_file: nil, marker: nil, attrs: nil, mtime: nil, age_seconds: 0,
+      claude_pid: nil, claude_pid_alive: nil, action_key: "ready_to_brainstorm",
+      action_label: "ready", suggested_command: "hive brainstorm a1",
+      next_action: nil, diagnostic: nil
+    ).freeze
+    alpha = Hive::Tui::Snapshot::ProjectView.new(name: "alpha", path: "/a", hive_state_path: "/a/.h", error: nil, rows: [ row ].freeze).freeze
+    empty = Hive::Tui::Snapshot::ProjectView.new(name: "empty", path: "/e", hive_state_path: "/e/.h", error: nil, rows: [].freeze).freeze
+    gamma = Hive::Tui::Snapshot::ProjectView.new(name: "gamma", path: "/g", hive_state_path: "/g/.h", error: nil, rows: [ row ].freeze).freeze
+    snap = Hive::Tui::Snapshot.new(generated_at: nil, projects: [ alpha, empty, gamma ])
+    starting = model.with(snapshot: snap, pane_focus: :right, cursor: [ 2, 0 ])
+
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CURSOR_UP)
     assert_equal [ 0, 0 ], new_model.cursor
   end

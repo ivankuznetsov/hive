@@ -3,7 +3,7 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-05-21
+updated: 2026-05-22
 tags: [command, migration, stages]
 ---
 

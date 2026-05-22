@@ -108,6 +108,15 @@ class ForgetCommandTest < Minitest::Test
     end
   end
 
+  def test_forget_error_kind_for_internal_and_unknown_errors
+    command = Hive::Commands::Forget.new("anything", json: true)
+
+    assert_equal Hive::Schemas::ForgetErrorKind::INTERNAL,
+                 command.send(:error_kind_for, Hive::InternalError.new("boom"))
+    assert_equal Hive::Schemas::ForgetErrorKind::INTERNAL,
+                 command.send(:error_kind_for, RuntimeError.new("boom"))
+  end
+
   # P1 #4: malformed YAML used to leak as InternalError(70). It must
   # now surface as ConfigError → exit 78 with `error_kind: "config"`.
   def test_forget_malformed_yaml_emits_config_error

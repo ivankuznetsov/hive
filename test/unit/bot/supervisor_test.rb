@@ -55,17 +55,17 @@ class HiveBotSupervisorTest < Minitest::Test
       state = Struct.new(:question_n, :mode, :project, :draft, :history, :awaiting_confirm, keyword_init: true).new(
         question_n: kwargs[:question_n], mode: kwargs[:mode], project: kwargs[:project], history: []
       )
-      states[[kwargs[:chat_id], kwargs[:slug]]] = state
+      states[[ kwargs[:chat_id], kwargs[:slug] ]] = state
       state
     end
 
     def get(chat_id:, slug:)
-      states[[chat_id, slug]]
+      states[[ chat_id, slug ]]
     end
 
     def update(chat_id:, slug:, **kwargs)
       updates << { chat_id: chat_id, slug: slug, values: kwargs }
-      state = states[[chat_id, slug]] || start(
+      state = states[[ chat_id, slug ]] || start(
         chat_id: chat_id, slug: slug, question_n: kwargs[:question_n], mode: kwargs[:mode]
       )
       kwargs.each { |key, value| state.public_send("#{key}=", value) if state.respond_to?("#{key}=") }
@@ -90,7 +90,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.instance_variable_set(:@router, FakeRouter.new)
     @supervisor.instance_variable_set(:@dry_run, false)
     @supervisor.instance_variable_set(:@config, {
-      "chat_id_allowlist" => [42, 43],
+      "chat_id_allowlist" => [ 42, 43 ],
       "clear_retry_grace_sec" => 1,
       "conversation_ttl_sec" => 60,
       "poll_interval_sec" => 1
@@ -103,7 +103,7 @@ class HiveBotSupervisorTest < Minitest::Test
       exit_code: exit_code,
       project: "hive",
       slug: "red-task-260518-aaaa",
-      command_argv: ["hive", "status", "--diagnose", "red-task-260518-aaaa", "--json"],
+      command_argv: [ "hive", "status", "--diagnose", "red-task-260518-aaaa", "--json" ],
       chat_id: 42,
       update_id: 99,
       started_at: Time.now,
@@ -181,11 +181,11 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def test_send_reconnect_summary_sends_plural_summary_to_allowlisted_chats
-    updates = [Update.new(chat_id: 42, update_id: 7), Update.new(chat_id: 42, update_id: 8)]
+    updates = [ Update.new(chat_id: 42, update_id: 7), Update.new(chat_id: 42, update_id: 8) ]
 
     @supervisor.send(:send_reconnect_summary, updates)
 
-    assert_equal [42, 43], @telegram.messages.map { |message| message.fetch(:chat_id) }
+    assert_equal [ 42, 43 ], @telegram.messages.map { |message| message.fetch(:chat_id) }
     assert @telegram.messages.all? { |message| message.fetch(:text).include?("2 messages queued") }
     assert_equal :reconnect_summary, @logger.events.first.fetch(:name)
     assert_equal 2, @logger.events.first.fetch(:payload).fetch(:queued_count)
@@ -193,7 +193,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_render_queue_filters_inert_rows_caps_output_and_reports_overflow
     rows = 12.times.map { |i| row(slug: "task-#{i}") }
-    rows += [row(slug: "done", action: "archived"), row(slug: "running", action: "agent_running")]
+    rows += [ row(slug: "done", action: "archived"), row(slug: "running", action: "agent_running") ]
 
     text = @supervisor.send(:render_queue, rows)
 
@@ -205,7 +205,7 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def test_render_details_sorts_attrs_and_handles_missing_row
-    rows = [row(attrs: { "z" => 9, "a" => 1 }, marker: nil, action_label: nil)]
+    rows = [ row(attrs: { "z" => 9, "a" => 1 }, marker: nil, action_label: nil) ]
 
     text = @supervisor.send(:render_details, rows, "hive", "task")
 
@@ -217,9 +217,9 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def test_execute_dispatch_renders_status_queue_without_spawning_child
-    rows = [row(slug: "alpha")]
+    rows = [ row(slug: "alpha") ]
     @status_watcher.result = StatusResult.new(ok: true, rows: rows)
-    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: ["hive", "status", "--json"])
+    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: [ "hive", "status", "--json" ])
 
     pid = @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
 
@@ -230,9 +230,9 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def test_execute_dispatch_renders_status_details_when_slug_is_present
-    rows = [row(slug: "alpha")]
+    rows = [ row(slug: "alpha") ]
     @status_watcher.result = StatusResult.new(ok: true, rows: rows)
-    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: ["hive", "status", "--json"],
+    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: [ "hive", "status", "--json" ],
                                     project: "hive", slug: "alpha")
 
     @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
@@ -244,7 +244,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.instance_variable_set(:@dry_run, true)
     result = FakeRouter::Result.new(
       action: :dispatch_then_reply,
-      command_argv: ["hive", "plan", "task"],
+      command_argv: [ "hive", "plan", "task" ],
       project: "hive",
       slug: "task"
     )
@@ -261,7 +261,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @child_supervisor.completed[123] = failed
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
-      commands: [["hive", "markers", "clear"], ["hive", "develop", "task"]],
+      commands: [ [ "hive", "markers", "clear" ], [ "hive", "develop", "task" ] ],
       project: "hive",
       slug: "task"
     )
@@ -285,7 +285,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
       queued = @supervisor.send(:queued_updates, updates)
 
-      assert_equal [12], queued.map(&:update_id)
+      assert_equal [ 12 ], queued.map(&:update_id)
     end
   end
 

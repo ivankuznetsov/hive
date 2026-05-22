@@ -129,7 +129,7 @@ class HiveBotChildSupervisorTest < Minitest::Test
 
   def test_reap_all_records_exit_when_pid_is_no_longer_a_child
     sup = supervisor(log_path: nil)
-    entry = sup.send(:entry, project: "hive", slug: "orphan", command_argv: ["hive", "status"],
+    entry = sup.send(:entry, project: "hive", slug: "orphan", command_argv: [ "hive", "status" ],
                      chat_id: 123, update_id: 10, started_at: Time.now, log_path: nil, dry_run: false)
     sup.instance_variable_get(:@running)[987_654_321] = entry
 
@@ -143,19 +143,19 @@ class HiveBotChildSupervisorTest < Minitest::Test
 
   def test_in_flight_pids_returns_snapshot_of_running_children
     sup = Hive::Bot::ChildSupervisor.new(logger: logger, dry_run: true)
-    first = sup.dispatch(command_argv: ["hive", "plan", "alpha"], cwd: Dir.pwd, chat_id: 1, update_id: 1)
-    second = sup.dispatch(command_argv: ["hive", "review", "beta"], cwd: Dir.pwd, chat_id: 1, update_id: 2)
+    first = sup.dispatch(command_argv: [ "hive", "plan", "alpha" ], cwd: Dir.pwd, chat_id: 1, update_id: 1)
+    second = sup.dispatch(command_argv: [ "hive", "review", "beta" ], cwd: Dir.pwd, chat_id: 1, update_id: 2)
 
-    assert_equal [first, second].sort, sup.in_flight_pids.sort
+    assert_equal [ first, second ].sort, sup.in_flight_pids.sort
   end
 
   def test_derive_slug_handles_known_verbs_unknown_commands_and_missing_candidates
     sup = Hive::Bot::ChildSupervisor.new(logger: logger, hive_bin: "/opt/hive")
 
-    assert_equal "task-1", sup.send(:derive_slug, ["/opt/hive", "plan", "task-1"])
-    assert_nil sup.send(:derive_slug, ["/opt/hive", "status", "--json"])
-    assert_nil sup.send(:derive_slug, ["/opt/hive", "plan", "--json"])
-    assert_equal "unknown", sup.send(:derive_slug, ["--json"])
+    assert_equal "task-1", sup.send(:derive_slug, [ "/opt/hive", "plan", "task-1" ])
+    assert_nil sup.send(:derive_slug, [ "/opt/hive", "status", "--json" ])
+    assert_nil sup.send(:derive_slug, [ "/opt/hive", "plan", "--json" ])
+    assert_equal "unknown", sup.send(:derive_slug, [ "--json" ])
   end
 
   def test_log_path_for_uses_tmpdir_when_project_has_no_hive_state

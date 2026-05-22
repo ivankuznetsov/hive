@@ -87,9 +87,9 @@ module HiveTestCoverage
   end
 
   def merge_lines(left, right)
-    max = [left&.length || 0, right&.length || 0].max
+    max = [ left&.length || 0, right&.length || 0 ].max
     Array.new(max) do |index|
-      counts = [left&.[](index), right&.[](index)].compact
+      counts = [ left&.[](index), right&.[](index) ].compact
       counts.empty? ? nil : counts.sum
     end
   end
@@ -227,7 +227,7 @@ module HiveTestCoverage
 
     lowest = report.fetch(:files)
       .reject { |file| file.fetch(:line_total).zero? }
-      .sort_by { |file| [file.fetch(:line_percent), -file.fetch(:uncovered_lines).length, file.fetch(:file)] }
+      .sort_by { |file| [ file.fetch(:line_percent), -file.fetch(:uncovered_lines).length, file.fetch(:file) ] }
       .first(15)
 
     warn ""

@@ -1251,7 +1251,7 @@ class HiveDaemonCommandTest < Minitest::Test
       env = ENV.to_h.merge(
         "HOME" => home,
         "HIVE_HOME" => home,
-        "PATH" => [bin, ENV.fetch("PATH", "")].join(File::PATH_SEPARATOR)
+        "PATH" => [ bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
       )
       block.call(home, env)
     end

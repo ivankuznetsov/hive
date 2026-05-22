@@ -17,7 +17,7 @@ task :coverage do
   ENV["HIVE_COVERAGE"] = "1"
   ENV["HIVE_COVERAGE_ROOT"] = root
   coverage_rubyopt = "-I#{File.join(root, "test")} -rhive_coverage_boot"
-  ENV["RUBYOPT"] = [coverage_rubyopt, ENV["RUBYOPT"]].compact.join(" ")
+  ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
   Rake::Task[:test].invoke
 end
 

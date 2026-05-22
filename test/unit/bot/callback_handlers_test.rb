@@ -35,11 +35,11 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   def test_simple_reply_callbacks_return_operator_facing_text
     cases = {
-      callback_reject: ["reject:anything", "Left unchanged."],
-      callback_open_laptop: ["open_laptop:hive:slug", "Open laptop for this one."],
-      callback_codex_edit: ["codex_edit:hive:slug:1", "Send the edited answer as a message."],
-      callback_codex_cancel: ["codex_cancel:hive:slug:1", "Draft cancelled."],
-      unknown: ["unknown:hive:slug", "Bot got confused - please retry from /queue."]
+      callback_reject: [ "reject:anything", "Left unchanged." ],
+      callback_open_laptop: [ "open_laptop:hive:slug", "Open laptop for this one." ],
+      callback_codex_edit: [ "codex_edit:hive:slug:1", "Send the edited answer as a message." ],
+      callback_codex_cancel: [ "codex_cancel:hive:slug:1", "Draft cancelled." ],
+      unknown: [ "unknown:hive:slug", "Bot got confused - please retry from /queue." ]
     }
 
     cases.each do |intent, (data, text)|
@@ -84,10 +84,10 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
     result = @handlers.handle(:callback_idea_project_pick, update("idea_project:hive:tok"))
 
-    assert_equal ["hive"], @last_projects
+    assert_equal [ "hive" ], @last_projects
     assert_equal :dispatch_then_reply, result.action
     assert_equal "hive", result.project
-    assert_equal ["hive", "new", "hive", "ship the thing", "--json"], result.command_argv
+    assert_equal [ "hive", "new", "hive", "ship the thing", "--json" ], result.command_argv
     refute @pending_ideas.key?("tok")
   end
 
@@ -108,8 +108,8 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
     assert_equal :dispatch_commands, result.action
     assert_equal [
-      ["hive", "accept-finding", "slug", "--all", "--stage", "6-review", "--project", "hive", "--json"],
-      ["hive", "review", "slug", "--from", "6-review", "--project", "hive", "--json"]
+      [ "hive", "accept-finding", "slug", "--all", "--stage", "6-review", "--project", "hive", "--json" ],
+      [ "hive", "review", "slug", "--from", "6-review", "--project", "hive", "--json" ]
     ], result.commands
   end
 
@@ -118,7 +118,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
     assert_equal :dispatch_commands, result.action
     assert_equal [
-      ["hive", "reject-finding", "slug", "--all", "--stage", "unknown-stage", "--project", "hive", "--json"]
+      [ "hive", "reject-finding", "slug", "--all", "--stage", "unknown-stage", "--project", "hive", "--json" ]
     ], result.commands
   end
 

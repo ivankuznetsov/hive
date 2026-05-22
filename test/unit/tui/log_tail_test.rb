@@ -67,6 +67,29 @@ class TuiLogTailTest < Minitest::Test
     assert_equal line, Hive::Tui::LogTail::Formatter.format(line)
   end
 
+  def test_formatter_formats_hive_lines_raw_lines_and_batches
+    hive_line = "[hive] 2026-05-07T14:37:13Z spawn cwd=/tmp/project"
+    raw_line = "plain child output"
+
+    assert_equal "14:37:13 hive spawn cwd=/tmp/project",
+                 Hive::Tui::LogTail::Formatter.format(hive_line)
+    assert_equal raw_line, Hive::Tui::LogTail::Formatter.format(raw_line)
+    assert_equal [ "14:37:13 hive spawn cwd=/tmp/project", raw_line ],
+                 Hive::Tui::LogTail::Formatter.format_lines([ hive_line, raw_line ])
+  end
+
+  def test_formatter_compacts_unknown_stream_event_ids
+    payload = {
+      "type" => "tool_call",
+      "task_id" => "task-1234567890",
+      "tool_use_id" => "tool-abcdef12345"
+    }
+    line = "[stream] 2026-05-07T14:37:13Z #{JSON.generate(payload)}"
+
+    assert_equal "14:37:13 tool_call task=task-1234567 tool=tool-abcdef1",
+                 Hive::Tui::LogTail::Formatter.format(line)
+  end
+
   # ---------- FileResolver ----------
 
   def test_latest_returns_file_with_newest_mtime
@@ -110,6 +133,14 @@ class TuiLogTailTest < Minitest::Test
     yield
   ensure
     Dir.singleton_class.define_method(:[], original)
+  end
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
   end
 
   def test_latest_skips_path_that_vanishes_between_glob_and_stat
@@ -284,6 +315,65 @@ class TuiLogTailTest < Minitest::Test
       tail.close!
       tail.close! # must not raise
     end
+  end
+
+  def test_tail_poll_reopens_after_espipe
+    with_log_dir do |dir|
+      path = File.join(dir, "x.log")
+      File.write(path, "cached\n")
+      tail = Hive::Tui::LogTail::Tail.new(path)
+      tail.open!
+      original_file = tail.instance_variable_get(:@file)
+
+      tail.define_singleton_method(:handle_rotation_if_needed) { raise Errno::ESPIPE }
+      tail.poll!
+
+      reopened_file = tail.instance_variable_get(:@file)
+      assert original_file.closed?, "ESPIPE recovery closes the stale file handle"
+      refute_same original_file, reopened_file
+      refute reopened_file.closed?
+    ensure
+      tail&.close!
+    end
+  end
+
+  def test_tail_poll_logs_transient_errno_and_keeps_cached_lines
+    logs = []
+    with_log_dir do |dir|
+      path = File.join(dir, "x.log")
+      File.write(path, "cached\n")
+      tail = Hive::Tui::LogTail::Tail.new(path)
+      tail.open!
+      tail.define_singleton_method(:handle_rotation_if_needed) { raise Errno::EACCES }
+
+      with_replaced_singleton_method(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
+        logs << [ tag, message ]
+      }) do
+        assert_nil tail.poll!
+      end
+
+      assert_equal [ [ "log_tail", "poll! errno=EACCES" ] ], logs
+      assert_equal [ "cached" ], tail.lines(10)
+    ensure
+      tail&.close!
+    end
+  end
+
+  def test_tail_close_logs_ioerror
+    logs = []
+    fake_file = Object.new
+    fake_file.define_singleton_method(:close) { raise IOError, "bad fd" }
+    tail = Hive::Tui::LogTail::Tail.new("unused.log")
+    tail.instance_variable_set(:@file, fake_file)
+
+    with_replaced_singleton_method(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
+      logs << [ tag, message ]
+    }) do
+      assert_nil tail.close!
+    end
+
+    assert_nil tail.instance_variable_get(:@file)
+    assert_equal [ [ "log_tail", "close! IOError: bad fd" ] ], logs
   end
 
   # A pathological child writing a huge no-newline blob would

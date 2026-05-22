@@ -1771,11 +1771,11 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 ## [2026-05-22T17:00:00Z] tui — remove orphaned findings triage mode
 
+**Note:** This entry recorded an intermediate decision. See the 18:00 entry below — the back-compat carve-out was reversed and the `REVIEW_FINDINGS` constant + schema enum value were dropped in place. The umbrella comment update mentioned here was also reverted. The "Refreshed pages" list below is otherwise accurate.
+
 **Action:** Removed the TUI `:triage` sub-mode (Enter on a `review_findings` row → Space toggle accept/reject → bulk `a`/`r` → `d` re-dispatch develop). The mode was unreachable in the live pipeline: no producer in current 4-execute or 6-review writes the `findings_count=` marker attr that `TaskAction#execute_action` keyed on. The chain `findings_count > 0` → `:execute_findings` → `REVIEW_FINDINGS` action key → `KeyMap#enter_message` `"review_findings"` branch → `Messages::OpenFindings` → triage view was dead.
 
 Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/triage.rb`, the `OpenFindings` / `ToggleFinding` / `BulkAccept` / `BulkReject` / `TriageDevelop` / `TriageCursorDown/Up` `Messages::*` definitions, the `:triage` arms in `KeyMap.message_for` / `Update.apply` / `Update.apply_back` / `BubbleModel#view` / `BubbleModel#handle_side_effect`, `Model.triage_state`, and the help-overlay Triage section. Producer-side: `:execute_findings` action def + `findings_count` predicate dropped from `TaskAction`. Stale references scrubbed from `Styles::ACTION_KEY_COLORS` + `_STYLES`, `Views::TasksPane::ICONS`, `Bot::NotificationBuilders::SKIP_ACTIONS`, `Commands::Status::ACTION_LABEL_ORDER`, `Daemon::Policy` + `ConcurrencyController` comments, and `hive tui --help` text.
-
-**Back-compat carve-out (decision):** `lib/hive/findings.rb` and the `hive findings` / `accept-finding` / `reject-finding` CLI commands stay — they operate on `reviews/*.md` files directly and remain the agent-callable triage surface. `Hive::Schemas::TaskActionKind::REVIEW_FINDINGS` constant + `schemas/hive-status.v2.json` enum value retained as vestigial back-compat for published-JSON consumers; `SCHEMA_VERSIONS["hive-status"]` not bumped. The umbrella comment at `lib/hive.rb:106-110` was updated to cover this "unreachable-but-retained" case.
 
 **Workflow policy:** Added `## Workflow` section to `CLAUDE.md` requiring all new feature/bugfix/refactor work to start in an isolated git worktree.
 
@@ -1785,8 +1785,7 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 - `wiki/modules/task_action.md` — dropped `execute_findings` ACTIONS table row.
 - `wiki/commands/daemon.md` — dropped `review_findings` dispatch table row.
 - `wiki/modules/markers.md` — corrected the "findings_count still parsed for compatibility" claim to clarify no live consumer reads it.
-- `wiki/commands/findings.md` (new) — documents the manual `hive findings` / `accept-finding` / `reject-finding` workflow since the TUI surface is gone.
-- `wiki/decisions.md` — added ADR capturing the back-compat carve-out (retain enum + constant + CLI module without schema bump).
+- `wiki/decisions.md` — added ADR-028. (Rewritten by the 18:00 entry below to record the in-place schema edit instead of the original back-compat carve-out.)
 - `wiki/operating.md` — added Worktree-first workflow section mirroring the CLAUDE.md policy.
 
 ## [2026-05-22T18:00:00Z] schemas — drop `review_findings` from hive-status / hive-stage-action v2 enums

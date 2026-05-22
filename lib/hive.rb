@@ -107,7 +107,10 @@ module Hive
     # keys) emitted by `hive status --json`. Same self-derived ALL pattern
     # as NextActionKind so adding a new bucket without updating ALL is
     # impossible. Adding a new value is non-breaking by contract; renaming
-    # or removing a value bumps SCHEMA_VERSIONS["hive-status"].
+    # or removing a value bumps SCHEMA_VERSIONS["hive-status"] — the one
+    # pre-1.0 carve-out is documented in ADR-028 (wiki/decisions.md),
+    # which permits in-place schema edits while hive has no external
+    # consumers. Once hive ships, the strict bump rule applies.
     module TaskActionKind
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze

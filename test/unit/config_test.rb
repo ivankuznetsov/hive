@@ -18,6 +18,22 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # Plan U1 explicit test scenarios for the 7-artifacts stage defaults
+  # (see .hive-state/stages/.../we-need-to-collect-artifacts/plan.md, U1).
+  # Without these assertions a silent drift on the artifact stage's
+  # budget/timeout/agent goes undetected.
+  def test_load_returns_artifacts_stage_defaults
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal 100, cfg.dig("budget_usd", "artifacts"),
+                   "artifacts budget must default to 100 USD per plan U1"
+      assert_equal 3600, cfg.dig("timeout_sec", "artifacts"),
+                   "artifacts timeout must default to 3600 seconds per plan U1"
+      assert_equal "claude", cfg.dig("artifacts", "agent"),
+                   "artifacts agent must default to claude per plan U1"
+    end
+  end
+
   def test_load_merges_per_project_overrides
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

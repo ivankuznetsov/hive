@@ -109,6 +109,27 @@ module Hive
       end
 
       def preflight_collisions!(plan)
+        # First: detect duplicate destinations *within* the plan itself.
+        # STAGE_RENAMES maps multiple legacy stages to the same canonical
+        # target (e.g., both `6-pr` and `7-finalize` map to `8-finalize`).
+        # If a project has the same slug under two source stages,
+        # File.exist? on the not-yet-created destination misses the
+        # conflict — both ops pass preflight, the second FileUtils.mv
+        # silently nests the source folder inside the existing dst
+        # (`8-finalize/<slug>/<slug>/`), and PATH_RE cannot re-parse it.
+        # Group by destination and raise on any plan-internal duplicate
+        # before any mv runs.
+        plan.group_by { |op| op[:dst] }.each do |dst, ops|
+          next if ops.size == 1
+
+          sources = ops.map { |op| "#{op[:old_stage]}/#{op[:entry]}" }.join(", ")
+          raise Hive::DestinationCollision.new(
+            "cannot migrate: multiple legacy stages target the same destination #{dst} " \
+            "(sources: #{sources}); resolve by moving or renaming one of the source folders before rerunning",
+            path: dst
+          )
+        end
+
         collisions = plan.select { |op| File.exist?(op[:dst]) }
         return if collisions.empty?
 

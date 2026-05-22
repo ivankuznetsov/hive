@@ -390,7 +390,6 @@ module Hive
         "Needs your input",
         "Ready to plan",
         "Ready to develop",
-        "Review findings",
         "Needs recovery",
         "Ready to open PR",
         "Ready for review",

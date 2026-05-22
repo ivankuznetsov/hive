@@ -44,7 +44,6 @@ module Hive
           "recover_execute" => "⚠ ",
           "recover_review"  => "⚠ ",
           "needs_input"     => "⏸ ",
-          "review_findings" => "⏸ ",
           "archived"        => "✓ ",
           "ready_to_brainstorm" => "▶ ",
           "ready_to_plan"       => "▶ ",

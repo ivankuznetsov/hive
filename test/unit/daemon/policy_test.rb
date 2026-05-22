@@ -151,11 +151,14 @@ class HiveDaemonPolicyTest < Minitest::Test
                                             last_dispatched_state_file_mtime: agent_post_write)
   end
 
-  def test_review_findings_skips
-    # PR-40 review P2 #5: `Hive::TaskAction` emits `hive findings <slug>`
-    # for this row, which is a read-only listing — auto-dispatching
-    # produces a no-op spawn. Daemon must skip and let the user run
-    # findings/accept-finding/reject-finding manually.
+  def test_legacy_review_findings_string_still_skips
+    # `review_findings` used to be a real action key (TUI-triage entry
+    # point) but was removed from the schema by PR #122. Pins the
+    # daemon's forward-compat default branch: the literal string still
+    # routes to `:skip` rather than dispatching its command, so a
+    # hand-crafted state file or replayed legacy snapshot can't
+    # accidentally auto-dispatch `hive findings` (a read-only listing).
+    # See ADR-028 in wiki/decisions.md for the in-place schema edit.
     assert_equal :skip, decide(action: "review_findings",
                                command: "hive findings slug-a",
                                state_file_mtime: T0 - 600,

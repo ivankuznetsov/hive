@@ -35,7 +35,7 @@ class HiveTuiStylesTest < Minitest::Test
 
   # ---------- for_action_key() per-row style ----------
   # v2 palette: blue = ready_*, magenta = agent_running, red = error/recover,
-  # yellow = needs_input/review_findings, green = archived.
+  # yellow = needs_input, green = archived.
 
   def test_for_action_key_agent_running_is_magenta_foreground
     style = Hive::Tui::Styles.for_action_key("agent_running")
@@ -60,11 +60,6 @@ class HiveTuiStylesTest < Minitest::Test
   def test_for_action_key_needs_input_is_yellow
     style = Hive::Tui::Styles.for_action_key("needs_input")
     assert_equal "3", style.get_foreground, "needs_input should be yellow (ANSI index 3)"
-  end
-
-  def test_for_action_key_review_findings_is_yellow
-    style = Hive::Tui::Styles.for_action_key("review_findings")
-    assert_equal "3", style.get_foreground
   end
 
   def test_for_action_key_archived_is_green
@@ -181,7 +176,7 @@ class HiveTuiStylesTest < Minitest::Test
 
   def test_action_key_colors_covers_v2_additions
     # v2 widens the palette beyond v1's recovery-only mapping.
-    %w[needs_input review_findings archived].each do |k|
+    %w[needs_input archived].each do |k|
       assert Hive::Tui::Styles::ACTION_KEY_COLORS.key?(k),
              "ACTION_KEY_COLORS must define #{k.inspect} (v2 palette)"
     end

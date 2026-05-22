@@ -2,7 +2,6 @@ require "test_helper"
 require "hive/tui/model"
 require "hive/tui/messages"
 require "hive/tui/update"
-require "hive/tui/triage_state"
 
 # Hive::Tui::Update is the MVU dispatcher: (Model, Message) → [Model, Cmd].
 # These tests pin every Message → Update branch as a pure function call,
@@ -1122,68 +1121,11 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal :help, new_model.mode
   end
 
-  # F1 fix: triage j/k must drive `triage_state.cursor_down/up`, not the
-  # grid-mode `model.cursor`. TriageState mutates in place; the model
-  # itself is returned unchanged.
-  def test_triage_cursor_down_moves_finding_cursor_and_clamps
-    require "hive/findings"
-    findings = [
-      Hive::Findings::Finding.new(id: 1, severity: "high", accepted: false,
-                                  title: "first", justification: nil, line_index: 0),
-      Hive::Findings::Finding.new(id: 2, severity: "high", accepted: false,
-                                  title: "second", justification: nil, line_index: 1)
-    ]
-    state = Hive::Tui::TriageState.new(slug: "x", findings: findings)
-    starting = model.with(mode: :triage, triage_state: state)
-
-    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::TRIAGE_CURSOR_DOWN)
-    assert_same state, new_model.triage_state
-    assert_equal 1, state.cursor
-
-    Hive::Tui::Update.apply(starting, Hive::Tui::Messages::TRIAGE_CURSOR_DOWN)
-    assert_equal 1, state.cursor, "must clamp at last finding"
-  end
-
-  def test_triage_cursor_up_moves_finding_cursor_and_clamps_at_zero
-    require "hive/findings"
-    findings = [
-      Hive::Findings::Finding.new(id: 1, severity: "high", accepted: false,
-                                  title: "first", justification: nil, line_index: 0),
-      Hive::Findings::Finding.new(id: 2, severity: "high", accepted: false,
-                                  title: "second", justification: nil, line_index: 1)
-    ]
-    state = Hive::Tui::TriageState.new(slug: "x", findings: findings)
-    state.cursor_down # cursor = 1
-    starting = model.with(mode: :triage, triage_state: state)
-
-    Hive::Tui::Update.apply(starting, Hive::Tui::Messages::TRIAGE_CURSOR_UP)
-    assert_equal 0, state.cursor
-
-    Hive::Tui::Update.apply(starting, Hive::Tui::Messages::TRIAGE_CURSOR_UP)
-    assert_equal 0, state.cursor, "must clamp at zero"
-  end
-
-  def test_triage_cursor_messages_are_safe_when_triage_state_nil
-    starting = model.with(mode: :triage, triage_state: nil)
-
-    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::TRIAGE_CURSOR_DOWN)
-    assert_same starting, new_model
-    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::TRIAGE_CURSOR_UP)
-    assert_same starting, new_model
-  end
-
   def test_open_filter_prompt_pre_fills_buffer_with_active_filter
     starting = model.with(filter: "auth")
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_FILTER_PROMPT)
     assert_equal :filter, new_model.mode
     assert_equal "auth", new_model.filter_buffer
-  end
-
-  def test_back_from_triage_clears_triage_state
-    starting = model.with(mode: :triage, triage_state: Object.new)
-    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
-    assert_equal :grid, new_model.mode
-    assert_nil new_model.triage_state
   end
 
   def test_back_from_log_tail_clears_tail_state

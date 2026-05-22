@@ -12,10 +12,10 @@ module Hive
     # `Update.apply` (or for `BubbleModel`'s side-effect handlers
     # when the message has external dependencies).
     #
-    # The same `key` may bind to different actions across modes:
-    # `a` is `archive` verb dispatch in `:grid` mode and `bulk_accept`
-    # in `:triage` mode; that's why `mode:` is a required keyword. The
-    # argv carried by grid-mode `Messages::DispatchCommand` comes from
+    # The same `key` may bind to different actions across modes
+    # (filter prompt, new-idea composer, etc.); that's why `mode:` is a
+    # required keyword. The argv carried by grid-mode
+    # `Messages::DispatchCommand` comes from
     # `Hive::Tui::Snapshot::Row#suggested_command`, never synthesized
     # here — TaskAction already produced the correct `--from <stage>` /
     # `--project <name>` flags upstream.
@@ -55,7 +55,7 @@ module Hive
       # `enter_message` -> `error_message` branch below.
       ENTER_FLASH_MESSAGES = {
         "archived" => "task is archived; no further action",
-        "recover_execute" => "task needs recovery — open findings to re-prioritise"
+        "recover_execute" => "task needs recovery — open the worktree to re-prioritise"
       }.freeze
 
       # @api private
@@ -79,7 +79,6 @@ module Hive
       def message_for(mode:, key:, row:, pane_focus: :right)
         case mode
         when :grid then grid_message(key: key, row: row, pane_focus: pane_focus)
-        when :triage then triage_message(key: key, row: row)
         when :log_tail then log_tail_message(key: key, row: row)
         when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
@@ -188,7 +187,6 @@ module Hive
         return Messages::OpenRedStatusDetail.new(row: row) if red_detail_row?(row)
 
         case row.action_key
-        when "review_findings" then Messages::OpenFindings.new(row: row)
         when "agent_running" then Messages::OpenLogTail.new(row: row)
         when "error" then error_message(row)
         when "recover_review" then Messages::RecoverReview.new(row: row)
@@ -291,33 +289,6 @@ module Hive
         return Messages::Flash.new(text: text) if text
 
         Messages::NOOP
-      end
-
-      def triage_message(key:, row:)
-        return Messages::BACK if ESCAPE_KEYS.include?(key)
-        return Messages::TRIAGE_CURSOR_DOWN if DOWN_KEYS.include?(key)
-        return Messages::TRIAGE_CURSOR_UP if UP_KEYS.include?(key)
-        return triage_space_message(row) if key == " " || key == :space
-
-        # Triage d/a/r are payload-free singletons. The handler in
-        # BubbleModel resolves the target argv from `triage_state`'s
-        # captured slug+folder rather than the live grid row, which a
-        # 1Hz snapshot poll could have re-pointed at a different task
-        # between triage open and the keystroke. row may be nil here
-        # (filter hid the parent row mid-triage); the handler still
-        # works because it ignores row entirely.
-        case key
-        when "d" then Messages::TRIAGE_DEVELOP
-        when "a" then Messages::BULK_ACCEPT
-        when "r" then Messages::BULK_REJECT
-        else Messages::NOOP
-        end
-      end
-
-      def triage_space_message(row)
-        return Messages::NOOP if row.nil?
-
-        Messages::ToggleFinding.new(row: row)
       end
 
       def log_tail_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument

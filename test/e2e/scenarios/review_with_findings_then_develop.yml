@@ -29,4 +29,4 @@ steps:
     args: [status, --json]
     schema: hive-status
     pick: [projects, 0, tasks, 0, action]
-    equals: review_findings
+    equals: recover_execute

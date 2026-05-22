@@ -35,6 +35,10 @@ Before making architectural decisions, check ~/wikis/master/wiki/ for existing p
 
 `docs/solutions/` — documented solutions to past problems (bugs, architecture patterns, conventions, workflow learnings), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas.
 
+## Workflow
+
+All new feature, bugfix, or refactor work must start in an isolated git worktree (use the `Agent` tool with `isolation: "worktree"` for delegated tasks, or `git worktree add` for direct work). Never mutate the main checkout for non-trivial changes — the worktree keeps the main branch clean and lets parallel work proceed without conflicts.
+
 <!-- BEGIN LLM WIKI -->
 ## Wiki
 

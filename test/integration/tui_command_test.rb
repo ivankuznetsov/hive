@@ -25,15 +25,14 @@ class TuiCommandTest < Minitest::Test
     assert_match(/--json/, out, "the long description must mention the rejected --json flag")
   end
 
-  # F22: pre-fix, `hive help tui` only listed grid bindings. Triage /
-  # log_tail / filter mode bindings were only visible via `?` inside
-  # the running TUI — invisible to agents that have only --help to read.
+  # F22: pre-fix, `hive help tui` only listed grid bindings. Sub-mode
+  # bindings (log_tail / filter) were only visible via `?` inside the
+  # running TUI — invisible to agents that have only --help to read.
   def test_help_for_tui_lists_every_mode_keymap
     out, _err = capture_io { Hive::CLI.start([ "help", "tui" ]) }
-    %w[grid triage log_tail filter].each do |mode|
+    %w[grid log_tail filter].each do |mode|
       assert_match(/#{mode}/, out, "long_desc must list the '#{mode}' mode keymap")
     end
-    assert_match(/Space/, out, "triage Space binding must appear in --help output")
     assert_match(/printable/, out, "filter mode editing keys must appear in --help output")
   end
 

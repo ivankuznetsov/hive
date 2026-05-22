@@ -14,7 +14,6 @@ require "hive/commands/new"
 require "hive/markers"
 require "hive/stages"
 require "hive/task"
-require "hive/findings"
 require "hive/tui/debug"
 require "hive/tui/model"
 require "hive/tui/messages"
@@ -22,7 +21,6 @@ require "hive/tui/key_map"
 require "hive/tui/update"
 require "hive/tui/snapshot"
 require "hive/tui/text"
-require "hive/tui/triage_state"
 require "hive/tui/log_tail"
 require "hive/tui/brainstorm_answers"
 require "hive/tui/clipboard"
@@ -30,7 +28,6 @@ require "hive/tui/composer_staging"
 require "hive/tui/subprocess"
 require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
-require "hive/tui/views/triage"
 require "hive/tui/views/log_tail"
 require "hive/tui/views/red_status_detail"
 require "hive/tui/views/help_overlay"
@@ -53,10 +50,9 @@ module Hive
     #   * Handle messages that need a runner reference (DispatchCommand
     #     wraps takeover_command with `runner.method(:send)` — Update
     #     can't, since it's runner-agnostic).
-    #   * Handle messages that perform synchronous I/O (OpenFindings,
-    #     OpenLogTail, OpenInputEditor, BulkAccept, BulkReject, ToggleFinding) — same
-    #     pattern as the curses path's run_triage / run_quiet! calls.
-    #     I/O lands here, not in Update, to keep Update pure.
+    #   * Handle messages that perform synchronous I/O (OpenLogTail,
+    #     OpenInputEditor) — I/O lands here, not in Update, to keep
+    #     Update pure.
     #   * Dispatch view by `model.mode` to one of the Views modules.
     #
     # The `dispatch:` lambda is set externally (App.run_charm wires
@@ -206,7 +202,7 @@ module Hive
       rescue StandardError => e
         # Last-resort safety net. Every I/O-doing handler in
         # `handle_side_effect` lists its plausible failure modes
-        # explicitly (see `open_findings`, `open_log_tail`, …) and
+        # explicitly (see `open_log_tail`, `open_input_editor`, …) and
         # converts them into a flash. This catches the
         # *unanticipated* ones — a new Errno from a future fs feature,
         # a YAML parse error from a malformed reviewer file, a
@@ -228,7 +224,6 @@ module Hive
       def view
         case @hive_model.mode
         when :grid then compose_two_pane_view
-        when :triage then Views::Triage.render(@hive_model)
         when :log_tail then Views::LogTail.render(@hive_model)
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
         when :help then Views::HelpOverlay.render(@hive_model)
@@ -345,8 +340,7 @@ module Hive
 
       # The cursor's current row, derived from snapshot + scope + filter.
       # KeyMap consults this for verb-on-running-agent refusals and for
-      # row-driven action_key dispatch (review_findings, agent_running,
-      # needs_input, etc.).
+      # row-driven action_key dispatch (agent_running, needs_input, etc.).
       def current_row
         snap = @hive_model.snapshot
         return nil if snap.nil? || @hive_model.cursor.nil?
@@ -373,8 +367,6 @@ module Hive
           diagnose_subprocess_exit(message)
         when Hive::Tui::Messages::DispatchCommand
           dispatch_command(message)
-        when Hive::Tui::Messages::OpenFindings
-          open_findings(message.row)
         when Hive::Tui::Messages::OpenLogTail
           open_log_tail(message.row)
         when Hive::Tui::Messages::RecoverReview
@@ -408,14 +400,6 @@ module Hive
           # and tail_state clearing.
           close_tail_if_log_tail
           nil
-        when Hive::Tui::Messages::ToggleFinding
-          toggle_finding(message.row)
-        when Hive::Tui::Messages::BulkAccept
-          bulk_accept
-        when Hive::Tui::Messages::BulkReject
-          bulk_reject
-        when Hive::Tui::Messages::TriageDevelop
-          triage_develop
         when Hive::Tui::Messages::NewIdeaSubmitted
           submit_new_idea
         when Hive::Tui::Messages::NewIdeaPasteRequested
@@ -1503,23 +1487,6 @@ module Hive
         Hive::Workflows.interactive?(verb)
       end
 
-      # Synchronous I/O: open the review file, build a TriageState,
-      # flip mode. If the file is missing (concurrent archive) we flash
-      # and stay in grid mode rather than entering an empty triage view.
-      def open_findings(row)
-        task = Hive::Task.new(row.folder)
-        review_path = Hive::Findings.review_path_for(task)
-
-        document = Hive::Findings::Document.new(review_path)
-        state = Hive::Tui::TriageState.new(
-          slug: row.slug, folder: row.folder,
-          findings: document.findings, review_path: review_path
-        )
-        [ @hive_model.with(mode: :triage, triage_state: state), nil ]
-      rescue Hive::NoReviewFile, Hive::InvalidTaskPath, Errno::ENOENT
-        [ flashed("no review file for #{row.slug}"), nil ]
-      end
-
       # Open the most recent log file under the task's state log dir
       # or review-local log dir, build a Tail, flip mode.
       # Race-tolerant: if the file disappears
@@ -2536,66 +2503,6 @@ module Hive
         end
       end
 
-      # Toggle accept/reject on the current finding, then reload the
-      # findings document. The cursor relocator preserves position
-      # across re-orderings (TriageState#relocate_cursor).
-      def toggle_finding(row)
-        state = @hive_model.triage_state
-        return [ @hive_model, nil ] if state.nil?
-
-        finding = state.current_finding
-        return [ @hive_model, nil ] if finding.nil?
-
-        argv = state.toggle_command(finding)
-        exit_code, _, err = Hive::Tui::Subprocess.run_quiet!(argv)
-        if exit_code != 0
-          flash_text = "toggle failed: #{err.lines.first&.chomp || "exit #{exit_code}"}"
-          return [ flashed(flash_text), nil ]
-        end
-
-        reload_findings_into_state(state, row)
-      end
-
-      # Bulk a/r/develop dispatch from triage mode. All three read the
-      # captured TriageState rather than the live grid row, so a 1Hz
-      # snapshot poll re-pointing the cursor at a different task can't
-      # misroute the dispatch.
-      def bulk_accept
-        bulk_run(direction: :accept)
-      end
-
-      def bulk_reject
-        bulk_run(direction: :reject)
-      end
-
-      def bulk_run(direction:)
-        state = @hive_model.triage_state
-        return [ @hive_model, nil ] if state.nil?
-
-        argv = state.bulk_command(direction)
-        exit_code, _, err = Hive::Tui::Subprocess.run_quiet!(argv)
-        if exit_code != 0
-          flash_text = "#{direction} failed: #{err.lines.first&.chomp || "exit #{exit_code}"}"
-          return [ flashed(flash_text), nil ]
-        end
-
-        reload_findings_into_state(state, nil)
-      end
-
-      # Triage `d` dispatches via the same takeover/background path as
-      # grid-mode workflow verbs, but builds the argv from triage_state
-      # so the dispatch never sees a stale-row mismatch.
-      def triage_develop
-        state = @hive_model.triage_state
-        return [ @hive_model, nil ] if state.nil?
-
-        message = Hive::Tui::Messages::DispatchCommand.new(
-          argv: state.develop_command,
-          verb: "develop"
-        )
-        dispatch_command(message)
-      end
-
       # `n` submission. Two paths depending on the composer buffer:
       #
       # * Plain text → shell out to `bin/hive new <project> <title>` via
@@ -2675,7 +2582,7 @@ module Hive
         # invokes Open3.popen3(*cmd) directly, so a missing "hive" prefix
         # would exec a literal "new" binary and ENOENT (exit 127). Mirror
         # the canonical shape used by every other run_quiet! caller in
-        # this file and in lib/hive/tui/triage_state.rb.
+        # this file.
         argv = [ "hive", "new", project, title ]
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
         # User may have pasted an image and then deleted every
@@ -3041,14 +2948,6 @@ module Hive
         else
           "all registered projects are unhealthy — re-init the broken ones or `hive forget` per-name"
         end
-      end
-
-      def reload_findings_into_state(state, _row)
-        document = Hive::Findings::Document.new(state.review_path)
-        state.relocate_cursor(document.findings)
-        [ @hive_model.with(triage_state: state), nil ]
-      rescue Hive::NoReviewFile, Errno::ENOENT
-        [ @hive_model.with(mode: :grid, triage_state: nil, flash: "review file gone", flash_set_at: Time.now), nil ]
       end
 
       def flashed(text)

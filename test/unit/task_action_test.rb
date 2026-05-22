@@ -442,13 +442,14 @@ class TaskActionTest < Minitest::Test
                  "findings command must carry --stage when status.rb flags a slug collision"
   end
 
-  # Canary for the post-PR #122 invariant: no live producer in
-  # Hive::TaskAction should ever emit the vestigial REVIEW_FINDINGS
-  # action key. A future revert or parallel branch reintroducing a
-  # `findings_count`-bearing EXECUTE_WAITING writer would silently
-  # route through `needs_input` → daemon auto-dispatches `hive develop`
-  # instead of the prior human-gated flow. This canary fails fast.
-  def test_no_live_producer_emits_review_findings
+  # Canary for the post-PR #122 invariant: no producer in Hive::TaskAction
+  # should ever emit the removed `review_findings` action key. A future
+  # revert or parallel branch reintroducing a `findings_count`-bearing
+  # EXECUTE_WAITING writer would silently route through `needs_input` →
+  # daemon auto-dispatches `hive develop` instead of a human gate, and
+  # would fail schema validation against hive-status.v2 (the enum value
+  # is gone). This canary fails fast at unit-test time.
+  def test_no_producer_emits_review_findings
     stage_markers = [
       [ "brainstorm",  2, [ :waiting, :complete, :agent_working, :error ] ],
       [ "plan",        3, [ :waiting, :complete, :agent_working, :error ] ],
@@ -462,12 +463,12 @@ class TaskActionTest < Minitest::Test
       marker_names.each do |marker_name|
         # Cover both "no attrs" and "findings_count carried as legacy
         # attr" — the latter is the case that pre-PR #122 routed to
-        # REVIEW_FINDINGS and must now route elsewhere.
+        # `review_findings` and must now route elsewhere.
         [ {}, { "findings_count" => 3 } ].each do |attrs|
           task = fake_task(stage_name: stage_name, stage_index: stage_index)
           action = Hive::TaskAction.for(task, marker(marker_name, **attrs))
           refute_equal "review_findings", action.key,
-                       "no producer in the live pipeline may emit REVIEW_FINDINGS " \
+                       "no producer may emit `review_findings` " \
                        "(stage=#{stage_name} marker=#{marker_name} attrs=#{attrs.inspect}); " \
                        "see ADR-028 in wiki/decisions.md"
         end

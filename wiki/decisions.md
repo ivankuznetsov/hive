@@ -319,21 +319,23 @@ Then it offers three explicit gestures: `Enter` for the existing autofix/retry p
 - A stale `diagnostics/red-status.md` cannot explain a new marker because the marker signature must match.
 - The diagnosis agent is intentionally outside the workflow lock/marker lifecycle; it writes one artifact and does not claim, clear, or advance the task.
 
-## ADR-028: Retain `REVIEW_FINDINGS` enum without schema bump after TUI triage removal
+## ADR-028: Remove `review_findings` from `hive-status` enum in place after TUI triage removal
 
-**Status:** Active (shipped with PR #122)
+**Status:** Active (shipped with PR #122 + follow-up commit)
 
-**Context:** PR #122 removed the TUI `:triage` sub-mode and its support code after audit showed the chain `EXECUTE_WAITING findings_count>0` → `:execute_findings` action → `REVIEW_FINDINGS` action key → `KeyMap` Enter dispatch → `Messages::OpenFindings` → triage view was unreachable: no producer in the live pipeline writes `findings_count=` on `EXECUTE_WAITING` markers. The `lib/hive.rb` comment for `TaskActionKind` says "renaming or removing a value bumps SCHEMA_VERSIONS["hive-status"]", which forced an explicit decision on whether removing the only producer counts as "removing a value" for schema-versioning purposes.
+**Context:** PR #122 removed the TUI `:triage` sub-mode and its support code after audit showed the chain `EXECUTE_WAITING findings_count>0` → `:execute_findings` action → `REVIEW_FINDINGS` action key → `KeyMap` Enter dispatch → `Messages::OpenFindings` → triage view was unreachable: no producer in the live pipeline writes `findings_count=` on `EXECUTE_WAITING` markers. The `lib/hive.rb` comment for `TaskActionKind` says "renaming or removing a value bumps SCHEMA_VERSIONS["hive-status"]", which forced an explicit decision on whether to bump the schema or keep the dead value as vestigial back-compat.
 
-**Decision:** Keep `Hive::Schemas::TaskActionKind::REVIEW_FINDINGS` and the `review_findings` enum value in `schemas/hive-status.v2.json`; do **not** bump `SCHEMA_VERSIONS["hive-status"]` (still 2). Document the value as vestigial back-compat with an inline comment naming the now-dead producer chain. The umbrella enum comment is amended to cover the third case ("unreachable but enum-retained"). Schema-validating consumers stay green; switch/case-handling consumers retain the dead case harmlessly; only documentation generators may need an `x-deprecated` marker (deferred to a follow-up).
+**Decision:** Edit `schemas/hive-status.v2.json` and `schemas/hive-stage-action.v2.json` in place — drop the `review_findings` enum value. Drop `Hive::Schemas::TaskActionKind::REVIEW_FINDINGS`. Do **not** bump `SCHEMA_VERSIONS["hive-status"]` (still 2). Rationale: hive has no external consumers in production yet, so the published-schema-stability invariant has no real downstream cost; an in-place removal is cleaner than maintaining a vestigial enum. The umbrella enum comment at `lib/hive.rb` reverts to its original "renaming or removing a value bumps SCHEMA_VERSIONS" form — the rule still holds, the exception is now unnecessary.
 
 Keep `lib/hive/findings.rb` and the `hive findings` / `accept-finding` / `reject-finding` CLI commands. They operate on `reviews/*.md` files directly and remain the agent-callable triage surface (the bot's review-triage Accept-all/Reject-all buttons still call into them).
 
+Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1.json`) are left untouched — they remain the frozen record of what the v1 producer emitted.
+
 **Consequences:**
-- Published `hive-status.v2.json` contract stays stable for external consumers pinned to v2.
+- `hive-status.v2.json` no longer advertises `review_findings` as a valid emittable action. Schema-validating consumers receive a sharper contract.
 - Producer-side semantic remap: `EXECUTE_WAITING + findings_count>0` markers now route to `needs_input` instead of `review_findings`. Same input → different output. A canary producer-sweep test pins the non-emission invariant so a future revert / parallel branch re-introducing a writer is caught at unit-test time.
-- Doc generators scraping the schema still advertise the value as a valid emittable action. An `x-deprecated` annotation is a future polish, not a v2-blocker.
-- The convention "removing a producer does not require a schema bump" is now load-bearing for any future enum-pruning work. The umbrella `lib/hive.rb` comment carries the rule; this ADR carries the rationale.
+- `test_unknown_action_skips` in `test/unit/daemon/policy_test.rb` continues to use the string `"review_findings"` as a synthetic-unknown fixture: it now pins forward-compat (`:skip` for any unknown action) rather than back-compat.
+- If hive ever gains external schema consumers pinned to v2, this decision becomes more expensive to make again. Treat the in-place edit pattern as a pre-1.0 affordance, not a permanent convention.
 
 ## Source
 

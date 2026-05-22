@@ -242,7 +242,6 @@
             "ready_to_finalize",
             "ready_to_archive",
             "needs_input",
-            "review_findings",
             "recover_execute",
             "recover_review",
             "agent_running",

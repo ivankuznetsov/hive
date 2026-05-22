@@ -107,11 +107,7 @@ module Hive
     # keys) emitted by `hive status --json`. Same self-derived ALL pattern
     # as NextActionKind so adding a new bucket without updating ALL is
     # impossible. Adding a new value is non-breaking by contract; renaming
-    # or removing a value bumps SCHEMA_VERSIONS["hive-status"]. A value
-    # that is no longer emitted by any live producer may stay in the enum
-    # without a schema bump — mark it as vestigial back-compat with a
-    # comment naming the now-dead producer chain (see REVIEW_FINDINGS
-    # below).
+    # or removing a value bumps SCHEMA_VERSIONS["hive-status"].
     module TaskActionKind
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze
@@ -121,11 +117,6 @@ module Hive
       READY_TO_FINALIZE   = "ready_to_finalize".freeze
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       NEEDS_INPUT         = "needs_input".freeze
-      # REVIEW_FINDINGS is retained as a vestigial enum value for
-      # back-compat with published hive-status.v2.json consumers. No
-      # producer in the live pipeline emits it — the action key was the
-      # entry point to the now-removed TUI triage mode.
-      REVIEW_FINDINGS     = "review_findings".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze
       AGENT_RUNNING       = "agent_running".freeze

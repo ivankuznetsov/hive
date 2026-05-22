@@ -1788,3 +1788,10 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 - `wiki/commands/findings.md` (new) — documents the manual `hive findings` / `accept-finding` / `reject-finding` workflow since the TUI surface is gone.
 - `wiki/decisions.md` — added ADR capturing the back-compat carve-out (retain enum + constant + CLI module without schema bump).
 - `wiki/operating.md` — added Worktree-first workflow section mirroring the CLAUDE.md policy.
+
+## [2026-05-22T18:00:00Z] schemas — drop `review_findings` from hive-status / hive-stage-action v2 enums
+
+**Action:** Follow-up to the 17:00 entry. Resolved the deferral question (issue #123) by editing `schemas/hive-status.v2.json` and `schemas/hive-stage-action.v2.json` in place to remove the orphaned `review_findings` enum value. Dropped `Hive::Schemas::TaskActionKind::REVIEW_FINDINGS`. Kept `SCHEMA_VERSIONS["hive-status"]` at 2 — hive has no external production consumers yet, so the published-schema-stability invariant has no downstream cost. Historical v1 schemas left untouched.
+
+**Refreshed pages:**
+- `wiki/decisions.md` — ADR-028 rewritten to record the in-place edit (was previously "retain as vestigial"). Notes the pre-1.0 affordance vs. post-1.0 convention difference.

@@ -151,13 +151,15 @@ class HiveDaemonPolicyTest < Minitest::Test
                                             last_dispatched_state_file_mtime: agent_post_write)
   end
 
-  def test_review_findings_skips
-    # `review_findings` is a vestigial enum value — no live producer
-    # emits it after the TUI triage mode was removed. This test pins the
-    # daemon's forward-compat default branch (`:skip` for unknown /
-    # non-routable actions) so a replayed legacy snapshot or a future
-    # external system synthesizing the value never accidentally
-    # auto-dispatches `hive findings`, which is a read-only listing.
+  def test_unknown_action_skips
+    # Pins the daemon's forward-compat default branch: any action string
+    # that doesn't match ADVANCE_ACTIONS / EDIT_RESUME_ACTIONS /
+    # MERGE_WAIT_ACTION / plan_approval routes to `:skip` rather than
+    # dispatching its command. `review_findings` was the historical
+    # canary (now-removed TUI-triage entry point); kept as a synthetic
+    # unknown so a hand-crafted state file or replayed legacy snapshot
+    # can't accidentally auto-dispatch `hive findings`, which is a
+    # read-only listing.
     assert_equal :skip, decide(action: "review_findings",
                                command: "hive findings slug-a",
                                state_file_mtime: T0 - 600,

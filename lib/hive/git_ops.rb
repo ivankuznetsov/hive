@@ -162,18 +162,57 @@ module Hive
     # Scoped add: only stage files under stages/<stage_name>/<slug>/ and the
     # logs/ directory so a crashed prior run's leftover staging cannot cross-
     # contaminate this commit's message.
-    def hive_commit(stage_name:, slug:, action:)
+    def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false)
       message = "hive: #{stage_name}/#{slug} #{action}"
       task_path = File.join("stages", stage_name, slug)
-      run_git!("-C", hive_state_path, "add", task_path) if File.directory?(File.join(hive_state_path, task_path))
-      run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
+      if pathspecs
+        Array(pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
+      else
+        run_git!("-C", hive_state_path, "add", task_path) if File.directory?(File.join(hive_state_path, task_path))
+        run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
+      end
       _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
-      if status.success?
+      if status.success? && !allow_empty
         :nothing_to_commit
       else
-        run_git!("-C", hive_state_path, "commit", "-m", message)
+        args = [ "-C", hive_state_path, "commit", "-m", message ]
+        args += [ "-m", body ] if body && !body.to_s.empty?
+        args << "--allow-empty" if allow_empty
+        run_git!(*args)
         :committed
       end
+    end
+
+    def delete_branch!(name)
+      out, err, status = Open3.capture3("git", "-C", @project_root, "branch", "-D", name)
+      return true if status.success?
+
+      combined = "#{out}\n#{err}"
+      return false if combined.match?(/branch .* not found|not a valid branch name|branch .+ not found/i)
+
+      raise GitError, "git -C #{@project_root} branch -D #{name} failed: #{err.strip.empty? ? out : err}"
+    end
+
+    def prune_worktrees!
+      run_git!("-C", @project_root, "worktree", "prune")
+      :pruned
+    end
+
+    def stage_hive_state_pathspec(pathspec)
+      rel = pathspec.to_s
+      return if rel.empty?
+
+      abs = File.join(hive_state_path, rel)
+      if File.exist?(abs) || hive_state_pathspec_tracked?(rel)
+        run_git!("-C", hive_state_path, "add", "-A", "--", rel)
+      end
+    end
+
+    def hive_state_pathspec_tracked?(pathspec)
+      out, err, status = Open3.capture3("git", "-C", hive_state_path, "ls-files", "--", pathspec)
+      raise GitError, "git -C #{hive_state_path} ls-files failed: #{err.strip.empty? ? out : err}" unless status.success?
+
+      !out.strip.empty?
     end
 
     def detect_default_branch

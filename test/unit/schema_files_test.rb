@@ -3,6 +3,7 @@ require "json"
 require "json_schemer"
 require "hive/commands/approve"
 require "hive/commands/daemon"
+require "hive/commands/drop"
 require "hive/commands/forget"
 require "hive/commands/prune"
 require "hive/commands/run"
@@ -955,6 +956,107 @@ class SchemaFilesTest < Minitest::Test
     }
     refute schemer.valid?(payload),
            "schema must reject error_kind values outside ForgetErrorKind::ALL"
+  end
+
+  # ── hive-drop ──────────────────────────────────────────────────────────
+
+  def test_hive_drop_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-drop")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-drop",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_drop_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-drop")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    expected = %w[
+      agent_kill_skipped_reason agent_killed agent_killed_pids agent_pid
+      branch_deleted commit_action from_stages ok pr_closed project schema
+      schema_version slug worktree_removed
+    ].sort
+    assert_equal expected, schema_required,
+                 "schema/producer required-key drift in hive-drop.v1.json"
+
+    context = Hive::Commands::Drop::TaskContext.new(
+      slug: "demo-260522-aaaa",
+      project_name: "demo",
+      project_root: "/tmp/demo",
+      hive_state_path: "/tmp/demo/.hive-state",
+      folders: [],
+      from_stages: [ "4-execute" ]
+    )
+    cleanup = {
+      agent: { killed: false, pid: nil, killed_pids: [], skipped_reason: "no_pid" },
+      pr_closed: false,
+      worktree_removed: false,
+      branch_deleted: false
+    }
+    producer = Hive::Commands::Drop.new("demo-260522-aaaa", json: true).send(
+      :success_payload, context, cleanup, "dropped"
+    )
+    assert_equal schema_required, producer.keys.sort,
+                 "Drop#success_payload must emit exactly the schema's required keys"
+  end
+
+  def test_hive_drop_error_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-drop")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Schemas::DropErrorKind::ALL.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror Hive::Schemas::DropErrorKind::ALL"
+  end
+
+  def test_hive_drop_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-drop"))))
+    cases = {
+      Hive::Schemas::DropErrorKind::ALREADY_ARCHIVED => Hive::Commands::Drop::AlreadyArchived.new("archived"),
+      Hive::Schemas::DropErrorKind::AMBIGUOUS_SLUG =>
+        Hive::AmbiguousSlug.new("ambiguous", slug: "s", candidates: []),
+      Hive::Schemas::DropErrorKind::WRONG_STAGE =>
+        Hive::WrongStage.new("wrong", current_stage: "3-plan", target_stage: "2-brainstorm"),
+      Hive::Schemas::DropErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("missing"),
+      Hive::Schemas::DropErrorKind::CONFIG => Hive::ConfigError.new("bad config"),
+      Hive::Schemas::DropErrorKind::GIT => Hive::GitError.new("bad git"),
+      Hive::Schemas::DropErrorKind::WORKTREE => Hive::WorktreeError.new("bad worktree"),
+      Hive::Schemas::DropErrorKind::INTERNAL => Hive::InternalError.new("boom"),
+      Hive::Schemas::DropErrorKind::ERROR => Hive::Error.new("generic")
+    }
+    cases.each do |kind, error|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-drop",
+        error: error,
+        error_kind: kind
+      )
+      assert schemer.valid?(payload),
+             "hive-drop ErrorPayload arm must accept error_kind=#{kind.inspect} (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_hive_drop_success_payload_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-drop"))))
+    payload = {
+      "schema" => "hive-drop",
+      "schema_version" => 1,
+      "ok" => true,
+      "slug" => "demo-260522-aaaa",
+      "project" => "demo",
+      "from_stages" => [ "4-execute" ],
+      "pr_closed" => false,
+      "worktree_removed" => true,
+      "branch_deleted" => true,
+      "agent_killed" => false,
+      "agent_pid" => nil,
+      "agent_killed_pids" => [],
+      "agent_kill_skipped_reason" => "no_pid",
+      "commit_action" => "dropped"
+    }
+    assert schemer.valid?(payload),
+           "hive-drop SuccessPayload must validate (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
   end
 
   # ── hive-prune ─────────────────────────────────────────────────────────

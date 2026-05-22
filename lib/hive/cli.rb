@@ -328,6 +328,38 @@ module Hive
       run_stage_action("archive", target)
     end
 
+    desc "drop TARGET", "Hard-delete a task: kill agent, remove folder(s)/worktree/branch, close draft PR"
+    long_desc <<~DESC
+      TARGET is a task folder path or a bare slug. A bare slug is resolved
+      across registered projects; pass --project to disambiguate cross-project
+      collisions and --from to assert the source stage on retry.
+
+      Drop is irreversible: there is no archive/dropped bucket, no undo, no
+      reason prompt. Cleanup is idempotent — re-running drop after an interrupt
+      completes the remaining steps.
+
+      Tasks already at 9-done are refused with exit code 64 and
+      error_kind: already_archived.
+
+      Exit codes:
+        0  — dropped successfully
+        4  — --from did not match the task's current stage
+        64 — unknown slug, ambiguous slug, or already archived
+        70 — internal error
+    DESC
+    option :from, type: :string, enum: APPROVE_TO_ENUM,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def drop(target)
+      require "hive/commands/drop"
+      Hive::Commands::Drop.new(
+        target,
+        project: options[:project],
+        from: options[:from],
+        json: options[:json]
+      ).call
+    end
+
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered

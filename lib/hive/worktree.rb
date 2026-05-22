@@ -59,11 +59,18 @@ module Hive
       :created
     end
 
-    def remove!
-      out, err, status = Open3.capture3("git", "-C", @project_root, "worktree", "remove", path)
+    def remove!(path: self.path, force: false)
+      args = [ "worktree", "remove" ]
+      args << "--force" if force
+      args << path
+      out, err, status = Open3.capture3("git", "-C", @project_root, *args)
       raise WorktreeError, "git worktree remove failed: #{err.strip.empty? ? out : err}" unless status.success?
 
       :removed
+    end
+
+    def remove_force!(path: self.path)
+      remove!(path: path, force: true)
     end
 
     # Decide what to base a new worktree branch on. Prefer

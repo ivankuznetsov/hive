@@ -535,6 +535,35 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  def test_json_error_envelope_on_invalid_task_path
+    out, _err, status = with_captured_exit do
+      Hive::Commands::Markers.new("clear", nil, name: "ERROR", json: true).call
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    payload = JSON.parse(out)
+    assert_equal false, payload["ok"]
+    assert_equal "InvalidTaskPath", payload["error_class"]
+    assert_equal "invalid_task_path", payload["error_kind"]
+    assert_match(/missing FOLDER/, payload["message"])
+  end
+
+  def test_json_error_envelope_on_internal_error
+    command = Hive::Commands::Markers.new("clear", "task", name: "ERROR", json: true)
+    command.define_singleton_method(:do_call) { raise RuntimeError, "boom" }
+
+    out, err, status = with_captured_exit { command.call }
+
+    assert_equal Hive::ExitCodes::SOFTWARE, status
+    assert_match(/internal error: RuntimeError: boom/, err)
+
+    payload = JSON.parse(out)
+    assert_equal false, payload["ok"]
+    assert_equal "InternalError", payload["error_class"]
+    assert_equal "error", payload["error_kind"]
+    assert_equal Hive::ExitCodes::SOFTWARE, payload["exit_code"]
+    assert_match(/RuntimeError: boom/, payload["message"])
+  end
   # ── Subcommand dispatch ─────────────────────────────────────────────────
 
   def test_unknown_subcommand_raises_invalid_task_path

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed — `7-artifacts` pipeline stage inserted
+
+- Inserted `7-artifacts` between `6-review` and the existing finalize/done stages. The new stage owns per-task artifact capture (demo reels for visualisable work, PR-description refreshes for backend-only work) before the PR is marked ready. This commit ships the registry plumbing (U1); the stage runner lands in a follow-up unit.
+- Renumbered the pipeline tail: `7-finalize` → `8-finalize`, `8-done` → `9-done`. The full pipeline is now `1-inbox`, `2-brainstorm`, `3-plan`, `4-execute`, `5-open-pr`, `6-review`, `7-artifacts`, `8-finalize`, `9-done`.
+- Added the `hive artifacts <slug>` workflow verb (`6-review` → `7-artifacts`) and a matching grid-mode `A` keybinding in the TUI (capital so it doesn't collide with `a` for archive).
+- Extended `hive migrate`'s `STAGE_RENAMES` to relocate in-flight `7-finalize/<slug>` → `8-finalize/<slug>` and `8-done/<slug>` → `9-done/<slug>` on upgrade. Existing projects must run `hive migrate` before resuming task work; daemon-driven projects should restart the daemon after migration so the in-memory `archive` verb template re-derives from the new layout.
+- Schema enums in `hive-status`, `hive-stage-action`, `hive-approve`, `hive-findings`, and `hive-run` widened in place to include the new stage names; consumers pinned to the old enum sets must update.
+
 ### Added — install channels
 
 - Hive now ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. The Homebrew tap formula, AUR `hive-bin` template, and `install.sh` all download the same signed `.gem` and `gem install` it. The earlier tebako/static-binary build path was dropped — Hive already requires Ruby 3.4 on the user's machine, so bundling a Ruby runtime into a single binary added build-pipeline complexity for no user gain.

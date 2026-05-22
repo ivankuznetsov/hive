@@ -1,6 +1,6 @@
 # Recipes
 
-These recipes are meant to be copied into real project work. They use the current eight-stage workflow.
+These recipes are meant to be copied into real project work. They use the current nine-stage workflow.
 
 ## Xbookmark End-To-End
 
@@ -23,6 +23,7 @@ hive plan i-want-to-create-a-260504-1253
 hive develop i-want-to-create-a-260504-1253
 hive open-pr i-want-to-create-a-260504-1253
 hive review i-want-to-create-a-260504-1253
+hive artifacts i-want-to-create-a-260504-1253
 hive finalize i-want-to-create-a-260504-1253
 hive archive i-want-to-create-a-260504-1253
 ```

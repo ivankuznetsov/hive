@@ -23,13 +23,11 @@ The folder's location is the task state. Moving a task from `2-brainstorm/` to `
     `-- escalations-01.md
 ```
 
-## The Eight Stages
-
-![Hive pipeline](assets/pipeline-1-to-8.svg)
+## The Nine Stages
 
 ```text
-1-inbox  ->  2-brainstorm  ->  3-plan  ->  4-execute  ->  5-open-pr  ->  6-review  ->  7-finalize  ->  8-done
-capture       refine           design      build          draft PR       harden        publish         archive
+1-inbox  ->  2-brainstorm  ->  3-plan  ->  4-execute  ->  5-open-pr  ->  6-review  ->  7-artifacts  ->  8-finalize  ->  9-done
+capture       refine           design      build          draft PR       harden        collect        publish         archive
 ```
 
 ### 1-inbox
@@ -56,11 +54,15 @@ Open-pr pushes the task branch and opens a draft GitHub PR. This gives humans an
 
 Review runs the autonomous loop: CI fix, reviewers, triage, fix, guardrail, and optional browser test. It pauses at human-input or recovery gates and completes with `REVIEW_COMPLETE`. See [wiki/stages/review.md](../wiki/stages/review.md).
 
-### 7-finalize
+### 7-artifacts
+
+Artifacts is the collection handoff after review. The current runner creates `artifact.md` and marks it `COMPLETE`, giving future release-packaging work a stable stage slot without skipping a marker gate. See [wiki/stages/artifacts.md](../wiki/stages/artifacts.md).
+
+### 8-finalize
 
 Finalize verifies the branch is clean and pushed, refreshes the PR body, writes `summary.md`, and marks the draft PR ready. See [wiki/stages/finalize.md](../wiki/stages/finalize.md).
 
-### 8-done
+### 9-done
 
 Done archives the task and prints manual cleanup commands for the feature worktree and branch. See [wiki/stages/done.md](../wiki/stages/done.md).
 
@@ -81,7 +83,7 @@ Markers are HTML comments at the bottom of the stage state file. The last marker
 | `<!-- REVIEW_WAITING ... -->` | Review needs human triage or guardrail approval. |
 | `<!-- REVIEW_CI_STALE ... -->` | Review's CI-fix phase exhausted its attempts. |
 | `<!-- REVIEW_STALE ... -->` | Review hit a pass or wall-clock cap. |
-| `<!-- REVIEW_COMPLETE ... -->` | Review is done and the task can finalize. |
+| `<!-- REVIEW_COMPLETE ... -->` | Review is done and the task can collect artifacts. |
 | `<!-- REVIEW_ERROR ... -->` | A review phase failed or protected-file tampering was detected. |
 
 Human edits are part of the protocol. You can edit `brainstorm.md`, `plan.md`, `reviews/escalations-NN.md`, or a recovery file, then re-run the same stage command.

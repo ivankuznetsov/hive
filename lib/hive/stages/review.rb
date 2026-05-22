@@ -15,6 +15,7 @@ require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
 require "hive/stages/review/fix_guardrail"
 require "hive/stages/review/github_publisher"
+require "hive/workflows"
 
 module Hive
   module Stages
@@ -92,7 +93,8 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          warn "hive: already complete; mv this folder to 7-finalize/ to continue"
+          next_dir = Hive::Workflows.next_dir_after("6-review")
+          warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
           warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \

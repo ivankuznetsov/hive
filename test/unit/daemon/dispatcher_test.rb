@@ -62,10 +62,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeMergeWatcher
     attr_reader :enqueued
-    attr_accessor :next_archives
+    attr_accessor :next_archives, :next_dropped
     def initialize
       @enqueued = []
       @next_archives = []
+      @last_tick_dropped = []
+      @next_dropped = []
     end
 
     def enqueue(project:, slug:, task_folder:)
@@ -75,8 +77,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def tick(now:)
       out = @next_archives
       @next_archives = []
+      @last_tick_dropped = @next_dropped
+      @next_dropped = []
       out
     end
+
+    attr_reader :last_tick_dropped
   end
 
   # ── construction helpers ───────────────────────────────────────────────
@@ -184,8 +190,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_archive_action_routes_to_merge_watcher
-    rows = [ row(stage: "7-finalize", action: "ready_to_archive",
-                 command: "hive archive s1 --from 7-finalize") ]
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive",
+                 command: "hive archive s1 --from 8-finalize") ]
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
     dispatcher.tick(now: T0)
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
@@ -199,13 +205,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # supervisor + caps just like a regular advance dispatch.
     dispatcher, sup, _ctrl, _logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "7-finalize",
-      command: "hive archive s1 --from 7-finalize --project p1 --json",
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
     assert_equal 1, sup.spawned.size
-    assert_equal "hive archive s1 --from 7-finalize --project p1 --json", sup.spawned.first[:command]
+    assert_equal "hive archive s1 --from 8-finalize --project p1 --json", sup.spawned.first[:command]
   end
 
   def test_merged_pr_archive_skips_when_project_disabled_after_enqueue
@@ -215,14 +221,45 @@ class HiveDaemonDispatcherTest < Minitest::Test
       rows: [], with_merge_watcher: true, project_enabled: false
     )
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "7-finalize",
-      command: "hive archive s1 --from 7-finalize --project p1 --json",
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)
     assert_equal 0, sup.spawned.size
     skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "project_disabled_after_enqueue" }
     refute_nil skipped, "must log :skipped reason: project_disabled_after_enqueue"
+  end
+
+  def test_merged_pr_archive_skips_when_project_layout_is_legacy
+    # ce-code-review P1 #10: when a project's status snapshot reports
+    # legacy_stage_dirs (half-migrated layout), archive dispatch must
+    # be deferred. The watcher's ARCHIVE_VERB_TEMPLATE is frozen at
+    # class-load and may interpolate a stale `--from <stage>` that
+    # doesn't match the post-migrate on-disk layout. Skip the dispatch
+    # and let handle_row re-enqueue on a future tick.
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
+      rows: [], with_merge_watcher: true
+    )
+    legacy_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
+      name: "p1",
+      legacy_stage_dirs: [ { "stage_dir" => "7-finalize", "task_count" => 1 } ]
+    )
+    dispatcher.instance_variable_get(:@status_consumer).next_result =
+      Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [], projects: [ legacy_project ], error: nil
+      )
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+    dispatcher.tick(now: T0)
+    assert_equal 0, sup.spawned.size,
+                 "archive must not fire while the project is half-migrated"
+    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "legacy_layout_detected" }
+    refute_nil skipped, "must log :skipped reason: legacy_layout_detected"
+    assert_equal "archive", skipped[1][:action]
   end
 
   def test_merged_pr_archive_respects_global_cap
@@ -241,8 +278,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
 
     mw.next_archives = [ {
-      project: "p1", slug: "s1", stage: "7-finalize",
-      command: "hive archive s1 --from 7-finalize --project p1 --json",
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
       state_file_mtime: nil, hive_state_path: nil
     } ]
     dispatcher.tick(now: T0)

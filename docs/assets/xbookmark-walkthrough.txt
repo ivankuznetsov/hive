@@ -1,7 +1,7 @@
 # xbookmark dogfood replay
 
 This is a replay transcript derived from the completed local
-`i-want-to-create-a-260504-1253` task, rendered in the current eight-stage
+`i-want-to-create-a-260504-1253` task, rendered in the earlier eight-stage
 pipeline.
 
 The task produced a real draft PR. The original plan asked for a live capture,

@@ -393,6 +393,7 @@ module Hive
         "Needs recovery",
         "Ready to open PR",
         "Ready for review",
+        "Ready to collect artifacts",
         "Ready to finalize",
         "Ready to archive",
         "Archived",

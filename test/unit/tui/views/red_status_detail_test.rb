@@ -117,7 +117,7 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
       }
     }
     manual_row = Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: "7-finalize", slug: "red-task",
+      project_name: "alpha", stage: "8-finalize", slug: "red-task",
       folder: "/tmp/red-task", state_file: "/tmp/red-task/pr.md",
       marker: "none", attrs: {}, mtime: nil,
       age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,

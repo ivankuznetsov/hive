@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hive:schema:status:v2",
   "title": "hive status output (v2)",
-  "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`.",
+  "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`. v2 (current) widens the stage / stage_dir enums to include `7-artifacts` and renumbers the tail to `8-finalize` / `9-done`; the action enum gains `ready_to_artifacts`.",
   "oneOf": [
     {
       "$ref": "#/$defs/SuccessPayload"
@@ -198,8 +198,9 @@
             "4-execute",
             "5-open-pr",
             "6-review",
-            "7-finalize",
-            "8-done"
+            "7-artifacts",
+            "8-finalize",
+            "9-done"
           ]
         },
         "slug": {
@@ -271,6 +272,7 @@
             "ready_to_develop",
             "ready_to_open_pr",
             "ready_for_review",
+            "ready_to_artifacts",
             "ready_to_finalize",
             "ready_to_archive",
             "needs_input",

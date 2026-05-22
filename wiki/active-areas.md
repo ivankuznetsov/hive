@@ -29,7 +29,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 | CI | `.github/workflows/ci.yml`, `.github/dependabot.yml`, `config/brakeman.ignore` | Wired |
 | Repo hygiene | `CHANGELOG.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | Authored |
 | Docs | `README.md`, `wiki/` knowledge base | Authored |
-| Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 7-finalize after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
+| Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
 | Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. |
 
 ## Phase 1 deferred work
@@ -47,7 +47,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 - ~~Dispatcher daemon at `~/Dev/hive/daemon.rb` with polling + fswatch.~~ Shipped (polling-only) under ADR-024. fswatch deferred behind `daemon.fswatch.enabled: true`.
 - ~~Telegram bot bidirectional adapter.~~ Shipped under ADR-026 as `hive bot`.
 - Observability probes track (`<project>/.hive-state/reports/`).
-- QMD export of `8-done/` task artefacts to per-project learning collections.
+- QMD export of `9-done/` task artefacts to per-project learning collections.
 - `gh api` PR-comment ingestion into `reviews/pr-comments-NN.md`.
 - `hive daemon doctor` — first-time-setup health check (verifies `gh auth status`, registered projects, daemon-enabled flags).
 - TUI live integration of daemon state (read-only "Daemon" pane).

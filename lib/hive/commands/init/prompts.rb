@@ -379,7 +379,7 @@ module Hive
           @output.puts "Hive daemon — auto-advance tasks through the pipeline."
           @output.puts "  When enabled, the daemon polls hive status and dispatches"
           @output.puts "  workflow verbs (brainstorm/plan/develop/open-pr/review/finalize) on tasks"
-          @output.puts "  ready to advance, plus auto-archives 7-finalize after PR merge."
+          @output.puts "  ready to advance, plus auto-archives the finalize stage after PR merge."
           @output.puts "  It stops at human-input gates (brainstorm questions, review"
           @output.puts "  escalations, recovery markers). Disable later by setting"
           @output.puts "  daemon.enabled: false in .hive-state/config.yml."

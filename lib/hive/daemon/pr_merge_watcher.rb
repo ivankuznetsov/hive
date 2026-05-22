@@ -2,10 +2,11 @@ require "open3"
 require "json"
 require "yaml"
 require "time"
+require "hive/workflows"
 
 module Hive
   module Daemon
-    # For tasks at 7-finalize/`:complete`, periodically polls
+    # For tasks at the finalize stage with `:complete`, periodically polls
     # `gh pr view <url> --json state` and tells the dispatcher to fire
     # `hive archive <slug>` once the PR is `MERGED`.
     #
@@ -19,7 +20,13 @@ module Hive
     #                                     enqueued_at, hive_state_path,
     #                                     stage }>
     class PrMergeWatcher
-      ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from 7-finalize --project %<project>s --json".freeze
+      # Derived from the workflow verb map so the artifacts-stage renumber
+      # (or any future stage shuffle) re-points the archive command without
+      # editing this file. Building the format string at class-load time is
+      # safe: `Hive::Workflows::VERBS` is frozen at require time.
+      ARCHIVE_FROM_STAGE = Hive::Workflows::VERBS.fetch("archive").fetch(:source).freeze
+      ARCHIVE_VERB_TEMPLATE = "hive archive %<slug>s --from #{ARCHIVE_FROM_STAGE} " \
+                              "--project %<project>s --json".freeze
 
       # Backoff schedule for consecutive `gh` failures (network /
       # auth / rate limit). After exhaustion, the watcher drops the
@@ -32,9 +39,20 @@ module Hive
         @poll_interval_sec = poll_interval_sec
         @gh_bin = gh_bin
         @pending = {}
+        # Buffer of `{project:, slug:, pr_url:, failure_count:, last_error:}`
+        # entries that hit GH_MAX_FAILURES during the most recent #tick.
+        # The dispatcher reads this after every tick to emit
+        # `:merge_watcher_dropped` logger events — without it, exhausted
+        # entries vanished silently and the operator had no signal that
+        # the watcher had given up on a merged PR.
+        @last_tick_dropped = []
       end
 
-      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: "7-finalize")
+      # Drops that hit GH_MAX_FAILURES during the most recent #tick.
+      # Cleared and repopulated on each tick.
+      attr_reader :last_tick_dropped
+
+      def enqueue(project:, slug:, task_folder:, hive_state_path: nil, stage: ARCHIVE_FROM_STAGE)
         key = [ project, slug ]
         return if @pending.key?(key) # idempotent
 
@@ -65,6 +83,7 @@ module Hive
       def tick(now: Time.now)
         archives = []
         keys_to_drop = []
+        @last_tick_dropped = []
 
         @pending.each do |key, entry|
           # Cadence: respect both the regular poll interval AND any
@@ -85,6 +104,13 @@ module Hive
             entry[:failure_count] += 1
             if entry[:failure_count] >= GH_MAX_FAILURES
               keys_to_drop << key
+              project, slug = key
+              @last_tick_dropped << {
+                project: project, slug: slug,
+                pr_url: entry[:pr_url],
+                failure_count: entry[:failure_count],
+                last_error: error
+              }
             else
               # Schedule the next eligible poll using the backoff
               # schedule (60 → 300 → 900 s). Index is failure_count - 1

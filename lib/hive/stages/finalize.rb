@@ -5,6 +5,7 @@ require "hive/git_ops"
 require "hive/markers"
 require "hive/protected_files"
 require "hive/secret_patterns"
+require "hive/stages"
 require "hive/stages/base"
 require "hive/worktree"
 
@@ -21,7 +22,7 @@ module Hive
         if File.exist?(File.join(task.folder, "summary.md"))
           marker = Hive::Markers.current(task.state_file)
           warn "hive: already complete (#{marker.attrs['pr_url'] || '(no url)'}); " \
-               "mv this folder to 8-done/ to continue"
+               "mv this folder to #{Hive::Stages::DIRS.last}/ to continue"
           return { commit: nil, status: :complete }
         end
 

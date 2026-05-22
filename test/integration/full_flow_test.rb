@@ -140,9 +140,9 @@ class FullFlowTest < Minitest::Test
   end
 
   # AC1 + AC2 + AC5 (PR-first pipeline e2e coverage):
-  #   AC1 — open-pr runs BEFORE review in the new 8-stage layout
+  #   AC1 — open-pr runs BEFORE review in the current 9-stage layout
   #         (1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr
-  #          → 6-review → 7-finalize → 8-done).
+  #          → 6-review → 7-artifacts → 8-finalize → 9-done).
   #   AC2 — the branch is pushed to origin during 5-open-pr (verified
   #         indirectly: 6-review opens against a real PR URL).
   #   AC5 — the full flow advances from inbox to done with no manual
@@ -252,10 +252,17 @@ class FullFlowTest < Minitest::Test
         assert_equal :review_complete, marker.name
         assert_equal "skipped", marker.attrs["browser"]
 
-        # 6-review → 7-finalize
-        finalize_dir = File.join(dir, ".hive-state", "stages", "7-finalize", slug)
+        # 6-review → 7-artifacts
+        artifacts_dir = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
+        FileUtils.mkdir_p(File.dirname(artifacts_dir))
+        FileUtils.mv(review_dir, artifacts_dir)
+        capture_io { Hive::Commands::Run.new(artifacts_dir).call }
+        assert_equal :complete, Hive::Markers.current(File.join(artifacts_dir, "artifact.md")).name
+
+        # 7-artifacts → 8-finalize
+        finalize_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
         FileUtils.mkdir_p(File.dirname(finalize_dir))
-        FileUtils.mv(review_dir, finalize_dir)
+        FileUtils.mv(artifacts_dir, finalize_dir)
 
         ENV["HIVE_FLOW_FOLDER"] = finalize_dir
         ENV["HIVE_FLOW_PHASE"] = "finalize"
@@ -263,8 +270,8 @@ class FullFlowTest < Minitest::Test
         assert_equal :complete, Hive::Markers.current(File.join(finalize_dir, "pr.md")).name
         assert File.exist?(File.join(finalize_dir, "summary.md"))
 
-        # 7-finalize → 8-done (no agent invoked)
-        done_dir = File.join(dir, ".hive-state", "stages", "8-done", slug)
+        # 8-finalize → 9-done (no agent invoked)
+        done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
         FileUtils.mkdir_p(File.dirname(done_dir))
         FileUtils.mv(finalize_dir, done_dir)
         out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }

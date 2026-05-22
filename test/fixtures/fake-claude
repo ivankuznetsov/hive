@@ -33,6 +33,14 @@ if [[ -n "${HIVE_FAKE_CLAUDE_WRITE_FILE:-}" && -n "${HIVE_FAKE_CLAUDE_WRITE_CONT
   printf '%s' "${HIVE_FAKE_CLAUDE_WRITE_CONTENT}" > "${HIVE_FAKE_CLAUDE_WRITE_FILE}"
 fi
 
+if [[ -n "${HIVE_FAKE_CLAUDE_COMMIT_FILE:-}" ]]; then
+  printf '%s' "${HIVE_FAKE_CLAUDE_COMMIT_CONTENT:-implemented\n}" > "${HIVE_FAKE_CLAUDE_COMMIT_FILE}"
+  git add -- "${HIVE_FAKE_CLAUDE_COMMIT_FILE}"
+  if ! git diff --cached --quiet; then
+    git commit -m "${HIVE_FAKE_CLAUDE_COMMIT_MESSAGE:-test: fake agent commit}" --quiet
+  fi
+fi
+
 # Simulate the side-effect of `gh pr create` on a subsequent `gh pr
 # list`: when HIVE_FAKE_GH_PR_EXISTS_FILE is set, mark the file so
 # fake-gh's `pr list` claims the PR exists. Tests for the open-pr

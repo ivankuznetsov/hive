@@ -15,7 +15,7 @@ class StagesDoneTest < Minitest::Test
   def test_run_returns_cleanup_instructions_with_pointer_and_writes_nothing_to_stdout
     with_tmp_dir do |dir|
       slug = "feat-x-260424-aaaa"
-      folder = File.join(dir, ".hive-state", "stages", "8-done", slug)
+      folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "worktree.yml"),
                  { "path" => "/tmp/wt-feat-x", "branch" => slug }.to_yaml)
@@ -43,7 +43,7 @@ class StagesDoneTest < Minitest::Test
   def test_run_returns_archived_message_without_pointer
     with_tmp_dir do |dir|
       slug = "feat-y-260424-bbbb"
-      folder = File.join(dir, ".hive-state", "stages", "8-done", slug)
+      folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
       FileUtils.mkdir_p(folder)
       task = Hive::Task.new(folder)
       cfg = Hive::Config.load(dir)
@@ -61,7 +61,7 @@ class StagesDoneTest < Minitest::Test
   def test_run_sets_complete_marker_on_state_file
     with_tmp_dir do |dir|
       slug = "feat-z-260424-cccc"
-      folder = File.join(dir, ".hive-state", "stages", "8-done", slug)
+      folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
       FileUtils.mkdir_p(folder)
       task = Hive::Task.new(folder)
       cfg = Hive::Config.load(dir)

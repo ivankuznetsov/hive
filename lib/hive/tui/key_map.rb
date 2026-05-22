@@ -2,6 +2,7 @@ require "shellwords"
 require "hive/markers"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
+require "hive/workflows"
 
 module Hive
   module Tui
@@ -32,6 +33,7 @@ module Hive
         "d" => "develop",
         "P" => "open-pr",
         "r" => "review",
+        "A" => "artifacts",
         "F" => "finalize",
         "a" => "archive"
       }.freeze
@@ -195,8 +197,13 @@ module Hive
         end
       end
 
+      # The "completed finalize" row routes Enter to the final-summary
+      # browser. The stage name is sourced from the archive verb's source
+      # so a stage renumber doesn't silently break this affordance.
+      FINALIZE_STAGE_DIR = Hive::Workflows::VERBS.fetch("archive").fetch(:source).freeze
+
       def finalize_complete_row?(row)
-        row.stage == "7-finalize" && row.marker.to_s == "complete"
+        row.stage == FINALIZE_STAGE_DIR && row.marker.to_s == "complete"
       end
 
       # Enter on an `error` row routes to `RecoverError` (clear ERROR

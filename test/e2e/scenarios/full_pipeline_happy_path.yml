@@ -22,6 +22,10 @@ steps:
     marker: { current: COMPLETE }
   - kind: cli
     args: [develop, "{slug}", --from, 3-plan]
+    env:
+      HIVE_FAKE_CLAUDE_COMMIT_FILE: implementation.txt
+      HIVE_FAKE_CLAUDE_COMMIT_CONTENT: "implemented\n"
+      HIVE_FAKE_CLAUDE_COMMIT_MESSAGE: "feat: implement e2e fixture"
   - kind: state_assert
     path: "{task_dir:4-execute}/task.md"
     marker: { current: EXECUTE_COMPLETE }
@@ -40,15 +44,22 @@ steps:
   - kind: state_assert
     path: "{task_dir:6-review}/task.md"
     marker: { current: REVIEW_COMPLETE }
+  # AC: the workflow inserts 7-artifacts between review and finalize.
+  # The artifacts verb is network-free, so exercise the real CLI command here.
   - kind: cli
-    args: [approve, "{slug}", --from, 6-review, --to, 7-finalize]
+    args: [artifacts, "{slug}", --from, 6-review]
+  - kind: state_assert
+    path: "{task_dir:7-artifacts}/artifact.md"
+    marker: { current: COMPLETE }
+  - kind: cli
+    args: [approve, "{slug}", --from, 7-artifacts, --to, 8-finalize]
   - kind: write_file
-    path: "{task_dir:7-finalize}/pr.md"
+    path: "{task_dir:8-finalize}/pr.md"
     content: "# PR\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 -->\n"
   - kind: cli
-    args: [archive, "{slug}", --from, 7-finalize]
+    args: [archive, "{slug}", --from, 8-finalize]
   - kind: json_assert
     args: [status, --json]
     schema: hive-status
     pick: [projects, 0, tasks, 0, stage]
-    equals: 8-done
+    equals: 9-done

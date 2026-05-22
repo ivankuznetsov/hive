@@ -3,11 +3,11 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-05-13
+updated: 2026-05-22
 tags: [stage, index]
 ---
 
-**TLDR**: Eight wired pipeline stages, no gaps. PR creation now happens before review in `5-open-pr`; `7-finalize` is the post-review wrap-up that refreshes the PR and marks it ready.
+**TLDR**: Nine wired pipeline stages, no gaps. PR creation happens before review in `5-open-pr`; `7-artifacts` is the artifact-collection handoff; `8-finalize` refreshes the PR and marks it ready.
 
 | Stage | Runner | State file | Spawns agent? | Page |
 |-------|--------|------------|----------------|------|
@@ -17,8 +17,9 @@ tags: [stage, index]
 | 4-execute | `Hive::Stages::Execute` | `task.md` (+ `worktree.yml`) | yes (impl-only since U9) | [[stages/execute]] |
 | 5-open-pr | `Hive::Stages::OpenPr` | `pr.md` | yes | [[stages/open-pr]] |
 | 6-review | `Hive::Stages::Review` (orchestrator) + `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | `task.md` (+ `reviews/ce-review-*-NN.md`, `reviews/escalations-NN.md`, `reviews/ci-blocked.md`, `reviews/browser-test-NN.md`, `reviews/fix-guardrail-NN.md`) | yes (CI-fix + reviewers + triage + fix + browser) | [[stages/review]] |
-| 7-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
-| 8-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
+| 7-artifacts | `Hive::Stages::Artifacts` | `artifact.md` | no | [[stages/artifacts]] |
+| 8-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
+| 9-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
 
 All active stages share `Hive::Stages::Base.spawn_agent` for agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.render(template_name, bindings)` for ERB prompt rendering. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns.
 

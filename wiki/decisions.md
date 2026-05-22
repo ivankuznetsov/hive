@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-20
+updated: 2026-05-22
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion.
 
 ## ADR-027: Release artifacts are Tebako-packed binaries
 
@@ -22,7 +22,7 @@ tags: [decisions, adr]
 
 **Status:** Active
 **Context:** Opening the GitHub PR only after autonomous review made human intervention awkward: a person had to find the task under `.hive-state/stages/6-review/` and edit local files instead of using `gh pr checkout`. At the same time, the daemon needed a deterministic install surface — manual launchd/systemd cp+edit recipes drift across platforms and become stale doc the moment `hive init` learns to install a unit on its own.
-**Decision:** Insert `5-open-pr` between execute and review. It pushes the branch and opens a draft PR. Rename the old PR stage to `7-finalize`; it now verifies the reviewed branch is pushed, refreshes the PR description, writes `summary.md`, and flips the PR from draft to ready-for-review. The full stage order is `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-finalize → 8-done`. In parallel, `hive init` now installs the platform daemon unit on disk by default via `Hive::Commands::Daemon::ServiceInstaller`: the unit (launchd plist on macOS, systemd-user service on Linux) is written unconditionally, while `launchctl load` / `systemctl --user enable --now` are only invoked when the user opts in at the `daemon_autostart` prompt. Drifted/customised units are detected by content hash and left untouched.
+**Decision:** Insert `5-open-pr` between execute and review. It pushes the branch and opens a draft PR. Rename the old PR stage to `7-finalize`; it now verifies the reviewed branch is pushed, refreshes the PR description, writes `summary.md`, and flips the PR from draft to ready-for-review. The stage order from that decision was `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-finalize → 8-done`; ADR-029 supersedes the tail with `7-artifacts → 8-finalize → 9-done`. In parallel, `hive init` now installs the platform daemon unit on disk by default via `Hive::Commands::Daemon::ServiceInstaller`: the unit (launchd plist on macOS, systemd-user service on Linux) is written unconditionally, while `launchctl load` / `systemctl --user enable --now` are only invoked when the user opts in at the `daemon_autostart` prompt. Drifted/customised units are detected by content hash and left untouched.
 **Consequences:** Review runs against an already-open draft PR. Reviewer files remain authoritative locally, but the review orchestrator mirrors each reviewer/escalation file to the PR as a comment for human visibility. Existing in-flight tasks on old stage names require explicit `hive migrate`; hive does not silently rename task folders. For daemon registration: users who previously hand-installed a service unit see the "already exists; leaving user-customized file untouched" warning instead of a silent overwrite. Homebrew-installed macOS units point at the stable `${HOMEBREW_PREFIX}/bin/hive` symlink rather than a versioned Cellar realpath, so `brew upgrade hive` keeps the daemon binary path current; customized drifted plists still require explicit removal and `hive init` re-registration.
 
 ## ADR-001: Folder-as-task, not single markdown file
@@ -179,7 +179,7 @@ tags: [decisions, adr]
 
 **Status:** Active
 **Context:** The 6-review orchestrator owns the terminal `REVIEW_*` marker. Sub-agents spawned during a phase (reviewer / triage / fix / browser) must NOT write to `task.state_file`, or they'd race the orchestrator's marker. Pre-U4 every `spawn_agent` call wrote the agent's state to `task.state_file` unconditionally.
-**Decision:** `Stages::Base.spawn_agent` takes a `status_mode:` kwarg per spawn. Three values: `:state_file_marker` (legacy default — agent writes its own state to `task.state_file`), `:exit_code_only` (for sub-spawns inside an orchestrator — runner judges success purely by exit code; agent's task.md writes are no-ops via mode-gating), `:output_file_exists` (for cases where a side-effect file is the truth). 6-review uses `:exit_code_only` for every sub-spawn; `:state_file_marker` is reserved for stages where the agent IS the orchestrator (today: 2-brainstorm, 3-plan, 4-execute, 7-finalize).
+**Decision:** `Stages::Base.spawn_agent` takes a `status_mode:` kwarg per spawn. Three values: `:state_file_marker` (legacy default — agent writes its own state to `task.state_file`), `:exit_code_only` (for sub-spawns inside an orchestrator — runner judges success purely by exit code; agent's task.md writes are no-ops via mode-gating), `:output_file_exists` (for cases where a side-effect file is the truth). 6-review uses `:exit_code_only` for every sub-spawn; `:state_file_marker` is reserved for stages where the agent IS the orchestrator (today: 2-brainstorm, 3-plan, 4-execute, 8-finalize).
 **Consequences:** No marker collision between orchestrator and sub-spawns. The runner's mark/finalize logic stays simple — every sub-spawn returns `{status:, error_message:}` from `Hive::Agent.run!`, and the orchestrator decides what to write to disk.
 
 ## ADR-022: Agentic E2E test layer with structured failure artifacts
@@ -212,7 +212,7 @@ Meanwhile the system grew its own load-bearing safety net: `hive approve` (`wiki
   1. **Q&A waits** (`:waiting`, `:execute_waiting`) — agent asked questions, user answers in the file.
   2. **Triage waits** (`:review_waiting`, including `reason=fix_guardrail`) — user ticks `[x]` on accepted findings or removes rogue commits.
   3. **Recovery waits** (`:execute_stale`, `:review_stale`, `:review_ci_stale`, `:review_error`, `:error`) — these markers EXIST to demand human intervention; skipping them is correct.
-  4. **External-state waits** — 7-finalize/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
+  4. **External-state waits** — 8-finalize/`:complete` whose PR is open on GitHub. Daemon polls `gh pr view --json state` and auto-archives on `MERGED`. The merge itself remains a human gesture (the green button on GitHub); the daemon detects the merge and removes the bookkeeping burden.
 
 `3-plan`/`:waiting` is not a Q&A wait. It is the plan-approval pause
 used by the manual TUI/editor flow. For daemon-enabled projects,
@@ -336,6 +336,16 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 - Producer-side semantic remap: `EXECUTE_WAITING + findings_count>0` markers now route to `recover_execute` instead of `review_findings`. Same input → different output, but still a human recovery gate with a `hive findings` command rather than generic edit guidance. A canary producer-sweep test pins the non-emission invariant so a future revert / parallel branch re-introducing a writer is caught at unit-test time.
 - `test_unknown_action_skips` in `test/unit/daemon/policy_test.rb` continues to use the string `"review_findings"` as a synthetic-unknown fixture: it now pins forward-compat (`:skip` for any unknown action) rather than back-compat.
 - If hive ever gains external schema consumers pinned to v2, this decision becomes more expensive to make again. Treat the in-place edit pattern as a pre-1.0 affordance, not a permanent convention.
+
+## ADR-029: 7-artifacts separates review completion from PR finalization
+
+**Status:** Active
+
+**Context:** Review completion now needs a stable artifact-collection slot before PR finalization. Without a real `artifacts` runner, the workflow metadata could advertise `hive artifacts` while Thor rejected the command, and markerless `7-artifacts` rows could be shown as ready to finalize even though `StageAction` correctly refuses to advance rows without a terminal marker.
+
+**Decision:** Insert `7-artifacts` between `6-review` and `8-finalize`, making the current stage order `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-artifacts → 8-finalize → 9-done`. The `hive artifacts` workflow verb is a first-class Thor command. `Hive::Stages::Artifacts` is a no-agent runner that creates `artifact.md` and stamps `COMPLETE`, so the existing terminal-marker gate remains intact before `hive finalize` can promote to `8-finalize`.
+
+**Consequences:** Daemon, bot, TUI, status JSON, and humans see `ready_to_artifacts` after `REVIEW_COMPLETE`, then `ready_to_finalize` only after `artifact.md` carries `COMPLETE`. `hive migrate` maps both the pre-open-pr layout and the previous canonical `7-finalize` / `8-done` directories to the current names. Future artifact packaging work has a dedicated stage without overloading finalize.
 
 ## Source
 

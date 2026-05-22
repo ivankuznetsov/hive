@@ -3,17 +3,17 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-05-15
+updated: 2026-05-22
 tags: [command, daemon, automation, json]
 ---
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
 auto-advancing dispatcher (ADR-024). One long-running process polls
 `hive status --json` every 30s, dispatches workflow verbs (`hive plan`
-/ `develop` / `open-pr` / `review` / `finalize`) on tasks ready to advance, and
-auto-archives 7-finalize → 8-done after `gh pr view` reports `MERGED`. Stops
+/ `develop` / `open-pr` / `review` / `artifacts` / `finalize`) on tasks ready to advance, and
+auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED`. Stops
 only at human-input gates: `_WAITING` markers (Q&A / triage), recovery
-markers (`_STALE` / `_ERROR`), and 7-finalize while the PR is still open on
+markers (`_STALE` / `_ERROR`), and 8-finalize while the PR is still open on
 GitHub.
 
 ## Subcommands
@@ -53,8 +53,9 @@ value) and routes:
 | `ready_to_develop`    | Dispatch `hive develop <slug> --from 3-plan` (3→4) |
 | `ready_to_open_pr`    | Dispatch `hive open-pr <slug> --from 4-execute` (4→5) |
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
-| `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 6-review` (6→7) |
-| `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 7-finalize` (7→8) |
+| `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
+| `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
+| `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 8-finalize` (8→9) |
 | `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. |
 | `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |

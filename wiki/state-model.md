@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/bot/*
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-22
 tags: [state, filesystem, model, architecture, review]
 ---
 
@@ -24,12 +24,13 @@ Per project, every task is a folder in exactly one stage subdirectory. Stage = l
 │   ├── 4-execute/<slug>/
 │   ├── 5-open-pr/<slug>/
 │   ├── 6-review/<slug>/
-│   ├── 7-finalize/<slug>/
-│   └── 8-done/<slug>/
+│   ├── 7-artifacts/<slug>/
+│   ├── 8-finalize/<slug>/
+│   └── 9-done/<slug>/
 └── logs/<slug>/<stage>-<UTC-ts>.log
 ```
 
-The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-finalize 8-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]] and [[stages/review]].
+The constant `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` is the canonical list (`lib/hive/stages.rb`). `GitOps`, `Status`, `Run#next_stage_dir`, and `Approve` all delegate to that single constant. See [[modules/stages]] and [[stages/review]].
 
 `Hive::Task::PATH_RE` (`lib/hive/task.rb:14`) is the only validator for task paths and parses `<root>/.hive-state/stages/<N>-<stage>/<slug>/`.
 
@@ -45,8 +46,9 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
 | `6-review` | `task.md` | reused from `4-execute`; markers driven by `Stages::Review` orchestrator |
-| `7-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
-| `8-done` | `task.md` | reused from `4-execute` |
+| `7-artifacts` | `artifact.md` | `Stages::Artifacts` creates the artifact collection marker file and stamps `COMPLETE` |
+| `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
+| `9-done` | `task.md` | reused from `4-execute` |
 
 Mapping is encoded in `Hive::Task::STATE_FILES` (`lib/hive/task.rb:6`).
 
@@ -74,10 +76,10 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_WAITING escalations=N pass=NN -->` | review pass produced escalations awaiting human edit | `Stages::Review` orchestrator |
 | `<!-- REVIEW_CI_STALE attempts=N -->` | CI hard-block — `cfg.review.ci.max_attempts` reached without green; reviewers don't run on red CI | `Stages::Review` CI phase |
 | `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 2) | `Stages::Review` orchestrator |
-| `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to mv to 7-finalize (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
+| `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to run `hive artifacts` into 7-artifacts (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=… reason=… -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`) | `Stages::Review` orchestrator |
 
-`5-open-pr` and `7-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`.
+`5-open-pr` and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`.
 
 Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for back-compat parsing of historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
 
@@ -241,8 +243,8 @@ Loaded by `Hive::Config.load`, recursively deep-merged onto `Hive::Config::DEFAU
 ## Frontmatter conventions
 
 - `idea.md` (Step 0 capture): `slug`, `created_at`, `original_text` (multiline).
-- `task.md` (4-execute / 6-review / 8-done): `slug`, `started_at`. Pre-U9 carried `pass:`; the field was dropped when review iteration moved to 6-review and pass became filesystem-derived.
-- `pr.md`: `pr_url`, `pr_number` (when populated by 7-finalize runner from existing PR lookup).
+- `task.md` (4-execute / 6-review / 9-done): `slug`, `started_at`. Pre-U9 carried `pass:`; the field was dropped when review iteration moved to 6-review and pass became filesystem-derived.
+- `pr.md`: `pr_url`, `pr_number` (when populated by 8-finalize runner from existing PR lookup).
 
 ## Commit trailers (fix-agent metric)
 
@@ -273,17 +275,18 @@ stateDiagram-v2
     S4_execute --> S5_open_pr: user mv (EXECUTE_COMPLETE)
     S5_open_pr --> S6_review: user mv (draft PR open)
     S6_review --> S6_review: hive run (next review pass — ci/reviewers/triage/fix/browser)
-    S6_review --> S7_finalize: user mv (REVIEW_COMPLETE)
-    S7_finalize --> S8_done: user mv (after merge)
-    S8_done --> [*]
+    S6_review --> S7_artifacts: user mv or hive artifacts (REVIEW_COMPLETE)
+    S7_artifacts --> S8_finalize: user mv (COMPLETE)
+    S8_finalize --> S9_done: user mv (after merge)
+    S9_done --> [*]
 ```
 
-Since 2026-05-13, `Hive::Stages::DIRS` has all eight slots filled in order; `Stages.next_dir(4)` returns `"5-open-pr"`, and `Stages.next_dir(6)` returns `"7-finalize"`. See [[stages/review]] for the autonomous-loop semantics.
+Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stages.next_dir(4)` returns `"5-open-pr"`, `Stages.next_dir(6)` returns `"7-artifacts"`, and `Stages.next_dir(8)` returns `"9-done"`. See [[stages/review]] for the autonomous-loop semantics.
 
 See [[stages/index]] for one page per stage.
 
 ## Backlinks
 
 - [[architecture]]
-- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/finalize]] · [[stages/done]]
+- [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]]

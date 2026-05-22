@@ -23,8 +23,30 @@ class MigrateTest < Minitest::Test
         capture_io { Hive::Commands::Migrate.new(dir).call }
 
         assert File.directory?(File.join(stages, "6-review", "old-review-260513-abcd"))
-        assert File.directory?(File.join(stages, "7-finalize", "old-pr-260513-abcd"))
-        assert File.directory?(File.join(stages, "8-done", "old-done-260513-abcd"))
+        assert File.directory?(File.join(stages, "8-finalize", "old-pr-260513-abcd"))
+        assert File.directory?(File.join(stages, "9-done", "old-done-260513-abcd"))
+      end
+    end
+  end
+
+  def test_migrates_previous_canonical_finalize_and_done_stage_directories
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        {
+          "7-finalize" => "old-finalize-260522-abcd",
+          "8-done" => "old-done-260522-abcd"
+        }.each do |stage, slug|
+          folder = File.join(stages, stage, slug)
+          FileUtils.mkdir_p(folder)
+          File.write(File.join(folder, "task.md"), "x\n")
+        end
+
+        capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert File.directory?(File.join(stages, "8-finalize", "old-finalize-260522-abcd"))
+        assert File.directory?(File.join(stages, "9-done", "old-done-260522-abcd"))
       end
     end
   end
@@ -51,7 +73,7 @@ class MigrateTest < Minitest::Test
   # Mid-loop atomicity (round-1 finding): pre-flight collision check
   # must catch a SECOND-iteration collision BEFORE the first-iteration
   # rename runs. Without this, a successful 5-review→6-review followed
-  # by a 6-pr→7-finalize collision would leave the filesystem partially
+  # by a 6-pr→8-finalize collision would leave the filesystem partially
   # renamed with no rollback.
   def test_migrate_preflight_catches_later_collision_before_first_mv
     with_tmp_global_config do
@@ -62,9 +84,9 @@ class MigrateTest < Minitest::Test
         pr_slug = "pr-260513-bbbb"
         # Set up a clean 5-review→6-review path (would succeed alone)
         FileUtils.mkdir_p(File.join(stages, "5-review", review_slug))
-        # And a 6-pr→7-finalize collision (destination exists).
+        # And a 6-pr→8-finalize collision (destination exists).
         FileUtils.mkdir_p(File.join(stages, "6-pr", pr_slug))
-        FileUtils.mkdir_p(File.join(stages, "7-finalize", pr_slug))
+        FileUtils.mkdir_p(File.join(stages, "8-finalize", pr_slug))
 
         assert_raises(Hive::DestinationCollision) do
           capture_io { Hive::Commands::Migrate.new(dir).call }

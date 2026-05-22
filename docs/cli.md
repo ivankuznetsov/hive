@@ -13,8 +13,9 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive develop TARGET` | Promote completed plan to execute or re-run execute. | `hive develop <slug> --from 3-plan` |
 | `hive open-pr TARGET` | Promote completed execute to draft PR creation. | `hive open-pr <slug> --from 4-execute` |
 | `hive review TARGET` | Run the autonomous review loop. | `hive review <slug> --from 5-open-pr` |
-| `hive finalize TARGET` | Refresh PR body and mark the draft PR ready. | `hive finalize <slug> --from 6-review` |
-| `hive archive TARGET` | Move finalized work to `8-done/`. | `hive archive <slug> --from 7-finalize` |
+| `hive artifacts TARGET` | Collect the reviewed task's release artifacts. | `hive artifacts <slug> --from 6-review` |
+| `hive finalize TARGET` | Refresh PR body and mark the draft PR ready. | `hive finalize <slug> --from 7-artifacts` |
+| `hive archive TARGET` | Move finalized work to `9-done/`. | `hive archive <slug> --from 8-finalize` |
 
 The workflow verbs promote then run when the task is at the previous stage. If the task is already at the target stage, they only run that stage.
 
@@ -49,7 +50,7 @@ Use these when building scripts, recovering a task, or checking idempotency.
 
 ## Daemon
 
-The daemon is optional and per-project. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the PR merged.
+The daemon is optional and per-project. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
 
 ```bash
 hive daemon enable <project>
@@ -80,7 +81,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), and daemon control all support `--json` and emit a single typed envelope with `ok: true` on success or `ok: false` on failure. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `init`, `new`, `migrate`, `forget`, `prune`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), and daemon control all support `--json` and emit a single typed envelope with `ok: true` on success or `ok: false` on failure. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `init`, `new`, `migrate`, `forget`, `prune`) are still text-only.
 
 ## Exit Codes
 

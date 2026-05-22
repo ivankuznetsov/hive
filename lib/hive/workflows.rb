@@ -1,6 +1,6 @@
 module Hive
   # Single source of truth for the workflow verbs (brainstorm, plan,
-  # develop, open-pr, review, finalize, archive). Each verb advances a task from one
+  # develop, open-pr, review, artifacts, finalize, archive). Each verb advances a task from one
   # stage to the next; `Hive::Commands::StageAction` consumes this map
   # directly, `Hive::TaskAction` uses it to label the "ready to <verb>"
   # status bucket per stage, and `Hive::Commands::Approve` /
@@ -30,12 +30,13 @@ module Hive
       "develop"    => { source: "3-plan", target: "4-execute" },
       "open-pr"    => { source: "4-execute", target: "5-open-pr" },
       "review"     => { source: "5-open-pr", target: "6-review" },
-      "finalize"   => { source: "6-review", target: "7-finalize" },
-      "archive"    => { source: "7-finalize", target: "8-done" }
+      "artifacts"  => { source: "6-review", target: "7-artifacts" },
+      "finalize"   => { source: "7-artifacts", target: "8-finalize" },
+      "archive"    => { source: "8-finalize", target: "9-done" }
     }.freeze
 
     # Reverse lookup by source: verb that advances OUT of stage_dir.
-    # nil for `8-done` (no further verb).
+    # nil for `9-done` (no further verb).
     VERB_BY_SOURCE = VERBS.each_with_object({}) { |(verb, cfg), h| h[cfg[:source]] = verb }.freeze
 
     # Reverse lookup by target: verb whose target IS stage_dir. Same
@@ -53,6 +54,14 @@ module Hive
 
     def verb_advancing_from(stage_dir)
       VERB_BY_SOURCE[stage_dir]
+    end
+
+    # Stage directory that follows stage_dir in the pipeline, or nil at the
+    # terminal stage. Use this instead of hardcoding `"7-artifacts"` /
+    # `"8-finalize"` etc. so a future renumber doesn't strand call sites.
+    def next_dir_after(stage_dir)
+      verb = VERB_BY_SOURCE[stage_dir]
+      verb && VERBS.fetch(verb).fetch(:target)
     end
 
     # Returns true when the verb is flagged `interactive: true` —

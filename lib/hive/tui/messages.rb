@@ -202,7 +202,7 @@ module Hive
       # archive-on-exit side effect.
       OpenInAgent = Data.define(:row)
 
-      # Enter on a completed 7-finalize row — browse the final summary
+      # Enter on a completed finalize-stage row — browse the final summary
       # document in $EDITOR. Falls back to pr.md if summary.md is missing.
       OpenSummary = Data.define(:row)
 

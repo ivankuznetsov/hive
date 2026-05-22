@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/cli"
 require "hive/workflows"
 
 # Direct coverage for Hive::Workflows. The workflow verb map is the
@@ -8,10 +9,18 @@ require "hive/workflows"
 # rebase can't drift the contract without breaking this file.
 class WorkflowsTest < Minitest::Test
   def test_verbs_has_canonical_keys_in_order
-    assert_equal %w[brainstorm plan develop open-pr review finalize archive],
+    assert_equal %w[brainstorm plan develop open-pr review artifacts finalize archive],
                  Hive::Workflows::VERBS.keys,
                  "VERBS must list the canonical workflow verbs"
-    assert_equal 7, Hive::Workflows::VERBS.size
+    assert_equal 8, Hive::Workflows::VERBS.size
+  end
+
+  def test_every_workflow_verb_has_thor_command
+    missing = Hive::Workflows::VERBS.keys.reject do |verb|
+      Hive::CLI.all_commands.key?(verb) || Hive::CLI.map.key?(verb)
+    end
+    assert_empty missing,
+                 "workflow verbs must be callable through the Thor CLI"
   end
 
   def test_open_pr_verb_source_and_target
@@ -28,14 +37,20 @@ class WorkflowsTest < Minitest::Test
 
   def test_finalize_verb_source_and_target
     cfg = Hive::Workflows::VERBS.fetch("finalize")
-    assert_equal "6-review", cfg[:source]
-    assert_equal "7-finalize", cfg[:target]
+    assert_equal "7-artifacts", cfg[:source]
+    assert_equal "8-finalize", cfg[:target]
   end
 
   def test_archive_verb_source_and_target
     cfg = Hive::Workflows::VERBS.fetch("archive")
-    assert_equal "7-finalize", cfg[:source]
-    assert_equal "8-done", cfg[:target]
+    assert_equal "8-finalize", cfg[:source]
+    assert_equal "9-done", cfg[:target]
+  end
+
+  def test_artifacts_verb_source_and_target
+    cfg = Hive::Workflows::VERBS.fetch("artifacts")
+    assert_equal "6-review", cfg[:source]
+    assert_equal "7-artifacts", cfg[:target]
   end
 
   # ── verb_advancing_from ───────────────────────────────────────────────
@@ -45,11 +60,11 @@ class WorkflowsTest < Minitest::Test
   end
 
   def test_verb_advancing_from_6_review_is_finalize
-    assert_equal "finalize", Hive::Workflows.verb_advancing_from("6-review")
+    assert_equal "artifacts", Hive::Workflows.verb_advancing_from("6-review")
   end
 
-  def test_verb_advancing_from_8_done_is_nil
-    assert_nil Hive::Workflows.verb_advancing_from("8-done"),
+  def test_verb_advancing_from_9_done_is_nil
+    assert_nil Hive::Workflows.verb_advancing_from("9-done"),
                "no verb advances out of the terminal stage"
   end
 
@@ -62,6 +77,26 @@ class WorkflowsTest < Minitest::Test
   def test_verb_arriving_at_1_inbox_is_nil
     assert_nil Hive::Workflows.verb_arriving_at("1-inbox"),
                "no verb arrives at 1-inbox; tasks are seeded via `hive new`"
+  end
+
+  # ── next_dir_after ────────────────────────────────────────────────────
+
+  def test_next_dir_after_6_review_is_7_artifacts
+    assert_equal "7-artifacts", Hive::Workflows.next_dir_after("6-review")
+  end
+
+  def test_next_dir_after_7_artifacts_is_8_finalize
+    assert_equal "8-finalize", Hive::Workflows.next_dir_after("7-artifacts")
+  end
+
+  def test_next_dir_after_terminal_is_nil
+    assert_nil Hive::Workflows.next_dir_after("9-done"),
+               "no stage follows the terminal stage"
+  end
+
+  def test_next_dir_after_unknown_stage_is_nil
+    assert_nil Hive::Workflows.next_dir_after("99-imaginary"),
+               "unknown stage dirs surface as nil so callers can branch on absence"
   end
 
   # ── workflow_verb? ────────────────────────────────────────────────────

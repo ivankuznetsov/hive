@@ -1800,3 +1800,22 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 **Action:** Follow-up to ADR-028 after PR #122 review. Kept `review_findings` removed from v2 schemas, but remapped legacy `EXECUTE_WAITING findings_count>0` markers to the existing `recover_execute` action surface instead of generic `needs_input`. Those pinned state folders now emit `hive findings <slug>` and a manual-fix diagnostic, while ordinary execute waits keep their structured edit `next_action`.
 
 **Docs:** Refreshed README, [[commands/tui]], [[modules/task_action]], and [[decisions]] so they describe the shell/agent findings workflow and the `recover_execute` legacy compatibility path, not the deleted TUI triage mode.
+
+## [2026-05-22T00:00:00Z] artifacts-stage — runner and docs follow-up
+
+**Action:** Closed the 7-artifacts workflow gap from PR #120 review. Added `hive artifacts` as a Thor command, wired `Hive::Stages::Artifacts` into `hive run`, made markerless `7-artifacts` rows dispatch artifact collection instead of finalize, and refreshed the live stage docs to the current `7-artifacts` / `8-finalize` / `9-done` tail.
+
+**Refreshed pages:**
+- [[state-model]]
+- [[commands/stage_action]]
+- [[commands/daemon]]
+- [[modules/workflows]]
+- [[modules/stages]]
+- [[stages/artifacts]]
+- [[stages/index]]
+
+## [2026-05-22T18:01:31Z] e2e — fake Codex execute path
+
+**Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
+
+**Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.

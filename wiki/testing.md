@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-04-29
+updated: 2026-05-22
 tags: [test, minitest, fixtures]
 ---
 
@@ -37,7 +37,7 @@ task default: :test
 
 | Path | Purpose |
 |------|---------|
-| `test/fixtures/fake-claude` | Shell script that takes the `claude -p` argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, exit 0. Pointed at via `HIVE_CLAUDE_BIN`. |
+| `test/fixtures/fake-claude` | Shell script that takes Claude/Codex headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. Pointed at via `HIVE_CLAUDE_BIN` and e2e `HIVE_CODEX_BIN`. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 
 ## Unit suite (`test/unit/`)
@@ -62,8 +62,8 @@ task default: :test
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `run_execute_test.rb` | `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery. |
 | `run_open_pr_test.rb` | `hive run` of `5-open-pr/` — push, draft PR creation, idempotent existing-PR path. |
-| `run_finalize_test.rb` | `hive run` of `7-finalize/` — clean/pushed verification, PR-ready wrap-up, summary rendering. |
-| `run_done_test.rb` | `hive run` of `8-done/` — cleanup instructions, complete marker. |
+| `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, PR-ready wrap-up, summary rendering. |
+| `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `status_test.rb` | `hive status` — empty registry, multi-stage rendering, stale-lock decoration. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
 | `skip_worktree_test.rb` | Verifies hive-state commits on master don't leak into feature worktrees. |
@@ -78,7 +78,7 @@ bin/hive-e2e list
 bin/hive-e2e run
 ```
 
-The six starter scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+The six starter scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
 
 ## Lint
 

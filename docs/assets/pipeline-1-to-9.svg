@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 130" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 130" role="img" aria-labelledby="title desc">
   <title id="title">Hive pipeline from inbox to done</title>
-  <desc id="desc">Eight stage boxes connected left to right: inbox, brainstorm, plan, execute, open-pr, review, finalize, done.</desc>
+  <desc id="desc">Nine stage boxes connected left to right: inbox, brainstorm, plan, execute, open-pr, review, artifacts, finalize, done.</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L0,6 L9,3 z" fill="#9ca3af"/>
@@ -37,13 +37,18 @@
     <text x="917.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">harden</text>
     <line x1="983" y1="64" x2="1018" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect x="1025" y="25" width="115" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
-    <text x="1082.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">7-finalize</text>
-    <text x="1082.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">publish</text>
-    <line x1="1148" y1="64" x2="1183" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+    <rect x="1025" y="25" width="125" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1087.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">7-artifacts</text>
+    <text x="1087.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">capture</text>
+    <line x1="1158" y1="64" x2="1193" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
 
-    <rect x="1190" y="25" width="80" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
-    <text x="1230" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">8-done</text>
-    <text x="1230" y="81" text-anchor="middle" fill="#6b7280" font-size="13">archive</text>
+    <rect x="1200" y="25" width="120" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1260" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">8-finalize</text>
+    <text x="1260" y="81" text-anchor="middle" fill="#6b7280" font-size="13">publish</text>
+    <line x1="1328" y1="64" x2="1363" y2="64" stroke="#9ca3af" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <rect x="1370" y="25" width="85" height="78" fill="#ffffff" stroke="#111827" stroke-width="2" rx="8"/>
+    <text x="1412.5" y="58" text-anchor="middle" fill="#111827" font-size="16" font-weight="700">9-done</text>
+    <text x="1412.5" y="81" text-anchor="middle" fill="#6b7280" font-size="13">archive</text>
   </g>
 </svg>

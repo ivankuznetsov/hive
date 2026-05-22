@@ -102,14 +102,39 @@ module Hive
         command: "review"
       },
       review_complete: {
-        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
-        label: "Ready to finalize",
-        command: "finalize"
+        key: Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
+        label: "Ready to collect artifacts",
+        command: "artifacts"
       },
       review_stale: {
         key: Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
         label: "Needs recovery",
         command: nil
+      },
+      # Used by TWO call sites that today happen to want identical
+      # "re-run finalize" semantics:
+      #
+      #   1. `artifacts_action` for a real task at 7-artifacts with
+      #      `:complete` — its artifact run is done, finalize is next.
+      #   2. `finalize_complete_action` as the fallback when finalize
+      #      ran but left the PR as a draft (is_draft != "false") —
+      #      operator should re-run finalize.
+      #
+      # If U2 (or any future artifacts-stage change) repurposes this
+      # entry, AUDIT `finalize_complete_action` first: the draft-PR
+      # fallback at lib/hive/task_action.rb depends on the current
+      # READY_TO_FINALIZE/command:"finalize" shape and would silently
+      # break if this entry's key or command shifts. The two call sites
+      # should be split into separate ACTIONS keys at that point.
+      artifacts_complete: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
+        label: "Ready to finalize",
+        command: "finalize"
+      },
+      artifacts_ready: {
+        key: Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
+        label: "Ready to collect artifacts",
+        command: "artifacts"
       },
       finalize_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
@@ -237,6 +262,8 @@ module Hive
         marker.name == :complete ? ACTIONS.fetch(:open_pr_complete) : ACTIONS.fetch(:open_pr_ready)
       when "review"
         review_action
+      when "artifacts"
+        artifacts_action
       when "finalize"
         finalize_action
       when "done"
@@ -303,7 +330,19 @@ module Hive
       return ACTIONS.fetch(:error) if finalize_pr_url_mismatch?
       return ACTIONS.fetch(:finalize_complete) if marker.attrs["is_draft"].to_s == "false"
 
-      ACTIONS.fetch(:review_complete)
+      # Draft PR fallback: re-run finalize. After the artifacts-stage
+      # renumber, :review_complete now routes to "hive artifacts" (the
+      # 6-review → 7-artifacts verb), so we can't reuse it here. The
+      # :artifacts_complete action carries the "Ready to finalize"
+      # semantics this fallback wants TODAY — see the doc comment on
+      # the ACTIONS entry above before changing either side.
+      ACTIONS.fetch(:artifacts_complete)
+    end
+
+    # Markerless 7-artifacts rows still need their stage runner to write
+    # artifact.md and the terminal marker before finalize is allowed.
+    def artifacts_action
+      marker.name == :complete ? ACTIONS.fetch(:artifacts_complete) : ACTIONS.fetch(:artifacts_ready)
     end
 
     # Returns :agent_died, :agent_orphaned, or nil. Mirrors

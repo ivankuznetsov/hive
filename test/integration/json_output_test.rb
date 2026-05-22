@@ -202,8 +202,8 @@ class JsonOutputTest < Minitest::Test
         assert_equal Hive::Schemas::NextActionKind::APPROVE, next_action["kind"]
         assert_equal slug, next_action["slug"]
         assert_equal "6-review", next_action["from_stage"]
-        assert_equal "7-finalize", next_action["to_stage"]
-        assert_equal "hive finalize #{slug} --from 6-review", next_action["command"]
+        assert_equal "7-artifacts", next_action["to_stage"]
+        assert_equal "hive artifacts #{slug} --from 6-review", next_action["command"]
       end
     end
   end

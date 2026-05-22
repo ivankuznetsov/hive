@@ -2404,7 +2404,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "error",
       action_label: "Error",
       slug: "finalize-task-260519-abcd",
-      stage: "7-finalize",
+      stage: "8-finalize",
       marker: "none",
       attrs: {},
       suggested_command: nil
@@ -4954,7 +4954,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     with_isolated_subprocess_log do |log_path|
       write_log_section(
         log_path,
-        argv: %w[hive pr hello-world-test-260425-431f --project demo --from 7-finalize],
+        argv: %w[hive pr hello-world-test-260425-431f --project demo --from 8-finalize],
         stderr: "hive: git push failed: fatal: 'origin' does not appear to be a git repository",
         exit_code: 1
       )

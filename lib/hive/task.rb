@@ -3,7 +3,7 @@ require "hive/stages"
 
 module Hive
   class Task
-    STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review finalize done].freeze
+    STAGE_NAMES = %w[inbox brainstorm plan execute open-pr review artifacts finalize done].freeze
     STATE_FILES = {
       "inbox" => "idea.md",
       "brainstorm" => "brainstorm.md",
@@ -11,6 +11,7 @@ module Hive
       "execute" => "task.md",
       "open-pr" => "pr.md",
       "review" => "task.md",
+      "artifacts" => "artifact.md",
       "finalize" => "pr.md",
       "done" => "task.md"
     }.freeze
@@ -55,7 +56,7 @@ module Hive
 
     def worktree_path
       # Worktree first appears in 4-execute and carries through open-pr,
-      # review, and finalize; earlier stages don't have one. 8-done is post-PR; the
+      # review, artifacts, and finalize; earlier stages don't have one. 9-done is post-PR; the
       # worktree may still exist (cleanup happens after merge).
       return nil if @stage_index < 4
 

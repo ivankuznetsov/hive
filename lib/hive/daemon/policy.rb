@@ -5,7 +5,7 @@ module Hive
     # state-file mtime context to one of four outcomes:
     #
     #   :dispatch          — run `row.suggested_command` as a child
-    #   :poll_for_merge    — hand off to PrMergeWatcher (7-finalize → 8-done)
+    #   :poll_for_merge    — hand off to PrMergeWatcher (finalize → done)
     #   :wait_for_debounce — user is mid-edit; let mtime settle
     #   :skip              — do nothing this tick
     #
@@ -54,13 +54,14 @@ module Hive
         ready_to_develop
         ready_to_open_pr
         ready_for_review
+        ready_to_artifacts
         ready_to_finalize
       ].freeze
 
-      # Action that means "task is at 7-finalize, waiting for the human to merge
-      # the PR on GitHub". Daemon hands off to PrMergeWatcher (U10) which
-      # polls `gh pr view --json state` and dispatches `hive archive` on
-      # `MERGED`.
+      # Action that means "task is at the finalize stage, waiting for the human
+      # to merge the PR on GitHub". Daemon hands off to PrMergeWatcher (U10)
+      # which polls `gh pr view --json state` and dispatches `hive archive`
+      # on `MERGED`.
       MERGE_WAIT_ACTION = "ready_to_archive".freeze
 
       # Actions that mean "the task is in a stage and ready to RE-RUN with

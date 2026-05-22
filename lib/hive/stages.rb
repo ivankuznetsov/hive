@@ -10,8 +10,9 @@ module Hive
       4-execute
       5-open-pr
       6-review
-      7-finalize
-      8-done
+      7-artifacts
+      8-finalize
+      9-done
     ].freeze
     NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
     SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze

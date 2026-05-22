@@ -6,11 +6,12 @@ class StagesTest < Minitest::Test
     expected_short_to_full = {
       "inbox" => "1-inbox", "brainstorm" => "2-brainstorm", "plan" => "3-plan",
       "execute" => "4-execute", "open-pr" => "5-open-pr", "review" => "6-review",
-      "finalize" => "7-finalize", "done" => "8-done"
+      "artifacts" => "7-artifacts", "finalize" => "8-finalize", "done" => "9-done"
     }
     assert_equal expected_short_to_full, Hive::Stages::SHORT_TO_FULL.to_h
-    assert_equal %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-finalize 8-done], Hive::Stages::DIRS
-    assert_equal %w[inbox brainstorm plan execute open-pr review finalize done], Hive::Stages::NAMES
+    assert_equal %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done],
+                 Hive::Stages::DIRS
+    assert_equal %w[inbox brainstorm plan execute open-pr review artifacts finalize done], Hive::Stages::NAMES
     assert Hive::Stages::DIRS.frozen?
     assert Hive::Stages::NAMES.frozen?
     assert Hive::Stages::SHORT_TO_FULL.frozen?
@@ -28,9 +29,10 @@ class StagesTest < Minitest::Test
     assert_equal "2-brainstorm", Hive::Stages.next_dir(1)
     assert_equal "5-open-pr", Hive::Stages.next_dir(4)
     assert_equal "6-review", Hive::Stages.next_dir(5)
-    assert_equal "7-finalize", Hive::Stages.next_dir(6)
-    assert_equal "8-done", Hive::Stages.next_dir(7)
-    assert_nil Hive::Stages.next_dir(8),
+    assert_equal "7-artifacts", Hive::Stages.next_dir(6)
+    assert_equal "8-finalize", Hive::Stages.next_dir(7)
+    assert_equal "9-done", Hive::Stages.next_dir(8)
+    assert_nil Hive::Stages.next_dir(9),
                "past the final stage must return nil so the caller can branch on it"
   end
 

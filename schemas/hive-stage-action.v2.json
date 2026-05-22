@@ -47,6 +47,7 @@
             "develop",
             "open-pr",
             "review",
+            "artifacts",
             "finalize",
             "archive"
           ]
@@ -62,7 +63,7 @@
         },
         "noop": {
           "type": "boolean",
-          "description": "True when nothing was promoted, run, or committed. Currently set only by `archive` against a task already at 8-done with :complete marker."
+          "description": "True when nothing was promoted, run, or committed. Currently set only by `archive` against a task already at the terminal stage with :complete marker."
         },
         "slug": {
           "type": "string"
@@ -76,7 +77,8 @@
             "4-execute",
             "5-open-pr",
             "6-review",
-            "7-finalize"
+            "7-artifacts",
+            "8-finalize"
           ],
           "description": "The verb's documented source stage."
         },
@@ -88,8 +90,9 @@
             "4-execute",
             "5-open-pr",
             "6-review",
-            "7-finalize",
-            "8-done"
+            "7-artifacts",
+            "8-finalize",
+            "9-done"
           ],
           "description": "The verb's documented target stage."
         },
@@ -141,6 +144,7 @@
             "develop",
             "open-pr",
             "review",
+            "artifacts",
             "finalize",
             "archive"
           ]
@@ -239,6 +243,7 @@
             "ready_to_develop",
             "ready_to_open_pr",
             "ready_for_review",
+            "ready_to_artifacts",
             "ready_to_finalize",
             "ready_to_archive",
             "needs_input",

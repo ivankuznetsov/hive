@@ -46,7 +46,7 @@ class RunOpenPrTest < Minitest::Test
           assert_includes File.read(pr_md),
                           "<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false idempotent=true -->"
 
-          finalize_dir = File.join(dir, ".hive-state", "stages", "7-finalize", slug)
+          finalize_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
           FileUtils.mkdir_p(File.dirname(finalize_dir))
           FileUtils.mv(task_dir, finalize_dir)
           pr_md = File.join(finalize_dir, "pr.md")

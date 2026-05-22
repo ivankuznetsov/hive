@@ -27,7 +27,7 @@ tags: [marker, protocol, flock]
 <!-- REVIEW_WAITING escalations=3 pass=2 -->                     # terminal — user inspects escalations
 <!-- REVIEW_CI_STALE attempts=3 -->                              # terminal — CI hard-block; reviewers don't run
 <!-- REVIEW_STALE pass=4 -->                                     # terminal — max review passes reached
-<!-- REVIEW_COMPLETE pass=3 browser=passed -->                   # terminal — ready to mv to 7-finalize
+<!-- REVIEW_COMPLETE pass=3 browser=passed -->                   # terminal — ready to run `hive artifacts` into 7-artifacts
 <!-- REVIEW_ERROR phase=reviewers reason=all_failed -->          # terminal — agent-level failure
 ```
 
@@ -53,7 +53,7 @@ Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`. Adding a marker name 
 | `REVIEW_WAITING` | Three shapes per `reason` attr: (1) **escalations-only** (no `reason`): `escalations=N`, `pass=NN` — user inspects `reviews/escalations-NN.md`. (2) **`reason=fix_guardrail`**: `matches=N`, `head=<sha>`, `pass=NN` — user inspects `reviews/fix-guardrail-NN.md` and ticks every `[x]` to approve; approval re-checks count + HEAD + worktree-clean. Legacy markers without `head=` (hive ≤ PR-A round-2) skip the HEAD check with a stderr notice. (3) **`reason=reviewer_partial_failure`**: `pass=NN` — at least one reviewer's adapter failed; user inspects `reviews/errors-NN.md` and either re-runs or clears the marker to accept partial coverage. | Terminal until next `hive run`. |
 | `REVIEW_CI_STALE` | `attempts=N` | Terminal — `cfg.review.ci.max_attempts` reached without green CI. Reviewers don't run on red CI. Recovery: edit `reviews/ci-blocked.md`, remove the marker, re-run. |
 | `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. Recovery: if highest-NN reviewer files have no `escalations-NN.md`, remove the marker and re-run to retry that incomplete triage pass; otherwise edit reviewer files / escalations.md, delete or rename the highest-NN reviewer files, remove the marker, re-run. |
-| `REVIEW_COMPLETE` | `pass=NN`, `browser=passed\|warned\|skipped` | Terminal success — ready to `mv` to 7-finalize. `browser=warned` means browser test failed twice but loop continued (soft-warn); 7-finalize stage surfaces this in the PR body. |
+| `REVIEW_COMPLETE` | `pass=NN`, `browser=passed\|warned\|skipped` | Terminal success — ready to run `hive artifacts` into 7-artifacts. `browser=warned` means browser test failed twice but loop continued (soft-warn); 8-finalize stage surfaces this in the PR body. |
 | `REVIEW_ERROR` | `phase=…`, `reason=…`. Known `phase=resume` `reason=` values (added in PR-A round-3): `approval_head_mismatch` (worktree HEAD differs from marker `head=`), `approval_dirty_worktree` (uncommitted edits in worktree at approval time), `malformed_marker_matches` (fix_guardrail marker has missing/non-Integer `matches`), `resume_no_findings` (legacy: reviewer files were deleted between trip and resume). Other phase/reason families (`phase=fix reason=fix_tampered`, `phase=triage reason=triage_failed`, etc.) per the runner's protected-files + agent-error contracts. | Terminal — agent-level error or protected-file tampering. Mirrors ADR-013's `:error` shape for `EXECUTE_*`. |
 
 ## `State` struct

@@ -153,6 +153,17 @@ module Hive
         @merge_watcher&.tick(now: now)&.each do |archive_dispatch|
           dispatch_archive_with_gates(archive_dispatch, now: now)
         end
+        # Surface entries the watcher dropped after exhausting
+        # GH_MAX_FAILURES so the operator sees the give-up signal in
+        # daemon.log instead of the task silently sitting at
+        # ready_to_archive forever (ce-code-review P1 #9).
+        @merge_watcher&.last_tick_dropped&.each do |drop|
+          @logger.event(:merge_watcher_dropped,
+                        project: drop[:project], slug: drop[:slug],
+                        pr_url: drop[:pr_url],
+                        failure_count: drop[:failure_count],
+                        last_error: drop[:last_error])
+        end
 
         # 4. Per-row dispatch
         result.rows.each { |row| handle_row(row, now: now) }
@@ -410,6 +421,22 @@ module Hive
                                   stage: archive_dispatch[:stage],
                                   action: "archive",
                                   reason: "project_disabled_after_enqueue")
+          return
+        end
+
+        # Mirror handle_row's @legacy_layout_projects guard: if the
+        # project is mid-migration, the archive command's --from stage
+        # may not match the current on-disk layout (the watcher's
+        # ARCHIVE_VERB_TEMPLATE is frozen at class load). Skip the
+        # dispatch and let handle_row re-enqueue once the half-migrated
+        # state clears on a future tick. ce-code-review P1 #10.
+        if @legacy_layout_projects.key?(project)
+          @logger.event(:skipped, project: project, slug: slug,
+                                  stage: archive_dispatch[:stage],
+                                  action: "archive",
+                                  reason: "legacy_layout_detected",
+                                  note: "skipping archive while project layout is half-migrated; " \
+                                        "next tick will re-enqueue once migration completes")
           return
         end
 

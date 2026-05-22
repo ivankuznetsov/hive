@@ -157,7 +157,7 @@ class HiveTuiUpdateTest < Minitest::Test
         marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
       )
     )
-    recovered = red_detail_row(marker: "review_complete", attrs: {}, action_key: "ready_to_finalize")
+    recovered = red_detail_row(marker: "review_complete", attrs: {}, action_key: "ready_to_artifacts")
 
     new_model, _cmd = Hive::Tui::Update.apply(
       starting,

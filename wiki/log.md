@@ -1866,3 +1866,11 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 **Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
 
 **Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.
+
+## [2026-05-22T22:01:22Z] drop — hard-delete active task command and TUI Shift+X binding
+
+**Action:** Added `hive drop TARGET [--project NAME] [--from STAGE] [--json]` as the hard-delete surface for active tasks. Drop resolves through `TaskResolver`, refuses `9-done`, kills recorded agent PIDs with the process-start guard, closes draft PRs best-effort, removes task worktrees and branches, deletes every active-stage folder for the slug, removes per-slug logs, and commits a `hive: dropped/<slug> dropped` audit record on `hive/state`. The `hive-drop.v1` schema documents the success fields (`from_stages`, `pr_closed`, `worktree_removed`, `branch_deleted`, `agent_killed`) and error envelope kinds.
+
+**TUI / daemon:** Shift+X in [[commands/tui]] now dispatches `hive drop <slug> --project <project> --from <stage> --json` against the focused right-pane row. Lowercase `x` is unbound; archived and empty-grid cases flash without spawning. The old missing-project registry cleanup binding moved fully to shell commands ([[commands/forget]] / [[commands/prune]]). The daemon dispatcher now re-stats a row's folder immediately before spawning and skips `reason: "folder_missing"` if a stale status snapshot races with a drop.
+
+**Docs:** Added [[commands/drop]], updated [[cli]], [[commands/tui]], and [[commands/forget]].

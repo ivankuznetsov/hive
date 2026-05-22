@@ -10,7 +10,7 @@ tags: [index, wiki]
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 61
+Page count: 66
 Updated: 2026-05-22
 
 Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive.
@@ -25,10 +25,13 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/bot]] — `wiki/commands/bot.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
+- [[commands/drop]] — `wiki/commands/drop.md`
 - [[commands/findings]] — `wiki/commands/findings.md`
 - [[commands/forget]] — `wiki/commands/forget.md`
 - [[commands/init]] — `wiki/commands/init.md`
 - [[commands/markers]] — `wiki/commands/markers.md`
+- [[commands/metrics]] — `wiki/commands/metrics.md`
+- [[commands/migrate]] — `wiki/commands/migrate.md`
 - [[commands/new]] — `wiki/commands/new.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
@@ -36,6 +39,8 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
 - [[commands/tui]] — `wiki/commands/tui.md`
+- [[commands/uninstall]] — `wiki/commands/uninstall.md`
+- [[commands/update]] — `wiki/commands/update.md`
 - [[decisions]] — `wiki/decisions.md`
 - [[dependencies]] — `wiki/dependencies.md`
 - [[e2e]] — `wiki/e2e.md`

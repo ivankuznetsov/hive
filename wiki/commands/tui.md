@@ -203,5 +203,5 @@ No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling do
 
 ## Backlinks
 
-- [[cli]] · [[commands/status]] · [[commands/findings]] · [[commands/stage_action]]
+- [[cli]] · [[commands/status]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]]
 - [[modules/task_action]] · [[modules/workflows]] · [[modules/findings]]

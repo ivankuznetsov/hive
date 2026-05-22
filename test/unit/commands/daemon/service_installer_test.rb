@@ -444,6 +444,78 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_envelope_platform_maps_macos_and_unsupported_hosts
+    macos = Hive::Commands::Daemon::ServiceInstaller.new(host_os: "darwin23")
+    unsupported = Hive::Commands::Daemon::ServiceInstaller.new(host_os: "freebsd14")
+
+    assert_equal "macos", macos.envelope_platform
+    assert_equal "unsupported", unsupported.envelope_platform
+  end
+
+  def test_macos_force_autostart_warns_when_unload_fails_then_loads
+    with_tmp_dir do |dir|
+      plist = File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "stale plist\n")
+      commands = []
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: dir,
+        binary_path: "/opt/hive/bin/hive",
+        runner: ->(argv) { commands << argv; argv[1] != "unload" }
+      )
+
+      result = installer.install!(autostart: true, force: true)
+
+      assert_equal :upgraded, result
+      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ], commands
+      assert installer.last_restart_invoked
+      assert installer.messages.any? { |msg| msg.include?("launchctl unload returned non-zero") }
+    end
+  end
+
+  def test_macos_brew_channel_without_stable_binary_uses_configured_binary
+    with_tmp_dir do |dir|
+      prefix = File.join(dir, "empty-brew")
+      FileUtils.mkdir_p(File.join(prefix, "bin"))
+      cellar_hive = "/opt/homebrew/Cellar/hive/0.1.0/bin/hive"
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: dir,
+        binary_path: cellar_hive,
+        runner: ->(_argv) { true }
+      )
+      installer.define_singleton_method(:install_channel) { "brew" }
+      installer.define_singleton_method(:homebrew_prefixes) { [ prefix ] }
+
+      installer.install!(autostart: false)
+
+      plist = File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
+      assert_includes File.read(plist), "<string>#{cellar_hive}</string>"
+    end
+  end
+
+  def test_install_channel_returns_nil_when_detection_config_fails
+    original_detect = Hive::InstallChannel.method(:detect)
+    Hive::InstallChannel.define_singleton_method(:detect) do
+      raise Hive::ConfigError, "bad install-channel"
+    end
+
+    installer = Hive::Commands::Daemon::ServiceInstaller.new(host_os: "darwin23")
+    assert_nil installer.send(:install_channel)
+  ensure
+    Hive::InstallChannel.define_singleton_method(:detect, original_detect) if original_detect
+  end
+
+  def test_systemctl_available_returns_false_when_systemctl_is_missing
+    installer = Hive::Commands::Daemon::ServiceInstaller.new(host_os: "linux")
+    installer.define_singleton_method(:system) do |_cmd, *_args, **_kwargs|
+      raise Errno::ENOENT, "systemctl"
+    end
+
+    refute installer.send(:systemctl_available?)
+  end
+
   def test_missing_binary_fallback_warns_loudly
     with_tmp_dir do |dir|
       old_path = ENV["PATH"]

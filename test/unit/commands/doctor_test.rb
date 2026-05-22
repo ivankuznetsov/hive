@@ -576,4 +576,55 @@ class HiveCommandsDoctorTest < Minitest::Test
         "header and separator must be the same width even with long reviewer labels"
     end
   end
+
+  def test_json_config_error_returns_config_exit_and_error_payload
+    out = StringIO.new
+    cfg = base_config("brainstorm" => { "agent" => "bogus", "skill" => "/x" })
+
+    exit_code = Hive::Commands::Doctor.new(
+      config: cfg,
+      project_root: nil,
+      json: true,
+      output: out
+    ).call
+
+    assert_equal Hive::Commands::Doctor::EXIT_CONFIG_ERROR, exit_code
+    payload = JSON.parse(out.string)
+    assert_match(/unknown agent profile/, payload.fetch("error"))
+  end
+
+  def test_text_config_error_returns_config_exit_and_prefixed_message
+    out = StringIO.new
+    cfg = base_config("brainstorm" => { "agent" => "bogus", "skill" => "/x" })
+
+    exit_code = Hive::Commands::Doctor.new(
+      config: cfg,
+      project_root: nil,
+      output: out
+    ).call
+
+    assert_equal Hive::Commands::Doctor::EXIT_CONFIG_ERROR, exit_code
+    assert_match(/hive doctor: unknown agent profile/, out.string)
+  end
+
+  def test_row_line_marks_version_too_old_and_unknown_statuses
+    doctor = Hive::Commands::Doctor.new(config: base_config, project_root: nil)
+    widths = { label: 5, agent: 6, skill: 2, status: 15 }
+
+    old_line = doctor.send(:row_line, {
+      label: "plan",
+      agent: "claude",
+      skill: "/x",
+      status: "version_too_old"
+    }, widths)
+    unknown_line = doctor.send(:row_line, {
+      label: "plan",
+      agent: "claude",
+      skill: "/x",
+      status: "mystery"
+    }, widths)
+
+    assert_match(/✗ version_too_old/, old_line)
+    assert_match(/\? mystery/, unknown_line)
+  end
 end

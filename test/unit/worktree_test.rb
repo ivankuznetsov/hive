@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/config"
 require "hive/git_ops"
 require "hive/worktree"
 
@@ -68,6 +69,20 @@ class WorktreeTest < Minitest::Test
       end
       ok = Hive::Worktree.validate_pointer_path("#{root}/inside", root)
       assert_equal "#{root}/inside", ok
+    end
+  end
+
+  def test_worktree_root_uses_project_config_when_not_overridden
+    Dir.mktmpdir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      configured_root = File.join(dir, "configured-worktrees")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), { "worktree_root" => configured_root }.to_yaml)
+
+      wt = Hive::Worktree.new(dir, "feat-configured")
+
+      assert_equal configured_root, wt.worktree_root
+      assert_equal File.join(configured_root, "feat-configured"), wt.path
     end
   end
 

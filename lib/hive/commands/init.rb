@@ -3,6 +3,7 @@ require "fileutils"
 require "stringio"
 require "hive/config"
 require "hive/git_ops"
+require "hive/llm_wiki_bootstrap"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
 require "hive/commands/daemon/service_installer"
@@ -42,6 +43,9 @@ module Hive
         ops.hive_state_init
         write_per_project_config(ops, answers: answers)
         ops.add_hive_state_to_master_gitignore!
+        Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
+        ops.commit_llm_wiki_bootstrap!
+        Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
 
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
 

@@ -7,7 +7,7 @@ updated: 2026-05-22T13:30:00Z
 tags: [git, init, commit]
 ---
 
-**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, and run `git add && git commit` inside the hive-state worktree.
+**TLDR**: Project-scoped git operations: detect default branch, inspect HEAD/branch/worktree status, bootstrap the orphan `hive/state` worktree at `<project>/.hive-state/`, append `/.hive-state/` to master's `.gitignore`, commit managed llm-wiki bootstrap files during `hive init`, and run `git add && git commit` inside the hive-state worktree.
 
 ## Constants
 
@@ -68,7 +68,22 @@ Appends `/.hive-state/` to `<project>/.gitignore` (idempotent: returns `:already
 1. `git -C <project> add .gitignore`.
 2. `git -C <project> commit -m "chore: ignore .hive-state worktree"`.
 
-This is the *only* commit Hive ever makes on master. After this, all hive activity goes to `hive/state`.
+This is one of the project-setup commits Hive may make on master/default branch. Runtime task activity still goes to `hive/state`.
+
+## `commit_llm_wiki_bootstrap!`
+
+Stages the managed llm-wiki context paths written by `Hive::LlmWikiBootstrap`:
+
+- `.llm-wiki/config.json`
+- `.llm-wiki/refresh-wiki.sh`
+- `.llm-wiki/post-commit-refresh.sh`
+- `.claude/settings.json`
+- `AGENTS.md`
+- `CLAUDE.md`
+- `wiki/{index,log,gaps,architecture,decisions,dependencies}.md`
+- `raw/notes/.gitkeep`
+
+If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise returns `:nothing_to_commit`. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately.
 
 ## `hive_commit(stage_name:, slug:, action:)`
 

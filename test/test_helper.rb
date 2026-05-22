@@ -15,6 +15,10 @@ module HiveTestStdinIsolation
   # interactive path inject their own tty-flagged StringIO explicitly.
   def before_setup
     @hive_original_stdin = $stdin
+    @hive_original_skip_llm_wiki_scheduler = ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"]
+    @hive_original_skip_llm_wiki_post_commit = ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"]
+    ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
+    ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
     $stdin = StringIO.new
     super
   end
@@ -22,6 +26,20 @@ module HiveTestStdinIsolation
   def after_teardown
     super
   ensure
+    if defined?(@hive_original_skip_llm_wiki_scheduler)
+      if @hive_original_skip_llm_wiki_scheduler.nil?
+        ENV.delete("HIVE_SKIP_LLM_WIKI_SCHEDULER")
+      else
+        ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = @hive_original_skip_llm_wiki_scheduler
+      end
+    end
+    if defined?(@hive_original_skip_llm_wiki_post_commit)
+      if @hive_original_skip_llm_wiki_post_commit.nil?
+        ENV.delete("HIVE_SKIP_LLM_WIKI_POST_COMMIT")
+      else
+        ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = @hive_original_skip_llm_wiki_post_commit
+      end
+    end
     $stdin = @hive_original_stdin if defined?(@hive_original_stdin)
   end
 end

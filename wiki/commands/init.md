@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-05-19
-tags: [command, bootstrap, git, prompts]
+updated: 2026-05-22
+tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which Claude brainstorm runtime to use, and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, and registers the project globally.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which Claude brainstorm runtime to use, and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, and registers the project globally.
 
 ## Usage
 
@@ -39,8 +39,16 @@ hive init [PROJECT_PATH] [--force]
    - Initial commit `hive: bootstrap` on `hive/state`.
 5. **Render `<path>/.hive-state/config.yml`** from `templates/project_config.yml.erb`, threading the answers hash from step 3 through `ProjectConfigBinding`. Skipped if the file already exists.
 6. **Ignore `.hive-state/` on master** via `GitOps#add_hive_state_to_master_gitignore!`: appends `/.hive-state/` to `.gitignore` (idempotent), then commits `chore: ignore .hive-state worktree` on master.
-7. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into `~/Dev/hive/config.yml`.
-8. Print summary: project name, default branch, hive-state path, worktree root, and a `next:` line with the `hive new ...` invocation.
+7. **Bootstrap managed llm-wiki files** via `Hive::LlmWikiBootstrap.install!(post_commit_hook: false, scheduler: false)`:
+   - `.llm-wiki/config.json` with `headless_agent: "codex"`, `context_agents: ["claude", "codex", "pi"]`, `created_by: "hive"`, and a detected `main_wiki_path` when one exists.
+   - `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh`, both Codex-owned and run with `codex exec --add-dir <qmd-cache> -C <project>`. Both scripts keep qmd's normal GPU auto-detection and fall back to `.llm-wiki/qmd-cache` when the normal qmd cache is not writable.
+   - `wiki/index.md`, `wiki/log.md`, `wiki/gaps.md`, `wiki/architecture.md`, `wiki/decisions.md`, `wiki/dependencies.md`, and `raw/notes/.gitkeep`.
+   - Managed LLM WIKI blocks in `AGENTS.md` and `CLAUDE.md`, plus `.claude/settings.json` with a managed `SessionStart` hook that prints `wiki/index.md` and recent `wiki/log.md`.
+8. **Commit llm-wiki bootstrap files** via `GitOps#commit_llm_wiki_bootstrap!`, committing tracked project context as `chore: initialize llm-wiki` so future Hive worktrees inherit wiki context.
+9. **Install runtime wiki hooks** via `Hive::LlmWikiBootstrap.install_runtime_hooks!`: adds/replaces only the managed block in `.git/hooks/post-commit`, writes Linux user systemd service/timer files for daily refresh, and enables the timer through `timers.target.wants`.
+10. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into `~/Dev/hive/config.yml`.
+11. Print summary: project name, default branch, hive-state path, worktree root, and a `next:` line with the `hive new ...` invocation.
+12. Run the non-fatal `hive doctor` skill preflight; missing skills warn on stderr without failing init.
 
 ## Prompt flow (ADR-023)
 
@@ -94,7 +102,7 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 ## Tests
 
-- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, and the U5 piped-input + abort + already-initialized-guard scenarios.
+- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, and the U5 piped-input + abort + already-initialized-guard scenarios.
 - `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, edge re-prompts, the Claude-only brainstorm runtime prompt, the non-TTY summary contract, and the testability invariant.
 
 ## Backlinks

@@ -89,7 +89,7 @@ class HiveCommandsDoctorTest < Minitest::Test
   def test_pi_stage_uses_profile_skill_format_and_resolves
     with_fake_home do |home|
       write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
-      write_file("#{home}/.pi/agent/skills/plan/SKILL.md")
+      write_file("#{home}/.pi/agent/skills/wiki-plan/SKILL.md")
       out = StringIO.new
       cfg = {
         "brainstorm" => { "agent" => "pi" },
@@ -102,7 +102,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       ).call
       assert_equal 0, exit_code
       assert_match(%r{brainstorm.*pi.*/skill:ce-brainstorm.*✓ present}, out.string)
-      assert_match(%r{plan.*pi.*/skill:plan.*✓ present}, out.string)
+      assert_match(%r{plan.*pi.*/skill:wiki-plan.*✓ present}, out.string)
     end
   end
 
@@ -120,7 +120,47 @@ class HiveCommandsDoctorTest < Minitest::Test
         output: out
       ).call
       assert_equal Hive::Commands::Doctor::EXIT_MISSING_SKILL, exit_code
-      assert_match(%r{plan.*pi.*/skill:plan.*✗ missing}, out.string)
+      assert_match(%r{plan.*pi.*/skill:wiki-plan.*✗ missing}, out.string)
+    end
+  end
+
+  def test_codex_plan_stage_uses_llm_wiki_plugin_skill_by_default
+    with_fake_home do |home|
+      write_file("#{home}/.codex/plugins/cache/mp/llm-wiki/0.1.7/skills/wiki-plan/SKILL.md")
+      write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.8.1/skills/ce-brainstorm/SKILL.md")
+      out = StringIO.new
+      cfg = {
+        "brainstorm" => { "agent" => "codex" },
+        "plan" => { "agent" => "codex" }
+      }
+      exit_code = Hive::Commands::Doctor.new(
+        config: cfg,
+        project_root: nil,
+        output: out
+      ).call
+
+      assert_equal 0, exit_code
+      assert_match(%r{plan.*codex.*/llm-wiki:wiki-plan.*✓ present}, out.string)
+    end
+  end
+
+  def test_codex_plan_stage_maps_legacy_plan_alias_to_llm_wiki
+    with_fake_home do |home|
+      write_file("#{home}/.codex/plugins/cache/mp/llm-wiki/0.1.7/skills/wiki-plan/SKILL.md")
+      write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.8.1/skills/ce-brainstorm/SKILL.md")
+      out = StringIO.new
+      cfg = {
+        "brainstorm" => { "agent" => "codex" },
+        "plan" => { "agent" => "codex", "skill" => "/plan" }
+      }
+      exit_code = Hive::Commands::Doctor.new(
+        config: cfg,
+        project_root: nil,
+        output: out
+      ).call
+
+      assert_equal 0, exit_code
+      assert_match(%r{plan.*codex.*/llm-wiki:wiki-plan.*✓ present}, out.string)
     end
   end
 
@@ -153,7 +193,7 @@ class HiveCommandsDoctorTest < Minitest::Test
   def test_uses_config_defaults_when_skill_key_unset
     with_fake_home do |home|
       # No `skill:` key in config; doctor falls back to DEFAULTS
-      # ("/compound-engineering:ce-brainstorm" and "/plan").
+      # ("/compound-engineering:ce-brainstorm" and Claude's "/plan").
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
       write_file("#{home}/.claude/commands/plan.md")
       out = StringIO.new

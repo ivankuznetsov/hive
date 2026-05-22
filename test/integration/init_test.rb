@@ -1,8 +1,22 @@
 require "test_helper"
+require "json"
 require "hive/commands/init"
+require "hive/llm_wiki_bootstrap"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
+
+  def with_tmp_home
+    Dir.mktmpdir("hive-home") do |dir|
+      old = ENV["HOME"]
+      ENV["HOME"] = dir
+      begin
+        yield(dir)
+      ensure
+        old.nil? ? ENV.delete("HOME") : ENV["HOME"] = old
+      end
+    end
+  end
 
   def test_initializes_project_with_orphan_branch_and_global_registration
     # `with_tmp_global_config_and_home` overrides HOME alongside
@@ -34,6 +48,7 @@ class InitTest < Minitest::Test
 
         master_log = `git -C #{dir} log --format=%s master`.strip
         assert_includes master_log, "chore: ignore .hive-state worktree"
+        assert_includes master_log, "chore: initialize llm-wiki"
 
         gitignore = File.read(File.join(dir, ".gitignore"))
         assert_includes gitignore, "/.hive-state/"
@@ -46,6 +61,117 @@ class InitTest < Minitest::Test
         global = YAML.safe_load(File.read(File.join(home, "config.yml")))
         assert_equal false, global.dig("daemon", "autostart"),
                      "non-TTY init writes the service unit but does not start it by default"
+      end
+    end
+  end
+
+  def test_initializes_managed_llm_wiki_with_codex_headless_agent_and_scheduler
+    with_tmp_home do |home|
+      ENV.delete("HIVE_SKIP_LLM_WIKI_SCHEDULER")
+      FileUtils.mkdir_p(File.join(home, "wikis", "master", "wiki"))
+
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+
+          llm_wiki_config = JSON.parse(File.read(File.join(dir, ".llm-wiki", "config.json")))
+          assert_equal "codex", llm_wiki_config.fetch("headless_agent")
+          assert_equal %w[claude codex pi], llm_wiki_config.fetch("context_agents")
+          assert_equal "hive", llm_wiki_config.fetch("created_by")
+          assert_equal File.join(home, "wikis", "master", "wiki"), llm_wiki_config.fetch("main_wiki_path")
+
+          assert File.exist?(File.join(dir, "wiki", "index.md"))
+          assert File.exist?(File.join(dir, "wiki", "log.md"))
+          assert File.exist?(File.join(dir, "wiki", "gaps.md"))
+          assert File.exist?(File.join(dir, "raw", "notes", ".gitkeep"))
+          tracked = `git -C #{dir} ls-files .llm-wiki/config.json .llm-wiki/refresh-wiki.sh AGENTS.md CLAUDE.md wiki/index.md`
+          assert_includes tracked, ".llm-wiki/config.json"
+          assert_includes tracked, ".llm-wiki/refresh-wiki.sh"
+          assert_includes tracked, "AGENTS.md"
+          assert_includes tracked, "CLAUDE.md"
+          assert_includes tracked, "wiki/index.md"
+
+          agents = File.read(File.join(dir, "AGENTS.md"))
+          claude = File.read(File.join(dir, "CLAUDE.md"))
+          assert_includes agents, "<!-- BEGIN LLM WIKI -->"
+          assert_includes agents, "/llm-wiki:wiki-plan"
+          assert_includes claude, "<!-- BEGIN LLM WIKI -->"
+
+          settings = JSON.parse(File.read(File.join(dir, ".claude", "settings.json")))
+          hook_commands = settings.dig("hooks", "SessionStart").flat_map { |entry| entry.fetch("hooks") }
+                                  .map { |hook| hook.fetch("command") }
+          assert hook_commands.any? { |command| command.include?("wiki/index.md") }
+          assert hook_commands.any? { |command| command.include?("LLM WIKI SESSION START") }
+
+          refresh_script = File.join(dir, ".llm-wiki", "refresh-wiki.sh")
+          post_commit_script = File.join(dir, ".llm-wiki", "post-commit-refresh.sh")
+          assert File.executable?(refresh_script)
+          assert File.executable?(post_commit_script)
+          assert_includes File.read(refresh_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
+          assert_includes File.read(post_commit_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
+          assert_includes File.read(refresh_script), "LLM_WIKI_QMD_CACHE_DIR"
+          assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_CACHE_DIR"
+          assert_includes File.read(refresh_script), ".llm-wiki/qmd-cache"
+          assert_includes File.read(post_commit_script), ".llm-wiki/qmd-cache"
+          assert_includes File.read(refresh_script), "LLM_WIKI_CODEX_TIMEOUT"
+          assert_includes File.read(refresh_script), "LLM_WIKI_QMD_TIMEOUT"
+          assert_includes File.read(refresh_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
+          assert_includes File.read(refresh_script), "Do not run qmd update or qmd embed yourself"
+          assert_includes File.read(post_commit_script), "LLM_WIKI_CODEX_TIMEOUT"
+          assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_TIMEOUT"
+          assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
+          assert_includes File.read(post_commit_script), "Do not run qmd update or qmd embed yourself"
+          refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
+          refute_includes File.read(post_commit_script), "QMD_LLAMA_GPU"
+          refute_includes File.read(refresh_script), "claude -p"
+          refute_includes File.read(post_commit_script), "claude -p"
+
+          hook = File.read(File.join(dir, ".git", "hooks", "post-commit"))
+          assert_includes hook, "# BEGIN LLM WIKI POST-COMMIT"
+          assert_includes hook, ".llm-wiki/post-commit-refresh.sh"
+
+          assert_llm_wiki_scheduler_files(home, dir)
+        end
+      end
+    ensure
+      ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
+    end
+  end
+
+  def assert_llm_wiki_scheduler_files(home, project_dir)
+    skip "systemd user timers are Linux-only" unless RbConfig::CONFIG["host_os"].include?("linux")
+
+    slug = Hive::LlmWikiBootstrap.project_slug(project_dir)
+    user_dir = File.join(home, ".config", "systemd", "user")
+    service = File.join(user_dir, "llm-wiki-#{slug}.service")
+    timer = File.join(user_dir, "llm-wiki-#{slug}.timer")
+    wants = File.join(user_dir, "timers.target.wants", "llm-wiki-#{slug}.timer")
+
+    assert File.exist?(service)
+    assert File.exist?(timer)
+    assert File.symlink?(wants)
+    service_contents = File.read(service)
+    assert_includes service_contents, "WorkingDirectory=#{project_dir}"
+    assert_includes service_contents, "ExecStart=#{File.join(project_dir, ".llm-wiki", "refresh-wiki.sh")}"
+    assert_includes service_contents, "TimeoutStartSec=45min"
+    refute_includes service_contents, 'WorkingDirectory="'
+    assert_includes File.read(timer), "OnUnitActiveSec=1d"
+  end
+
+  def test_init_preserves_existing_post_commit_hook_when_adding_managed_wiki_block
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        hook_path = File.join(dir, ".git", "hooks", "post-commit")
+        File.write(hook_path, "#!/usr/bin/env bash\nprintf 'existing hook\\n'\n")
+        File.chmod(0o755, hook_path)
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+        Hive::LlmWikiBootstrap.install!(dir)
+
+        hook = File.read(hook_path)
+        assert_includes hook, "printf 'existing hook\\n'"
+        assert_equal 1, hook.scan("# BEGIN LLM WIKI POST-COMMIT").length
+        assert_equal 1, hook.scan("# END LLM WIKI POST-COMMIT").length
       end
     end
   end

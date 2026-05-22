@@ -163,7 +163,8 @@ module Hive
 
       def check_stage(stage)
         agent_name = (@config.dig(stage, "agent") || "claude").to_s
-        skill = @config.dig(stage, "skill") || Hive::Config::DEFAULTS.dig(stage, "skill")
+        configured_skill = @config.dig(stage, "skill")
+        skill = Hive::Config.stage_skill(@config, stage)
         profile = Hive::AgentProfiles.lookup(agent_name.to_sym)
         invocation = profile.format_skill_invocation(skill)
 
@@ -173,7 +174,7 @@ module Hive
           stage: stage,
           label: stage,
           agent: agent_name,
-          configured_skill: skill.to_s,
+          configured_skill: (configured_skill || skill).to_s,
           skill: invocation,
           status: status.to_s,
           message: message

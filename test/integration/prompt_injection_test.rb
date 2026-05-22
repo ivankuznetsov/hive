@@ -100,7 +100,7 @@ class PromptInjectionTest < Minitest::Test
           task_folder: task.folder,
           brainstorm_text: HOSTILE_IDEA,
           user_supplied_tag: tag,
-          skill_invocation: Hive::Config::DEFAULTS.dig("plan", "skill")
+          skill_invocation: Hive::Config.stage_skill({ "plan" => { "agent" => "claude" } }, "plan")
         )
       )
       assert_includes prompt, "<#{tag} content_type=\"brainstorm_md\">"
@@ -296,7 +296,7 @@ class PromptInjectionTest < Minitest::Test
           task_folder: task.folder,
           brainstorm_text: "",
           user_supplied_tag: tag,
-          skill_invocation: Hive::Config::DEFAULTS.dig("plan", "skill")
+          skill_invocation: Hive::Config.stage_skill({ "plan" => { "agent" => "claude" } }, "plan")
         )
       )
       assert_includes prompt, "use the `/plan` skill",
@@ -328,13 +328,16 @@ class PromptInjectionTest < Minitest::Test
   end
 
   def test_default_skill_values_match_shipped_invocations
-    # Pins the DEFAULTS so a refactor that drops the skill key (or
+    # Pins the DEFAULTS so a refactor that drops the skill defaults (or
     # changes the shipped skill name) trips this test. Hive ships
-    # expecting both llm-wiki (`/plan`) and compound-engineering
-    # (`/compound-engineering:ce-*`) to be installed.
+    # expecting both llm-wiki and compound-engineering to be installed.
     assert_equal "/compound-engineering:ce-brainstorm",
       Hive::Config::DEFAULTS.dig("brainstorm", "skill")
     assert_equal "/plan",
-      Hive::Config::DEFAULTS.dig("plan", "skill")
+      Hive::Config::DEFAULTS.dig("plan", "skill_by_agent", "claude")
+    assert_equal "/llm-wiki:wiki-plan",
+      Hive::Config::DEFAULTS.dig("plan", "skill_by_agent", "codex")
+    assert_equal "/llm-wiki:wiki-plan",
+      Hive::Config::DEFAULTS.dig("plan", "skill_by_agent", "pi")
   end
 end

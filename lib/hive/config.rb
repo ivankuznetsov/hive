@@ -50,15 +50,11 @@ module Hive
       # DEFAULTS itself, to avoid silently flipping the implementer for old
       # projects on next load.
       # The `skill` field per stage names the slash-command the agent
-      # is told to invoke inside its prompt. Hive ships expecting both
-      # llm-wiki (`/plan`) and compound-engineering (`/compound-
-      # engineering:ce-*`) to be installed alongside the agent CLI:
-      # - `plan` defaults to `/plan` (llm-wiki's wiki-research-first
-      #   wrapper that delegates into the CE planning workflow).
-      # - `brainstorm` defaults to `/compound-engineering:ce-brainstorm`
-      #   (no llm-wiki equivalent today; flip this here if one lands).
-      # Per-project overrides via `<stage>.skill` in config.yml pick a
-      # different skill without touching templates/.
+      # is told to invoke inside its prompt. Per-project overrides via
+      # `<stage>.skill` in config.yml pick a different skill without
+      # touching templates/. When the field is absent, stage runners use
+      # `stage_skill` below so agent-specific defaults can follow each
+      # CLI's installed skill names.
       "brainstorm" => {
         "agent" => "claude",
         "skill" => "/compound-engineering:ce-brainstorm",
@@ -66,7 +62,12 @@ module Hive
       },
       "plan" => {
         "agent" => "claude",
-        "skill" => "/plan"
+        "skill_by_agent" => {
+          "claude" => "/plan",
+          "codex" => "/llm-wiki:wiki-plan",
+          "pi" => "/llm-wiki:wiki-plan",
+          "default" => "/llm-wiki:wiki-plan"
+        }
       },
       "execute" => { "agent" => "claude" },
       "open_pr" => { "agent" => "claude" },
@@ -212,6 +213,12 @@ module Hive
       %w[review browser_test agent]
     ].freeze
 
+    # `/plan` was Hive's original wiki-first planning alias. It remains the
+    # Claude default because Claude supports user-level slash commands. Codex
+    # and Pi receive llm-wiki's canonical skill name unless a project chooses
+    # a non-legacy override.
+    LEGACY_WIKI_PLAN_ALIAS = "/plan"
+
     module_function
 
     def hive_home
@@ -240,6 +247,32 @@ module Hive
       merged = merge_defaults(data).merge("project_root" => project_root)
       validate!(merged, candidate)
       merged
+    end
+
+    def stage_skill(cfg, stage)
+      stage_cfg = cfg.fetch(stage, {})
+      agent_name = (stage_cfg["agent"] || DEFAULTS.dig(stage, "agent") || "claude").to_s
+      configured_skill = stage_cfg["skill"]
+
+      return configured_skill if configured_skill && !legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, configured_skill)
+
+      skills_by_agent = {}
+      default_skills_by_agent = DEFAULTS.dig(stage, "skill_by_agent")
+      skills_by_agent.merge!(default_skills_by_agent) if default_skills_by_agent.is_a?(Hash)
+      configured_skills_by_agent = stage_cfg["skill_by_agent"]
+      skills_by_agent.merge!(configured_skills_by_agent) if configured_skills_by_agent.is_a?(Hash)
+
+      if !skills_by_agent.empty?
+        skills_by_agent[agent_name] || skills_by_agent["default"] || configured_skill
+      else
+        configured_skill || DEFAULTS.dig(stage, "skill")
+      end
+    end
+
+    def legacy_wiki_plan_alias_for_non_claude?(stage, agent_name, skill)
+      stage == "plan" &&
+        agent_name != "claude" &&
+        skill.to_s == LEGACY_WIKI_PLAN_ALIAS
     end
 
     # Surface a misconfigured HIVE_HOME loudly on READ paths only.
@@ -562,6 +595,7 @@ module Hive
     # ever fails validation.
     def validate!(cfg, source_path)
       validate_hash_shaped_keys!(cfg, source_path)
+      validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
@@ -602,6 +636,27 @@ module Hive
               "#{key} in #{describe_source(source_path)} must be a Hash; " \
               "got #{value.inspect} (#{value.class}). Either remove the key " \
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
+      end
+    end
+
+    def validate_stage_skill_by_agent!(cfg, source_path)
+      %w[brainstorm plan].each do |stage|
+        value = cfg.dig(stage, "skill_by_agent")
+        next if value.nil?
+
+        unless value.is_a?(Hash)
+          raise ConfigError,
+                "#{stage}.skill_by_agent in #{describe_source(source_path)} must be a Hash; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+
+        value.each do |agent, skill|
+          unless skill.is_a?(String) || skill.is_a?(Symbol)
+            raise ConfigError,
+                  "#{stage}.skill_by_agent.#{agent} in #{describe_source(source_path)} must be a String; " \
+                  "got #{skill.inspect} (#{skill.class})"
+          end
+        end
       end
     end
 

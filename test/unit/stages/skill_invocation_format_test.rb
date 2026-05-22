@@ -58,8 +58,48 @@ class HiveStagesSkillInvocationFormatTest < Minitest::Test
       with_stubbed_spawn do |captured|
         Hive::Stages::Plan.run!(task, { "plan" => { "agent" => "pi" } })
 
-        assert_includes captured.first[:prompt], "/skill:plan"
+        assert_includes captured.first[:prompt], "/skill:wiki-plan"
         assert_equal :pi, captured.first[:kwargs][:profile].name
+      end
+    end
+  end
+
+  def test_plan_formats_default_skill_for_codex_profile
+    with_tmp_dir do |project|
+      task_dir = File.join(project, ".hive-state", "stages", "3-plan", "demo")
+      FileUtils.mkdir_p(task_dir)
+      File.write(File.join(task_dir, "brainstorm.md"), "brainstorm\n")
+      task = TaskStub.new(
+        project_root: project,
+        folder: task_dir,
+        state_file: File.join(task_dir, "plan.md")
+      )
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Plan.run!(task, { "plan" => { "agent" => "codex" } })
+
+        assert_includes captured.first[:prompt], "/llm-wiki:wiki-plan"
+        assert_equal :codex, captured.first[:kwargs][:profile].name
+      end
+    end
+  end
+
+  def test_plan_maps_legacy_plan_alias_for_codex_profile
+    with_tmp_dir do |project|
+      task_dir = File.join(project, ".hive-state", "stages", "3-plan", "demo")
+      FileUtils.mkdir_p(task_dir)
+      File.write(File.join(task_dir, "brainstorm.md"), "brainstorm\n")
+      task = TaskStub.new(
+        project_root: project,
+        folder: task_dir,
+        state_file: File.join(task_dir, "plan.md")
+      )
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Plan.run!(task, { "plan" => { "agent" => "codex", "skill" => "/plan" } })
+
+        assert_includes captured.first[:prompt], "/llm-wiki:wiki-plan"
+        assert_equal :codex, captured.first[:kwargs][:profile].name
       end
     end
   end

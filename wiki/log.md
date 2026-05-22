@@ -168,6 +168,16 @@ Skipped per product direction: schema versioning #5 (product unreleased, in-plac
 - [[commands/doctor]] — tmux preflight and stale-session reporting.
 - [[state-model]] — `brainstorm.runtime` config flag.
 
+## [2026-05-14T17:30:00Z] commands/init — managed llm-wiki bootstrap during project setup
+
+**Action:** `hive init` now initializes managed llm-wiki project context directly. New `Hive::LlmWikiBootstrap` writes `.llm-wiki/config.json` with Codex as `headless_agent`, creates project wiki starter pages plus `raw/notes/`, writes managed LLM WIKI blocks into `AGENTS.md` and `CLAUDE.md`, and writes `.claude/settings.json` with a managed `SessionStart` hook that surfaces `wiki/index.md` and recent `wiki/log.md`. The refresh scripts are Codex-owned (`codex exec --add-dir <qmd-cache> -C <project>`), preserve qmd's GPU auto-detection, grant the maintenance agent qmd cache write access, and fall back to `.llm-wiki/qmd-cache` when the normal qmd cache is not writable. The post-commit hook is installed only after the bootstrap files are committed so init's own `chore: initialize llm-wiki` commit does not immediately launch a refresh. Linux init also writes daily user-systemd service/timer files and enables the timer symlink. Tests cover managed config shape, committed context files, scheduler files, hook preservation, qmd cache fallback, and no legacy `claude -p` refresh path.
+
+**Refreshed pages:**
+- [[commands/init]] — init steps now include managed llm-wiki files, the committed bootstrap context, runtime hook installation, and the doctor preflight.
+- [[modules/git_ops]] — documents the `commit_llm_wiki_bootstrap!` project-setup commit and why it runs before post-commit hook installation.
+- [[decisions]] — ADR-009 now distinguishes task-state commits from one-time project-setup commits required for feature worktrees to inherit wiki context.
+- [[cli]], [[index]], and [[gaps]] — command/source summaries now note the llm-wiki initialization surface.
+
 ## [2026-05-14T17:17:00Z] review — clarify live review-pass config and stale recovery docs
 
 **Action:** Follow-up from code review on the review/daemon default PR. Removed the stale top-level `max_review_passes` key from `Config::DEFAULTS`, the project config template, README, and wiki examples so `review.max_passes` is the only documented live review-loop cap. Replaced the README troubleshooting row that still described max review pass exhaustion as `EXECUTE_STALE` with the current `REVIEW_STALE` / `hive markers clear ... --name REVIEW_STALE` recovery flow. Clarified daemon docs that `max_concurrent_per_project` is a per-project burst cap; setting it below the global cap is what enforces cross-project fairness.
@@ -175,6 +185,14 @@ Skipped per product direction: schema versioning #5 (product unreleased, in-plac
 **Refreshed pages:**
 - [[commands/daemon]] — concurrency table wording now matches the 5/5 default.
 - [[modules/config]] and [[state-model]] — config examples only expose `review.max_passes`.
+
+## [2026-05-14T16:45:00Z] plan — agent-aware llm-wiki planning defaults for Codex and Pi
+
+**Action:** Changed 3-plan skill resolution from one literal default (`/plan`) to `Hive::Config.stage_skill`, which keeps Claude on the legacy `/plan` wiki-first alias while using llm-wiki's canonical `/llm-wiki:wiki-plan` skill for Codex and Pi. Pi's agent profile formats that to `/skill:wiki-plan`. Existing configs that still say `plan.skill: /plan` now map to `wiki-plan` for Codex/Pi, so switching `plan.agent` no longer requires a local Codex or Pi `plan` alias. Non-legacy stage overrides, such as `/compound-engineering:ce-plan`, still win. `hive doctor` now verifies the resolved agent-aware planning skill, and tests cover Codex defaults, Pi defaults, and the legacy alias mapping.
+
+**Refreshed pages:**
+- [[stages/plan]] — plan stage now documents `Hive::Config.stage_skill`, agent-aware llm-wiki defaults, task-folder-only isolation, and current plan budget/timeout defaults.
+- [[commands/doctor]] — doctor rows now document the resolved Codex/Pi `wiki-plan` invocation instead of the old `/skill:plan` example.
 
 ## [2026-05-14T15:20:40Z] review — lower default review loop cap to 2 passes
 

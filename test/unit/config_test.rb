@@ -124,6 +124,40 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_stage_skill_uses_agent_specific_plan_defaults
+    assert_equal "/plan",
+      Hive::Config.stage_skill({ "plan" => { "agent" => "claude" } }, "plan")
+    assert_equal "/llm-wiki:wiki-plan",
+      Hive::Config.stage_skill({ "plan" => { "agent" => "codex" } }, "plan")
+    assert_equal "/llm-wiki:wiki-plan",
+      Hive::Config.stage_skill({ "plan" => { "agent" => "pi" } }, "plan")
+  end
+
+  def test_stage_skill_maps_legacy_plan_alias_for_non_claude_agents
+    cfg = { "plan" => { "agent" => "codex", "skill" => "/plan" } }
+
+    assert_equal "/llm-wiki:wiki-plan", Hive::Config.stage_skill(cfg, "plan")
+  end
+
+  def test_stage_skill_keeps_non_legacy_plan_override
+    cfg = { "plan" => { "agent" => "codex", "skill" => "/compound-engineering:ce-plan" } }
+
+    assert_equal "/compound-engineering:ce-plan", Hive::Config.stage_skill(cfg, "plan")
+  end
+
+  def test_load_rejects_non_hash_stage_skill_by_agent
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          skill_by_agent: wiki-plan
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/plan\.skill_by_agent.*must be a Hash/, err.message)
+    end
+  end
+
   def test_load_raises_when_stage_agent_is_unknown_profile
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

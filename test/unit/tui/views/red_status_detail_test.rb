@@ -4,13 +4,17 @@ require "hive/tui/snapshot"
 require "hive/tui/views/red_status_detail"
 
 class HiveTuiViewsRedStatusDetailTest < Minitest::Test
-  def row(diagnostic: nil)
+  ProfileStub = Struct.new(:bin, keyword_init: true)
+
+  def row(diagnostic: nil, action_key: "recover_review", stage: "6-review",
+          marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
+          folder: "/tmp/demo/.hive-state/stages/6-review/red-task")
     Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: "6-review", slug: "red-task", folder: "/tmp/red-task",
-      state_file: "/tmp/red-task/task.md", marker: "review_error",
-      attrs: { "phase" => "fix", "pass" => "2" }, mtime: nil, age_seconds: 0,
+      project_name: "alpha", stage: stage, slug: "red-task", folder: folder,
+      state_file: File.join(folder, "task.md"), marker: marker,
+      attrs: attrs, mtime: nil, age_seconds: 0,
       claude_pid: nil, claude_pid_alive: nil,
-      action_key: "recover_review", action_label: "Needs recovery",
+      action_key: action_key, action_label: "Needs recovery",
       suggested_command: nil, next_action: nil, diagnostic: diagnostic
     )
   end
@@ -23,26 +27,61 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state, cols: 100, rows: 24)
   end
 
-  def test_renders_q_and_a_diagnosis_and_actions
+  def with_config_load_stub(stub_proc)
+    sentinel = Hive::Config.method(:load)
+    Hive::Config.define_singleton_method(:load, &stub_proc)
+    yield
+  ensure
+    Hive::Config.define_singleton_method(:load, sentinel) if sentinel
+  end
+
+  def with_agent_profile_lookup_stub(stub_proc)
+    sentinel = Hive::AgentProfiles.method(:lookup)
+    Hive::AgentProfiles.define_singleton_method(:lookup, &stub_proc)
+    yield
+  ensure
+    Hive::AgentProfiles.define_singleton_method(:lookup, sentinel) if sentinel
+  end
+
+  def test_renders_user_facing_summary_with_two_actions
     diagnostic = {
-      "summary" => "REVIEW_ERROR phase=fix pass=2",
-      "detail" => "Fix agent failed before tests completed.",
-      "artifact_paths" => [ "/tmp/red-task/reviews/errors-02.md" ]
+      "summary" => "The review fixer stopped before tests completed."
     }
 
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: diagnostic)))
+    output = nil
+    with_config_load_stub(->(_project_root) { { "execute" => { "agent" => "codex" } } }) do
+      with_agent_profile_lookup_stub(->(_name, cfg:) { ProfileStub.new(bin: "/usr/local/bin/codex") }) do
+        output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: diagnostic)))
+      end
+    end
 
-    assert_includes output, "Q: Why is this red?"
-    assert_includes output, "REVIEW_ERROR phase=fix pass=2"
-    assert_includes output, "Q: What can Hive do next?"
-    assert_includes output, "/tmp/red-task/reviews/errors-02.md"
-    assert_includes output, "[Enter] autofix / retry"
+    assert_includes output, "Task needs attention"
+    assert_includes output, "red-task"
+    assert_includes output, "Project: alpha"
+    assert_includes output, "Stage: 6-review"
+    assert_includes output, "The review fixer stopped before tests completed."
+    assert_includes output, "Recover"
+    assert_includes output, "Open in agent"
+    assert_includes output, "codex"
+    assert_includes output, "[Enter]"
+    assert_includes output, "[o]"
+    assert_includes output, "[Esc] back"
+    refute_includes output, "marker_signature"
+    refute_includes output, "$EDITOR"
+    refute_includes output, "manual fix"
+    refute_includes output, "autofix"
+    refute_includes output, "recover_review"
+    refute_includes output, "recover_execute"
+    refute_includes output, "EXECUTE_STALE"
+    refute_includes output, "phase=fix"
+    refute_includes output, "pass=2"
+    refute_includes output, "Q: Why is this red?"
+    refute_includes output, "Q: What can Hive do next?"
   end
 
   def test_sanitizes_ansi_sequences_from_diagnostic_text
     diagnostic = {
       "summary" => "\e[31mbad\e[0m",
-      "detail" => "detail\e[2J",
       "artifact_paths" => []
     }
 
@@ -52,82 +91,40 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "bad"
   end
 
-  # Footer is row-dependent: recover_review / error rows advertise
-  # [Enter] autofix; recover_execute rows DO NOT (Enter would be a no-op
-  # because EXECUTE_STALE has no auto-retry recipe). Pinning both
-  # branches so the footer cannot regress to advertising a non-op.
-  # See PR #84 review row 25.
-  def test_footer_includes_enter_affordance_for_recover_review_rows
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
-    assert_includes output, "[Enter] autofix / retry",
-                    "recover_review rows must keep the [Enter] affordance"
+  def test_falls_back_when_dev_agent_lookup_fails
+    output = nil
+    with_config_load_stub(->(_project_root) { raise Hive::ConfigError, "broken config" }) do
+      output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+    end
+
+    assert_includes output, "Open in agent"
+    assert_includes output, "your project's development agent"
   end
 
-  def test_footer_omits_enter_affordance_for_recover_execute_rows
-    execute_row = Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: "4-execute", slug: "stale-task",
-      folder: "/tmp/stale-task", state_file: "/tmp/stale-task/task.md",
-      marker: "execute_stale", attrs: { "pass" => "3" }, mtime: nil,
-      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "recover_execute", action_label: "Needs recovery",
-      suggested_command: nil, next_action: nil, diagnostic: nil
+  def test_recover_execute_rows_still_show_only_two_actions
+    output = Hive::Tui::Views::RedStatusDetail.render(
+      model_for(
+        row(
+          action_key: "recover_execute",
+          stage: "4-execute",
+          marker: "execute_stale",
+          attrs: { "pass" => "3" },
+          folder: "/tmp/demo/.hive-state/stages/4-execute/red-task"
+        )
+      )
     )
 
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(execute_row))
-
-    refute_includes output, "[Enter] autofix / retry",
-                    "recover_execute rows MUST NOT advertise [Enter] (Enter is a no-op for EXECUTE_STALE)"
-    assert_includes output, "[f] manual fix",
-                    "recover_execute rows must keep the manual-fix affordance"
-    assert_includes output, "[R] refresh diagnosis",
-                    "recover_execute rows must keep the refresh affordance"
-    assert_includes output, "[q] back",
-                    "recover_execute rows must keep the back affordance"
+    assert_includes output, "[Enter] Recover"
+    assert_includes output, "[o] Open in agent"
+    refute_includes output, "[f] manual fix"
+    refute_includes output, "[R] refresh diagnosis"
+    refute_includes output, "EXECUTE_STALE"
   end
 
-  def test_markerless_retry_error_keeps_enter_affordance
-    diagnostic = {
-      "summary" => "PLAN_MISSING_OUTPUT",
-      "suggested_next_action" => {
-        "kind" => "retry",
-        "command" => "hive plan red-task --from 3-plan"
-      }
-    }
-    retry_row = Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: "3-plan", slug: "red-task",
-      folder: "/tmp/red-task", state_file: "/tmp/red-task/plan.md",
-      marker: "none", attrs: {}, mtime: nil,
-      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error",
-      suggested_command: nil, next_action: nil, diagnostic: diagnostic
-    )
+  def test_missing_diagnostic_uses_plain_english_fallback
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: nil)))
 
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(retry_row))
-
-    assert_includes output, "[Enter] autofix / retry"
-    assert_includes output, "Enter reruns the suggested recovery command"
-  end
-
-  def test_manual_fix_error_omits_enter_affordance
-    diagnostic = {
-      "summary" => "FINALIZE_MISSING_PR_MD",
-      "suggested_next_action" => {
-        "kind" => "manual_fix",
-        "command" => nil
-      }
-    }
-    manual_row = Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: "8-finalize", slug: "red-task",
-      folder: "/tmp/red-task", state_file: "/tmp/red-task/pr.md",
-      marker: "none", attrs: {}, mtime: nil,
-      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
-      action_key: "error", action_label: "Error",
-      suggested_command: nil, next_action: nil, diagnostic: diagnostic
-    )
-
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(manual_row))
-
-    refute_includes output, "[Enter] autofix / retry"
-    assert_includes output, "No autofix available"
+    assert_includes output, "Hive does not have a diagnosis yet"
+    refute_includes output, "marker"
   end
 end

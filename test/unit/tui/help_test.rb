@@ -158,6 +158,7 @@ class TuiHelpTest < Minitest::Test
 
     refute_nil entry, "expected a grid-mode binding for `i`"
     assert_equal :open_idea_preview, entry[:action]
+    assert_match(/info panel/i, entry[:description])
     assert_match(/original idea/i, entry[:description])
   end
 
@@ -170,11 +171,19 @@ class TuiHelpTest < Minitest::Test
     assert_match(/no undo/i, entry[:description])
   end
 
-  def test_idea_preview_mode_has_a_dismiss_entry
-    entry = Hive::Tui::Help::BINDINGS.find { |b| b[:mode] == :idea_preview && b[:key] == "any" }
+  def test_idea_preview_mode_has_explicit_close_entries
+    entries = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :idea_preview }
+    by_key = entries.to_h { |entry| [ entry[:key], entry ] }
 
-    refute_nil entry, "expected an idea-preview dismissal binding"
-    assert_equal :back, entry[:action]
-    assert_match(/dismiss/i, entry[:description])
+    assert_equal %w[Esc i q], by_key.keys.sort
+    %w[q Esc i].each do |key|
+      assert_equal :back, by_key.fetch(key)[:action]
+      assert_match(/close the info panel/i, by_key.fetch(key)[:description])
+    end
+  end
+
+  def test_idea_preview_mode_has_no_any_key_binding
+    refute Hive::Tui::Help::BINDINGS.any? { |b| b[:mode] == :idea_preview && b[:key] == "any" },
+           "idea-preview help must list explicit close keys, not an any-key dismissal"
   end
 end

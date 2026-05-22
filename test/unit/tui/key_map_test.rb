@@ -258,10 +258,17 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal "i", msg.char
   end
 
-  def test_idea_preview_any_key_returns_back
-    [ "i", "x", :key_enter, :key_escape, "q", :space ].each do |key|
+  def test_idea_preview_q_escape_and_i_return_back
+    [ "q", :key_escape, "\e", "i" ].each do |key|
       msg = Hive::Tui::KeyMap.message_for(mode: :idea_preview, key: key, row: nil)
-      assert_same Hive::Tui::Messages::BACK, msg, "#{key.inspect} must dismiss idea preview"
+      assert_same Hive::Tui::Messages::BACK, msg, "#{key.inspect} must close idea preview"
+    end
+  end
+
+  def test_idea_preview_unmapped_keys_are_noop
+    [ "x", :key_enter, :space ].each do |key|
+      msg = Hive::Tui::KeyMap.message_for(mode: :idea_preview, key: key, row: nil)
+      assert_same Hive::Tui::Messages::NOOP, msg, "#{key.inspect} must not close idea preview"
     end
   end
 

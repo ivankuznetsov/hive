@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-05-04
+updated: 2026-05-19
 tags: [command, bootstrap, git, prompts]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, and registers the project globally.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which Claude brainstorm runtime to use, and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, and registers the project globally.
 
 ## Usage
 
@@ -44,14 +44,15 @@ hive init [PROJECT_PATH] [--force]
 
 ## Prompt flow (ADR-023)
 
-On TTY input streams the prompt walks the operator through four sections in order:
+On TTY input streams the prompt walks the operator through five sections in order:
 
 1. **Planning agent** (`brainstorm.agent` + `plan.agent`): one combined choice; the answer maps to both keys. Recommended default `claude`.
-2. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
-3. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
-4. **Per-stage limits**: budget+timeout for each of 8 effective keys (`brainstorm`, `plan`, `execute_implementation`, `pr`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
+2. **Brainstorm runtime** (`brainstorm.runtime`): shown only when the planning agent resolves to `claude`. `headless` keeps the existing non-interactive `claude -p` path; `tmux_interactive` runs Claude in an attachable tmux pane using the logged-in Claude session. If planning is not `claude`, init renders `headless` because `tmux_interactive` hardcodes the Claude binary.
+3. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
+4. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
+5. **Per-stage limits**: budget+timeout for each of 9 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
 
-Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
+Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). The brainstorm runtime prompt follows the same rule (`headless` / `tmux_interactive` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
 
 ### Stable-iteration-order contract
 
@@ -66,7 +67,7 @@ Reordering either is a **breaking change for scripted automation** that uses ind
 When `$stdin.tty?` is false the prompt module skips every question and emits exactly one line to `$stdout`:
 
 ```
-hive: using defaults — planning=claude, dev=codex, reviewers=all3, limits=defaults
+hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 ```
 
 Piped input is **not** consumed — `printf 'codex\n...' | hive init` ignores the piped data and uses defaults. Document this contract for any automation that wants to set non-default values: use `--force` plus an explicitly-edited YAML rather than expecting heredoc piping to populate answers.
@@ -93,8 +94,8 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 ## Tests
 
-- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, the idempotent double-init, the rendered template's stage-agent blocks, the bumped-generous limits, the dropped `execute_review` key, and the U5 piped-input + abort + already-initialized-guard scenarios.
-- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: 29 cases over happy paths, edge re-prompts, the non-TTY summary contract, and the testability invariant.
+- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, and the U5 piped-input + abort + already-initialized-guard scenarios.
+- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, edge re-prompts, the Claude-only brainstorm runtime prompt, the non-TTY summary contract, and the testability invariant.
 
 ## Backlinks
 

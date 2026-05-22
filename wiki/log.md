@@ -24,6 +24,27 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[modules/git_ops]] — new probe step in `detect_default_branch` ordering; `ref_exists?` added to the public API surface.
 
+## [2026-05-20T09:11:00Z] brainstorm — read-only Stop-hook + bounded trust loop
+
+**Action:** Documented two safety fixes on `fix/brainstorm-tmux-interactive-live-smoke`. `Hive::StopHookInstaller` now `chmod 0o444`s the installed `.claude/settings.json` (dropping it first for idempotency) so a prompt-injected `idea.md` cannot rewrite the Stop hook command and execute arbitrary shell on graceful exit. `BrainstormTmux#prepare_claude_session!`'s trust-prompt branch now respects `claude_ready_wait_timeout` instead of looping Enter forever when the trust strings persist. The dead `--allowed-tools` kebab alias was removed from `interactive_claude_wrapper.sh`; only `--allowedTools` is wired up.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — Stop-hook installer chmod + bounded trust-prompt loop noted in the runtime description.
+
+## [2026-05-20T00:12:57Z] TUI image paste mode boundary
+
+**Action:** Clarified that Ctrl+V is inert outside the `:new_idea` composer, including while the help overlay is visible. This preserves the image-paste boundary documented for the composer and keeps overlays from closing on an image-paste probe.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — documented the Ctrl+V no-op behavior outside `:new_idea`.
+
+## [2026-05-20T00:00:00Z] README rewritten with TUI-first framing
+
+**Action:** Restructured `README.md` so the user-facing entry point is the `hive tui` dashboard, the second-tier entry point is "Drive Hive From Your Coding Agent" (folding in the existing install-prompt block plus day-to-day operate-via-agent guidance), and direct CLI use is demoted to a Power-User / Scripting CLI summary that links out to `docs/cli.md` instead of duplicating the per-command table. The hero now explains what Hive does and the folder-as-agent + compound-engineering mental model before any install line. The Documentation section replaces bare bullet links with 1–3 sentence prose descriptions per linked doc.
+
+**Refreshed pages:**
+- None — README sits outside `wiki/`. This entry logs the rewrite for traceability with the rest of the docs surface.
+
 ## [2026-05-19T23:51:41Z] review — reviewer prompts prefer origin/default as the compare ref
 
 **Action:** Fixed a stale-local-main review failure mode: review prompts now compare against `origin/<default_branch>` when the remote-tracking ref exists, falling back to the configured/default local branch only when the remote ref is absent. This keeps long-lived operator checkouts from feeding reviewers `git diff main..HEAD` when local `main` is behind `origin/main`, which previously produced phantom findings for already-merged upstream changes.
@@ -38,6 +59,13 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[modules/rebase]] — conflict-resolution spawn now documents the `:exit_code_only` status contract for development agents.
 - [[commands/run]] — auto-rebase conflict-agent bullets now include the status-mode override.
+
+## [2026-05-19T23:20:28Z] tui — Ctrl+V also triggers composer image paste
+
+**Action:** Documented that Ctrl+V in the `:new_idea` composer now runs the same image clipboard probe as an empty bracketed paste, covering terminals that send literal Ctrl+V instead of a bracketed-paste burst for image-only clipboards. The staging convention, `[imageN]` placeholders, and submit rewrite remain unchanged.
+
+**Refreshed pages:**
+- [[commands/tui]] — added Ctrl+V as an additional image-paste trigger in the new-idea composer.
 
 ## [2026-05-19T22:22:00Z] plan — missing output surfaces as error
 
@@ -54,6 +82,28 @@ Status also no longer treats any `7-finalize` `COMPLETE` marker as archive-ready
 
 **Refreshed pages:**
 - [[stages/finalize]] — preconditions and marker-action table now mention missing PR metadata error markers.
+
+## [2026-05-19T21:40:00Z] install — avoid remote-script pipe in bash channel
+
+**Action:** Follow-up from review fix-guardrail inspection. `hive update` now downloads the pinned `install.sh` into a temporary directory and runs that file instead of using a remote-script pipe. The agent installer prompt and operating guide now show the same download-then-run flow for glibc Linux installs, while still pinning to the release tag.
+
+**Refreshed pages:**
+- [[operating]] — bash install channel example now uses a tempfile download before execution.
+
+## [2026-05-19T19:15:00Z] init — prompt for Claude brainstorm runtime
+
+**Action:** Documented the `hive init` prompt addition for `brainstorm.runtime`. Fresh projects now render the selected runtime into `.hive-state/config.yml`: `headless` by default, or `tmux_interactive` when the planning agent is Claude and the operator chooses the tmux path. If planning is not Claude, init keeps `headless` because the tmux runtime hardcodes the Claude binary.
+
+**Refreshed pages:**
+- [[commands/init]] — prompt order, non-TTY summary, runtime choices, and test coverage notes.
+- [[stages/brainstorm]] — notes that runtime can be selected during init.
+
+## [2026-05-19T18:30:00Z] brainstorm — harden tmux interactive live prompt path
+
+**Action:** Documented the live-smoke fix for `brainstorm.runtime: tmux_interactive`. Hive now waits for Claude's interactive prompt before pasting, auto-confirms Claude's first-run folder-trust prompt for the task folder, launches interactive Claude with `--permission-mode bypassPermissions` plus `--allowedTools Read,Write,Edit,LS` so task-folder reads and `brainstorm.md` writes do not block on approval prompts while Bash stays unavailable, and uses a short paste-to-Enter delay so Claude Code's input box receives the prompt before submission. The defensive orphan sweep now uses `pgrep/pkill --` before a POSIX-compatible `--add-dir...` regex so process matching does not parse the pattern as an option.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] — tmux runtime prompt-readiness, trust confirmation, bypass-permissions/read-write tool restriction, and paste-submit delay.
 
 ## [2026-05-19T16:00:00Z] status — surface legacy stage dirs in JSON + text + TUI (PR #93)
 
@@ -1526,6 +1576,20 @@ One single propagation made: `lib/hive/config.rb:220` corrected a misattribution
 - `wiki/testing.md` — updated the e2e starter scenario count to six.
 - `wiki/commands/tui.md` — documented bounded quiet subprocesses and truncated retained spawn captures.
 
+## [2026-05-15T00:00:00Z] release — v0.1.0 artifact workflow
+
+**Action:** Added the v0.1.0 release artifact scaffold: `rake build:release[<target>]`, Tebako-backed `packaging/build/release.sh`, a spike helper under `packaging/spike/`, and a tag-triggered GitHub Actions workflow that builds tier-1 tarballs, writes `SHA256SUMS`, signs the checksum file with cosign keyless, and publishes the GitHub Release. Recorded ADR-027 in [[decisions]] so the chosen packager and fallback point are explicit.
+
+**Refreshed pages:**
+- `wiki/decisions.md` — ADR-027 (Tebako release artifact strategy).
+
+## [2026-05-15T01:00:00Z] install — channels, XDG paths, prompt installer
+
+**Action:** Added the user-facing install surface for v0.1.0: `install.sh`, `install.md`, Homebrew/AUR templates, XDG path docs, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint. `hive init` now writes the per-user daemon service unit and records whether the user chose to start it immediately.
+
+**Refreshed pages:**
+- `wiki/operating.md` — install channels, tier matrix, XDG layout, update/uninstall, skills marketplace command shapes.
+
 ## [2026-05-05T18:00:00Z] architecture — TUI/MVU pipeline
 
 **Action:** Documented the TUI MVU pipeline (`BubbleModel ↔ Update ↔ KeyMap ↔ PasteAwareRunner ↔ InputDecoder`) in `wiki/architecture.md`, including the side-effect seam in `BubbleModel#handle_side_effect`, the paste-routing-by-mode contract for `RawTextInput`, decoder reset on cancel, and the GVL-yielding `YieldTick`. Hardened `InputDecoder` against unmapped C0 bytes (Ctrl+C now decodes to `KEY_CTRL_C`; other unmapped bytes are silently dropped), added 4 KiB `@pending` and 1 MiB `@paste_buffer` caps with truncation flashes, a 5 s paste-timeout flush, stray `\e[201~` consumption, ESC+CR/LF cancel-gesture absorption, and C0 stripping in `normalize_paste`. `PasteAwareRunner` now resets the decoder on transitions out of `:new_idea` / `:filter` and asserts `Bubbletea::VERSION == "0.1.4"` at load. Removed the dead `Messages::NewIdeaCharAppended` path; consolidated paste normalization on the decoder; switched the new-idea over-limit branch from drop-everything to partial-fit with a truncation flash; raised `input_timeout` from 1 ms to 5 ms to absorb fragmented paste markers; pinned bubbletea to `= 0.1.4` in the Gemfile.
@@ -1637,3 +1701,41 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 - `wiki/commands/tui.md` — documented red-status detail mode, keybindings, snapshot refresh behavior, and preserved direct recovery exceptions.
 - `wiki/decisions.md` — ADR-027 records the diagnose-then-act policy and its relationship to ADR-025.
 - `wiki/index.md` — bumped refresh date.
+
+## [2026-05-20T00:00:00Z] install — v0.1.0 release-surface review fixes
+
+**Action:** Tightened the v0.1.0 install surface after review pass 2. The bash installer now keeps runtime dependency checks warn-only, writes prefix sidecars for `hive update`, pins cosign verification to the repository identity, and is covered by checksum, PATH-collision, and unsupported-platform smoke fixtures. `hive init` now passes the invoked Hive binary to daemon service registration; Homebrew macOS units resolve to the stable Homebrew `bin/hive` symlink. The AUR publisher remains deferred but the release workflow now fails loudly if its secret is configured before real publishing exists.
+
+**Refreshed pages:**
+- `wiki/operating.md` — documented prefix update behavior, tier-3 macOS x86_64 install.sh status, `--force-purge-state`, AUR `hv` caveat, and skills-package deferral.
+- `wiki/decisions.md` — updated ADR-024 and ADR-027 for Homebrew stable daemon paths and release-workflow Tebako validation.
+- `wiki/gaps.md` — added AUR publish, Rosetta/macOS x86_64, and skills-package follow-ups.
+
+## [2026-05-15T16:03:12Z] tui — manual steering key
+
+**Action:** Documented the `s` manual-steering gesture for `hive tui`. The key opens the focused task in the configured `execute.agent` inside the feature worktree, passes existing slug stage folders as add-dir context, marks the row `MANUAL_STEERING` so headless automation skips it, and archives the active folder under `.hive-state/stages/archived-manual/` after the interactive agent exits.
+
+**Refreshed pages:**
+- [[commands/tui]] — added keybinding, subprocess/manual-steering behavior, and status icon notes.
+- [[operating]] — added the stuck-task manual takeover path for daemon operators.
+
+## [2026-05-20T00:00:00Z] manual steering — run/status skip contracts
+
+**Action:** Tightened the manual-steering escape hatch. `hive run` now stops before auto-rebase and stage dispatch when the state file carries `MANUAL_STEERING`, and `hive status` treats `.hive-state/stages/archived-manual/` as an intentional status-private sibling rather than a legacy stage directory.
+
+**Refreshed pages:**
+- [[commands/run]] — documented the manual-steering pre-run skip and JSON rebase reason.
+- [[commands/status]] — documented status-private stage siblings for legacy-stage detection.
+
+## [2026-05-20T14:00:00Z] daemon — env-hardened systemd unit, install --force, stale-AGENT_WORKING healer
+
+**Action:** Unstuck the `hive daemon` failure mode where the systemd-user unit ticked forever with `status_failure ENOENT hive` because the daemon's `Open3.capture3({}, "hive", ...)` couldn't find the binary on a systemd-default PATH. Three coupled changes (PR #113):
+
+- Baked `Environment=HIVE_BIN=<absolute-resolved-path>` and `Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin` into both `examples/systemd/hive-daemon.service` and `ServiceInstaller#render_systemd` substitution.
+- Added `hive daemon install [--force]` for in-place unit upgrades. Atomic-write the new unit (tempfile + rename), rotate prior content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (never overwrites a prior backup), and restart the running daemon on Linux / unload-then-load on macOS so new `Environment=` lines take effect.
+- Added `Hive::Daemon::StaleAgentHealer` (tick-time): rewrites `AGENT_WORKING` markers whose backing agent isn't alive to `ERROR reason=agent_died` (dead pid) or `reason=agent_orphaned` (no pid, mtime past `daemon.agent_marker_grace_sec`, default 300s, mirrored from `Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC`). Skips in-flight controller slots and half-migrated projects. New daemon log events `marker_healed` / `marker_heal_failed` (registered in `Hive::Daemon::Logger::EVENTS`). `Hive::TaskAction` reads the same grace via threaded config so the synthetic classification (immediate, in-memory) and on-disk heal (next tick) agree.
+
+**Refreshed pages:**
+- `wiki/commands/daemon.md` — added `install [--force]` to the subcommands table.
+- `wiki/modules/daemon.md` — corrected the load-bearing "daemon never writes markers" claim; documented the healer's narrow carve-out (heals, never advances) and the new log events.
+- `wiki/modules/task_action.md` — updated the `:agent_working` carve-out to cover the new stale-classification branch and the synthetic diagnostic.

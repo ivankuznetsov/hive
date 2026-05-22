@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
+require "hive/commands/daemon/service_installer"
 
 module Hive
   module Commands
@@ -45,6 +46,7 @@ module Hive
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
 
         print_summary(entry: entry, ops: ops)
+        register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight!
       end
 
@@ -100,6 +102,47 @@ module Hive
       def write_warn(line)
         warn line
       rescue Errno::EPIPE
+        nil
+      end
+
+      def register_daemon_service!(autostart:)
+        record_daemon_autostart!(autostart)
+        installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: current_binary_path)
+        result = installer.install!(autostart: autostart)
+        installer.messages.each { |line| write_warn("hive: #{line}") }
+        if result == :failed
+          write_warn("hive: daemon service registration reported a failure; run `hive doctor` and check daemon logs")
+        end
+      rescue Errno::EACCES, Errno::ENOSPC, Errno::EPERM => e
+        write_warn("hive: daemon service registration failed (#{e.class}: #{e.message}); fix permissions and re-run `hive init`")
+      rescue Hive::Error => e
+        write_warn("hive: daemon service registration failed: #{e.message}")
+      end
+
+      def record_daemon_autostart!(autostart)
+        path = Hive::Config.global_config_path
+        data = File.exist?(path) ? Hive::Config.load_global_config(path) : {}
+        data["daemon"] = {} unless data["daemon"].is_a?(Hash)
+        data["daemon"]["autostart"] = autostart ? true : false
+        Hive::Config.write_global_config!(data)
+      end
+
+      def current_binary_path
+        raw = $PROGRAM_NAME.to_s
+        return nil unless File.basename(raw) == "hive"
+
+        if raw.include?(File::SEPARATOR)
+          File.expand_path(raw)
+        else
+          which("hive")
+        end
+      end
+
+      def which(name)
+        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
+          path = File.join(dir, name)
+          return path if File.file?(path) && File.executable?(path)
+        end
         nil
       end
 
@@ -221,8 +264,9 @@ module Hive
       # the per-project scaffolding values (project name, default branch,
       # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / development_agent /
-      # enabled_reviewers / triage_bias / budgets / timeouts). The single source of
-      # truth for the answers hash is `Prompts#collect`; this binding
+      # brainstorm_runtime / enabled_reviewers / triage_bias / budgets /
+      # timeouts). The single source of truth for the answers hash is
+      # `Prompts#collect`; this binding
       # never invents defaults of its own — callers always supply
       # `answers:` (production: from Prompts; tests: explicit hashes).
       class ProjectConfigBinding
@@ -231,6 +275,11 @@ module Hive
           @default_branch = default_branch
           @worktree_root = worktree_root
           @planning_agent = answers.fetch("planning_agent")
+          # Default to headless for legacy answer hashes from older tests.
+          @brainstorm_runtime = answers.fetch(
+            "brainstorm_runtime",
+            Hive::Commands::Init::Prompts::DEFAULT_BRAINSTORM_RUNTIME
+          )
           @development_agent = answers.fetch("development_agent")
           @enabled_reviewers = answers.fetch("enabled_reviewers")
           @triage_bias = answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS)
@@ -240,11 +289,13 @@ module Hive
           # daemon key (e.g. integration fixtures predating ADR-024).
           # Production answers always set this explicitly via Prompts.
           @daemon_enabled = answers.fetch("daemon_enabled", true)
+          @daemon_autostart = answers.fetch("daemon_autostart", false)
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
-                    :planning_agent, :development_agent,
-                    :enabled_reviewers, :triage_bias, :budgets, :timeouts, :daemon_enabled
+                    :planning_agent, :brainstorm_runtime, :development_agent,
+                    :enabled_reviewers, :triage_bias, :budgets, :timeouts,
+                    :daemon_enabled, :daemon_autostart
 
         def binding_for_erb
           binding

@@ -190,6 +190,21 @@ module Hive
       # (workflow-contextual) and the verb keys (subprocess dispatch).
       OpenTaskFolder = Data.define(:row)
 
+      # `i` in grid mode — read the focused row's source idea.md and
+      # show its original_text in the bottom strip. Carries the row so
+      # BubbleModel's side-effect handler can resolve `row.folder` at
+      # the moment of the keystroke; this cannot be a payload-free
+      # singleton because snapshot polling may move the live cursor.
+      OpenIdeaPreview = Data.define(:row)
+
+      # `s` in grid mode — suspend the TUI and open the focused row's
+      # configured development agent in the feature worktree. BubbleModel
+      # owns the marker flip and the foreground takeover here; the
+      # follow-up `AgentSteerExited` message (dispatched by the takeover
+      # callable after the agent process exits) is what owns the
+      # archive-on-exit side effect.
+      OpenInAgent = Data.define(:row)
+
       # Enter on a completed 7-finalize row — browse the final summary
       # document in $EDITOR. Falls back to pr.md if summary.md is missing.
       OpenSummary = Data.define(:row)
@@ -199,6 +214,11 @@ module Hive
       # the edit window, so the status flash can distinguish a saved
       # edit from a no-op/cancel.
       InputEditorExited = Data.define(:slug, :exit_code, :changed)
+
+      # Sent by the manual-steering agent takeover callable after the
+      # interactive agent exits. BubbleModel uses this follow-up to move
+      # the task folder out of the active stage tree.
+      AgentSteerExited = Data.define(:slug, :folder, :exit_code, :worktree)
 
       # Triage Space — toggle accept/reject on the current finding.
       # `row` is the parent task row from grid mode, used by the

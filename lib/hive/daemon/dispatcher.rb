@@ -1,10 +1,12 @@
 require "hive/config"
 require "hive/stages"
+require "hive/task_action"
 require "hive/daemon/policy"
 require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
+require "hive/daemon/stale_agent_healer"
 require "hive/daemon/logger"
 
 module Hive
@@ -43,6 +45,22 @@ module Hive
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
+        # Grace window for AGENT_WORKING markers with no PID attribute
+        # (placeholders stamped on stage entry). Within this window the
+        # dispatcher is presumed to be mid-spawn; past it, the marker
+        # is healed to ERROR reason=agent_orphaned. Default is mirrored
+        # from Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC so the
+        # daemon and the synthetic-stale classification share one source
+        # of truth — operator-overridable in the daemon config block.
+        agent_marker_grace_sec = @daemon_cfg.fetch(
+          "agent_marker_grace_sec",
+          Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
+        )
+        @stale_agent_healer = StaleAgentHealer.new(
+          controller: @controller,
+          logger: @logger,
+          grace_sec: agent_marker_grace_sec
+        )
 
         @shutdown = false
         @reload = false
@@ -107,6 +125,24 @@ module Hive
         refresh_active_agent_snapshot(result.rows)
 
         observe_external_running_rows(result.rows)
+
+        # Heal AGENT_WORKING markers whose backing agent isn't alive
+        # BEFORE per-row dispatch — a healed row classifies as :error on
+        # the next status read, and we don't want the dispatcher to try
+        # to advance the stage on the same tick that just learned the
+        # agent died. The outer rescue protects the tick from a future
+        # NoMethodError/TypeError in the healer: without it, a healer
+        # bug would crash the tick before per-row dispatch and hit
+        # StartLimitBurst=3 in the unit's restart-loop cap.
+        begin
+          @stale_agent_healer.heal(
+            result.rows, now: now, legacy_layout_projects: @legacy_layout_projects
+          )
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "stale_agent_healer raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
 
         # 3. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +
@@ -520,6 +556,19 @@ module Hive
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
+        # Rebuild the healer so an operator tuning
+        # daemon.agent_marker_grace_sec via SIGHUP takes effect within
+        # one tick. Without this rebuild the healer keeps the grace it
+        # captured at boot and only a full daemon restart applies new
+        # values.
+        @stale_agent_healer = StaleAgentHealer.new(
+          controller: @controller,
+          logger: @logger,
+          grace_sec: @daemon_cfg.fetch(
+            "agent_marker_grace_sec",
+            Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
+          )
+        )
         @enabled_cache.clear
         @logger.event(:config_reloaded)
       rescue Hive::ConfigError => e

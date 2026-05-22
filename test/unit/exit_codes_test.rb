@@ -70,7 +70,7 @@ class ExitCodesTest < Minitest::Test
     expected = %w[
       ready_to_brainstorm ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
       ready_to_finalize ready_to_archive
-      needs_input review_findings recover_execute recover_review agent_running archived error
+      needs_input review_findings recover_execute recover_review agent_running archived manual_steering error
     ].sort
     assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort
   end

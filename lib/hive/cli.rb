@@ -32,13 +32,14 @@ module Hive
       `<project>/.hive-state/`, scaffolds stage folders, ignores
       `.hive-state/` on master, and registers the project globally.
 
-      On a TTY, init asks the operator four questions before writing
+      On a TTY, init asks the operator five questions before writing
       anything to disk:
 
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
-        2. Development agent (drives 4-execute)                  — default codex
-        3. Review agents (multi-select over 3 default reviewers) — default all
-        4. Per-stage budget+timeout (8 stage/role pairs)         — default generous
+        2. Brainstorm runtime for Claude                         — default headless
+        3. Development agent (drives 4-execute)                  — default codex
+        4. Review agents (multi-select over 3 default reviewers) — default all
+        5. Per-stage budget+timeout (9 stage/role pairs)         — default generous
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -48,7 +49,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, dev=codex, reviewers=all3, limits=defaults
+        hive: using defaults — planning=claude, brainstorm_runtime=headless, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
@@ -167,6 +168,46 @@ module Hive
         config: cfg,
         project_root: Dir.pwd,
         json: options[:json]
+      ).call
+    end
+
+    desc "update", "Update hive via the install channel that installed it"
+    long_desc <<~DESC
+      Reads the install-channel marker written by the installer and delegates
+      to the native updater:
+
+        brew  → brew upgrade ivankuznetsov/hive/hive
+        aur   → yay -Syu hive-bin (or paru when yay is unavailable)
+        bash  → download the pinned install.sh to a tempfile, then run it
+        dev   → prints git pull && bundle install guidance
+
+      Hive never swaps its own binary in place and never guesses across
+      channels.
+    DESC
+    option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
+    def update
+      require "hive/commands/update"
+      Hive::Commands::Update.new(dry_run: options[:dry_run]).call
+    end
+
+    desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
+    long_desc <<~DESC
+      Stops and deregisters the per-user daemon service, removes hive config
+      and cache directories, and removes versioned bash-install payloads.
+      It preserves accumulated work under XDG state and project .hive-state
+      directories by default.
+
+      --purge is non-interactive for CI but still preserves accumulated work.
+      --force-purge-state is the explicit destructive escape hatch.
+    DESC
+    option :purge, type: :boolean, default: false, desc: "non-interactive cleanup; still preserves state"
+    option :force_purge_state, type: :boolean, default: false,
+                               desc: "also remove XDG state and registered project .hive-state directories"
+    def uninstall
+      require "hive/commands/uninstall"
+      Hive::Commands::Uninstall.new(
+        purge: options[:purge],
+        force_purge_state: options[:force_purge_state]
       ).call
     end
 
@@ -478,7 +519,7 @@ module Hive
       ).call
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / enable / disable)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -489,6 +530,16 @@ module Hive
         reload [--json]                   Send SIGHUP to reload config.
                                           --json emits hive-daemon-reload.v1.
         tail                              Stream daemon.log.
+        install [--force] [--json]        (Re)write the platform-native unit
+                                          file. Without --force, refuses to
+                                          overwrite a pre-existing unit and
+                                          exits 64 (USAGE). With --force,
+                                          saves the previous file to a
+                                          timestamped <path>.bak-<UTC-stamp>
+                                          (never overwritten) and restarts
+                                          the running daemon so new
+                                          Environment= lines take effect.
+                                          --json emits hive-daemon-install.v1.
         enable  PROJECT|--all [--json]    Set daemon.enabled: true in
                                           <project>/.hive-state/config.yml.
                                           --all = every registered project;
@@ -523,6 +574,8 @@ module Hive
                      desc: "log dispatch decisions without spawning real children"
     option :all, type: :boolean, default: false,
                  desc: "for enable/disable: apply to every registered project"
+    option :force, type: :boolean, default: false,
+                   desc: "for install: overwrite an existing unit (saves <path>.bak)"
     def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
       # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
@@ -545,12 +598,21 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
         )
       end
+      if options[:force] && subcommand != "install"
+        emit_daemon_argv_error(
+          subcommand: subcommand,
+          message: "hive daemon #{subcommand}: --force only applies to `install`; " \
+                   "drop it or use `hive daemon install --force`",
+          error_kind: Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG
+        )
+      end
       Hive::Commands::Daemon.new(
         subcommand, targets.first,
         detach: options[:detach],
         dry_run: options[:dry_run],
         all: options[:all],
-        json: options[:json]
+        json: options[:json],
+        force: options[:force]
       ).call
     end
 
@@ -628,10 +690,15 @@ module Hive
       Modes (each with its own keymap):
 
         grid (default)
-          b/p/d/r/P/a   dispatch hive brainstorm/plan/develop/review/pr/archive
+          b/p/d/r/P/F/a dispatch hive brainstorm/plan/develop/review/open-pr/finalize/archive
           j/k or Down/Up cursor up/down (jumps across projects at edges)
           Enter         contextual: review_findings opens triage,
-                        agent_running/error opens log tail, ready_* dispatches
+                        agent_running opens log tail, recoverable errors rerun,
+                        ready_* dispatches
+          o             open the focused task folder in $EDITOR for browse-only inspection
+          s             steer the focused task manually in the configured dev agent;
+                        marks MANUAL_STEERING and archives it on agent exit
+          n             open the new-idea prompt
           /             open the slug-filter prompt
           1-9           scope to the Nth registered project; 0 clears scope
           ?             open this help overlay

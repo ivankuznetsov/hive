@@ -3,17 +3,17 @@ title: 2-brainstorm stage
 type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-19
 tags: [stage, brainstorm, qa, tmux]
 ---
 
-**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Two runtimes are selectable via `brainstorm.runtime` in project config: `headless` (default; non-interactive agent spawn) and `tmux_interactive` (claude runs inside a managed tmux session via `Hive::TmuxRunner` + `Hive::Stages::BrainstormTmux`, allowing live user typing). Runtime is validated by `Hive::Config.validate_brainstorm_runtime!` against `BRAINSTORM_RUNTIMES = %w[headless tmux_interactive]`. `hive doctor` adds a `kind: "dependency"` row checking tmux availability and minimum version when the project is on `tmux_interactive`.
+**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Two runtimes are selectable via `brainstorm.runtime` in project config and during `hive init` when the planning agent is Claude: `headless` (default; non-interactive agent spawn) and `tmux_interactive` (claude runs inside a managed tmux session via `Hive::TmuxRunner` + `Hive::Stages::BrainstormTmux`, allowing live user typing). The tmux runner waits for Claude's interactive prompt before pasting, confirms Claude's first-run folder-trust prompt for the task folder, and starts Claude with `--permission-mode bypassPermissions` plus `--allowedTools Read,Write,Edit,LS` so task-folder reads and `brainstorm.md` edits do not block on approval prompts while Bash stays unavailable. Runtime is validated by `Hive::Config.validate_brainstorm_runtime!` against `BRAINSTORM_RUNTIMES = %w[headless tmux_interactive]`. `hive doctor` adds a `kind: "dependency"` row checking tmux availability and minimum version when the project is on `tmux_interactive`.
 
 ## Setup
 
 - **State file**: `brainstorm.md` (touched empty if absent so the marker write has a target).
 - **Prompt**: `templates/brainstorm_prompt.md.erb`, rendered with `project_name`, `task_folder`, `idea_text`. Idea text is wrapped in `<user_supplied content_type="idea_text">…</user_supplied>` per the prompt-injection boundary policy.
-- **Agent invocation**: `cwd = task.folder`, `--add-dir <project_root>` (so `claude` picks up the project's `CLAUDE.md` / `.claude/`), `log_label = "brainstorm"`.
+- **Agent invocation**: `cwd = task.folder`, `--add-dir <project_root>` (so `claude` picks up the project's `CLAUDE.md` / `.claude/`), `log_label = "brainstorm"`. For `tmux_interactive`, `BrainstormTmux` starts Claude through `interactive_claude_wrapper.sh`, unsets API-key env vars, passes `--add-dir <task.folder>` plus `--permission-mode bypassPermissions` and `--allowedTools Read,Write,Edit,LS`, waits for the TUI prompt, and then pastes/submits the rendered prompt with a short delay so Enter does not race the paste.
 - **Profile**: `Hive::Stages::Base.stage_profile(cfg, "brainstorm")` — reads `cfg.dig("brainstorm", "agent")` with `|| "claude"` fallback so legacy configs keep working. Spawn pins `status_mode: :state_file_marker` regardless of profile, because brainstorm's lifecycle contract is the WAITING/COMPLETE marker the agent writes to `brainstorm.md` — codex's profile default `:output_file_exists` would never satisfy that.
 - **Budgets**: `cfg["budget_usd"]["brainstorm"]` (default 50), `cfg["timeout_sec"]["brainstorm"]` (default 1800). Bumped ~5× in plan 2026-05-04-001 — generous sanity caps for runaway agents, not cost targets.
 

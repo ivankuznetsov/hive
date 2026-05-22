@@ -131,6 +131,11 @@ module Hive
         label: "Archived",
         command: nil
       },
+      manual_steering: {
+        key: Hive::Schemas::TaskActionKind::MANUAL_STEERING,
+        label: "Manually steered",
+        command: nil
+      },
       agent_running: {
         # Marker is `:agent_working` — a `hive run` is in flight. Surfacing
         # a workflow command here would send the user (or an agent loop)
@@ -149,12 +154,24 @@ module Hive
 
     attr_reader :task, :marker, :project_name
 
-    def initialize(task, marker, project_name: nil, project_count: 1, stage_collision: false)
+    # Default grace window for placeholder AGENT_WORKING markers (no PID
+    # attribute) before they classify as orphaned. Mirrors the daemon's
+    # `daemon.agent_marker_grace_sec` default so consumers see the same
+    # threshold whether they read from the daemon-healed marker or the
+    # synthetic classification done here. Configurable per-instance.
+    DEFAULT_AGENT_MARKER_GRACE_SEC = 300
+
+    def initialize(task, marker, project_name: nil, project_count: 1, stage_collision: false,
+                   pid_alive: nil, state_file_mtime: nil,
+                   agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC)
       @task = task
       @marker = marker
       @project_name = project_name
       @project_count = project_count
       @stage_collision = stage_collision
+      @pid_alive = pid_alive
+      @state_file_mtime = state_file_mtime
+      @agent_marker_grace_sec = agent_marker_grace_sec
     end
 
     def self.for(task, marker, **)
@@ -201,9 +218,16 @@ module Hive
     def action
       # `:agent_working` overrides every (stage, marker) pair — a live
       # agent run on the task pre-empts whatever workflow advice the
-      # state-machine would otherwise produce.
-      return ACTIONS.fetch(:agent_running) if marker.name == :agent_working
+      # state-machine would otherwise produce. When liveness signal is
+      # passed and proves the agent isn't actually alive, classify as
+      # :error immediately so consumers don't have to wait for the
+      # daemon's StaleAgentHealer to rewrite the marker on disk.
+      if marker.name == :agent_working
+        return ACTIONS.fetch(:error) if stale_agent_reason
+        return ACTIONS.fetch(:agent_running)
+      end
       return ACTIONS.fetch(:error) if marker.name == :error
+      return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering
 
       case task.stage_name
       when "inbox"
@@ -289,9 +313,31 @@ module Hive
       ACTIONS.fetch(:review_complete)
     end
 
+    # Returns :agent_died, :agent_orphaned, or nil. Mirrors
+    # Hive::Daemon::StaleAgentHealer's classification so the in-memory
+    # action surface matches the disk-side healing, even before the
+    # daemon has ticked.
+    def stale_agent_reason
+      return nil unless marker.name == :agent_working
+
+      case @pid_alive
+      when false
+        :agent_died
+      when nil
+        return nil unless @state_file_mtime && marker.attrs["pid"].to_s.empty?
+
+        age = Time.now - @state_file_mtime
+        age > @agent_marker_grace_sec ? :agent_orphaned : nil
+      else
+        nil
+      end
+    end
+
     public
 
     def diagnostic
+      synthesized = synthetic_stale_agent_diagnostic
+      return synthesized if synthesized
       return nil unless diagnostic_action?
 
       artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
@@ -320,6 +366,43 @@ module Hive
     end
 
     private
+
+    # Diagnostic synthesized purely from liveness signal — the on-disk
+    # marker is still AGENT_WORKING (no artifact, no diagnosis pass),
+    # so the existing diagnostic_artifacts pipeline has nothing to chew
+    # on. Once the daemon's StaleAgentHealer rewrites the marker to
+    # ERROR reason=..., the normal generic_error_artifacts path takes
+    # over and this synthesized shape is no longer produced.
+    def synthetic_stale_agent_diagnostic
+      reason = stale_agent_reason
+      return nil unless reason
+
+      summary =
+        case reason
+        when :agent_died
+          recorded_pid = marker.attrs["pid"]
+          if recorded_pid && !recorded_pid.empty?
+            "agent process not alive (recorded pid=#{recorded_pid})"
+          else
+            "agent process not alive"
+          end
+        when :agent_orphaned
+          age_min = ((Time.now - @state_file_mtime) / 60).to_i
+          "agent never attached (marker placeholder is #{age_min} min old)"
+        end
+
+      {
+        "summary" => summary,
+        "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, recover via `hive markers clear #{task.slug} --name ERROR` or the standard red-status flow. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
+        "source" => "marker",
+        "source_path" => nil,
+        "artifact_paths" => [],
+        "generated_by" => "local",
+        "marker_signature" => marker_signature,
+        "suggested_next_action" => suggested_next_action_payload,
+        "updated_at" => Time.now.utc.iso8601
+      }
+    end
 
     # The diagnostic shape exists for ALL three recovery action keys per
     # ADR-027 and wiki/commands/status.md — recover_review, error, AND

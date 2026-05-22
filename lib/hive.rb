@@ -22,6 +22,7 @@ module Hive
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
       "hive-daemon-reload" => 1,
+      "hive-daemon-install" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1
@@ -121,6 +122,7 @@ module Hive
       RECOVER_REVIEW      = "recover_review".freeze
       AGENT_RUNNING       = "agent_running".freeze
       ARCHIVED            = "archived".freeze
+      MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
@@ -251,13 +253,17 @@ module Hive
     #                       non-mapping shape) → exit 78.
     #   internal          — uncategorised crash (exit 70).
     module EnrollErrorKind
-      MISSING_PROJECT = "missing_project".freeze
-      UNKNOWN_PROJECT = "unknown_project".freeze
-      PROJECT_AND_ALL = "project_and_all".freeze
-      NOT_INITIALISED = "not_initialised".freeze
-      NO_PROJECTS     = "no_projects".freeze
-      CONFIG          = "config".freeze
-      INTERNAL        = "internal".freeze
+      MISSING_PROJECT       = "missing_project".freeze
+      UNKNOWN_PROJECT       = "unknown_project".freeze
+      PROJECT_AND_ALL       = "project_and_all".freeze
+      NOT_INITIALISED       = "not_initialised".freeze
+      NO_PROJECTS           = "no_projects".freeze
+      CONFIG                = "config".freeze
+      INTERNAL              = "internal".freeze
+      # Flag passed to a subcommand that doesn't accept it (e.g.,
+      # `--force` on `hive daemon stop`). Distinct from PROJECT_AND_ALL
+      # so automation branching on error_kind can act differently.
+      WRONG_SUBCOMMAND_FLAG = "wrong_subcommand_flag".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
 
@@ -298,6 +304,7 @@ module Hive
     TASK_IN_ERROR = 3
     WRONG_STAGE = 4
     USAGE = 64
+    UNAVAILABLE = 69
     SOFTWARE = 70
     TEMPFAIL = 75
     CONFIG = 78
@@ -372,6 +379,12 @@ module Hive
     end
   end
 
+  class UnavailableError < Error
+    def exit_code
+      ExitCodes::UNAVAILABLE
+    end
+  end
+
   class StageError < Error
     def exit_code
       ExitCodes::SOFTWARE
@@ -382,6 +395,24 @@ module Hive
   # CLI's top-level rescue. Translates to SOFTWARE (70) so wrappers can
   # treat it like other internal failures rather than the generic 1.
   class InternalError < Error
+    def exit_code
+      ExitCodes::SOFTWARE
+    end
+  end
+
+  # `hive daemon install` outcome split (PR #113 follow-up): drift is a
+  # recoverable USAGE error (re-run with --force) while a service-manager
+  # failure (systemctl reload/restart, launchctl load) is SOFTWARE. Two
+  # error classes so the top-level rescue maps each outcome to a stable
+  # exit code (64 / 70) that automation can branch on without parsing
+  # the JSON envelope.
+  class DaemonInstallDriftError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class DaemonInstallFailed < Error
     def exit_code
       ExitCodes::SOFTWARE
     end

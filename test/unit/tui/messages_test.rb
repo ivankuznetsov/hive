@@ -59,6 +59,46 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_open_idea_preview_carries_row
+    row = Object.new
+    msg = Hive::Tui::Messages::OpenIdeaPreview.new(row: row)
+
+    assert_same row, msg.row
+    assert_includes Hive::Tui::Messages::OpenIdeaPreview.members, :row
+  end
+
+  def test_open_in_agent_carries_row
+    row = Object.new
+    msg = Hive::Tui::Messages::OpenInAgent.new(row: row)
+    assert_same row, msg.row
+    assert msg.frozen?, "Data.define records must be frozen"
+  end
+
+  def test_open_in_agent_requires_row
+    assert_raises(ArgumentError) { Hive::Tui::Messages::OpenInAgent.new }
+  end
+
+  def test_agent_steer_exited_carries_exit_context
+    msg = Hive::Tui::Messages::AgentSteerExited.new(
+      slug: "manual-task",
+      folder: "/tmp/hive/.hive-state/stages/4-execute/manual-task",
+      exit_code: 0,
+      worktree: "/tmp/hive.worktrees/manual-task"
+    )
+
+    assert_equal "manual-task", msg.slug
+    assert_equal "/tmp/hive/.hive-state/stages/4-execute/manual-task", msg.folder
+    assert_equal 0, msg.exit_code
+    assert_equal "/tmp/hive.worktrees/manual-task", msg.worktree
+    assert msg.frozen?, "Data.define records must be frozen"
+  end
+
+  def test_agent_steer_exited_requires_all_fields
+    assert_raises(ArgumentError) do
+      Hive::Tui::Messages::AgentSteerExited.new(slug: "manual-task", folder: "/tmp/f")
+    end
+  end
+
   def test_recover_review_carries_row
     row = Object.new
     msg = Hive::Tui::Messages::RecoverReview.new(row: row)

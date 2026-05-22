@@ -16,6 +16,7 @@ module Hive
         waiting: "⏸",
         complete: "✓",
         agent_working: "🤖",
+        manual_steering: "🛠",
         execute_waiting: "⏸",
         execute_complete: "✓",
         execute_stale: "⚠",
@@ -144,12 +145,15 @@ module Hive
       # the number — the same predicate `Hive::Commands::Migrate` uses to
       # decide what it is allowed to mv, so the count matches what
       # `hive migrate` would actually move.
+      STATUS_PRIVATE_STAGE_DIRS = %w[archived-manual].freeze
+
       def detect_legacy_stage_dirs(hive_state)
         stages_root = File.join(hive_state, "stages")
         return [] unless File.directory?(stages_root)
 
         Dir.children(stages_root).filter_map do |basename|
           next if Hive::Stages::DIRS.include?(basename)
+          next if STATUS_PRIVATE_STAGE_DIRS.include?(basename)
 
           dir = File.join(stages_root, basename)
           next unless File.directory?(dir)
@@ -191,7 +195,8 @@ module Hive
           stage_filter: @stage
         ).resolve
         marker = Hive::Markers.current(task.state_file)
-        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task))
+        liveness = liveness_kwargs_for(task)
+        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
         diagnostic = action.diagnostic
 
         if @write
@@ -218,11 +223,28 @@ module Hive
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
-          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task)).diagnostic
+          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
           emit_diagnose_result(task, diagnostic, result[:path])
         else
           emit_diagnose_result(task, diagnostic, nil)
         end
+      end
+
+      # Liveness inputs for TaskAction. Mirrors the per-row computation
+      # in collect_rows so the diagnose surface classifies stale
+      # AGENT_WORKING the same way `hive status --json` and the TUI do.
+      # Otherwise stale rows hit via `--diagnose <slug>` would report
+      # diagnostic=nil and the `--write` path would refuse with "not
+      # in a red recovery state."
+      def liveness_kwargs_for(task)
+        claude_pid = lookup_claude_pid(task)
+        state_file = task.state_file
+        mtime = File.exist?(state_file) ? File.mtime(state_file) : nil
+        {
+          pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
+          state_file_mtime: mtime,
+          agent_marker_grace_sec: agent_marker_grace_sec_from_config
+        }
       end
 
       def emit_diagnose_result(task, diagnostic, path)
@@ -375,18 +397,23 @@ module Hive
         "Ready to finalize",
         "Ready to archive",
         "Archived",
+        "Manually steered",
         "Error"
       ].freeze
 
       def annotate_actions(rows, project, project_count, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
+        grace_sec = agent_marker_grace_sec_from_config
         rows.map do |row|
           action = Hive::TaskAction.for(
             row[:task],
             marker_from_row(row),
             project_name: project["name"],
             project_count: project_count,
-            stage_collision: slug_counts[row[:slug]] > 1
+            stage_collision: slug_counts[row[:slug]] > 1,
+            pid_alive: row[:claude_pid_alive],
+            state_file_mtime: row[:mtime],
+            agent_marker_grace_sec: grace_sec
           )
           row.merge(
             action_key: action.key,
@@ -395,6 +422,27 @@ module Hive
             next_action: action.next_action,
             diagnostic: with_diagnostic ? action.diagnostic : nil
           )
+        end
+      end
+
+      # Memoize per status call. The daemon's StaleAgentHealer reads the
+      # same key from the same global config so both surfaces classify
+      # rows with one threshold; if this fetch raises a recognised
+      # config error (corrupted YAML, missing file, non-Integer value),
+      # warn loudly and fall back to the TaskAction constant so the
+      # status snapshot never crashes over a config edge case.
+      # Unexpected errors (programmer bugs, runtime NoMethodError) are
+      # NOT caught here — the broader CLI rescue at bin/hive surfaces
+      # those with a stack trace, which is the right behaviour.
+      def agent_marker_grace_sec_from_config
+        @agent_marker_grace_sec_from_config ||= begin
+          daemon_cfg = Hive::Config.load_global_daemon
+          Integer(daemon_cfg.fetch("agent_marker_grace_sec",
+                                   Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC))
+        rescue Hive::ConfigError, TypeError, ArgumentError => e
+          warn "hive: invalid daemon.agent_marker_grace_sec (#{e.class}: #{e.message}); " \
+               "using default #{Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC}s"
+          Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
         end
       end
 

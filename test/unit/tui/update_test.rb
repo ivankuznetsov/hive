@@ -478,6 +478,31 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil cmd
   end
 
+  def test_open_in_agent_is_side_effect_owned_and_noops_in_update
+    new_model, cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::OpenInAgent.new(row: Object.new)
+    )
+
+    assert_same model, new_model
+    assert_nil cmd
+  end
+
+  def test_agent_steer_exited_is_side_effect_owned_and_noops_in_update
+    new_model, cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::AgentSteerExited.new(
+        slug: "manual-task",
+        folder: "/tmp/hive/manual-task",
+        exit_code: 0,
+        worktree: "/tmp/hive.worktrees/manual-task"
+      )
+    )
+
+    assert_same model, new_model
+    assert_nil cmd
+  end
+
   # ---------- Pure-function discipline ----------
 
   def test_apply_does_not_mutate_input_model
@@ -1172,6 +1197,33 @@ class HiveTuiUpdateTest < Minitest::Test
     starting = model.with(mode: :help)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
     assert_equal :grid, new_model.mode
+  end
+
+  def test_back_from_idea_preview_clears_text_and_returns_to_grid
+    starting = model.with(
+      mode: :idea_preview,
+      idea_preview_text: "original idea",
+      idea_preview_slug: "some-slug"
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.idea_preview_text
+    assert_nil new_model.idea_preview_slug
+  end
+
+  def test_back_from_idea_preview_preserves_cursor_and_scope
+    starting = model.with(
+      mode: :idea_preview,
+      idea_preview_text: "original idea",
+      idea_preview_slug: "some-slug",
+      cursor: [ 1, 2 ],
+      scope: 2
+    )
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+
+    assert_equal [ 1, 2 ], new_model.cursor
+    assert_equal 2, new_model.scope
   end
 
   def test_project_scope_sets_scope_and_resets_cursor

@@ -163,6 +163,46 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
+  def test_body_with_only_section_headers_returns_no_findings_without_posting
+    # A reviewer that found nothing still writes the High/Medium/Nit
+    # section headers per the reviewer prompt; posting that empty
+    # skeleton is pure noise. Publisher must short-circuit to
+    # :no_findings before calling `gh pr comment`.
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "## High\n\n## Medium\n\n## Nit\n")
+
+      result = Hive::Stages::Review::GithubPublisher.publish!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+      )
+
+      assert_equal :no_findings, result
+      log_path = File.join(@log_dir, "fake-gh-argv.log")
+      log = File.exist?(log_path) ? File.read(log_path) : ""
+      refute_includes log, "arg=comment\n",
+                      "no-findings short-circuit must NOT invoke `gh pr comment`"
+    end
+  end
+
+  def test_body_with_checked_finding_still_posts
+    # `[x]` lines are the triage-accepted-auto-fix signal — still a
+    # finding worth surfacing on the PR. Guard the no-findings
+    # short-circuit so it only fires when literally zero checkbox
+    # lines exist.
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "## High\n\n- [x] fixed by triage\n")
+
+      result = Hive::Stages::Review::GithubPublisher.publish!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+      )
+
+      assert_equal :posted, result
+    end
+  end
+
   def test_secret_in_reviewer_body_returns_secret_without_posting
     # plan Risk #3: a reviewer body that contains a credential
     # pattern must short-circuit to :secret with zero `gh pr comment`
@@ -170,7 +210,7 @@ class ReviewGithubPublisherTest < Minitest::Test
     with_tmp_dir do |dir|
       task = make_task(dir)
       body = File.join(task.reviews_dir, "codex-01.md")
-      File.write(body, "key: sk-ant-#{'a' * 30}\n")
+      File.write(body, "- [ ] leaked key: sk-ant-#{'a' * 30}\n")
 
       _out, err = capture_io do
         result = Hive::Stages::Review::GithubPublisher.publish!(

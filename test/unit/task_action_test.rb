@@ -295,11 +295,120 @@ class TaskActionTest < Minitest::Test
     # retry loops into ConcurrentRunError. Always agent_running, no command.
     %w[brainstorm plan execute open-pr review finalize].each do |stage|
       task = fake_task(stage_name: stage, stage_index: Hive::Stages::NAMES.index(stage) + 1)
-      action = Hive::TaskAction.for(task, marker(:agent_working, "pid" => "12345"))
+      action = Hive::TaskAction.for(task, marker(:agent_working, "pid" => "12345"),
+                                    pid_alive: true)
       assert_equal "agent_running", action.key, "stage=#{stage} must short-circuit to agent_running"
       assert_equal "Agent running", action.label
       assert_nil action.command, "agent_running must emit no command"
     end
+  end
+
+  def test_manual_steering_marker_is_non_actionable_in_execute_stage
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:manual_steering, "agent" => "claude"))
+
+    assert_equal "manual_steering", action.key
+    assert_equal "Manually steered", action.label
+    assert_nil action.command, "manual steering rows must not expose a workflow command"
+  end
+
+  def test_manual_steering_marker_overrides_early_stage_classification
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:manual_steering, "agent" => "codex"))
+
+    assert_equal "manual_steering", action.key
+    assert_equal "Manually steered", action.label
+    assert_nil action.command
+  end
+
+  def test_agent_working_with_dead_pid_classifies_as_error
+    # Liveness signal: marker has pid attr AND caller passes
+    # pid_alive: false → the agent died without rewriting its own
+    # marker. Classifying as :agent_running would lie to every
+    # consumer (TUI, bot, daemon) about there being live work.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(
+      task, marker(:agent_working, "pid" => "12345"), pid_alive: false
+    )
+    assert_equal "error", action.key,
+                 "dead-pid AGENT_WORKING must classify as error so the row stops claiming the agent is running"
+    assert_nil action.command
+    diag = action.diagnostic
+    refute_nil diag, "stale agent_working must emit a synthetic diagnostic so the red-status surface has something to render"
+    assert_includes diag["summary"], "12345",
+                    "diagnostic summary should surface the recorded pid for operator triage"
+  end
+
+  def test_agent_working_with_no_pid_and_old_mtime_classifies_as_error
+    # The placeholder case: executor stage stamps AGENT_WORKING with no
+    # pid attribute on stage entry. If the dispatcher never attaches an
+    # agent, the marker just lingers — this was the original bug. Once
+    # the placeholder is older than the grace window, classify as
+    # :error reason=agent_orphaned.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(
+      task, marker(:agent_working),
+      pid_alive: nil,
+      state_file_mtime: Time.now - 600,
+      agent_marker_grace_sec: 300
+    )
+    assert_equal "error", action.key
+    assert_match(/never attached/, action.diagnostic["summary"])
+  end
+
+  def test_synthetic_stale_agent_diagnostic_suggests_a_command_in_markers_clear_allowlist
+    # The synthetic diagnostic's `detail` text instructs the operator
+    # to run `hive markers clear <slug> --name ERROR`. If a future
+    # rename in lib/hive/commands/markers.rb#ALLOWED_NAMES ships a
+    # different terminal-recovery marker, this test catches the drift
+    # at unit-test time rather than at customer-frustration time
+    # (exit 4 from a copy-paste).
+    require "hive/commands/markers"
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    pattern = /clear[^\n]*--name ([A-Z_]+)/
+
+    # agent_died branch: marker has pid attr, claude_pid_alive=false.
+    died_action = Hive::TaskAction.for(
+      task, marker(:agent_working, "pid" => "12345"),
+      pid_alive: false, agent_marker_grace_sec: 300
+    )
+    died_detail = died_action.diagnostic["detail"]
+    died_match = died_detail.match(pattern)
+    assert died_match, "agent_died synthetic detail must include a `markers clear --name X` command; got: #{died_detail.inspect}"
+    assert_includes Hive::Commands::Markers::ALLOWED_NAMES, died_match[1],
+                    "agent_died synthetic detail suggests `--name #{died_match[1]}` which is not in ALLOWED_NAMES"
+
+    # agent_orphaned branch: marker has NO pid attr, mtime past grace.
+    orphan_action = Hive::TaskAction.for(
+      task, marker(:agent_working),
+      pid_alive: nil, state_file_mtime: Time.now - 600, agent_marker_grace_sec: 300
+    )
+    orphan_detail = orphan_action.diagnostic["detail"]
+    orphan_match = orphan_detail.match(pattern)
+    assert orphan_match, "agent_orphaned synthetic detail must include a `markers clear --name X` command; got: #{orphan_detail.inspect}"
+    assert_includes Hive::Commands::Markers::ALLOWED_NAMES, orphan_match[1],
+                    "agent_orphaned synthetic detail suggests `--name #{orphan_match[1]}` which is not in ALLOWED_NAMES"
+  end
+
+  def test_agent_working_with_no_pid_within_grace_stays_agent_running
+    # Within the grace window the daemon is presumed to be mid-spawn.
+    # Classifying as :error here would race the dispatcher.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(
+      task, marker(:agent_working),
+      pid_alive: nil,
+      state_file_mtime: Time.now - 60,
+      agent_marker_grace_sec: 300
+    )
+    assert_equal "agent_running", action.key
+  end
+
+  def test_agent_working_without_liveness_signal_falls_back_to_agent_running
+    # Backward compat: callers that haven't been updated to pass
+    # pid_alive/state_file_mtime should see the original behavior.
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:agent_working))
+    assert_equal "agent_running", action.key
   end
 
   def test_error_marker_overrides_every_stage

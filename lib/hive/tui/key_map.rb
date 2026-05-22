@@ -84,6 +84,7 @@ module Hive
         when :red_status_detail then red_status_detail_message(key: key, row: row)
         when :filter then filter_message(key: key, row: row)
         when :help then help_message(key: key, row: row)
+        when :idea_preview then idea_preview_message(key: key, row: row)
         when :new_idea_project then new_idea_project_message(key: key, row: row)
         when :new_idea then new_idea_message(key: key, row: row)
         else raise ArgumentError, "unknown mode: #{mode.inspect}"
@@ -116,7 +117,14 @@ module Hive
 
         return Messages::NOOP if row.nil?
 
-        return Messages::OpenTaskFolder.new(row: row) if key == "o"
+        # `o`, `i`, and `s` are row-bound browse/preview/steer gestures
+        # that require right-pane focus (where the row under the cursor
+        # is). Without the gate, an operator on the left (scope) pane
+        # could fire any of these against a row whose cursor they are
+        # not visually tracking.
+        return Messages::OpenTaskFolder.new(row: row) if key == "o" && pane_focus == :right
+        return Messages::OpenIdeaPreview.new(row: row) if key == "i" && pane_focus == :right
+        return Messages::OpenInAgent.new(row: row) if key == "s" && pane_focus == :right
         return verb_message(row, key) if VERB_KEYS.key?(key)
         return enter_message(row) if ENTER_KEYS.include?(key)
 
@@ -362,11 +370,18 @@ module Hive
         key.is_a?(String) && key.length == 1
       end
 
-      # Help overlay dismisses on any key — matches the curses-era
-      # `Render::HelpOverlay#show` behaviour. Any printable char or
-      # special key returns BACK; the cursor singletons aren't special-
-      # cased here because they should also dismiss.
+      # Help overlay dismisses on any key except Ctrl+V, which remains
+      # inert outside the new-idea composer instead of closing overlays.
       def help_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
+        return Messages::NOOP if key == :key_ctrl_v
+
+        Messages::BACK
+      end
+
+      # Idea preview is read-only: every key closes it and returns to
+      # grid, whether Bubble Tea emitted a printable String or a
+      # special-key Symbol.
+      def idea_preview_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         Messages::BACK
       end
 
@@ -387,6 +402,7 @@ module Hive
         return Messages::NEW_IDEA_CURSOR_RIGHT if key == :key_right
         return Messages::NEW_IDEA_CURSOR_HOME if key == :key_home || key == :key_ctrl_a
         return Messages::NEW_IDEA_CURSOR_END if key == :key_end || key == :key_ctrl_e
+        return Messages::NewIdeaPasteRequested.new(raw_text: "") if key == :key_ctrl_v
         return Messages::NewIdeaTextInserted.new(text: " ") if key == :space
         return Messages::NewIdeaTextInserted.new(text: key) if printable_filter_char?(key)
 

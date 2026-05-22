@@ -26,6 +26,8 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil model.new_idea_staging_dir
     assert_nil model.new_idea_staging_tmp_root
     assert_equal [], model.new_idea_broken_labels
+    assert_nil model.idea_preview_text
+    assert_nil model.idea_preview_slug
     assert_nil model.flash
     assert_nil model.flash_set_at
     assert_nil model.triage_state
@@ -62,6 +64,17 @@ class HiveTuiModelTest < Minitest::Test
     refute_same a, b, "#with must return a new Model, never mutate"
     assert_equal 0, a.scope
     assert_equal 2, b.scope
+  end
+
+  def test_with_updates_idea_preview_fields
+    a = Hive::Tui::Model.initial
+    b = a.with(idea_preview_text: "original idea", idea_preview_slug: "ship-preview")
+
+    assert_nil a.idea_preview_text
+    assert_nil a.idea_preview_slug
+    assert_equal "original idea", b.idea_preview_text
+    assert_equal "ship-preview", b.idea_preview_slug
+    refute_same a, b
   end
 
   def test_model_is_immutable
@@ -117,7 +130,8 @@ class HiveTuiModelTest < Minitest::Test
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_project_name
                   new_idea_project_cursor new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
-                  new_idea_broken_labels flash flash_set_at triage_state tail_state red_status_detail_state
+                  new_idea_broken_labels idea_preview_text idea_preview_slug flash flash_set_at
+                  triage_state tail_state red_status_detail_state
                   cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end

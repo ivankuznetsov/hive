@@ -51,6 +51,15 @@ StartLimitIntervalSec=300
 
 [Service]
 Type=simple
+# `hive daemon` shells out to `hive status --json` once per tick. systemd
+# user services do NOT inherit your interactive shell's PATH, so we set
+# HIVE_BIN to an absolute path (consumed by lib/hive/daemon/status_consumer.rb)
+# and a minimal PATH for any other shell-outs the daemon performs (git, etc.).
+# `hive init` and `hive daemon install` rewrite HIVE_BIN= to the same absolute
+# path used in ExecStart=. If you copy this template verbatim, the default
+# %h/.local/bin/hive is the option-A install location.
+Environment=HIVE_BIN=%h/.local/bin/hive
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/hive daemon start
 Restart=on-failure
 RestartSec=30s

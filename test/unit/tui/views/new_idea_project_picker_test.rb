@@ -54,4 +54,26 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
 
     assert_includes Hive::Tui::Views::NewIdeaProjectPicker.render(model), "Loading projects"
   end
+
+  def test_choices_returns_empty_when_snapshot_is_nil
+    model = Hive::Tui::Model.initial.with(snapshot: nil)
+
+    assert_empty Hive::Tui::Views::NewIdeaProjectPicker.choices(model)
+  end
+
+  def test_visible_projects_windows_long_lists_around_cursor
+    projects = 8.times.map { |idx| Struct.new(:name).new("project-#{idx + 1}") }
+
+    visible, first_idx = Hive::Tui::Views::NewIdeaProjectPicker.visible_projects(projects, 7)
+
+    assert_equal 2, first_idx
+    assert_equal %w[project-3 project-4 project-5 project-6 project-7 project-8], visible.map(&:name)
+  end
+
+  def test_truncate_leaves_line_unchanged_when_width_is_not_positive
+    line = "Choose project for new idea: hive"
+
+    assert_equal line, Hive::Tui::Views::NewIdeaProjectPicker.truncate(line, 0)
+    assert_equal line, Hive::Tui::Views::NewIdeaProjectPicker.truncate(line, -5)
+  end
 end

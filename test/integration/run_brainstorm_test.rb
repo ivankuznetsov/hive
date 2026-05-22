@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
@@ -47,6 +48,12 @@ class RunBrainstormTest < Minitest::Test
         assert_equal :waiting, marker.name
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
         assert_match(%r{\Ahive: 2-brainstorm/.* round_waiting\z}, log)
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        event_types = events.map { |event| event.fetch("event_type") }
+        assert_operator event_types.index("stage_enter"), :<, event_types.index("round_waiting")
+        assert_operator event_types.index("round_waiting"), :<, event_types.index("stage_exit")
+        assert_equal "2-brainstorm", events.first.fetch("stage")
+        assert File.exist?(File.join(folder, "status.md")), "status.md should be rendered after events"
       end
     end
   end

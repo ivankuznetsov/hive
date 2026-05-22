@@ -389,6 +389,11 @@ class RunReviewTest < Minitest::Test
         # ci-blocked.md is written for the user to inspect.
         assert File.exist?(File.join(folder, "reviews", "ci-blocked.md"))
         assert_includes File.read(File.join(folder, "reviews", "ci-blocked.md")), "FAIL"
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        assert_includes events.map { |event| event.fetch("event_type") }, "stage_enter"
+        assert events.any? { |event| event["event_type"] == "error" && event["message"].include?("review_ci_stale") },
+               "review_ci_stale should be mirrored to events.jsonl"
+        assert_equal "stage_exit", events.last.fetch("event_type")
       end
     end
   end

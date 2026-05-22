@@ -4,6 +4,8 @@ require "securerandom"
 require "time"
 require "hive/agent"
 require "hive/agent_profiles"
+require "hive/events"
+require "hive/markers"
 
 module Hive
   module Stages
@@ -109,6 +111,80 @@ module Hive
       def stage_profile(cfg, stage_name)
         name = cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
+      end
+
+      def with_stage_events(task)
+        stage = stage_label(task)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :stage_enter,
+          message: "run started"
+        )
+        result = yield
+        marker = Hive::Markers.current(task.state_file)
+        emit_marker_event(task, stage, marker)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :stage_exit,
+          message: "status=#{marker.name}"
+        )
+        result
+      rescue SystemExit => e
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage || stage_label(task),
+          event_type: :error,
+          message: "system_exit status=#{e.status}"
+        )
+        raise
+      rescue StandardError => e
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage || stage_label(task),
+          event_type: :error,
+          message: "#{e.class}: #{e.message}"
+        )
+        raise
+      end
+
+      def stage_label(task)
+        "#{task.stage_index}-#{task.stage_name}"
+      end
+
+      def emit_marker_event(task, stage, marker)
+        if %w[brainstorm plan].include?(task.stage_name)
+          case marker.name
+          when :waiting
+            Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
+                              event_type: :round_waiting, message: "status=waiting")
+          when :complete
+            Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
+                              event_type: :round_complete, message: "status=complete")
+          end
+        end
+
+        return unless error_marker?(marker.name)
+
+        Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
+                          event_type: :error, message: marker_event_message(marker))
+      end
+
+      def error_marker?(name)
+        %i[error review_error review_ci_stale review_stale].include?(name)
+      end
+
+      def marker_event_message(marker)
+        attrs = marker.attrs
+        detail = attrs["reason"] || attrs["phase"] || attrs["attempts"] || attrs["pass"]
+        return "#{marker.name} #{detail}" if detail
+
+        marker.name.to_s
       end
 
       # Spawn an agent and return its result hash.

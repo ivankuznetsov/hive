@@ -6,6 +6,7 @@ require "hive/lock"
 require "hive/git_ops"
 require "hive/agent"
 require "hive/stages"
+require "hive/stages/base"
 require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
@@ -67,7 +68,7 @@ module Hive
 
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
-          result = runner.call(task, cfg)
+          result = Hive::Stages::Base.with_stage_events(task) { runner.call(task, cfg) }
           commit_after(task, result)
           report(task, result)
         end

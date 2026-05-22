@@ -600,6 +600,125 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :project_dropped)
   end
 
+  # ── stale-agent healer integration ────────────────────────────────────
+
+  def test_dispatcher_tick_heals_dead_pid_agent_working_marker_on_disk
+    # End-to-end wiring test: dispatcher#tick must invoke the real
+    # StaleAgentHealer with the tick's frozen `now` and the current
+    # legacy_layout_projects set. Plant a real on-disk task.md with
+    # AGENT_WORKING and an attached-but-dead pid; assert the marker
+    # is rewritten on the same tick that processed it.
+    Dir.mktmpdir("dispatcher-healer-integration") do |tmpdir|
+      state_file = File.join(tmpdir, "task.md")
+      File.write(state_file, "# task\n\n<!-- AGENT_WORKING pid=99999999 -->\n")
+
+      stale_row = row(
+        project: "p1", slug: "stale-1", stage: "4-execute",
+        marker: "agent_working", action: "error", # post-U4 status produces this
+        state_file: state_file,
+        mtime: T0 - 1000,
+        claude_pid_alive: false
+      )
+      dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher(rows: [ stale_row ])
+      dispatcher.tick(now: T0)
+
+      assert events_include?(logger, :marker_healed),
+             "dispatcher#tick must invoke the real healer; events=#{logger.events.inspect}"
+      heal_attrs = logger.events.find { |(n, _)| n == :marker_healed }[1]
+      assert_equal "agent_died", heal_attrs[:reason]
+      assert_match(/ERROR\s+reason=agent_died/, File.read(state_file),
+                   "healer must rewrite the on-disk marker, not just log")
+    end
+  end
+
+  def test_dispatcher_tick_skips_healing_for_legacy_layout_projects
+    Dir.mktmpdir("dispatcher-healer-legacy") do |tmpdir|
+      state_file = File.join(tmpdir, "task.md")
+      File.write(state_file, "# task\n\n<!-- AGENT_WORKING pid=99999999 -->\n")
+      stale_row = row(
+        project: "legacy-proj", slug: "stale-1", stage: "4-execute",
+        marker: "agent_working", action: "error",
+        state_file: state_file, mtime: T0 - 1000, claude_pid_alive: false
+      )
+      legacy_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
+        name: "legacy-proj",
+        legacy_stage_dirs: [ { "stage_dir" => "1-input", "task_count" => 1 } ]
+      )
+
+      config = { "daemon" => { "edit_debounce_sec" => 30, "poll_interval_sec" => 30 } }
+      controller = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 5, max_concurrent_per_project: 5,
+        max_runs_per_day_per_project: 100
+      )
+      supervisor = FakeSupervisor.new
+      status = FakeStatusConsumer.new
+      status.next_result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [ stale_row ], projects: [ legacy_project ], error: nil
+      )
+      logger = StubLogger.new
+      dispatcher = Hive::Daemon::Dispatcher.new(
+        config: config, controller: controller, supervisor: supervisor,
+        status_consumer: status, logger: logger
+      )
+
+      dispatcher.tick(now: T0)
+
+      refute events_include?(logger, :marker_healed),
+             "half-migrated projects must be excluded from healing; events=#{logger.events.inspect}"
+      assert_match(/AGENT_WORKING/, File.read(state_file),
+                   "marker on disk must be untouched when project is half-migrated")
+    end
+  end
+
+  def test_dispatcher_outer_rescue_logs_fatal_and_continues_per_row_dispatch
+    # If the healer itself raises (a bug, not a per-row disk failure),
+    # the dispatcher's outer rescue must log :fatal and let the rest of
+    # the tick proceed — so a future healer bug doesn't trigger
+    # systemd's StartLimitBurst cap by failing every tick.
+    advance_row = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ advance_row ])
+    # Stub the dispatcher's healer instance to raise on heal.
+    healer = dispatcher.instance_variable_get(:@stale_agent_healer)
+    def healer.heal(*, **)
+      raise NoMethodError, "simulated healer bug"
+    end
+
+    dispatcher.tick(now: T0)
+
+    fatal = logger.events.find { |(n, _)| n == :fatal }
+    assert fatal, "outer rescue must log :fatal when healer raises; events=#{logger.events.inspect}"
+    assert_includes fatal[1][:message], "stale_agent_healer raised"
+    assert_equal 1, sup.spawned.size,
+                 "per-row dispatch must still run after healer crash to avoid StartLimitBurst flapping"
+  end
+
+  def test_reload_config_rebuilds_healer_with_new_grace_sec
+    dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+    original_healer = dispatcher.instance_variable_get(:@stale_agent_healer)
+    refute_nil original_healer, "dispatcher must construct a healer at boot"
+
+    # Stub Config.load_global_daemon to return a new grace, then reload.
+    # `Hive::Config` is a module_function-defined module, so its
+    # methods live on the singleton class. Save the original and
+    # restore via `define_singleton_method(..., &original)` rather
+    # than `remove_method` — the latter would delete the real
+    # implementation and break every later test that loads config.
+    new_cfg = { "agent_marker_grace_sec" => 60, "edit_debounce_sec" => 30 }
+    original = Hive::Config.method(:load_global_daemon)
+    Hive::Config.define_singleton_method(:load_global_daemon) { new_cfg }
+    begin
+      dispatcher.send(:reload_config!)
+    ensure
+      Hive::Config.define_singleton_method(:load_global_daemon, &original)
+    end
+
+    rebuilt = dispatcher.instance_variable_get(:@stale_agent_healer)
+    refute_same original_healer, rebuilt,
+                "reload_config! must rebuild the healer so new daemon.agent_marker_grace_sec binds"
+    assert_equal 60, rebuilt.instance_variable_get(:@grace_sec),
+                 "rebuilt healer must carry the reloaded grace value"
+  end
+
   private
 
   def events_include?(logger, name)

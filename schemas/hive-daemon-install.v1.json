@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-daemon-install.v1.json",
+  "title": "hive daemon install output (v1)",
+  "description": "Stable contract emitted by `hive daemon install --json` (and `hive daemon install --force --json`). Idempotent: a no-op install against a matching unit returns ok=true with outcome=unchanged. Drift without --force returns ok=false with outcome=drifted and exit_code=64 so agents can branch `hive daemon install --json || (test $? = 64 && hive daemon install --force --json)`. Internal failures (systemctl reload/start/restart, launchctl load) return ok=false with outcome=failed and exit_code=70.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "outcome",
+        "platform",
+        "target_path",
+        "restarted"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-install" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "outcome": {
+          "type": "string",
+          "enum": [ "written", "upgraded", "unchanged", "unsupported" ],
+          "description": "What happened on disk. `written` = no prior unit, new file created. `upgraded` = existing unit differed and --force overwrote it (backup_path is set). `unchanged` = existing unit already matches the rendered template. `unsupported` = host platform has no auto-install path (target_path is null)."
+        },
+        "platform": {
+          "type": "string",
+          "enum": [ "linux", "macos", "unsupported" ],
+          "description": "Resolved install platform from RbConfig::CONFIG[\"host_os\"]."
+        },
+        "target_path": {
+          "type": [ "string", "null" ],
+          "description": "Absolute path of the platform-native unit file. Null on `unsupported` platforms where no unit was written."
+        },
+        "backup_path": {
+          "type": [ "string", "null" ],
+          "description": "Absolute path of the timestamped backup file written before --force overwrote the unit. Null on outcomes other than `upgraded` and when the existing unit already matched."
+        },
+        "restarted": {
+          "type": "boolean",
+          "description": "True if this call ran `systemctl --user restart hive-daemon` (Linux force-upgrade) or `launchctl unload && launchctl load` (macOS force-upgrade). False on first-time install (`enable --now` / `launchctl load`) and on no-op `unchanged` outcomes."
+        },
+        "messages": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Operator-facing notices emitted by the installer (binary-path fallback warnings, restart-block warnings, systemd-missing notes, etc.). Stable line shape but no schema enum — meant for human display, not programmatic branching."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-install" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": {
+          "type": "string",
+          "enum": [ "DaemonInstallDriftError", "DaemonInstallFailed", "Error" ]
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [ "drifted", "failed", "internal" ],
+          "description": "`drifted` = pre-existing unit differs from the rendered template and --force was not passed (recoverable, retry with --force). `failed` = a service-manager call (systemctl / launchctl) reported failure (investigate, see messages). `internal` = uncategorised."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [ 1, 64, 70 ],
+          "description": "Process exit code the CLI will set. 64 = USAGE (drift, retryable with --force). 70 = SOFTWARE (service-manager failure). 1 = GENERIC (uncategorised)."
+        },
+        "message": { "type": "string" },
+        "outcome": {
+          "type": "string",
+          "enum": [ "drifted", "failed" ]
+        },
+        "platform": {
+          "type": "string",
+          "enum": [ "linux", "macos", "unsupported" ]
+        },
+        "target_path": {
+          "type": [ "string", "null" ]
+        },
+        "messages": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

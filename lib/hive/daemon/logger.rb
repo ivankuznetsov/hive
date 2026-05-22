@@ -42,6 +42,8 @@ module Hive
         merge_watcher_dispatched
         merge_watcher_dropped
         gh_error
+        marker_healed
+        marker_heal_failed
         fatal
       ].freeze
 

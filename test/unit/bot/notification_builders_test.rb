@@ -162,6 +162,26 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ "Open laptop", "Show details", "Refresh diagnosis" ], labels
   end
 
+  def test_stale_agent_working_pending_heal_suppresses_clear_and_retry_button
+    # When TaskAction has reclassified a stale agent_working row to
+    # :error but the daemon hasn't yet rewritten the marker to ERROR
+    # on disk, rendering the default "Clear and retry" button would
+    # dispatch `hive markers clear --name AGENT_WORKING` — which is
+    # not in lib/hive/commands/markers.rb#ALLOWED_NAMES and exits 4.
+    # The bot must instead offer Open laptop only; the daemon's
+    # StaleAgentHealer rewrites the marker within ~30s after which
+    # the normal ERROR recovery affordance fires.
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "error", marker: "agent_working", stage: "4-execute")
+    )
+
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    refute_includes labels, "Clear and retry",
+                    "Clear and retry on AGENT_WORKING would dispatch a markers-clear name not in the allowlist"
+    assert_includes labels, "Open laptop",
+                    "Open laptop must remain as a fallback while the daemon heals the marker"
+  end
+
   def test_refresh_diagnosis_button_carries_callback_with_project_slug_and_stage
     # The button data must round-trip through the router's callback_intent
     # regex (\Arefresh_diagnose:/) and split cleanly into

@@ -1689,3 +1689,16 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 **Refreshed pages:**
 - [[commands/run]] — documented the manual-steering pre-run skip and JSON rebase reason.
 - [[commands/status]] — documented status-private stage siblings for legacy-stage detection.
+
+## [2026-05-20T14:00:00Z] daemon — env-hardened systemd unit, install --force, stale-AGENT_WORKING healer
+
+**Action:** Unstuck the `hive daemon` failure mode where the systemd-user unit ticked forever with `status_failure ENOENT hive` because the daemon's `Open3.capture3({}, "hive", ...)` couldn't find the binary on a systemd-default PATH. Three coupled changes (PR #113):
+
+- Baked `Environment=HIVE_BIN=<absolute-resolved-path>` and `Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin` into both `examples/systemd/hive-daemon.service` and `ServiceInstaller#render_systemd` substitution.
+- Added `hive daemon install [--force]` for in-place unit upgrades. Atomic-write the new unit (tempfile + rename), rotate prior content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (never overwrites a prior backup), and restart the running daemon on Linux / unload-then-load on macOS so new `Environment=` lines take effect.
+- Added `Hive::Daemon::StaleAgentHealer` (tick-time): rewrites `AGENT_WORKING` markers whose backing agent isn't alive to `ERROR reason=agent_died` (dead pid) or `reason=agent_orphaned` (no pid, mtime past `daemon.agent_marker_grace_sec`, default 300s, mirrored from `Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC`). Skips in-flight controller slots and half-migrated projects. New daemon log events `marker_healed` / `marker_heal_failed` (registered in `Hive::Daemon::Logger::EVENTS`). `Hive::TaskAction` reads the same grace via threaded config so the synthetic classification (immediate, in-memory) and on-disk heal (next tick) agree.
+
+**Refreshed pages:**
+- `wiki/commands/daemon.md` — added `install [--force]` to the subcommands table.
+- `wiki/modules/daemon.md` — corrected the load-bearing "daemon never writes markers" claim; documented the healer's narrow carve-out (heals, never advances) and the new log events.
+- `wiki/modules/task_action.md` — updated the `:agent_working` carve-out to cover the new stale-classification branch and the synthetic diagnostic.

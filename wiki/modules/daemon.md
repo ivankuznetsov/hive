@@ -49,14 +49,31 @@ without spinning up the whole stack.
 
 ## Trust boundary
 
-The daemon adds NO new approval logic. Forward-advance safety is
-delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
+The daemon adds NO new forward-advance approval logic. Workflow-verb
+safety is delegated to `Hive::Commands::Approve::VALID_TERMINAL_MARKERS`
 (`%i[complete execute_complete review_complete]`). The daemon is a
-subprocess caller; it never writes markers, never `File.rename`s task
-folders, never touches per-task `.lock` files directly. Any
-misclassification at the `Policy` level surfaces as `Hive::WrongStage`
-(exit 4) at the workflow-verb level, not as a silent advance past a
-human gate. See ADR-024.
+subprocess caller; it never `File.rename`s task folders or touches
+per-task `.lock` files directly. Any misclassification at the `Policy`
+level surfaces as `Hive::WrongStage` (exit 4) at the workflow-verb
+level, not as a silent advance past a human gate. See ADR-024.
+
+The daemon has two narrowly-scoped marker writers — both are
+state-machine completions, not workflow advancement. The marker's
+stage does not move and no workflow verb fires from either path.
+
+1. **`Hive::Daemon::PlanApproval`** flips a plan-stage `:waiting`
+   marker to `:complete` to satisfy the `hive develop` terminal-
+   marker gate when the per-project consent (`daemon.enabled: true`)
+   is the durable approval signal. Validates the dispatch command's
+   shape before flipping (`Hive::Daemon::PlanApproval.prepare`).
+2. **`Hive::Daemon::StaleAgentHealer`** rewrites stale `AGENT_WORKING`
+   markers to `ERROR reason=agent_died` (dead `claude_pid`) or
+   `ERROR reason=agent_orphaned` (placeholder marker stamped at
+   stage entry that no agent ever attached to, older than
+   `daemon.agent_marker_grace_sec`, default 300s). Skips rows whose
+   project has a half-migrated layout (`legacy_stage_dirs`) and rows
+   for which the `ConcurrencyController` has a live in-flight slot.
+   Heal/skip events are logged as `marker_healed` / `marker_heal_failed`.
 
 `3-plan`/`needs_input` is the policy exception to the generic
 edit-resume debounce. A generated plan in `WAITING` is an approval

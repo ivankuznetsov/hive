@@ -25,6 +25,125 @@ class RunReviewersTest < Minitest::Test
     )
   end
 
+  # Refs are full `refs/remotes/origin/<branch>` paths so the test matches
+  # how `reviewer_compare_ref` probes existence in production (the short
+  # form `origin/<branch>` is ambiguous with a like-named tag).
+  class FakeOps
+    def initialize(origin_default_branch: nil, refs: [])
+      @origin_default_branch = origin_default_branch
+      @refs = refs
+    end
+
+    attr_reader :origin_default_branch
+
+    def ref_exists?(ref)
+      @refs.include?(ref)
+    end
+  end
+
+  def test_reviewer_compare_ref_prefers_origin_default_branch_when_available
+    ops = FakeOps.new(origin_default_branch: "main",
+                      refs: [ "refs/remotes/origin/main" ])
+
+    assert_equal "origin/main", Hive::Stages::Review.reviewer_compare_ref({}, ops)
+  end
+
+  def test_reviewer_compare_ref_falls_back_to_local_default_when_origin_ref_missing
+    # origin_default_branch is set (operator's project HAS a default branch
+    # from origin/HEAD or a probe match) but the remote-tracking ref is
+    # absent locally (shallow clone, offline worktree). Warn and fall back.
+    ops = FakeOps.new(origin_default_branch: "main", refs: [])
+
+    result = nil
+    _out, err = capture_io do
+      result = Hive::Stages::Review.reviewer_compare_ref({}, ops)
+    end
+
+    assert_equal "main", result
+    assert_match(/origin\/main not found/, err)
+    assert_match(/diffs may be stale/, err)
+  end
+
+  def test_reviewer_compare_ref_refuses_preflight_when_no_trusted_source
+    # No config, no origin/HEAD, no origin/main, no origin/master:
+    # falling back to the worktree's current branch would make reviewers
+    # diff the task branch against itself. Refuse instead with a clear
+    # message naming the two remediation paths.
+    ops = FakeOps.new(origin_default_branch: nil, refs: [])
+
+    _out, err = capture_io do
+      assert_raises(SystemExit) do
+        Hive::Stages::Review.reviewer_compare_ref({}, ops)
+      end
+    end
+
+    assert_match(/reviewer compare ref unavailable/, err)
+    assert_match(/default_branch/, err)
+    assert_match(/remote set-head/, err)
+  end
+
+  def test_reviewer_compare_ref_honors_configured_default_branch
+    ops = FakeOps.new(origin_default_branch: "main",
+                      refs: [ "refs/remotes/origin/trunk" ])
+    cfg = { "default_branch" => "trunk" }
+
+    assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
+  end
+
+  def test_reviewer_compare_ref_preserves_explicit_remote_ref
+    ops = FakeOps.new(origin_default_branch: "main",
+                      refs: [ "refs/remotes/origin/main" ])
+    cfg = { "default_branch" => "origin/main" }
+
+    assert_equal "origin/main", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
+  end
+
+  def test_reviewer_compare_ref_strips_whitespace_in_configured_branch
+    ops = FakeOps.new(origin_default_branch: "main",
+                      refs: [ "refs/remotes/origin/trunk" ])
+    cfg = { "default_branch" => "  trunk  " }
+
+    assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
+  end
+
+  def test_reviewer_compare_ref_configured_branch_falls_back_to_local_with_warn
+    # Configured branch is the explicit operator opt-in, so we use it
+    # even when the remote ref is missing — but still warn so the
+    # operator sees the degraded mode.
+    ops = FakeOps.new(origin_default_branch: nil, refs: [])
+    cfg = { "default_branch" => "develop" }
+
+    result = nil
+    _out, err = capture_io do
+      result = Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
+    end
+
+    assert_equal "develop", result
+    assert_match(/origin\/develop not found/, err)
+  end
+
+  def test_reviewer_compare_ref_ignores_tag_named_origin_main
+    # rev-parse --verify on the SHORT form `origin/main` resolves a tag
+    # of that name; the helper probes the full path
+    # `refs/remotes/origin/main` to reject this collision. Pin the
+    # contract: a FakeOps that returns true for the SHORT form but false
+    # for the FULL form must NOT yield an origin/-form return.
+    ops = Class.new do
+      def origin_default_branch = "main"
+      # Tag-shaped match: only the short form would resolve.
+      def ref_exists?(ref) = ref == "origin/main"
+    end.new
+
+    result = nil
+    _out, err = capture_io do
+      result = Hive::Stages::Review.reviewer_compare_ref({}, ops)
+    end
+
+    assert_equal "main", result,
+                 "tag-shaped short-form match must not satisfy the remote-tracking ref check"
+    assert_match(/origin\/main not found/, err)
+  end
+
   # A reviewer whose run! raises mid-phase. The orchestrator must
   # convert this to :error, write the stub finding, and continue with
   # the next reviewer.

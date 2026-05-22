@@ -3,7 +3,7 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-05-13
+updated: 2026-05-22T13:30:00Z
 tags: [git, init, commit]
 ---
 
@@ -26,14 +26,28 @@ Hive::GitOps.new(project_root)
 
 ## `detect_default_branch`
 
-Memoised. Tries in order:
+Tries in order:
 
-1. `git -C <root> symbolic-ref refs/remotes/origin/HEAD` → strip `refs/remotes/origin/` prefix.
+1. `origin_default_branch` (see below) — origin/HEAD symref or origin/main/origin/master probe.
 2. `git -C <root> rev-parse --abbrev-ref HEAD` (skipped if it returns `"HEAD"`).
 3. `git config init.defaultBranch`.
 4. Literal `"master"`.
 
-This handles repos with no remote (steps 2/3) and brand-new repos (step 4).
+This handles repos with no remote (steps 2/3) and brand-new repos (step 4). Callers that must NOT fall back to the local current branch (e.g. `Hive::Stages::Review.reviewer_compare_ref`, since the local current branch in a `git worktree add` is the task branch and reviewers diffing the task against itself is the phantom-findings bug) call `origin_default_branch` directly and handle the `nil` case explicitly.
+
+## `origin_default_branch`
+
+Returns the project default branch derived from a trusted remote source only:
+
+1. `git -C <root> symbolic-ref refs/remotes/origin/HEAD` → strip `refs/remotes/origin/` prefix.
+2. Probe `ref_exists?("refs/remotes/origin/main")`, then `refs/remotes/origin/master`.
+3. `nil`.
+
+Both probes use the full `refs/remotes/origin/<branch>` path so a tag named e.g. `origin/main` cannot satisfy the check (rev-parse short-form is ambiguous with `refs/tags/<name>`).
+
+## `ref_exists?(ref)`
+
+Returns `true` when `git -C <root> rev-parse --verify --quiet <ref>` succeeds. Used by `origin_default_branch` to probe remote-tracking refs, and by `Hive::Stages::Review.reviewer_compare_ref` to prefer `origin/<default_branch>` over a stale local ref. Callers checking remote-tracking refs should pass the full `refs/remotes/origin/<branch>` path, not the short form `origin/<branch>`, to avoid tag-name collisions.
 
 ## `hive_state_init`
 

@@ -19,6 +19,45 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  # When origin/HEAD is unset in a worktree, `git rev-parse --abbrev-ref HEAD`
+  # returns the task branch, not main. Probing refs/remotes/origin/{main,master}
+  # before falling back to HEAD keeps `default_branch` stable in this case.
+  def test_default_branch_prefers_origin_main_when_symref_unset_in_worktree
+    with_tmp_git_repo do |dir|
+      # Make `dir` look like a clone of itself so `origin/main` can exist as
+      # a remote-tracking ref while origin/HEAD stays unset, then add a
+      # worktree on a different branch to exercise the fallback ordering.
+      run!("git", "-C", dir, "remote", "add", "origin", dir)
+      run!("git", "-C", dir, "branch", "main")
+      run!("git", "-C", dir, "fetch", "origin", "--quiet")
+      # Ensure origin/HEAD is unset (git fetch may auto-create it).
+      run!("git", "-C", dir, "remote", "set-head", "origin", "--delete")
+      worktree = Dir.mktmpdir("hive-test-wt")
+      begin
+        run!("git", "-C", dir, "worktree", "add", "-B", "task/branch", worktree, "HEAD")
+        ops = Hive::GitOps.new(worktree)
+        assert_equal "main", ops.default_branch,
+                     "default_branch must prefer origin/main over the worktree's task branch"
+      ensure
+        FileUtils.rm_rf(worktree)
+      end
+    end
+  end
+
+  def test_ref_exists_returns_true_for_existing_ref
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      assert ops.ref_exists?("HEAD"), "HEAD must exist in any initialized repo"
+    end
+  end
+
+  def test_ref_exists_returns_false_for_unknown_ref
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      refute ops.ref_exists?("refs/remotes/origin/this-ref-does-not-exist")
+    end
+  end
+
   def test_hive_state_init_creates_orphan_branch_and_worktree
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

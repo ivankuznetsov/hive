@@ -3,7 +3,7 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb
 created: 2026-05-14
-updated: 2026-05-14T12:00:00Z
+updated: 2026-05-22T13:30:00Z
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
@@ -61,6 +61,7 @@ When `git rebase <origin/default>` raises `Hive::RebaseConflict`:
       - `cwd: task.worktree_path` — git rebase state lives in the worktree.
       - `add_dirs: []` — security boundary; agent physically cannot reach `task.folder` (`plan.md`, `worktree.yml`, `task.md` are unreachable regardless of prompt content).
       - `timeout_sec: cfg.rebase.conflict_resolution_timeout_sec` (default `2700`).
+      - `status_mode: :exit_code_only` — success is the agent process exiting cleanly; the rebase runner then validates git state and conflict-marker bytes. This is required for development agents such as Codex whose profile default is artifact-based (`:output_file_exists`) in reviewer contexts.
       - `max_budget_usd: cfg.budget_usd.execute_implementation || 500`.
       - `prompt:` rendered from `templates/rebase_conflict_resolution.md.erb` with the commit message + conflict file paths + file contents inside a per-spawn `<user_supplied_<hex>>` nonce block (ADR-008/019).
    4. After the agent returns:
@@ -71,6 +72,12 @@ When `git rebase <origin/default>` raises `Hive::RebaseConflict`:
    5. `rebase_continue` advances to the next commit; if it raises `RebaseConflict`, loop. If it raises `GitError` / `SystemCallError` / `IOError`, abort with `:rebase_continue_failed`.
 
 `MAX_CONFLICT_RESOLUTIONS` exceeded → `:max_attempts_exceeded`.
+
+### Post-loop contamination guard
+
+After the conflict-resolution loop exits cleanly (the last `rebase_continue` drained without raising `RebaseConflict`), the orchestrator does one final `git.dirty?` check before returning success. If the agent staged its conflict resolution AND left untracked scratch files (or modified files outside the conflict set), git treats the rebase as complete while the worktree carries contamination that later stages would silently absorb (e.g. a subsequent `git add .` would commit cruft). In that case `abort_with(:dirty_after_success)` runs the standard fail-soft sequence (`rebase --abort` + `reset --hard ORIG_HEAD` + `clean -fd`), undoing the rebase rather than carrying the contaminated tree forward.
+
+The agent-called-continue-itself branch already required `!git.dirty?` before accepting the agent's result (PR #69 review B9); the post-loop guard extends the same contract to the normal path where the orchestrator drives `rebase_continue` itself.
 
 ### Abort path
 

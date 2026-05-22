@@ -4,6 +4,7 @@ require "hive/bot/conversation_store"
 require "hive/bot/telegram"
 
 class HiveBotRouterTest < Minitest::Test
+  include HiveTestHelper
   def setup
     @logger = StubLogger.new
     @store = Hive::Bot::ConversationStore.new
@@ -157,6 +158,98 @@ class HiveBotRouterTest < Minitest::Test
                    "--project", "hive", "--json" ], result.commands.last
   end
 
+  def test_default_projects_provider_reads_registered_projects
+    with_tmp_global_config do
+      router = Hive::Bot::Router.new(
+        bot_config: { "chat_id_allowlist" => [ 12345 ] },
+        logger: @logger,
+        conversation_store: @store
+      )
+
+      result = router.handle(update(text: "/idea fix broken cron"))
+
+      assert_equal :reply, result.action
+      assert_match(/No Hive projects are registered yet/, result.text)
+    end
+  end
+
+  def test_classifies_all_callback_prefixes
+    cases = {
+      "reject:anything" => :callback_reject,
+      "open_laptop:hive:slug-260514-abcd" => :callback_open_laptop,
+      "details:hive:slug-260514-abcd" => :callback_show_details,
+      "refresh_diagnose:hive:slug-260514-abcd:6-review" => :callback_refresh_diagnose,
+      "answer:hive:slug-260514-abcd" => :callback_answer,
+      "path_a_yes:hive:slug-260514-abcd" => :callback_path_a_yes,
+      "path_a_type:hive:slug-260514-abcd" => :callback_path_a_just_type,
+      "codex_write:hive:slug-260514-abcd:1" => :callback_codex_write_draft,
+      "codex_edit:hive:slug-260514-abcd:1" => :callback_codex_edit,
+      "codex_cancel:hive:slug-260514-abcd:1" => :callback_codex_cancel,
+      "findings:accept_all:hive:slug-260514-abcd:6-review" => :callback_findings_accept_all,
+      "findings:reject_all:hive:slug-260514-abcd:6-review" => :callback_findings_reject_all,
+      "idea_project_new:token" => :callback_idea_project_new,
+      "unknown:hive:slug-260514-abcd" => :unknown
+    }
+
+    cases.each do |callback_data, intent|
+      assert_equal intent, @router.classify(update(callback_data: callback_data)), callback_data
+    end
+  end
+
+  def test_slash_approve_dispatches_approve_command
+    result = @router.handle(update(text: "/approve slug-260514-abcd"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "approve", "slug-260514-abcd", "--json" ], result.command_argv
+  end
+
+  def test_slash_help_returns_commands_reply
+    result = @router.handle(update(text: "/help"))
+
+    assert_equal :reply, result.action
+    assert_includes result.text, "/status"
+    assert_includes result.text, "/approve <slug>"
+  end
+
+  def test_legacy_callback_update_without_with_still_dispatches
+    legacy = LegacyCallbackUpdate.new(
+      update_id: 1,
+      chat_id: 12345,
+      callback_data: "reject:anything"
+    )
+
+    assert_equal :callback_reject, @router.classify(legacy)
+    result = @router.handle(legacy)
+
+    assert_equal :reply, result.action
+    assert_equal "Left unchanged.", result.text
+  end
+
+  def test_legacy_message_update_without_reply_to_text_gets_help_hint
+    result = @router.handle(LegacyMessageUpdate.new(update_id: 1, chat_id: 12345, text: "hello"))
+
+    assert_equal :reply, result.action
+    assert_match(/\/help/, result.text)
+  end
+
+  def test_handle_rejects_impossible_classifier_intent
+    @router.define_singleton_method(:classify) { |_update| :not_an_intent }
+
+    error = assert_raises(RuntimeError) { @router.handle(update(text: "/status")) }
+
+    assert_match(/unknown intent :not_an_intent/, error.message)
+  end
+
+  def test_handle_rejects_disallowed_result_action
+    @router.define_singleton_method(:dispatch) do |_intent, _update|
+      Hive::Bot::Router::Result.new(action: :teleport)
+    end
+
+    error = assert_raises(RuntimeError) { @router.handle(update(text: "/status")) }
+
+    assert_match(/action :teleport is not allowed/, error.message)
+  end
+
   def test_done_refuses_when_pending_codex_confirm_exists
     @store.start(chat_id: 12345, slug: "slug", question_n: 1)
     @store.update(chat_id: 12345, slug: "slug", awaiting_confirm: true)
@@ -165,6 +258,18 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_match(/awaiting confirm/, result.text)
+  end
+
+  LegacyCallbackUpdate = Struct.new(:update_id, :chat_id, :callback_data, keyword_init: true) do
+    def callback_query?
+      true
+    end
+  end
+
+  LegacyMessageUpdate = Struct.new(:update_id, :chat_id, :text, keyword_init: true) do
+    def callback_query?
+      false
+    end
   end
 
   class StubLogger

@@ -139,4 +139,24 @@ class HiveTuiComposerStagingTest < Minitest::Test
       refute File.exist?(dir)
     end
   end
+
+  def test_copy_file_preserves_cause_class_on_failure
+    err = assert_raises(Hive::Tui::ComposerStaging::WriteError) do
+      Hive::Tui::ComposerStaging.copy_file!("/no/such/source.png", "/tmp/image-1.png")
+    end
+
+    assert_equal Errno::ENOENT, err.cause_class
+  end
+
+  def test_truncate_at_separator_prefers_separator_after_midpoint
+    value = "aaaaaaaaaaaa/bbbbbbbbbbbbb"
+
+    assert_equal "aaaaaaaaaaaa/…", Hive::Tui::ComposerStaging.truncate_at_separator(value, max: 20)
+  end
+
+  def test_truncate_at_separator_falls_back_to_hard_cap
+    value = "a" * 30
+
+    assert_equal "aaaaaaaaaaaaaaaaaaaa…", Hive::Tui::ComposerStaging.truncate_at_separator(value, max: 20)
+  end
 end

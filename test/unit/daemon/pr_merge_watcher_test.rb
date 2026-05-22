@@ -292,6 +292,58 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     ENV.delete("HIVE_FAKE_GH_STATE")
   end
 
+  def test_state_for_returns_last_polled_state
+    with_pr_md(url: "x") do |folder|
+      watcher = make(poll_interval_sec: 0)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+
+      ENV["HIVE_FAKE_GH_STATE"] = "OPEN"
+      watcher.tick(now: Time.now)
+
+      assert_equal "OPEN", watcher.state_for(project: "p1", slug: "s1")
+    end
+  ensure
+    ENV.delete("HIVE_FAKE_GH_STATE")
+  end
+
+  def test_tick_with_malformed_gh_json_keeps_entry_for_retry
+    with_tmp_dir do |dir|
+      bad_gh = File.join(dir, "bad-gh")
+      File.write(bad_gh, <<~RUBY_SCRIPT)
+        #!/usr/bin/env ruby
+        $stdout.write("not-json")
+      RUBY_SCRIPT
+      FileUtils.chmod(0o755, bad_gh)
+
+      with_pr_md(url: "x") do |folder|
+        watcher = Hive::Daemon::PrMergeWatcher.new(poll_interval_sec: 0, gh_bin: bad_gh)
+        watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+
+        result = watcher.tick(now: Time.now)
+
+        assert_equal [], result
+        assert watcher.watching?(project: "p1", slug: "s1"),
+               "malformed gh JSON is a retryable poll failure"
+      end
+    end
+  end
+
+  def test_tick_with_missing_gh_binary_keeps_entry_for_retry
+    with_tmp_dir do |dir|
+      missing_gh = File.join(dir, "missing-gh")
+      with_pr_md(url: "x") do |folder|
+        watcher = Hive::Daemon::PrMergeWatcher.new(poll_interval_sec: 0, gh_bin: missing_gh)
+        watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+
+        result = watcher.tick(now: Time.now)
+
+        assert_equal [], result
+        assert watcher.watching?(project: "p1", slug: "s1"),
+               "unexpected gh execution errors are retryable poll failures"
+      end
+    end
+  end
+
   # ── manual drop ───────────────────────────────────────────────────────
 
   def test_drop_removes_entry

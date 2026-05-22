@@ -9,8 +9,10 @@ class HiveBotSupervisorTest < Minitest::Test
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, keyword_init: true)
 
-  FakeTelegram = Struct.new(:messages, keyword_init: true) do
+  FakeTelegram = Struct.new(:messages, :raise_on_send, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
+      raise raise_on_send if raise_on_send
+
       messages << { chat_id: chat_id, text: text, reply_markup: reply_markup }
     end
   end
@@ -26,6 +28,13 @@ class HiveBotSupervisorTest < Minitest::Test
   FakeStatusWatcher = Struct.new(:result, keyword_init: true) do
     def fetch
       result
+    end
+  end
+
+
+  FakeNotificationDispatcher = Struct.new(:processed, keyword_init: true) do
+    def process_rows(rows)
+      processed << rows
     end
   end
 
@@ -49,7 +58,7 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  FakeConversationStore = Struct.new(:starts, :updates, :states, keyword_init: true) do
+  FakeConversationStore = Struct.new(:starts, :updates, :states, :ttl_updates, keyword_init: true) do
     def start(**kwargs)
       starts << kwargs
       state = Struct.new(:question_n, :mode, :project, :draft, :history, :awaiting_confirm, keyword_init: true).new(
@@ -72,7 +81,9 @@ class HiveBotSupervisorTest < Minitest::Test
       state
     end
 
-    def update_ttl(_ttl); end
+    def update_ttl(ttl)
+      ttl_updates << ttl
+    end
   end
 
   def setup
@@ -80,13 +91,15 @@ class HiveBotSupervisorTest < Minitest::Test
     @logger = FakeLogger.new(events: [])
     @status_watcher = FakeStatusWatcher.new(result: StatusResult.new(ok: true, rows: []))
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
-    @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {})
+    @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
+    @notification_dispatcher = FakeNotificationDispatcher.new(processed: [])
     @supervisor = Hive::Bot::Supervisor.allocate
     @supervisor.instance_variable_set(:@telegram, @telegram)
     @supervisor.instance_variable_set(:@logger, @logger)
     @supervisor.instance_variable_set(:@status_watcher, @status_watcher)
     @supervisor.instance_variable_set(:@child_supervisor, @child_supervisor)
     @supervisor.instance_variable_set(:@conversation_store, @conversation_store)
+    @supervisor.instance_variable_set(:@notification_dispatcher, @notification_dispatcher)
     @supervisor.instance_variable_set(:@router, FakeRouter.new)
     @supervisor.instance_variable_set(:@dry_run, false)
     @supervisor.instance_variable_set(:@config, {
@@ -117,6 +130,27 @@ class HiveBotSupervisorTest < Minitest::Test
           action_label: "Develop", marker: "COMPLETE", attrs: {})
     Row.new(project: project, slug: slug, stage: stage, action: action,
             action_label: action_label, marker: marker, attrs: attrs)
+  end
+
+
+  def with_brainstorm_file(slug: "bot-task-260522-aa", content:)
+    with_tmp_dir do |dir|
+      project = File.join(dir, "project")
+      folder = File.join(project, ".hive-state", "stages", "2-brainstorm", slug)
+      FileUtils.mkdir_p(folder)
+      path = File.join(folder, "brainstorm.md")
+      File.write(path, content)
+      yield path, project
+    end
+  end
+
+  Outcome = Struct.new(:kind, :draft, :text, :reason, keyword_init: true)
+
+  FakeCodexConversation = Struct.new(:outcome, :calls, keyword_init: true) do
+    def next_turn(**kwargs)
+      calls << kwargs
+      outcome
+    end
   end
 
   def test_reply_for_child_renders_status_diagnose_success_envelope
@@ -329,5 +363,299 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 15))
     assert_equal "No unanswered questions remain for done.", @telegram.messages.last.fetch(:text)
+  end
+  def test_request_shutdown_and_reload_set_loop_flags
+    @supervisor.request_shutdown!
+    @supervisor.request_reload!
+
+    assert_equal true, @supervisor.instance_variable_get(:@shutdown)
+    assert_equal true, @supervisor.instance_variable_get(:@reload)
+  end
+
+  def test_process_update_executes_reply_and_persists_last_seen
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "last_seen")
+      @supervisor.instance_variable_get(:@config)["last_seen_state_file"] = state_file
+      router = Object.new
+      router.define_singleton_method(:handle) do |_update|
+        FakeRouter::Result.new(action: :reply, text: "hello", reply_markup: { inline_keyboard: [] })
+      end
+      @supervisor.instance_variable_set(:@router, router)
+
+      @supervisor.process_update(Update.new(chat_id: 42, update_id: 77))
+
+      assert_equal "hello", @telegram.messages.last.fetch(:text)
+      assert_equal "77", File.read(state_file)
+    end
+  end
+
+  def test_execute_result_rejects_unknown_action
+    error = assert_raises(RuntimeError) do
+      @supervisor.send(:execute_result, FakeRouter::Result.new(action: :surprise), Update.new(chat_id: 42, update_id: 1))
+    end
+
+    assert_match(/unknown action/, error.message)
+  end
+
+  def test_safe_send_message_logs_telegram_failures
+    @telegram.raise_on_send = RuntimeError.new("offline")
+
+    assert_nil @supervisor.send(:safe_send_message, chat_id: 42, text: "hello")
+
+    event = @logger.events.last
+    assert_equal :send_failure, event.fetch(:name)
+    assert_equal "offline", event.fetch(:payload).fetch(:message)
+  end
+
+  def test_status_tick_processes_rows_only_when_status_is_ok
+    failure = StatusResult.new(ok: false, rows: [ row(slug: "ignored") ])
+    @status_watcher.result = failure
+
+    assert_same failure, @supervisor.status_tick
+    assert_empty @notification_dispatcher.processed
+
+    success = StatusResult.new(ok: true, rows: [ row(slug: "active") ])
+    @status_watcher.result = success
+
+    assert_same success, @supervisor.status_tick
+    assert_equal [ [ row(slug: "active") ] ], @notification_dispatcher.processed
+  end
+
+  def test_wait_for_child_success_reaps_and_replies_for_completed_child
+    child = child_exit(exit_code: 0, pid: 456)
+    @child_supervisor.reap_batches << [ child ]
+
+    ok = @supervisor.send(:wait_for_child_success, 456, deadline: Time.now + 1)
+
+    assert_equal true, ok
+    assert_equal "Command completed", @telegram.messages.last.fetch(:text)
+  end
+
+  def test_wait_for_child_success_times_out_without_completed_child
+    ok = @supervisor.send(:wait_for_child_success, 999, deadline: Time.now - 1)
+
+    assert_equal false, ok
+  end
+
+  def test_queue_inline_keyboard_falls_back_to_details_callback_with_stage
+    keyboard = @supervisor.send(:queue_inline_keyboard, [ row(action: "unknown", action_label: nil) ])
+
+    button = keyboard.first.first
+    assert_equal "Details: hive/task", button.fetch(:text)
+    assert_equal "details:hive:task:3-plan", button.fetch(:callback_data)
+  end
+
+  def test_project_and_brainstorm_paths_resolve_registered_project
+    with_tmp_global_config do
+      with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, project|
+        Hive::Config.register_project(name: "proj", path: project)
+
+        assert_equal project, @supervisor.send(:project_path_for, "proj")
+        assert_equal path, @supervisor.send(:brainstorm_path_for, "bot-task-260522-aa", project: "proj")
+      end
+    end
+  end
+
+  def test_reload_config_success_rebuilds_runtime_collaborators
+    new_config = @supervisor.instance_variable_get(:@config).merge("conversation_ttl_sec" => 123)
+    original = Hive::Config.method(:load_global_bot)
+    Hive::Config.define_singleton_method(:load_global_bot) do |require_runtime:|
+      raise "reload must require runtime" unless require_runtime
+
+      new_config
+    end
+
+    @supervisor.request_reload!
+    @supervisor.send(:reload_config_if_requested)
+
+    assert_equal new_config, @supervisor.instance_variable_get(:@config)
+    assert_equal [ 123 ], @conversation_store.ttl_updates
+    assert_equal :config_reloaded, @logger.events.last.fetch(:name)
+    assert_equal false, @supervisor.instance_variable_get(:@reload)
+  ensure
+    Hive::Config.define_singleton_method(:load_global_bot, original) if original
+  end
+
+  def test_reload_config_failure_keeps_existing_config
+    old_config = @supervisor.instance_variable_get(:@config)
+    original = Hive::Config.method(:load_global_bot)
+    Hive::Config.define_singleton_method(:load_global_bot) do |require_runtime:|
+      raise Hive::ConfigError, "bad bot config"
+    end
+
+    @supervisor.request_reload!
+    @supervisor.send(:reload_config_if_requested)
+
+    assert_same old_config, @supervisor.instance_variable_get(:@config)
+    assert_equal false, @supervisor.instance_variable_get(:@reload)
+    assert_equal :fatal, @logger.events.last.fetch(:name)
+    assert_match(/bad bot config/, @logger.events.last.fetch(:payload).fetch(:message))
+  ensure
+    Hive::Config.define_singleton_method(:load_global_bot, original) if original
+  end
+
+  def test_interruptible_sleep_returns_when_shutdown_or_reload_is_requested
+    @supervisor.request_shutdown!
+    started = Time.now
+    @supervisor.send(:interruptible_sleep, 5)
+    assert_operator Time.now - started, :<, 1
+
+    @supervisor.instance_variable_set(:@shutdown, false)
+    @supervisor.request_reload!
+    started = Time.now
+    @supervisor.send(:interruptible_sleep, 5)
+    assert_operator Time.now - started, :<, 1
+  end
+
+  def test_execute_answer_write_appends_real_answer_and_advances_conversation
+    content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
+    with_brainstorm_file(content: content) do |path, _project|
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_b, project: "hive")
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(
+        action: :write_answer_then_reply,
+        slug: "task",
+        project: "hive",
+        question_n: 1,
+        answer_text: "Build the real thing"
+      )
+
+      @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 20))
+
+      assert_includes File.read(path), "Build the real thing"
+      assert_equal "Got Q1.", @telegram.messages.last.fetch(:text)
+      assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
+    end
+  end
+
+  def test_execute_answer_write_reports_already_answered_and_missing_question
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
+  Done.\n") do |path, _project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      answered = FakeRouter::Result.new(
+        action: :write_answer_then_reply,
+        slug: "task",
+        project: "hive",
+        question_n: 1,
+        answer_text: "new answer"
+      )
+
+      @supervisor.send(:execute_answer_write, answered, Update.new(chat_id: 42, update_id: 21))
+      assert_equal "Question 1 was already answered by another device", @telegram.messages.last.fetch(:text)
+
+      missing = FakeRouter::Result.new(
+        action: :write_answer_then_reply,
+        slug: "task",
+        project: "hive",
+        question_n: 99,
+        answer_text: "new answer"
+      )
+      @supervisor.send(:execute_answer_write, missing, Update.new(chat_id: 42, update_id: 22))
+      assert_equal "Question 99 was not found.", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_start_codex_creates_draft_and_keyboard
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      conversation = FakeCodexConversation.new(
+        outcome: Outcome.new(kind: :draft_ready, draft: "Use focused tests."),
+        calls: []
+      )
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      @supervisor.define_singleton_method(:codex_conversation) { conversation }
+      result = FakeRouter::Result.new(
+        action: :start_codex,
+        slug: "bot-task-260522-aa",
+        project: "hive",
+        answer_text: "draft it"
+      )
+
+      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 30))
+
+      assert_equal 1, conversation.calls.length
+      assert_kind_of Hive::Task, conversation.calls.first.fetch(:task)
+      assert_equal "draft it", conversation.calls.first.fetch(:user_input)
+      assert_equal "Codex draft for Q1:\nUse focused tests.", @telegram.messages.last.fetch(:text)
+      assert_equal "codex_write:hive:bot-task-260522-aa:1",
+                   @telegram.messages.last.fetch(:reply_markup).first.first.fetch(:callback_data)
+      state = @conversation_store.get(chat_id: 42, slug: "bot-task-260522-aa")
+      assert_equal true, state.awaiting_confirm
+      assert_equal "Use focused tests.", state.draft
+    end
+  end
+
+  def test_execute_start_codex_sends_reply_and_failure_without_draft
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      conversation = FakeCodexConversation.new(outcome: Outcome.new(kind: :reply, text: "Need more context."), calls: [])
+      @supervisor.define_singleton_method(:codex_conversation) { conversation }
+      result = FakeRouter::Result.new(action: :start_codex, slug: "bot-task-260522-aa", project: "hive")
+
+      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 31))
+      assert_equal "Need more context.", @telegram.messages.last.fetch(:text)
+      state = @conversation_store.get(chat_id: 42, slug: "bot-task-260522-aa")
+      assert_equal false, state.awaiting_confirm
+
+      conversation.outcome = Outcome.new(kind: :failed, reason: "budget_exhausted")
+      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 32))
+      assert_equal "Codex failed: budget_exhausted. Send your answer directly.", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_start_codex_handles_missing_path_and_no_questions
+    missing = FakeRouter::Result.new(action: :start_codex, slug: "missing", project: "hive")
+    @supervisor.send(:execute_start_codex, missing, Update.new(chat_id: 42, update_id: 33))
+    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
+
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
+  Done.\n") do |path, _project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      done = FakeRouter::Result.new(action: :start_codex, slug: "done", project: "hive")
+
+      @supervisor.send(:execute_start_codex, done, Update.new(chat_id: 42, update_id: 34))
+      assert_equal "No unanswered questions remain for done.", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_confirm_codex_draft_writes_answer_and_advances
+    content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
+    with_brainstorm_file(content: content) do |path, _project|
+      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_a, project: "hive")
+      @conversation_store.update(chat_id: 42, slug: "task", draft: "Real answer", awaiting_confirm: true)
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 1)
+
+      @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 40))
+
+      assert_includes File.read(path), "Real answer"
+      assert_equal "Draft saved as Q1.", @telegram.messages.last.fetch(:text)
+      state = @conversation_store.get(chat_id: 42, slug: "task")
+      assert_nil state.draft
+      assert_equal false, state.awaiting_confirm
+      assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
+    end
+  end
+
+  def test_execute_confirm_codex_draft_reports_empty_missing_and_already_answered
+    empty = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "empty", project: "hive", question_n: 1)
+    @supervisor.send(:execute_confirm_codex_draft, empty, Update.new(chat_id: 42, update_id: 41))
+    assert_equal "No draft to confirm for empty.", @telegram.messages.last.fetch(:text)
+
+    @conversation_store.start(chat_id: 42, slug: "missing", question_n: 1, mode: :path_a, project: "hive")
+    @conversation_store.update(chat_id: 42, slug: "missing", draft: "Draft", awaiting_confirm: true)
+    missing = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "missing", project: "hive", question_n: 1)
+    @supervisor.send(:execute_confirm_codex_draft, missing, Update.new(chat_id: 42, update_id: 42))
+    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
+
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
+  Done.\n") do |path, _project|
+      @conversation_store.start(chat_id: 42, slug: "answered", question_n: 1, mode: :path_a, project: "hive")
+      @conversation_store.update(chat_id: 42, slug: "answered", draft: "Draft", awaiting_confirm: true)
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      answered = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "answered", project: "hive", question_n: 1)
+
+      @supervisor.send(:execute_confirm_codex_draft, answered, Update.new(chat_id: 42, update_id: 43))
+      assert_equal "Question 1 was already answered by another device", @telegram.messages.last.fetch(:text)
+    end
   end
 end

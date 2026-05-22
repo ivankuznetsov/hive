@@ -1739,3 +1739,19 @@ dispatch while preserving first-sight brainstorm baseline behavior.
 - `wiki/commands/daemon.md` — added `install [--force]` to the subcommands table.
 - `wiki/modules/daemon.md` — corrected the load-bearing "daemon never writes markers" claim; documented the healer's narrow carve-out (heals, never advances) and the new log events.
 - `wiki/modules/task_action.md` — updated the `:agent_working` carve-out to cover the new stale-classification branch and the synthetic diagnostic.
+
+## [2026-05-22T13:30:00Z] release — packaging/verify-release.sh end-to-end behavior check
+
+**Action:** Added `packaging/verify-release.sh` and a matching `verify-release` job in `install-smoke.yml`. The existing install-smoke jobs verify install SHAPE (binary lands, sidecar files written, `hive --version` works). The new script verifies BEHAVIOR — that the installed release artifact actually runs `init` / `status --json` / `daemon install --json` / `uninstall` and produces the right JSON envelopes (PR #118).
+
+Key contracts:
+
+- Isolates everything inside an XDG/HIVE_HOME/HOME tmp prefix. Captures `HOME_BEFORE` BEFORE overwriting `HOME` so the leak detector can scan the real user's home on macOS too (getent doesn't exist there).
+- Sentinel file (`$PREFIX/.start-marker`) anchors `find -newer` for leak detection so the reference timestamp doesn't drift forward as the script writes child files into $PREFIX.
+- Feature-detects post-`v0.1.0` subcommands (`daemon install`) by listing `VALID_SUBCOMMANDS` via the unknown-subcommand error path — robust against Thor's wrapped long_desc.
+- Force-upgrade test plants a canary unit and asserts the `.bak-<timestamp>` rotation regardless of whether the service-manager call succeeded (the atomic write happens BEFORE systemctl/launchctl is invoked), so the .bak contract has CI coverage even on hosts without user systemd.
+- `--report=json` flag emits a `hive-verify-release.v1` envelope on stdout (`{ok, version, prefix, passed, failed, steps[]}`) with human prose redirected to stderr, for programmatic consumption.
+- Doctor crash discrimination keys off doctor's signature report header (`stage / agent / skill / status`), not arbitrary log content — tolerates rc=1/65/70 while still catching genuine Ruby uncaught-exception crashes.
+
+**Refreshed pages:**
+- `wiki/operating.md` — added a Release Verification section documenting the script's usage, exit codes, and JSON envelope.

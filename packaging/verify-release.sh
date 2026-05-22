@@ -32,28 +32,60 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'HELP'
+verify-release.sh — end-to-end verification of a published hive release.
+
+USAGE:
+  packaging/verify-release.sh [--version=vX.Y.Z] [--prefix=/path]
+                              [--keep-prefix] [--no-uninstall]
+                              [--report=json]
+
+DEFAULTS:
+  --version       v0.1.0 (override to verify a different release)
+  --prefix        mktemp -d hive-verify-XXXXXX (deleted on success
+                  unless --keep-prefix; failures always preserve it)
+
+FLAGS:
+  --keep-prefix   keep the tmp prefix after success (debugging)
+  --no-uninstall  skip the uninstall step (poke at installed state)
+  --report=json   emit a hive-verify-release.v1 JSON envelope on
+                  stdout at end-of-run; human prose redirected to
+                  stderr. Without this flag, output is human-only.
+
+EXIT CODES:
+  0   all verifications passed
+  1   a verification step failed (script preserves the tmp prefix)
+  2   bad arguments
+  3   prerequisite missing (curl, ruby, jq, git)
+HELP
+}
+
 # ─── argument parsing ────────────────────────────────────────────────
 
 HIVE_VERSION=""
 PREFIX=""
 KEEP_PREFIX=0
 RUN_UNINSTALL=1
+REPORT_FORMAT="text"
 
-# Argument dialect matches install.sh: --flag=value only. Drops the
-# space-separated form so two release-ceremony scripts share one
-# parser convention.
+# Argument dialect matches install.sh: --flag=value only.
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version=*) HIVE_VERSION="${1#*=}"; shift ;;
-    --prefix=*)  PREFIX="${1#*=}"; shift ;;
-    --keep-prefix) KEEP_PREFIX=1; shift ;;
+    --version=*)    HIVE_VERSION="${1#*=}"; shift ;;
+    --prefix=*)     PREFIX="${1#*=}"; shift ;;
+    --keep-prefix)  KEEP_PREFIX=1; shift ;;
     --no-uninstall) RUN_UNINSTALL=0; shift ;;
-    -h|--help)
-      sed -n '3,29p' "$0"
-      exit 0 ;;
+    --report=*)     REPORT_FORMAT="${1#*=}"; shift ;;
+    -h|--help)      usage; exit 0 ;;
     *) echo "verify-release: unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
+
+case "$REPORT_FORMAT" in
+  text|json) ;;
+  *) echo "verify-release: invalid --report value: $REPORT_FORMAT (want: text|json)" >&2; exit 2 ;;
+esac
 
 if [[ -z "$HIVE_VERSION" ]]; then
   HIVE_VERSION="v0.1.0"
@@ -128,18 +160,53 @@ PASS_COUNT=0
 FAIL_COUNT=0
 STEP=0
 
-# ANSI colors only when stdout is a TTY and NO_COLOR is unset (per
-# no-color.org). CI typically captures stdout non-interactively;
-# emitting raw escape codes there pollutes log parsers.
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+# Output routing: --report=json puts every human line on stderr
+# (FD 2) and reserves stdout (FD 1) for the single JSON envelope
+# emitted at end-of-run. Default (--report=text) puts log/ok on
+# stdout and fail on stderr, like a normal CLI tool. FD 3 is the
+# "human prose" sink — log/ok write to it; fail keeps writing to
+# stderr regardless so failure markers always reach the operator.
+if [[ "$REPORT_FORMAT" == "json" ]]; then
+  exec 3>&2
+else
+  exec 3>&1
+fi
+
+# ANSI colors only when the prose sink is a TTY and NO_COLOR is unset
+# (per no-color.org). CI typically captures non-interactively so
+# emitting raw escape codes pollutes log parsers.
+if { [[ "$REPORT_FORMAT" == "text" ]] && [[ -t 1 ]]; } \
+   || { [[ "$REPORT_FORMAT" == "json" ]] && [[ -t 2 ]]; } \
+   && [[ -z "${NO_COLOR:-}" ]]; then
   C_INFO=$'\033[1;36m'; C_OK=$'\033[1;32m'; C_FAIL=$'\033[1;31m'; C_RESET=$'\033[0m'
 else
   C_INFO=""; C_OK=""; C_FAIL=""; C_RESET=""
 fi
 
-log() { printf '%s[verify]%s %s\n' "$C_INFO" "$C_RESET" "$*"; }
-ok()  { printf '%s  ✓%s %s\n' "$C_OK" "$C_RESET" "$*"; PASS_COUNT=$((PASS_COUNT + 1)); }
+log() { printf '%s[verify]%s %s\n' "$C_INFO" "$C_RESET" "$*" >&3; }
+ok()  { printf '%s  ✓%s %s\n' "$C_OK" "$C_RESET" "$*" >&3; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { printf '%s  ✗%s %s\n' "$C_FAIL" "$C_RESET" "$*" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+
+# Per-step pass/fail bookkeeping for the JSON envelope. Each call to
+# `step` finalises the prior step's record using the delta in
+# PASS_COUNT/FAIL_COUNT, then snapshots the counters for the new
+# step. STEP_RECORDS is an array of JSON-line strings.
+STEP_RECORDS=()
+CURRENT_STEP_NAME=""
+LAST_PASS_SNAPSHOT=0
+LAST_FAIL_SNAPSHOT=0
+
+finalize_current_step() {
+  if [[ -n "$CURRENT_STEP_NAME" ]]; then
+    local p=$((PASS_COUNT - LAST_PASS_SNAPSHOT))
+    local f=$((FAIL_COUNT - LAST_FAIL_SNAPSHOT))
+    STEP_RECORDS+=("$(jq -cn \
+      --arg name "$CURRENT_STEP_NAME" \
+      --argjson passed "$p" \
+      --argjson failed "$f" \
+      '{name: $name, passed: $passed, failed: $failed}')")
+  fi
+}
 
 cleanup() {
   local exit_code=$?
@@ -158,7 +225,40 @@ cleanup() {
 }
 trap cleanup EXIT
 
-step() { STEP=$((STEP + 1)); log "step ${STEP}: $*"; }
+step() {
+  finalize_current_step
+  STEP=$((STEP + 1))
+  CURRENT_STEP_NAME="$*"
+  LAST_PASS_SNAPSHOT=$PASS_COUNT
+  LAST_FAIL_SNAPSHOT=$FAIL_COUNT
+  log "step ${STEP}: $*"
+}
+
+# Emit the hive-verify-release.v1 envelope on stdout. Single JSON
+# document; per-step records carry pass/fail counts. Shape pinned so
+# automation can branch on .ok and inspect .steps[] without parsing
+# the human prose stream on stderr.
+emit_json_envelope() {
+  finalize_current_step
+  local steps_json
+  steps_json="[$(IFS=,; printf '%s' "${STEP_RECORDS[*]-}")]"
+  jq -cn \
+    --arg version "$HIVE_VERSION" \
+    --arg prefix "$PREFIX" \
+    --argjson passed "$PASS_COUNT" \
+    --argjson failed "$FAIL_COUNT" \
+    --argjson steps "$steps_json" \
+    '{
+      schema: "hive-verify-release",
+      schema_version: 1,
+      ok: ($failed == 0),
+      version: $version,
+      prefix: $prefix,
+      passed: $passed,
+      failed: $failed,
+      steps: $steps
+    }'
+}
 
 # ─── 1. install ──────────────────────────────────────────────────────
 
@@ -339,27 +439,70 @@ if [[ "$DAEMON_INSTALL_AVAILABLE" -eq 1 ]]; then
     *)  fail "daemon install exited unexpectedly rc=$INSTALL_RC" ;;
   esac
 
-  # If install reported success (rc=0), exercise --force on the existing
-  # unit and assert the .bak rotation contract.
-  if [[ "$INSTALL_RC" -eq 0 ]]; then
-    step "daemon install --force --json (verify .bak rotation)"
+  # Force-upgrade test runs UNCONDITIONALLY by planting a known
+  # canary unit at the target path. The atomic-write contract
+  # (write + rotate-to-timestamped-.bak) runs BEFORE the systemctl
+  # restart inside install_linux! / install_macos!, so even on CI
+  # hosts where the restart call fails (no user systemd session),
+  # the .bak file MUST be on disk with the canary content and the
+  # main unit file MUST contain the new template. Previously this
+  # block was gated on `INSTALL_RC -eq 0` (first install succeeded),
+  # which is structurally false on ubuntu-24.04 runners → the .bak
+  # rotation contract had zero CI coverage.
+  UNIT_PATH=""
+  case "$(uname -s)" in
+    Linux)  UNIT_PATH="$HOME/.config/systemd/user/hive-daemon.service" ;;
+    Darwin) UNIT_PATH="$HOME/Library/LaunchAgents/local.hive-daemon.plist" ;;
+  esac
+  if [[ -n "$UNIT_PATH" ]]; then
+    step "daemon install --force --json (verify .bak rotation, unconditional)"
+    CANARY='# verify-release canary — drifted user-customised unit content'
+    mkdir -p "$(dirname "$UNIT_PATH")"
+    printf '%s\n' "$CANARY" > "$UNIT_PATH"
+
     set +e
     "$XDG_BIN_HOME/hive" daemon install --force --json \
       >"$PREFIX/daemon-install-force.json" 2>"$PREFIX/daemon-install-force.err"
     FORCE_RC=$?
     set -e
     FORCE_OUTCOME="$(jq -r '.outcome // empty' "$PREFIX/daemon-install-force.json" 2>/dev/null || true)"
-    if [[ "$FORCE_RC" -eq 0 ]] && [[ "$FORCE_OUTCOME" == "upgraded" || "$FORCE_OUTCOME" == "unchanged" ]]; then
-      ok "daemon install --force outcome=$FORCE_OUTCOME"
-      if [[ "$FORCE_OUTCOME" == "upgraded" ]]; then
-        BACKUPS="$(find "$HOME/.config/systemd/user" -maxdepth 1 -name 'hive-daemon.service.bak-*' 2>/dev/null | wc -l)"
-        [[ "$BACKUPS" -ge 1 ]] && ok "timestamped .bak present after --force" \
-                               || fail "force-upgrade reported but no .bak-<timestamp> file written"
+
+    # Atomic-write contract: regardless of whether the service-manager
+    # call (systemctl restart / launchctl load) ultimately succeeded,
+    # the unit file was rewritten BEFORE that call and the previous
+    # content was rotated to a timestamped .bak.
+    BACKUPS=( "$UNIT_PATH".bak-* )
+    if [[ -e "${BACKUPS[0]}" ]]; then
+      ok "timestamped .bak written before service-manager call (count=${#BACKUPS[@]})"
+      # Pin: the .bak must contain the canary content we planted.
+      if grep -qxF "$CANARY" "${BACKUPS[0]}" 2>/dev/null; then
+        ok "backup preserves prior unit content verbatim"
+      else
+        fail "backup at ${BACKUPS[0]} does not contain the canary content"
       fi
     else
-      cat "$PREFIX/daemon-install-force.json" "$PREFIX/daemon-install-force.err" >&2
-      fail "daemon install --force unexpected outcome (rc=$FORCE_RC, outcome=$FORCE_OUTCOME)"
+      fail "no .bak-<timestamp> file written despite --force against drifted unit"
     fi
+
+    # New content must have landed on disk regardless of outcome
+    # (atomic write happens before the systemctl/launchctl call).
+    if ! grep -qxF "$CANARY" "$UNIT_PATH" 2>/dev/null; then
+      ok "main unit file rewritten with new template (canary content gone)"
+    else
+      fail "main unit at $UNIT_PATH still contains the canary content"
+    fi
+
+    # The outcome enum is contextual: outcome=upgraded means
+    # service-manager succeeded too; outcome=failed means the write
+    # happened but the restart didn't. Both are acceptable here —
+    # we already validated the disk-level contract above. Reject only
+    # truly bad shapes.
+    case "$FORCE_OUTCOME" in
+      upgraded) ok "force outcome=upgraded (write + service-manager both succeeded)" ;;
+      failed)   ok "force outcome=failed (write succeeded; service-manager rejected, expected on CI without user systemd)" ;;
+      *) cat "$PREFIX/daemon-install-force.json" "$PREFIX/daemon-install-force.err" >&2
+         fail "force outcome='$FORCE_OUTCOME' (rc=$FORCE_RC) — want upgraded or failed" ;;
+    esac
   fi
 else
   log "step: daemon install — SKIPPED (pinned release predates the subcommand)"
@@ -440,6 +583,9 @@ fi
 # ─── summary ─────────────────────────────────────────────────────────
 
 log "summary: $PASS_COUNT passed, $FAIL_COUNT failed"
+if [[ "$REPORT_FORMAT" == "json" ]]; then
+  emit_json_envelope
+fi
 if [[ $FAIL_COUNT -gt 0 ]]; then
   log "logs preserved at: $PREFIX"
   exit 1

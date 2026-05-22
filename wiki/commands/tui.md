@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb
 created: 2026-04-27
-updated: 2026-05-19T00:00:00Z
+updated: 2026-05-22
 tags: [command, tui, observability, interactive, diagnostics]
 ---
 
@@ -25,7 +25,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │                 │                                                        │
 │  ★ All projects │  ▶  fix-cache-…   2-brainstorm  Ready to plan      2h │
 │  hive           │  🤖 metrics-…     4-execute     Agent running       1m │
-│  myapp          │  ⚠  oauth-…       6-review      Review findings     1h │
+│  myapp          │  ⚠  oauth-…       6-review      Needs recovery      1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
 │ Footer: [Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q]│
@@ -75,7 +75,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `q` | quit (default mode) |
 | `Esc` | back to default mode (any sub-mode) |
 
-For findings triage, use the `hive accept-finding` / `hive reject-finding` CLI commands directly (the in-TUI triage mode was removed once the `review_findings` action key stopped being emitted by the live pipeline; see [[commands/findings]]). In red-status detail mode, `Enter` runs the existing autofix/retry path, `f` opens the task worktree in `$VISUAL` / `$EDITOR` / `vi`, `R` runs `hive status --diagnose <slug> --project <project> --write` in the background, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
+Findings triage is no longer an in-TUI mode. Use `hive findings`, `hive accept-finding`, and `hive reject-finding` directly from a shell or coding agent; legacy `EXECUTE_WAITING findings_count` rows surface as `recover_execute` and point at `hive findings` from status JSON (see [[commands/findings]]). In red-status detail mode, `Enter` runs the existing autofix/retry path, `f` opens the task worktree in `$VISUAL` / `$EDITOR` / `vi`, `R` runs `hive status --diagnose <slug> --project <project> --write` in the background, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
 
 ## New Idea Prompt Editing
 
@@ -179,7 +179,6 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 
 `error` rows behave by exit_code. Kill-class codes (`130` / `137` / `143`, hosted on `Hive::Markers::KILL_CLASS_EXIT_CODES`) are signal kills (SIGINT / SIGKILL / SIGTERM); the background auto-healer in `BubbleModel#auto_heal_kill_class_errors` clears those `<!-- ERROR -->` markers on its own, so Enter on those rows falls through to the log-tail view rather than triggering a parallel clear that would race the auto-healer for the same markers-lock. Every other exit_code (`1`, `2`, anything outside the kill-class list, or markers with no exit_code attr at all) is a real failure the agent ran into; grid Enter opens red-status detail first, and Enter in that view routes through `RecoverError` on a background worker, mirroring the `recover_review` sequence: `hive markers clear <folder> --name ERROR --match-attr exit_code=N` (the match-attr ties the clear to the specific marker seen at snapshot time so a concurrent fresh failure with a different code is not erased), then `hive run <folder>` in the normal background-spawn path. The status column shows `ERROR exit_code=N` (or `ERROR <reason>` when no exit code is set) so the operator can read WHY the agent failed without leaving the grid. Per-folder dedup is tracked on `@error_recovery_inflight`; same partial-failure and programmer-error contracts as `recover_review`. The synchronous flash announces `error recovery: clearing ERROR …`; the worker dispatches a follow-up `Messages::Flash` with the outcome.
 
-Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead — a bounded captured-stdio child runs `hive accept-finding` / `hive reject-finding` without tearing down the alt-screen, so the screen does not flash on every toggle. On a non-zero exit the captured stderr appears in the status line; a hung helper is terminated as a process group and reported as exit 124.
 
 `SUBPROCESS_LOG_PATH` (`$TMPDIR/hive-tui-subprocess.log`, or `$HIVE_TUI_LOG_DIR/hive-tui-subprocess.log` when the e2e harness scopes a run) is a marker-only log: BEGIN[id] / END[id] / ERRNO records, no child stdio. Each background spawn captures its own stdout/stderr to `hive-tui-spawn-<id>.log` in the same directory (the same 8-char hex ID embedded in the marker line). The reaper deletes the per-spawn capture on `exit_code == 0` (success has nothing to diagnose) and keeps a truncated failure capture on non-zero exits so `Subprocess.diagnose_recent_failure(verb)` can read the actual stderr. `SUBPROCESS_LOG_MAX_BYTES` (10 MiB) is checked at each stamp write — when exceeded the file is renamed to `…log.1` (single rotation tier). With child output redirected away from the shared file, that cap is now an actual disk-usage bound rather than the approximate ceiling it used to be. Per-spawn captures are reaped opportunistically: every BEGIN sweeps `hive-tui-spawn-*.log` in the active log directory and deletes anything older than 24 h so a crashed reaper or a `kill -9 hive` can't leak files.
 
@@ -195,8 +194,8 @@ Per-`Space` finding toggles use `Hive::Tui::Subprocess.run_quiet!(argv)` instead
 ## Test surface
 
 - `test/integration/tui_command_test.rb` — Thor help-text registration, `--json` rejection, non-tty boundary check.
-- `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `TriageState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
-- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `Triage`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
+- `test/unit/tui/*_test.rb` — pure-Ruby state machines (`StateSource`, `Snapshot`, `KeyMap`, `GridState`, `LogTail::FileResolver`, `Help`, `Model`, `Messages`, `Update`, `BubbleModel`).
+- `test/unit/tui/views/*_test.rb` — pure-function view tests for every Lipgloss-rendered frame (`ProjectsPane`, `TasksPane`, `LogTail`, `RedStatusDetail`, `HelpOverlay`, `FilterPrompt`, `NewIdeaPrompt`). Layout/text content is pinned; visual styling (color/bold/reverse) is validated by manual dogfood — lipgloss-ruby v0.2.2 strips ANSI in non-tty test environments (gap tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). Selection / cursor highlight predicates (`ProjectsPane#selected?`, `TasksPane#highlight?`) are exposed for unit-test assertion since the rendered output cannot distinguish them in non-tty.
 - `test/integration/tui_subprocess_test.rb` — `Subprocess.takeover_command` / `run_quiet!` against a fake child binary.
 - `test/integration/tui_smoke_test.rb` + `test/integration/tui_smoke_charm_test.rb` — PTY-based boot smokes: `bin/hive tui` paints, the seeded project name appears, `q` exits 0.
 

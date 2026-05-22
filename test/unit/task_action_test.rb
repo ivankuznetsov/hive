@@ -142,6 +142,17 @@ class TaskActionTest < Minitest::Test
     assert_equal "needs_input", action.key
   end
 
+  def test_legacy_execute_waiting_with_findings_surfaces_recovery_findings_cli
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 3))
+
+    assert_equal "recover_execute", action.key
+    assert_equal "Needs recovery", action.label
+    assert_equal "hive findings demo-260426-aaaa", action.command
+    assert_nil action.next_action,
+               "legacy findings rows should not fall through to ExecuteWaitingAction edit guidance"
+  end
+
   def test_execute_waiting_no_changes_exposes_structured_next_action
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(
@@ -427,9 +438,8 @@ class TaskActionTest < Minitest::Test
 
   # Generic verbs (`findings` and friends) only carry `--stage` when slug
   # collision actually exists, so the common single-task command stays
-  # clean. `execute_stale` is the surviving emitter of the `findings`
-  # verb after PR #122 removed the `:execute_findings` action, so it's
-  # the right fixture to pin the collision-aware `--stage` plumbing on.
+  # clean. Both EXECUTE_STALE and legacy EXECUTE_WAITING findings rows
+  # emit the findings verb through the recover_execute action surface.
   def test_findings_command_uses_stage_only_on_collision
     task = fake_task(stage_name: "execute", stage_index: 4)
     no_collision = Hive::TaskAction.for(task, marker(:execute_stale, "max_passes" => 4))
@@ -440,15 +450,24 @@ class TaskActionTest < Minitest::Test
                                           stage_collision: true)
     assert_equal "hive findings demo-260426-aaaa --stage 4-execute", with_collision.command,
                  "findings command must carry --stage when status.rb flags a slug collision"
+
+    legacy_no_collision = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 2))
+    assert_equal "hive findings demo-260426-aaaa", legacy_no_collision.command
+
+    legacy_with_collision = Hive::TaskAction.for(
+      task,
+      marker(:execute_waiting, "findings_count" => 2),
+      stage_collision: true
+    )
+    assert_equal "hive findings demo-260426-aaaa --stage 4-execute", legacy_with_collision.command
   end
 
   # Canary for the post-PR #122 invariant: no producer in Hive::TaskAction
   # should ever emit the removed `review_findings` action key. A future
   # revert or parallel branch reintroducing a `findings_count`-bearing
-  # EXECUTE_WAITING writer would silently route through `needs_input` →
-  # daemon auto-dispatches `hive develop` instead of a human gate, and
-  # would fail schema validation against hive-status.v2 (the enum value
-  # is gone). This canary fails fast at unit-test time.
+  # EXECUTE_WAITING writer must route through `recover_execute`, not the
+  # deleted enum value or a generic `needs_input` edit path. This canary
+  # fails fast at unit-test time.
   def test_no_producer_emits_review_findings
     stage_markers = [
       [ "brainstorm",  2, [ :waiting, :complete, :agent_working, :error ] ],
@@ -463,7 +482,7 @@ class TaskActionTest < Minitest::Test
       marker_names.each do |marker_name|
         # Cover both "no attrs" and "findings_count carried as legacy
         # attr" — the latter is the case that pre-PR #122 routed to
-        # `review_findings` and must now route elsewhere.
+        # `review_findings` and must now route through recover_execute.
         [ {}, { "findings_count" => 3 } ].each do |attrs|
           task = fake_task(stage_name: stage_name, stage_index: stage_index)
           action = Hive::TaskAction.for(task, marker(marker_name, **attrs))
@@ -471,6 +490,10 @@ class TaskActionTest < Minitest::Test
                        "no producer may emit `review_findings` " \
                        "(stage=#{stage_name} marker=#{marker_name} attrs=#{attrs.inspect}); " \
                        "see ADR-028 in wiki/decisions.md"
+          if stage_name == "execute" && marker_name == :execute_waiting && attrs["findings_count"]
+            assert_equal "recover_execute", action.key,
+                         "legacy findings_count waits must stay a human recovery gate"
+          end
         end
       end
     end
@@ -581,6 +604,26 @@ class TaskActionTest < Minitest::Test
       assert_equal ci_blocked, diagnostic["source_path"]
       assert_includes diagnostic["summary"], "REVIEW_CI_STALE"
       assert_includes diagnostic["detail"], "bundle exec rake test"
+    end
+  end
+
+  def test_legacy_execute_waiting_with_findings_emits_recovery_diagnostic
+    Dir.mktmpdir("hive-task-action") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "ce-review-01.md"), "legacy finding remains\n")
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(:execute_waiting, "findings_count" => "1")
+      ).diagnostic
+
+      refute_nil diagnostic
+      assert_includes diagnostic["summary"], "EXECUTE_WAITING"
+      assert_includes diagnostic["detail"], "legacy finding remains"
+      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_nil diagnostic.fetch("suggested_next_action")["command"]
     end
   end
 

@@ -1795,3 +1795,9 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 
 **Refreshed pages:**
 - `wiki/decisions.md` — ADR-028 rewritten to record the in-place edit (was previously "retain as vestigial"). Notes the pre-1.0 affordance vs. post-1.0 convention difference.
+
+## [2026-05-22T18:30:00Z] status — preserve legacy findings recovery without review_findings enum
+
+**Action:** Follow-up to ADR-028 after PR #122 review. Kept `review_findings` removed from v2 schemas, but remapped legacy `EXECUTE_WAITING findings_count>0` markers to the existing `recover_execute` action surface instead of generic `needs_input`. Those pinned state folders now emit `hive findings <slug>` and a manual-fix diagnostic, while ordinary execute waits keep their structured edit `next_action`.
+
+**Docs:** Refreshed README, [[commands/tui]], [[modules/task_action]], and [[decisions]] so they describe the shell/agent findings workflow and the `recover_execute` legacy compatibility path, not the deleted TUI triage mode.

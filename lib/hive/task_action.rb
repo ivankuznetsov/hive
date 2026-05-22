@@ -276,6 +276,8 @@ module Hive
       when :execute_stale
         ACTIONS.fetch(:execute_stale)
       when :execute_waiting
+        return ACTIONS.fetch(:execute_stale) if legacy_execute_findings?
+
         ACTIONS.fetch(:execute_waiting)
       else
         ACTIONS.fetch(:execute_waiting)
@@ -412,6 +414,7 @@ module Hive
 
     def diagnostic_artifacts
       return latest_log_artifacts if incomplete_plan_artifact?
+      return fresh_diagnosis_artifact + execute_stale_artifacts if legacy_execute_findings?
 
       case marker.name
       when :review_error
@@ -742,7 +745,7 @@ module Hive
       # through to a nil payload so agents reading hive-status JSON
       # see an explicit "do not auto-retry" signal rather than the
       # absence of data. See PR #84 review finding #9.
-      if marker.name == :execute_stale
+      if marker.name == :execute_stale || legacy_execute_findings?
         return { "kind" => "manual_fix", "command" => nil }
       end
 
@@ -874,7 +877,15 @@ module Hive
     end
 
     def execute_waiting_input?
-      task.stage_name == "execute" && marker.name == :execute_waiting
+      task.stage_name == "execute" &&
+        marker.name == :execute_waiting &&
+        !legacy_execute_findings?
+    end
+
+    def legacy_execute_findings?
+      task.stage_name == "execute" &&
+        marker.name == :execute_waiting &&
+        marker.attrs["findings_count"].to_i.positive?
     end
 
     def finalize_missing_pr_md?

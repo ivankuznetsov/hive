@@ -333,7 +333,7 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 **Consequences:**
 - `hive-status.v2.json` no longer advertises `review_findings` as a valid emittable action. Schema-validating consumers receive a sharper contract.
-- Producer-side semantic remap: `EXECUTE_WAITING + findings_count>0` markers now route to `needs_input` instead of `review_findings`. Same input → different output. A canary producer-sweep test pins the non-emission invariant so a future revert / parallel branch re-introducing a writer is caught at unit-test time.
+- Producer-side semantic remap: `EXECUTE_WAITING + findings_count>0` markers now route to `recover_execute` instead of `review_findings`. Same input → different output, but still a human recovery gate with a `hive findings` command rather than generic edit guidance. A canary producer-sweep test pins the non-emission invariant so a future revert / parallel branch re-introducing a writer is caught at unit-test time.
 - `test_unknown_action_skips` in `test/unit/daemon/policy_test.rb` continues to use the string `"review_findings"` as a synthetic-unknown fixture: it now pins forward-compat (`:skip` for any unknown action) rather than back-compat.
 - If hive ever gains external schema consumers pinned to v2, this decision becomes more expensive to make again. Treat the in-place edit pattern as a pre-1.0 affordance, not a permanent convention.
 

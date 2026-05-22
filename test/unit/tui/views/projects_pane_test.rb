@@ -152,6 +152,37 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
     assert_includes out, "⚠ stale (needs init)"
   end
 
+  def test_healthy_project_with_legacy_stage_dirs_renders_migration_hint
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        {
+          "name" => "legacy",
+          "tasks" => [],
+          "legacy_stage_dirs" => [ "7-done" ],
+          "legacy_migrate_command" => "hive migrate"
+        }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, pane_focus: :left)
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 60)
+
+    assert_includes out, "⚠ legacy (legacy dirs — run hive migrate)"
+  end
+
+  def test_unhealthy_project_with_unknown_error_uses_raw_error_label
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-05-04",
+      "projects" => [
+        { "name" => "odd", "error" => "registry_timeout", "tasks" => [] }
+      ]
+    )
+    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, pane_focus: :left)
+    out = Hive::Tui::Views::ProjectsPane.render(model, width: 50)
+
+    assert_includes out, "⚠ odd (registry_timeout)"
+  end
+
   def test_long_project_name_is_truncated_with_ellipsis
     long_name = "this-is-a-very-long-project-name-that-overflows"
     model = Hive::Tui::Model.initial.with(snapshot: make_snapshot(names: [ long_name ]),

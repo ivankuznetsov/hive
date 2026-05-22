@@ -1,4 +1,5 @@
 require "hive/stages/base"
+require "hive/config"
 
 module Hive
   module Stages
@@ -16,8 +17,21 @@ module Hive
       end
 
       def runtime_for(cfg)
-        runtime = cfg.dig("brainstorm", "runtime") ||
-          Hive::Config::DEFAULTS.dig("brainstorm", "runtime")
+        agent_name = (cfg.dig("brainstorm", "agent") || "claude").to_s
+        return :headless unless agent_name == "claude"
+
+        if !Hive::Config.explicit_claude_mode?(cfg) &&
+           Hive::Config.explicit_brainstorm_runtime?(cfg)
+          return legacy_runtime_for(cfg.dig("brainstorm", "runtime"))
+        end
+
+        case Hive::Config.claude_mode(cfg)
+        when :headless then :headless
+        when :tmux then :tmux_interactive
+        end
+      end
+
+      def legacy_runtime_for(runtime)
         case runtime
         when "headless" then :headless
         when "tmux_interactive" then :tmux_interactive

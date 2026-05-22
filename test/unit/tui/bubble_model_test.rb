@@ -5737,4 +5737,282 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "buffer must NOT receive the oversize-image text"
     assert_match(/too large/i, @model.hive_model.flash.to_s)
   end
+  def test_stage66_recovery_helpers_cover_rescue_and_timeout_flash
+    row = make_task_row(folder: "/tmp/hive/recover-edge", attrs: { "pass" => "1" })
+
+    with_singleton_method_stub(Dir, :[], ->(_pattern) { raise Errno::EACCES, "denied" }) do
+      refute @model.send(:retryable_incomplete_triage_pass?, row)
+    end
+
+    flash = @model.send(
+      :error_recovery_failure_flash,
+      row,
+      Hive::Tui::Subprocess::COMMAND_TIMEOUT_EXIT,
+      "ignored"
+    )
+    assert_match(/markers-clear timed out/, flash)
+    assert_match(/hive markers clear \/tmp\/hive\/recover-edge --name ERROR/, flash)
+  end
+
+  def test_stage66_open_handlers_flash_for_missing_resources
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "4-execute", "missing-review")
+      FileUtils.mkdir_p(folder)
+      row = make_task_row(action_key: "review_findings", slug: "missing-review", stage: "4-execute", folder: folder)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenFindings.new(row: row))
+
+      assert_nil cmd
+      assert_match(/no review file for missing-review/, @model.hive_model.flash.to_s)
+    end
+
+    bad_row = make_task_row(action_key: "agent_running", slug: "bad-log", folder: "/tmp/not-a-task")
+    _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: bad_row))
+
+    assert_nil cmd
+    assert_match(/log file gone/, @model.hive_model.flash.to_s)
+  end
+
+  def test_stage66_open_in_agent_refuses_stale_and_invalid_folders
+    with_manual_task_context do |_project_root, _hive_state, folder, _state_file, _worktree_path, row|
+      FileUtils.rm_rf(folder)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+      assert_nil cmd
+      assert_match(/no task folder for manual-task/, @model.hive_model.flash.to_s)
+    end
+
+    invalid_row = make_task_row(slug: "bad-agent", folder: "/tmp/not-a-task")
+    _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: invalid_row))
+
+    assert_nil cmd
+    assert_match(/no task folder for bad-agent/, @model.hive_model.flash.to_s)
+  end
+
+  def test_stage66_open_in_agent_surfaces_lookup_and_marker_write_errors
+    with_manual_task_context do |_project_root, _hive_state, _folder, _state_file, _worktree_path, row|
+      with_agent_profile_lookup_stub(->(name, cfg:) { raise Hive::AgentProfiles::UnknownAgent, "unknown #{name}" }) do
+        _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+        assert_nil cmd
+        assert_match(/unknown agent in config: claude/, @model.hive_model.flash.to_s)
+      end
+    end
+
+    with_manual_task_context do |_project_root, _hive_state, _folder, _state_file, _worktree_path, row|
+      profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
+
+      with_agent_profile_lookup_stub(->(_name, cfg:) { profile }) do
+        with_singleton_method_stub(Hive::Markers, :set, ->(*_args, **_kwargs) { raise Errno::EACCES, "denied" }) do
+          _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+          assert_nil cmd
+          assert_match(/steer failed for manual-task: EACCES/, @model.hive_model.flash.to_s)
+        end
+      end
+    end
+  end
+
+  def test_stage66_archive_steer_error_paths_and_flash_variants
+    invalid = Hive::Tui::Messages::AgentSteerExited.new(
+      slug: "bad-folder", folder: "/tmp/not-a-task", exit_code: 1, worktree: "/tmp/worktree"
+    )
+    _, cmd = @model.update(invalid)
+
+    assert_nil cmd
+    assert_match(/manual archive failed for bad-folder: invalid task folder/, @model.hive_model.flash.to_s)
+
+    with_manual_task_context(slug: "missing-manual") do |_project_root, _hive_state, folder, _state_file, worktree_path, row|
+      FileUtils.rm_rf(folder)
+      message = Hive::Tui::Messages::AgentSteerExited.new(
+        slug: row.slug, folder: folder, exit_code: 1, worktree: worktree_path
+      )
+
+      @model.update(message)
+
+      assert_match(/manual archive failed for missing-manual: ENOENT/, @model.hive_model.flash.to_s)
+    end
+
+    with_tmp_dir do |dir|
+      archived_root = File.join(dir, "archived-manual")
+      FileUtils.mkdir_p(archived_root)
+      FileUtils.mkdir_p(File.join(archived_root, "manual-task"))
+      (2..Hive::Tui::BubbleModel::MANUAL_ARCHIVE_SUFFIX_CEILING).each do |suffix|
+        FileUtils.mkdir_p(File.join(archived_root, "manual-task-#{suffix}"))
+      end
+
+      assert_raises(Errno::EEXIST) do
+        @model.send(:manual_archive_target, archived_root, "manual-task")
+      end
+    end
+
+    assert_match(
+      /agent binary not found.*archived manual-task/,
+      @model.send(:manual_archive_flash, "manual-task", "/tmp/manual-task", 127, false)
+    )
+    assert_match(
+      /archived-manual\/manual-task-2\//,
+      @model.send(:manual_archive_flash, "manual-task", "/tmp/manual-task-2", 127, true)
+    )
+    assert_match(
+      /agent exited 2.*manual-task-2\/ \(collision\)/,
+      @model.send(:manual_archive_flash, "manual-task", "/tmp/manual-task-2", 2, true)
+    )
+  end
+
+  def test_stage66_summary_paths_and_editor_error_flash
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "7-finalize", "summary-fallback")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "pr.md"), "# PR\n")
+      row = make_task_row(action_key: "complete", slug: "summary-fallback", stage: "7-finalize", folder: folder)
+
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      _, cmd = @model.update(Hive::Tui::Messages::OpenSummary.new(row: row))
+
+      assert_kind_of Bubbletea::SequenceCommand, cmd
+      assert_match(/opening summary for summary-fallback in fake-editor/, @model.hive_model.flash.to_s)
+    end
+
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "7-finalize", "summary-error")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "summary.md"), "# Summary\n")
+      row = make_task_row(action_key: "complete", slug: "summary-error", stage: "7-finalize", folder: folder)
+
+      @model.define_singleton_method(:editor_argv) { raise ArgumentError, "empty editor" }
+      _, cmd = @model.update(Hive::Tui::Messages::OpenSummary.new(row: row))
+
+      assert_nil cmd
+      assert_match(/editor command invalid: empty editor/, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_stage66_review_stale_and_review_file_helpers_cover_rescues
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "escalations-04.md"), "## High\n- [ ] finding\n")
+      row = make_task_row(
+        action_key: "recover_review", slug: "stale-review", stage: "6-review",
+        folder: dir, marker: "review_stale", attrs: { "pass" => "4" }, suggested_command: nil
+      )
+
+      @model.define_singleton_method(:editor_argv) { raise ArgumentError, "empty editor" }
+      _, cmd = @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+
+      assert_nil cmd
+      assert_match(/editor command invalid: empty editor/, @model.hive_model.flash.to_s)
+    end
+
+    with_singleton_method_stub(File, :readlines, ->(_path) { raise Errno::EACCES, "denied" }) do
+      refute @model.send(:file_has_unchecked_finding?, "/tmp/review.md")
+    end
+  end
+
+  def test_stage66_marker_terminal_and_file_helpers_cover_error_paths
+    race = Hive::Tui::BubbleModel::MarkerRaceError.new(:complete)
+    assert_equal :complete, race.observed
+    assert_match(/expected :waiting, observed :complete/, race.message)
+
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# Plan\n<!-- COMPLETE -->\n")
+      row = make_task_row(slug: "plan-race", state_file: state_file)
+
+      assert_raises(Hive::Tui::BubbleModel::MarkerRaceError) do
+        @model.send(:finalize_plan_marker, row)
+      end
+    end
+
+    with_singleton_method_stub(Hive::Markers, :current, ->(_path) { raise Errno::EACCES, "denied" }) do
+      refute @model.send(:marker_still_open_for_input?, "/tmp/state.md")
+    end
+
+    assert_nil @model.send(:file_mtime, "/tmp/does-not-exist-for-hive-test")
+
+    original_stdout = $stdout
+    writes = []
+    fake_stdout = Object.new
+    fake_stdout.define_singleton_method(:tty?) { true }
+    fake_stdout.define_singleton_method(:write) { |text| writes << text }
+    fake_stdout.define_singleton_method(:flush) { nil }
+    $stdout = fake_stdout
+    @model.send(:clear_terminal_for_takeover)
+    assert_equal [ "\e[2J\e[H" ], writes
+
+    fake_stdout.define_singleton_method(:flush) { raise Errno::EPIPE, "closed" }
+    @model.send(:clear_terminal_for_takeover)
+  ensure
+    $stdout = original_stdout if original_stdout
+  end
+
+  def test_stage66_log_tail_and_triage_failure_helpers
+    tail = Struct.new(:path) do
+      def lines(_count)
+        [ "raw log\n" ]
+      end
+    end.new("/tmp/hive.log")
+    wrapper = Hive::Tui::BubbleModel::LogTailContext.new(tail: tail, claude_pid_alive: true)
+
+    assert_equal "/tmp/hive.log", wrapper.path
+    assert_equal [ "raw log\n" ], wrapper.lines(1)
+
+    state = Object.new
+    state.define_singleton_method(:current_finding) { :finding }
+    state.define_singleton_method(:toggle_command) { |_finding| [ "hive", "accept-finding", "/tmp/task", "1" ] }
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
+      dispatch: @dispatch
+    )
+    with_run_quiet_stub(->(_argv) { [ 1, "", "toggle broke\n" ] }) do
+      _, cmd = @model.update(Hive::Tui::Messages::ToggleFinding.new(row: make_task_row))
+
+      assert_nil cmd
+      assert_match(/toggle failed: toggle broke/, @model.hive_model.flash.to_s)
+    end
+
+    state.define_singleton_method(:bulk_command) { |_direction| [ "hive", "accept-finding", "/tmp/task", "--all" ] }
+    with_run_quiet_stub(->(_argv) { [ 2, "", "bulk broke\n" ] }) do
+      _, cmd = @model.update(Hive::Tui::Messages::BULK_ACCEPT)
+
+      assert_nil cmd
+      assert_match(/accept failed: bulk broke/, @model.hive_model.flash.to_s)
+    end
+
+    missing_state = Struct.new(:review_path).new("/tmp/missing-review.md")
+    model, cmd = @model.send(:reload_findings_into_state, missing_state, nil)
+
+    assert_nil cmd
+    assert_equal :grid, model.mode
+    assert_match(/review file gone/, model.flash.to_s)
+  end
+
+  def test_stage66_attachment_and_scope_helpers_cover_defensive_paths
+    attachment = Hive::Tui::Model::Attachment.new(label: "image1", staging_path: "/tmp/missing-image.png", ext: "png")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(new_idea_attachments: [ attachment ]),
+      dispatch: @dispatch
+    )
+
+    with_singleton_method_stub(File, :exist?, ->(_path) { raise Errno::ENAMETOOLONG, "too long" }) do
+      assert_equal [ "image1" ], @model.send(:rich_new_idea_broken_labels, "see [image1]")
+    end
+
+    duplicate = Hive::Tui::Model::Attachment.new(label: "image1", staging_path: "/tmp/other.png", ext: "png")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: @model.hive_model.with(new_idea_attachments: [ attachment, duplicate ]),
+      dispatch: @dispatch
+    )
+    error = assert_raises(Hive::Error) { @model.send(:attachments_by_label) }
+    assert_match(/duplicate attachment labels: image1/, error.message)
+
+    project = Struct.new(:name).new("beta")
+    snapshot = Struct.new(:projects).new([ project ])
+    model = Hive::Tui::Model.initial.with(scope: 1, snapshot: snapshot)
+    assert_equal "beta", @model.send(:scope_label_for, model)
+
+    model = Hive::Tui::Model.initial.with(scope: 2, snapshot: snapshot)
+    assert_equal "2", @model.send(:scope_label_for, model)
+  end
 end

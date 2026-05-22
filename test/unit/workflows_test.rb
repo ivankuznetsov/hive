@@ -8,10 +8,10 @@ require "hive/workflows"
 # rebase can't drift the contract without breaking this file.
 class WorkflowsTest < Minitest::Test
   def test_verbs_has_canonical_keys_in_order
-    assert_equal %w[brainstorm plan develop open-pr review finalize archive],
+    assert_equal %w[brainstorm plan develop open-pr review artifacts finalize archive],
                  Hive::Workflows::VERBS.keys,
                  "VERBS must list the canonical workflow verbs"
-    assert_equal 7, Hive::Workflows::VERBS.size
+    assert_equal 8, Hive::Workflows::VERBS.size
   end
 
   def test_open_pr_verb_source_and_target
@@ -28,14 +28,20 @@ class WorkflowsTest < Minitest::Test
 
   def test_finalize_verb_source_and_target
     cfg = Hive::Workflows::VERBS.fetch("finalize")
-    assert_equal "6-review", cfg[:source]
-    assert_equal "7-finalize", cfg[:target]
+    assert_equal "7-artifacts", cfg[:source]
+    assert_equal "8-finalize", cfg[:target]
   end
 
   def test_archive_verb_source_and_target
     cfg = Hive::Workflows::VERBS.fetch("archive")
-    assert_equal "7-finalize", cfg[:source]
-    assert_equal "8-done", cfg[:target]
+    assert_equal "8-finalize", cfg[:source]
+    assert_equal "9-done", cfg[:target]
+  end
+
+  def test_artifacts_verb_source_and_target
+    cfg = Hive::Workflows::VERBS.fetch("artifacts")
+    assert_equal "6-review", cfg[:source]
+    assert_equal "7-artifacts", cfg[:target]
   end
 
   # ── verb_advancing_from ───────────────────────────────────────────────
@@ -45,11 +51,11 @@ class WorkflowsTest < Minitest::Test
   end
 
   def test_verb_advancing_from_6_review_is_finalize
-    assert_equal "finalize", Hive::Workflows.verb_advancing_from("6-review")
+    assert_equal "artifacts", Hive::Workflows.verb_advancing_from("6-review")
   end
 
-  def test_verb_advancing_from_8_done_is_nil
-    assert_nil Hive::Workflows.verb_advancing_from("8-done"),
+  def test_verb_advancing_from_9_done_is_nil
+    assert_nil Hive::Workflows.verb_advancing_from("9-done"),
                "no verb advances out of the terminal stage"
   end
 

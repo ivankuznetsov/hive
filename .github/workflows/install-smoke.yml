@@ -13,11 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash -n install.sh
+      - run: bash -n packaging/verify-release.sh
       - name: Shellcheck
         uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
         with:
           scandir: '.'
-          additional_files: install.sh
+          additional_files: |
+            install.sh
+            packaging/verify-release.sh
       - run: bash install.sh --dry-run --version=v0.1.0
 
   macos-dry-run:
@@ -96,6 +99,41 @@ jobs:
           grep -q '^bash$' "$XDG_DATA_HOME/hive/install-channel"
           test -x "$XDG_BIN_HOME/hive"
           "$XDG_BIN_HOME/hive" --version
+
+  verify-release:
+    name: verify-release.sh (end-to-end behavior)
+    runs-on: ubuntu-24.04
+    # Same gate as full-smoke: only runs against a real published
+    # release. Skips on PRs that predate the pinned release. The
+    # script feature-detects post-pin subcommands (e.g., `daemon
+    # install` shipped post-v0.1.0) and skips their assertions when
+    # the released binary doesn't have them yet.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Check pinned release exists
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HIVE_VERSION: v0.1.0
+        run: |
+          if gh release view "$HIVE_VERSION" --repo ivankuznetsov/hive >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify-release skipped: ${HIVE_VERSION} is not published yet" >&2
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install jq (for envelope assertions)
+        if: ${{ steps.release.outputs.exists == 'true' }}
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+      - name: Run verify-release.sh
+        if: ${{ steps.release.outputs.exists == 'true' }}
+        env:
+          HIVE_VERSION: v0.1.0
+        run: |
+          bash packaging/verify-release.sh --version="$HIVE_VERSION"
 
   installer-fixtures:
     name: install.sh fixture regressions

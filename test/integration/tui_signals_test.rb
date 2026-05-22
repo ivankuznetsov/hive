@@ -29,4 +29,39 @@ class TuiSignalsTest < Minitest::Test
     assert_nil Hive::Tui::SubprocessRegistry.current,
                "kill_inflight! must clear the slot after handling placeholder"
   end
+
+  def test_subprocess_registry_kill_inflight_terminates_registered_process_group
+    calls = []
+
+    with_replaced_singleton_method(Process, :kill, ->(signal, pid) { calls << [ signal, pid ] }) do
+      Hive::Tui::SubprocessRegistry.register(12_345)
+
+      assert_nil Hive::Tui::SubprocessRegistry.kill_inflight!
+    end
+
+    assert_equal [ [ "TERM", -12_345 ] ], calls
+    assert_nil Hive::Tui::SubprocessRegistry.current
+  end
+
+  def test_subprocess_registry_kill_inflight_swallows_missing_process_group
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+      Hive::Tui::SubprocessRegistry.register(12_345)
+
+      assert_nil Hive::Tui::SubprocessRegistry.kill_inflight!
+    end
+
+    assert_nil Hive::Tui::SubprocessRegistry.current
+  end
+
+  private
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name) do |*args, **kwargs, &block|
+      original.call(*args, **kwargs, &block)
+    end
+  end
 end

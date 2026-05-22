@@ -72,6 +72,7 @@ module Hive
       # lives on `Hive::Markers::KILL_CLASS_EXIT_CODES` so KeyMap's
       # Enter-routing predicate and this auto-healer never drift.
       KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
+      INFO_PANEL_EXECUTE_TAIL_BYTES = 4 * 1024
       # Lowercase snapshot-row marker keys → uppercase CLI marker names
       # accepted by `hive markers clear --name`. Mirrors the upcase
       # convention in `Hive::Markers::KNOWN_NAMES`. A new recoverable
@@ -1520,18 +1521,30 @@ module Hive
         idea_path = File.join(row.folder, "idea.md")
         return [ flashed("no idea.md for #{row.slug}"), nil ] unless File.exist?(idea_path)
 
-        data = idea_frontmatter(File.read(idea_path))
+        contents = File.read(idea_path)
+        data = idea_frontmatter(contents)
         original_text = data["original_text"].to_s
         if original_text.empty?
           return [ flashed("idea has no original_text for #{row.slug}"), nil ]
         end
 
         capped_text = original_text[0, Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS]
+        latest_log_path = latest_log_for(row)
+        state = Hive::Tui::Model::InfoPanelState.new(
+          slug: row.slug,
+          stage: row.stage,
+          created_at: idea_created_at(contents, data),
+          original_text: capped_text,
+          folder_path: File.expand_path(row.folder),
+          latest_log_path: latest_log_path,
+          stage_extra: stage_extra_for(row, latest_log_path)
+        )
         [
           @hive_model.with(
             mode: :idea_preview,
             idea_preview_text: capped_text,
-            idea_preview_slug: row.slug
+            idea_preview_slug: row.slug,
+            info_panel_state: state
           ),
           nil
         ]
@@ -1550,6 +1563,105 @@ module Hive
           aliases: false
         ) || {}
         parsed.is_a?(Hash) ? parsed : {}
+      end
+
+      def idea_created_at(contents, data)
+        raw = frontmatter_scalar(contents, "created_at")
+        return raw unless raw.to_s.empty?
+
+        value = data["created_at"]
+        return nil if value.nil?
+        return value.utc.iso8601 if value.is_a?(Time)
+        return value.iso8601 if value.respond_to?(:iso8601)
+
+        value.to_s
+      end
+
+      def frontmatter_scalar(contents, key)
+        match = contents.match(/\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\z)/m)
+        return nil unless match
+
+        match[1].lines.each do |line|
+          next unless (field = line.match(/\A#{Regexp.escape(key)}:[ \t]*(.*?)[ \t]*(?:#.*)?\r?\n?\z/))
+
+          value = field[1].strip
+          return nil if value.empty? || value == "|" || value == ">"
+
+          quote = value[0]
+          return value[1...-1] if value.length >= 2 && (quote == "\"" || quote == 39.chr) && value[-1] == quote
+
+          return value
+        end
+        nil
+      end
+
+      def latest_log_for(row)
+        log_dir = task_log_dir_for(row)
+        return nil if log_dir.nil? || !File.directory?(log_dir)
+
+        candidates = Dir.glob(File.join(log_dir, "*.log"))
+        return nil if candidates.empty?
+
+        with_mtimes = candidates.filter_map do |path|
+          [ File.expand_path(path), File.mtime(path) ]
+        rescue Errno::ENOENT
+          nil
+        end
+        if with_mtimes.empty?
+          candidate = candidates.find { |path| File.exist?(path) }
+          return candidate ? File.expand_path(candidate) : nil
+        end
+
+        with_mtimes.max_by(&:last).first
+      rescue Errno::EACCES
+        nil
+      end
+
+      def task_log_dir_for(row)
+        Hive::Task.new(row.folder).log_dir
+      rescue Hive::InvalidTaskPath
+        nil
+      end
+
+      def stage_extra_for(row, latest_log_path)
+        case row.stage.to_s
+        when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md"))
+        when "3-plan" then read_capped(File.join(row.folder, "plan.md"))
+        when "4-execute" then tail_capped(latest_log_path)
+        else nil
+        end
+      rescue Errno::ENOENT, Errno::EACCES
+        nil
+      end
+
+      def read_capped(path)
+        return nil if path.to_s.empty? || !File.exist?(path)
+
+        text = File.open(path, "rb") { |file| file.read(Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS) }
+        scrub_utf8(text)
+      rescue Errno::ENOENT, Errno::EACCES
+        nil
+      end
+
+      def tail_capped(path)
+        return nil if path.to_s.empty? || !File.exist?(path)
+
+        # 4 KiB is enough recent execute context for the no-scroll panel
+        # without letting large logs dominate render-time memory.
+        text = File.open(path, "rb") do |file|
+          file.seek(-INFO_PANEL_EXECUTE_TAIL_BYTES, IO::SEEK_END)
+          file.read
+        rescue Errno::EINVAL
+          file.rewind
+          file.read
+        end
+        scrub_utf8(text)
+      rescue Errno::ENOENT, Errno::EACCES
+        nil
+      end
+
+      def scrub_utf8(text)
+        text.to_s.force_encoding(Encoding::UTF_8).scrub
       end
 
       def resolve_agent_label(row)

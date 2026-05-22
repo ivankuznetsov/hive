@@ -46,17 +46,17 @@ class HiveTuiBubbleModelTest < Minitest::Test
     old_editor.nil? ? ENV.delete("EDITOR") : ENV["EDITOR"] = old_editor
   end
 
-  def write_idea_md(dir, original_text:)
+  def write_idea_md(dir, original_text:, slug: "some-slug", created_at: "2026-05-20T00:00:00Z")
     indented_original = original_text.lines.map { |line| "  #{line.chomp}" }
     body = [
       "---",
-      "slug: some-slug",
-      "created_at: 2026-05-20T00:00:00Z",
+      "slug: #{slug}",
+      "created_at: #{created_at}",
       "original_text: |",
       *indented_original,
       "---",
       "",
-      "# some-slug",
+      "# #{slug}",
       "",
       original_text,
       "",
@@ -86,6 +86,21 @@ class HiveTuiBubbleModelTest < Minitest::Test
     yield(staging_dir, staging_path, attachment)
   ensure
     Hive::Tui::ComposerStaging.cleanup!(staging_dir) if staging_dir && File.exist?(staging_dir)
+  end
+
+  def make_task_folder(root, stage: "2-brainstorm", slug: "some-slug")
+    folder = File.join(root, ".hive-state", "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    folder
+  end
+
+  def make_log(root, slug: "some-slug", name: "run.log", text: "log\n", mtime: Time.now)
+    dir = File.join(root, ".hive-state", "logs", slug)
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, name)
+    File.write(path, text)
+    File.utime(mtime, mtime, path)
+    path
   end
 
   # ---- Construction / init ----
@@ -3674,12 +3689,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "OpenTaskFolder must not dispatch any follow-up message — no auto-continue, no InputEditorExited"
   end
 
-  # ---- OpenIdeaPreview → bottom-strip preview (read-only) ----
+  # ---- OpenIdeaPreview → full-screen info panel (read-only) ----
 
-  def test_open_idea_preview_reads_original_text_and_enters_preview_mode
-    with_tmp_dir do |dir|
-      write_idea_md(dir, original_text: "Build task from user note")
-      row = make_task_row(folder: dir, slug: "some-slug")
+  def test_open_idea_preview_reads_inbox_common_fields_without_extra
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "1-inbox")
+      write_idea_md(folder, original_text: "Build task from user note")
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "1-inbox")
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
@@ -3687,6 +3703,103 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal :idea_preview, @model.hive_model.mode
       assert_equal "Build task from user note", @model.hive_model.idea_preview_text
       assert_equal "some-slug", @model.hive_model.idea_preview_slug
+      state = @model.hive_model.info_panel_state
+      assert_equal "some-slug", state.slug
+      assert_equal "1-inbox", state.stage
+      assert_equal "2026-05-20T00:00:00Z", state.created_at
+      assert_equal "Build task from user note", state.original_text
+      assert_equal File.expand_path(folder), state.folder_path
+      assert_nil state.latest_log_path
+      assert_nil state.stage_extra
+    end
+  end
+
+  def test_open_idea_preview_reads_brainstorm_extra_and_latest_log_path
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      write_idea_md(folder, original_text: "Brainstorm this")
+      File.write(File.join(folder, "brainstorm.md"), "# Brainstorm\nA1")
+      older = make_log(root, name: "old.log", text: "old\n", mtime: Time.at(1_700_000_000))
+      latest = make_log(root, name: "latest.log", text: "latest\n", mtime: Time.at(1_700_000_010))
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "2-brainstorm")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      state = @model.hive_model.info_panel_state
+      assert_equal File.expand_path(latest), state.latest_log_path
+      refute_equal File.expand_path(older), state.latest_log_path
+      assert_equal "# Brainstorm\nA1", state.stage_extra
+    end
+  end
+
+  def test_open_idea_preview_brainstorm_extra_missing_is_nil
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      write_idea_md(folder, original_text: "Brainstorm this")
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "2-brainstorm")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_nil @model.hive_model.info_panel_state.stage_extra
+    end
+  end
+
+  def test_open_idea_preview_reads_plan_extra
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "3-plan")
+      write_idea_md(folder, original_text: "Plan this")
+      File.write(File.join(folder, "plan.md"), "# Plan\nIU1")
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "3-plan")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      state = @model.hive_model.info_panel_state
+      assert_equal "3-plan", state.stage
+      assert_equal "# Plan\nIU1", state.stage_extra
+    end
+  end
+
+  def test_open_idea_preview_reads_execute_log_tail
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "4-execute")
+      write_idea_md(folder, original_text: "Execute this")
+      old_log = make_log(root, name: "execute-old.log", text: "old log\n", mtime: Time.at(1_700_000_000))
+      long_prefix = "prefix-marker\n" + ("x" * (Hive::Tui::BubbleModel::INFO_PANEL_EXECUTE_TAIL_BYTES + 100))
+      latest_log = make_log(
+        root,
+        name: "execute-latest.log",
+        text: "#{long_prefix}\nlatest tail marker\n",
+        mtime: Time.at(1_700_000_020)
+      )
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "4-execute")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      state = @model.hive_model.info_panel_state
+      assert_equal File.expand_path(latest_log), state.latest_log_path
+      refute_equal File.expand_path(old_log), state.latest_log_path
+      assert_includes state.stage_extra, "latest tail marker"
+      refute_includes state.stage_extra, "prefix-marker"
+    end
+  end
+
+  def test_open_idea_preview_execute_without_log_has_nil_log_fields
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "4-execute")
+      write_idea_md(folder, original_text: "Execute this")
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "4-execute")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      state = @model.hive_model.info_panel_state
+      assert_nil state.latest_log_path
+      assert_nil state.stage_extra
     end
   end
 
@@ -3701,8 +3814,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_open_idea_preview_flashes_when_idea_md_missing
-    with_tmp_dir do |dir|
-      row = make_task_row(folder: dir)
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      row = make_task_row(folder: folder)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
@@ -3713,9 +3827,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_open_idea_preview_flashes_when_original_text_missing
-    with_tmp_dir do |dir|
-      File.write(File.join(dir, "idea.md"), "---\nslug: some-slug\n---\n")
-      row = make_task_row(folder: dir)
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      File.write(File.join(folder, "idea.md"), "---\nslug: some-slug\n---\n")
+      row = make_task_row(folder: folder)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
@@ -3726,9 +3841,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_open_idea_preview_flashes_on_unreadable_idea_md
-    with_tmp_dir do |dir|
-      File.write(File.join(dir, "idea.md"), "---\noriginal_text: [broken\n---\n")
-      row = make_task_row(folder: dir)
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      File.write(File.join(folder, "idea.md"), "---\noriginal_text: [broken\n---\n")
+      row = make_task_row(folder: folder)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
@@ -3738,25 +3854,56 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
-  def test_open_idea_preview_does_not_dispatch_or_mutate_marker
-    with_tmp_dir do |dir|
-      idea_path = write_idea_md(dir, original_text: "Read only")
-      before = File.read(idea_path)
-      row = make_task_row(folder: dir)
+  def test_open_idea_preview_unreadable_extra_opens_common_fields
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      write_idea_md(folder, original_text: "Read common")
+      extra_path = File.join(folder, "brainstorm.md")
+      File.write(extra_path, "secret\n")
+      File.chmod(0, extra_path)
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "2-brainstorm")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_equal "Read common", @model.hive_model.info_panel_state.original_text
+      assert_nil @model.hive_model.info_panel_state.stage_extra
+    ensure
+      File.chmod(0o600, extra_path) if extra_path && File.exist?(extra_path)
+    end
+  end
+
+  def test_open_idea_preview_does_not_dispatch_or_mutate_files
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      idea_path = write_idea_md(folder, original_text: "Read only")
+      extra_path = File.join(folder, "brainstorm.md")
+      File.write(extra_path, "notes\n")
+      log_path = make_log(root, text: "log\n")
+      before_mtimes = [ idea_path, extra_path, log_path ].to_h { |path| [ path, File.mtime(path) ] }
+      before_contents = [ idea_path, extra_path, log_path ].to_h { |path| [ path, File.read(path) ] }
+      row = make_task_row(folder: folder)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
       assert_nil cmd
       assert_empty @messages
-      assert_equal before, File.read(idea_path)
+      before_mtimes.each do |path, mtime|
+        assert_equal mtime, File.mtime(path), "#{path} mtime changed"
+      end
+      before_contents.each do |path, content|
+        assert_equal content, File.read(path), "#{path} content changed"
+      end
     end
   end
 
   def test_open_idea_preview_truncates_oversized_original_text
-    with_tmp_dir do |dir|
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
       original = "x" * (Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS + 20)
-      write_idea_md(dir, original_text: original)
-      row = make_task_row(folder: dir)
+      write_idea_md(folder, original_text: original)
+      row = make_task_row(folder: folder)
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
@@ -3764,26 +3911,43 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal :idea_preview, @model.hive_model.mode
       assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS,
                    @model.hive_model.idea_preview_text.length
+      assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS,
+                   @model.hive_model.info_panel_state.original_text.length
     end
   end
 
-  def test_idea_preview_roundtrip_open_then_any_key_dismisses
-    with_tmp_dir do |dir|
-      write_idea_md(dir, original_text: "Roundtrip idea")
-      row = make_task_row(folder: dir)
+  def test_open_idea_preview_created_at_is_propagated_from_frontmatter
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      write_idea_md(folder, original_text: "Has timestamp", created_at: "2026-05-22T22:40:00Z")
+      row = make_task_row(folder: folder)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal "2026-05-22T22:40:00Z", @model.hive_model.info_panel_state.created_at
+    end
+  end
+
+  def test_idea_preview_roundtrip_open_then_i_dismisses
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      write_idea_md(folder, original_text: "Roundtrip idea")
+      row = make_task_row(folder: folder)
 
       _, open_cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
       assert_nil open_cmd
       assert_equal :idea_preview, @model.hive_model.mode
-      assert_equal "Roundtrip idea", @model.hive_model.idea_preview_text
+      assert_equal "Roundtrip idea", @model.hive_model.info_panel_state.original_text
 
-      _, dismiss_cmd = @model.update(Bubbletea::KeyMessage.new(key_type: 0, runes: [ "x".ord ]))
+      _, dismiss_cmd = @model.update(Bubbletea::KeyMessage.new(key_type: 0, runes: [ "i".ord ]))
 
       assert_nil dismiss_cmd
       assert_equal :grid, @model.hive_model.mode
       assert_nil @model.hive_model.idea_preview_text
       assert_nil @model.hive_model.idea_preview_slug
+      assert_nil @model.hive_model.info_panel_state
       assert_empty @messages
     end
   end

@@ -63,11 +63,22 @@ class PiPreflightTest < Minitest::Test
     end
   end
 
-  # NOTE: HOME-unset path translates ArgumentError → Hive::AgentError. The
-  # rescue clause is exercised by code review; we don't have a test because
-  # File.expand_path falls back to getpwuid on Linux when HOME is unset, so
-  # the failure is environment-dependent. The rescue is defensive and
-  # cheap; verifying it lives in code, not in a flaky test.
+  def test_translates_home_resolution_failure_to_agent_error
+    original_expand_path = File.method(:expand_path)
+    File.define_singleton_method(:expand_path) do |target, *args|
+      if target == "~/.pi/agent/auth.json"
+        raise ArgumentError, "could not find home directory"
+      end
+
+      original_expand_path.call(target, *args)
+    end
+
+    err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
+    assert_match(/cannot resolve home directory/, err.message)
+    assert_match(/Set \$HOME/, err.message)
+  ensure
+    File.define_singleton_method(:expand_path, original_expand_path) if original_expand_path
+  end
 
   def test_translates_unreadable_auth_file_to_agent_error
     skip "running as root: file mode 000 still readable" if Process.uid.zero?

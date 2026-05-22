@@ -224,6 +224,100 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  # ── Ruby version-manager shim detection (PR #113 follow-up) ────────────
+  # The gem's bin/hive uses `#!/usr/bin/env ruby`. The unit's baked
+  # PATH must include the active Ruby manager's shim dir so the
+  # shebang resolves to a Ruby with the gem's dependencies, not
+  # system Ruby (which on a mise/rbenv/asdf workstation has none of
+  # them and crashes with `cannot load such file -- thor (LoadError)`).
+
+  # Build an installer that fakes `which("ruby")` to point at a
+  # path under one of the manager directories, mimicking what the
+  # operator's interactive shell would resolve.
+  def installer_with_ruby_at(dir, ruby_relative)
+    hive = File.join(dir, "bin", "hive")
+    FileUtils.mkdir_p(File.dirname(hive))
+    File.write(hive, "#!/bin/sh\n")
+    FileUtils.chmod(0755, hive)
+    ruby_path = File.join(dir, ruby_relative)
+    FileUtils.mkdir_p(File.dirname(ruby_path))
+    File.write(ruby_path, "#!/bin/sh\n")
+    FileUtils.chmod(0755, ruby_path)
+    installer = Hive::Commands::Daemon::ServiceInstaller.new(
+      host_os: "linux", home: dir, binary_path: hive, systemctl_available: false
+    )
+    installer.define_singleton_method(:which) do |name|
+      name == "ruby" ? ruby_path : nil
+    end
+    installer
+  end
+
+  def assert_unit_path_includes(dir, shim_template, msg)
+    unit_body = File.read(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+    path_line = unit_body.lines.find { |l| l.start_with?("Environment=PATH=") }
+    refute_nil path_line, "no Environment=PATH= line"
+    assert_includes path_line, shim_template, msg
+  end
+
+  def test_path_includes_mise_shims_when_ruby_resolves_under_mise
+    with_tmp_dir do |dir|
+      installer = installer_with_ruby_at(dir, ".local/share/mise/installs/ruby/3.4.7/bin/ruby")
+      installer.install!(autostart: false)
+      assert_unit_path_includes(dir, "%h/.local/share/mise/shims",
+        "mise-managed Ruby must inject %h/.local/share/mise/shims into PATH or the daemon's `env ruby` falls through to system Ruby which lacks gem deps")
+    end
+  end
+
+  def test_path_includes_rbenv_shims_when_ruby_resolves_under_rbenv
+    with_tmp_dir do |dir|
+      installer = installer_with_ruby_at(dir, ".rbenv/versions/3.4.7/bin/ruby")
+      installer.install!(autostart: false)
+      assert_unit_path_includes(dir, "%h/.rbenv/shims",
+        "rbenv-managed Ruby must inject %h/.rbenv/shims into PATH")
+    end
+  end
+
+  def test_path_includes_asdf_shims_when_ruby_resolves_under_asdf
+    with_tmp_dir do |dir|
+      installer = installer_with_ruby_at(dir, ".asdf/installs/ruby/3.4.7/bin/ruby")
+      installer.install!(autostart: false)
+      assert_unit_path_includes(dir, "%h/.asdf/shims",
+        "asdf-managed Ruby must inject %h/.asdf/shims into PATH")
+    end
+  end
+
+  def test_path_stays_minimal_when_ruby_is_system_install
+    with_tmp_dir do |dir|
+      installer = installer_with_ruby_at(dir, "usr/bin/ruby")
+      installer.install!(autostart: false)
+      unit_body = File.read(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+      path_line = unit_body.lines.find { |l| l.start_with?("Environment=PATH=") }.strip
+      assert_equal "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin", path_line,
+        "system Ruby installs use the minimal PATH; no manager shim should be injected"
+    end
+  end
+
+  def test_path_stays_minimal_when_ruby_not_on_path
+    # The which("ruby") probe returning nil mirrors a host that
+    # doesn't have ruby on PATH at install time. The installer
+    # should emit the minimal PATH and let the operator deal with
+    # the missing prereq via `hive doctor`.
+    with_tmp_dir do |dir|
+      hive = File.join(dir, "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(hive))
+      File.write(hive, "#!/bin/sh\n")
+      FileUtils.chmod(0755, hive)
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux", home: dir, binary_path: hive, systemctl_available: false
+      )
+      installer.define_singleton_method(:which) { |_| nil }
+      installer.install!(autostart: false)
+      unit_body = File.read(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+      path_line = unit_body.lines.find { |l| l.start_with?("Environment=PATH=") }.strip
+      assert_equal "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin", path_line
+    end
+  end
+
   def test_linux_hive_bin_matches_exec_start_for_realpath_binary
     with_tmp_dir do |dir|
       real_hive = File.join(dir, "bin", "hive")

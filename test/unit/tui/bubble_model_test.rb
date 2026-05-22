@@ -345,18 +345,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "/auth"
   end
 
-  def test_view_composes_idea_preview_onto_grid_in_idea_preview_mode
+  def test_view_composes_idea_preview_as_full_frame_with_default_footer
+    state = Hive::Tui::Model::InfoPanelState.new(
+      slug: "some-slug",
+      stage: "2-brainstorm",
+      created_at: "2026-05-22T22:40:00Z",
+      original_text: "original idea",
+      folder_path: "/tmp/.hive-state/stages/2-brainstorm/some-slug",
+      latest_log_path: "/tmp/.hive-state/logs/some-slug/run.log",
+      stage_extra: "brainstorm notes"
+    )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
         mode: :idea_preview,
-        idea_preview_slug: "some-slug",
-        idea_preview_text: "original idea"
+        info_panel_state: state,
+        rows: 20,
+        cols: 100
       ),
       dispatch: @dispatch
     )
     out = @model.view
-    assert_includes out, "Idea for some-slug:"
+
+    assert_includes out, "Info: some-slug"
     assert_includes out, "original idea"
+    assert_includes out, "brainstorm notes"
+    assert_includes out, "[i] info"
+    refute_includes out, "Projects"
   end
 
   # Regression: paste-truncated / paste-timeout / overflow flashes

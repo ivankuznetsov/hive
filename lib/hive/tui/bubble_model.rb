@@ -2886,7 +2886,12 @@ module Hive
 
       def compose_idea_preview_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: prompt_footer(Views::IdeaPreview.render(@hive_model, width: usable), usable))
+        panel_height = [ @hive_model.rows.to_i - 1, 1 ].max
+        Lipgloss.join_vertical(
+          Lipgloss::TOP,
+          Views::IdeaPreview.render(@hive_model, width: usable, height: panel_height),
+          default_footer(usable)
+        )
       end
 
       # New-idea mode: same composition; footer = the inline prompt with

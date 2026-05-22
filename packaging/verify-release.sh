@@ -282,18 +282,26 @@ case "$INSTALL_RC" in
        exit 1 ;;
 esac
 
-[[ -x "$XDG_BIN_HOME/hive" ]] && ok "binary at \$XDG_BIN_HOME/hive is executable" \
-                              || fail "binary missing or not executable at $XDG_BIN_HOME/hive"
+if [[ -x "$XDG_BIN_HOME/hive" ]]; then
+  ok "binary at \$XDG_BIN_HOME/hive is executable"
+else
+  fail "binary missing or not executable at $XDG_BIN_HOME/hive"
+fi
 
 INSTALLED_VERSION="$("$XDG_BIN_HOME/hive" --version 2>/dev/null || true)"
-[[ -n "$INSTALLED_VERSION" ]] && ok "hive --version: $INSTALLED_VERSION" \
-                              || fail "hive --version returned empty / failed"
+if [[ -n "$INSTALLED_VERSION" ]]; then
+  ok "hive --version: $INSTALLED_VERSION"
+else
+  fail "hive --version returned empty / failed"
+fi
 
 # install.sh writes an install-channel sidecar so `hive update` knows
 # how the binary was installed. Pin its presence.
-[[ -s "$XDG_DATA_HOME/hive/install-channel" ]] \
-  && ok "install-channel sidecar exists" \
-  || fail "install-channel sidecar missing at $XDG_DATA_HOME/hive/install-channel"
+if [[ -s "$XDG_DATA_HOME/hive/install-channel" ]]; then
+  ok "install-channel sidecar exists"
+else
+  fail "install-channel sidecar missing at $XDG_DATA_HOME/hive/install-channel"
+fi
 
 # ─── 2. doctor ───────────────────────────────────────────────────────
 
@@ -336,21 +344,29 @@ else
   fail "hive init failed"
 fi
 
-[[ -d "$PROJECT/.hive-state/stages/1-inbox" ]] \
-  && ok ".hive-state/stages/1-inbox/ created" \
-  || fail ".hive-state/stages/1-inbox/ missing after init"
+if [[ -d "$PROJECT/.hive-state/stages/1-inbox" ]]; then
+  ok ".hive-state/stages/1-inbox/ created"
+else
+  fail ".hive-state/stages/1-inbox/ missing after init"
+fi
 
 step "new task + status --json"
 PROJECT_NAME="$(basename "$PROJECT")"
-"$XDG_BIN_HOME/hive" new "$PROJECT_NAME" "verify release smoke task" \
-  >"$PREFIX/new.log" 2>&1 \
-  && ok "hive new exited 0" \
-  || { cat "$PREFIX/new.log" >&2; fail "hive new failed"; }
+if "$XDG_BIN_HOME/hive" new "$PROJECT_NAME" "verify release smoke task" \
+     >"$PREFIX/new.log" 2>&1; then
+  ok "hive new exited 0"
+else
+  cat "$PREFIX/new.log" >&2 2>/dev/null || true
+  fail "hive new failed"
+fi
 
 STATUS_JSON="$PREFIX/status.json"
-"$XDG_BIN_HOME/hive" status --json >"$STATUS_JSON" 2>"$PREFIX/status.err" \
-  && ok "hive status --json exited 0" \
-  || { cat "$PREFIX/status.err" >&2 2>/dev/null || true; fail "hive status --json failed"; }
+if "$XDG_BIN_HOME/hive" status --json >"$STATUS_JSON" 2>"$PREFIX/status.err"; then
+  ok "hive status --json exited 0"
+else
+  cat "$PREFIX/status.err" >&2 2>/dev/null || true
+  fail "hive status --json failed"
+fi
 
 # Validate envelope shape: schema name, then probe the new task's
 # stage/marker/action so a regression that creates the row in the
@@ -364,16 +380,20 @@ NEW_TASK_STAGE="$(jq -r '[.projects[].tasks[]][0].stage // empty' "$STATUS_JSON"
 NEW_TASK_MARKER="$(jq -r '[.projects[].tasks[]][0].marker // empty' "$STATUS_JSON" 2>/dev/null || true)"
 NEW_TASK_ACTION="$(jq -r '[.projects[].tasks[]][0].action // empty' "$STATUS_JSON" 2>/dev/null || true)"
 
-[[ "$SCHEMA" == "hive-status" ]] && ok "status envelope schema=hive-status" \
-                                 || fail "status envelope schema is '$SCHEMA', want hive-status"
-[[ "${TASK_COUNT:-0}" -ge 1 ]] && ok "status envelope reports >=1 task" \
-                               || fail "status envelope reports 0 tasks after 'hive new'"
-[[ "$NEW_TASK_STAGE" == "1-inbox" ]] && ok "new task at stage=1-inbox" \
-                                     || fail "new task at stage='$NEW_TASK_STAGE', want 1-inbox"
-[[ "$NEW_TASK_MARKER" == "waiting" ]] && ok "new task marker=waiting" \
-                                      || fail "new task marker='$NEW_TASK_MARKER', want waiting"
-[[ "$NEW_TASK_ACTION" == "ready_to_brainstorm" ]] && ok "new task action=ready_to_brainstorm" \
-                                                  || fail "new task action='$NEW_TASK_ACTION', want ready_to_brainstorm"
+if [[ "$SCHEMA" == "hive-status" ]]; then ok "status envelope schema=hive-status"
+else fail "status envelope schema is '$SCHEMA', want hive-status"; fi
+
+if [[ "${TASK_COUNT:-0}" -ge 1 ]]; then ok "status envelope reports >=1 task"
+else fail "status envelope reports 0 tasks after 'hive new'"; fi
+
+if [[ "$NEW_TASK_STAGE" == "1-inbox" ]]; then ok "new task at stage=1-inbox"
+else fail "new task at stage='$NEW_TASK_STAGE', want 1-inbox"; fi
+
+if [[ "$NEW_TASK_MARKER" == "waiting" ]]; then ok "new task marker=waiting"
+else fail "new task marker='$NEW_TASK_MARKER', want waiting"; fi
+
+if [[ "$NEW_TASK_ACTION" == "ready_to_brainstorm" ]]; then ok "new task action=ready_to_brainstorm"
+else fail "new task action='$NEW_TASK_ACTION', want ready_to_brainstorm"; fi
 
 # ─── 4. daemon install --json envelope ───────────────────────────────
 
@@ -428,14 +448,27 @@ if [[ "$DAEMON_INSTALL_AVAILABLE" -eq 1 ]]; then
   fi
 
   case "$INSTALL_RC" in
-    0)  [[ "$DAEMON_OK" == "true" ]] && ok "daemon install success: outcome=$DAEMON_OUTCOME (rc=0)" \
-                                      || fail "rc=0 but ok=$DAEMON_OK" ;;
-    64) [[ "$DAEMON_OK" == "false" ]] && [[ "$DAEMON_OUTCOME" == "drifted" ]] \
-          && ok "daemon install drift (rc=64, outcome=drifted) — retryable with --force" \
-          || fail "rc=64 but envelope shape unexpected (ok=$DAEMON_OK, outcome=$DAEMON_OUTCOME)" ;;
-    70) [[ "$DAEMON_OK" == "false" ]] && [[ "$DAEMON_OUTCOME" == "failed" ]] \
-          && ok "daemon install failure (rc=70, outcome=failed) — expected without systemd-user" \
-          || fail "rc=70 but envelope shape unexpected (ok=$DAEMON_OK, outcome=$DAEMON_OUTCOME)" ;;
+    0)
+      if [[ "$DAEMON_OK" == "true" ]]; then
+        ok "daemon install success: outcome=$DAEMON_OUTCOME (rc=0)"
+      else
+        fail "rc=0 but ok=$DAEMON_OK"
+      fi
+      ;;
+    64)
+      if [[ "$DAEMON_OK" == "false" ]] && [[ "$DAEMON_OUTCOME" == "drifted" ]]; then
+        ok "daemon install drift (rc=64, outcome=drifted) — retryable with --force"
+      else
+        fail "rc=64 but envelope shape unexpected (ok=$DAEMON_OK, outcome=$DAEMON_OUTCOME)"
+      fi
+      ;;
+    70)
+      if [[ "$DAEMON_OK" == "false" ]] && [[ "$DAEMON_OUTCOME" == "failed" ]]; then
+        ok "daemon install failure (rc=70, outcome=failed) — expected without systemd-user"
+      else
+        fail "rc=70 but envelope shape unexpected (ok=$DAEMON_OK, outcome=$DAEMON_OUTCOME)"
+      fi
+      ;;
     *)  fail "daemon install exited unexpectedly rc=$INSTALL_RC" ;;
   esac
 
@@ -512,23 +545,43 @@ fi
 
 if [[ $RUN_UNINSTALL -eq 1 ]]; then
   step "hive uninstall"
+  # Snapshot daemon-unit state before uninstall so the post-condition
+  # check below knows whether removal was a meaningful assertion at
+  # all. On CI runners without user systemd, uninstall.rb correctly
+  # bails out of the systemctl --user disable path and leaves the
+  # unit file in place — the operator is expected to clean up
+  # manually in that case. We mirror that contract here: only assert
+  # "removed" when uninstall could actually remove it.
+  UNIT_SYSTEMD="$HOME/.config/systemd/user/hive-daemon.service"
+  UNIT_LAUNCHD="$HOME/Library/LaunchAgents/local.hive-daemon.plist"
+  UNIT_PRESENT_BEFORE=0
+  [[ -f "$UNIT_SYSTEMD" ]] && UNIT_PRESENT_BEFORE=1
+  [[ -f "$UNIT_LAUNCHD" ]] && UNIT_PRESENT_BEFORE=1
+
   # `hive uninstall` is interactive (prompts before purging state).
   # Pipe empty stdin so it takes the default (no purge) path.
   if echo "" | "$XDG_BIN_HOME/hive" uninstall >"$PREFIX/uninstall.log" 2>&1; then
     ok "uninstall exited 0"
   else
-    cat "$PREFIX/uninstall.log" >&2
+    cat "$PREFIX/uninstall.log" >&2 2>/dev/null || true
     fail "uninstall failed"
   fi
 
   # Per uninstall.rb, it removes the daemon unit and user config/cache
-  # but leaves project .hive-state/ in place by default. Verify the
-  # daemon unit is gone from the sandboxed HOME.
-  if [[ ! -f "$HOME/.config/systemd/user/hive-daemon.service" ]] \
-       && [[ ! -f "$HOME/Library/LaunchAgents/local.hive-daemon.plist" ]]; then
+  # but leaves project .hive-state/ in place by default. The unit
+  # removal is contingent on the service manager being reachable
+  # (`systemctl --user disable --now hive-daemon` on Linux,
+  # `launchctl unload` on macOS) — uninstall bails out with a
+  # warning if the call fails. Match that behavior in the assertion.
+  if [[ "$UNIT_PRESENT_BEFORE" -eq 0 ]]; then
+    ok "daemon unit removal: not applicable (no unit was installed)"
+  elif [[ ! -f "$UNIT_SYSTEMD" ]] && [[ ! -f "$UNIT_LAUNCHD" ]]; then
     ok "daemon unit removed from sandboxed HOME"
+  elif grep -qE "systemctl --user disable failed|launchctl unload failed" \
+         "$PREFIX/uninstall.log" 2>/dev/null; then
+    ok "daemon unit removal skipped (service manager unreachable, expected on CI without user systemd; uninstall.log warned correctly)"
   else
-    fail "uninstall left a daemon unit behind"
+    fail "uninstall left a daemon unit behind without warning"
   fi
 fi
 

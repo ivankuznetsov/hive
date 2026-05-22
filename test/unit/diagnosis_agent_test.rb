@@ -397,8 +397,8 @@ class DiagnosisAgentTest < Minitest::Test
   end
 
   def test_run_with_timeout_succeeds_when_descendant_drains_within_grace
-    # Pre-fix this test pinned the false-timeout bug: a descendant
-    # holding stdio open for 2s would trip a timeout even though the
+    # Pre-fix this test pinned the false-timeout bug: a fast shell parent plus descendant
+    # holding stdio open past the runtime deadline would trip a timeout even though the
     # parent had exited successfully and only the pipe drain was
     # outstanding. The drain phase now uses its own TERMINATE_GRACE
     # budget rather than the runtime timeout, so a successful parent
@@ -409,10 +409,10 @@ class DiagnosisAgentTest < Minitest::Test
     Timeout.timeout(8) do
       out = agent.send(
         :run_with_timeout,
-        [ RbConfig.ruby, "-e", "fork { sleep 2 }; puts 'done'" ],
+        [ "sh", "-c", "sleep 2 & echo done" ],
         Dir.pwd,
         nil,
-        0.5
+        1.0
       )
     end
 

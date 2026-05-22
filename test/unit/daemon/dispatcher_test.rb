@@ -231,6 +231,37 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil skipped, "must log :skipped reason: project_disabled_after_enqueue"
   end
 
+  def test_merged_pr_archive_skips_when_project_layout_is_legacy
+    # ce-code-review P1 #10: when a project's status snapshot reports
+    # legacy_stage_dirs (half-migrated layout), archive dispatch must
+    # be deferred. The watcher's ARCHIVE_VERB_TEMPLATE is frozen at
+    # class-load and may interpolate a stale `--from <stage>` that
+    # doesn't match the post-migrate on-disk layout. Skip the dispatch
+    # and let handle_row re-enqueue on a future tick.
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
+      rows: [], with_merge_watcher: true
+    )
+    legacy_project = Hive::Daemon::StatusConsumer::ProjectInfo.new(
+      name: "p1",
+      legacy_stage_dirs: [ { "stage_dir" => "7-finalize", "task_count" => 1 } ]
+    )
+    dispatcher.instance_variable_get(:@status_consumer).next_result =
+      Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [], projects: [ legacy_project ], error: nil
+      )
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+    dispatcher.tick(now: T0)
+    assert_equal 0, sup.spawned.size,
+                 "archive must not fire while the project is half-migrated"
+    skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "legacy_layout_detected" }
+    refute_nil skipped, "must log :skipped reason: legacy_layout_detected"
+    assert_equal "archive", skipped[1][:action]
+  end
+
   def test_merged_pr_archive_respects_global_cap
     # PR-40 review P2 #4: with N PRs ready to archive but only M
     # capacity slots open, only M archives spawn this tick; the rest

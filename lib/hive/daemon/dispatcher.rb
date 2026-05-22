@@ -424,6 +424,22 @@ module Hive
           return
         end
 
+        # Mirror handle_row's @legacy_layout_projects guard: if the
+        # project is mid-migration, the archive command's --from stage
+        # may not match the current on-disk layout (the watcher's
+        # ARCHIVE_VERB_TEMPLATE is frozen at class load). Skip the
+        # dispatch and let handle_row re-enqueue once the half-migrated
+        # state clears on a future tick. ce-code-review P1 #10.
+        if @legacy_layout_projects.key?(project)
+          @logger.event(:skipped, project: project, slug: slug,
+                                  stage: archive_dispatch[:stage],
+                                  action: "archive",
+                                  reason: "legacy_layout_detected",
+                                  note: "skipping archive while project layout is half-migrated; " \
+                                        "next tick will re-enqueue once migration completes")
+          return
+        end
+
         gate = @controller.can_dispatch?(
           project: project, slug: slug, now: now,
           external_global_count: @external_active_agent_total,

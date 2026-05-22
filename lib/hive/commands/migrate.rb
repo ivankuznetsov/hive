@@ -4,6 +4,7 @@ require "yaml"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
+require "hive/paths"
 require "hive/stages"
 
 module Hive
@@ -78,6 +79,7 @@ module Hive
         end
 
         puts "hive: migrate complete (#{moved.size} task#{moved.size == 1 ? '' : 's'} moved)"
+        restart_daemon_if_running!
         moved
       end
 
@@ -223,6 +225,74 @@ module Hive
       # complete migration.
       def already_migrated?(stages)
         STAGE_RENAMES.all? { |old, new_dir| !Dir.exist?(File.join(stages, old)) && Dir.exist?(File.join(stages, new_dir)) }
+      end
+
+      # When `hive migrate` reshuffles the stage layout, an already-
+      # running daemon still has Ruby constants (most importantly
+      # `Hive::Daemon::PrMergeWatcher::ARCHIVE_VERB_TEMPLATE` and
+      # `ARCHIVE_FROM_STAGE`) frozen at class-load time from the OLD
+      # `Workflows::VERBS`. Its next archive dispatch would emit
+      # `hive archive ... --from <old-stage>` against the post-migrate
+      # disk layout and silently fail with `WrongStage`. Restarting the
+      # daemon process is the only way to refresh those constants
+      # (SIGHUP only re-reads YAML config, not Ruby constants).
+      #
+      # Best-effort: skip when no daemon pid file, no live process, or
+      # `HIVE_MIGRATE_SKIP_DAEMON_RESTART` is set. On Linux with
+      # systemd-user available, restart via systemctl. Anywhere else,
+      # print a load-bearing warning so the operator restarts manually.
+      def restart_daemon_if_running!
+        return if ENV["HIVE_MIGRATE_SKIP_DAEMON_RESTART"] == "1"
+
+        pid = read_daemon_pid
+        return if pid.nil? || !daemon_alive?(pid)
+
+        if systemctl_available?
+          ok = system("systemctl", "--user", "restart", "hive-daemon",
+                      out: File::NULL, err: File::NULL)
+          if ok
+            puts "hive: restarted hive-daemon (pid #{pid}) so its in-memory stage layout matches the migrated on-disk layout"
+            return
+          end
+
+          warn "hive: migrate detected a running hive-daemon (pid #{pid}) but " \
+               "`systemctl --user restart hive-daemon` failed; restart the daemon " \
+               "manually before its next archive dispatch (e.g., `hive daemon stop && hive daemon start`)"
+          return
+        end
+
+        warn "hive: migrate detected a running hive-daemon (pid #{pid}); restart it " \
+             "manually so its in-memory stage layout refreshes from the new Hive::Workflows::VERBS " \
+             "(e.g., `hive daemon stop && hive daemon start`)"
+      end
+
+      def read_daemon_pid
+        pid_file = File.join(Hive::Paths.config_home, ".daemon.pid")
+        return nil unless File.exist?(pid_file)
+
+        payload = YAML.safe_load(File.read(pid_file)) rescue nil
+        pid = payload.is_a?(Hash) ? payload["pid"] : payload
+        pid.is_a?(Integer) && pid.positive? ? pid : nil
+      rescue SystemCallError
+        nil
+      end
+
+      def daemon_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        # We can't signal it, but the process exists — treat as alive
+        # rather than risk a silent miss.
+        true
+      end
+
+      def systemctl_available?
+        system("systemctl", "--user", "--version",
+               out: File::NULL, err: File::NULL)
+      rescue SystemCallError
+        false
       end
     end
   end

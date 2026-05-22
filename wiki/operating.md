@@ -103,6 +103,45 @@ still succeeds without it:
 | Codex | `codex plugin install ivankuznetsov/hive-skills` |
 | Pi | `pi install ivankuznetsov/hive-skills` |
 
+## Release verification
+
+The release ceremony exercises the published artifact end-to-end via
+[`packaging/verify-release.sh`](../packaging/verify-release.sh). The
+script installs a published release into an isolated XDG/HIVE_HOME/HOME
+tmp prefix, walks the command surface (`hive --version`, `hive doctor`,
+`hive init`, `hive new`, `hive status --json`, `hive daemon install
+[--force] --json`, `hive uninstall`), validates JSON envelopes against
+the published schemas, and asserts no state leaks outside the prefix.
+
+Local usage:
+
+```bash
+packaging/verify-release.sh --version=v0.1.0
+packaging/verify-release.sh --version=v0.1.0 --report=json | jq .ok
+```
+
+Exit codes:
+
+- `0` — all verifications passed; tmp prefix removed
+- `1` — a verification step failed; tmp prefix preserved at the
+  path printed in the trailing `[verify] logs preserved at` line
+- `2` — bad arguments
+- `3` — prerequisite missing (`curl`, `ruby`, `jq`, `git`)
+
+`--report=json` emits a single `hive-verify-release.v1` envelope on
+stdout (with human prose redirected to stderr) for programmatic
+consumption: `{schema, schema_version, ok, version, prefix, passed,
+failed, steps[]}` where each step is `{name, passed, failed}`.
+
+In CI, the `verify-release` job in
+[`.github/workflows/install-smoke.yml`](../.github/workflows/install-smoke.yml)
+runs this script against the pinned `HIVE_VERSION` whenever the
+matching GitHub Release exists. The script feature-detects
+post-pin subcommands (e.g., `daemon install` shipped in PR #113) and
+gracefully skips assertions the released binary doesn't support — so
+the script keeps providing value during the gap between when a feature
+lands on main and when the next release tag is cut.
+
 ## Prerequisites
 
 Once per workstation:

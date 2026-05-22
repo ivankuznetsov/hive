@@ -44,6 +44,35 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_run_emits_agent_start_and_end_events
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      Hive::Agent.new(
+        task: task,
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        log_label: "brainstorm"
+      ).run!
+
+      events = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+      start_event = events.find { |event| event.fetch("event_type") == "agent_start" }
+      end_event = events.find { |event| event.fetch("event_type") == "agent_end" }
+
+      refute_nil start_event
+      refute_nil end_event
+      assert_equal "claude brainstorm", start_event.fetch("agent")
+      assert_equal start_event.fetch("agent"), end_event.fetch("agent")
+      assert_includes start_event.fetch("message"), "timeout_sec=5"
+      assert_includes end_event.fetch("message"), "status=waiting"
+      assert_includes end_event.fetch("message"), "exit_code=0"
+    end
+  end
+
   def test_marks_error_when_subprocess_exits_nonzero
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -75,6 +104,36 @@ class AgentTest < Minitest::Test
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, marker.name
       assert_equal "timeout", marker.attrs["reason"]
+    end
+  end
+
+  def test_timeout_emits_agent_end_with_timeout_status
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "5"
+
+      Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 1).run!
+
+      events = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+      end_event = events.reverse.find { |event| event.fetch("event_type") == "agent_end" }
+      assert_includes end_event.fetch("message"), "status=timeout"
+    end
+  end
+
+  def test_exception_before_handle_exit_emits_agent_end_with_exception_status
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5)
+      agent.define_singleton_method(:spawn_and_wait) { raise "synthetic spawn failure" }
+
+      assert_raises(RuntimeError) { agent.run! }
+
+      events = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+      end_event = events.reverse.find { |event| event.fetch("event_type") == "agent_end" }
+      assert_includes end_event.fetch("message"), "status=exception"
+      assert_includes end_event.fetch("message"), "RuntimeError: synthetic spawn failure"
     end
   end
 

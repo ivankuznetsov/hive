@@ -161,4 +161,46 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_healed
     assert_includes Hive::Daemon::Logger::EVENTS, :marker_heal_failed
   end
+
+  def test_agent_marker_grace_sec_threads_from_global_config_to_TaskAction
+    # Operator overrides `daemon.agent_marker_grace_sec` in
+    # ~/Dev/hive/config.yml. Both surfaces (status/TaskAction in
+    # memory, daemon healer on disk) must read the same value so they
+    # classify rows with one threshold. This pins the
+    # global-config → Status → TaskAction chain via the real
+    # `hive status --json` command.
+    with_seeded_task do |dir, _folder, state_file, slug|
+      File.write(state_file, "---\nslug: #{slug}\n---\n\n# #{slug}\n\n<!-- AGENT_WORKING -->\n")
+      # 90 seconds old: still inside the default 300s grace, but well
+      # past the 60s override we'll write to config.
+      mtime = Time.now - 90
+      File.utime(mtime, mtime, state_file)
+
+      # Without the override: row classifies as agent_running.
+      out, _err = capture_io { Hive::Commands::Status.new(json: true).call rescue Hive::Error }
+      row_default = JSON.parse(out)["projects"].flat_map { |p| p["tasks"] }.find { |t| t["slug"] == slug }
+      assert_equal "agent_working", row_default["marker"]
+      assert_equal "agent_running", row_default["action"],
+                   "with default 300s grace, a 90s-old placeholder must stay agent_running"
+
+      # Override the global config to a 60s grace. Merge into the
+      # existing config so the project registry isn't wiped (the
+      # registry write happened during `Hive::Commands::Init.new(dir).call`).
+      existing = if File.exist?(Hive::Config.global_config_path)
+                   YAML.safe_load_file(Hive::Config.global_config_path, permitted_classes: [ Symbol ]) || {}
+      else
+                   {}
+      end
+      existing["daemon"] = (existing["daemon"] || {}).merge("agent_marker_grace_sec" => 60)
+      Hive::Config.write_global_config!(existing)
+
+      # New Status instance to bypass per-call memoization.
+      out2, _err2 = capture_io { Hive::Commands::Status.new(json: true).call rescue Hive::Error }
+      row_overridden = JSON.parse(out2)["projects"].flat_map { |p| p["tasks"] }.find { |t| t["slug"] == slug }
+      assert_equal "error", row_overridden["action"],
+                   "with 60s grace, the same 90s-old placeholder must reclassify to error; " \
+                   "if this fails, the daemon.agent_marker_grace_sec config key is not threading " \
+                   "through to TaskAction"
+    end
+  end
 end

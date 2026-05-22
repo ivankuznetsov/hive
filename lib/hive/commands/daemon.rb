@@ -404,20 +404,48 @@ module Hive
         require "hive/commands/daemon/service_installer"
         installer = Hive::Commands::Daemon::ServiceInstaller.new
         result = installer.install!(autostart: true, force: @force)
-        installer.messages.each { |line| warn "hive: #{line}" } unless @json
+        unless @json
+          installer.messages.each { |line| warn "hive: #{line}" }
+          emit_install_success_summary(installer, result)
+        end
         emit_install_outcome(installer, result)
+      end
+
+      # Bare-text positive confirmation on the non-JSON success path
+      # so operators can distinguish first-time install / no-op /
+      # in-place upgrade at a glance. Mirrors what `reload_daemon`
+      # already does on its success path.
+      def emit_install_success_summary(installer, result)
+        return if @json
+
+        case result
+        when :ok, :written
+          puts "hive daemon: installed unit at #{installer.target_path}"
+        when :upgraded
+          msg = "hive daemon: upgraded unit at #{installer.target_path}"
+          msg += " (backup: #{installer.last_backup_path})" if installer.last_backup_path
+          puts msg
+        when :unchanged
+          puts "hive daemon: unit already up to date at #{installer.target_path}"
+        when :unsupported, :drifted, :failed
+          # :unsupported is messaged via installer.messages.
+          # :drifted / :failed are handled by emit_install_outcome
+          # (which raises); no positive summary applies.
+        end
       end
 
       def emit_install_outcome(installer, result)
         outcome_str =
           case result
-          when :ok       then "written"
-          when :upgraded then "upgraded"
           when :written  then "written"
+          when :upgraded then "upgraded"
           when :unchanged then "unchanged"
           when :unsupported then "unsupported"
           when :drifted then "drifted"
           when :failed  then "failed"
+          # Pre-PR-113 callers may receive :ok from a stale ServiceInstaller
+          # in another branch; map it conservatively to "written".
+          when :ok       then "written"
           end
         success = %w[written upgraded unchanged unsupported].include?(outcome_str)
 

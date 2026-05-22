@@ -195,7 +195,8 @@ module Hive
           stage_filter: @stage
         ).resolve
         marker = Hive::Markers.current(task.state_file)
-        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task))
+        liveness = liveness_kwargs_for(task)
+        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
         diagnostic = action.diagnostic
 
         if @write
@@ -222,11 +223,28 @@ module Hive
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
-          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task)).diagnostic
+          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
           emit_diagnose_result(task, diagnostic, result[:path])
         else
           emit_diagnose_result(task, diagnostic, nil)
         end
+      end
+
+      # Liveness inputs for TaskAction. Mirrors the per-row computation
+      # in collect_rows so the diagnose surface classifies stale
+      # AGENT_WORKING the same way `hive status --json` and the TUI do.
+      # Otherwise stale rows hit via `--diagnose <slug>` would report
+      # diagnostic=nil and the `--write` path would refuse with "not
+      # in a red recovery state."
+      def liveness_kwargs_for(task)
+        claude_pid = lookup_claude_pid(task)
+        state_file = task.state_file
+        mtime = File.exist?(state_file) ? File.mtime(state_file) : nil
+        {
+          pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
+          state_file_mtime: mtime,
+          agent_marker_grace_sec: agent_marker_grace_sec_from_config
+        }
       end
 
       def emit_diagnose_result(task, diagnostic, path)
@@ -409,15 +427,21 @@ module Hive
 
       # Memoize per status call. The daemon's StaleAgentHealer reads the
       # same key from the same global config so both surfaces classify
-      # rows with one threshold; if this fetch raises (corrupted YAML,
-      # missing file), fall back to the TaskAction constant so status
-      # never crashes over a config edge case.
+      # rows with one threshold; if this fetch raises a recognised
+      # config error (corrupted YAML, missing file, non-Integer value),
+      # warn loudly and fall back to the TaskAction constant so the
+      # status snapshot never crashes over a config edge case.
+      # Unexpected errors (programmer bugs, runtime NoMethodError) are
+      # NOT caught here — the broader CLI rescue at bin/hive surfaces
+      # those with a stack trace, which is the right behaviour.
       def agent_marker_grace_sec_from_config
         @agent_marker_grace_sec_from_config ||= begin
           daemon_cfg = Hive::Config.load_global_daemon
           Integer(daemon_cfg.fetch("agent_marker_grace_sec",
                                    Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC))
-        rescue StandardError
+        rescue Hive::ConfigError, TypeError, ArgumentError => e
+          warn "hive: invalid daemon.agent_marker_grace_sec (#{e.class}: #{e.message}); " \
+               "using default #{Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC}s"
           Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
         end
       end

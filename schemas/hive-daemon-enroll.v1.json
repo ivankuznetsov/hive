@@ -124,9 +124,10 @@
             "not_initialised",
             "no_projects",
             "config",
-            "internal"
+            "internal",
+            "wrong_subcommand_flag"
           ],
-          "description": "missing_project = PROJECT positional missing without --all. unknown_project = PROJECT not in registry. project_and_all = both PROJECT and --all were passed. not_initialised = project registered but its .hive-state/config.yml is missing. no_projects = --all but registry empty. config = malformed config.yml (exit 78). internal = uncategorised crash (exit 70)."
+          "description": "missing_project = PROJECT positional missing without --all. unknown_project = PROJECT not in registry. project_and_all = both PROJECT and --all were passed. not_initialised = project registered but its .hive-state/config.yml is missing. no_projects = --all but registry empty. config = malformed config.yml (exit 78). internal = uncategorised crash (exit 70). wrong_subcommand_flag = a flag was passed to a subcommand that does not accept it (e.g., --force on `daemon stop`)."
         },
         "exit_code": {
           "type": "integer",

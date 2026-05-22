@@ -1286,22 +1286,34 @@ class HiveDaemonCommandTest < Minitest::Test
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
                                          "daemon", "install", "--force", "--json")
       doc = JSON.parse(out)
-      # Exit code depends on whether systemctl is available in the
-      # sandbox; on a CI host without systemd-user, systemctl-failed
-      # (exit 70) is the expected outcome. Either way, the envelope
-      # must validate and the on-disk write must have happened.
-      assert_includes [ 0, 70 ], status.exitstatus,
-                      "install --force exits 0 on success or 70 on systemctl failure; got #{status.exitstatus}, doc=#{doc.inspect}"
       errors = schema.validate(doc).map { |e| e["error"] }
       assert_empty errors,
-                   "install --force envelope must validate; got: #{errors.inspect}"
+                   "install --force envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
+
+      # The on-disk write must have happened regardless of whether the
+      # service-manager call succeeded — `atomic_write` runs BEFORE the
+      # systemctl restart, so even on exit 70 the new template is in
+      # place. Pin this contract so a future install_linux! refactor
+      # that short-circuits before atomic_write fails this assertion.
+      assert_includes File.read(unit_path), "ExecStart=",
+                      "atomic write must land the new unit before systemctl is called, regardless of exit code"
+      backups = Dir["#{unit_path}.bak-*"]
+      assert_equal 1, backups.size, "force must write exactly one timestamped backup"
+      assert_equal "stale-pre-existing-content\n", File.read(backups.first)
+
+      # Branch on whether systemctl-user is actually available so the
+      # assertion is deterministic per environment. On hosts where
+      # systemctl IS available, exit 0 is the only acceptable outcome;
+      # accepting exit 70 there would silently mask a real systemctl
+      # failure regression.
+      expected_exit = systemctl_user_available? ? 0 : 70
+      assert_equal expected_exit, status.exitstatus,
+                   "expected exit #{expected_exit} on this host (systemctl_user_available? = #{systemctl_user_available?}); " \
+                   "got #{status.exitstatus}, doc=#{doc.inspect}"
 
       if status.exitstatus.zero?
         assert_equal true, doc["ok"]
         assert_equal "upgraded", doc["outcome"]
-        backups = Dir["#{unit_path}.bak-*"]
-        assert_equal 1, backups.size, "force must write exactly one timestamped backup"
-        assert_equal "stale-pre-existing-content\n", File.read(backups.first)
         assert_equal backups.first, doc["backup_path"]
       else
         assert_equal false, doc["ok"]
@@ -1309,6 +1321,21 @@ class HiveDaemonCommandTest < Minitest::Test
         assert_equal 70, doc["exit_code"]
       end
     end
+  end
+
+  # systemd-user is available iff `systemctl --user --version` exits 0.
+  # ENOENT (no systemctl binary) or non-zero exit (e.g., WSL without
+  # systemd-user, CI containers) means the install path will take the
+  # "systemctl not detected" / "systemctl call failed" branches.
+  def systemctl_user_available?
+    return @systemctl_user_available if defined?(@systemctl_user_available)
+
+    @systemctl_user_available =
+      begin
+        system("systemctl", "--user", "--version", out: File::NULL, err: File::NULL)
+      rescue Errno::ENOENT
+        false
+      end
   end
 
   def test_install_unsupported_platform_envelope_passes_through

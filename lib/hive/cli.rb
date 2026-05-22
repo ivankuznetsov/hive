@@ -530,10 +530,16 @@ module Hive
         reload [--json]                   Send SIGHUP to reload config.
                                           --json emits hive-daemon-reload.v1.
         tail                              Stream daemon.log.
-        install [--force]                 (Re)write the platform-native unit
-                                          file. --force overwrites an existing
-                                          unit (the previous file is saved as
-                                          <path>.bak) and restarts the daemon.
+        install [--force] [--json]        (Re)write the platform-native unit
+                                          file. Without --force, refuses to
+                                          overwrite a pre-existing unit and
+                                          exits 64 (USAGE). With --force,
+                                          saves the previous file to a
+                                          timestamped <path>.bak-<UTC-stamp>
+                                          (never overwritten) and restarts
+                                          the running daemon so new
+                                          Environment= lines take effect.
+                                          --json emits hive-daemon-install.v1.
         enable  PROJECT|--all [--json]    Set daemon.enabled: true in
                                           <project>/.hive-state/config.yml.
                                           --all = every registered project;
@@ -597,7 +603,7 @@ module Hive
           subcommand: subcommand,
           message: "hive daemon #{subcommand}: --force only applies to `install`; " \
                    "drop it or use `hive daemon install --force`",
-          error_kind: Hive::Schemas::EnrollErrorKind::PROJECT_AND_ALL
+          error_kind: Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG
         )
       end
       Hive::Commands::Daemon.new(

@@ -73,9 +73,20 @@ module Hive
             if write_result == :upgraded
               # launchd does not pick up a rewritten plist while the
               # service is loaded; new EnvironmentVariables would be
-              # ignored. Unload first (best-effort: plist may not be
-              # currently loaded), then load the refreshed file.
-              @runner.call([ "launchctl", "unload", path ])
+              # ignored. Unload first (plist may not be currently
+              # loaded; that's benign), then load the refreshed file.
+              # Capture the unload exit code in `messages` so the
+              # operator can distinguish "plist wasn't loaded yet"
+              # (benign) from "launchd refused to unload" (real
+              # failure — the subsequent `load` would then silently
+              # no-op against the still-loaded old plist and the
+              # operator's `--force` would lie about restarting).
+              unload_ok = @runner.call([ "launchctl", "unload", path ])
+              unless unload_ok
+                @messages << "launchctl unload returned non-zero for #{path} (benign if plist " \
+                             "was not loaded; otherwise launchd refused — run `launchctl bootout " \
+                             "gui/$(id -u) #{path}` to force unload, then re-run `hive daemon install --force`)"
+              end
               @last_restart_invoked = true
             end
             ok = @runner.call([ "launchctl", "load", path ])
@@ -84,7 +95,12 @@ module Hive
               return :failed
             end
           end
-          write_result == :upgraded ? :upgraded : :ok
+          # Preserve the write_result distinction (:written / :upgraded /
+          # :unchanged) for the operator-facing success summary in
+          # `Hive::Commands::Daemon#emit_install_success_summary`. A flat
+          # :ok would hide whether install actually wrote, upgraded, or
+          # no-op'd.
+          write_result
         end
 
         def install_linux!(autostart:, force:)
@@ -125,7 +141,9 @@ module Hive
               @messages << "systemd not detected; enable systemd in WSL or run `hive daemon start` manually."
             end
           end
-          write_result == :upgraded ? :upgraded : :ok
+          # Preserve the write_result distinction for the operator-facing
+          # success summary (see install_macos! comment).
+          write_result
         end
 
         def write_if_safe(path, content, force: false)

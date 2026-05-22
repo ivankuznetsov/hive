@@ -9,18 +9,21 @@ module Hive
     #
     # Two failure modes are healed, distinguished by the row's
     # `claude_pid_alive` field (populated by Hive::Commands::Status from
-    # the per-task .lock file):
+    # the per-task .lock file's `claude_pid` field — NOT from the
+    # marker's `pid` attribute, which records the hive runner PID
+    # instead):
     #
-    #   - `agent_died`     — marker carried a PID (claude_pid_alive ==
-    #                        false). The agent was running and exited
-    #                        without rewriting its own marker (SIGKILL,
-    #                        OOM, crash, hard reboot).
-    #   - `agent_orphaned` — marker had no PID (claude_pid_alive == nil)
-    #                        and the marker's state-file mtime is older
-    #                        than the grace window. Either the daemon
-    #                        never dispatched the stage (the bug that
-    #                        produced this healer), or the dispatch
-    #                        process died before recording its PID.
+    #   - `agent_died`     — the .lock recorded a claude_pid that's
+    #                        no longer alive (claude_pid_alive == false).
+    #                        Covers SIGKILL, OOM, crash, hard reboot
+    #                        of an attached agent.
+    #   - `agent_orphaned` — no .lock claude_pid (claude_pid_alive ==
+    #                        nil) and the marker's state-file mtime is
+    #                        older than the grace window. Either the
+    #                        daemon never dispatched the stage (the bug
+    #                        that produced this healer), or the dispatch
+    #                        process died before recording its PID in
+    #                        the lock.
     #
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch

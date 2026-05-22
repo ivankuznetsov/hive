@@ -694,6 +694,34 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
   end
 
+  def with_singleton_method_stub(receiver, name, stub_proc)
+    sentinel = receiver.method(name)
+    receiver.define_singleton_method(name, &stub_proc)
+    yield
+  ensure
+    receiver.define_singleton_method(name, sentinel) if sentinel
+  end
+
+  def test_red_status_autofix_force_delegates_to_task_action_predicate
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      marker: "review_stale",
+      attrs: { "pass" => "4" },
+      suggested_command: nil
+    )
+    captured = nil
+
+    with_singleton_method_stub(Hive::TaskAction, :max_passes_review_stale_with_escalations?, lambda { |**kwargs|
+      captured = kwargs
+      true
+    }) do
+      assert_equal true, @model.send(:red_status_autofix_force?, row)
+    end
+
+    assert_equal({ folder: row.folder, marker_name: "review_stale", attrs: { "pass" => "4" } }, captured)
+  end
+
   def with_run_takeover_stub(stub_proc)
     sentinel = Hive::Tui::Subprocess.method(:run_takeover_child_sync)
     Hive::Tui::Subprocess.define_singleton_method(:run_takeover_child_sync, &stub_proc)

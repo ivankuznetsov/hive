@@ -151,6 +151,40 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_call_bang_raises_typed_reserved_slug
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        err = assert_raises(Hive::Commands::New::InvalidSlugError) do
+          Hive::Commands::New.new(project, "x", slug_override: "main").call!
+        end
+
+        assert_includes err.message, "reserved or unsafe slug"
+        assert_equal "main", err.value
+      end
+    end
+  end
+
+  def test_call_bang_raises_typed_slug_collision
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        hive_state = File.join(dir, ".hive-state")
+        FileUtils.mkdir_p(File.join(hive_state, "stages", "1-inbox", "duplicate-slug"))
+
+        err = assert_raises(Hive::Commands::New::SlugCollisionError) do
+          Hive::Commands::New.new(project, "x", slug_override: "duplicate-slug").call!
+        end
+
+        assert_includes err.message, "slug collision"
+        assert_equal "duplicate-slug", err.value
+      end
+    end
+  end
+
   def test_body_override_and_attachments_are_captured_in_one_commit
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -152,6 +152,74 @@ class HiveTuiUpdateTest < Minitest::Test
                  new_model.red_status_detail_state.agent_label
   end
 
+  def test_red_status_detail_scroll_down_reduces_offset
+    state = Hive::Tui::Model::RedStatusDetailState.new(
+      row: red_detail_row,
+      marker_signature: "sig",
+      log_lines: (1..50).map { |i| "line-#{i}" },
+      log_scroll_offset: 5
+    )
+    starting = model.with(mode: :red_status_detail, red_status_detail_state: state, cols: 100, rows: 24)
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :down, amount: 1)
+    )
+
+    assert_equal 4, new_model.red_status_detail_state.log_scroll_offset
+  end
+
+  def test_red_status_detail_scroll_up_increases_offset
+    state = Hive::Tui::Model::RedStatusDetailState.new(
+      row: red_detail_row,
+      marker_signature: "sig",
+      log_lines: (1..50).map { |i| "line-#{i}" },
+      log_scroll_offset: 0
+    )
+    starting = model.with(mode: :red_status_detail, red_status_detail_state: state, cols: 100, rows: 24)
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :up, amount: 10)
+    )
+
+    assert_equal 10, new_model.red_status_detail_state.log_scroll_offset
+  end
+
+  def test_red_status_detail_scroll_saturates_at_top
+    state = Hive::Tui::Model::RedStatusDetailState.new(
+      row: red_detail_row,
+      marker_signature: "sig",
+      log_lines: (1..50).map { |i| "line-#{i}" },
+      log_scroll_offset: 0
+    )
+    starting = model.with(mode: :red_status_detail, red_status_detail_state: state, cols: 100, rows: 24)
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :up, amount: 100)
+    )
+
+    assert_equal 42, new_model.red_status_detail_state.log_scroll_offset
+  end
+
+  def test_red_status_detail_scroll_empty_log_is_noop
+    state = Hive::Tui::Model::RedStatusDetailState.new(
+      row: red_detail_row,
+      marker_signature: "sig",
+      log_lines: [],
+      log_scroll_offset: 0
+    )
+    starting = model.with(mode: :red_status_detail, red_status_detail_state: state, cols: 100, rows: 24)
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :up, amount: 10)
+    )
+
+    assert_same starting, new_model
+  end
+
   def test_snapshot_arrived_closes_red_detail_when_row_recovers
     row = red_detail_row
     starting = model.with(

@@ -23,6 +23,11 @@ module Hive
     # snapshot poll, subprocess exit, terminate) and the filter-prompt
     # text-editing messages.
     module Update
+      RED_STATUS_MIN_REASON_ROWS = 8
+      RED_STATUS_MIN_LOG_PANEL_ROWS = 4
+      RED_STATUS_MAX_LOG_PANEL_ROWS = 12
+      RED_STATUS_CHIP_SEPARATOR_WIDTH = 3
+
       module_function
 
       def apply(model, message)
@@ -73,6 +78,8 @@ module Hive
           [ apply_open_filter_prompt(model), nil ]
         when Messages::OpenRedStatusDetail
           [ apply_open_red_status_detail(model, message), nil ]
+        when Messages::RedStatusDetailScroll
+          [ apply_red_status_detail_scroll(model, message), nil ]
         when Messages::Back
           [ apply_back(model), nil ]
         when Messages::ProjectScope
@@ -707,6 +714,103 @@ module Hive
           Model::RedStatusDetailState.new(row: msg.row)
         end
         model.with(mode: :red_status_detail, red_status_detail_state: state)
+      end
+
+      def apply_red_status_detail_scroll(model, msg)
+        state = model.red_status_detail_state
+        return model if model.mode != :red_status_detail || state.nil?
+
+        lines = Array(state.log_lines)
+        return model if lines.empty?
+
+        capacity = red_status_detail_log_capacity(model)
+        return model if capacity <= 0
+
+        amount = msg.amount.to_i
+        next_offset = case msg.direction
+        when :up then state.log_scroll_offset.to_i + amount
+        when :down then state.log_scroll_offset.to_i - amount
+        else state.log_scroll_offset.to_i
+        end
+        max_offset = [ lines.length - capacity, 0 ].max
+        clamped = [[ next_offset, 0 ].max, max_offset].min
+        return model if clamped == state.log_scroll_offset
+
+        model.with(red_status_detail_state: state.with(log_scroll_offset: clamped))
+      end
+
+      def red_status_detail_log_capacity(model)
+        state = model.red_status_detail_state
+        return 0 if state.nil? || Array(state.log_lines).empty?
+
+        rows = [ model.rows.to_i, 1 ].max
+        width = [ model.cols.to_i - 1, 1 ].max
+        action_rows = red_status_detail_action_rows(state.row, width, rows)
+        content_budget = [ rows - action_rows, 0 ].max
+        remaining = content_budget - 1
+        remaining -= 1 if remaining.positive?
+
+        extra_rows = red_status_detail_artifact_rows(state.row)
+        extra_rows += 1 if state.refreshing
+        core_rows = [ remaining - extra_rows, 0 ].max
+        return 0 unless core_rows >= RED_STATUS_MIN_REASON_ROWS + RED_STATUS_MIN_LOG_PANEL_ROWS + 2
+
+        log_height = [[ core_rows - RED_STATUS_MIN_REASON_ROWS - 2, RED_STATUS_MIN_LOG_PANEL_ROWS ].max,
+                      RED_STATUS_MAX_LOG_PANEL_ROWS].min
+        [ log_height - 2, 1 ].max
+      end
+
+      def red_status_detail_action_rows(row, width, rows)
+        chip_lengths = red_status_detail_chip_labels(row).map { |label| [ label.length, width ].min }
+        lines = 0
+        current = 0
+        chip_lengths.each do |length|
+          candidate = current.zero? ? length : current + RED_STATUS_CHIP_SEPARATOR_WIDTH + length
+          if candidate <= width
+            current = candidate
+          else
+            lines += 1 if current.positive?
+            current = length
+          end
+        end
+        lines += 1 if current.positive?
+        available = [ rows.to_i, 1 ].max
+        lines >= available ? available : lines + 1
+      end
+
+      def red_status_detail_chip_labels(row)
+        labels = []
+        labels << "[Enter] autofix / retry" if red_status_auto_action_available?(row)
+        labels << "[f] manual fix ($EDITOR)"
+        labels << "[R] refresh diagnosis"
+        labels << "[q] back"
+        labels
+      end
+
+      def red_status_auto_action_available?(row)
+        return false if row.nil?
+        return true if row.action_key.to_s == "recover_review"
+        return false if row.action_key.to_s == "recover_execute"
+        return true if row.action_key.to_s == "error" && red_status_diagnostic_retry_command(row)
+        return true if row.action_key.to_s == "error" && row.marker.to_s == "error"
+
+        false
+      end
+
+      def red_status_diagnostic_retry_command(row)
+        suggested = row&.diagnostic && row.diagnostic["suggested_next_action"]
+        return nil unless suggested.is_a?(Hash)
+        return nil unless suggested["kind"].to_s == "retry"
+
+        command = suggested["command"].to_s.strip
+        command.empty? ? nil : command
+      end
+
+      def red_status_detail_artifact_rows(row)
+        paths = Array(row&.diagnostic && row.diagnostic["artifact_paths"])
+        return 0 if paths.empty?
+
+        1 + [ paths.length, 5 ].min + (paths.length > 5 ? 1 : 0) + 1
       end
 
       # Esc / `q` from a sub-mode returns to grid. Clears tail_state on

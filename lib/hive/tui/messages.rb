@@ -163,6 +163,10 @@ module Hive
       # recovery handler the grid row used to run directly.
       RedStatusAutofix = Data.define(:row)
 
+      # Scroll the captured red-status detail log snapshot. `direction`
+      # is :up (older lines) or :down (newer lines); `amount` is a line
+      # count and is clamped by Update against the rendered capacity.
+      RedStatusDetailScroll = Data.define(:direction, :amount)
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or
       # revise inline questions before re-running the stage.

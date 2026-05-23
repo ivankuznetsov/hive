@@ -236,6 +236,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       Bubbletea::KeyMessage::KEY_RIGHT => :key_right,
       Bubbletea::KeyMessage::KEY_HOME => :key_home,
       Bubbletea::KeyMessage::KEY_END => :key_end,
+      Bubbletea::KeyMessage::KEY_PGUP => :key_pgup,
+      Bubbletea::KeyMessage::KEY_PGDOWN => :key_pgdn,
       Bubbletea::KeyMessage::KEY_DELETE => :key_delete,
       Bubbletea::KeyMessage::KEY_CTRL_A => :key_ctrl_a,
       Bubbletea::KeyMessage::KEY_CTRL_E => :key_ctrl_e,

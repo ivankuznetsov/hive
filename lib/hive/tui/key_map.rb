@@ -316,6 +316,12 @@ module Hive
 
       def red_status_detail_message(key:, row:)
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
+        return Messages::RedStatusDetailScroll.new(direction: :up, amount: 1) if key == :key_up
+        return Messages::RedStatusDetailScroll.new(direction: :down, amount: 1) if key == :key_down
+        return Messages::RedStatusDetailScroll.new(direction: :up, amount: 10) if key == :key_pgup
+        return Messages::RedStatusDetailScroll.new(direction: :down, amount: 10) if key == :key_pgdn
+        return Messages::RedStatusDetailScroll.new(direction: :up, amount: 1_000_000) if key == :key_home
+        return Messages::RedStatusDetailScroll.new(direction: :down, amount: 1_000_000) if key == :key_end
         return Messages::RedStatusAutofix.new(row: row) if ENTER_KEYS.include?(key) && row
         return Messages::OpenInAgent.new(row: row) if key == "o" && row
         # The grid-mode steer key is `s`; in detail mode the equivalent

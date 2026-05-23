@@ -315,6 +315,10 @@ module Hive
                             km.key_type == Bubbletea::KeyMessage::KEY_HOME
         return :key_end if defined?(Bubbletea::KeyMessage::KEY_END) &&
                           km.key_type == Bubbletea::KeyMessage::KEY_END
+        return :key_pgup if defined?(Bubbletea::KeyMessage::KEY_PGUP) &&
+                            km.key_type == Bubbletea::KeyMessage::KEY_PGUP
+        return :key_pgdn if defined?(Bubbletea::KeyMessage::KEY_PGDOWN) &&
+                            km.key_type == Bubbletea::KeyMessage::KEY_PGDOWN
         return :key_delete if defined?(Bubbletea::KeyMessage::KEY_DELETE) &&
                               km.key_type == Bubbletea::KeyMessage::KEY_DELETE
         return :key_ctrl_a if defined?(Bubbletea::KeyMessage::KEY_CTRL_A) &&

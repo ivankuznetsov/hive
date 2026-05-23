@@ -81,6 +81,18 @@ class HiveBotCodexConversationTest < Minitest::Test
     end
   end
 
+  def test_unknown_bot_marker_returns_unparseable_error
+    with_task do |task|
+      result = conversation(status: :ok, exit_code: 0,
+                            final_message: "BOT_UNKNOWN: unsupported marker").next_turn(
+                              task: task, question: question, history: [], draft: "", user_input: "x"
+                            )
+
+      assert_equal :error, result.kind
+      assert_equal :unparseable, result.reason
+    end
+  end
+
   def test_timeout_returns_error
     with_task do |task|
       result = conversation(status: :timeout, timed_out: true, final_message: "").next_turn(

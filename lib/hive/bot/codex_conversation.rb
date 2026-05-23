@@ -81,8 +81,6 @@ module Hive
           Result.new(kind: :draft_ready, draft: value)
         when "ERROR"
           Result.new(kind: :error, reason: value.empty? ? "codex_error" : value)
-        else
-          raise "CodexConversation got unknown marker kind #{kind.inspect}"
         end
       end
 

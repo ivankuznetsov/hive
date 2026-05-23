@@ -1,6 +1,7 @@
 require "open3"
 require "fileutils"
 require "yaml"
+require "hive/config"
 
 module Hive
   class Worktree
@@ -69,6 +70,10 @@ module Hive
       :removed
     end
 
+    # Fallback used by drop when `git worktree remove` refuses (locked,
+    # dirty tree, missing index). `--force` will discard uncommitted
+    # work in the worktree, so callers must already have decided the
+    # data is forfeit (drop is irreversible by contract).
     def remove_force!(path: self.path)
       remove!(path: path, force: true)
     end
@@ -123,10 +128,29 @@ module Hive
       pointer = File.join(task_folder, "worktree.yml")
       return nil unless File.exist?(pointer)
 
-      data = YAML.safe_load(File.read(pointer)) || {}
+      data = begin
+        YAML.safe_load(File.read(pointer))
+      rescue Psych::Exception, SystemCallError, IOError
+        nil
+      end
+      return nil if data.nil?
+
       raise WorktreeError, "worktree.yml must be a hash" unless data.is_a?(Hash)
 
       data
+    end
+
+    # Resolves the canonical worktree root for a project (per-project
+    # `worktree_root` override, falling back to `~/Dev/<repo>.worktrees`).
+    # Shared by Drop and other callers so the resolution rule has one
+    # home; previously Drop duplicated the formula and would have
+    # silently drifted on any future change here.
+    def self.canonical_root(project_root)
+      cfg = Hive::Config.load(project_root)
+      File.expand_path(
+        cfg["worktree_root"] ||
+          File.expand_path("~/Dev/#{File.basename(File.expand_path(project_root))}.worktrees")
+      )
     end
 
     # Resolve symlinks before the prefix check — File.expand_path normalises

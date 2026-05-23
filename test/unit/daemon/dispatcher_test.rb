@@ -181,8 +181,37 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0)
 
     assert_equal 0, sup.spawned.size, "stale snapshot row must not spawn after drop removed the folder"
+    # No :dispatched event should fire — Policy.decide ran but the
+    # vanished-folder guard suppresses the spawn AFTER the decision.
+    refute events_include?(logger, :dispatched),
+           "vanished-folder row must not produce a :dispatched log event"
     skipped = logger.events.find { |(name, attrs)| name == :skipped && attrs[:reason] == "folder_missing" }
     refute_nil skipped, "must log :skipped reason: folder_missing"
+    assert_equal "s1", skipped[1][:slug]
+  end
+
+  # Nil/empty row.folder is a different signal (malformed snapshot)
+  # than a folder that vanished between snapshot and dispatch. The
+  # dispatcher distinguishes the two so operators reading daemon.log
+  # can tell "drop just ran" apart from "the snapshot is broken".
+  def test_advance_action_skips_with_distinct_reason_when_row_folder_nil
+    folder_dir = make_existing_row_folder(project: "p1", stage: "1-inbox", slug: "s1")
+    raw_row = Row.new(
+      project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
+      folder: nil,
+      state_file: File.join(folder_dir, "idea.md"),
+      state_file_mtime: T0 - 600, action: "ready_to_plan",
+      suggested_command: "hive plan s1 --from 2-brainstorm",
+      claude_pid_alive: nil
+    )
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ raw_row ])
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size, "nil-folder row must not spawn"
+    skipped = logger.events.find { |(name, attrs)| name == :skipped && attrs[:reason] == "folder_missing_nil" }
+    refute_nil skipped,
+               "nil row.folder must log :skipped reason: folder_missing_nil (distinct from folder_missing)"
     assert_equal "s1", skipped[1][:slug]
   end
 

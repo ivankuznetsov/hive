@@ -5188,6 +5188,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_label: "Ready to plan"
     )
     calls = []
+    before = Time.now
 
     with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
       @model.update(Hive::Tui::Messages::DropFocusedTask.new(row: row))
@@ -5197,6 +5198,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
       [ "hive", "drop", "drop-me", "--project", "demo", "--from", "2-brainstorm", "--json" ]
     ], calls
     assert_equal "dropping drop-me...", @model.hive_model.flash
+    flash_set_at = @model.hive_model.flash_set_at
+    refute_nil flash_set_at,
+               "flash_set_at must be stamped so the 'dropping…' flash can age out"
+    assert_kind_of Time, flash_set_at
+    assert flash_set_at >= before,
+           "flash_set_at must be recorded at/after the dispatch instant"
   end
 
   def test_drop_focused_task_without_row_flashes_selection_hint

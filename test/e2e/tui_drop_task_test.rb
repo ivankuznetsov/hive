@@ -109,7 +109,8 @@ class TuiDropTaskE2ETest < Minitest::Test
       slug = "tui-drop-brainstorm-260522-aaaa"
       folder = create_task(dir, "2-brainstorm", slug)
       File.write(File.join(folder, ".lock"), { "pid" => 999_999 }.to_yaml)
-      File.write(File.join(folder, ".markers-lock"), "locked\n")
+      markers_lock_path = File.join(folder, ".markers-lock")
+      File.write(markers_lock_path, "locked\n")
 
       model, messages, calls = run_shift_x(snapshot)
 
@@ -118,7 +119,10 @@ class TuiDropTaskE2ETest < Minitest::Test
       ], calls
       assert_equal "dropping #{slug}...", model.hive_model.flash
       assert messages.any? { |message| message.is_a?(Hive::Tui::Messages::SubprocessExited) }
-      refute File.directory?(folder)
+      refute File.directory?(folder),
+             "task folder must be removed after drop"
+      refute File.exist?(markers_lock_path),
+             ".markers-lock must be removed with the parent folder"
       assert_empty tasks.select { |task| task["slug"] == slug }
     end
   end
@@ -173,7 +177,6 @@ class TuiDropTaskE2ETest < Minitest::Test
       dispatch = ->(message) { messages << message }
       begin
         ENV["PATH"] = "#{hive_bin_dir}:#{original_path}"
-        ENV["HIVE_HOME"] = ENV["HIVE_HOME"] # already set by with_tmp_global_config
         ENV["BUNDLE_GEMFILE"] = bundle_path
         argv = [ "hive", "drop", slug, "--project", project, "--from", "2-brainstorm", "--json" ]
         Hive::Tui::Subprocess.dispatch_background(argv, dispatch: dispatch)

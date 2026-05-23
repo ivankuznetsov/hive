@@ -909,4 +909,15 @@ class TuiKeyMapMessageForTest < Minitest::Test
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "x", row: row)
     assert_same Hive::Tui::Messages::NOOP, msg
   end
+
+  # Pin the left-pane + nil-row case: the focus-guard must win over
+  # the "select a task first" hint so the operator gets a single,
+  # actionable message ("focus the tasks pane first") instead of two
+  # conflicting flashes.
+  def test_grid_capital_x_left_pane_with_nil_row_flashes_focus_hint
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "X", row: nil, pane_focus: :left)
+
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_equal "focus the tasks pane first (Tab or l)", msg.text
+  end
 end

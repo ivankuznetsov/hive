@@ -132,7 +132,8 @@ class DropCommandTest < Minitest::Test
         payload = JSON.parse(out)
         assert_equal true, payload["pr_closed"]
       end
-      assert_equal [ [ "gh", "pr", "close", "https://example.com/pr/1", "--comment", "task dropped" ] ], calls
+      assert_equal [ [ "gh", "pr", "close", "https://example.com/pr/1", "--comment", "task dropped (hive drop #{slug})" ] ], calls,
+                   "gh pr close --comment must include the slug so reviewers can link back to the dropped task"
       refute File.directory?(folder)
     end
   end
@@ -201,18 +202,189 @@ class DropCommandTest < Minitest::Test
     with_drop_project do |dir, _ops, project|
       slug = "pid-guard-260522-aaaa"
       folder = create_task(dir, "4-execute", slug)
-      File.write(
-        File.join(folder, ".lock"),
-        { "pid" => Process.pid, "process_start_time" => "definitely-not-this-process" }.to_yaml
+      # Pin a live start-time lookup so the guard can compare against
+      # the divergent recorded value. Without this stub the test could
+      # silently degrade to "process_start_time returned blank" and
+      # the guard would short-circuit to trust-the-pid, hiding a
+      # regression in the start-time path.
+      with_lock_start_time_stub("live-start-time-fixture") do
+        File.write(
+          File.join(folder, ".lock"),
+          { "pid" => Process.pid,
+            "process_start_time" => "definitely-not-this-process" }.to_yaml
+        )
+
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal false, payload["agent_killed"]
+        assert_equal Process.pid, payload["agent_pid"]
+        assert_equal "pid_reuse_guard", payload["agent_kill_skipped_reason"]
+      end
+    end
+  end
+
+  # `<!-- AGENT_WORKING pid=N -->` marker without a `.lock` file is a
+  # legitimate path (lock was removed by a crashed run, or the daemon
+  # stamped a marker but the agent hadn't taken the lock yet). Drop
+  # must still surface a kill candidate from the marker alone.
+  def test_drop_picks_up_pid_from_marker_without_lock_file
+    with_drop_project do |dir, _ops, project|
+      slug = "marker-only-260522-aaaa"
+      # Create an execute task with an AGENT_WORKING marker but NO .lock.
+      folder = create_task(
+        dir, "4-execute", slug,
+        body: "# #{slug}\n<!-- AGENT_WORKING pid=999999 -->\n"
       )
+      refute File.exist?(File.join(folder, ".lock")), "fixture must omit .lock"
 
       out, _err = capture_io do
         Hive::Commands::Drop.new(slug, project: project, json: true).call
       end
       payload = JSON.parse(out)
+      # PID 999999 is essentially never alive; we expect a marker-only
+      # candidate to be surfaced with skipped_reason: "not_alive"
+      # rather than the no-candidate path's "no_pid".
+      assert_equal 999_999, payload["agent_pid"],
+                   "marker-only PID must surface as agent_pid"
       assert_equal false, payload["agent_killed"]
-      assert_equal Process.pid, payload["agent_pid"]
-      assert_equal "pid_reuse_guard", payload["agent_kill_skipped_reason"]
+      assert_equal "not_alive", payload["agent_kill_skipped_reason"],
+                   "marker-only PID should be picked up but skipped as not_alive"
+    end
+  end
+
+  # `gh pr close` returning non-zero (e.g. PR already closed, network
+  # error) must be a soft failure: drop continues, pr_closed:false,
+  # exit 0, and a warning hits stderr so the operator sees the signal.
+  def test_drop_handles_gh_pr_close_non_zero_exit_as_soft_failure
+    with_drop_project do |dir, ops, project|
+      slug = "gh-fail-260522-aaaa"
+      folder = create_task(
+        dir, "5-open-pr", slug,
+        body: "---\npr_url: https://example.com/pr/9\n---\n\n<!-- COMPLETE -->\n"
+      )
+      commit_hive_state(ops, "5-open-pr", slug)
+
+      with_gh_capture_stub(lambda do |*_cmd, **_kwargs|
+        [ "", "PR is already closed\n", Hive::Gh::CommandStatus.new(exitstatus: 1) ]
+      end) do
+        out, err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal true, payload["ok"],
+                     "non-zero gh pr close must NOT abort drop"
+        assert_equal false, payload["pr_closed"]
+        assert_includes err, "gh pr close",
+                        "stderr must warn when gh pr close fails so silence is impossible"
+      end
+      refute File.directory?(folder)
+    end
+  end
+
+  # Worktree pointer validation is a plan-stated security guard:
+  # an out-of-root path in worktree.yml must be rejected (treated
+  # as no-worktree) so a tampered pointer cannot trick drop into
+  # removing a sibling worktree. Drop must converge to ok=true.
+  def test_drop_rejects_out_of_root_worktree_pointer_path
+    with_drop_project do |dir, ops, project|
+      slug = "bad-pointer-260522-aaaa"
+      folder = create_task(dir, "4-execute", slug)
+      # Hand-write a pointer that escapes the worktree_root entirely.
+      escape_path = File.join(Dir.tmpdir, "hive-escape-#{Process.pid}-#{rand(1_000_000)}")
+      File.write(
+        File.join(folder, "worktree.yml"),
+        { "path" => escape_path, "branch" => slug, "created_at" => Time.now.utc.iso8601 }.to_yaml
+      )
+      commit_hive_state(ops, "4-execute", slug)
+
+      out, err = capture_io do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal true, payload["ok"],
+                   "out-of-root pointer must not abort drop — converge silently"
+      assert_equal false, payload["worktree_removed"],
+                   "tampered pointer must NOT be honoured; no worktree removed"
+      assert_includes err, "rejecting out-of-root worktree pointer",
+                      "stderr must warn about rejected pointer paths for security forensics"
+      refute File.directory?(folder)
+    end
+  end
+
+  # When the same slug exists in BOTH active and 9-done (race between
+  # archive and the operator running drop), drop must silently focus
+  # on the active stage and leave the 9-done copy alone. Inverting
+  # this would accidentally remove the archive record.
+  def test_drop_leaves_9_done_copy_intact_when_slug_spans_active_and_archive
+    with_drop_project do |dir, ops, project|
+      slug = "span-260522-aaaa"
+      active_folder = create_task(dir, "2-brainstorm", slug)
+      done_folder = create_task(dir, "9-done", slug)
+      commit_hive_state(ops, "2-brainstorm", slug)
+      commit_hive_state(ops, "9-done", slug)
+
+      out, _err = capture_io do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal [ "2-brainstorm" ], payload["from_stages"],
+                   "from_stages must reflect the active copy only — 9-done must not be touched"
+      refute File.directory?(active_folder), "active copy must be removed"
+      assert File.directory?(done_folder),
+             "9-done archive copy must NOT be removed"
+    end
+  end
+
+  # When a slug exists in TWO projects and --from doesn't match either
+  # project's actual stage, the contract falls through to
+  # InvalidTaskPath (cross-project --from-mismatch is not WrongStage
+  # because the slug isn't pinned to a single project yet).
+  def test_drop_cross_project_slug_with_wrong_from_yields_invalid_task_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir1|
+        with_tmp_git_repo do |dir2|
+          [ dir1, dir2 ].each do |dir|
+            ops = Hive::GitOps.new(dir)
+            ops.hive_state_init
+            Hive::Config.register_project(name: File.basename(dir), path: dir)
+            create_task(dir, "2-brainstorm", "x-share-260522-aaaa")
+          end
+
+          out, _err, status = with_captured_exit do
+            Hive::Commands::Drop.new(
+              "x-share-260522-aaaa", from: "4-execute", json: true
+            ).call
+          end
+          payload = JSON.parse(out)
+          assert_equal Hive::ExitCodes::USAGE, status
+          assert_equal "invalid_task_path", payload["error_kind"],
+                       "cross-project slug with wrong --from must report invalid_task_path, not wrong_stage"
+        end
+      end
+    end
+  end
+
+  # `record_drop_commit!` runs inside `Hive::Lock.with_commit_lock` so
+  # commit-lock contention surfaces as a documented exit code 75
+  # (TEMPFAIL). Pin this so a regression that removed or rewrapped the
+  # lock would fail here instead of breaking the documented contract
+  # silently.
+  def test_drop_surfaces_commit_lock_contention_as_exit_75
+    with_drop_project do |dir, _ops, project|
+      slug = "lock-conflict-260522-aaaa"
+      create_task(dir, "2-brainstorm", slug)
+
+      with_commit_lock_stub_raising_concurrent_run do
+        out, _err, status = with_captured_exit do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal Hive::ExitCodes::TEMPFAIL, status,
+                     "commit-lock contention must exit 75 (TEMPFAIL) per docs/wiki"
+        assert_equal false, payload["ok"]
+      end
     end
   end
 
@@ -245,6 +417,32 @@ class DropCommandTest < Minitest::Test
     yield
   ensure
     Hive::Gh.define_singleton_method(:capture3, original) if original
+  end
+
+  # Pin Hive::Lock.process_start_time so tests of the PID-reuse guard
+  # don't silently degrade to the "live empty" short-circuit when the
+  # platform's start-time source is unavailable.
+  def with_lock_start_time_stub(value)
+    original = Hive::Lock.method(:process_start_time)
+    Hive::Lock.define_singleton_method(:process_start_time) { |_pid| value }
+    yield
+  ensure
+    Hive::Lock.define_singleton_method(:process_start_time, original) if original
+  end
+
+  # Force `Hive::Lock.with_commit_lock` to raise ConcurrentRunError so
+  # we can pin drop's exit-code contract for lock contention.
+  def with_commit_lock_stub_raising_concurrent_run
+    original = Hive::Lock.method(:with_commit_lock)
+    Hive::Lock.define_singleton_method(:with_commit_lock) do |path, &_block|
+      raise Hive::ConcurrentRunError.new(
+        "commit lock at #{path} held longer than fixture",
+        lock_path: File.join(path, ".commit-lock")
+      )
+    end
+    yield
+  ensure
+    Hive::Lock.define_singleton_method(:with_commit_lock, original) if original
   end
 
   # Best-effort kill + reap of a helper child PID. Used to clean up

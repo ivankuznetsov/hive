@@ -67,7 +67,8 @@
         },
         "commit_action": {
           "type": "string",
-          "description": "hive/state audit commit action."
+          "enum": ["committed"],
+          "description": "hive/state audit commit action. Drop always writes a commit (allow_empty=true), so the closed set is the single value `committed`."
         }
       }
     },

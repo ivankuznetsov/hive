@@ -998,7 +998,7 @@ class SchemaFilesTest < Minitest::Test
       branch_deleted: false
     }
     producer = Hive::Commands::Drop.new("demo-260522-aaaa", json: true).send(
-      :success_payload, context, cleanup, "dropped"
+      :success_payload, context, cleanup, "committed"
     )
     assert_equal schema_required, producer.keys.sort,
                  "Drop#success_payload must emit exactly the schema's required keys"
@@ -1053,7 +1053,7 @@ class SchemaFilesTest < Minitest::Test
       "agent_pid" => nil,
       "agent_killed_pids" => [],
       "agent_kill_skipped_reason" => "no_pid",
-      "commit_action" => "dropped"
+      "commit_action" => "committed"
     }
     assert schemer.valid?(payload),
            "hive-drop SuccessPayload must validate (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"

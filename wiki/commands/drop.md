@@ -21,6 +21,8 @@ Bare slugs use [[modules/task_resolver]] lookup. Pass `--project` to disambiguat
 
 ## Refusals
 
+Tasks at `9-done` are archive records — drop refuses them and leaves the folder alone.
+
 | Case | Exit | `error_kind` |
 |---|---:|---|
 | Dropped successfully | 0 | — |
@@ -34,8 +36,6 @@ Bare slugs use [[modules/task_resolver]] lookup. Pass `--project` to disambiguat
 | Internal failure | 70 | `internal` |
 | `hive/state` commit lock contention | 75 | `error` |
 | Malformed project / global config | 78 | `config` |
-
-Tasks in the last stage (`9-done`) are archive records, not active work. Drop refuses them and leaves the folder alone.
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
 

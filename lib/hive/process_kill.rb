@@ -10,6 +10,14 @@ module Hive
 
     module_function
 
+    # A PID of 0 means the current process group when passed to
+    # Process.kill, and 1 is init. A malformed `.lock` or marker
+    # leaking either through would target ourselves (or PID 1) instead
+    # of an agent — refuse outright.
+    def valid_target_pid?(pid)
+      pid.is_a?(Integer) && pid > 1
+    end
+
     def pid_alive?(pid)
       Process.kill(0, Integer(pid))
       true
@@ -19,12 +27,22 @@ module Hive
       true
     end
 
+    # Defense in depth for the PID-reuse guard: if the start-time lookup
+    # raises (containerised /proc, missing ps, malformed lock metadata)
+    # we return nil here and `pid_owned_by_recorded_start?` falls
+    # through to "trust the recorded pid". Combined with the empty-live
+    # short-circuit this means a hardened guard requires BOTH a
+    # recorded start-time and a working start-time source.
     def process_start_time(pid)
       Hive::Lock.process_start_time(Integer(pid))
     rescue ArgumentError, TypeError
       nil
     end
 
+    # Linux/macOS reuse PIDs aggressively under load. The recorded
+    # start-time pinned at lock-acquire time is the discriminator: if
+    # the live process boots with a different start-time, the original
+    # agent has exited and the PID belongs to an unrelated process.
     def pid_owned_by_recorded_start?(pid, recorded_start_time)
       return true if recorded_start_time.to_s.empty?
 
@@ -36,6 +54,7 @@ module Hive
 
     def terminate_process(pid, recorded_start_time: nil, grace_seconds: TERM_GRACE_SECONDS)
       pid = Integer(pid)
+      return Result.new(pid: pid, killed: false, skipped_reason: "invalid_pid") unless valid_target_pid?(pid)
       return Result.new(pid: pid, killed: false, skipped_reason: "not_alive") unless pid_alive?(pid)
 
       unless pid_owned_by_recorded_start?(pid, recorded_start_time)
@@ -48,7 +67,8 @@ module Hive
         safe_kill("KILL", pid)
         wait_until_dead(pid, KILL_GRACE_SECONDS)
       end
-      Result.new(pid: pid, killed: !pid_alive?(pid), skipped_reason: nil)
+      killed = !pid_alive?(pid)
+      Result.new(pid: pid, killed: killed, skipped_reason: killed ? nil : "kill_failed")
     rescue ArgumentError, TypeError
       Result.new(pid: nil, killed: false, skipped_reason: "invalid_pid")
     rescue Errno::EPERM
@@ -57,6 +77,7 @@ module Hive
 
     def terminate_process_group(pid, recorded_start_time: nil, grace_seconds: TERM_GRACE_SECONDS)
       pid = Integer(pid)
+      return Result.new(pid: pid, killed: false, skipped_reason: "invalid_pid") unless valid_target_pid?(pid)
       return Result.new(pid: pid, killed: false, skipped_reason: "not_alive") unless pid_alive?(pid)
 
       unless pid_owned_by_recorded_start?(pid, recorded_start_time)
@@ -70,7 +91,8 @@ module Hive
         safe_kill("KILL", -pgid)
         wait_until_dead(pid, KILL_GRACE_SECONDS)
       end
-      Result.new(pid: pid, killed: !pid_alive?(pid), skipped_reason: nil)
+      killed = !pid_alive?(pid)
+      Result.new(pid: pid, killed: killed, skipped_reason: killed ? nil : "kill_failed")
     rescue ArgumentError, TypeError
       Result.new(pid: nil, killed: false, skipped_reason: "invalid_pid")
     rescue Errno::ESRCH

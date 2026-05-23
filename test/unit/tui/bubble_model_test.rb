@@ -1712,6 +1712,49 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/internal error/, @model.hive_model.flash.to_s)
   end
 
+  def test_rich_submit_logs_when_staging_cleanup_fails
+    with_staged_image_attachment do |staging_dir, _staging_path, attachment|
+      snap = Hive::Tui::Snapshot.from_payload(
+        "generated_at" => "2026-05-13",
+        "projects" => [ { "name" => "hive", "tasks" => [] } ]
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(
+          mode: :new_idea,
+          snapshot: snap,
+          new_idea_project_name: "hive",
+          new_idea_buffer: "title [image1]",
+          new_idea_cursor: 14,
+          new_idea_attachments: [ attachment ],
+          new_idea_staging_dir: staging_dir
+        ),
+        dispatch: @dispatch
+      )
+      logs = []
+      new_sentinel = Hive::Commands::New.instance_method(:call!)
+      Hive::Commands::New.define_method(:call!) { nil }
+
+      begin
+        with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |channel, message|
+          logs << [ channel, message ]
+        }) do
+          with_singleton_method_stub(Hive::Tui::ComposerStaging, :cleanup!, lambda { |_path, **_kwargs|
+            raise Errno::EACCES, "denied"
+          }) do
+            capture_io { @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+          end
+        end
+      ensure
+        Hive::Commands::New.define_method(:call!, new_sentinel)
+      end
+
+      assert_equal :grid, @model.hive_model.mode
+      assert_nil @model.hive_model.new_idea_staging_dir
+      assert_equal "new_idea_staging", logs.dig(0, 0)
+      assert_match(/ensure cleanup: Errno::EACCES/, logs.dig(0, 1).to_s)
+    end
+  end
+
   def test_open_findings_enters_triage_from_review_file
     with_tmp_dir do |project_root|
       folder = File.join(project_root, ".hive-state", "stages", "4-execute", "review-me")

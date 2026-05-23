@@ -345,11 +345,10 @@ Runtime token:
 ```bash
 export HIVE_TELEGRAM_BOT_TOKEN=123456:token-from-botfather
 hive bot start --dry-run
+hive bot status
 ```
 
-`--dry-run` is useful for first shakedown: inbound command parsing and
-status notifications run, but state-changing child commands are not
-spawned. The bot log is `~/.local/state/hive/logs/bot.log`:
+`hive bot start` backgrounds by default so the shell prompt returns immediately. `--dry-run` is useful for first shakedown: inbound command parsing and status notifications run, but state-changing child commands are not spawned. Use `hive bot start --foreground --dry-run` when you want to watch the process under a terminal or process supervisor. The bot log is `~/.local/state/hive/logs/bot.log`:
 
 ```bash
 jq -r '.event' ~/.local/state/hive/logs/bot.log | sort | uniq -c
@@ -380,8 +379,9 @@ $EDITOR ~/Library/LaunchAgents/hive-bot.plist     # set token / paths
 launchctl load ~/Library/LaunchAgents/hive-bot.plist
 ```
 
-The sample files run `hive bot start` in the foreground and let the
-host supervisor restart on failure. `hive bot stop` remains the manual
+The sample files run `hive bot start --foreground` and let the
+host supervisor restart on failure. Plain `hive bot start` backgrounds
+for manual use. `hive bot stop` remains the manual
 drain path when you are not using systemd/launchd.
 
 ## Day-2 operations

@@ -74,6 +74,57 @@ You see a left pane listing your registered projects (with `★ All projects` on
 
 Workflow keystrokes are non-blocking: dispatching `b` (brainstorm) on one task while another task's agent is still running is fine — both processes run in their own pgroup and the dashboard keeps polling. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full layout, red-status detail, log tail, the new-idea composer with image paste, and the keybinding map per mode.
 
+## Manage Hive From Telegram in 2 Minutes
+
+Hive can notify you, show the queue, and accept approvals from Telegram. It uses long polling, so there is no webhook, public URL, or tunnel to configure.
+
+1. Create a bot with `@BotFather`.
+
+   Send `/newbot`, choose a display name, then choose a username ending in `bot`. BotFather gives you a token like `123456789:ABCdef...`. Keep it secret.
+
+2. Message your bot once.
+
+   Open the new bot chat and send `/start` or `hi`. Telegram only exposes your chat id after you have messaged the bot.
+
+3. Get your numeric chat id.
+
+   ```bash
+   export HIVE_TELEGRAM_BOT_TOKEN='paste-token-from-botfather'
+
+   curl -s "https://api.telegram.org/bot${HIVE_TELEGRAM_BOT_TOKEN}/getUpdates" |
+     ruby -rjson -e 'data = JSON.parse(STDIN.read); ids = data.fetch("result", []).filter_map { |u| (u["message"] || u["edited_message"] || u.dig("callback_query", "message"))&.dig("chat", "id") }; abort("No chat id yet: send your bot a fresh message and retry") if ids.empty?; puts ids.last'
+   ```
+
+   Use this number, not your `@username`.
+
+4. Allow that chat in Hive.
+
+   Add the bot block to `~/.config/hive/config.yml`, preserving any existing `registered_projects:` entries:
+
+   ```yaml
+   bot:
+     enabled: true
+     chat_id_allowlist:
+       - 123456789
+   ```
+
+5. Start Hive bot.
+
+   ```bash
+   hive bot start
+   hive bot status --json
+   ```
+
+Now send `/help`, `/status`, or `/queue` in Telegram. Useful local commands:
+
+```bash
+hive bot tail        # follow ~/.local/state/hive/logs/bot.log
+hive bot reload      # pick up allowlist/config changes
+hive bot stop        # stop the background bot
+```
+
+If the bot stays silent, check `hive bot tail`, confirm the allowlist contains the numeric chat id, and send a fresh Telegram message before rerunning `getUpdates`. A Telegram `404 Not Found` usually means the token is missing or mistyped. If a token leaks, rotate it in `@BotFather` with `/revoke` and restart `hive bot`.
+
 ## Drive Hive From Your Coding Agent
 
 Hive's other primary surface is a coding agent — Claude Code, Codex, Gemini, Pi, or anything that can read terminal output and run shell commands. You describe intent in natural language ("brainstorm the bookmark service idea", "run review on the failing task and report the findings"), the agent translates that into `hive <verb>` calls, and you watch the result in the TUI or read the markdown artefacts directly. Every workflow verb supports `--json` and emits a typed envelope (schemas under [schemas/](schemas/), contract in [docs/cli.md#json-output](docs/cli.md#json-output)), so agent-side parsing is structured rather than scraped.

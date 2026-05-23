@@ -17,8 +17,9 @@ class ClaudeModeDispatchTest < Minitest::Test
 
   def with_spawn_capture
     captured = []
-    original_agent = Hive::Stages::Base.method(:spawn_agent)
-    original_claude = Hive::Stages::Base.method(:spawn_claude!)
+    singleton = Hive::Stages::Base.singleton_class
+    original_agent = singleton.instance_method(:spawn_agent)
+    original_claude = singleton.instance_method(:spawn_claude!)
     Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task, **kwargs|
       captured << { launcher: :headless, task: task, kwargs: kwargs }
       { status: :ok }
@@ -29,12 +30,8 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
     yield captured
   ensure
-    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*args, **kwargs, &block|
-      original_agent.call(*args, **kwargs, &block)
-    end
-    Hive::Stages::Base.define_singleton_method(:spawn_claude!) do |*args, **kwargs, &block|
-      original_claude.call(*args, **kwargs, &block)
-    end
+    singleton.define_method(:spawn_agent, original_agent)
+    singleton.define_method(:spawn_claude!, original_claude)
   end
 
   def make_task(dir, stage_name: "plan", state_name: "plan.md")

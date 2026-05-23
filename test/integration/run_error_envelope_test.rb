@@ -28,13 +28,18 @@ class RunErrorEnvelopeTest < Minitest::Test
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT].each { |k| ENV.delete(k) }
   end
 
+  def init_project(dir)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    set_project_claude_mode(dir, "headless")
+  end
+
   # When report_json wrote the SuccessPayload before raising TaskInErrorState,
   # the rescue must NOT add a second envelope — that would break JSON.parse(stdout).
   # This is the load-bearing test for the @stdout_written guard.
   def test_dual_signal_emits_exactly_one_json_document
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "dual signal probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -61,7 +66,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_concurrent_run_error_emits_envelope
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "concurrent probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -101,7 +106,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_ambiguous_slug_emits_envelope_with_candidates
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         # Seed two folders sharing the same slug across two stages.
         slug = "ambig-260430-aaaa"
         a = File.join(dir, ".hive-state", "stages", "1-inbox", slug)
@@ -132,7 +137,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_invalid_task_path_emits_envelope
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
 
         out, _err, status = with_captured_exit do
           Hive::Commands::Run.new("does-not-exist-slug-xyz", json: true).call
@@ -156,7 +161,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_wrong_stage_matches_wrong_stage_kind
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "wrong stage probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         inbox_dir = File.join(dir, ".hive-state", "stages", "1-inbox", slug)
@@ -186,7 +191,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_config_error_emits_config_kind_envelope
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "config probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -213,7 +218,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_standard_error_wraps_to_internal_envelope
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "internal probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -241,7 +246,7 @@ class RunErrorEnvelopeTest < Minitest::Test
   def test_human_path_no_json_unchanged_on_error
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "human probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)

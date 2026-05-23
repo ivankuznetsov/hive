@@ -59,6 +59,11 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
     nil
   end
 
+  def init_project(dir)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    set_project_claude_mode(dir, "headless")
+  end
+
   # Per project CLAUDE.md "NEVER skip tests conditionally based on
   # environment availability" — PTY is stdlib (Linux + macOS always
   # provide it) and bin/hive is part of the repo. If those break the
@@ -66,7 +71,7 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
   def test_paste_three_images_submit_and_brainstorm_sees_asset_refs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         project = File.basename(dir)
         project_prefix = project[0, 12]
 
@@ -197,7 +202,7 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
   def test_ctrl_v_stages_clipboard_image_and_submit_persists_asset
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         project = File.basename(dir)
         project_prefix = project[0, 12]
 

@@ -453,9 +453,15 @@ module Hive
     end
 
     def event_agent_label
-      "#{@profile.name} #{@log_label}"
+      [ @profile.name, @log_label ].compact.map(&:to_s).reject(&:empty?).join(" ")
     end
 
+    # @task is a Hive::Task on stage-runner-owned spawns (4-execute,
+    # brainstorm, plan, open-pr) but a Hive::Reviewers::SyntheticTask
+    # on 6-review sub-spawns (reviewers, triage, ci-fix, browser-test).
+    # SyntheticTask is a Struct that intentionally omits `slug` /
+    # `stage_index` and stores the full "6-review" label in `stage_name`.
+    # The respond_to? fallback covers both shapes from one call site.
     def event_slug
       @task.respond_to?(:slug) ? @task.slug : File.basename(@task.folder)
     end
@@ -464,12 +470,16 @@ module Hive
       if @task.respond_to?(:stage_index) && @task.respond_to?(:stage_name) && @task.stage_index
         "#{@task.stage_index}-#{@task.stage_name}"
       else
-        File.basename(File.dirname(@task.folder))
+        @task.respond_to?(:stage_name) && !@task.stage_name.to_s.empty? ?
+          @task.stage_name.to_s :
+          File.basename(File.dirname(@task.folder))
       end
     end
 
     def agent_start_message
-      "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd}"
+      # Use basename to keep retain-forever records compact; the absolute
+      # cwd path is still recoverable from logs/<slug>/*.log if needed.
+      "cwd=#{File.basename(@cwd.to_s)} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd}"
     end
 
     def agent_end_message(result, exception)

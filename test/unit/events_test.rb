@@ -59,27 +59,55 @@ class EventsTest < Minitest::Test
 
       status = File.read(File.join(dir, "status.md"))
       assert_includes status, "# Status: event-test-260522-aaaa"
-      assert_includes status, "Stage:        6-review"
-      assert_includes status, "Last event:   round_complete - pass done"
-      assert_includes status, "Current agent: -"
+      assert_includes status, "Stage:         6-review"
+      assert_includes status, "Last event:    round_complete #{Hive::Events::EM_DASH} pass done"
+      assert_includes status, "Current agent: #{Hive::Events::EM_DASH}"
       assert_includes status, "agent_start  reviewer-a pass=1  reviewing"
     end
   end
 
+  def test_current_agent_survives_past_recent_events_tail
+    with_tmp_dir do |dir|
+      # Open agent_start that lands well outside STATUS_TAIL_LINES (20).
+      # The recent-events display ends up showing only the closing tail,
+      # but the wider current-agent walk still finds the unclosed start.
+      Hive::Events.emit(task_folder: dir, slug: "tail-test", stage: "6-review",
+                        agent: "long-runner", event_type: :agent_start, message: "starting")
+      30.times do |idx|
+        Hive::Events.emit(task_folder: dir, slug: "tail-test", stage: "6-review",
+                          agent: "noise-#{idx}", event_type: :stage_enter,
+                          message: "noise #{idx}")
+      end
+
+      status = File.read(File.join(dir, "status.md"))
+      assert_includes status, "Current agent: long-runner",
+                      "current_agent must survive past STATUS_TAIL_LINES via the wider CURRENT_AGENT_WALK_LINES window"
+    end
+  end
+
+  # Drives the SystemCallError rescue inside emit by making the task
+  # folder unwritable instead of monkey-patching File.open. The earlier
+  # form aliased File.singleton_class#open, which is process-global and
+  # races against any sibling test that happens to call File.open during
+  # the patched window. Stripping write permissions on the dir is fully
+  # local to this test — FileUtils.mkdir_p on the pre-existing dir
+  # short-circuits, then File.open(events.jsonl, WRONLY|APPEND|CREAT)
+  # raises Errno::EACCES (a SystemCallError subclass) which the emit
+  # rescue absorbs into a warn + nil return.
   def test_emit_swallow_system_call_errors_and_warns
     with_tmp_dir do |dir|
-      File.singleton_class.alias_method(:__hive_events_test_open, :open)
-      File.define_singleton_method(:open) { |*| raise Errno::ENOSPC, "full" }
-      err = capture_io do
-        assert_nil Hive::Events.emit(task_folder: dir, slug: "event-test-260522-aaaa", stage: "2-brainstorm",
-                                     event_type: :stage_enter)
-      end.last
-      assert_includes err, "[hive.events]"
-      refute File.exist?(File.join(dir, "events.jsonl"))
-    ensure
-      if File.singleton_class.method_defined?(:__hive_events_test_open)
-        File.singleton_class.alias_method(:open, :__hive_events_test_open)
-        File.singleton_class.remove_method(:__hive_events_test_open)
+      File.chmod(0o500, dir) # readable but not writable: blocks events.jsonl creation
+      begin
+        err = capture_io do
+          assert_nil Hive::Events.emit(task_folder: dir, slug: "event-test-260522-aaaa",
+                                       stage: "2-brainstorm", event_type: :stage_enter)
+        end.last
+        assert_includes err, "[hive.events]"
+        refute File.exist?(File.join(dir, "events.jsonl"))
+      ensure
+        # Restore write permission so with_tmp_dir's FileUtils.rm_rf
+        # cleanup can descend the directory.
+        File.chmod(0o755, dir)
       end
     end
   end

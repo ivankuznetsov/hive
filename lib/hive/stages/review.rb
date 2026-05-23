@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "open3"
 require "time"
+require "hive/events"
 require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
@@ -88,6 +89,13 @@ module Hive
         # REVIEW_ERROR. The hive runner is single-task per process, so
         # cross-invocation contamination isn't a concern.
         @current_phase = :pre_flight
+        # Phase-level agent_start/agent_end pair tracking. Each
+        # mark_working call closes the previously-open phase event
+        # (if any) and emits a new one. The ensure block at the bottom
+        # of run! closes whatever phase is still open when the runner
+        # exits (return, raise, or system_exit), so events.jsonl
+        # readers always see balanced brackets.
+        @open_phase_event = nil
 
         # Pre-flight terminal markers
         marker = Hive::Markers.current(task.state_file)
@@ -559,6 +567,12 @@ module Hive
                           reason: "runner_exception",
                           exception_class: e.class.name)
         raise
+      ensure
+        # Close the last open phase event on any exit path (return,
+        # rescue, SystemExit) so the events.jsonl bracket structure
+        # stays balanced. Swallow failures here — a torn events file
+        # must not mask the underlying control-flow result/exception.
+        close_phase_event!(task) if @open_phase_event
       end
 
       # --- helpers ---------------------------------------------------------
@@ -606,6 +620,52 @@ module Hive
 
       def mark_working(task, phase:, pass:)
         Hive::Markers.set(task.state_file, :review_working, phase: phase, pass: pass)
+        # Bracket the phase with agent_start/agent_end so the drill-down
+        # view can show "review pass=2 — fix" and the per-reviewer
+        # spawn brackets nest cleanly under it. Reviewer spawns
+        # additionally emit their own agent_start/agent_end via
+        # Hive::Agent#run! — those use the profile name + log_label
+        # ("claude review-stub-reviewer-pass01") and are distinguishable
+        # from the phase-level pair ("phase=reviewers pass=01").
+        close_phase_event!(task) if @open_phase_event
+        label = "phase=#{phase} pass=#{format('%02d', pass)}"
+        @open_phase_event = {
+          task: task,
+          label: label,
+          stage: stage_label_for(task)
+        }
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: @open_phase_event[:stage],
+          event_type: :agent_start,
+          agent: label,
+          message: "phase=#{phase}"
+        )
+      end
+
+      def close_phase_event!(_task = nil)
+        return unless @open_phase_event
+
+        open = @open_phase_event
+        @open_phase_event = nil
+        Hive::Events.emit(
+          task_folder: open[:task].folder,
+          slug: open[:task].slug,
+          stage: open[:stage],
+          event_type: :agent_end,
+          agent: open[:label],
+          message: "phase complete"
+        )
+      rescue StandardError
+        # Closing the phase event must never mask the underlying control
+        # flow's result. Drill-down readers tolerate an unclosed bracket
+        # better than a confusing surfaced exception here.
+        nil
+      end
+
+      def stage_label_for(task)
+        Hive::Stages::Base.stage_label(task)
       end
 
       def triage_enabled?(cfg)

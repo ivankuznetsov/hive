@@ -130,35 +130,54 @@ module Hive
           slug: task.slug,
           stage: stage,
           event_type: :stage_exit,
-          message: "status=#{marker.name}"
+          message: stage_exit_message(marker)
         )
         result
       rescue SystemExit => e
-        Hive::Events.emit(
-          task_folder: task.folder,
-          slug: task.slug,
-          stage: stage || stage_label(task),
-          event_type: :error,
-          message: "system_exit status=#{e.status}"
-        )
+        emit_rescue_close(task, stage, "system_exit status=#{e.status}")
         raise
       rescue StandardError => e
+        emit_rescue_close(task, stage, "#{e.class}: #{e.message}")
+        raise
+      end
+
+      # `error` + closing `stage_exit` pair so drill-down readers see a
+      # balanced bracket on failure paths. Without the trailing stage_exit
+      # an operator scanning events.jsonl would observe an open stage
+      # bracket per raise — confusing in the TUI and breaks any future
+      # consumer that depends on enter/exit symmetry.
+      def emit_rescue_close(task, stage, error_message)
+        stage ||= stage_label(task)
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
-          stage: stage || stage_label(task),
+          stage: stage,
           event_type: :error,
-          message: "#{e.class}: #{e.message}"
+          message: error_message
         )
-        raise
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :stage_exit,
+          message: "status=error #{error_message}"
+        )
       end
 
       def stage_label(task)
         "#{task.stage_index}-#{task.stage_name}"
       end
 
+      # Stage runners that publish `round_waiting` / `round_complete`
+      # events when their state-file marker lands on `:waiting` /
+      # `:complete`. Adding a new stage that wants the round events
+      # must add itself here. Kept on Base as a single registry so the
+      # `emit_marker_event` allow-list can never drift away from the
+      # stage-runner site that produces those markers.
+      ROUND_EVENT_STAGES = %w[brainstorm plan].freeze
+
       def emit_marker_event(task, stage, marker)
-        if %w[brainstorm plan].include?(task.stage_name)
+        if ROUND_EVENT_STAGES.include?(task.stage_name)
           case marker.name
           when :waiting
             Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
@@ -185,6 +204,18 @@ module Hive
         return "#{marker.name} #{detail}" if detail
 
         marker.name.to_s
+      end
+
+      # Stage_exit message includes reason / phase / pass when present so
+      # a drill-down reader scanning events.jsonl for "what closed this
+      # stage" sees the actionable context, not just the marker name.
+      # Falls back to the marker name alone when no relevant attrs landed.
+      def stage_exit_message(marker)
+        attrs = marker.attrs
+        details = %w[phase reason pass].map { |key| attrs[key] && "#{key}=#{attrs[key]}" }.compact
+        return "status=#{marker.name}" if details.empty?
+
+        "status=#{marker.name} #{details.join(' ')}"
       end
 
       # Spawn an agent and return its result hash.

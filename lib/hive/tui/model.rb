@@ -86,15 +86,8 @@ module Hive
       end
     end
 
-    Model::RedStatusDetailState = Data.define(:row, :marker_signature, :acknowledged_marker_signature, :refreshing) do
-      # `marker_signature` is the most-recently observed value from the
-      # row's diagnostic; it follows the producer in real time.
-      # `acknowledged_marker_signature` is only updated on operator
-      # actions (open detail view, press R, dispatch autofix) so a
-      # marker that rotates multiple times between polls still fires
-      # the "marker changed" flash once per acknowledgement window
-      # rather than only on the first poll. See PR #84 review #7.
-      def initialize(row:, marker_signature:, acknowledged_marker_signature: marker_signature, refreshing: false)
+    Model::RedStatusDetailState = Data.define(:row, :marker_signature, :agent_label) do
+      def initialize(row:, marker_signature:, agent_label: nil)
         super
       end
     end

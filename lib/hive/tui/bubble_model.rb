@@ -138,10 +138,9 @@ module Hive
         # in the spawn-thread's `ensure` so retries unblock once the
         # first pass settles. Reuses @healed_folders_mutex so all
         # background-thread bookkeeping fields (@healed_folders,
-        # @heal_threads, @review_recovery_inflight, @error_recovery_inflight,
-        # @diagnosis_inflight) share a single lock.
+        # @heal_threads, @review_recovery_inflight,
+        # @error_recovery_inflight) share a single lock.
         @error_recovery_inflight = Set.new
-        @diagnosis_inflight = Set.new
         # Once-per-session latch (reset in #stage_image on success).
         @clipboard_tool_hint_shown = false
         # Consecutive `wl-paste`/`xclip` timeouts: a single timeout
@@ -374,11 +373,7 @@ module Hive
         when Hive::Tui::Messages::RecoverError
           recover_error(message.row)
         when Hive::Tui::Messages::RedStatusAutofix
-          red_status_autofix(message.row)
-        when Hive::Tui::Messages::OpenManualFix
-          open_manual_fix(message.row)
-        when Hive::Tui::Messages::RefreshRedStatusDiagnosis
-          refresh_red_status_diagnosis(message.row)
+          red_status_autofix_from_detail(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
@@ -386,7 +381,7 @@ module Hive
         when Hive::Tui::Messages::OpenIdeaPreview
           open_idea_preview(message.row)
         when Hive::Tui::Messages::OpenInAgent
-          open_in_agent(message.row)
+          open_in_agent_from_detail(message.row)
         when Hive::Tui::Messages::AgentSteerExited
           archive_steer(message)
         when Hive::Tui::Messages::OpenSummary
@@ -667,37 +662,12 @@ module Hive
       # `Update.apply_subprocess_exited` keeps its existing default
       # flash behavior.
       def diagnose_subprocess_exit(msg)
-        if msg.verb.to_s == "status"
-          # Evict EXACTLY the completing folder (passed through by
-          # refresh_red_status_diagnosis's dispatcher wrap). Clearing
-          # the whole Set on every status exit cascaded across rows:
-          # a finish on folder A wiped B's inflight slot while B was
-          # still running, letting a second R-press on B spawn a
-          # duplicate agent.
-          evict_diagnosis_attempt(msg.folder) if msg.folder
-          model = clear_detail_refreshing(@hive_model)
-          if msg.exit_code.to_i.zero?
-            return [ model.with(flash: "red-status diagnosis refreshed", flash_set_at: Time.now), nil ]
-          end
-
-          diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
-          text = diagnostic || "`status --diagnose` exited #{msg.exit_code} — tail #{Hive::Tui::Subprocess.log_path}"
-          return [ model.with(flash: text, flash_set_at: Time.now), nil ]
-        end
-
         return nil if msg.exit_code.nil? || msg.exit_code.zero?
 
         diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
         return nil if diagnostic.nil?
 
         [ @hive_model.with(flash: diagnostic, flash_set_at: Time.now), nil ]
-      end
-
-      def clear_detail_refreshing(model)
-        state = model.red_status_detail_state
-        return model if state.nil?
-
-        model.with(red_status_detail_state: state.with(refreshing: false))
       end
 
       # Scan a fresh snapshot for tasks whose `:error` marker came from
@@ -884,13 +854,45 @@ module Hive
         when "error"
           recover_error(row)
         else
-          [ flashed("no autofix action available for #{row.slug}"), nil ]
+          [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ]
         end
+      end
+
+      # Wrap red_status_autofix so the detail screen closes after the
+      # keypress (Recover refusal flash still surfaces — the operator's
+      # gesture was binary, leaving them on the screen contradicts the
+      # plan's "screen closes after the keypress" requirement).
+      def red_status_autofix_from_detail(row)
+        model, cmd = red_status_autofix(row)
+        close_red_status_detail_on_dispatch(model, cmd)
+      end
+
+      # Wrap open_in_agent so the detail screen closes on dispatch
+      # (success and refusal alike). The takeover Cmd is preserved so
+      # the foreground takeover still suspends the TUI; on return the
+      # operator lands on the grid rather than a stale detail view.
+      def open_in_agent_from_detail(row)
+        model, cmd = open_in_agent(row)
+        close_red_status_detail_on_dispatch(model, cmd)
+      end
+
+      def close_red_status_detail_on_dispatch(model, cmd)
+        return [ model, cmd ] unless model
+        return [ model, cmd ] unless model.mode == :red_status_detail
+
+        closed = model.with(mode: :grid, red_status_detail_state: nil)
+        snap = closed.snapshot
+        if snap
+          visible = snap.scope_to_project_index(closed.scope).filter_by_slug(closed.filter)
+          cursor = Hive::Tui::Update.reclamp_cursor(visible, closed.cursor)
+          closed = closed.with(cursor: cursor)
+        end
+        [ closed, cmd ]
       end
 
       def dispatch_diagnostic_retry(row)
         command = diagnostic_retry_command(row)
-        return [ flashed("no autofix action available for #{row.slug}"), nil ] if command.nil?
+        return [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ] if command.nil?
 
         if command.match?(/[;&|]/)
           return [ flashed("diagnostic retry command is not directly dispatchable; use the shell command from details"), nil ]
@@ -926,141 +928,6 @@ module Hive
         Hive::TaskAction.max_passes_review_stale_with_escalations?(
           folder: row.folder, marker_name: row.marker, attrs: row.attrs
         )
-      end
-
-      # Returns true if a per-row autofix (recover_review / recover_error)
-      # is currently in flight. Used by refresh_red_status_diagnosis to
-      # refuse R-press while autofix is running — the autofix path
-      # acquires the per-task lock via `hive run`, and a parallel
-      # diagnose would either fail at the flock or write an artifact that
-      # describes pre-autofix state. See PR #84 review row 13.
-      def autofix_in_flight?(row)
-        @healed_folders_mutex.synchronize do
-          @review_recovery_inflight.include?(row.folder) ||
-            @error_recovery_inflight.include?(row.folder)
-        end
-      rescue StandardError
-        false
-      end
-
-      def register_diagnosis_attempt(folder)
-        @healed_folders_mutex.synchronize do
-          return false if @diagnosis_inflight.include?(folder)
-
-          @diagnosis_inflight.add(folder)
-          true
-        end
-      end
-
-      def evict_diagnosis_attempt(folder)
-        @healed_folders_mutex.synchronize { @diagnosis_inflight.delete(folder) }
-      end
-
-      def refresh_red_status_diagnosis(row)
-        return [ flashed("diagnosis unavailable: task folder missing"), nil ] if row.folder.to_s.empty?
-        # Refuse to spawn a second diagnose if autofix is already running
-        # against this row — the autofix path acquires the per-task lock
-        # via `hive run` and a parallel diagnose would either fail at the
-        # flock or write an artifact that describes pre-autofix state.
-        # Surface the operator-visible reason rather than a generic
-        # "in progress" flash so the operator knows which gesture to
-        # wait on. See PR #84 review row 13.
-        if row.action_key.to_s == "agent_running" || autofix_in_flight?(row)
-          return [ flashed("autofix already running for #{row.slug}; wait or press q to abort"), nil ]
-        end
-        return [ flashed("diagnosis already in progress for #{row.slug}"), nil ] unless register_diagnosis_attempt(row.folder)
-
-        argv = [ "hive", "status", "--diagnose", row.slug ]
-        argv += [ "--project", row.project_name ] if row.project_name.to_s != ""
-        # Disambiguate when the same slug lives in multiple stages of the
-        # same project (TaskResolver raises AmbiguousSlug otherwise).
-        argv += [ "--stage", row.stage ] if row.stage.to_s != ""
-        argv << "--write"
-        # An explicit operator R-press signals "show me a fresh verdict";
-        # the idempotency short-circuit (cache hit on matching
-        # marker_signature) would otherwise return the previous artifact
-        # silently and the TUI would flash "refreshed" without any
-        # new agent run. --force bypasses the short-circuit. See PR #84
-        # review row 8.
-        argv << "--force"
-
-        folder = row.folder
-        # Wrap the dispatcher so the SubprocessExited message arriving
-        # from the reaper Thread carries the originating folder. This
-        # is what lets diagnose_subprocess_exit evict EXACTLY the
-        # completing folder from @diagnosis_inflight; without the wrap
-        # we either evicted the whole Set (cross-task cascade letting
-        # duplicates through) or we'd need the SubprocessRegistry to
-        # track per-pid folders.
-        wrapped_dispatch = lambda do |msg|
-          if msg.is_a?(Hive::Tui::Messages::SubprocessExited)
-            msg = Hive::Tui::Messages::SubprocessExited.new(
-              verb: msg.verb, exit_code: msg.exit_code, folder: folder
-            )
-          end
-          @dispatch.call(msg)
-        end
-
-        Hive::Tui::Subprocess.dispatch_background(argv, dispatch: wrapped_dispatch)
-        state = @hive_model.red_status_detail_state
-        # Pressing R is an explicit operator acknowledgement of the
-        # current marker_signature — re-baseline so a subsequent
-        # snapshot-poll marker rotation re-fires the "marker changed"
-        # flash. See PR #84 review finding #7.
-        next_state =
-          if state
-            state.with(refreshing: true,
-                       acknowledged_marker_signature: state.marker_signature)
-          end
-        model = next_state ? @hive_model.with(red_status_detail_state: next_state) : @hive_model
-        [ model.with(flash: "refreshing diagnosis for #{row.slug}", flash_set_at: Time.now), nil ]
-      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-        evict_diagnosis_attempt(folder)
-        [ flashed("diagnosis failed to start: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
-      end
-
-      def open_manual_fix(row)
-        path = manual_fix_path(row)
-        return [ flashed("worktree not found for #{row.slug}: #{manual_fix_candidate(row)}"), nil ] if path.empty?
-
-        argv = editor_argv
-        callable = lambda do
-          run_editor(argv, path)
-          clear_terminal_for_takeover
-        end
-
-        cmd = Hive::Tui::Subprocess.foreground_takeover_command(callable)
-        [
-          @hive_model.with(
-            flash: "opening worktree for #{row.slug} in #{File.basename(argv.first)}",
-            flash_set_at: Time.now
-          ),
-          cmd
-        ]
-      rescue ArgumentError => e
-        [ flashed("editor command invalid: #{e.message}"), nil ]
-      end
-
-      def manual_fix_path(row)
-        candidate = manual_fix_candidate(row)
-        return "" if candidate.to_s.empty?
-
-        File.directory?(candidate) ? candidate : ""
-      end
-
-      def manual_fix_candidate(row)
-        task = Hive::Task.new(row.folder.to_s)
-        task.worktree_path.to_s
-      rescue Hive::InvalidTaskPath, Hive::ConfigError, Hive::WorktreeError,
-             SystemCallError, Psych::SyntaxError, Psych::DisallowedClass => e
-        # Narrow rescue: only the classes Task#worktree_path may
-        # legitimately raise via the config-load + worktree-yml path.
-        # The previous Hive::Error umbrella swallowed every Hive-namespaced
-        # error to ""; future subclasses would silently inherit the
-        # collapse. Log via Debug so the operator-visible "worktree not
-        # found" flash still has a breadcrumb in the debug log.
-        Hive::Tui::Debug.log("manual_fix_candidate", "#{row.slug}: #{e.class.name}: #{e.message}") if defined?(Hive::Tui::Debug)
-        ""
       end
 
       # Enter-driven review recovery. Review-stage recovery markers are

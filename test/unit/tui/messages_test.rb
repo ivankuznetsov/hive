@@ -115,8 +115,6 @@ class HiveTuiMessagesTest < Minitest::Test
     row = Object.new
     assert_same row, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row).row
     assert_same row, Hive::Tui::Messages::RedStatusAutofix.new(row: row).row
-    assert_same row, Hive::Tui::Messages::OpenManualFix.new(row: row).row
-    assert_same row, Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row).row
   end
 
   def test_terminate_requested_singleton

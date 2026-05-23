@@ -51,11 +51,10 @@ module Hive
         { mode: :log_tail, key: "q",   action: :back, description: "back to grid" },
         { mode: :log_tail, key: "Esc", action: :back, description: "back to grid" },
         # Red-status detail mode.
-        { mode: :red_status_detail, key: "Enter", action: :autofix, description: "autofix / retry using the existing recovery handler" },
-        { mode: :red_status_detail, key: "f",     action: :manual_fix, description: "open the task worktree in $EDITOR without clearing markers" },
-        { mode: :red_status_detail, key: "R",     action: :refresh_diagnosis, description: "run headless status diagnosis and write the durable diagnostic artifact" },
-        { mode: :red_status_detail, key: "q",     action: :back, description: "back to grid" },
-        { mode: :red_status_detail, key: "Esc",   action: :back, description: "back to grid" },
+        { mode: :red_status_detail, key: "Enter", action: :recover,       description: "run hive's automated recovery for this task and close this screen" },
+        { mode: :red_status_detail, key: "o",     action: :open_in_agent, description: "open this task in the project's development agent and close this screen" },
+        { mode: :red_status_detail, key: "q",     action: :back,          description: "close this screen and return to the grid" },
+        { mode: :red_status_detail, key: "Esc",   action: :back,          description: "close this screen and return to the grid" },
         # Filter prompt mode.
         { mode: :filter, key: "Enter", action: :commit_filter, description: "commit typed filter" },
         { mode: :filter, key: "Esc",   action: :cancel_filter, description: "discard typed buffer and return to grid (any committed filter is preserved)" },

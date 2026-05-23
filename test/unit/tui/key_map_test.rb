@@ -711,10 +711,14 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::BACK,
       Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_escape, row: row)
 
-    assert_same Hive::Tui::Messages::NOOP,
-      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "f", row: row)
-    assert_same Hive::Tui::Messages::NOOP,
-      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "R", row: row)
+    # `f` (old manual-fix) and `R` (old refresh-diagnosis) flash a
+    # refusal hint rather than silently NOOP so a muscle-memory drift
+    # surfaces the new contract instead of returning no signal.
+    f_msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "f", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, f_msg
+
+    r_msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "R", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, r_msg
   end
 
   def test_red_status_detail_s_key_flashes_use_o_hint

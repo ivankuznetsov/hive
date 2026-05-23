@@ -169,7 +169,12 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_match(/recovered/, new_model.flash)
   end
 
-  def test_snapshot_arrived_updates_red_detail_when_marker_signature_changes
+  def test_snapshot_arrived_updates_red_detail_row_without_flash
+    # The red-status detail screen now exposes only two actions; the
+    # "marker changed — refresh (R)" flash relied on R-press which is
+    # no longer in the keymap. A snapshot poll while the screen is
+    # open quietly updates the cached row so the operator sees fresh
+    # diagnosis the next time they re-open the screen.
     row = red_detail_row
     starting = model.with(
       mode: :red_status_detail,
@@ -187,39 +192,7 @@ class HiveTuiUpdateTest < Minitest::Test
 
     assert_equal :red_status_detail, new_model.mode
     assert_same changed, new_model.red_status_detail_state.row
-    assert_match(/marker changed/, new_model.flash)
-  end
-
-  def test_snapshot_arrived_fires_flash_again_on_second_marker_rotation
-    # The "marker changed" flash must fire on EVERY rotation that
-    # hasn't been operator-acknowledged. Previously the state
-    # rebased marker_signature on every poll, so a second rotation
-    # between polls was silently swallowed and the operator never
-    # saw the warning. See PR #84 review finding #7.
-    row = red_detail_row
-    initial_sig = Hive::Tui::Update.red_status_marker_signature(row)
-    starting = model.with(
-      mode: :red_status_detail,
-      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
-        row: row,
-        marker_signature: initial_sig
-      )
-    )
-
-    rotated_once = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
-    after_first, _cmd = Hive::Tui::Update.apply(
-      starting,
-      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_once))
-    )
-    assert_match(/marker changed/, after_first.flash, "first rotation must flash")
-
-    rotated_twice = red_detail_row(attrs: { "phase" => "fix", "pass" => "3" })
-    after_second, _cmd = Hive::Tui::Update.apply(
-      after_first.with(flash: nil, flash_set_at: nil),
-      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_twice))
-    )
-    assert_match(/marker changed/, after_second.flash,
-                 "second rotation without operator acknowledgement must also flash")
+    assert_nil new_model.flash
   end
 
   # ---------- PollFailed ----------

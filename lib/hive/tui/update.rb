@@ -3,6 +3,7 @@ require "hive"
 require "hive/tui/model"
 require "hive/tui/messages"
 require "hive/tui/subprocess"
+require "hive/tui/views/red_status_detail"
 
 module Hive
   module Tui
@@ -182,27 +183,7 @@ module Hive
         end
 
         signature = red_status_marker_signature(row)
-        # Preserve the operator-visible "Refreshing diagnosis..." flag
-        # across snapshot polls. The 1Hz poll lands while a headless
-        # diagnose subprocess can run up to 600s; the indicator must
-        # survive snapshots and only clear on SubprocessExited (see
-        # BubbleModel#diagnose_subprocess_exit).
-        #
-        # marker_signature follows the live row; acknowledged_marker_signature
-        # only moves on explicit operator actions. Comparing against the
-        # acknowledged value means a second marker rotation still flashes
-        # the "marker changed" warning even when the first rotation
-        # already updated state.marker_signature. See PR #84 review #7.
-        next_state = state.with(row: row, marker_signature: signature)
-        if signature != state.acknowledged_marker_signature
-          return model.with(
-            red_status_detail_state: next_state,
-            flash: "marker changed since you opened this view — refresh (R)",
-            flash_set_at: Time.now
-          )
-        end
-
-        model.with(red_status_detail_state: next_state)
+        model.with(red_status_detail_state: state.with(row: row, marker_signature: signature))
       end
 
       # Close the red-status detail view and return to grid. Recompute
@@ -721,7 +702,8 @@ module Hive
           mode: :red_status_detail,
           red_status_detail_state: Model::RedStatusDetailState.new(
             row: msg.row,
-            marker_signature: red_status_marker_signature(msg.row)
+            marker_signature: red_status_marker_signature(msg.row),
+            agent_label: Hive::Tui::Views::RedStatusDetail.resolve_agent_label(msg.row)
           )
         )
       end

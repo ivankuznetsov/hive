@@ -43,12 +43,10 @@ module Hive
       # POSIX-shell-convention status (0 success; 128+signo for signal
       # kills; 127 command-not-found).
       #
-      # `folder` is optional — present only when the dispatcher wrapped
-      # @dispatch to thread per-row context through the reaper Thread
-      # (today: `refresh_red_status_diagnosis`, so the diagnose-subprocess
-      # exit handler can evict the right slot from @diagnosis_inflight).
-      # Default nil keeps every existing call site (workflow-verb spawns,
-      # takeover-command spawns) unchanged.
+      # `folder` is optional — reserved for dispatchers that wrap
+      # @dispatch to thread per-row context through the reaper Thread.
+      # No active callers today; default nil keeps every workflow-verb
+      # and takeover-command spawn unchanged.
       SubprocessExited = Data.define(:verb, :exit_code, :folder) do
         def initialize(verb:, exit_code:, folder: nil)
           super
@@ -166,14 +164,6 @@ module Hive
       # Enter inside the red-status detail view — run the same
       # recovery handler the grid row used to run directly.
       RedStatusAutofix = Data.define(:row)
-
-      # `f` inside the red-status detail view — open the task worktree
-      # in $EDITOR for manual edits. This never clears markers.
-      OpenManualFix = Data.define(:row)
-
-      # `R` inside the red-status detail view — ask Hive to refresh the
-      # durable headless diagnosis artifact for this row.
-      RefreshRedStatusDiagnosis = Data.define(:row)
 
       # Enter on a `needs_input` row — suspend the TUI and open the
       # row's input target in the user's editor so they can answer or

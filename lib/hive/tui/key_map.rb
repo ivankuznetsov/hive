@@ -2,6 +2,7 @@ require "shellwords"
 require "hive/markers"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
+require "hive/tui/views/red_status_detail"
 require "hive/workflows"
 
 module Hive
@@ -233,13 +234,13 @@ module Hive
           attrs = row.attrs || {}
           !KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
         when "recover_execute"
-          # EXECUTE_STALE rows expose the same diagnostic payload in
-          # JSON but historically lacked a detail view. Opening the
-          # view lets operators read the bounded summary + artifact
-          # tail and refresh the diagnosis with `R`. The autofix
-          # action is intentionally a no-op for these rows (they
-          # require a manual fix); see PR #84 review finding #10 and
-          # task_action.rb#suggested_next_action_payload.
+          # EXECUTE_STALE rows route through the detail screen so the
+          # operator sees the diagnosis + the two unified actions
+          # ([Enter] Recover always flashes when no auto-recovery
+          # recipe exists; [o] Open in agent is the manual fallback).
+          # See plan Unit 1: the screen always advertises both actions
+          # regardless of action_key, and refusals are surfaced via a
+          # flash that names the manual fallback.
           true
         else
           false
@@ -308,18 +309,29 @@ module Hive
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
         return Messages::RedStatusAutofix.new(row: row) if ENTER_KEYS.include?(key) && row
         return Messages::OpenInAgent.new(row: row) if key == "o" && row
-        hint = "press Enter to recover, o to open in agent, Esc to close"
-        return Messages::Flash.new(text: hint) if key == "s"
+        # The grid-mode steer key is `s`; in detail mode the equivalent
+        # action is bound to `o`. Surface an explicit nudge rather than
+        # the generic refusal so a muscle-memory drift fires a
+        # diagnosable signal instead of a silent NOOP.
+        return Messages::Flash.new(text: "press o for Open in agent") if key == "s"
+        # `f` (manual fix) and `R` (refresh diagnosis) were the previous
+        # detail-mode bindings; flash the refusal so muscle-memory drift
+        # surfaces the new contract rather than silently noop-ing.
+        return Messages::Flash.new(text: red_status_detail_hint) if key == "f" || key == "R"
         # Grid-mode verb keys (b/p/d/r/P/F/a) silently no-oping in the
         # detail view conflicts with the muscle memory documented in
         # wiki/commands/tui.md — notably `r` is the in-grid force-retry
         # gesture (PR #72). Flash an explicit refusal instead so the
         # operator sees the mode boundary.
         if VERB_KEYS.key?(key)
-          return Messages::Flash.new(text: hint)
+          return Messages::Flash.new(text: red_status_detail_hint)
         end
 
         Messages::NOOP
+      end
+
+      def red_status_detail_hint
+        Hive::Tui::Views::RedStatusDetail::ACTION_KEYS.map { |k| k[:hint] }.join(", ")
       end
 
       # Filter-prompt mode keystrokes. Update consumes the FilterChar*

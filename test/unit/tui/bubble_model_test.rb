@@ -601,214 +601,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, sentinel) if sentinel
   end
 
-  def test_refresh_red_status_diagnosis_dispatches_status_diagnose_and_dedups
-    row = make_task_row(
-      action_key: "error",
-      action_label: "Error",
-      marker: "error",
-      attrs: { "reason" => "exit_code", "exit_code" => "1" },
-      suggested_command: nil
-    )
-    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "error")
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
-      dispatch: @dispatch
-    )
-
-    calls = []
-    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
-      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
-      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
-    end
-
-    # --stage disambiguates when the same slug exists in multiple stages
-    # of the same project. TaskResolver raises AmbiguousSlug otherwise,
-    # which the operator sees as "diagnosis failed to start" — silently
-    # losing the refresh signal.
-    #
-    # --force is appended on the R-press path so the CLI's
-    # marker_signature idempotency short-circuit (silent cache reuse)
-    # does NOT fire. Without --force, R-press would flash "refreshed"
-    # while no new agent ran (PR #84 review row 8).
-    expected = [ "hive", "status", "--diagnose", row.slug,
-                 "--project", row.project_name, "--stage", row.stage,
-                 "--write", "--force" ]
-    assert_equal [ expected ], calls
-    assert @model.hive_model.red_status_detail_state.refreshing
-    assert_match(/already in progress/, @model.hive_model.flash)
-  end
-
-  def test_refresh_red_status_diagnosis_short_circuits_when_autofix_inflight
-    # If a recover_review autofix is already running for the row, R-press
-    # must refuse rather than spawn a parallel diagnose. The autofix path
-    # holds the per-task `hive run` lock; a parallel diagnose would fail
-    # at the flock or describe pre-autofix state. See PR #84 review row 13.
-    row = make_task_row(
-      action_key: "recover_review",
-      action_label: "Needs recovery",
-      marker: "review_error",
-      attrs: { "phase" => "fix", "pass" => "1" },
-      suggested_command: nil
-    )
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial,
-      dispatch: @dispatch
-    )
-    # Simulate an in-flight autofix by claiming the recovery slot.
-    inflight = @model.instance_variable_get(:@review_recovery_inflight)
-    inflight.add(row.folder)
-
-    calls = []
-    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
-      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
-    end
-
-    assert_empty calls,
-                 "diagnose must not dispatch when autofix is already running"
-    assert_match(/autofix already running/i, @model.hive_model.flash)
-  end
-
-  def test_refresh_red_status_diagnosis_short_circuits_when_error_autofix_inflight
-    row = make_task_row(
-      action_key: "error",
-      action_label: "Error",
-      marker: "error",
-      attrs: { "exit_code" => "70" },
-      suggested_command: nil
-    )
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial,
-      dispatch: @dispatch
-    )
-    inflight = @model.instance_variable_get(:@error_recovery_inflight)
-    inflight.add(row.folder)
-
-    calls = []
-    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
-      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
-    end
-
-    assert_empty calls,
-                 "diagnose must not dispatch when error autofix is already running"
-    assert_match(/autofix already running/i, @model.hive_model.flash)
-  end
-
-  def test_refresh_red_status_diagnosis_short_circuits_on_agent_running_row
-    # action_key=='agent_running' means the row is currently being
-    # processed by a workflow agent (claude/codex). Same refuse-then-flash
-    # contract as the autofix-inflight branch.
-    row = make_task_row(
-      action_key: "agent_running",
-      action_label: "Agent running",
-      marker: "agent_working",
-      attrs: { "pid" => "12345" },
-      suggested_command: nil
-    )
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial,
-      dispatch: @dispatch
-    )
-    calls = []
-    with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
-      @model.update(Hive::Tui::Messages::RefreshRedStatusDiagnosis.new(row: row))
-    end
-
-    assert_empty calls,
-                 "diagnose must not dispatch when action_key is agent_running"
-    assert_match(/autofix already running/i, @model.hive_model.flash)
-  end
-
-  def test_diagnose_subprocess_exit_success_flashes_and_evicts_inflight
-    # success case: exit_code zero → "refreshed" flash, slot evicted so
-    # a subsequent R-press can run. See PR #84 review row 14.
-    row = make_task_row(
-      action_key: "error",
-      action_label: "Error",
-      marker: "error",
-      attrs: {},
-      suggested_command: nil
-    )
-    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "sig", refreshing: true)
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
-      dispatch: @dispatch
-    )
-    inflight = @model.instance_variable_get(:@diagnosis_inflight)
-    inflight.add(row.folder)
-
-    @model.update(
-      Hive::Tui::Messages::SubprocessExited.new(verb: "status", exit_code: 0, folder: row.folder)
-    )
-
-    refute_includes inflight, row.folder,
-                    "successful diagnose exit must evict the inflight slot"
-    assert_match(/refreshed/, @model.hive_model.flash)
-    refute @model.hive_model.red_status_detail_state.refreshing,
-           "refreshing flag must clear on subprocess exit"
-  end
-
-  def test_diagnose_subprocess_exit_failure_flashes_and_evicts_inflight
-    # failure case: non-zero exit → operator-actionable failure flash
-    # AND the slot is evicted so a retry is possible.
-    row = make_task_row(
-      action_key: "error",
-      action_label: "Error",
-      marker: "error",
-      attrs: {},
-      suggested_command: nil
-    )
-    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "sig", refreshing: true)
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
-      dispatch: @dispatch
-    )
-    inflight = @model.instance_variable_get(:@diagnosis_inflight)
-    inflight.add(row.folder)
-
-    @model.update(
-      Hive::Tui::Messages::SubprocessExited.new(verb: "status", exit_code: 1, folder: row.folder)
-    )
-
-    refute_includes inflight, row.folder,
-                    "failed diagnose exit must STILL evict the inflight slot (retry must be possible)"
-    refute @model.hive_model.red_status_detail_state.refreshing,
-           "refreshing flag must clear on subprocess exit (even on failure)"
-    refute_nil @model.hive_model.flash
-  end
-
-  def test_open_manual_fix_opens_task_worktree_without_changing_marker
-    require "tmpdir"
-    Dir.mktmpdir do |project_root|
-      slug = "manual-fix-260516-aaaa"
-      folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
-      worktree = File.join(project_root, "worktrees", slug)
-      FileUtils.mkdir_p(folder)
-      FileUtils.mkdir_p(worktree)
-      marker_path = File.join(folder, "task.md")
-      marker_body = "<!-- REVIEW_ERROR phase=fix pass=1 -->\n"
-      File.write(marker_path, marker_body)
-      File.write(File.join(folder, "worktree.yml"), { "path" => worktree }.to_yaml)
-      row = make_task_row(
-        action_key: "error",
-        action_label: "Error",
-        stage: "6-review",
-        slug: slug,
-        folder: folder,
-        state_file: marker_path,
-        marker: "error",
-        attrs: { "reason" => "exit_code", "exit_code" => "1" },
-        suggested_command: nil
-      )
-      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
-
-      _model, cmd = @model.update(Hive::Tui::Messages::OpenManualFix.new(row: row))
-
-      refute_nil cmd
-      assert_match(/opening worktree/, @model.hive_model.flash)
-      assert_equal marker_body, File.read(marker_path)
-    end
-  end
-
   def with_run_takeover_stub(stub_proc)
     sentinel = Hive::Tui::Subprocess.method(:run_takeover_child_sync)
     Hive::Tui::Subprocess.define_singleton_method(:run_takeover_child_sync, &stub_proc)
@@ -2425,7 +2217,39 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
 
     assert_equal 0, clear_count
-    assert_match(/no autofix action available/, @model.hive_model.flash)
+    assert_match(/no automatic recovery/i, @model.hive_model.flash)
+    assert_match(/Open in agent/, @model.hive_model.flash,
+                 "no-recipe refusal must nudge operator toward the manual fallback")
+  end
+
+  def test_red_status_autofix_from_detail_mode_closes_screen_on_no_recipe
+    # Pressing Enter from :red_status_detail on a row with no automatic
+    # recovery still closes the screen — the operator's gesture was
+    # binary, leaving them stranded contradicts the plan's
+    # "screen closes after the keypress" requirement. The Risk #3
+    # mitigation flash names "Open in agent" so the next action is
+    # obvious from the same flash. See plan Unit 4.
+    row = make_task_row(
+      action_key: "recover_execute",
+      action_label: "Needs recovery",
+      slug: "execute-stale-row",
+      stage: "4-execute",
+      marker: "execute_stale",
+      attrs: {},
+      suggested_command: nil
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "execute_stale")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::RedStatusAutofix.new(row: row))
+
+    assert_equal :grid, @model.hive_model.mode
+    assert_nil @model.hive_model.red_status_detail_state
+    assert_match(/no automatic recovery/i, @model.hive_model.flash)
+    assert_match(/Open in agent/, @model.hive_model.flash)
   end
 
   def test_recover_error_does_not_rerun_when_marker_clear_fails
@@ -3447,6 +3271,31 @@ class HiveTuiBubbleModelTest < Minitest::Test
         _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
 
         assert_nil cmd
+        assert_match(/no worktree for manual-task/, @model.hive_model.flash)
+        assert_equal :none, Hive::Markers.current(state_file).name
+      end
+    end
+  end
+
+  def test_open_in_agent_from_detail_mode_closes_screen_on_refusal
+    # Pressing `o` from :red_status_detail closes the screen even
+    # when the refusal branch fires (no worktree) — the operator
+    # should land back on the grid, not stay stranded on the stale
+    # detail view. See plan Unit 5.
+    with_manual_task_context(stage: "3-plan", worktree: false) do |_project_root, _hive_state, _folder, state_file, _worktree_path, row|
+      profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
+      state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "x")
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+        dispatch: @dispatch
+      )
+
+      with_agent_profile_lookup_stub(->(_name, cfg:) { profile }) do
+        _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+        assert_nil cmd
+        assert_equal :grid, @model.hive_model.mode
+        assert_nil @model.hive_model.red_status_detail_state
         assert_match(/no worktree for manual-task/, @model.hive_model.flash)
         assert_equal :none, Hive::Markers.current(state_file).name
       end

@@ -4479,6 +4479,33 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_input_editor_plan_advance_reports_marker_race_during_finalize
+    with_tmp_dir do |dir|
+      plan_md = File.join(dir, "plan.md")
+      File.write(plan_md, "# Plan\nUntouched.\n<!-- WAITING -->\n")
+
+      row = make_task_row(
+        stage: "3-plan",
+        state_file: plan_md,
+        suggested_command: "hive plan some-slug --project demo --from 3-plan"
+      )
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |_argv, _path| 0 }
+      @model.define_singleton_method(:finalize_plan_marker) do |_row|
+        raise Hive::Tui::BubbleModel::MarkerRaceError, :complete
+      end
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenInputEditor.new(row: row))
+      cmd.commands.find { |c| c.is_a?(Bubbletea::ExecCommand) }.callable.call
+
+      flash = @messages.find { |m| m.is_a?(Hive::Tui::Messages::Flash) }
+      refute_nil flash, "expected a suppression flash on marker race"
+      assert_match(/plan marker changed during edit \(complete\)/, flash.text)
+      refute(@messages.any? { |m| m.is_a?(Hive::Tui::Messages::DispatchCommand) },
+             "no DispatchCommand may be emitted when marker finalization races")
+    end
+  end
+
   def test_open_input_editor_plan_advance_falls_back_when_marker_write_fails
     # When the marker flip fails (e.g., parent dir gone, perms),
     # surface a suppression flash and DO NOT dispatch hive develop —

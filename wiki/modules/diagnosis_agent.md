@@ -7,7 +7,7 @@ updated: 2026-05-19
 tags: [module, status, diagnostic, agent, recovery]
 ---
 
-**TLDR**: Headless one-shot spawn of the project's configured execute AgentProfile (claude / codex / pi) whose sole purpose is producing a human-readable verdict on a red task's marker state. Writes the result to `<task.folder>/diagnostics/red-status.md`, which `Hive::TaskAction#diagnostic` then prefers over its local bounded extraction. Invoked by `hive status --diagnose <slug> --write` (CLI) and by the TUI red-status detail view's `R` key.
+**TLDR**: Headless one-shot spawn of the project's configured execute AgentProfile (claude / codex / pi) whose sole purpose is producing a human-readable verdict on a red task's marker state. Writes the result to `<task.folder>/diagnostics/red-status.md`, which `Hive::TaskAction#diagnostic` then prefers over its local bounded extraction. Invoked by `hive status --diagnose <slug> --write` (CLI). The previous TUI `R`-key entry point was removed when the red-status detail screen was simplified to the two-action `[Enter] Recover` / `[o] Open in agent` contract; refreshing a diagnosis is now a shell-only affordance.
 
 ## Public surface
 
@@ -60,7 +60,6 @@ diagnosed_at: <ISO 8601 UTC timestamp>
 | File | Use |
 |------|-----|
 | `lib/hive/commands/status.rb` | `diagnose_call` invokes `DiagnosisAgent.run!` when `--write` is passed and emits the resulting path under the `hive-status-diagnose` schema's `SuccessPayload.path`. |
-| `lib/hive/tui/bubble_model.rb` | `refresh_red_status_diagnosis` shells out to `hive status --diagnose <slug> --write --force` via `Hive::Tui::Subprocess.dispatch_background`; the spawn ultimately re-enters this module. Per-folder dedup via `@diagnosis_inflight` prevents duplicate budget burn from held-down `R` keys within a single TUI session. |
 | `lib/hive/task_action.rb` | `#diagnostic` reads the artifact `red-status.md` and prefers its body over the local fallback when `marker_signature` matches the current marker (`fresh_diagnosis_artifact`). |
 
 ## Backlinks
@@ -69,5 +68,4 @@ diagnosed_at: <ISO 8601 UTC timestamp>
 - [[modules/agent_profile]] — the AgentProfile this module spawns (execute-stage profile)
 - [[modules/secret_patterns]] — redaction patterns applied to the agent body before write
 - [[commands/status]] — `--diagnose --write` entry point
-- [[commands/tui]] — TUI `R` keybinding entry point
 - [[decisions]] ADR-019 (nonce-wrapped prompts), ADR-025 (required-and-nullable envelopes), ADR-027 (diagnose-then-act, automation outside the lock)

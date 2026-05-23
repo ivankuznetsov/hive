@@ -75,7 +75,7 @@ Pane focus is keyboard-only; the focused pane border is bright cyan, the inactiv
 | `q` | quit (default mode) |
 | `Esc` | back to default mode (any sub-mode) |
 
-Findings triage is no longer an in-TUI mode. Use `hive findings`, `hive accept-finding`, and `hive reject-finding` directly from a shell or coding agent; legacy `EXECUTE_WAITING findings_count` rows surface as `recover_execute` and point at `hive findings` from status JSON (see [[commands/findings]]). In red-status detail mode, `Enter` runs the existing autofix/retry path, `f` opens the task worktree in `$VISUAL` / `$EDITOR` / `vi`, `R` runs `hive status --diagnose <slug> --project <project> --write` in the background, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
+Findings triage is no longer an in-TUI mode. Use `hive findings`, `hive accept-finding`, and `hive reject-finding` directly from a shell or coding agent; legacy `EXECUTE_WAITING findings_count` rows surface as `recover_execute` and point at `hive findings` from status JSON (see [[commands/findings]]). In red-status detail mode, `Enter` runs hive's automated recovery for the task and closes the detail screen (rows with no auto-recovery recipe surface a refusal flash that names `Open in agent` as the manual fallback before closing), `o` opens the task in the project's configured development agent and closes the detail screen, and `q` / `Esc` returns to the grid. The help overlay groups bindings by mode for the disambiguation.
 
 ## New Idea Prompt Editing
 
@@ -155,9 +155,9 @@ Red rows still show the concrete marker details in the grid status column, but s
 - `Q: What can Hive do next?` names the available action.
 - `Artifacts` lists the exact files Hive used to explain the row.
 
-The goal is "auto-fix first, ask only when needed." `Enter` inside the detail view invokes the same recovery path that grid Enter used to call directly. `f` opens the task worktree in the configured editor without clearing markers, for the "open worktree in development agent/fix manually" path. `R` asks the configured development agent for a fresh diagnosis by dispatching `hive status --diagnose <slug> --project <project> --write`; once the next snapshot lands, the view refreshes from `diagnostics/red-status.md` if its marker signature matches the current marker.
+The goal is "auto-fix first, ask only when needed." `Enter` inside the detail view runs the same recovery path that grid Enter used to call directly and closes the screen on dispatch (success or refusal); rows with no automatic recovery recipe surface a refusal flash naming `Open in agent` and still close the screen so the operator's binary gesture never strands them on a stale view. `o` invokes the manual-steering takeover — same path as grid `s` — and closes the detail screen as the agent suspends the TUI; on agent exit the operator lands back on the grid rather than a stale detail view.
 
-Snapshot polling keeps the view honest. If the row disappears, the detail view closes with `<slug> no longer in this project`. If the row recovers to a non-red action, it closes with `<slug> recovered - status updated`. If the marker changes under the open view, the row refreshes in place and the footer prompts the user to refresh diagnosis with `R`.
+Snapshot polling keeps the view honest. If the row disappears, the detail view closes with `<slug> no longer in this project`. If the row recovers to a non-red action, it closes with `<slug> recovered - status updated`. If the marker changes under the open view, the cached row updates in place silently — the next time the operator re-opens the screen they see the fresh diagnosis.
 
 The grid still preserves the established direct paths where the right answer is already known:
 

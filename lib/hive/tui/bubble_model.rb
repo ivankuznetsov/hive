@@ -368,12 +368,14 @@ module Hive
           dispatch_command(message)
         when Hive::Tui::Messages::OpenLogTail
           open_log_tail(message.row)
+        when Hive::Tui::Messages::OpenRedStatusDetail
+          open_red_status_detail(message)
         when Hive::Tui::Messages::RecoverReview
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
           recover_error(message.row)
         when Hive::Tui::Messages::RedStatusAutofix
-          red_status_autofix_from_detail(message.row)
+          dispatch_red_status_autofix_then_close_detail(message.row)
         when Hive::Tui::Messages::OpenInputEditor
           open_input_editor(message.row)
         when Hive::Tui::Messages::OpenTaskFolder
@@ -381,7 +383,7 @@ module Hive
         when Hive::Tui::Messages::OpenIdeaPreview
           open_idea_preview(message.row)
         when Hive::Tui::Messages::OpenInAgent
-          open_in_agent_from_detail(message.row)
+          dispatch_open_in_agent_then_close_detail(message.row)
         when Hive::Tui::Messages::AgentSteerExited
           archive_steer(message)
         when Hive::Tui::Messages::OpenSummary
@@ -861,8 +863,12 @@ module Hive
       # Wrap red_status_autofix so the detail screen closes after the
       # keypress (Recover refusal flash still surfaces — the operator's
       # gesture was binary, leaving them on the screen contradicts the
-      # plan's "screen closes after the keypress" requirement).
-      def red_status_autofix_from_detail(row)
+      # plan's "screen closes after the keypress" requirement). The
+      # wrapper is also reached from grid mode (Enter routes
+      # `RedStatusAutofix` through `handle_side_effect`) — the close
+      # branch is mode-guarded so grid-mode invocations are a no-op
+      # pass-through.
+      def dispatch_red_status_autofix_then_close_detail(row)
         model, cmd = red_status_autofix(row)
         close_red_status_detail_on_dispatch(model, cmd)
       end
@@ -871,7 +877,9 @@ module Hive
       # (success and refusal alike). The takeover Cmd is preserved so
       # the foreground takeover still suspends the TUI; on return the
       # operator lands on the grid rather than a stale detail view.
-      def open_in_agent_from_detail(row)
+      # Reached from grid mode (`s` key) and detail mode (`o` key); the
+      # close branch is mode-guarded so grid-mode `s` is unchanged.
+      def dispatch_open_in_agent_then_close_detail(row)
         model, cmd = open_in_agent(row)
         close_red_status_detail_on_dispatch(model, cmd)
       end
@@ -881,9 +889,8 @@ module Hive
         return [ model, cmd ] unless model.mode == :red_status_detail
 
         closed = model.with(mode: :grid, red_status_detail_state: nil)
-        snap = closed.snapshot
-        if snap
-          visible = snap.scope_to_project_index(closed.scope).filter_by_slug(closed.filter)
+        visible = Hive::Tui::Update.visible_snapshot(closed)
+        if visible
           cursor = Hive::Tui::Update.reclamp_cursor(visible, closed.cursor)
           closed = closed.with(cursor: cursor)
         end
@@ -895,7 +902,7 @@ module Hive
         return [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ] if command.nil?
 
         if command.match?(/[;&|]/)
-          return [ flashed("diagnostic retry command is not directly dispatchable; use the shell command from details"), nil ]
+          return [ flashed("diagnostic retry command is not directly dispatchable; run it from a shell or use Open in agent"), nil ]
         end
 
         argv = Shellwords.split(command)
@@ -1511,6 +1518,38 @@ module Hive
           aliases: false
         ) || {}
         parsed.is_a?(Hash) ? parsed : {}
+      end
+
+      # Resolve the configured development-agent label for the detail
+      # screen, then delegate to Update so the model transition stays in
+      # the pure MVU layer. Lives here (not in Update or the view) so
+      # the no-I/O Update contract is preserved and the view stays a
+      # pure projection. Rescue list is intentionally broad — a corrupt
+      # project config (chmod 000, hand-edited YAML aliases, dangling
+      # path) must never crash the bubbletea runner when the user opens
+      # the detail screen; fall back to the canonical "your project's
+      # development agent" label instead. Plan Risk #4.
+      def open_red_status_detail(message)
+        label = resolve_agent_label(message.row)
+        new_message = Hive::Tui::Messages::OpenRedStatusDetail.new(
+          row: message.row,
+          agent_label: label
+        )
+        new_model, _cmd = Hive::Tui::Update.apply(@hive_model, new_message)
+        [ new_model, nil ]
+      end
+
+      def resolve_agent_label(row)
+        task = Hive::Task.new(row.folder.to_s)
+        cfg = Hive::Config.load(task.project_root)
+        agent_name = cfg.dig("execute", "agent") || "claude"
+        profile = Hive::AgentProfiles.lookup(agent_name, cfg: cfg)
+        basename = File.basename(profile.bin.to_s)
+        basename.empty? ? Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK : basename
+      rescue Hive::ConfigError, Hive::AgentProfiles::UnknownAgent,
+             Hive::AgentError, Hive::InvalidTaskPath,
+             Psych::Exception, SystemCallError, IOError
+        Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
       end
 
       def open_in_agent(row)

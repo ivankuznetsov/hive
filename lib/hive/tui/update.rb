@@ -1,9 +1,7 @@
-require "digest"
 require "hive"
 require "hive/tui/model"
 require "hive/tui/messages"
 require "hive/tui/subprocess"
-require "hive/tui/views/red_status_detail"
 
 module Hive
   module Tui
@@ -182,8 +180,7 @@ module Hive
           )
         end
 
-        signature = red_status_marker_signature(row)
-        model.with(red_status_detail_state: state.with(row: row, marker_signature: signature))
+        model.with(red_status_detail_state: state.with(row: row))
       end
 
       # Close the red-status detail view and return to grid. Recompute
@@ -697,15 +694,19 @@ module Hive
         model.with(mode: :filter, filter_buffer: model.filter.to_s)
       end
 
+      # Agent-label resolution lives in BubbleModel (filesystem/config
+      # I/O); when reached without a pre-built state, fall through with
+      # `RedStatusDetailState`'s default `AGENT_FALLBACK`. The
+      # `agent_label:` field on `OpenRedStatusDetail` lets the caller
+      # plumb a resolved label through without touching disk from Update.
       def apply_open_red_status_detail(model, msg)
-        model.with(
-          mode: :red_status_detail,
-          red_status_detail_state: Model::RedStatusDetailState.new(
-            row: msg.row,
-            marker_signature: red_status_marker_signature(msg.row),
-            agent_label: Hive::Tui::Views::RedStatusDetail.resolve_agent_label(msg.row)
-          )
-        )
+        label = msg.respond_to?(:agent_label) ? msg.agent_label : nil
+        state = if label && !label.to_s.empty?
+          Model::RedStatusDetailState.new(row: msg.row, agent_label: label)
+        else
+          Model::RedStatusDetailState.new(row: msg.row)
+        end
+        model.with(mode: :red_status_detail, red_status_detail_state: state)
       end
 
       # Esc / `q` from a sub-mode returns to grid. Clears tail_state on
@@ -760,31 +761,6 @@ module Hive
 
       def red_status_row?(row)
         %w[recover_review recover_execute error].include?(row.action_key.to_s)
-      end
-
-      # Read the canonical marker_signature off the diagnostic payload
-      # rather than recomputing locally. TaskAction#marker_signature is
-      # the producer (the SHA256-hex value emitted into the status JSON
-      # and into the diagnostics/red-status.md artifact frontmatter); the
-      # TUI is a consumer. Recomputing here with a different algorithm
-      # (the prior `\\0`-joined raw concat) meant the freshness compare
-      # could never match the hex stored in row.diagnostic, so the
-      # "marker changed since you opened this view" banner fired on
-      # every poll regardless of marker state.
-      #
-      # Fallback (rarely hit): when row.diagnostic is nil — e.g., the
-      # row is no longer red, or the JSON producer's schema_version
-      # predates the field — fall back to a deterministic local digest
-      # so the live-update gate still compares against a stable value
-      # across snapshots. The local digest is namespaced with a
-      # "no-diag:" prefix so it cannot collide with a real signature.
-      def red_status_marker_signature(row)
-        sig = row.diagnostic && row.diagnostic["marker_signature"]
-        return sig.to_s if sig && !sig.to_s.empty?
-
-        attrs = (row.attrs || {}).sort_by { |key, _value| key.to_s }
-                                 .map { |key, value| "#{key}=#{value}" }
-        "no-diag:" + Digest::SHA256.hexdigest(([ row.marker.to_s ] + attrs).join("\n"))
       end
 
       def next_non_empty_project_idx(visible, start_idx)

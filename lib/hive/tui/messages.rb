@@ -43,15 +43,7 @@ module Hive
       # POSIX-shell-convention status (0 success; 128+signo for signal
       # kills; 127 command-not-found).
       #
-      # `folder` is optional — reserved for dispatchers that wrap
-      # @dispatch to thread per-row context through the reaper Thread.
-      # No active callers today; default nil keeps every workflow-verb
-      # and takeover-command spawn unchanged.
-      SubprocessExited = Data.define(:verb, :exit_code, :folder) do
-        def initialize(verb:, exit_code:, folder: nil)
-          super
-        end
-      end
+      SubprocessExited = Data.define(:verb, :exit_code)
 
       # Cooperative shutdown signal — set by the SIGHUP trap (via
       # `runner.send`) and by `q`-keystroke dispatch in grid mode.
@@ -158,8 +150,14 @@ module Hive
       RecoverError = Data.define(:row)
 
       # Enter on a gated red row — open the diagnosis/action view
-      # without clearing markers or dispatching recovery.
-      OpenRedStatusDetail = Data.define(:row)
+      # without clearing markers or dispatching recovery. `agent_label`
+      # is the resolved development-agent name, resolved by BubbleModel
+      # before dispatch so the no-I/O Update layer never reads disk.
+      OpenRedStatusDetail = Data.define(:row, :agent_label) do
+        def initialize(row:, agent_label: nil)
+          super
+        end
+      end
 
       # Enter inside the red-status detail view — run the same
       # recovery handler the grid row used to run directly.

@@ -2,7 +2,7 @@ require "shellwords"
 require "hive/markers"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
-require "hive/tui/views/red_status_detail"
+require "hive/tui/red_status_detail_keys"
 require "hive/workflows"
 
 module Hive
@@ -54,11 +54,13 @@ module Hive
       # `error` is intentionally absent — Enter on an error-state row
       # is routed by `error_message` (clear the ERROR marker + re-run
       # for non-kill-class failures; OpenLogTail while a kill-class
-      # auto-heal is in flight). The dual routing lives in the
-      # `enter_message` -> `error_message` branch below.
+      # auto-heal is in flight). `recover_execute` is also intentionally
+      # absent — Enter on those rows routes through `red_detail_row?` to
+      # the detail screen before ever reaching this lookup. The dual
+      # routing lives in the `enter_message` -> `error_message` branch
+      # below.
       ENTER_FLASH_MESSAGES = {
-        "archived" => "task is archived; no further action",
-        "recover_execute" => "task needs recovery — open the worktree to re-prioritise"
+        "archived" => "task is archived; no further action"
       }.freeze
 
       # @api private
@@ -331,7 +333,7 @@ module Hive
       end
 
       def red_status_detail_hint
-        Hive::Tui::Views::RedStatusDetail::ACTION_KEYS.map { |k| k[:hint] }.join(", ")
+        Hive::Tui::RedStatusDetailKeys::ACTION_KEYS.map { |k| k[:hint] }.join(", ")
       end
 
       # Filter-prompt mode keystrokes. Update consumes the FilterChar*

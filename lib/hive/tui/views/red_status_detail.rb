@@ -1,8 +1,6 @@
 require "lipgloss"
-require "hive"
-require "hive/agent_profiles"
-require "hive/config"
-require "hive/task"
+require "hive/tui/model"
+require "hive/tui/red_status_detail_keys"
 require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/views/format"
@@ -11,23 +9,24 @@ module Hive
   module Tui
     module Views
       module RedStatusDetail
-        # Shared key list — referenced by both the footer and the
-        # KeyMap hint flash. Single source so a key rename in one
-        # surface cannot drift away from the other.
-        ACTION_KEYS = [
-          { footer: "[Enter] Recover",      hint: "press Enter to recover" },
-          { footer: "[o] Open in agent",    hint: "o to open in agent" },
-          { footer: "[Esc] back",           hint: "Esc / q to close" }
-        ].freeze
-        FOOTER = ACTION_KEYS.map { |k| k[:footer] }.join("   ").freeze
-        AGENT_FALLBACK = "your project's development agent".freeze
+        # Shared single-source-of-truth for the detail screen's action
+        # key list lives in `Hive::Tui::RedStatusDetailKeys` so both
+        # this view (footer) and `KeyMap` (refusal-flash hint) read the
+        # same data without the view module exposing rendering surface.
+        ACTION_KEYS = Hive::Tui::RedStatusDetailKeys::ACTION_KEYS
+        FOOTER = Hive::Tui::RedStatusDetailKeys::FOOTER
+        # Re-export so external readers (tests, KeyMap) can pin against
+        # the canonical fallback string without depending on Model
+        # internals.
+        AGENT_FALLBACK = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
 
         # Detect a `TaskAction#marker_summary`-style string (uppercase
-        # marker name optionally followed by attr key=value pairs) that
-        # leaked into diagnostic["summary"] from an older artifact. The
-        # detail screen must never echo debug copy — fall back to the
-        # plain-English placeholder instead. See plan Unit 1.
-        MARKER_SUMMARY_PATTERN = /\A[A-Z][A-Z0-9_]+(?:\s+[a-z_]+=\S+)*\z/
+        # marker name followed by at least one `key=value` attr pair)
+        # that leaked into diagnostic["summary"] from an older artifact.
+        # Requires the attrs portion so a legitimate bare upper-case
+        # verdict like `ABORTED` or a real sentence is not mistakenly
+        # treated as debug copy. See plan Unit 1.
+        MARKER_SUMMARY_PATTERN = /\A[A-Z][A-Z0-9_]+(?:\s+[a-z_]+=\S+)+\z/
 
         module_function
 
@@ -40,7 +39,7 @@ module Hive
           bordered = model.cols.to_i >= 40
           inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
           body_height = [ model.rows.to_i - 4, 1 ].max
-          footer_line = Styles::HINT.render(truncate(FOOTER, inner_width))
+          footer_lines = footer_lines_for(inner_width)
 
           body_lines = []
           body_lines << Styles::HEADER.render(truncate("Task needs attention · #{safe(row.slug)}", inner_width))
@@ -50,26 +49,49 @@ module Hive
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
           body_lines << ""
           body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
-          # Unified affordance: [Enter] Recover is always shown
-          # regardless of row.action_key. Rows with no automatic
-          # recovery recipe (e.g., recover_execute / EXECUTE_STALE)
-          # flash the Risk-#3 mitigation text and close the screen,
-          # rather than hiding the affordance and stranding the
-          # operator on a "now what?" view.
           body_lines << truncate("[Enter] Recover — re-run hive's automated recovery for this task", inner_width)
-          body_lines << truncate("[o]     Open in agent — launch #{state.agent_label || AGENT_FALLBACK} in the task worktree", inner_width)
+          body_lines << truncate("[o]     Open in agent — launch #{state.agent_label} in the task worktree", inner_width)
 
-          # Reserve the footer line outside the body_height trim so a
-          # short terminal or a long wrapped "Why" block can never
-          # clip the only on-screen reference for the action keys.
-          inner_body_height = [ body_height - 2, 1 ].max
+          flash_line = flash_line_for(model, inner_width)
+
+          # Reserve the footer (and optional flash) lines outside the
+          # body_height trim so a short terminal or long wrapped "Why"
+          # block can never clip the only on-screen reference for the
+          # action keys.
+          reserved = footer_lines.size + 1 # footer + leading blank
+          reserved += 1 if flash_line
+          inner_body_height = [ body_height - reserved, 1 ].max
           visible = body_lines.first(inner_body_height)
           visible << ""
-          visible << footer_line
+          visible << flash_line if flash_line
+          visible.concat(footer_lines)
           body = Lipgloss.join_vertical(Lipgloss::TOP, *visible)
           return body unless bordered
 
           Styles::PANE_FOCUSED_BORDER.width(inner_width).render(body)
+        end
+
+        def footer_lines_for(inner_width)
+          return [ Styles::HINT.render(FOOTER) ] if FOOTER.length <= inner_width
+
+          # Narrow terminals: stack one key per line so a `[Esc] back`
+          # affordance never gets truncated off the end of a single
+          # joined footer line.
+          ACTION_KEYS.map { |entry| Styles::HINT.render(truncate(entry[:footer], inner_width)) }
+        end
+
+        # Surface `model.flash` on the detail screen so a refusal flash
+        # fired by KeyMap (e.g., `s` muscle-memory drift) is observable
+        # without backing out to the grid. Without this, the explicit-
+        # refusal contract documented in `red_status_detail_message` is
+        # invisible until the operator dismisses the screen.
+        def flash_line_for(model, inner_width)
+          return nil unless model.respond_to?(:flash_active?) && model.flash_active?
+
+          text = safe(model.flash.to_s).strip
+          return nil if text.empty?
+
+          Styles::HINT.render(truncate(text, inner_width))
         end
 
         def summary_text(row)
@@ -85,22 +107,6 @@ module Hive
 
         def missing_summary_fallback
           "Hive does not have a diagnosis yet — try Open in agent to inspect."
-        end
-
-        # Called by `Update.apply_open_red_status_detail` so the resolved
-        # label is cached on RedStatusDetailState at open time — render
-        # stays a pure projection and the per-frame Hive::Config.load
-        # cost only fires once per screen open. Plan Risk #4.
-        def resolve_agent_label(row)
-          task = Hive::Task.new(row.folder.to_s)
-          cfg = Hive::Config.load(task.project_root)
-          agent_name = cfg.dig("execute", "agent") || "claude"
-          profile = Hive::AgentProfiles.lookup(agent_name, cfg: cfg)
-          basename = File.basename(profile.bin.to_s)
-          basename.empty? ? AGENT_FALLBACK : basename
-        rescue Hive::ConfigError, Hive::AgentProfiles::UnknownAgent,
-               Hive::AgentError, Hive::InvalidTaskPath, Psych::SyntaxError
-          AGENT_FALLBACK
         end
 
         def wrapped(text, width)

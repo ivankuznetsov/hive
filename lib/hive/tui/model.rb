@@ -40,8 +40,6 @@ module Hive
       # asset. Resets only on open / cancel / submit.
       :new_idea_attachment_counter,
       :new_idea_broken_labels, # Array<String> — labels highlighted after rich-submit validation fails
-      :idea_preview_text, # String or nil — deprecated legacy preview text mirror
-      :idea_preview_slug, # String or nil — deprecated legacy preview slug mirror
       :info_panel_state, # Model::InfoPanelState or nil — read-only :idea_preview payload
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
@@ -139,8 +137,6 @@ module Hive
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           new_idea_broken_labels: [],
-          idea_preview_text: nil,
-          idea_preview_slug: nil,
           info_panel_state: nil,
           flash: nil,
           flash_set_at: nil,

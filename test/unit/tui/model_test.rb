@@ -26,8 +26,6 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil model.new_idea_staging_dir
     assert_nil model.new_idea_staging_tmp_root
     assert_equal [], model.new_idea_broken_labels
-    assert_nil model.idea_preview_text
-    assert_nil model.idea_preview_slug
     assert_nil model.info_panel_state
     assert_nil model.flash
     assert_nil model.flash_set_at
@@ -66,20 +64,12 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal 2, b.scope
   end
 
-  def test_with_updates_idea_preview_fields
+  def test_with_updates_info_panel_state
     a = Hive::Tui::Model.initial
     state = info_panel_state(slug: "ship-preview", original_text: "original idea")
-    b = a.with(
-      idea_preview_text: "original idea",
-      idea_preview_slug: "ship-preview",
-      info_panel_state: state
-    )
+    b = a.with(info_panel_state: state)
 
-    assert_nil a.idea_preview_text
-    assert_nil a.idea_preview_slug
     assert_nil a.info_panel_state
-    assert_equal "original idea", b.idea_preview_text
-    assert_equal "ship-preview", b.idea_preview_slug
     assert_equal state, b.info_panel_state
     refute_same a, b
   end
@@ -158,7 +148,7 @@ class HiveTuiModelTest < Minitest::Test
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_project_name
                   new_idea_project_cursor new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
-                  new_idea_broken_labels idea_preview_text idea_preview_slug info_panel_state flash flash_set_at
+                  new_idea_broken_labels info_panel_state flash flash_set_at
                   tail_state red_status_detail_state
                   cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members

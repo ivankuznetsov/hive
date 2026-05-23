@@ -783,7 +783,7 @@ end
           visible = visible_snapshot(closed)
           visible.nil? ? closed : closed.with(cursor: reclamp_cursor(visible, closed.cursor))
         when :idea_preview
-          model.with(mode: :grid, idea_preview_text: nil, idea_preview_slug: nil, info_panel_state: nil)
+          model.with(mode: :grid, info_panel_state: nil)
         when :help, :filter then model.with(mode: :grid)
         when :new_idea_project then apply_new_idea_cancelled(model)
         else model

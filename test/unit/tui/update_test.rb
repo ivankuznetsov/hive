@@ -1338,7 +1338,7 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal :grid, new_model.mode
   end
 
-  def test_back_from_idea_preview_clears_text_and_returns_to_grid
+  def test_back_from_idea_preview_clears_state_and_returns_to_grid
     state = Hive::Tui::Model::InfoPanelState.new(
       slug: "some-slug",
       stage: "2-brainstorm",
@@ -1348,17 +1348,10 @@ class HiveTuiUpdateTest < Minitest::Test
       latest_log_path: nil,
       stage_extra: nil
     )
-    starting = model.with(
-      mode: :idea_preview,
-      idea_preview_text: "original idea",
-      idea_preview_slug: "some-slug",
-      info_panel_state: state
-    )
+    starting = model.with(mode: :idea_preview, info_panel_state: state)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
 
     assert_equal :grid, new_model.mode
-    assert_nil new_model.idea_preview_text
-    assert_nil new_model.idea_preview_slug
     assert_nil new_model.info_panel_state
   end
 

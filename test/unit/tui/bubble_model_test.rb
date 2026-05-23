@@ -656,6 +656,13 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert out.end_with?("…"), "narrow footer should truncate the right edge, got #{out.inspect}"
     refute_includes out, "[i] inf…",
                     "76-column truncation should not split the `[i] info` token"
+    # Pin the surviving tail so a future hint change that silently
+    # clipped `[q] quit` away entirely (or replaced it with a different
+    # token at the right edge) trips a meaningful failure instead of
+    # passing on `end_with?("…")` alone. The truncation lands one char
+    # into `[q] quit` so the visible prefix is `[q] ` plus the ellipsis.
+    assert out.end_with?("[q] …"),
+           "76-column truncation should preserve the `[q] ` prefix before the ellipsis, got #{out.inspect}"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols
@@ -3701,8 +3708,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       assert_nil cmd
       assert_equal :idea_preview, @model.hive_model.mode
-      assert_equal "Build task from user note", @model.hive_model.idea_preview_text
-      assert_equal "some-slug", @model.hive_model.idea_preview_slug
       state = @model.hive_model.info_panel_state
       assert_equal "some-slug", state.slug
       assert_equal "1-inbox", state.stage
@@ -3788,6 +3793,42 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_idea_preview_execute_tail_filters_to_execute_prefix
+    # 4-execute info-panel tail must select the latest `execute-*.log`
+    # — a newer non-execute log (e.g. `plan-*.log`) shows up in
+    # `latest_log_path` (the generic pointer) but is not tailed in the
+    # `execute log` extra section.
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "4-execute")
+      write_idea_md(folder, original_text: "Execute prefix test")
+      execute_log = make_log(
+        root,
+        name: "execute-impl-old.log",
+        text: "execute tail marker\n",
+        mtime: Time.at(1_700_000_010)
+      )
+      newer_plan = make_log(
+        root,
+        name: "plan-newer.log",
+        text: "plan tail marker\n",
+        mtime: Time.at(1_700_000_020)
+      )
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "4-execute")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      state = @model.hive_model.info_panel_state
+      # `latest_log_path` still reports the absolute newest log, so the
+      # operator sees the freshest pointer even when it isn't the
+      # execute log they are about to tail.
+      assert_equal File.expand_path(newer_plan), state.latest_log_path
+      assert_includes state.stage_extra, "execute tail marker"
+      refute_includes state.stage_extra, "plan tail marker"
+      _ = execute_log
+    end
+  end
+
   def test_open_idea_preview_execute_without_log_has_nil_log_fields
     with_tmp_dir do |root|
       folder = make_task_folder(root, stage: "4-execute")
@@ -3860,8 +3901,17 @@ class HiveTuiBubbleModelTest < Minitest::Test
       write_idea_md(folder, original_text: "Read common")
       extra_path = File.join(folder, "brainstorm.md")
       File.write(extra_path, "secret\n")
-      File.chmod(0, extra_path)
       row = make_task_row(folder: folder, slug: "some-slug", stage: "2-brainstorm")
+
+      # Stub `read_capped` to raise EACCES so the test exercises the
+      # rescue path deterministically. Pre-fix, the test relied on
+      # `File.chmod(0)` which does not block reads as root and breaks
+      # on CI containers that run the suite as root.
+      @model.define_singleton_method(:read_capped) do |path|
+        raise Errno::EACCES if path == extra_path
+
+        nil
+      end
 
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
@@ -3869,8 +3919,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal :idea_preview, @model.hive_model.mode
       assert_equal "Read common", @model.hive_model.info_panel_state.original_text
       assert_nil @model.hive_model.info_panel_state.stage_extra
-    ensure
-      File.chmod(0o600, extra_path) if extra_path && File.exist?(extra_path)
     end
   end
 
@@ -3910,8 +3958,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_nil cmd
       assert_equal :idea_preview, @model.hive_model.mode
       assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS,
-                   @model.hive_model.idea_preview_text.length
-      assert_equal Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS,
                    @model.hive_model.info_panel_state.original_text.length
     end
   end
@@ -3926,6 +3972,52 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       assert_nil cmd
       assert_equal "2026-05-22T22:40:00Z", @model.hive_model.info_panel_state.created_at
+    end
+  end
+
+  def test_open_idea_preview_created_at_preserves_non_utc_timezone_verbatim
+    # Pins the verbatim scalar path: a non-`Z` timestamp must survive
+    # the YAML round-trip exactly as the operator typed it. Without
+    # the `frontmatter_scalar` shortcut, a typed Time would normalize
+    # to UTC and silently strip the `+03:00` offset.
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      write_idea_md(folder, original_text: "TZ idea", created_at: "2026-05-22T22:40:00+03:00")
+      row = make_task_row(folder: folder)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal "2026-05-22T22:40:00+03:00", @model.hive_model.info_panel_state.created_at
+    end
+  end
+
+  def test_open_idea_preview_created_at_falls_back_to_typed_value
+    # When `frontmatter_scalar` cannot extract a verbatim value (block
+    # scalar, multi-line string, etc.), `idea_created_at` falls back to
+    # the YAML-parsed typed value. Constructs a frontmatter shape the
+    # scalar parser cannot represent and asserts the Time branch
+    # formats to a UTC iso8601 string.
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "2-brainstorm")
+      File.write(File.join(folder, "idea.md"), <<~MD)
+        ---
+        slug: some-slug
+        created_at: |
+          2026-05-22T22:40:00Z
+        original_text: |
+          Block scalar idea
+        ---
+      MD
+      row = make_task_row(folder: folder)
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      # YAML parses the block scalar to "2026-05-22T22:40:00Z\n"; the
+      # fallback path returns the trailing-newline-trimmed iso8601 via
+      # `to_s` since the value is not a Time/Date.
+      assert_match(/\A2026-05-22T22:40:00Z/, @model.hive_model.info_panel_state.created_at.to_s)
     end
   end
 
@@ -3945,8 +4037,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       assert_nil dismiss_cmd
       assert_equal :grid, @model.hive_model.mode
-      assert_nil @model.hive_model.idea_preview_text
-      assert_nil @model.hive_model.idea_preview_slug
       assert_nil @model.hive_model.info_panel_state
       assert_empty @messages
     end

@@ -11,11 +11,16 @@ module Hive
       module IdeaPreview
         DISMISS_HINT = "press q / Esc / i to close".freeze
         DIVIDER = "─".freeze
+        # Common label-column width for the `created_at`, `folder`, and
+        # `latest log` rows. Computed from the longest label so a future
+        # rename (e.g. `working_dir` at 11 chars) does not silently
+        # collapse the value-column gap to a single space.
+        LABEL_COL = [ "created_at", "folder", "latest log" ].map(&:length).max + 2
 
         module_function
 
         def render(model, width: model.cols.to_i, height: model.rows.to_i - 1)
-          state = model.info_panel_state || legacy_state(model)
+          state = model.info_panel_state
           return "" if state.nil?
 
           usable = [ width.to_i, 1 ].max
@@ -47,10 +52,11 @@ module Hive
         def extra_lines(state, width)
           return [] unless present(state.stage_extra)
 
+          title = extra_title(state)
           [
             "",
-            Styles::HINT.render(truncate(extra_title(state), width)),
-            Styles::HINT.render(DIVIDER * [ extra_title(state).length, width ].min),
+            Styles::HINT.render(truncate(title, width)),
+            Styles::HINT.render(DIVIDER * [ title.length, width ].min),
             *wrapped_body(state.stage_extra.to_s, width)
           ]
         end
@@ -72,9 +78,21 @@ module Hive
           visible
         end
 
+        # Append the truncation `…` indicator, taking care to insert it
+        # before any trailing ANSI reset escape so a styled line (e.g.
+        # the dim divider rendered via `Styles::HINT.render(DIVIDER * …)`)
+        # keeps the ellipsis inside the same style run. Without this,
+        # the indicator pops outside the dim style on real terminals.
         def with_ellipsis(line)
-          stripped = line.sub(/\s+\z/, "")
-          stripped.end_with?("…") ? stripped : "#{stripped}…"
+          if (match = line.match(/\A(.*?)(\e\[[\d;]*m)\z/m))
+            prefix = match[1].sub(/\s+\z/, "")
+            return line if prefix.end_with?("…")
+
+            "#{prefix}…#{match[2]}"
+          else
+            stripped = line.sub(/\s+\z/, "")
+            stripped.end_with?("…") ? stripped : "#{stripped}…"
+          end
         end
 
         def header_line(state, width)
@@ -85,7 +103,8 @@ module Hive
         end
 
         def field_line(label, value, width)
-          truncate("#{label}:#{' ' * [ 12 - label.length, 1 ].max}#{value}", width)
+          gap = [ LABEL_COL - label.length, 1 ].max
+          truncate("#{label}:#{' ' * gap}#{value}", width)
         end
 
         def extra_title(state)
@@ -95,23 +114,6 @@ module Hive
           when "4-execute" then "execute log"
           else "details"
           end
-        end
-
-        # Compatibility for the brief transition while BubbleModel still
-        # mirrors the old bottom-strip fields. New callers should set
-        # info_panel_state directly.
-        def legacy_state(model)
-          return nil if model.idea_preview_text.to_s.empty? && model.idea_preview_slug.to_s.empty?
-
-          Hive::Tui::Model::InfoPanelState.new(
-            slug: model.idea_preview_slug,
-            stage: "(unknown)",
-            created_at: nil,
-            original_text: model.idea_preview_text.to_s,
-            folder_path: nil,
-            latest_log_path: nil,
-            stage_extra: nil
-          )
         end
 
         def wrapped_body(text, width)

@@ -72,6 +72,10 @@ module Hive
       # lives on `Hive::Markers::KILL_CLASS_EXIT_CODES` so KeyMap's
       # Enter-routing predicate and this auto-healer never drift.
       KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
+      # Read window for the 4-execute info-panel log tail (see `tail_capped`
+      # ~1700 lines below). Sized for ~32 lines of recent agent output —
+      # enough operator context for the no-scroll panel without letting
+      # large logs dominate render-time memory.
       INFO_PANEL_EXECUTE_TAIL_BYTES = 4 * 1024
       # Lowercase snapshot-row marker keys → uppercase CLI marker names
       # accepted by `hive markers clear --name`. Mirrors the upcase
@@ -1537,15 +1541,10 @@ module Hive
           original_text: capped_text,
           folder_path: File.expand_path(row.folder),
           latest_log_path: latest_log_path,
-          stage_extra: stage_extra_for(row, latest_log_path)
+          stage_extra: stage_extra_for(row)
         )
         [
-          @hive_model.with(
-            mode: :idea_preview,
-            idea_preview_text: capped_text,
-            idea_preview_slug: row.slug,
-            info_panel_state: state
-          ),
+          @hive_model.with(mode: :idea_preview, info_panel_state: state),
           nil
         ]
       rescue Errno::ENOENT, Errno::EACCES, Psych::Exception
@@ -1565,6 +1564,15 @@ module Hive
         parsed.is_a?(Hash) ? parsed : {}
       end
 
+      # `created_at` is rendered as-is when the frontmatter carries a
+      # plain scalar (so a non-UTC `+03:00` timezone survives verbatim
+      # for the operator). The fallbacks cover edge cases the scalar
+      # parser can't represent — block scalars (`|` / `>`) or YAML-typed
+      # values that already parsed to a Time/Date — by formatting from
+      # `data`, which has been through `YAML.safe_load`. Time values are
+      # normalized to UTC iso8601 since a typed Time has lost the
+      # original literal; non-UTC offsets must come through the
+      # verbatim path above to be preserved.
       def idea_created_at(contents, data)
         raw = frontmatter_scalar(contents, "created_at")
         return raw unless raw.to_s.empty?
@@ -1577,6 +1585,16 @@ module Hive
         value.to_s
       end
 
+      # Tightly-scoped scalar extractor used only by `idea_created_at`
+      # so a non-UTC timestamp (e.g. `+03:00`) survives the
+      # YAML.safe_load round-trip verbatim. Intentionally narrow: it
+      # only handles plain and matched-quote scalars on a single line.
+      # Block scalars (`|` / `>`), multi-line strings, escaped quote
+      # sequences, and YAML tags fall through to `nil`, which sends
+      # `idea_created_at` to its typed-value fallback path. Do not
+      # extend this for general use — for anything beyond `created_at`
+      # verbatim preservation, read from the already-parsed
+      # `idea_frontmatter` hash.
       def frontmatter_scalar(contents, key)
         match = contents.match(/\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\z)/m)
         return nil unless match
@@ -1595,25 +1613,49 @@ module Hive
         nil
       end
 
+      # Returns the most recently modified log file under
+      # `.hive-state/logs/<slug>/` regardless of stage. Used for the
+      # generic `latest log` line in the info panel header — the
+      # 4-execute extra panel uses `latest_execute_log_for` instead so
+      # a stray `plan-*.log` mtime cannot be tailed as "execute log".
+      # The `*.log` glob matches `Hive::Agent#log_path`'s naming
+      # convention (`<log_label>-<ts>.log`); a non-`.log` artefact
+      # dropped into the logs dir is intentionally invisible here so
+      # cron-style sidecar files (`.tmp`, `.rotated`) do not surface as
+      # the operator-visible "latest log" pointer.
       def latest_log_for(row)
+        latest_log_matching(row) { |_path| true }
+      end
+
+      # Same shape as `latest_log_for` but restricted to files whose
+      # basename starts with `execute-` (matches the `log_label:
+      # "execute-impl"` convention in `Hive::Stages::Execute`). Keeps
+      # the 4-execute info-panel tail from picking up a freshly-written
+      # `plan-*.log` whose mtime happens to outrank the prior execute
+      # log.
+      def latest_execute_log_for(row)
+        latest_log_matching(row) { |path| File.basename(path).start_with?("execute-") }
+      end
+
+      def latest_log_matching(row)
         log_dir = task_log_dir_for(row)
         return nil if log_dir.nil? || !File.directory?(log_dir)
 
-        candidates = Dir.glob(File.join(log_dir, "*.log"))
+        candidates = Dir.glob(File.join(log_dir, "*.log")).select { |path| yield(path) }
         return nil if candidates.empty?
 
         with_mtimes = candidates.filter_map do |path|
           [ File.expand_path(path), File.mtime(path) ]
-        rescue Errno::ENOENT
+        rescue Errno::ENOENT, Errno::EACCES
           nil
         end
         if with_mtimes.empty?
-          candidate = candidates.find { |path| File.exist?(path) }
+          candidate = candidates.find { |path| File.file?(path) }
           return candidate ? File.expand_path(candidate) : nil
         end
 
         with_mtimes.max_by(&:last).first
-      rescue Errno::EACCES
+      rescue Errno::ENOENT, Errno::EACCES, SystemCallError
         nil
       end
 
@@ -1623,31 +1665,34 @@ module Hive
         nil
       end
 
-      def stage_extra_for(row, latest_log_path)
+      def stage_extra_for(row)
         case row.stage.to_s
         when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md"))
         when "3-plan" then read_capped(File.join(row.folder, "plan.md"))
-        when "4-execute" then tail_capped(latest_log_path)
+        when "4-execute" then tail_capped(latest_execute_log_for(row))
         else nil
         end
-      rescue Errno::ENOENT, Errno::EACCES
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO, SystemCallError
         nil
       end
 
       def read_capped(path)
-        return nil if path.to_s.empty? || !File.exist?(path)
+        return nil if path.to_s.empty? || !File.file?(path)
 
         text = File.open(path, "rb") { |file| file.read(Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS) }
         scrub_utf8(text)
-      rescue Errno::ENOENT, Errno::EACCES
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO
         nil
       end
 
       def tail_capped(path)
-        return nil if path.to_s.empty? || !File.exist?(path)
+        return nil if path.to_s.empty? || !File.file?(path)
 
-        # 4 KiB is enough recent execute context for the no-scroll panel
-        # without letting large logs dominate render-time memory.
+        # The seek is byte-aligned, not line-aligned: the tail's first
+        # rendered line may begin mid-character on a log line. This is
+        # acceptable for the read-only panel — it is documented here so
+        # a future contributor does not "fix" it by adding line-aware
+        # framing that re-introduces a full-file scan on large logs.
         text = File.open(path, "rb") do |file|
           file.seek(-INFO_PANEL_EXECUTE_TAIL_BYTES, IO::SEEK_END)
           file.read
@@ -1656,12 +1701,19 @@ module Hive
           file.read
         end
         scrub_utf8(text)
-      rescue Errno::ENOENT, Errno::EACCES
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO
         nil
       end
 
+      # `force_encoding` mutates in place, so dup first — callers may
+      # pass shared strings now or in the future. Also strips C0 control
+      # bytes (preserving TAB / LF / CR) and DEL so an agent-authored
+      # markdown body or log tail carrying ANSI escape sequences cannot
+      # corrupt the info-panel frame. Lone C1 bytes (0x80-0x9F) are
+      # invalid UTF-8 leads and are already removed by `String#scrub`.
       def scrub_utf8(text)
-        text.to_s.force_encoding(Encoding::UTF_8).scrub
+        scrubbed = text.to_s.dup.force_encoding(Encoding::UTF_8).scrub
+        scrubbed.gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
       end
 
       def resolve_agent_label(row)

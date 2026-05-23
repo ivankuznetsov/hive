@@ -1733,6 +1733,35 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_summary_foreground_callable_runs_editor_and_restores_terminal
+    with_tmp_dir do |project_root|
+      folder = File.join(project_root, ".hive-state", "stages", "7-finalize", "some-slug")
+      FileUtils.mkdir_p(folder)
+      summary = File.join(folder, "summary.md")
+      File.write(summary, "# Summary\n")
+      row = make_task_row(
+        action_key: "complete", stage: "7-finalize", marker: "complete", folder: folder
+      )
+      calls = []
+      captured_callable = nil
+      @model.define_singleton_method(:editor_argv) { [ "fake-editor" ] }
+      @model.define_singleton_method(:run_editor) { |argv, path| calls << [ :editor, argv, path ] }
+      @model.define_singleton_method(:clear_terminal_for_takeover) { calls << [ :clear ] }
+
+      with_singleton_method_stub(Hive::Tui::Subprocess, :foreground_takeover_command, lambda { |callable|
+        captured_callable = callable
+        :foreground_cmd
+      }) do
+        model, cmd = @model.send(:open_summary, row)
+        assert_equal :foreground_cmd, cmd
+        assert_match(/opening summary for some-slug in fake-editor/, model.flash)
+      end
+
+      captured_callable.call
+      assert_equal [ [ :editor, [ "fake-editor" ], summary ], [ :clear ] ], calls
+    end
+  end
+
   # ---- DispatchCommand → background spawn ----
 
   def test_dispatch_command_message_returns_nil_cmd_and_does_not_block

@@ -146,6 +146,11 @@ module Hive
       # an operator scanning events.jsonl would observe an open stage
       # bracket per raise — confusing in the TUI and breaks any future
       # consumer that depends on enter/exit symmetry.
+      #
+      # Body wrapped in its own rescue so a secondary failure here (e.g.
+      # Hive::Markers.current on a corrupt state file feeding stage_label,
+      # or Events.emit raising on a programmer bug) can never escape and
+      # mask the original exception the caller is propagating.
       def emit_rescue_close(task, stage, error_message)
         stage ||= stage_label(task)
         Hive::Events.emit(
@@ -162,6 +167,8 @@ module Hive
           event_type: :stage_exit,
           message: "status=error #{error_message}"
         )
+      rescue StandardError
+        nil
       end
 
       def stage_label(task)

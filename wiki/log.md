@@ -21,6 +21,18 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** [[commands/bot]], [[modules/bot]], [[operating]], [[state-model]].
 
+## [2026-05-23T00:00:00Z] events — task-local event log + derived status.md (U1–U4)
+
+**Action:** Documented the new `Hive::Events` module and the lifecycle hooks added across `Hive::Agent`, `Hive::Stages::Base`, `Hive::Stages::Review`, and `Hive::Commands::Run`. Every task now writes append-only JSON records to `<task>/events.jsonl` and a derived `status.md` after each emit. Stage runs are bracketed by `stage_enter` / `stage_exit` (with `error` + closing `stage_exit` on rescue paths), agent spawns by `agent_start` / `agent_end` (always emitted in `ensure`), and the review loop adds per-phase `agent_start` / `agent_end` pairs that nest above per-reviewer spawns. Marker-driven `round_waiting` / `round_complete` events fire when brainstorm or plan land on those terminal markers; error-class markers (`error`, `review_error`, `review_ci_stale`, `review_stale`) emit an `error` event with marker reason/phase/pass details.
+
+Implementation invariants captured: single O_APPEND write per record (POSIX append-atomicity guarantee), 16 KiB trailing read window for tail rendering, 20-event recent-events list with a wider 200-line walk for current-agent recovery, atomic rename for `status.md` writes, and torn-record tolerance via silent skip on `JSON::ParserError`. `Stages::Review` keeps phase brackets balanced through `@open_phase_event` and a tail `ensure`. `Hive::Agent` detects `SyntheticTask` vs real `Hive::Task` via `respond_to?` to derive the right slug and stage labels without branching by class.
+
+**Refreshed pages:**
+- New: [[modules/events]] — module reference (event types, record shape, atomicity contract, status.md renderer, bracket discipline, SyntheticTask handling).
+- [[commands/run]] — `runner.call` is now wrapped by `Hive::Stages::Base.with_stage_events`.
+- [[stages/review]] — `mark_working` doubles as the phase-bracket emitter; tail `ensure` in `run!` guarantees the closing `agent_end`.
+- [[index]] — added `modules/events` entry, bumped page count to 62.
+
 ## [2026-05-23T00:00:00Z] tui — red-status detail screen simplified to a two-action contract
 
 **Action:** Documented the simplification of the red-status detail screen to a unified two-action contract. The previous `[f] manual fix` and `[R] refresh diagnosis` bindings are removed; the screen now exposes only `[Enter] Recover` (re-runs hive's automated recovery and closes the screen — rows with no auto-recovery recipe surface a refusal flash naming `Open in agent`) and `[o] Open in agent` (suspends the TUI into the configured development agent — same path as grid `s` — and closes the detail screen). `q` / `Esc` returns to the grid.

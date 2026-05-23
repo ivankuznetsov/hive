@@ -27,7 +27,7 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 3. If the current marker is `MANUAL_STEERING`, skip before auto-rebase or runner dispatch and report `marker=manual_steering` with `next_action.kind=no_op`. JSON sets `rebase.reason="manual_steering"`.
 4. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see "Auto-rebase pre-step" below.
 5. `pick_runner(task)` returns one of `Hive::Stages::{Inbox,Brainstorm,Plan,Execute,OpenPr,Review,Artifacts,Finalize,Done}.method(:run!)`. Unknown stage → `StageError`.
-6. Call the runner: `runner.call(task, cfg)` → `{commit:, status:}`.
+6. Call the runner inside `Hive::Stages::Base.with_stage_events(task) { runner.call(task, cfg) }`. The wrapper emits a `stage_enter` event before the call, a `stage_exit` event after it, plus marker-driven `round_waiting` / `round_complete` (brainstorm, plan) or `error` (any error-class marker) events between them. Any raise emits a paired `error` + `stage_exit` so `events.jsonl` brackets stay balanced. See [[modules/events]].
 7. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
 8. `report`: print the current marker, the state file path, and a stage-aware next step.
 

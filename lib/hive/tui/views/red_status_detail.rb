@@ -29,6 +29,9 @@ module Hive
         # treated as debug copy. See plan Unit 1.
         MARKER_SUMMARY_PATTERN = /\A[A-Z][A-Z0-9_]+(?:\s+[a-z_]+=\S+)+\z/
 
+        MIN_LOG_PANEL_ROWS = 4
+        MAX_LOG_PANEL_ROWS = 12
+
         module_function
 
         def render(model)
@@ -42,28 +45,14 @@ module Hive
           inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
           body_height = [ model.rows.to_i - 5, 1 ].max
           footer_lines = footer_lines_for(inner_width)
-
-          body_lines = []
-          body_lines << Styles::HEADER.render(truncate("Task needs attention · #{safe(row.slug)}", inner_width))
-          body_lines << ""
-          body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
-          body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
-          body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
-          body_lines << ""
-          body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
-          body_lines << truncate("[Enter] Recover — re-run hive's automated recovery for this task", inner_width)
-          body_lines << truncate("[o]     Open in agent — launch #{state.agent_label} in the task worktree", inner_width)
-
           flash_line = flash_line_for(model, inner_width)
 
-          # Reserve the footer (and optional flash) lines outside the
-          # body_height trim so a short terminal or long wrapped "Why"
-          # block can never clip the only on-screen reference for the
-          # action keys.
+          # Reserve footer and optional flash rows outside the content
+          # trim so action keys remain visible on very short terminals.
           reserved = footer_lines.size + 1 # footer + leading blank
           reserved += 1 if flash_line
           inner_body_height = [ body_height - reserved, 1 ].max
-          append_log_preview(body_lines, state, inner_width, inner_body_height)
+          body_lines = composed_content_lines(state, inner_width, inner_body_height)
           visible = body_lines.first(inner_body_height)
           visible << ""
           visible << flash_line if flash_line
@@ -78,16 +67,44 @@ module Hive
           Lipgloss.join_vertical(Lipgloss::TOP, header_bar(row, header_width), panel)
         end
 
+        def composed_content_lines(state, inner_width, inner_body_height)
+          row = state.row
+          body_lines = []
+          body_lines << Styles::HEADER.render(truncate("Task needs attention · #{safe(row.slug)}", inner_width))
+          body_lines << ""
+          body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
+          body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
+          body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
+          body_lines << ""
+          body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
+          body_lines << truncate("[Enter] Recover — re-run hive's automated recovery for this task", inner_width)
+          body_lines << truncate("[o]     Open in agent — launch #{safe(state.agent_label || AGENT_FALLBACK)} in the task worktree", inner_width)
+
+          append_artifacts(body_lines, artifact_lines(row, inner_width), inner_body_height)
+          append_log_preview(body_lines, state, inner_width, inner_body_height)
+
+          body_lines
+        end
+
         def append_log_preview(body_lines, state, inner_width, inner_body_height)
           return if Array(state.log_lines).empty?
 
-          available = inner_body_height - body_lines.length - 1
-          return if available < 5
+          available = inner_body_height - body_lines.length
+          return if available < MIN_LOG_PANEL_ROWS + 2
 
-          if (panel = log_panel(state, inner_width, available - 1))
+          height_budget = [ available - 2, MAX_LOG_PANEL_ROWS ].min
+          if (panel = log_panel(state, inner_width, height_budget))
             body_lines << ""
             body_lines.concat(panel.lines.map(&:chomp))
           end
+        end
+
+        def append_artifacts(body_lines, artifact_lines, inner_body_height)
+          return if artifact_lines.empty?
+          return if body_lines.length + artifact_lines.length + 1 > inner_body_height
+
+          body_lines << ""
+          body_lines.concat(artifact_lines)
         end
 
         def footer_lines_for(inner_width)
@@ -166,6 +183,16 @@ module Hive
           marker_attrs = attrs_text(row)
           marker = [ "Marker: #{safe(row.marker)}", marker_attrs ].reject(&:empty?).join(" ")
           "#{marker}  ·  Status: #{safe(row.action_label)}"
+        end
+
+        def artifact_lines(row, width)
+          diagnostic = row.diagnostic || {}
+          paths = Array(diagnostic["artifact_paths"]).map { |path| safe(path).strip }.reject(&:empty?)
+          return [] if paths.empty?
+
+          lines = [ Styles::HEADER.render(truncate("Artifacts", width)) ]
+          paths.each { |path| lines << truncate("- #{path}", width) }
+          lines
         end
 
         def attrs_text(row)

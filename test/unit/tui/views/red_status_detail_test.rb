@@ -40,6 +40,15 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     )
   end
 
+  def model_with_log(lines, cols: 100, rows: 30)
+    model = model_for(row).with(cols: cols, rows: rows)
+    model.with(red_status_detail_state: model.red_status_detail_state.with(
+      log_path: "/tmp/red-task/logs/review.log",
+      log_lines: lines,
+      log_scroll_offset: 0
+    ))
+  end
+
   def test_renders_user_facing_summary_with_two_actions
     diagnostic = {
       "summary" => "The review fixer stopped before tests completed."
@@ -175,6 +184,44 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
 
     refute_includes panel, "\e["
     assert_includes panel, "bad"
+  end
+
+  def test_full_height_layout_shows_header_summary_log_artifacts_and_footer
+    diagnostic = {
+      "summary" => "REVIEW_ERROR phase=fix pass=2",
+      "detail" => "Fix agent failed before tests completed.",
+      "artifact_paths" => [ "/tmp/red-task/reviews/errors-02.md" ]
+    }
+    model = model_for(row(diagnostic: diagnostic)).with(cols: 100, rows: 30)
+    model = model.with(red_status_detail_state: model.red_status_detail_state.with(
+      log_lines: (1..50).map { |i| "line-#{i}" },
+      log_path: "/tmp/red-task/logs/review.log"
+    ))
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
+
+    assert_includes output, "RED · alpha/6-review"
+    assert_includes output, "Task needs attention"
+    assert_includes output, "Why: Hive does not have a diagnosis yet"
+    assert_includes output, "Log ·"
+    assert_includes output, "/tmp/red-task/reviews/errors-02.md"
+    assert_includes output, "[Esc] back"
+  end
+
+  def test_short_layout_drops_log_panel_and_keeps_footer_visible
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 12))
+
+    refute_includes output, "Log ·"
+    assert_includes output, "Why:"
+    assert_includes output, "[Enter] Recover"
+  end
+
+  def test_narrow_layout_keeps_lines_within_terminal_margin
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..12).map { |i| "line-#{i}" }, cols: 60, rows: 24))
+
+    output.lines.each do |line|
+      assert_operator line.chomp.length, :<=, 59
+    end
+    assert_match(/\ARED ·/, output.lines.first)
   end
 
   def test_sanitizes_ansi_sequences_from_diagnostic_text

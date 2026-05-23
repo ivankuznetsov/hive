@@ -205,6 +205,34 @@ class HiveStagesOpenPrTest < Minitest::Test
     assert_equal [ "gh", "pr", "close", "https://example.com/pr/5" ], calls[3]
   end
 
+  def test_remediate_secret_leak_warns_when_scrub_fails
+    failing_capture = ->(*_argv) { raise Hive::GhError, "network down" }
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, failing_capture) do
+      _out, err = capture_io do
+        Hive::Stages::OpenPr.remediate_secret_leak!("https://example.com/pr/9")
+      end
+
+      assert_includes err, "failed to scrub leaked PR https://example.com/pr/9"
+      assert_includes err, "Hive::GhError: network down"
+      assert_includes err, "manually edit and close it before resuming"
+    end
+  end
+
+  def test_remediate_orphan_pr_warns_when_close_fails
+    failing_capture = ->(*_argv) { raise Hive::GhError, "network down" }
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, failing_capture) do
+      _out, err = capture_io do
+        Hive::Stages::OpenPr.remediate_orphan_pr!("https://example.com/pr/10")
+      end
+
+      assert_includes err, "failed to close rejected PR https://example.com/pr/10"
+      assert_includes err, "Hive::GhError: network down"
+      assert_includes err, "manually inspect it before resuming"
+    end
+  end
+
   def test_handle_secret_scan_result_records_fetch_failure_and_hits
     with_tmp_dir do |root|
       task = make_task(root)

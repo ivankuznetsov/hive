@@ -32,6 +32,14 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state, cols: cols, rows: rows)
   end
 
+  def state_with_log(lines, offset: 0)
+    model_for(row).red_status_detail_state.with(
+      log_path: "/tmp/red-task/logs/review.log",
+      log_lines: lines,
+      log_scroll_offset: offset
+    )
+  end
+
   def test_renders_user_facing_summary_with_two_actions
     diagnostic = {
       "summary" => "The review fixer stopped before tests completed."
@@ -92,21 +100,81 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_match(/\ARED ·/, header)
   end
 
-  def test_reason_panel_renders_inside_rounded_border
+  def test_body_renders_inside_rounded_border
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
     panel_top = output.lines.find { |line| line.start_with?("╭") || line.start_with?("+") }
 
-    refute_nil panel_top, "reason block must render as a bordered panel"
-    assert_includes output, "Marker: review_error phase=fix pass=2"
-    assert_includes output, "Status: Needs recovery"
+    refute_nil panel_top, "detail body must render as a bordered panel"
+    assert_includes output, "Task needs attention"
+    assert_includes output, "Why:"
   end
 
-  def test_reason_panel_uses_outer_width_minus_border_for_content
+  def test_body_border_uses_outer_width_minus_border_for_content
     model = model_for(row).with(cols: 100)
     output = Hive::Tui::Views::RedStatusDetail.render(model)
     panel_top = output.lines.find { |line| line.start_with?("╭") || line.start_with?("+") }.to_s.chomp
 
     assert_operator panel_top.length, :<=, 99
+  end
+
+  def test_log_panel_renders_trailing_lines_with_height_budget
+    lines = (1..50).map { |i| "line-#{i}" }
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log(lines), 80, 10)
+
+    assert_includes panel, "Log · last 8 of 50 lines"
+    assert_includes panel, "line-43"
+    assert_includes panel, "line-50"
+    refute_includes panel, "line-42"
+  end
+
+  def test_log_panel_scroll_offset_moves_window_toward_older_lines
+    lines = (1..50).map { |i| "line-#{i}" }
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log(lines, offset: 5), 80, 10)
+
+    assert_includes panel, "line-38"
+    assert_includes panel, "line-45"
+    refute_includes panel, "line-46"
+  end
+
+  def test_log_panel_clamps_offset_to_available_lines
+    lines = (1..12).map { |i| "line-#{i}" }
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log(lines, offset: 100), 80, 10)
+
+    assert_includes panel, "line-1"
+    assert_includes panel, "line-8"
+    refute_includes panel, "line-9"
+  end
+
+  def test_log_panel_returns_nil_when_log_lines_empty
+    assert_nil Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log([]), 80, 10)
+  end
+
+  def test_render_omits_log_panel_when_no_log_lines_exist
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+
+    refute_includes output, "Log ·"
+  end
+
+  def test_render_includes_log_panel_when_log_lines_fit
+    state = state_with_log((1..20).map { |i| "line-#{i}" })
+    model = Hive::Tui::Model.initial.with(
+      mode: :red_status_detail,
+      red_status_detail_state: state,
+      cols: 100,
+      rows: 30
+    )
+
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
+
+    assert_includes output, "Log · last"
+    assert_includes output, "line-20"
+  end
+
+  def test_log_panel_sanitizes_ansi_sequences
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log([ "\e[31mbad\e[0m" ]), 80, 5)
+
+    refute_includes panel, "\e["
+    assert_includes panel, "bad"
   end
 
   def test_sanitizes_ansi_sequences_from_diagnostic_text

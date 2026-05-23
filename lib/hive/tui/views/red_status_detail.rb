@@ -3,6 +3,7 @@ require "hive/tui/model"
 require "hive/tui/red_status_detail_keys"
 require "hive/tui/styles"
 require "hive/tui/text"
+require "hive/tui/log_tail"
 require "hive/tui/views/format"
 
 module Hive
@@ -47,7 +48,6 @@ module Hive
           body_lines << ""
           body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
           body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
-          body_lines << Styles::HINT.render(truncate(reason_meta(row), inner_width))
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
           body_lines << ""
           body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
@@ -63,6 +63,7 @@ module Hive
           reserved = footer_lines.size + 1 # footer + leading blank
           reserved += 1 if flash_line
           inner_body_height = [ body_height - reserved, 1 ].max
+          append_log_preview(body_lines, state, inner_width, inner_body_height)
           visible = body_lines.first(inner_body_height)
           visible << ""
           visible << flash_line if flash_line
@@ -75,6 +76,18 @@ module Hive
                   end
 
           Lipgloss.join_vertical(Lipgloss::TOP, header_bar(row, header_width), panel)
+        end
+
+        def append_log_preview(body_lines, state, inner_width, inner_body_height)
+          return if Array(state.log_lines).empty?
+
+          available = inner_body_height - body_lines.length - 1
+          return if available < 5
+
+          if (panel = log_panel(state, inner_width, available - 1))
+            body_lines << ""
+            body_lines.concat(panel.lines.map(&:chomp))
+          end
         end
 
         def footer_lines_for(inner_width)
@@ -126,6 +139,27 @@ module Hive
           return truncate(first, width) if width < prefix.length
 
           prefix + truncate(project_stage, width - prefix.length)
+        end
+
+        def log_panel(state, outer_width, height_budget)
+          lines = Array(state.log_lines)
+          return nil if lines.empty?
+
+          content_width = [ outer_width - 2, 1 ].max
+          capacity = [ height_budget.to_i - 2, 1 ].max
+          offset = clamp_log_offset(state.log_scroll_offset, lines.length, capacity)
+          end_index = [ lines.length - offset, 0 ].max
+          start_index = [ end_index - capacity, 0 ].max
+          visible = lines[start_index...end_index] || []
+          body = visible.map { |line| truncate(safe(Hive::Tui::LogTail::Formatter.format(line)), content_width) }.join("\n")
+          title = Styles::HEADER.render(truncate("Log · last #{visible.length} of #{lines.length} lines", outer_width))
+          border = Styles::PANEL_BORDER.width(content_width).render(body)
+          Lipgloss.join_vertical(Lipgloss::TOP, title, border)
+        end
+
+        def clamp_log_offset(offset, line_count, capacity)
+          max = [ line_count - capacity, 0 ].max
+          [[ offset.to_i, 0 ].max, max].min
         end
 
         def reason_meta(row)

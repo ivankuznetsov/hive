@@ -198,6 +198,14 @@ class InitPromptsTest < Minitest::Test
     assert_match(/unknown brainstorm runtime "warm_pool"/, output.string)
   end
 
+  def test_interactive_brainstorm_runtime_index_out_of_range_reprompts
+    raw = ([ "", "7", "2" ] + ([ "" ] * 15)).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(raw)
+    answers = prompts.collect
+    assert_equal "tmux_interactive", answers["brainstorm_runtime"]
+    assert_match(/unknown brainstorm runtime "7"/, output.string)
+  end
+
   def test_interactive_brainstorm_runtime_skipped_for_non_claude_planning_agent
     prompts, output = make_prompts(interactive_input(planning: "codex", brainstorm_runtime: "tmux_interactive"))
     answers = prompts.collect
@@ -293,6 +301,14 @@ class InitPromptsTest < Minitest::Test
     answers = prompts.collect
     assert_equal "safetyist", answers["triage_bias"]
     assert_match(/unknown triage bias "bad"/, output.string)
+  end
+
+  def test_interactive_triage_bias_index_out_of_range_reprompts
+    input = ([ "", "", "", "", "7", "2" ] + ([ "" ] * 12)).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(input)
+    answers = prompts.collect
+    assert_equal "safetyist", answers["triage_bias"]
+    assert_match(/unknown triage bias "7"/, output.string)
   end
 
   def test_interactive_triage_bias_accepts_mixed_case_name
@@ -442,6 +458,14 @@ class InitPromptsTest < Minitest::Test
     prompts, _output = make_prompts(interactive_input(autostart: "y"))
     answers = prompts.collect
     assert_equal true, answers["daemon_autostart"]
+  end
+
+  def test_interactive_daemon_autostart_unknown_reprompts
+    input = ([ "" ] * 15 + [ "maybe", "y", "" ]).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(input)
+    answers = prompts.collect
+    assert_equal true, answers["daemon_autostart"]
+    assert_match(/please answer y or n/, output.string)
   end
 
   def test_non_tty_default_includes_triage_bias_courageous

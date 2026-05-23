@@ -63,6 +63,9 @@ class ClaudeModeDispatchTest < Minitest::Test
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
         assert_equal "hive-3-plan-dispatch-test", captured[0][:kwargs][:session_name]
+        # G3: plan uses the narrow allowed_tools set (no Bash/Glob/Grep) —
+        # planning operates on prose, not the worktree.
+        assert_equal "Read,Write,Edit,LS", captured[0][:kwargs][:allowed_tools]
       end
     end
   end
@@ -171,6 +174,10 @@ class ClaudeModeDispatchTest < Minitest::Test
         assert_equal [ :claude, :claude ], captured.map { |call| call[:launcher] }
         assert_equal "hive-5-open-pr-dispatch-test", captured[0][:kwargs][:session_name]
         assert_equal "hive-8-finalize-dispatch-test", captured[1][:kwargs][:session_name]
+        # G3: open-pr and finalize both need the WIDE allowed_tools set
+        # (Bash/Glob/Grep) — they read the worktree and run git/gh.
+        assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[0][:kwargs][:allowed_tools]
+        assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[1][:kwargs][:allowed_tools]
       end
     end
   end
@@ -188,6 +195,28 @@ class ClaudeModeDispatchTest < Minitest::Test
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
         assert_equal "hive-7-artifacts-dispatch-test", captured[0][:kwargs][:session_name]
+        # G3: artifacts is on the WIDE allowed_tools set — it inspects
+        # the worktree to gather artifact paths.
+        assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[0][:kwargs][:allowed_tools]
+      end
+    end
+  end
+
+  # G3: brainstorm via the new claude-on-tmux path lands the narrow
+  # allowed_tools set. A copy-paste regression that widened brainstorm
+  # to Bash would extend the prompt-injection blast radius from idea.md
+  # to the project worktree — pin the narrow set explicitly.
+  def test_brainstorm_claude_tmux_uses_narrow_allowed_tools
+    with_tmp_dir do |dir|
+      cfg = { "claude" => { "mode" => "tmux" } }
+      task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
+      File.write(File.join(task.folder, "idea.md"), "test idea")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Brainstorm.run!(task, cfg)
+
+        assert_equal :claude, captured.fetch(0).fetch(:launcher)
+        assert_equal "Read,Write,Edit,LS", captured[0][:kwargs][:allowed_tools]
       end
     end
   end

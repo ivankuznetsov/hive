@@ -200,6 +200,56 @@ class ClaudeLauncherTest < Minitest::Test
     assert_operator name.bytesize, :<=, 250
   end
 
+  # G5: enumerate every stage_short_name the orchestrator passes to
+  # tmux_session_name. A copy-paste regression that re-used another
+  # stage's short name (e.g. review-fix-pass1 vs review-pass1) would
+  # produce a session-name collision when the runner tried to keep both
+  # alive across a pass; pin the per-stage uniqueness contract.
+  def test_tmux_session_names_are_unique_across_orchestrator_call_sites
+    task = Struct.new(:slug, :folder, :stage_name).new("slug-260522-abcd", "/tmp", "_")
+    names = [
+      "2-brainstorm",
+      "3-plan",
+      "4-execute",
+      "5-open-pr",
+      "7-artifacts",
+      "8-finalize",
+      "6-review-pass1",
+      "6-review-pass2",
+      "6-review-fix-pass1",
+      "6-review-fix-pass2",
+      "6-review-triage-pass1",
+      "6-review-ci-fix-attempt1",
+      "6-review-ci-fix-attempt2",
+      "6-review-browser-pass1-attempt1",
+      "6-review-browser-pass1-attempt2"
+    ].map { |stage| Hive::ClaudeLauncher.tmux_session_name(stage, task) }
+
+    assert_equal names.size, names.uniq.size,
+                 "every stage_short_name must map to a unique tmux session name: " \
+                 "duplicates=#{names.tally.select { |_, n| n > 1 }.keys.inspect}"
+  end
+
+  # G5: a long slug that shares a 250-byte prefix with another slug
+  # must produce distinct session names when the stage component
+  # differs. Conversely, two long slugs that share the same stage
+  # name AND a 250-byte prefix will collide — that's an explicit
+  # operator-visible failure mode pinned here so a future refactor
+  # doesn't silently change it (e.g. by hashing the tail).
+  def test_tmux_session_names_collide_on_shared_prefix_within_same_stage
+    long_slug = "a" * 300
+    task = Struct.new(:slug, :folder, :stage_name).new(long_slug, "/tmp", "2-brainstorm")
+    name_a = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
+
+    other_task = Struct.new(:slug, :folder, :stage_name).new("#{long_slug}-DIFFERENT-TAIL",
+                                                              "/tmp", "2-brainstorm")
+    name_b = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", other_task)
+
+    assert_equal name_a, name_b,
+                 "long slugs sharing a 250-byte prefix collide within the same stage " \
+                 "(operator responsibility — pinned as an explicit behavior contract)"
+  end
+
   private
 
   def with_tmp_task(stage: "2-brainstorm")

@@ -21,11 +21,16 @@ module Hive
     # long-running agent whose agent_start scrolled past the recent-events
     # tail still renders honestly.
     CURRENT_AGENT_WALK_LINES = 200
-    # Read this many trailing bytes when recovering recent events. Small
-    # enough that emit cost stays sub-millisecond on a long log; large
-    # enough that CURRENT_AGENT_WALK_LINES fits comfortably for our
-    # ~140-char records (16 KiB ≈ 100 records minimum).
+    # Baseline trailing-byte read window. We scale this up when the caller
+    # asks for more lines than STATUS_TAIL_LINES so the walk honors
+    # CURRENT_AGENT_WALK_LINES even when records grow past the assumed
+    # average (~140 chars → 100 records per 16 KiB).
     STATUS_TAIL_BYTES = 16 * 1024
+    # Upper bound on per-emit message size before the record is encoded.
+    # Keeps the full JSON line well below the single-write append budget
+    # so concurrent emitters cannot interleave bytes within a record.
+    MAX_MESSAGE_BYTES = 1024
+    MESSAGE_TRUNCATION_SUFFIX = "…[truncated]".freeze
 
     EM_DASH = "—".freeze
 
@@ -33,10 +38,12 @@ module Hive
 
     # Append-only event log for task-local lifecycle observability.
     #
-    # Each emit performs one O_APPEND write of a short JSON line. POSIX
-    # guarantees atomic append positioning for this form; keep records small
-    # and single-write so concurrent emitters cannot interleave bytes within a
-    # line. status.md is derived state and is rewritten with atomic rename.
+    # Each emit issues one O_APPEND syswrite of a short JSON line so the
+    # write reaches the kernel as a single write(2) call. On Linux ext4/xfs
+    # an O_APPEND single-syscall append is atomic against concurrent
+    # appenders via the inode lock; we cap message size (see
+    # MAX_MESSAGE_BYTES) so the full line stays small and well-defined.
+    # status.md is derived state and is rewritten with atomic rename.
     def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil)
       event_type = event_type.to_sym
       unless EVENT_TYPES.include?(event_type)
@@ -49,24 +56,34 @@ module Hive
         "stage" => stage.to_s,
         "agent" => agent.nil? ? nil : agent.to_s,
         "event_type" => event_type.to_s,
-        "message" => message.nil? ? nil : message.to_s
+        "message" => message.nil? ? nil : truncate_message(message.to_s)
       }
 
       FileUtils.mkdir_p(task_folder)
       events_path = File.join(task_folder, "events.jsonl")
-      # Single-write append so POSIX append-atomicity for sub-PIPE_BUF
-      # writes (~4 KiB) holds across concurrent emitters; the docstring's
-      # "one O_APPEND write" guarantee would be void if we split the JSON
-      # payload and the trailing newline into two writes.
+      # syswrite issues a single write(2) so the JSON payload + trailing
+      # newline arrive at the kernel in one call; splitting that into two
+      # writes would void the single-syscall atomicity assumption above.
       line = "#{JSON.generate(record)}\n"
       File.open(events_path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
-        file.write(line)
+        file.syswrite(line)
       end
       render_status!(task_folder, record)
       record
     rescue SystemCallError => e
       warn "[hive.events] failed to emit #{event_type} for #{task_folder}: #{e.class}: #{e.message}"
       nil
+    end
+
+    def truncate_message(message)
+      return message if message.bytesize <= MAX_MESSAGE_BYTES
+
+      # Trim by byte budget while staying on a valid UTF-8 boundary so the
+      # JSON generator never sees malformed UTF-8 mid-character.
+      budget = MAX_MESSAGE_BYTES - MESSAGE_TRUNCATION_SUFFIX.bytesize
+      trimmed = message.byteslice(0, budget).to_s
+      trimmed.scrub!("")
+      "#{trimmed}#{MESSAGE_TRUNCATION_SUFFIX}"
     end
 
     def render_status!(task_folder, last_record)
@@ -119,17 +136,18 @@ module Hive
     end
 
     # Read up to `limit` trailing events without materializing the whole
-    # file. Reads the last STATUS_TAIL_BYTES, splits on newlines, and
-    # parses each line. Skips unparseable lines (e.g. a torn final write
-    # that the reader observes before the writer's append completes —
-    # the emit itself is atomic, but the very last record may not yet
-    # have its trailing newline visible to other processes on some FS).
+    # file. Reads a trailing slice scaled to the requested line count,
+    # splits on newlines, and parses each line. Skips unparseable lines
+    # (e.g. a torn final write that the reader observes before the
+    # writer's append completes — the emit itself is atomic, but the
+    # very last record may not yet have its trailing newline visible to
+    # other processes on some FS).
     def read_recent_events(path, limit)
       return [] unless File.exist?(path)
 
       File.open(path, "rb") do |file|
         size = file.size
-        offset = [ size - STATUS_TAIL_BYTES, 0 ].max
+        offset = [ size - tail_byte_window(limit), 0 ].max
         file.seek(offset)
         chunk = file.read
         next [] unless chunk
@@ -150,6 +168,18 @@ module Hive
       end
     rescue SystemCallError
       []
+    end
+
+    # Scale the read window with the caller's line budget so a
+    # CURRENT_AGENT_WALK_LINES=200 walk over heavier records (e.g.
+    # 300-byte review-stage messages) still surfaces enough lines.
+    # STATUS_TAIL_BYTES is sized for STATUS_TAIL_LINES at the assumed
+    # ~140-char average; widen it when the requested limit overshoots.
+    def tail_byte_window(limit)
+      return STATUS_TAIL_BYTES if limit <= STATUS_TAIL_LINES
+
+      scale_factor = (limit.to_f / STATUS_TAIL_LINES).ceil
+      STATUS_TAIL_BYTES * scale_factor
     end
 
     def write_atomic(path, body)

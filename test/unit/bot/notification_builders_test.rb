@@ -90,6 +90,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal "Ask Codex", notification.keyboard[1].first[:text]
   end
 
+  def test_generic_needs_input_marker_builds_details_and_laptop_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" })
+    )
+
+    assert_match(/Needs input: agent_waiting reason=operator/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Show details", "Open laptop" ], labels
+  end
+
   def test_compacted_callback_round_trips
     long_slug = "slug-" + ("a" * 80)
     notification = Hive::Bot::NotificationBuilders.build(

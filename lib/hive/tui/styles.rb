@@ -81,6 +81,13 @@ module Hive
       # Header line — bold default-fg. Works on monochrome terminals.
       HEADER = Lipgloss::Style.new.bold(true)
 
+      # Red-status detail header — bold red foreground so recovery
+      # urgency matches the grid's red action-key palette.
+      RECOVERY_HEADER_BAR = Lipgloss::Style.new
+        .foreground(color(:red))
+        .bold(true)
+        .freeze
+
       # Cursor row indicator: reverse video. Chosen because it survives
       # monochrome / 16-color / TrueColor consistently — the brainstorm's
       # "Linux way" hardware floor doesn't assume color is available.
@@ -102,6 +109,9 @@ module Hive
       # it recedes against the active grid content.
       HINT = Lipgloss::Style.new.faint(true)
 
+      ACTION_CHIP_PRIMARY = Lipgloss::Style.new.reverse(true).freeze
+      ACTION_CHIP_MUTED = Lipgloss::Style.new.faint(true).freeze
+
       # ---- v2 two-pane border styles ----
       # Both panes carry a rounded border. The focused pane uses a bright
       # cyan accent; the inactive pane uses faint default-fg so the
@@ -117,6 +127,9 @@ module Hive
         .border(Lipgloss::ROUNDED_BORDER)
         .border_foreground(color(:bright_black))
         .freeze
+
+      # Recovery detail panels use the same dim border as inactive panes.
+      PANEL_BORDER = PANE_DIM_BORDER
     end
   end
 end

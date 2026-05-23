@@ -5493,6 +5493,65 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_red_status_detail_captures_last_50_lines_from_latest_log
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-tail-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "review-fix-pass02.log")
+      File.write(log_path, (1..100).map { |i| "line-#{i}" }.join("\n") + "\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: "review_error",
+        attrs: { "pass" => "2" }, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: { "summary" => "review failed", "marker_signature" => "sig" }
+      )
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      state = @model.hive_model.red_status_detail_state
+
+      assert_nil cmd
+      assert_equal :red_status_detail, @model.hive_model.mode
+      assert_equal log_path, state.log_path
+      assert_equal 50, state.log_lines.length
+      assert_equal "line-51", state.log_lines.first
+      assert_equal "line-100", state.log_lines.last
+      assert_equal 0, state.log_scroll_offset
+    end
+  end
+
+  def test_open_red_status_detail_omits_log_state_when_no_log_exists
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-no-log-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      FileUtils.mkdir_p(task_folder)
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: "review_error",
+        attrs: { "pass" => "2" }, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: { "summary" => "review failed", "marker_signature" => "sig" }
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      state = @model.hive_model.red_status_detail_state
+
+      assert_equal :red_status_detail, @model.hive_model.mode
+      assert_nil state.log_path
+      assert_equal [], state.log_lines
+    end
+  end
+
   # F3: Tail#poll! was never called — the view was frozen at the
   # bytes read by Tail#open!. open_log_tail now schedules a recurring
   # LOG_TAIL_POLL tick; the handler calls tail.poll! and reschedules

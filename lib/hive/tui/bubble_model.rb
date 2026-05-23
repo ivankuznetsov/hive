@@ -1360,6 +1360,41 @@ module Hive
         [ flashed("log file gone"), nil ]
       end
 
+      # Resolve the configured development-agent label and capture a
+      # bounded latest-log snapshot for the detail screen. Both reads
+      # stay in BubbleModel so Update remains filesystem-free.
+      def open_red_status_detail(message)
+        row = message.row
+        label = resolve_agent_label(row)
+        log_path, log_lines = red_status_detail_log_snapshot(row)
+        new_message = Hive::Tui::Messages::OpenRedStatusDetail.new(
+          row: row,
+          agent_label: label
+        )
+        new_model, _cmd = Hive::Tui::Update.apply(@hive_model, new_message)
+        state = new_model.red_status_detail_state.with(
+          log_path: log_path,
+          log_lines: log_lines,
+          log_scroll_offset: 0
+        )
+        [ new_model.with(red_status_detail_state: state), nil ]
+      end
+
+      def red_status_detail_log_snapshot(row)
+        task = Hive::Task.new(row.folder)
+        log_path = Hive::Tui::LogTail::FileResolver.latest_in_dirs(
+          [ task.log_dir, File.join(task.folder, "logs") ]
+        )
+        tail = Hive::Tui::LogTail::Tail.new(log_path, ring_capacity: 50, backbuffer_bytes: 64 * 1024)
+        tail.open!
+        [ log_path, tail.lines(50) ]
+      rescue Hive::NoLogFiles, Hive::InvalidTaskPath, Errno::ENOENT, Errno::EACCES, Errno::EBADF, Errno::EIO => e
+        Hive::Tui::Debug.log("red_status_detail", "log snapshot skipped: #{e.class.name.split('::').last}")
+        [ nil, [] ]
+      ensure
+        tail&.close!
+      end
+
       # Foreground takeover: open the row's input target in $EDITOR
       # (with $VISUAL preferred over $EDITOR; vi as the final fallback)
       # so the operator can answer inline questions. For brainstorm
@@ -1491,25 +1526,6 @@ module Hive
           aliases: false
         ) || {}
         parsed.is_a?(Hash) ? parsed : {}
-      end
-
-      # Resolve the configured development-agent label for the detail
-      # screen, then delegate to Update so the model transition stays in
-      # the pure MVU layer. Lives here (not in Update or the view) so
-      # the no-I/O Update contract is preserved and the view stays a
-      # pure projection. Rescue list is intentionally broad — a corrupt
-      # project config (chmod 000, hand-edited YAML aliases, dangling
-      # path) must never crash the bubbletea runner when the user opens
-      # the detail screen; fall back to the canonical "your project's
-      # development agent" label instead. Plan Risk #4.
-      def open_red_status_detail(message)
-        label = resolve_agent_label(message.row)
-        new_message = Hive::Tui::Messages::OpenRedStatusDetail.new(
-          row: message.row,
-          agent_label: label
-        )
-        new_model, _cmd = Hive::Tui::Update.apply(@hive_model, new_message)
-        [ new_model, nil ]
       end
 
       def resolve_agent_label(row)

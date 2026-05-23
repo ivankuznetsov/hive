@@ -20,6 +20,17 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
   end
 
+  FakeSequencePidRunner = Struct.new(:pids) do
+    def pane_pid
+      pids.shift
+    end
+  end
+
+  FakePidTmuxErrorRunner = Struct.new(:name) do
+    def pane_pid
+      raise Hive::TmuxError, "pane gone"
+    end
+  end
 
   FakeNeverReadyRunner = Struct.new(:name) do
     def session_exists?
@@ -164,6 +175,39 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
   end
 
+  def test_orphan_sweep_logging_ignores_missing_task_folder
+    with_tmp_dir do |dir|
+      task = Struct.new(:folder).new(File.join(dir, "missing"))
+      status_ok = fake_status(success: true, exitstatus: 0)
+
+      assert_nil Hive::Stages::BrainstormTmux.log_orphan_sweep(task, "123 claude", "", "", status_ok)
+      assert_nil Hive::Stages::BrainstormTmux.log_orphan_sweep_warning(task, "pgrep failed")
+    end
+  end
+
+  def test_rotate_orphan_sweep_log_ignores_write_failures
+    with_tmp_dir do |dir|
+      path = File.join(dir, "brainstorm-tmux-orphan-sweep.log")
+      File.write(path, "x" * Hive::Stages::BrainstormTmux::ORPHAN_SWEEP_LOG_MAX_BYTES)
+
+      with_replaced_singleton_method(File, :write, ->(*_args) { raise Errno::EACCES, "blocked" }) do
+        assert_nil Hive::Stages::BrainstormTmux.rotate_orphan_sweep_log(path)
+      end
+    end
+  end
+
+  def test_cleanup_scratch_ignores_permission_failures
+    with_tmp_dir do |dir|
+      scratch = File.join(dir, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(scratch))
+      File.write(scratch, "{}")
+
+      with_replaced_singleton_method(File, :delete, ->(_path) { raise Errno::EACCES, "blocked" }) do
+        assert_nil Hive::Stages::BrainstormTmux.cleanup_scratch(scratch)
+      end
+    end
+  end
+
   def test_cleanup_scratch_deletes_settings_file_and_empty_dir
     with_tmp_dir do |dir|
       scratch = File.join(dir, ".claude", "settings.json")
@@ -211,6 +255,39 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     ensure
       Hive::Lock.release_task_lock(task.folder)
     end
+  end
+
+  def test_record_claude_pid_retries_until_pid_is_available
+    with_tmp_task_folder do |task|
+      Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
+      sleeps = []
+      runner = FakeSequencePidRunner.new([ nil, 12_346 ])
+
+      with_replaced_singleton_method(Hive::Stages::BrainstormTmux, :sleep, ->(seconds) { sleeps << seconds }) do
+        Hive::Stages::BrainstormTmux.record_claude_pid(task, runner)
+      end
+
+      lock = YAML.safe_load(File.read(File.join(task.folder, ".lock")))
+      assert_equal 12_346, lock.fetch("claude_pid")
+      assert_equal [ 0.05 ], sleeps
+    ensure
+      Hive::Lock.release_task_lock(task.folder)
+    end
+  end
+
+  def test_record_claude_pid_ignores_tmux_errors
+    with_tmp_task_folder do |task|
+      assert_nil Hive::Stages::BrainstormTmux.record_claude_pid(task, FakePidTmuxErrorRunner.new("broken"))
+    end
+  end
+
+  def test_ready_wait_timeout_uses_legacy_env_override
+    old = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]
+    ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = "0.25"
+
+    assert_in_delta 0.25, Hive::Stages::BrainstormTmux.ready_wait_timeout, 0.001
+  ensure
+    old.nil? ? ENV.delete("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC") : ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = old
   end
 
   def test_prepare_claude_session_confirms_trust_prompt_before_ready
@@ -327,6 +404,14 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   end
 
   private
+
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.singleton_class.instance_method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.singleton_class.send(:define_method, name, original) if original
+  end
 
   def fake_status(success:, exitstatus:)
     Struct.new(:success_value, :exitstatus) do

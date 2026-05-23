@@ -179,6 +179,40 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "line-20"
   end
 
+  def test_artifacts_block_returns_nil_when_empty
+    assert_nil Hive::Tui::Views::RedStatusDetail.artifacts_block(row(diagnostic: { "artifact_paths" => [] }), 80)
+  end
+
+  def test_artifacts_block_lists_available_paths
+    diagnostic = { "artifact_paths" => [ "/tmp/a.md", "/tmp/b.md", "/tmp/c.md" ] }
+    block = Hive::Tui::Views::RedStatusDetail.artifacts_block(row(diagnostic: diagnostic), 80)
+
+    assert_includes block, "Artifacts"
+    assert_includes block, "• /tmp/a.md"
+    assert_includes block, "• /tmp/b.md"
+    assert_includes block, "• /tmp/c.md"
+  end
+
+  def test_artifacts_block_caps_list_and_shows_remainder_count
+    paths = (1..7).map { |i| "/tmp/artifact-#{i}.md" }
+    block = Hive::Tui::Views::RedStatusDetail.artifacts_block(
+      row(diagnostic: { "artifact_paths" => paths }),
+      80
+    )
+
+    assert_includes block, "/tmp/artifact-5.md"
+    refute_includes block, "/tmp/artifact-6.md"
+    assert_includes block, "… (2 more)"
+  end
+
+  def test_render_omits_artifacts_section_when_empty
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: { "artifact_paths" => [] })))
+
+    refute_includes output, "Artifacts"
+    refute_includes output, "Artifacts: none"
+  end
+
+
   def test_log_panel_sanitizes_ansi_sequences
     panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log([ "\e[31mbad\e[0m" ]), 80, 5)
 

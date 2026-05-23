@@ -80,7 +80,7 @@ module Hive
           body_lines << truncate("[Enter] Recover — re-run hive's automated recovery for this task", inner_width)
           body_lines << truncate("[o]     Open in agent — launch #{safe(state.agent_label || AGENT_FALLBACK)} in the task worktree", inner_width)
 
-          append_artifacts(body_lines, artifact_lines(row, inner_width), inner_body_height)
+          append_artifacts(body_lines, artifacts_block(row, inner_width), inner_body_height)
           append_log_preview(body_lines, state, inner_width, inner_body_height)
 
           body_lines
@@ -99,13 +99,16 @@ module Hive
           end
         end
 
-        def append_artifacts(body_lines, artifact_lines, inner_body_height)
-          return if artifact_lines.empty?
+        def append_artifacts(body_lines, artifacts_block, inner_body_height)
+          return unless artifacts_block
+
+          artifact_lines = artifacts_block.lines.map(&:chomp)
           return if body_lines.length + artifact_lines.length + 1 > inner_body_height
 
           body_lines << ""
           body_lines.concat(artifact_lines)
         end
+
 
         def footer_lines_for(inner_width)
           return [ Styles::HINT.render(FOOTER) ] if FOOTER.length <= inner_width
@@ -185,15 +188,21 @@ module Hive
           "#{marker}  ·  Status: #{safe(row.action_label)}"
         end
 
-        def artifact_lines(row, width)
+        def artifacts_block(row, width)
           diagnostic = row.diagnostic || {}
           paths = Array(diagnostic["artifact_paths"]).map { |path| safe(path).strip }.reject(&:empty?)
-          return [] if paths.empty?
+          return nil if paths.empty?
 
           lines = [ Styles::HEADER.render(truncate("Artifacts", width)) ]
-          paths.each { |path| lines << truncate("- #{path}", width) }
-          lines
+          paths.first(5).each do |path|
+            lines << Styles::HINT.render(truncate("  • #{path}", width))
+          end
+          if paths.length > 5
+            lines << Styles::HINT.render(truncate("  • … (#{paths.length - 5} more)", width))
+          end
+          lines.join("\n")
         end
+
 
         def attrs_text(row)
           (row.attrs || {}).map { |key, value| "#{safe(key)}=#{safe(value)}" }.join(" ")

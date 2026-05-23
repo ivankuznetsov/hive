@@ -74,6 +74,20 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Findings::Document.new(path)
   end
 
+  def with_staged_image_attachment
+    staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
+    staging_path = File.join(staging_dir, "image-1.png")
+    File.binwrite(staging_path, "image".b)
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1",
+      staging_path: staging_path,
+      ext: "png"
+    )
+    yield(staging_dir, staging_path, attachment)
+  ensure
+    Hive::Tui::ComposerStaging.cleanup!(staging_dir) if staging_dir && File.exist?(staging_dir)
+  end
+
   # ---- Construction / init ----
 
   def test_init_returns_self_and_yield_tick
@@ -1471,6 +1485,66 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :new_idea, @model.hive_model.mode
     assert_equal [ "image1" ], @model.hive_model.new_idea_broken_labels
     assert_match(/broken image placeholder: image1/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_new_idea_submission_with_chosen_project_missing_bounces_to_picker
+    with_staged_image_attachment do |staging_dir, staging_path, attachment|
+      snap = Hive::Tui::Snapshot.from_payload(
+        "generated_at" => "2026-05-06",
+        "projects" => [ { "name" => "alpha", "tasks" => [] } ]
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(
+          mode: :new_idea,
+          snapshot: snap,
+          scope: 0,
+          new_idea_project_name: "ghost",
+          new_idea_buffer: "see [image1]",
+          new_idea_cursor: 12,
+          new_idea_attachments: [ attachment ],
+          new_idea_staging_dir: staging_dir
+        ),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+      assert_equal :new_idea_project, @model.hive_model.mode
+      assert_nil @model.hive_model.new_idea_project_name
+      assert_equal "see [image1]", @model.hive_model.new_idea_buffer
+      assert_equal [ attachment ], @model.hive_model.new_idea_attachments
+      assert File.exist?(staging_path), "staged image must survive the project re-pick bounce"
+      assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s)
+    end
+  end
+
+  def test_rich_new_idea_submission_with_unhealthy_explicit_scope_preserves_compose_state
+    with_staged_image_attachment do |staging_dir, staging_path, attachment|
+      snap = Hive::Tui::Snapshot.from_payload(
+        "generated_at" => "2026-05-06",
+        "projects" => [ { "name" => "broken", "error" => "missing_project_path", "tasks" => [] } ]
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(
+          mode: :new_idea,
+          snapshot: snap,
+          scope: 1,
+          new_idea_buffer: "see [image1]",
+          new_idea_cursor: 12,
+          new_idea_attachments: [ attachment ],
+          new_idea_staging_dir: staging_dir
+        ),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+      assert_equal :new_idea, @model.hive_model.mode
+      assert_equal "see [image1]", @model.hive_model.new_idea_buffer
+      assert_equal [ attachment ], @model.hive_model.new_idea_attachments
+      assert File.exist?(staging_path), "staged image must survive explicit-scope project failure"
+      assert_match(/"broken".*missing project path/i, @model.hive_model.flash.to_s)
+    end
   end
 
   def test_new_idea_text_edit_clears_broken_placeholder_highlight

@@ -728,8 +728,11 @@ class TuiKeyMapMessageForTest < Minitest::Test
     msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "s", row: row)
 
     assert_kind_of Hive::Tui::Messages::Flash, msg
-    assert_match(/\bo\b/, msg.text)
-    assert_match(/open in agent/i, msg.text)
+    # Pin the exact s-key copy so the s-key-specific nudge stays
+    # divergent from the generic f/R refusal — a regression that
+    # collapses both into `red_status_detail_hint` would slip through a
+    # looser `/\bo\b/` match.
+    assert_equal "press o for Open in agent", msg.text
   end
 
   def test_enter_on_needs_input_opens_input_editor_when_command_present

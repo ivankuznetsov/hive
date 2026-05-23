@@ -82,6 +82,29 @@ class TuiHelpTest < Minitest::Test
     assert_match(/MANUAL_STEERING/, entry[:description])
   end
 
+  def test_red_status_detail_mode_pins_two_action_contract
+    # Pin the operator-visible contract for red_status_detail mode:
+    # exactly Enter / o / q / Esc — and the removed [f] / [R] bindings
+    # must NOT come back without an explicit help-overlay update.
+    entries = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :red_status_detail }
+    keys = entries.map { |b| b[:key] }
+
+    assert_equal %w[Enter o q Esc].sort, keys.sort,
+                 "red_status_detail mode must expose exactly Enter / o / q / Esc"
+
+    enter = entries.find { |b| b[:key] == "Enter" }
+    assert_equal :recover, enter[:action]
+    o_key = entries.find { |b| b[:key] == "o" }
+    assert_equal :open_in_agent, o_key[:action]
+    %w[Esc q].each do |k|
+      back = entries.find { |b| b[:key] == k }
+      assert_equal :back, back[:action], "#{k} in red_status_detail must close the screen"
+    end
+
+    refute_includes keys, "f", "removed [f] manual-fix binding must not return"
+    refute_includes keys, "R", "removed [R] refresh-diagnosis binding must not return"
+  end
+
   def test_capital_p_is_open_pr_lowercase_p_is_plan
     grid = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid }
     by_key = grid.each_with_object({}) { |b, h| h[b[:key]] = b[:action] }

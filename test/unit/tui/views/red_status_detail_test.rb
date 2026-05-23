@@ -18,13 +18,13 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
   end
 
   # The agent label is cached on RedStatusDetailState at open time
-  # (Update.apply_open_red_status_detail), so the view never does
-  # per-frame disk I/O. Tests pass the precomputed label directly,
-  # matching how production opens the screen.
+  # (BubbleModel#resolve_agent_label populates it before delegating to
+  # Update.apply), so the view never does per-frame disk I/O. Tests
+  # pass the precomputed label directly, matching how production opens
+  # the screen.
   def model_for(row, cols: 100, rows: 24, agent_label: "codex")
     state = Hive::Tui::Model::RedStatusDetailState.new(
       row: row,
-      marker_signature: "review_error",
       agent_label: agent_label
     )
     Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state, cols: cols, rows: rows)
@@ -75,13 +75,16 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
   end
 
   def test_falls_back_when_agent_label_is_missing
-    # Caller resolution failure surfaces as a nil agent_label on
-    # RedStatusDetailState (the rescue in resolve_agent_label is
-    # exercised in test_resolve_agent_label_*).
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, agent_label: nil))
+    # Caller resolution failure surfaces as the canonical AGENT_FALLBACK
+    # label on RedStatusDetailState (the rescue in BubbleModel
+    # #resolve_agent_label is exercised in bubble_model_test.rb). Pin
+    # via the constant so a future rewording of the fallback copy stays
+    # in one place.
+    fallback = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, agent_label: fallback))
 
     assert_includes output, "Open in agent"
-    assert_includes output, "your project's development agent"
+    assert_includes output, fallback
   end
 
   def test_recover_execute_rows_still_show_two_actions_with_enter_affordance
@@ -140,6 +143,28 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     refute_includes output, "pass=2"
   end
 
+  def test_marker_summary_pattern_passes_through_bare_uppercase_verdict
+    # `ABORTED` looks like the leading-token portion of a marker_summary
+    # but has no `key=value` attrs — the tightened regex requires at
+    # least one attrs token, so a legitimate bare upper-case verdict
+    # must survive unmodified.
+    diagnostic = { "summary" => "ABORTED" }
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: diagnostic)))
+
+    assert_includes output, "ABORTED"
+    refute_includes output, "Hive does not have a diagnosis yet"
+  end
+
+  def test_marker_summary_pattern_passes_through_legitimate_sentence
+    # A normal human-readable sentence shares no shape with the
+    # marker_summary pattern and must render verbatim.
+    diagnostic = { "summary" => "Build failed: out of memory" }
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: diagnostic)))
+
+    assert_includes output, "Build failed: out of memory"
+    refute_includes output, "Hive does not have a diagnosis yet"
+  end
+
   def test_renders_without_border_on_narrow_terminals
     # Below the 40-col threshold the border is skipped so the body
     # gets the full inner width. Plan Risk #5 — the dual-path render
@@ -177,41 +202,37 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
                     "the action-keys footer must always be on screen even when the body is truncated"
   end
 
-  def test_resolve_agent_label_blank_bin_uses_fallback
-    profile = Struct.new(:bin).new("")
-    label = nil
-    with_singleton_method_stub(Hive::Config, :load, ->(_root) { { "execute" => { "agent" => "claude" } } }) do
-      with_singleton_method_stub(Hive::AgentProfiles, :lookup, ->(_name, cfg:) { profile }) do
-        label = Hive::Tui::Views::RedStatusDetail.resolve_agent_label(row)
-      end
-    end
+  def test_footer_stacks_per_key_on_very_narrow_terminals
+    # At rows=6 the body is trimmed and at cols=40 the joined FOOTER
+    # (~52 chars) won't fit on one line — `truncate` would drop the
+    # tail and hide `[Esc] back`. The stacked-footer branch puts one
+    # key per line so every affordance stays visible.
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, cols: 40, rows: 12))
 
-    assert_equal Hive::Tui::Views::RedStatusDetail::AGENT_FALLBACK, label
+    assert_includes output, "[Enter] Recover",
+                    "narrow terminals must keep [Enter] Recover visible"
+    assert_includes output, "[o] Open in agent",
+                    "narrow terminals must keep [o] Open in agent visible"
+    assert_includes output, "[Esc] back",
+                    "narrow terminals must keep [Esc] back visible — the only documented dismiss affordance"
   end
 
-  def test_resolve_agent_label_falls_back_on_psych_error
-    # Malformed YAML raises Psych::SyntaxError from Config.load. The
-    # resolver must catch it so an unhealthy config can't crash the
-    # detail-screen open path. See plan Risk #4 / codex review row.
-    label = nil
-    with_singleton_method_stub(Hive::Config, :load, ->(_root) { raise Psych::SyntaxError.new("config.yml", 1, 1, 0, "bad", "context") }) do
-      label = Hive::Tui::Views::RedStatusDetail.resolve_agent_label(row)
-    end
+  def test_renders_flash_on_detail_screen
+    # KeyMap fires `Messages::Flash` for refusal keystrokes (e.g.,
+    # `s`/`f`/`R` muscle-memory drift in :red_status_detail). The flash
+    # must be visible without backing out to the grid — otherwise the
+    # documented refusal contract is invisible until dismiss.
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, agent_label: "codex")
+    model = Hive::Tui::Model.initial.with(
+      mode: :red_status_detail,
+      red_status_detail_state: state,
+      cols: 100, rows: 24,
+      flash: "press o for Open in agent",
+      flash_set_at: Time.now
+    )
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
 
-    assert_equal Hive::Tui::Views::RedStatusDetail::AGENT_FALLBACK, label
-  end
-
-  private
-
-  # Module-singleton stub with original-method restore. Used only by
-  # the two resolve_agent_label tests above; the render-path tests
-  # avoid stubbing module singletons entirely because the agent label
-  # is now cached on RedStatusDetailState at open time.
-  def with_singleton_method_stub(target, name, stub_proc)
-    original = target.method(name)
-    target.define_singleton_method(name, &stub_proc)
-    yield
-  ensure
-    target.define_singleton_method(name, original) if original
+    assert_includes output, "press o for Open in agent",
+                    "active flash must surface on the detail screen so refusal hints are observable"
   end
 end

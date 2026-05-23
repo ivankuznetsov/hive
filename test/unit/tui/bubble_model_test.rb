@@ -2222,6 +2222,63 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "no-recipe refusal must nudge operator toward the manual fallback")
   end
 
+  def test_red_status_autofix_from_detail_mode_closes_screen_on_recovery_success
+    # Happy-path pin for plan Unit 4: a recoverable recover_review row
+    # dispatched from :red_status_detail must flip the mode back to
+    # :grid and clear red_status_detail_state — same close-on-dispatch
+    # contract as the no-recipe refusal branch, with the synchronous
+    # "clearing…" flash still surfacing.
+    folder = "/tmp/hive/recover-detail"
+    row = make_task_row(
+      action_key: "recover_review", action_label: "Needs recovery",
+      slug: "recover-detail", stage: "6-review", folder: folder,
+      marker: "review_error", attrs: {}, suggested_command: nil
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+      dispatch: @dispatch
+    )
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RedStatusAutofix.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal :grid, @model.hive_model.mode
+    assert_nil @model.hive_model.red_status_detail_state
+    assert_match(/clearing/, @model.hive_model.flash.to_s)
+  end
+
+  def test_close_red_status_detail_on_dispatch_passes_through_in_grid_mode
+    # `dispatch_*_then_close_detail` wrappers also fire from grid mode
+    # (RedStatusAutofix from grid Enter, OpenInAgent from grid `s`).
+    # Pin the mode-guarded early-return so a grid-mode dispatch never
+    # rewrites cursor / scope / filter through the close branch.
+    row = make_task_row(
+      action_key: "recover_review", action_label: "Needs recovery",
+      slug: "grid-row", stage: "6-review", folder: "/tmp/hive/grid-row",
+      marker: "review_error", attrs: {}, suggested_command: nil
+    )
+    starting = @model.hive_model.with(mode: :grid, cursor: [ 0, 0 ], scope: 0, filter: "foo")
+    @model = Hive::Tui::BubbleModel.new(hive_model: starting, dispatch: @dispatch)
+
+    with_run_quiet_stub(->(_argv) { [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RedStatusAutofix.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal :grid, @model.hive_model.mode, "grid-mode autofix must leave mode unchanged"
+    assert_nil @model.hive_model.red_status_detail_state
+    assert_equal [ 0, 0 ], @model.hive_model.cursor, "cursor must be preserved on grid-mode pass-through"
+    assert_equal 0, @model.hive_model.scope
+    assert_equal "foo", @model.hive_model.filter
+  end
+
   def test_red_status_autofix_from_detail_mode_closes_screen_on_no_recipe
     # Pressing Enter from :red_status_detail on a row with no automatic
     # recovery still closes the screen — the operator's gesture was
@@ -2238,7 +2295,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       attrs: {},
       suggested_command: nil
     )
-    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "execute_stale")
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
       dispatch: @dispatch
@@ -3277,6 +3334,32 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_in_agent_from_detail_mode_closes_screen_on_success
+    # Happy-path pin for plan Unit 5: pressing `o` from
+    # :red_status_detail on a healthy task (worktree present, profile
+    # resolves) returns a non-nil takeover Cmd alongside a model whose
+    # mode is :grid and red_status_detail_state cleared. The takeover
+    # Cmd is preserved so the foreground suspend still fires; the
+    # close-on-dispatch contract guarantees the operator lands back on
+    # the grid after the agent exits.
+    with_manual_task_context do |_project_root, _hive_state, _folder, _state_file, _worktree_path, row|
+      profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
+      state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
+        dispatch: @dispatch
+      )
+
+      with_agent_profile_lookup_stub(->(_name, cfg:) { profile }) do
+        _, cmd = @model.update(Hive::Tui::Messages::OpenInAgent.new(row: row))
+
+        refute_nil cmd, "happy path must return a foreground-takeover Cmd"
+        assert_equal :grid, @model.hive_model.mode
+        assert_nil @model.hive_model.red_status_detail_state
+      end
+    end
+  end
+
   def test_open_in_agent_from_detail_mode_closes_screen_on_refusal
     # Pressing `o` from :red_status_detail closes the screen even
     # when the refusal branch fires (no worktree) — the operator
@@ -3284,7 +3367,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     # detail view. See plan Unit 5.
     with_manual_task_context(stage: "3-plan", worktree: false) do |_project_root, _hive_state, _folder, state_file, _worktree_path, row|
       profile = ManualProfileStub.new(bin: "codex", add_dir_flag: "--add-dir")
-      state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "x")
+      state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
       @model = Hive::Tui::BubbleModel.new(
         hive_model: Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state),
         dispatch: @dispatch
@@ -4840,6 +4923,34 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_zero_exit_does_not_flash_diagnostic
     @model.update(Hive::Tui::Messages::SubprocessExited.new(verb: "pr", exit_code: 0))
     assert_nil @model.hive_model.flash, "zero exit must not flash anything (success path is silent)"
+  end
+
+  def test_verb_status_zero_exit_is_silent
+    # The previous `verb == "status"` special case (handled the
+    # `hive status --diagnose --write` background spawn fired by the
+    # removed [R] refresh-diagnosis binding) is gone. Replacement
+    # behavior: status verb falls through to the standard zero-exit
+    # short-circuit and emits no flash.
+    @model.update(Hive::Tui::Messages::SubprocessExited.new(verb: "status", exit_code: 0))
+    assert_nil @model.hive_model.flash,
+               "zero-exit status verb must be silent (no diagnose-failure flash)"
+  end
+
+  def test_verb_status_nonzero_exit_falls_through_to_default_flash
+    with_isolated_subprocess_log do |log_path|
+      write_log_section(
+        log_path,
+        argv: %w[hive status --diagnose hello --write],
+        stderr: "some unknown error nobody patterns against",
+        exit_code: 1
+      )
+
+      @model.update(Hive::Tui::Messages::SubprocessExited.new(verb: "status", exit_code: 1))
+
+      flash = @model.hive_model.flash.to_s
+      assert_match(/exited 1/, flash, "non-zero status verb without specific diagnostic falls back to generic flash")
+      assert_match(/tail/, flash)
+    end
   end
 
   # Last-resort safety net: an unhandled exception escaping

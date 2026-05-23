@@ -35,10 +35,11 @@ module Hive
           return "" if state.nil?
 
           row = state.row
+          header_width = [ model.cols.to_i - 1, 1 ].max
           outer_width = [ model.cols.to_i - 2, 1 ].max
           bordered = model.cols.to_i >= 40
           inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
-          body_height = [ model.rows.to_i - 4, 1 ].max
+          body_height = [ model.rows.to_i - 5, 1 ].max
           footer_lines = footer_lines_for(inner_width)
 
           body_lines = []
@@ -66,9 +67,13 @@ module Hive
           visible << flash_line if flash_line
           visible.concat(footer_lines)
           body = Lipgloss.join_vertical(Lipgloss::TOP, *visible)
-          return body unless bordered
+          panel = if bordered
+                    Styles::PANE_FOCUSED_BORDER.width(inner_width).render(body)
+                  else
+                    body
+                  end
 
-          Styles::PANE_FOCUSED_BORDER.width(inner_width).render(body)
+          Lipgloss.join_vertical(Lipgloss::TOP, header_bar(row, header_width), panel)
         end
 
         def footer_lines_for(inner_width)
@@ -92,6 +97,34 @@ module Hive
           return nil if text.empty?
 
           Styles::HINT.render(truncate(text, inner_width))
+        end
+
+        def header_bar(row, width)
+          prefix = "RED · "
+          project_stage = "#{safe(row.project_name)}/#{safe(row.stage)}"
+          slug = safe(row.slug)
+          path = safe(row.worktree_path || row.folder)
+
+          line = header_line(prefix, project_stage, slug, path, width)
+          Styles::RECOVERY_HEADER_BAR.render(line)
+        end
+
+        def header_line(prefix, project_stage, slug, path, width)
+          first = "#{prefix}#{project_stage}"
+          with_slug = "#{first} · #{slug}"
+          with_path_prefix = "#{with_slug} · "
+
+          if with_path_prefix.length < width
+            return with_path_prefix + truncate(path, width - with_path_prefix.length)
+          end
+
+          if "#{first} · ".length < width
+            return "#{first} · " + truncate(slug, width - "#{first} · ".length)
+          end
+
+          return truncate(first, width) if width < prefix.length
+
+          prefix + truncate(project_stage, width - prefix.length)
         end
 
         def summary_text(row)

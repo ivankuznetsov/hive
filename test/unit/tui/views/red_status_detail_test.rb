@@ -6,9 +6,11 @@ require "hive/tui/views/red_status_detail"
 class HiveTuiViewsRedStatusDetailTest < Minitest::Test
   def row(diagnostic: nil, action_key: "recover_review", stage: "6-review",
           marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
-          folder: "/tmp/demo/.hive-state/stages/6-review/red-task")
+          folder: nil, slug: "red-task", worktree_path: "/tmp/red-task-worktree")
+    folder ||= "/tmp/demo/.hive-state/stages/#{stage}/#{slug}"
     Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: stage, slug: "red-task", folder: folder,
+      project_name: "alpha", stage: stage, slug: slug, folder: folder,
+      worktree_path: worktree_path,
       state_file: File.join(folder, "task.md"), marker: marker,
       attrs: attrs, mtime: nil, age_seconds: 0,
       claude_pid: nil, claude_pid_alive: nil,
@@ -60,6 +62,34 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     refute_includes output, "pass=2"
     refute_includes output, "Q: Why is this red?"
     refute_includes output, "Q: What can Hive do next?"
+  end
+
+  def test_header_bar_is_single_row_with_status_project_stage_slug_and_worktree
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+    header = output.lines.first.to_s.chomp
+
+    assert_includes header, "RED · alpha/6-review · red-task · /tmp/red-task-worktree"
+    assert_equal 1, header.lines.size
+  end
+
+  def test_header_truncates_worktree_path_before_slug
+    long_path = "/tmp/" + ("deep/" * 20) + "red-task-worktree"
+    model = model_for(row(worktree_path: long_path)).with(cols: 41)
+
+    header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
+
+    assert_operator header.length, :<=, 40
+    assert_includes header, "RED · alpha/6-review · red-task · "
+    assert_includes header, "…"
+  end
+
+  def test_header_keeps_red_prefix_at_tiny_width
+    model = model_for(row(slug: "very-long-red-task-name")).with(cols: 21)
+
+    header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
+
+    assert_operator header.length, :<=, 20
+    assert_match(/\ARED ·/, header)
   end
 
   def test_sanitizes_ansi_sequences_from_diagnostic_text

@@ -17,11 +17,26 @@ module Hive
     SENTINEL_POLL_INTERVAL_SEC = 5
     SENTINEL_CAPTURE_BYTES = 8192
     PANE_LOG_CAPTURE_BYTES = 64 * 1024
-    CLAUDE_READY_WAIT_TIMEOUT_SEC = 30
+    # Shared-session reviewer sends re-call `prepare_claude_session!`
+    # between each per-reviewer prompt; a 30s ceiling was too tight for
+    # the legitimate case where the prior reviewer's response was still
+    # streaming when the next send arrived (a reviewer with the default
+    # 600s timeout can run minutes; the pane is busy-not-crashed). Bump
+    # to 120s so a slow-streaming-but-alive pane is treated as busy
+    # rather than crashed; an actually-dead session still surfaces
+    # quickly via the explicit `session_exists?` precheck.
+    CLAUDE_READY_WAIT_TIMEOUT_SEC = 120
     CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
     MIN_TMUX_VERSION = "3.0"
     TERMINAL_MARKERS = %i[waiting complete error execute_complete review_complete review_waiting review_error].freeze
-    DEFAULT_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
+    # Allowed-tool sets shared by every stage that spawns Claude. Keeping
+    # them as constants means a policy change lands in one place; previous
+    # PRs inlined the string literal across 11 sites and silently drifted
+    # when one of them was updated without the others. R4 in the plan
+    # called out the implementer/planner split — keep them separate.
+    PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
+    IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
+    DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
     DEFAULT_PERMISSION_MODE = "bypassPermissions".freeze
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
@@ -31,11 +46,21 @@ module Hive
     # tmux-is-present-but-slow failure, not "tmux missing", and routing
     # it through the hard-fail tmux_unavailable path would masquerade a
     # transient as an unrecoverable configuration error.
+    # Anchored regexes pin the exact `preflight_tmux!` error prefixes
+    # that classify as "tmux is missing/unrunnable" (as opposed to
+    # transient per-session failures, which are intentionally NOT in
+    # this list). The patterns match the literal message heads emitted
+    # by `preflight_tmux!`; a "tidying" refactor that broadens these
+    # (e.g. matching `tmux .* runnable` for a hypothetical "tmux
+    # runnable check failed" message) would silently route transients
+    # through the hard-fail path. The `\Atmux \S+ below minimum`
+    # pattern matches "tmux 2.9 below minimum 3.0" exactly. Update
+    # `preflight_tmux!` and this list together.
     TMUX_UNAVAILABLE_PATTERNS = [
-      /tmux not runnable/,
-      /tmux binary not runnable/,
-      /could not parse tmux -V output/,
-      /tmux \S+ below minimum/
+      /\Atmux not runnable:/,
+      /\Atmux binary not runnable:/,
+      /\Acould not parse tmux -V output:/,
+      /\Atmux \S+ below minimum/
     ].freeze
 
     SessionHandle = Struct.new(:task, :runner, keyword_init: true) do
@@ -117,9 +142,18 @@ module Hive
       safe_with_log(task, "reset_signal_files") { reset_signal_files(task) }
       preflight!(profile, runner)
 
-      settings_path = nil
+      settings_paths = []
       begin
-        settings_path = Hive::StopHookInstaller.install(stage_dir: task.folder)
+        # Install the Stop hook under task.folder (orchestrator-owned)
+        # AND the launch cwd. Claude resolves `.claude/settings.json`
+        # from the process cwd, not from --add-dir paths; stages whose
+        # cwd is the feature worktree (4-execute / 6-review) otherwise
+        # never produced .done / result.json and downstream waits hung
+        # until timeout.
+        settings_paths = Array(Hive::StopHookInstaller.install(
+          stage_dir: task.folder,
+          extra_dirs: [ cwd ]
+        ))
         runner.start_detached(
           command: wrapper_command(
             cwd: cwd,
@@ -143,7 +177,9 @@ module Hive
         safe_with_log(task, "shutdown_claude") { shutdown_claude(runner) }
         safe_with_log(task, "kill_session") { runner.kill_session if runner }
         safe_with_log(task, "sweep_orphan_processes") { sweep_orphan_processes(task) }
-        safe_with_log(task, "cleanup_scratch") { cleanup_scratch(settings_path) }
+        Array(settings_paths).each do |path|
+          safe_with_log(task, "cleanup_scratch") { cleanup_scratch(path) }
+        end
         safe_with_log(task, "cleanup_done") { cleanup_done(task) }
       end
     end
@@ -154,13 +190,56 @@ module Hive
       reset_signal_files(task)
       cleanup_expected_output(expected_output)
       prepare_claude_session!(runner)
+      effective_mode = status_mode || :state_file_marker
+      # Parity with `Hive::Agent#run!`: only the :state_file_marker mode
+      # stamps the AGENT_WORKING transient marker (the orchestrator
+      # owns the marker for the other modes). Without this, `hive
+      # status`, the TUI, and daemon recovery lose the in-progress
+      # marker required by ADR-005 while a tmux-mode spawn is alive.
+      if effective_mode == :state_file_marker
+        Hive::Markers.set(task.state_file, :agent_working,
+                          pid: Process.pid,
+                          started: Time.now.utc.iso8601)
+      end
       runner.send_prompt(prompt)
       result = wait_for_status(task, runner, timeout_sec, status_mode, expected_output, log_label)
       # Headless launches drop a `<log_label>-<ts>.log` under
       # `task.log_dir`; tmux launches need the same shared log path so
       # downstream Claude-driven stages can find per-invocation output.
       capture_pane_log(task, runner, log_label)
+      augment_result_with_final_message!(result, runner)
       result
+    end
+
+    # Headless agents return `{final_message:, final_message_source:,
+    # ...}`; tmux mode previously returned only `{status:, log_label:}`
+    # which broke every caller that read `final_message` (4-execute's
+    # research-mode check, append_implementation_output, …). Capture
+    # the pane tail as a `:plain` final_message so the contract is the
+    # same regardless of mode. Source stays `:plain` because a tmux
+    # pane is unstructured terminal output, not the headless JSON
+    # stream that Agent extracts `:structured` from.
+    def augment_result_with_final_message!(result, runner)
+      return result unless result.is_a?(Hash)
+      return result if result.key?(:final_message) || result.key?(:final_message_source)
+
+      tail = safe_pane_tail(runner, bytes: PANE_LOG_CAPTURE_BYTES).to_s.strip
+      if tail.empty?
+        result[:final_message] = nil
+        result[:final_message_source] = nil
+      else
+        result[:final_message] = tail
+        result[:final_message_source] = :plain
+      end
+      result
+    end
+
+    def safe_pane_tail(runner, bytes:)
+      return "" unless runner
+
+      runner.capture_pane_tail(bytes: bytes)
+    rescue Hive::TmuxError
+      ""
     end
 
     # Append the current pane tail to `<task.log_dir>/<log_label>-<ts>.log`
@@ -407,6 +486,17 @@ module Hive
         end
 
         if Time.now >= deadline
+          existing = Hive::Markers.current(task.state_file)
+          # When `marker_from_sentinel_tail` already stamped
+          # `:error reason="tmux_pane_unreadable"` (its terminal-
+          # marker contract: write attribution then return nil so the
+          # outer loop can keep polling), overwriting with a generic
+          # `reason="timeout"` would mask the real root cause. Preserve
+          # the existing attribution and bail.
+          if existing.name == :error && existing.attrs["reason"] == "tmux_pane_unreadable"
+            return existing
+          end
+
           Hive::Markers.set(task.state_file, :error, reason: "timeout", timeout_sec: timeout)
           return Hive::Markers.current(task.state_file)
         end
@@ -676,13 +766,7 @@ module Hive
       File.join(task.folder, "result.json")
     end
 
-    def safe
-      yield
-    rescue StandardError
-      nil
-    end
-
-    # Like `safe`, but logs the swallowed exception so the operator
+    # Like the (removed) bare `safe` helper, but logs the swallowed
     # sees cleanup failures (orphan tmux sessions, stale settings.json)
     # instead of discovering them on the next preflight collision.
     def safe_with_log(task, step)

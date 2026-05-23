@@ -13,6 +13,7 @@ require "hive/markers"
 require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
+require "hive/stages/review/orchestrator_owned"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
@@ -54,12 +55,13 @@ module Hive
       FIX_PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
 
       # Filenames in `reviews/` that the orchestrator (not a reviewer)
-      # writes. Triage's `discover_reviewer_files` and the runner's
-      # max_review_pass / collect_accepted_findings / reviewer_sources_for
-      # all need to skip these — otherwise a `fix-guardrail-NN.md` user
-      # tick `[x]` would re-flow into the next pass's fix prompt and
-      # over-amplify guardrail findings.
-      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success- errors-].freeze
+      # writes are listed in `Hive::Stages::Review::ORCHESTRATOR_OWNED_PREFIXES`
+      # (loaded from `orchestrator_owned.rb` so this list and Triage's
+      # consumer can never drift). Triage's `discover_reviewer_files`
+      # and the runner's max_review_pass / collect_accepted_findings /
+      # reviewer_sources_for all need to skip these — otherwise a
+      # `fix-guardrail-NN.md` user tick `[x]` would re-flow into the
+      # next pass's fix prompt and over-amplify guardrail findings.
       ESCALATION_Q_RE = /^\s*###\s+Q(\d+)\.\s*(.*?)\s*$/.freeze
       ESCALATION_A_RE = /^\s*###\s+A(\d+)\.\s*$/.freeze
 
@@ -73,13 +75,9 @@ module Hive
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
 
-      # True for filenames that originate from a reviewer (not the
-      # orchestrator). Used by every consumer of `reviews/*.md` so
-      # adding a new orchestrator-owned file family means changing this
-      # one constant.
-      def reviewer_file?(name)
-        ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
-      end
+      # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
+      # this module and `Review::Triage` share one definition. Re-export
+      # here as a class method so existing callers keep working.
 
       def fix_success_path(task_folder, pass)
         File.join(task_folder, fix_success_relative_path(pass))
@@ -925,7 +923,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{ctx.pass}", task),
             cwd: ctx.worktree_path,
             add_dirs: [ ctx.task_folder ],
-            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           ) do |handle|
             claude_specs.each do |spec|
               result = run_reviewer_spec(cfg, ctx, spec, deadline,
@@ -1301,7 +1299,7 @@ module Hive
             cfg,
             **kwargs,
             session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task),
-            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

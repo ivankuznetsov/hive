@@ -279,12 +279,26 @@ module Hive
       true
     end
 
+    # Only `Config.load` knows whether the user actually wrote
+    # `claude.mode` in config.yml; merge_defaults inserts the
+    # DEFAULTS value so the merged cfg always carries a non-nil
+    # `claude.mode`. After load, the EXPLICIT_CLAUDE_MODE_KEY flag is
+    # the single source of truth. Callers that synthesise a cfg
+    # in-process (tests, daemon helpers) must set the flag themselves;
+    # the default below is `false` so an unset flag is treated as
+    # "default kicked in", not "user wrote it".
     def explicit_claude_mode?(cfg)
-      return cfg[EXPLICIT_CLAUDE_MODE_KEY] unless cfg[EXPLICIT_CLAUDE_MODE_KEY].nil?
-
-      cfg.dig("claude", "mode") != nil
+      cfg[EXPLICIT_CLAUDE_MODE_KEY] == true
     end
 
+    # Pairs with `explicit_claude_mode?` but kept on the legacy
+    # explicit-via-cfg.dig fallback intentionally: synthesised cfgs
+    # under tests / daemon helpers that carry `brainstorm.runtime`
+    # without going through `Config.load` still need to opt into the
+    # one-release legacy 2-brainstorm branch. The DEFAULTS path does
+    # NOT seed `brainstorm.runtime`, so the dig-based fallback is
+    # unambiguous here — distinct from claude.mode, which IS seeded
+    # by DEFAULTS and needs the strict flag.
     def explicit_brainstorm_runtime?(cfg)
       return cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY] unless cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY].nil?
 

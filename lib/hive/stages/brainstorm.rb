@@ -92,7 +92,7 @@ module Hive
           profile: profile,
           session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task),
           status_mode: :state_file_marker,
-          allowed_tools: "Read,Write,Edit,LS"
+          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }

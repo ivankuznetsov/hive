@@ -6,6 +6,7 @@ require "hive/protected_files"
 require "hive/reviewers/plan_context"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
+require "hive/stages/review/orchestrator_owned"
 
 module Hive
   module Stages
@@ -41,7 +42,6 @@ module Hive
           "courageous" => "triage_courageous.md.erb",
           "safetyist" => "triage_safetyist.md.erb"
         }.freeze
-        ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success- errors-].freeze
 
         module_function
 
@@ -92,7 +92,7 @@ module Hive
                 cfg,
                 **kwargs,
                 session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task),
-                allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+                allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
               )
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)
@@ -169,7 +169,7 @@ module Hive
         end
 
         def reviewer_file?(name)
-          ORCHESTRATOR_OWNED_PREFIXES.none? { |prefix| name.start_with?(prefix) }
+          Hive::Stages::Review.reviewer_file?(name)
         end
 
         def resolve_template(cfg, ctx)

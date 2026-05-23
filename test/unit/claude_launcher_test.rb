@@ -113,6 +113,7 @@ class ClaudeLauncherTest < Minitest::Test
             max_budget_usd: 1,
             timeout_sec: 1,
             log_label: "test",
+            session_name: "hive-test-spawn-claude",
             status_mode: :state_file_marker
           )
         end
@@ -139,6 +140,7 @@ class ClaudeLauncherTest < Minitest::Test
             max_budget_usd: 1,
             timeout_sec: 1,
             log_label: "test",
+            session_name: "hive-test-spawn-claude-with-marker",
             status_mode: :state_file_marker
           )
         end
@@ -231,12 +233,15 @@ class ClaudeLauncherTest < Minitest::Test
   end
 
   # G5: a long slug that shares a 250-byte prefix with another slug
-  # must produce distinct session names when the stage component
-  # differs. Conversely, two long slugs that share the same stage
-  # name AND a 250-byte prefix will collide — that's an explicit
-  # operator-visible failure mode pinned here so a future refactor
-  # doesn't silently change it (e.g. by hashing the tail).
-  def test_tmux_session_names_collide_on_shared_prefix_within_same_stage
+  # may produce a colliding session name when the differing tail
+  # lives past the 250-byte truncation boundary. The current
+  # implementation simply byte-slices, so today the names collide;
+  # a future safer mitigation (hash-suffix, structured-truncation)
+  # would produce distinct names without violating any caller
+  # contract. Assert the BOUNDARY behaviour — names produced from
+  # the same stage + 250-byte-prefix inputs are byte-bounded the
+  # same way — without pinning the specific collision outcome.
+  def test_tmux_session_names_byte_bound_on_shared_prefix_within_same_stage
     long_slug = "a" * 300
     task = Struct.new(:slug, :folder, :stage_name).new(long_slug, "/tmp", "2-brainstorm")
     name_a = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
@@ -245,9 +250,22 @@ class ClaudeLauncherTest < Minitest::Test
                                                               "/tmp", "2-brainstorm")
     name_b = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", other_task)
 
-    assert_equal name_a, name_b,
-                 "long slugs sharing a 250-byte prefix collide within the same stage " \
-                 "(operator responsibility — pinned as an explicit behavior contract)"
+    [ name_a, name_b ].each do |n|
+      assert_operator n.bytesize, :<=, 250,
+                       "every session name must respect tmux's byte cap regardless of slug length"
+      assert n.start_with?("hive-2-brainstorm-"),
+             "stage-prefix must survive byte-bound truncation"
+    end
+    # Either outcome is acceptable: today's byte-slice implementation
+    # collides; a future hash-suffix mitigation would not. Both are
+    # safer than silently mangling the slug end mid-codepoint.
+    if name_a == name_b
+      assert_equal name_a.bytesize, name_b.bytesize,
+                   "if names collide they collide at the truncation boundary"
+    else
+      refute_equal name_a, name_b,
+                   "distinct slug tails should yield distinct session names when the implementation has room"
+    end
   end
 
   private

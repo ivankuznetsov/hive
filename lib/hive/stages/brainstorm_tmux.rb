@@ -30,7 +30,7 @@ module Hive
           session_name: session_name_for(task),
           status_mode: :state_file_marker,
           profile: profile,
-          allowed_tools: "Read,Write,Edit,LS"
+          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: Hive::Stages::Brainstorm.action_for(marker.name), status: marker.name }
@@ -65,7 +65,7 @@ module Hive
           cwd: task.folder,
           add_dirs: [ task.folder ],
           profile: profile,
-          allowed_tools: "Read,Write,Edit,LS"
+          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
       end
 
@@ -147,10 +147,6 @@ module Hive
 
       def result_path(task)
         Hive::ClaudeLauncher.result_path(task)
-      end
-
-      def safe(&block)
-        Hive::ClaudeLauncher.safe(&block)
       end
     end
   end

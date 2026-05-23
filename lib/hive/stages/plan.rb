@@ -45,7 +45,7 @@ module Hive
             cfg,
             **kwargs,
             session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task),
-            allowed_tools: "Read,Write,Edit,LS"
+            allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

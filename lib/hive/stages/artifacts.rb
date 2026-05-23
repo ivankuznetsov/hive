@@ -38,7 +38,7 @@ module Hive
             cfg,
             **kwargs,
             session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task),
-            allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
+            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)

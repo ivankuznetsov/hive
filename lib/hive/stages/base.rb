@@ -272,9 +272,9 @@ module Hive
       end
 
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
-                         add_dirs: [], cwd: nil, log_label: nil,
+                         session_name:, add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
-                         session_name: nil, allowed_tools: nil)
+                         allowed_tools: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -292,7 +292,7 @@ module Hive
           max_budget_usd: max_budget_usd,
           timeout_sec: timeout_sec,
           log_label: log_label,
-          session_name: session_name || Hive::ClaudeLauncher.tmux_session_name(task.stage_name, task),
+          session_name: session_name,
           status_mode: status_mode,
           expected_output: expected_output,
           profile: profile,
@@ -300,11 +300,21 @@ module Hive
         )
       end
 
-      # Wrap a spawn_claude! call so that tmux-unavailable AgentErrors land
-      # on the calling stage's own task.state_file as an `:error
-      # reason="tmux_unavailable"` marker. Used by top-level Claude stages
-      # (brainstorm / plan / execute / open_pr / artifacts / finalize)
-      # whose run! returns a stage envelope rather than propagating.
+      # Wrap a spawn_claude! call so that AgentErrors land on the
+      # calling stage's own task.state_file with an attributed marker
+      # rather than propagating uncaught through Plan.run! / OpenPr.run!
+      # / Finalize.run! / Artifacts.run! / Execute.run_pass — none of
+      # which carry their own `rescue Hive::AgentError`.
+      #
+      # tmux-unavailable errors are tagged `reason="tmux_unavailable"`
+      # (existing contract, preserved). Every OTHER AgentError raised
+      # by `ClaudeLauncher.launch!` — "tmux session … did not start",
+      # "tmux session … already exists", "claude interactive prompt did
+      # not become ready", "could not inspect claude tmux session",
+      # etc. — used to escape as a generic crash via cli.rb, leaving a
+      # stale AGENT_WORKING marker on disk. Now they land
+      # `reason="claude_launch_failed"` so the operator sees the real
+      # cause and AGENT_WORKING is replaced.
       #
       # The 6-review stage deliberately does NOT use this helper: its
       # sub-stage spawns share state with the main review task, and the
@@ -315,12 +325,23 @@ module Hive
       def spawn_claude_with_tmux_marker!(task, cfg, **kwargs)
         spawn_claude!(task, cfg, **kwargs)
       rescue Hive::AgentError => e
-        raise unless Hive::Config.claude_mode(cfg) == :tmux &&
-                     Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+        if Hive::Config.claude_mode(cfg) == :tmux &&
+           Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+          warn "[hive] claude tmux mode is unavailable: #{e.message}"
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "tmux_unavailable",
+                            message: e.message)
+          return { status: :error, error_message: e.message }
+        end
 
-        warn "[hive] claude tmux mode is unavailable: #{e.message}"
+        # Any other AgentError out of the launcher: surface the cause,
+        # replace any stale AGENT_WORKING with an attributed :error so
+        # `hive status` shows the failure state and the runner picks a
+        # recoverable next step instead of treating the task as alive.
+        warn "[hive] claude launch failed: #{e.message}"
         Hive::Markers.set(task.state_file, :error,
-                          reason: "tmux_unavailable",
+                          reason: "claude_launch_failed",
+                          exception_class: e.class.name,
                           message: e.message)
         { status: :error, error_message: e.message }
       end

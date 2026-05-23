@@ -537,6 +537,23 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_trips_on_executable_permission_change
+    with_two_commits(file: "scripts/run.sh",
+                     content: "#!/bin/sh\nexit 0\n",
+                     mode: 0o755) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :tripped, result.status
+      match = result.matches.find { |m| m.pattern_name == "permission_change" }
+      refute_nil match
+      assert_match(/new file mode 100755|new mode 100755/, match.snippet)
+      assert_equal :medium, match.severity
+    end
+  end
+
   # --- permission_change pattern direct coverage -----------------------
 
   def test_permission_change_regex_matches_100755_executable_bit

@@ -95,6 +95,7 @@ class EventsTest < Minitest::Test
   # raises Errno::EACCES (a SystemCallError subclass) which the emit
   # rescue absorbs into a warn + nil return.
   def test_emit_swallow_system_call_errors_and_warns
+    skip "root bypasses dir-write permission and would mask the EACCES path" if Process.uid.zero?
     with_tmp_dir do |dir|
       File.chmod(0o500, dir) # readable but not writable: blocks events.jsonl creation
       begin

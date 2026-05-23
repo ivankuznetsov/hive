@@ -477,9 +477,10 @@ module Hive
     end
 
     def agent_start_message
-      # Use basename to keep retain-forever records compact; the absolute
-      # cwd path is still recoverable from logs/<slug>/*.log if needed.
-      "cwd=#{File.basename(@cwd.to_s)} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd}"
+      # Full @cwd path per the plan U3 contract: basename collapses the
+      # worktree-vs-task-folder distinction (e.g. worktree-feat-x vs
+      # feat-x-260424-aaaa) and loses that signal in the event log.
+      "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd}"
     end
 
     def agent_end_message(result, exception)

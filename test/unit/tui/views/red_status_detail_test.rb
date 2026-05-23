@@ -235,4 +235,21 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "press o for Open in agent",
                     "active flash must surface on the detail screen so refusal hints are observable"
   end
+
+  def test_unknown_action_explains_that_no_autofix_is_available
+    unknown_row = Hive::Tui::Snapshot::Row.new(
+      project_name: "alpha", stage: "9-archive", slug: "red-task",
+      folder: "/tmp/red-task", state_file: "/tmp/red-task/task.md",
+      marker: "none", attrs: {}, mtime: nil,
+      age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+      action_key: "inspect", action_label: "Needs inspection",
+      suggested_command: nil, next_action: nil, diagnostic: nil
+    )
+
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(unknown_row))
+
+    assert_includes output, "This row has no autofix action in the detail view."
+    refute_includes output, "[Enter] autofix / retry"
+    assert_includes output, "[f] manual fix"
+  end
 end

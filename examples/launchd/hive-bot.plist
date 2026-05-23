@@ -10,6 +10,7 @@
     <string>/Users/asterio/Dev/hive/bin/hive</string>
     <string>bot</string>
     <string>start</string>
+    <string>--foreground</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

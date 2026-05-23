@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T09:20:00Z] bot - default start backgrounds for manual use
+
+**Action:** Simplified Telegram onboarding by making `hive bot start` background the bot by default. `--foreground` is now the explicit mode for systemd, launchd, and terminal debugging; legacy `--detach` remains accepted as a no-op compatibility flag because backgrounding is already the default. README now includes a short BotFather -> numeric chat id -> allowlist -> `hive bot start` path based on the OpenClaw-style quick onboarding pattern.
+
+**Refreshed pages:** [[commands/bot]], [[modules/bot]], [[operating]], [[state-model]].
+
 ## [2026-05-22T13:30:00Z] rebase / review — close three post-merge follow-up gaps from PR #104 review
 
 **Action:** Documented three follow-up fixes after the initial PR #104 review pass surfaced sharper failure modes than the first round caught.

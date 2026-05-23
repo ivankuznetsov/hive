@@ -657,8 +657,8 @@ module Hive
     desc "bot SUBCOMMAND", "Manage the Telegram bot (start / stop / status / reload / tail)"
     long_desc <<~DESC
       Subcommands:
-        start [--detach] [--dry-run]      Run the Telegram long-poll bot.
-                                          Without --detach, runs in foreground.
+        start [--foreground] [--dry-run]  Run the Telegram long-poll bot in the background.
+                                          Use --foreground for systemd/launchd/debugging.
         stop [--json]                     Send SIGTERM to the running bot.
                                           --json emits hive-bot-stop.v1.
         status [--json]                   Show running / not-running.
@@ -667,7 +667,7 @@ module Hive
                                           --json emits hive-bot-reload.v1.
         tail                              Stream bot.log.
 
-      The bot reads the global `bot:` block from ~/Dev/hive/config.yml.
+      The bot reads the global `bot:` block from ~/.config/hive/config.yml.
       Its Telegram token comes only from HIVE_TELEGRAM_BOT_TOKEN. Incoming
       updates from chat IDs outside bot.chat_id_allowlist are ignored.
 
@@ -675,14 +675,22 @@ module Hive
       70 internal error; 75 TEMPFAIL when start finds a live bot; 78 CONFIG
       when runtime config or HIVE_TELEGRAM_BOT_TOKEN is missing.
     DESC
-    option :detach, type: :boolean, default: false, desc: "fork to background after start"
+    option :foreground, type: :boolean, default: false,
+                        desc: "run in the foreground instead of backgrounding"
+    option :detach, type: :boolean, default: false, hide: true,
+                    desc: "deprecated; start already backgrounds by default"
     option :dry_run, type: :boolean, default: false,
                      desc: "log/send would-be actions without spawning child commands"
     def bot(subcommand = nil)
       require "hive/commands/bot"
+      if options[:foreground] && options[:detach]
+        raise Hive::InvalidTaskPath,
+              "hive bot start: --detach is the default; do not combine it with --foreground"
+      end
+
       Hive::Commands::Bot.new(
         subcommand,
-        detach: options[:detach],
+        foreground: options[:foreground],
         dry_run: options[:dry_run],
         json: options[:json]
       ).call

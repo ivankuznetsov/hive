@@ -164,7 +164,7 @@ module Hive
       },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
-      # from ~/Dev/hive/config.yml via load_global_bot. The token lives
+      # from the global config via load_global_bot. The token lives
       # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
       "bot" => {
         "enabled" => false,
@@ -396,7 +396,7 @@ module Hive
       merged
     end
 
-    # Load and validate the global `bot` block from ~/Dev/hive/config.yml.
+    # Load and validate the global `bot` block from the XDG config path.
     # `require_runtime: true` is used by `hive bot start` so the opt-in
     # credentials fail loudly there without making read-only commands like
     # `hive status` require a Telegram token.

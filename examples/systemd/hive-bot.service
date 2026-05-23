@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=%h/Dev/hive
 Environment=HIVE_HOME=%h/Dev/hive
 Environment=HIVE_TELEGRAM_BOT_TOKEN=replace-with-botfather-token
-ExecStart=%h/Dev/hive/bin/hive bot start
+ExecStart=%h/Dev/hive/bin/hive bot start --foreground
 ExecStop=%h/Dev/hive/bin/hive bot stop
 Restart=on-failure
 RestartSec=10

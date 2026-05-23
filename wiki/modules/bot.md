@@ -36,9 +36,9 @@ and subprocess I/O.
 
 ```
 hive bot start
-  └─ Hive::Commands::Bot
+  └─ Hive::Commands::Bot (daemonizes unless --foreground)
        ├─ validates global bot config + HIVE_TELEGRAM_BOT_TOKEN
-       ├─ writes ~/Dev/hive/.bot.pid
+       ├─ writes ~/.local/state/hive/.bot.pid
        └─ Hive::Bot::Supervisor.run_forever
             ├─ poll loop: Telegram.getUpdates → Router → handler descriptors
             ├─ status loop: hive status --json → NotificationDispatcher

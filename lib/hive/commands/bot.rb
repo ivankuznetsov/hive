@@ -13,10 +13,10 @@ module Hive
     class Bot
       VALID_SUBCOMMANDS = %w[start stop status reload tail].freeze
 
-      def initialize(subcommand, detach: false, dry_run: false, json: false,
+      def initialize(subcommand, detach: nil, foreground: false, dry_run: false, json: false,
                      hive_home: Hive::Paths.state_home)
         @subcommand = subcommand
-        @detach = detach
+        @foreground = foreground || detach == false
         @dry_run = dry_run
         @json = json
         @hive_home = hive_home
@@ -66,7 +66,7 @@ module Hive
                                              holder: { pid: existing_pid }, lock_path: pid_file)
         end
 
-        Process.daemon(true, true) if @detach
+        Process.daemon(true, true) unless @foreground
         lock_file.rewind
         lock_file.truncate(0)
         lock_file.write({ "pid" => Process.pid, "started_at" => Time.now.utc.iso8601 }.to_yaml)

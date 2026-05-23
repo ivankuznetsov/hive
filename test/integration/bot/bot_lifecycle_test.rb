@@ -72,13 +72,40 @@ class HiveBotLifecycleTest < Minitest::Test
     end
   end
 
-  def test_start_creates_pid_file_lockable_and_log_directory
+  def test_start_backgrounds_by_default
+    with_bot_home do
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "test-token"
+      daemon_args = []
+      fake_supervisor = Class.new do
+        def run_forever
+          raise StopIteration, "stop after startup"
+        end
+      end
+      original_daemon = Process.method(:daemon)
+      original_supervisor_new = Hive::Bot::Supervisor.method(:new)
+
+      Process.define_singleton_method(:daemon) { |*args| daemon_args << args }
+      Hive::Bot::Supervisor.define_singleton_method(:new) { |**_kwargs| fake_supervisor.new }
+
+      assert_raises(StopIteration) do
+        Hive::Commands::Bot.new("start", dry_run: true).send(:start_bot)
+      end
+
+      assert_equal [ [ true, true ] ], daemon_args
+    ensure
+      Process.define_singleton_method(:daemon, original_daemon) if original_daemon
+      Hive::Bot::Supervisor.define_singleton_method(:new, original_supervisor_new) if original_supervisor_new
+      ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+    end
+  end
+
+  def test_start_foreground_creates_pid_file_lockable_and_log_directory
     with_bot_home do |home|
       ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "test-token"
       pid_path = File.join(home, ".bot.pid")
       log_dir = File.join(home, "logs")
 
-      cmd = Hive::Commands::Bot.new("start", dry_run: true)
+      cmd = Hive::Commands::Bot.new("start", foreground: true, dry_run: true)
 
       pid = fork do
         cmd.send(:start_bot)

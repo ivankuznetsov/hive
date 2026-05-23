@@ -16,7 +16,7 @@ use. It is a subprocess caller, not a second approval engine.
 ## Subcommands
 
 ```
-hive bot start [--detach] [--dry-run]
+hive bot start [--foreground] [--dry-run]
 hive bot stop [--json]
 hive bot status [--json]
 hive bot reload [--json]
@@ -25,11 +25,11 @@ hive bot tail
 
 | Subcommand | Behavior |
 |-----------|----------|
-| `start` | Loads `bot:` from `~/Dev/hive/config.yml`, requires `HIVE_TELEGRAM_BOT_TOKEN`, writes `~/Dev/hive/.bot.pid`, then starts the long-poll/status/reaper supervisor. With `--detach`, daemonizes. With `--dry-run`, outbound Telegram parsing still works but child `hive ...` dispatches are reported rather than spawned. A second live bot exits `75 (TEMPFAIL)`. |
+| `start` | Loads `bot:` from the global config, requires `HIVE_TELEGRAM_BOT_TOKEN`, writes the bot PID file, then starts the long-poll/status/reaper supervisor. By default it daemonizes so the shell prompt returns immediately. With `--foreground`, it stays attached for systemd, launchd, or debugging. With `--dry-run`, inbound Telegram parsing and notifications still run but child `hive ...` dispatches are reported rather than spawned. A second live bot exits `75 (TEMPFAIL)`. |
 | `stop` | Sends `SIGTERM` to the PID file's process and waits up to `bot.shutdown_grace_sec`, then escalates to `SIGKILL`. Idempotent when no bot is running. With `--json`, emits `hive-bot-stop.v1`. |
 | `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, and `log_file`. |
 | `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
-| `tail` | Streams `~/Dev/hive/logs/bot.log`; exits 1 if the log does not exist. |
+| `tail` | Streams `~/.local/state/hive/logs/bot.log`; exits 1 if the log does not exist. |
 
 ## Commands in Telegram
 
@@ -67,9 +67,9 @@ bot:
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
-  pid_file: ~/Dev/hive/.bot.pid
-  log_file: ~/Dev/hive/logs/bot.log
-  last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
+  pid_file: ~/.local/state/hive/.bot.pid
+  log_file: ~/.local/state/hive/logs/bot.log
+  last_seen_state_file: ~/.local/state/hive/.bot.last_seen_update_id
 ```
 
 `HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
@@ -79,7 +79,7 @@ silently.
 
 ## Structured log
 
-`~/Dev/hive/logs/bot.log` is one JSON document per line with schema
+`~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
 `hive-bot-log.v1`. The event enum is closed in
 `Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
 Events include `bot_started`, `poll_failure`, `update_received`,
@@ -90,7 +90,7 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 
 | Subcommand | Code | Condition |
 |------------|------|-----------|
-| `start` | 0 | Foreground bot exits cleanly |
+| `start` | 0 | Background bot started, or foreground bot exited cleanly |
 | `start` | 75 | Another bot is already running |
 | `start` | 78 | Token/allowlist/config is missing or malformed |
 | `stop` | 0 | Always, including not-running |

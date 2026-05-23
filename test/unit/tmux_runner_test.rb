@@ -93,6 +93,30 @@ class TmuxRunnerTest < Minitest::Test
     end
   end
 
+  def test_session_exists_returns_false_when_tmux_missing
+    with_tmp_dir do |dir|
+      runner = Hive::TmuxRunner.new(name: unique_name("missing-exists"), cwd: dir, tmux_bin: "missing-tmux-for-hive")
+
+      refute runner.session_exists?
+    end
+  end
+
+  def test_pane_pid_returns_nil_for_non_integer_output
+    with_tmp_dir do |dir|
+      fake = write_fake_tmux(dir, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "display-message" ]; then
+          echo not-a-pid
+          exit 0
+        fi
+        exit 0
+      SH
+      runner = Hive::TmuxRunner.new(name: unique_name("pane-pid"), cwd: dir, tmux_bin: fake)
+
+      assert_nil runner.pane_pid
+    end
+  end
+
   def test_capture_pane_tail_scrubs_invalid_utf8
     with_tmp_dir do |dir|
       fake = write_fake_tmux(dir, <<~SH)

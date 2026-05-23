@@ -154,6 +154,16 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
            "SUCCESS after transient must clear the failure counter, not preserve it"
   end
 
+  def test_wrong_stage_triggers_short_cooldown
+    c = make
+    dispatch(c, 100, "p1", "s1")
+
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::WRONG_STAGE, completed_at: T0 + 1)
+
+    assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
+    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 62)
+  end
+
   # ── TEMPFAIL refunds daily slot ───────────────────────────────────────
 
   def test_tempfail_refunds_daily_slot
@@ -219,6 +229,14 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert c.project_dropped?("p1")
   end
 
+  def test_dropped_projects_returns_recorded_projects
+    c = make
+    c.record_project_dropped(project: "p1")
+    c.record_project_dropped(project: "p2")
+
+    assert_equal %w[p1 p2], c.dropped_projects.sort
+  end
+
   # ── mtime tracking ────────────────────────────────────────────────────
 
   def test_record_dispatch_records_state_file_mtime
@@ -275,6 +293,16 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
   end
 
   # ── in_flight bookkeeping ─────────────────────────────────────────────
+
+  def test_running_count_for_includes_internal_and_external_project_counts
+    c = make(global: 5, per_project: 5)
+    dispatch(c, 100, "p1", "s1")
+    dispatch(c, 101, "p2", "s1")
+    c.set_external_running_counts(per_project: { "p1" => 2 })
+
+    assert_equal 3, c.send(:running_count_for, "p1")
+    assert_equal 1, c.send(:running_count_for, "p2")
+  end
 
   def test_in_flight_count_tracks_running_entries
     c = make(global: 5, per_project: 5)

@@ -20,8 +20,8 @@ class ConfigTest < Minitest::Test
 
   # Plan U1 explicit test scenarios for the 7-artifacts stage defaults
   # (see .hive-state/stages/.../we-need-to-collect-artifacts/plan.md, U1).
-  # Without these assertions a silent drift on the artifact stage's
-  # budget/timeout/agent goes undetected.
+  # Without these assertions a silent drift on the artifact stage defaults
+  # goes undetected.
   def test_load_returns_artifacts_stage_defaults
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
@@ -32,6 +32,11 @@ class ConfigTest < Minitest::Test
       assert_equal "claude", cfg.dig("artifacts", "agent"),
                    "artifacts agent must default to claude per plan U1"
     end
+  end
+
+  def test_hive_state_dir_uses_default_and_custom_name
+    assert_equal File.join("/repo", ".hive-state"), Hive::Config.hive_state_dir("/repo")
+    assert_equal File.join("/repo", ".custom-state"), Hive::Config.hive_state_dir("/repo", ".custom-state")
   end
 
   def test_load_merges_per_project_overrides
@@ -421,6 +426,20 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/review\.reviewers/, err.message)
       assert_match(/must be an Array/, err.message)
+    end
+  end
+
+  def test_load_raises_when_reviewer_entry_is_not_a_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          reviewers:
+            - not-a-hash
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.reviewers\[0\].*must be a Hash/, err.message)
     end
   end
 
@@ -1498,6 +1517,57 @@ class ConfigTest < Minitest::Test
       assert_equal 3600, cfg.dig("bot", "conversation_ttl_sec")
       assert_equal 1, cfg.dig("bot", "codex_budget_usd")
       assert_equal 120, cfg.dig("bot", "codex_timeout_sec")
+    end
+  end
+
+  def test_load_global_bot_rejects_non_hash_bot_block
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot: enabled
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_non_boolean_enabled
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.enabled.*must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_non_array_allowlist
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          chat_id_allowlist: 12345
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.chat_id_allowlist.*must be an Array/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_blank_path
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pid_file: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.pid_file.*non-empty String path/, err.message)
     end
   end
 

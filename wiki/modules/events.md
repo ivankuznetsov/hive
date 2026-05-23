@@ -26,14 +26,14 @@ tags: [module, events, observability, status, append-only]
 ## Record shape
 
 ```json
-{"ts":"2026-05-23T08:12:44Z","slug":"my-task-260523-1a2b","stage":"4-execute","agent":"claude execute","event_type":"agent_start","message":"cwd=worktree-foo timeout_sec=3600 max_budget_usd=10"}
+{"ts":"2026-05-23T08:12:44Z","slug":"my-task-260523-1a2b","stage":"4-execute","agent":"claude execute","event_type":"agent_start","message":"cwd=/abs/path/to/worktree-foo timeout_sec=3600 max_budget_usd=10"}
 ```
 
 - `ts` — ISO-8601 UTC, second precision.
 - `slug` / `stage` — task slug and `<index>-<name>` stage label.
 - `agent` — `"<profile> <log_label>"` for agent spawns (e.g. `"claude review-stub-reviewer-pass01"`); `"phase=<name> pass=<NN>"` for review phase brackets; `null` for stage / round / error events.
 - `event_type` — one of the table above.
-- `message` — short human-readable detail. `agent_start` carries `cwd=<basename> timeout_sec=N max_budget_usd=N`; `agent_end` carries `status=… exit_code=… pid=…` (or `status=exception` with the error class); `stage_exit` carries `status=<marker> phase=… reason=… pass=…` when those marker attrs are present.
+- `message` — short human-readable detail. `agent_start` carries `cwd=<full @cwd path> timeout_sec=N max_budget_usd=N` (full path, not basename — basename collapsed the worktree-vs-task-folder distinction); `agent_end` carries `status=… exit_code=… pid=…` (or `status=exception` with the error class); `stage_exit` carries `status=<marker> phase=… reason=… pass=…` when those marker attrs are present.
 
 ## Storage and atomicity
 

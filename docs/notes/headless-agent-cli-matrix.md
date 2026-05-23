@@ -197,4 +197,4 @@ pastes the rendered stage prompt, and waits for the same artifact/marker
 contract as the headless path. The wrapper unsets `ANTHROPIC_API_KEY` and
 `CLAUDE_API_KEY` so billing follows the operator's logged-in Claude
 subscription. Non-Claude profiles remain headless, even when
-`claude.mode: tmux`. See `docs/notes/brainstorm-interactive-tmux.md`.
+`claude.mode: tmux`. See `docs/notes/claude-tmux-launch-mode.md`.

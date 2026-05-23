@@ -613,6 +613,32 @@ class InitPromptsTest < Minitest::Test
     assert_match(/registered_agents must be non-empty/, err.message)
   end
 
+  # G4 split-stream tty: pin `interactive?` to read $stdin.tty? rather
+  # than $stdout.tty?. A refactor to `@output.tty?` would only break
+  # under piped-output (test runner, CI redirection) and silently
+  # short-circuit `collect` to the non-TTY summary path — surprising
+  # an operator who is staring at the menu.
+  def test_interactive_predicate_reads_input_tty_not_output_tty
+    # Input claims TTY; output explicitly does not. StringIO responds
+    # to `tty?` with `false` by default, so a refactor that flipped
+    # `interactive?` to read `@output.tty?` would silently disable the
+    # whole prompt flow under piped output. Pin the contract: input
+    # tty-ness is the sole driver.
+    tty_input = StringIO.new("")
+    tty_input.define_singleton_method(:tty?) { true }
+    non_tty_output = StringIO.new # StringIO#tty? returns false
+    refute non_tty_output.tty?, "sanity: StringIO must report non-TTY"
+
+    prompts = Hive::Commands::Init::Prompts.new(
+      input: tty_input,
+      output: non_tty_output,
+      summary_io: StringIO.new,
+      registered_agents: AGENT_NAMES
+    )
+    assert prompts.interactive?,
+           "tty input must drive interactive? regardless of output stream"
+  end
+
   def test_initialize_raises_when_default_agents_not_in_registry
     # Inject a registry that lacks the recommended defaults — the prompt's
     # blank-input fallback would otherwise return 'claude'/'codex' which

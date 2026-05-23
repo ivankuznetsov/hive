@@ -52,13 +52,15 @@ hive init [PROJECT_PATH] [--force]
 
 ## Prompt flow (ADR-023)
 
-On TTY input streams the prompt walks the operator through five sections in order:
+On TTY input streams the prompt walks the operator through the following sections in order:
 
 1. **Planning agent** (`brainstorm.agent` + `plan.agent`): one combined choice; the answer maps to both keys. Recommended default `claude`.
 2. **Claude launch mode** (`claude.mode`): `tmux` (default) runs every Claude-backed stage in an attachable tmux pane using the logged-in Claude session; `headless` keeps the non-interactive `claude -p` path. The setting is global for Claude only — Codex/Pi stages remain on their normal headless profile path.
 3. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
 4. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
-5. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
+5. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the triage agent in the 6-review autonomous loop.
+6. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
+7. **Daemon enrollment + autostart** (`daemon.enabled`, `daemon.autostart`): whether to opt this project into the auto-advance daemon (default yes), and whether to enable+start the per-user service unit now (default no — the unit is always written, but autostart is opt-in).
 
 Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). The Claude mode prompt follows the same rule (`tmux` / `headless` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
 

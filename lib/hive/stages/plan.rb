@@ -40,7 +40,7 @@ module Hive
           status_mode: :state_file_marker
         }
         if profile.name == :claude
-          Hive::Stages::Base.spawn_claude!(
+          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
             cfg,
             **kwargs,

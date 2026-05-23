@@ -34,14 +34,16 @@ module Hive
       context with Codex as the headless wiki refresher, and registers
       the project globally.
 
-      On a TTY, init asks the operator five questions before writing
-      anything to disk:
+      On a TTY, init asks the operator the following questions before
+      writing anything to disk:
 
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
-        2. Brainstorm runtime for Claude                         — default headless
+        2. Claude launch mode (project-global, tmux/headless)    — default tmux
         3. Development agent (drives 4-execute)                  — default codex
         4. Review agents (multi-select over 3 default reviewers) — default all
-        5. Per-stage budget+timeout (9 stage/role pairs)         — default generous
+        5. Triage bias (courageous / safetyist)                  — default courageous
+        6. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        7. Daemon enrollment + autostart                         — default enabled / off
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at

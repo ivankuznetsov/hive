@@ -99,8 +99,8 @@ module Hive
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "triage_bias"       => String,           # courageous | safetyist
-        #     "budgets"  => Hash<String, Integer>,     # 9 keys (LIMIT_KEYS)
-        #     "timeouts" => Hash<String, Integer>,     # 9 keys (LIMIT_KEYS)
+        #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
+        #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
         #     "daemon_autostart"  => Boolean           # start user service now
         #   }

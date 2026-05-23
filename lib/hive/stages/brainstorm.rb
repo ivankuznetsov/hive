@@ -52,9 +52,11 @@ module Hive
         prompt = render_prompt(task, cfg, profile: profile)
         # add_dirs is intentionally limited to the task folder. Brainstorm
         # operates on user-supplied idea text and must not have write access
-        # to the project source code (claude runs with
-        # --dangerously-skip-permissions; widening add-dir would let a
-        # prompt-injected idea reach project files).
+        # to the project source code: widening add-dir would let a
+        # prompt-injected idea reach project files. (Claude-on-tmux is now
+        # routed through `run_claude!`; this method only covers codex / pi
+        # — both run with their own profile permissions, not Claude's
+        # `--dangerously-skip-permissions`.)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -78,7 +80,7 @@ module Hive
       def run_claude!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
-        Hive::Stages::Base.spawn_claude!(
+        Hive::Stages::Base.spawn_claude_with_tmux_marker!(
           task,
           cfg,
           prompt: prompt,
@@ -96,11 +98,16 @@ module Hive
         { commit: action_for(marker.name), status: marker.name }
       end
 
+      # Returns a new cfg Hash with `claude.mode` overridden, leaving the
+      # caller's cfg untouched (the dispatcher passes its cfg by reference
+      # to many stage helpers; mutating it would surprise unrelated
+      # call-sites that read claude.mode later in the same run).
       def cfg_with_claude_mode(cfg, mode)
         desired = mode.to_s
         return cfg if cfg.dig("claude", "mode") == desired
 
-        cfg.merge("claude" => (cfg["claude"] || {}).merge("mode" => desired))
+        existing_claude = cfg["claude"].is_a?(Hash) ? cfg["claude"] : {}
+        cfg.merge("claude" => existing_claude.merge("mode" => desired))
       end
 
       def render_prompt(task, cfg, profile:)

@@ -2,12 +2,24 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T15:00:00Z] claude.mode — review-pass 1 follow-up fixes
+
+**Action:** Applied the round-1 reviewer findings on `claude.mode`. `Stages::Base.spawn_claude!` now PROPAGATES `Hive::AgentError` (R7 hard-fail contract); a new `spawn_claude_with_tmux_marker!` wraps the top-level Claude stages (brainstorm / plan / execute / open_pr / artifacts / finalize) so the `:error reason="tmux_unavailable"` marker still lands for those, while the 6-review path's outer rescue lands the dedicated `:review_error reason="tmux_unavailable"` marker. `run_reviewer_spec` re-raises tmux-unavailable AgentErrors so they no longer land as N per-reviewer `errors-NN.md` lines plus `:all_failed`. The TMUX_UNAVAILABLE regex was narrowed (a session-startup timeout is transient, not "tmux missing"). Doctor surfaces a row when `.hive-state/config.yml` is unreadable. Renamed `docs/notes/brainstorm-interactive-tmux.md` → `claude-tmux-launch-mode.md` to match its retitled content. Wiki/init.md and Init#collect docs updated to 10 LIMIT_KEYS and to drop the "five sections" undercount.
+
+**Refreshed pages:** [[commands/init]].
+
 ## [2026-05-23T11:30:00Z] drop — pass-1 + pass-2 review-finding fixes hardened hard-delete
 
 **Action:** Recorded the two follow-up fix passes against `hive drop` after the initial feat/U1+U3 commit. Pass-1 (24 findings) and pass-2 (48 findings) tightened idempotency, PID-reuse safety, locale-stable git stderr parsing, worktree-pointer root validation, malformed-YAML rescue in `Worktree.read_pointer`, daemon-row `folder_missing_nil` distinction, and a closed `commit_action` enum on the drop schema. The `9-done` refusal prose in [[commands/drop]] was folded into the refusals-table caption. [[cli]] is already in sync (drop row + exit-code/`--json` envelope row). Schema enum + `holder`/`lock_path` extras were aligned with `DropErrorKind` during pass-1.
 
 **Refreshed pages:**
 - [[commands/drop]] — refusal prose tightened around the table; no surface change to flags, exits, or JSON keys (those were correct from feat commit).
+
+## [2026-05-23T10:00:00Z] claude.mode — global Claude launch mode (tmux | headless)
+
+**Action:** Documented ADR-030 work shipped on `we-added-tmux-mode-for-260519-69be` (U1–U8). Added top-level `claude.mode` config (default `tmux`) honored by every Claude-backed stage via `Hive::Stages::Base.spawn_claude!` + `Hive::ClaudeLauncher`. `hive init` prompts for the mode, `hive doctor` reports it, 6-review shares one tmux session per reviewer pass for Claude reviewers (Codex/Pi remain headless). `brainstorm.runtime` deprecated to brainstorm-only fallback. `tmux >= 3.0` becomes a hard runtime dependency when `claude.mode: tmux`.
+
+**Refreshed pages:** [[decisions]] (ADR-030 already authored), [[active-areas]].
 
 ## [2026-05-23T09:45:00Z] readme - add daemon-first TUI getting started
 

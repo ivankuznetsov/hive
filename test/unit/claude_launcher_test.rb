@@ -9,32 +9,30 @@ class ClaudeLauncherTest < Minitest::Test
   def test_headless_mode_delegates_to_base_spawn_agent
     with_tmp_task do |task|
       captured = nil
-      original = Hive::Stages::Base.method(:spawn_agent)
-      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |spawn_task, **kwargs|
-        captured = [ spawn_task, kwargs ]
-        { status: :complete }
-      end
+      original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+      capture_unbound_method_on(Hive::Stages::Base, :spawn_agent, original) do
+        Hive::Stages::Base.define_singleton_method(:spawn_agent) do |spawn_task, **kwargs|
+          captured = [ spawn_task, kwargs ]
+          { status: :complete }
+        end
 
-      result = Hive::ClaudeLauncher.launch!(
-        task: task,
-        cfg: { "claude" => { "mode" => "headless" } },
-        prompt: "prompt",
-        add_dirs: [ task.folder ],
-        cwd: task.folder,
-        max_budget_usd: 1,
-        timeout_sec: 1,
-        log_label: "test",
-        session_name: "hive-test-session",
-        status_mode: :state_file_marker
-      )
+        result = Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: { "claude" => { "mode" => "headless" } },
+          prompt: "prompt",
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 1,
+          log_label: "test",
+          session_name: "hive-test-session",
+          status_mode: :state_file_marker
+        )
 
-      assert_equal({ status: :complete }, result)
-      assert_equal task, captured.fetch(0)
-      assert_equal "prompt", captured.fetch(1).fetch(:prompt)
-      assert_equal :claude, captured.fetch(1).fetch(:profile).name
-    ensure
-      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*args, **kwargs, &block|
-        original.call(*args, **kwargs, &block)
+        assert_equal({ status: :complete }, result)
+        assert_equal task, captured.fetch(0)
+        assert_equal "prompt", captured.fetch(1).fetch(:prompt)
+        assert_equal :claude, captured.fetch(1).fetch(:profile).name
       end
     end
   end
@@ -91,41 +89,115 @@ class ClaudeLauncherTest < Minitest::Test
     restore_env("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", old_legacy)
   end
 
-  def test_stage_spawn_records_tmux_unavailable_marker
+  def test_spawn_claude_bang_propagates_agent_error_unchanged
+    # `spawn_claude!` no longer catches tmux-unavailable AgentErrors;
+    # the propagation is what lets the review stage's outer rescue
+    # land `:review_error reason="tmux_unavailable"` against the real
+    # task instead of writing the wrong marker shape to a synthetic
+    # task's state_file. Per-stage callers that want the marker shape
+    # use `spawn_claude_with_tmux_marker!` (see below).
     with_tmp_task do |task|
       original = Hive::ClaudeLauncher.method(:launch!)
-      Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
-        raise Hive::AgentError, "tmux binary not runnable: tmux"
+      capture_unbound_method(:launch!, original) do
+        Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
+          raise Hive::AgentError, "tmux binary not runnable: tmux"
+        end
+
+        assert_raises(Hive::AgentError) do
+          Hive::Stages::Base.spawn_claude!(
+            task,
+            { "claude" => { "mode" => "tmux" } },
+            prompt: "prompt",
+            add_dirs: [ task.folder ],
+            cwd: task.folder,
+            max_budget_usd: 1,
+            timeout_sec: 1,
+            log_label: "test",
+            status_mode: :state_file_marker
+          )
+        end
       end
-
-      result = Hive::Stages::Base.spawn_claude!(
-        task,
-        { "claude" => { "mode" => "tmux" } },
-        prompt: "prompt",
-        add_dirs: [ task.folder ],
-        cwd: task.folder,
-        max_budget_usd: 1,
-        timeout_sec: 1,
-        log_label: "test",
-        status_mode: :state_file_marker
-      )
-
-      marker = Hive::Markers.current(task.state_file)
-      assert_equal :error, result[:status]
-      assert_equal :error, marker.name
-      assert_equal "tmux_unavailable", marker.attrs["reason"]
-      assert_match(/tmux binary not runnable/, marker.attrs["message"])
-    ensure
-      Hive::ClaudeLauncher.define_singleton_method(:launch!, original)
     end
   end
 
-  def test_tmux_unavailable_error_is_narrower_than_any_tmux_message
-    unavailable = Hive::AgentError.new("tmux 2.9 below minimum 3.0")
-    duplicate = Hive::AgentError.new("tmux session hive-x already exists")
+  def test_spawn_claude_with_tmux_marker_records_marker
+    with_tmp_task do |task|
+      original = Hive::ClaudeLauncher.method(:launch!)
+      capture_unbound_method(:launch!, original) do
+        Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
+          raise Hive::AgentError, "tmux binary not runnable: tmux"
+        end
 
-    assert Hive::ClaudeLauncher.tmux_unavailable_error?(unavailable)
-    refute Hive::ClaudeLauncher.tmux_unavailable_error?(duplicate)
+        result = nil
+        _out, _err = capture_io do
+          result = Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+            task,
+            { "claude" => { "mode" => "tmux" } },
+            prompt: "prompt",
+            add_dirs: [ task.folder ],
+            cwd: task.folder,
+            max_budget_usd: 1,
+            timeout_sec: 1,
+            log_label: "test",
+            status_mode: :state_file_marker
+          )
+        end
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal :error, result[:status]
+        assert_equal :error, marker.name
+        assert_equal "tmux_unavailable", marker.attrs["reason"]
+        assert_match(/tmux binary not runnable/, marker.attrs["message"])
+      end
+    end
+  end
+
+  TMUX_UNAVAILABLE_MESSAGES = [
+    "tmux not runnable: tmux foo",
+    "tmux binary not runnable: tmux (ENOENT: foo)",
+    "could not parse tmux -V output: \"unexpected\"",
+    "tmux 2.9 below minimum 3.0"
+  ].freeze
+
+  # Q2: parameterize so EVERY entry of TMUX_UNAVAILABLE_PATTERNS is
+  # covered. A regression that broadens or narrows the regex is now
+  # immediately visible — not just for the one entry the original
+  # test happened to assert.
+  def test_tmux_unavailable_patterns_each_match
+    TMUX_UNAVAILABLE_MESSAGES.each do |msg|
+      err = Hive::AgentError.new(msg)
+      assert Hive::ClaudeLauncher.tmux_unavailable_error?(err),
+             "expected #{msg.inspect} to count as tmux unavailable"
+    end
+  end
+
+  def test_tmux_unavailable_excludes_session_collision_and_startup_timeout
+    [
+      "tmux session hive-x already exists",
+      "tmux session hive-x did not start"
+    ].each do |msg|
+      err = Hive::AgentError.new(msg)
+      refute Hive::ClaudeLauncher.tmux_unavailable_error?(err),
+             "#{msg.inspect} is a transient/per-session failure, not 'tmux missing'"
+    end
+  end
+
+  def test_tmux_session_name_truncates_at_250_bytes
+    long_slug = ("a" * 300)
+    task = Struct.new(:slug, :folder, :stage_name).new(long_slug, "/tmp", "2-brainstorm")
+    name = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
+    assert_operator name.bytesize, :<=, 250
+    assert name.start_with?("hive-2-brainstorm-")
+  end
+
+  def test_tmux_session_name_handles_multibyte_slug
+    multi = "тест-" + ("я" * 200)
+    task = Struct.new(:slug, :folder, :stage_name).new(multi, "/tmp", "2-brainstorm")
+    name = Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task)
+    # 250-byte slice can land mid-codepoint; that's an explicit
+    # behaviour choice (tmux session names are byte-bounded). Assert
+    # only the byte cap; do NOT assert UTF-8 validity.
+    assert_operator name.bytesize, :<=, 250
   end
 
   private
@@ -140,5 +212,25 @@ class ClaudeLauncherTest < Minitest::Test
 
   def restore_env(key, value)
     value.nil? ? ENV.delete(key) : ENV[key] = value
+  end
+
+  # Unify on the UnboundMethod capture+rebind stub pattern used in
+  # brainstorm_tmux_sentinel_test.rb (Q1 / pr-test-analyzer #9). The
+  # earlier `define_singleton_method` lambda-rebind approach could
+  # leak when minitest re-ordered tests; capturing the original
+  # UnboundMethod and restoring it via `define_method` is symmetric
+  # and survives reordering.
+  def capture_unbound_method(method_name, original_unbound_or_method, &block)
+    capture_unbound_method_on(Hive::ClaudeLauncher, method_name, original_unbound_or_method, &block)
+  end
+
+  def capture_unbound_method_on(mod, method_name, original_unbound_or_method)
+    yield
+  ensure
+    if original_unbound_or_method.is_a?(UnboundMethod)
+      mod.singleton_class.send(:define_method, method_name, original_unbound_or_method)
+    elsif original_unbound_or_method.is_a?(Method)
+      mod.define_singleton_method(method_name, original_unbound_or_method)
+    end
   end
 end

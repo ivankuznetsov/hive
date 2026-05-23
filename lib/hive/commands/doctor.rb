@@ -100,19 +100,34 @@ module Hive
       end
 
       def check_legacy_brainstorm_runtime
-        return [] unless legacy_brainstorm_runtime_present?
-
-        [
-          warning_row(
+        rows = []
+        if config_yml_unreadable?
+          rows << warning_row(
             stage: "2-brainstorm",
-            label: "2-brainstorm/brainstorm.runtime",
-            agent: "claude",
-            configured_skill: "brainstorm.runtime",
-            skill: "claude.mode",
-            message: "brainstorm.runtime is superseded by claude.mode (project-global); " \
-                     "migrate by adding `claude:\\n  mode: tmux` and removing the brainstorm.runtime key"
+            label: ".hive-state/config.yml",
+            agent: "config",
+            configured_skill: "config.yml",
+            skill: ".hive-state/config.yml",
+            message: "could not parse .hive-state/config.yml (#{@config_yml_error}); " \
+                     "any brainstorm.runtime → claude.mode migration warning is suppressed " \
+                     "until the file parses cleanly"
           )
-        ]
+          return rows
+        end
+
+        return rows unless legacy_brainstorm_runtime_present?
+
+        rows << warning_row(
+          stage: "2-brainstorm",
+          label: "2-brainstorm/brainstorm.runtime",
+          agent: "claude",
+          configured_skill: "brainstorm.runtime",
+          skill: "claude.mode",
+          message: "brainstorm.runtime is superseded by claude.mode (project-global); " \
+                   "migrate by adding the following YAML and removing the brainstorm.runtime key:\n" \
+                   "  claude:\n    mode: tmux"
+        )
+        rows
       end
 
       def legacy_brainstorm_runtime_present?
@@ -129,15 +144,45 @@ module Hive
         false
       end
 
+      # Detect a config.yml that cannot be loaded (corrupt YAML, perms,
+      # etc.) and remember the underlying error message so the operator
+      # sees a row explaining why doctor cannot evaluate the migration
+      # warning. Without this, a corrupt config.yml silently hid the
+      # legacy_brainstorm_runtime warning AND any other config-derived
+      # check that depends on the file.
+      def config_yml_unreadable?
+        return @config_yml_unreadable unless @config_yml_unreadable.nil?
+
+        @config_yml_unreadable =
+          if @project_root
+            path = File.join(@project_root, ".hive-state", "config.yml")
+            if File.exist?(path)
+              begin
+                YAML.safe_load(File.read(path))
+                false
+              rescue Psych::SyntaxError, Errno::EACCES, Errno::EISDIR => e
+                @config_yml_error = "#{e.class.name.split('::').last}: #{e.message}"
+                true
+              end
+            else
+              false
+            end
+          else
+            false
+          end
+      end
+
       # Operator-visible warnings for the tmux runtime. Each warning is a
       # `kind: "warning"` row — it does NOT contribute to the missing-skill
       # exit code, but renders in the human table with a "!" marker and in
       # the JSON envelope under `summary.warning`.
       #
-      # `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` exported — the wrapper
-      #      unsets these before exec'ing claude, but a parent shell that
-      #      exports either still implies the operator may be confused
-      #      about the billing-auth boundary. Surface the boundary loudly.
+      # Currently surfaces a single check: when the parent shell exports
+      # `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY`. The tmux wrapper unsets
+      # both before exec'ing claude, but an exported value at this scope
+      # hints the operator may be confused about the billing-auth
+      # boundary — flag it loudly so OAuth/subscription vs API-key
+      # billing intent is explicit.
       def tmux_runtime_warnings
         warnings = []
 

@@ -298,10 +298,27 @@ module Hive
           profile: profile,
           allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS
         )
+      end
+
+      # Wrap a spawn_claude! call so that tmux-unavailable AgentErrors land
+      # on the calling stage's own task.state_file as an `:error
+      # reason="tmux_unavailable"` marker. Used by top-level Claude stages
+      # (brainstorm / plan / execute / open_pr / artifacts / finalize)
+      # whose run! returns a stage envelope rather than propagating.
+      #
+      # The 6-review stage deliberately does NOT use this helper: its
+      # sub-stage spawns share state with the main review task, and the
+      # outer `Stages::Review.run!` rescue maps the same AgentError to
+      # `:review_error reason="tmux_unavailable"` against the real task.
+      # Routing through here would write the wrong marker shape onto the
+      # synthetic-task state file (which points at the main task.md).
+      def spawn_claude_with_tmux_marker!(task, cfg, **kwargs)
+        spawn_claude!(task, cfg, **kwargs)
       rescue Hive::AgentError => e
         raise unless Hive::Config.claude_mode(cfg) == :tmux &&
                      Hive::ClaudeLauncher.tmux_unavailable_error?(e)
 
+        warn "[hive] claude tmux mode is unavailable: #{e.message}"
         Hive::Markers.set(task.state_file, :error,
                           reason: "tmux_unavailable",
                           message: e.message)

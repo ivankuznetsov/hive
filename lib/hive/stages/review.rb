@@ -569,10 +569,17 @@ module Hive
         # the best-known phase so the user (and `hive run --json`) sees
         # the failure state, then re-raise so the runner / test suite
         # still surfaces the underlying bug.
+        #
+        # Truncate `e.message` to a bounded length: when a helper
+        # (e.g. `prepare_claude_session!`) raises with a pane-tail
+        # context, that tail is the single most actionable debug signal
+        # for the operator. Dropping the message entirely (the previous
+        # `exception_class`-only marker) silently hid it.
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "runner_exception",
-                          exception_class: e.class.name)
+                          exception_class: e.class.name,
+                          message: truncate_marker_message(e.message))
         raise
       ensure
         # Close the last open phase event on any exit path (return,
@@ -580,6 +587,17 @@ module Hive
         # stays balanced. Swallow failures here — a torn events file
         # must not mask the underlying control-flow result/exception.
         close_phase_event!(task) if @open_phase_event
+      end
+
+      # Marker attr values are scanned by `hive status --json` and read by
+      # the TUI; an unbounded multi-kilobyte tail in a single attr would
+      # break the line-oriented marker format. 500 bytes is the same cap
+      # `prepare_claude_session!` uses for its own tail capture.
+      def truncate_marker_message(message)
+        return "" if message.nil?
+
+        s = message.to_s
+        s.length <= 500 ? s : "#{s[0, 497]}..."
       end
 
       # --- helpers ---------------------------------------------------------
@@ -882,7 +900,25 @@ module Hive
         end
 
         statuses = []
+        # Partition into claude-tmux specs vs everything else so the
+        # shared tmux session covers ONLY the group that needs it: a
+        # mixed reviewer list keeps non-claude reviewers running in
+        # parallel/headless and limits the session lifetime to the
+        # claude run — extra session-open cost was real (preflight +
+        # trust prompt + pane setup) for reviewers that did not consume it.
         if shared_claude_reviewer_session?(cfg, specs)
+          claude_specs, other_specs = specs.partition { |spec| claude_tmux_reviewer?(cfg, spec) }
+
+          other_specs.each do |spec|
+            result = run_reviewer_spec(cfg, ctx, spec, deadline,
+                                       started_at: started_at,
+                                       max_wall_clock_sec: max_wall_clock_sec)
+            return :wall_clock_exceeded if result == :wall_clock_exceeded
+
+            statuses << result.status
+            handle_reviewer_result(task, cfg, ctx, spec, result)
+          end
+
           Hive::ClaudeLauncher.with_shared_session(
             task: task,
             cfg: cfg,
@@ -891,11 +927,11 @@ module Hive
             add_dirs: [ ctx.task_folder ],
             allowed_tools: "Read,Write,Edit,Bash,LS,Glob,Grep"
           ) do |handle|
-            specs.each do |spec|
+            claude_specs.each do |spec|
               result = run_reviewer_spec(cfg, ctx, spec, deadline,
                                          started_at: started_at,
                                          max_wall_clock_sec: max_wall_clock_sec,
-                                         handle: claude_tmux_reviewer?(cfg, spec) ? handle : nil)
+                                         handle: handle)
               return :wall_clock_exceeded if result == :wall_clock_exceeded
 
               statuses << result.status
@@ -948,6 +984,21 @@ module Hive
             else
               adapter.run!
             end
+          rescue Hive::AgentError => e
+            # R7: tmux unavailable is a hard-fail for `claude.mode: tmux`,
+            # not a per-reviewer infra error. Re-raise so the outer
+            # `Stages::Review.run!` rescue lands the dedicated
+            # `:review_error reason="tmux_unavailable"` marker instead
+            # of recording N per-reviewer errors-NN.md lines and an
+            # `:all_failed` envelope.
+            raise if Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+
+            Hive::Reviewers::Result.new(
+              name: spec["name"],
+              output_path: adapter.output_path,
+              status: :error,
+              error_message: "#{e.class}: #{e.message}"
+            )
           rescue StandardError => e
             Hive::Reviewers::Result.new(
               name: spec["name"],

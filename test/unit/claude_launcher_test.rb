@@ -91,6 +91,43 @@ class ClaudeLauncherTest < Minitest::Test
     restore_env("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", old_legacy)
   end
 
+  def test_stage_spawn_records_tmux_unavailable_marker
+    with_tmp_task do |task|
+      original = Hive::ClaudeLauncher.method(:launch!)
+      Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
+        raise Hive::AgentError, "tmux binary not runnable: tmux"
+      end
+
+      result = Hive::Stages::Base.spawn_claude!(
+        task,
+        { "claude" => { "mode" => "tmux" } },
+        prompt: "prompt",
+        add_dirs: [ task.folder ],
+        cwd: task.folder,
+        max_budget_usd: 1,
+        timeout_sec: 1,
+        log_label: "test",
+        status_mode: :state_file_marker
+      )
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "tmux_unavailable", marker.attrs["reason"]
+      assert_match(/tmux binary not runnable/, marker.attrs["message"])
+    ensure
+      Hive::ClaudeLauncher.define_singleton_method(:launch!, original)
+    end
+  end
+
+  def test_tmux_unavailable_error_is_narrower_than_any_tmux_message
+    unavailable = Hive::AgentError.new("tmux 2.9 below minimum 3.0")
+    duplicate = Hive::AgentError.new("tmux session hive-x already exists")
+
+    assert Hive::ClaudeLauncher.tmux_unavailable_error?(unavailable)
+    refute Hive::ClaudeLauncher.tmux_unavailable_error?(duplicate)
+  end
+
   private
 
   def with_tmp_task(stage: "2-brainstorm")

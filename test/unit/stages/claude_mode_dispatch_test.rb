@@ -4,6 +4,8 @@ require "hive/stages/execute"
 require "hive/stages/finalize"
 require "hive/stages/open_pr"
 require "hive/stages/plan"
+require "hive/stages/artifacts"
+require "hive/stages/brainstorm"
 
 class ClaudeModeDispatchTest < Minitest::Test
   include HiveTestHelper
@@ -64,6 +66,36 @@ class ClaudeModeDispatchTest < Minitest::Test
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
         assert_equal "hive-3-plan-dispatch-test", captured[0][:kwargs][:session_name]
+      end
+    end
+  end
+
+  def test_brainstorm_headless_claude_mode_still_uses_claude_launcher
+    with_tmp_dir do |dir|
+      cfg = { "claude" => { "mode" => "headless" } }
+      task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
+      File.write(File.join(task.folder, "idea.md"), "test idea")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Brainstorm.run!(task, cfg)
+
+        assert_equal :claude, captured.fetch(0).fetch(:launcher)
+        assert_equal "headless", captured[0][:cfg].dig("claude", "mode")
+      end
+    end
+  end
+
+  def test_brainstorm_legacy_headless_runtime_uses_claude_launcher_in_headless_mode
+    with_tmp_dir do |dir|
+      cfg = { "brainstorm" => { "runtime" => "headless" } }
+      task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
+      File.write(File.join(task.folder, "idea.md"), "test idea")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Brainstorm.run!(task, cfg)
+
+        assert_equal :claude, captured.fetch(0).fetch(:launcher)
+        assert_equal "headless", captured[0][:cfg].dig("claude", "mode")
       end
     end
   end
@@ -142,6 +174,23 @@ class ClaudeModeDispatchTest < Minitest::Test
         assert_equal [ :claude, :claude ], captured.map { |call| call[:launcher] }
         assert_equal "hive-5-open-pr-dispatch-test", captured[0][:kwargs][:session_name]
         assert_equal "hive-8-finalize-dispatch-test", captured[1][:kwargs][:session_name]
+      end
+    end
+  end
+
+  def test_artifacts_uses_stage_specific_claude_session
+    with_tmp_dir do |dir|
+      cfg = { "claude" => { "mode" => "tmux" } }
+      task = make_task(dir, stage_name: "artifacts", state_name: "artifact.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      task.define_singleton_method(:worktree_path) { worktree_path }
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Artifacts.spawn_artifacts_agent(task, cfg, "prompt", claude_profile(cfg))
+
+        assert_equal :claude, captured.fetch(0).fetch(:launcher)
+        assert_equal "hive-7-artifacts-dispatch-test", captured[0][:kwargs][:session_name]
       end
     end
   end

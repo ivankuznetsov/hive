@@ -298,6 +298,14 @@ module Hive
           profile: profile,
           allowed_tools: allowed_tools || Hive::ClaudeLauncher::DEFAULT_ALLOWED_TOOLS
         )
+      rescue Hive::AgentError => e
+        raise unless Hive::Config.claude_mode(cfg) == :tmux &&
+                     Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "tmux_unavailable",
+                          message: e.message)
+        { status: :error, error_message: e.message }
       end
 
       class TemplateBindings

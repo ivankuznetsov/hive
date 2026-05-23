@@ -332,6 +332,38 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_tmux_session_is_not_opened_when_wall_clock_already_exceeded
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| SharedSessionReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(
+            cfg,
+            ctx,
+            Task.new(dir, File.join(dir, "task.md")),
+            started_at: Time.now - 10,
+            max_wall_clock_sec: 1
+          )
+
+          assert_equal :wall_clock_exceeded, result
+          assert_empty sessions
+          assert_equal [ 0 ], adapters.map(&:headless_runs)
+          assert_equal [ 0 ], adapters.map(&:session_runs)
+        end
+      end
+    end
+  end
+
   def test_first_reviewer_raise_does_not_abort_second
     with_tmp_dir do |dir|
       cfg = {

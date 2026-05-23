@@ -279,6 +279,8 @@ class InitTest < Minitest::Test
                      "plan.agent must default to claude"
         assert_equal "codex",  cfg.dig("execute", "agent"),
                      "execute.agent must be the recommended-default codex in fresh templates"
+        assert_equal "claude", cfg.dig("artifacts", "agent"),
+                     "artifacts.agent must default to claude in fresh templates"
       end
     end
   end
@@ -292,7 +294,9 @@ class InitTest < Minitest::Test
         assert_equal 50,    cfg.dig("budget_usd", "brainstorm")
         assert_equal 100,   cfg.dig("budget_usd", "plan")
         assert_equal 500,   cfg.dig("budget_usd", "execute_implementation")
+        assert_equal 100,   cfg.dig("budget_usd", "artifacts")
         assert_equal 14400, cfg.dig("timeout_sec", "execute_implementation")
+        assert_equal 3600,  cfg.dig("timeout_sec", "artifacts")
       end
     end
   end
@@ -350,7 +354,7 @@ class InitTest < Minitest::Test
     # third reviewer, override `plan` budget/timeout, accept the rest.
     inputs = [
       "codex", "", "2", "1,3", "safetyist",
-      "", "30,900", "", "", "", "", "", "", "",
+      "", "30,900", "", "", "", "", "", "", "", "",
       "", "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
@@ -382,9 +386,11 @@ class InitTest < Minitest::Test
 
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), dev=blank,
-    # reviewers=blank, triage=blank, 9 limit blanks, daemon-enable=blank,
+    # reviewers=blank, triage=blank, limit blanks, daemon-enable=blank,
     # daemon-autostart=blank, confirm=blank.
-    inputs = ([ "", "2", "", "", "" ] + ([ "" ] * 9) + [ "", "", "" ]).join("\n") + "\n"
+    inputs = ([ "", "2", "", "", "" ] +
+              ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+              [ "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -403,10 +409,11 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    # 14 blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, 9 limits. Then "n" for daemon-enable, blank for
+    # Blanks: planning (claude), claude mode, dev, reviewers,
+    # triage bias, limits. Then "n" for daemon-enable, blank for
     # daemon-autostart, blank for confirm.
-    inputs = (([ "" ] * 14) + [ "n", "", "" ]).join("\n") + "\n"
+    inputs = (([ "" ] * (5 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+              [ "n", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -421,9 +428,10 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # 16 blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, 9 limits, daemon-enable, daemon-autostart.
-    inputs = (([ "" ] * 16) + [ "n" ]).join("\n") + "\n"
+    # Blanks: planning (claude), claude mode, dev, reviewers,
+    # triage bias, limits, daemon-enable, daemon-autostart.
+    inputs = (([ "" ] * (7 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+              [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)

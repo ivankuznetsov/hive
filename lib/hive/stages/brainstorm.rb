@@ -10,7 +10,12 @@ module Hive
       def run!(task, cfg)
         case runtime_for(cfg)
         when :headless
-          run_headless!(task, cfg)
+          profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+          if profile.name == :claude
+            run_claude!(task, cfg_with_claude_mode(cfg, :headless), profile: profile)
+          else
+            run_headless!(task, cfg, profile: profile)
+          end
         when :tmux_interactive
           run_claude!(task, cfg)
         end
@@ -42,8 +47,8 @@ module Hive
         end
       end
 
-      def run_headless!(task, cfg)
-        profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+      def run_headless!(task, cfg, profile: nil)
+        profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
         # add_dirs is intentionally limited to the task folder. Brainstorm
         # operates on user-supplied idea text and must not have write access
@@ -70,8 +75,8 @@ module Hive
         { commit: action_for(marker.name), status: marker.name }
       end
 
-      def run_claude!(task, cfg)
-        profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+      def run_claude!(task, cfg, profile: nil)
+        profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
         Hive::Stages::Base.spawn_claude!(
           task,
@@ -89,6 +94,13 @@ module Hive
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def cfg_with_claude_mode(cfg, mode)
+        desired = mode.to_s
+        return cfg if cfg.dig("claude", "mode") == desired
+
+        cfg.merge("claude" => (cfg["claude"] || {}).merge("mode" => desired))
       end
 
       def render_prompt(task, cfg, profile:)

@@ -53,6 +53,7 @@ module Hive
           plan
           execute_implementation
           open_pr
+          artifacts
           finalize
           review_ci
           review_triage

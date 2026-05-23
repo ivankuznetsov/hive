@@ -555,6 +555,14 @@ module Hive
                           reason: "config_error",
                           message: e.message)
         raise
+      rescue Hive::AgentError => e
+        raise unless Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+
+        Hive::Markers.set(task.state_file, :review_error,
+                          phase: @current_phase || :pre_flight,
+                          reason: "tmux_unavailable",
+                          message: e.message)
+        { commit: "review_error_tmux_unavailable", status: :review_error }
       rescue StandardError => e
         # Any uncaught helper exception would otherwise leave a stale
         # REVIEW_WORKING marker on disk. Translate to REVIEW_ERROR with
@@ -850,6 +858,10 @@ module Hive
         clear_reviewer_infra_errors(ctx)
 
         return :ok if specs.empty?
+        if started_at && max_wall_clock_sec &&
+           wall_clock_exceeded?(started_at, max_wall_clock_sec)
+          return :wall_clock_exceeded
+        end
 
         # Derive a monotonic deadline from the caller's wall-clock
         # budget so each reviewer's adapter

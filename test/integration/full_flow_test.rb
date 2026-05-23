@@ -100,6 +100,13 @@ class FullFlowTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(flag))
           File.write(flag, "")
         end
+      when "artifacts"
+        File.write(File.join(folder, "artifact.md"), <<~MD)
+          ## Artifacts
+          No extra artifacts for this flow fixture.
+
+          <!-- COMPLETE -->
+        MD
       when "finalize"
         File.write(File.join(folder, "summary.md"), <<~MD)
           ## Summary
@@ -161,6 +168,8 @@ class FullFlowTest < Minitest::Test
         worktree_root = Dir.mktmpdir("flow-wt-root-")
         @spawned_worktrees << worktree_root
         cfg["worktree_root"] = worktree_root
+        cfg["claude"] ||= {}
+        cfg["claude"]["mode"] = "headless"
         File.write(cfg_path, cfg.to_yaml)
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "fix readme whitespace").call }
@@ -256,6 +265,8 @@ class FullFlowTest < Minitest::Test
         artifacts_dir = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
         FileUtils.mkdir_p(File.dirname(artifacts_dir))
         FileUtils.mv(review_dir, artifacts_dir)
+        ENV["HIVE_FLOW_FOLDER"] = artifacts_dir
+        ENV["HIVE_FLOW_PHASE"] = "artifacts"
         capture_io { Hive::Commands::Run.new(artifacts_dir).call }
         assert_equal :complete, Hive::Markers.current(File.join(artifacts_dir, "artifact.md")).name
 

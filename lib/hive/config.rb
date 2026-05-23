@@ -658,6 +658,9 @@ module Hive
       claude
       plan
       execute
+      open_pr
+      artifacts
+      finalize
       budget_usd
       timeout_sec
       review

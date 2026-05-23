@@ -23,6 +23,13 @@ module Hive
     DEFAULT_PERMISSION_MODE = "bypassPermissions".freeze
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
+    TMUX_UNAVAILABLE_PATTERNS = [
+      /tmux not runnable/,
+      /tmux binary not runnable/,
+      /could not parse tmux -V output/,
+      /tmux \S+ below minimum/,
+      /tmux session .* did not start/
+    ].freeze
 
     SessionHandle = Struct.new(:task, :runner, keyword_init: true) do
       def send_and_wait!(prompt:, expected_output: nil, timeout_sec:,
@@ -210,6 +217,13 @@ module Hive
     rescue Hive::AgentError => e
       status = e.message.include?("below minimum") ? :version_too_old : :missing
       [ status, e.message ]
+    end
+
+    def tmux_unavailable_error?(error)
+      return false unless error.is_a?(Hive::AgentError)
+
+      message = error.message.to_s
+      TMUX_UNAVAILABLE_PATTERNS.any? { |pattern| message.match?(pattern) }
     end
 
     def parse_tmux_version(output)

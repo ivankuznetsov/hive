@@ -217,7 +217,7 @@ module Hive
           # MUST come BEFORE the resume_no_findings empty-guard so
           # approval doesn't require live reviewer files to land.
           #
-          # Two safety checks before advancing (ce-review P1 #7, #11):
+          # Two safety checks before advancing:
           # worktree_dirty? catches manual edits between trip and
           # approval; the max_passes-boundary check breaks to Phase 5
           # instead of writing REVIEW_STALE on an approved pass. The
@@ -226,8 +226,8 @@ module Hive
           # rather than an additional check.
           if resuming_from_waiting?(marker, pass) &&
              marker.attrs["reason"] == "fix_guardrail"
-            # ce-review round-3 P2 #8 — missing or malformed `matches`
-            # on a fix_guardrail marker disables the truncation
+            # Missing or malformed `matches` on a fix_guardrail marker
+            # disables the truncation
             # defense. Treat that as a malformed marker rather than
             # silently degrading to count-blind approval. The marker
             # is hand-edited rarely, but when it is (e.g. an operator
@@ -243,28 +243,25 @@ module Hive
             end
             expected_matches = raw_matches.to_i
 
-            # ce-review round-3 P1 #1 — verify the worktree HEAD is
-            # still the commit the guardrail flagged. A user who
-            # amended/rebased/squashed between trip and approval would
-            # otherwise have their `[x]` ticks honoured against a diff
-            # the guardrail never scanned.
+            # Verify the worktree HEAD is still the commit the guardrail
+            # flagged. A user who amended/rebased/squashed between trip
+            # and approval would otherwise have their `[x]` ticks honoured
+            # against a diff the guardrail never scanned.
             #
-            # Backward-compat (pr-review-toolkit round-4 Critical #1):
-            # legacy markers written by hive ≤ PR-A round-2 carry no
-            # `head=` attr. Treating that absence as "mismatch" would
-            # auto-error every in-flight REVIEW_WAITING reason=fix_guardrail
-            # task on first resume after upgrade — including the xbookmark
-            # task PR-A was authored to unblock. When the marker pre-dates
-            # the head-binding feature, skip the HEAD check with a stderr
-            # notice; the count + checkbox + worktree-clean gates still
-            # apply.
+            # Backward-compat: legacy markers written before the
+            # head-binding feature carry no `head=` attr. Treating that
+            # absence as "mismatch" would auto-error every in-flight
+            # REVIEW_WAITING reason=fix_guardrail task on first resume
+            # after upgrade. When the marker pre-dates the head-binding
+            # feature, skip the HEAD check with a stderr notice; the
+            # count + checkbox + worktree-clean gates still apply.
             guarded_head = marker.attrs["head"].to_s
             current_head = git_head(worktree_path).to_s
             if guarded_head.empty?
               warn "[hive.review] resume on legacy fix_guardrail marker without head= " \
                    "(task #{File.basename(task.folder)} pass #{pass}); HEAD-binding " \
-                   "approval check skipped. Future trips on hive ≥ PR-A round-3 " \
-                   "record head= and enforce this check."
+                   "approval check skipped. Newer markers record head= and enforce " \
+                   "this check."
             elsif current_head != guarded_head
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :resume, reason: "approval_head_mismatch",
@@ -296,7 +293,7 @@ module Hive
               pass += 1
               next
             else
-              # Partial-approval defense (ce-review P0 #1). When the
+              # Partial-approval defense. When the
               # user has ticked SOME `[x]` in fix-guardrail-NN.md but
               # not all, the prior PR-A behaviour was to fall through
               # to the generic REVIEW_WAITING resume path and re-spawn
@@ -385,8 +382,8 @@ module Hive
           escalations_count = count_escalations(ctx_pass)
 
           if accepted.strip.empty? && escalations_count.zero?
-            # ce-review round-3 P1 #4 — mixed reviewer success/failure
-            # must not silently auto-complete. If errors-NN.md exists
+            # Mixed reviewer success/failure must not silently
+            # auto-complete. If errors-NN.md exists
             # (at least one reviewer's adapter failed in this pass),
             # the all-clean signal from the surviving reviewers is
             # NOT proof that the worktree is clean — it only proves
@@ -444,8 +441,8 @@ module Hive
           protected_set = FIX_PROTECTED_FILES + [
             "reviews/escalations-#{format('%02d', pass)}.md",
             "reviews/fix-guardrail-#{format('%02d', pass)}.md",
-            # ce-review P2 #4: reviews/errors-NN.md is the orchestrator-
-            # owned record of reviewer infra failures from this pass. A
+            # reviews/errors-NN.md is the orchestrator-owned record of
+            # reviewer infra failures from this pass. A
             # fix agent rewriting or deleting it would erase the failure
             # provenance the user relies on for triage.
             "reviews/errors-#{format('%02d', pass)}.md",
@@ -488,8 +485,8 @@ module Hive
           )
           if guardrail.status == :tripped
             write_fix_guardrail_findings(ctx_pass, guardrail.matches)
-            # ce-review round-3 P1 #1 — record the guarded HEAD SHA on
-            # the marker so the approval-on-resume path can verify the
+            # Record the guarded HEAD SHA on the marker so the
+            # approval-on-resume path can verify the
             # commits the user is approving still match the diff the
             # guardrail flagged. Without this, a user (or an automated
             # editor) who amends/squashes/rebases the worktree between
@@ -544,7 +541,7 @@ module Hive
         # so the existing test contract is preserved.
         raise
       rescue Hive::ConfigError => e
-        # pr-review-toolkit round-5 code-reviewer #2: a Hive::ConfigError
+        # A Hive::ConfigError
         # (e.g. `max_review_pass NN=99 exceeds review.max_passes=4`) is
         # a typed, actionable failure with a helpful message. The
         # generic StandardError rescue below would re-classify it as
@@ -657,10 +654,10 @@ module Hive
           agent: open[:label],
           message: "phase complete"
         )
-      rescue StandardError
+      rescue SystemCallError, IOError, JSON::JSONError
         # Closing the phase event must never mask the underlying control
-        # flow's result. Drill-down readers tolerate an unclosed bracket
-        # better than a confusing surfaced exception here.
+        # flow's result on a torn events file. Narrow rescue lets genuine
+        # call-site bugs (NoMethodError, NameError, ArgumentError) surface.
         nil
       end
 
@@ -832,18 +829,18 @@ module Hive
       #   :wall_clock_exceeded — caller's wall-clock budget elapsed
       #                          mid-loop; remaining reviewers skipped
       #
-      # The wall-clock check is the U1+U2 reliability fix for ce-review
-      # P1 #8: adapter-local retry (max_attempts × timeout_sec ×
-      # reviewer count) can otherwise exhaust max_wall_clock_sec
-      # entirely inside this method before the outer phase-boundary
-      # check fires. With the budget threaded through, we short-circuit
-      # between reviewers as soon as the budget is gone — the partial
-      # results stay on disk for the next run to consume.
+      # The wall-clock check covers adapter-local retry (max_attempts ×
+      # timeout_sec × reviewer count) that can otherwise exhaust
+      # max_wall_clock_sec entirely inside this method before the outer
+      # phase-boundary check fires. With the budget threaded through,
+      # we short-circuit between reviewers as soon as the budget is
+      # gone — the partial results stay on disk for the next run to
+      # consume.
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
         specs = Array(cfg.dig("review", "reviewers"))
 
-        # ce-review round-3 P2 #9 — clear stale errors-NN.md BEFORE
-        # any early return. The docs promise "errors-NN.md reflects
+        # Clear stale errors-NN.md BEFORE any early return. The docs
+        # promise "errors-NN.md reflects
         # the current invocation's failures (or its absence reflects
         # all-success)"; an empty-spec early return that skipped the
         # cleanup violated that contract when a project removed all
@@ -852,8 +849,8 @@ module Hive
 
         return :ok if specs.empty?
 
-        # ce-review round-3 P1 #3 — derive a monotonic deadline from
-        # the caller's wall-clock budget so each reviewer's adapter
+        # Derive a monotonic deadline from the caller's wall-clock
+        # budget so each reviewer's adapter
         # caps its own spawn/backoff at the remaining time. Without
         # this, max_attempts × timeout_sec on a single reviewer can
         # exhaust the outer review.max_wall_clock_sec before the
@@ -883,8 +880,7 @@ module Hive
           # doesn't abort the whole reviewers phase. Treat as :error,
           # record the failure in errors-NN.md, and continue with the
           # next reviewer.
-          # pr-review-toolkit round-4 silent-failure-hunter C2 —
-          # feature-detect whether the adapter accepts a `deadline:`
+          # Feature-detect whether the adapter accepts a `deadline:`
           # kwarg via Method#parameters so we don't have to discriminate
           # ArgumentError-by-message at the rescue site. The previous
           # form (`rescue ArgumentError; adapter.run!`) silently swallowed
@@ -911,8 +907,8 @@ module Hive
           statuses << result.status
 
           if result.error?
-            # ce-review round-3 P2 #6 — guarantee the failed adapter
-            # leaves no reviewer file behind, even if the adapter
+            # Guarantee the failed adapter leaves no reviewer file
+            # behind, even if the adapter
             # raised (Agent#run!'s own final-failure cleanup doesn't
             # run on the rescue path, and custom adapters may not
             # implement it). Deleting unconditionally on the
@@ -963,7 +959,7 @@ module Hive
       # reflects the current invocation's reviewer-failure set, not
       # accumulated history.
       #
-      # pr-review-toolkit round-5 M1: try-delete pattern instead of
+      # Try-delete pattern instead of
       # `if File.exist?` to close the TOCTOU window (another process
       # could delete the file between the check and the delete on a
       # networked FS). ENOENT after that race is the expected
@@ -1004,8 +1000,7 @@ module Hive
           )
         end
       rescue SystemCallError => e
-        # pr-review-toolkit round-4 silent-failure-hunter C1: this file
-        # is load-bearing for the U2 contract and for the round-3
+        # This file is load-bearing for the U2 contract and for the
         # reviewer_partial_failure pause path. If the write fails
         # (ENOSPC, EROFS, EACCES on a shared mount, EDQUOT), the
         # outer run! rescue would classify it as a generic
@@ -1241,7 +1236,7 @@ module Hive
         FileUtils.mkdir_p(File.dirname(path))
         body = +"# Fix-guardrail findings for pass #{format('%02d', ctx.pass)}\n\n"
 
-        # ce-review P1 #10 — group findings by severity so the user
+        # Group findings by severity so the user
         # cannot accidentally approve a high-severity edit by reading
         # only the medium/low ones. Each severity becomes a labelled
         # ## section; approval semantic stays all-`[x]` per file but
@@ -1281,7 +1276,7 @@ module Hive
       # insensitive on the `x`); other line shapes (the title, blank
       # lines, any free-form prose under it) are ignored.
       #
-      # `expected_matches:` (ce-review P1 #2): the orchestrator
+      # `expected_matches:`: the orchestrator
       # supplies the original match count from `marker.attrs["matches"]`
       # so we reject approval when the file's checkbox count differs —
       # defends against a "truncation-forged" approval where the user

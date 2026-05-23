@@ -402,8 +402,7 @@ module Hive
         Messages::BACK
       end
 
-      # Idea preview is read-only and sticky: only explicit close keys
-      # leave the panel so accidental typing does not dismiss it.
+      # Sticky panel: only explicit close keys dismiss, so accidental typing cannot leave it.
       def idea_preview_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q" || key == "i"
 

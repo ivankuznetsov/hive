@@ -154,6 +154,11 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal expected, Hive::Tui::Model.members
   end
 
+  def test_info_panel_state_carries_all_documented_fields
+    expected = %i[slug stage created_at original_text folder_path latest_log_path stage_extra]
+    assert_equal expected, Hive::Tui::Model::InfoPanelState.members
+  end
+
   def test_pane_focus_can_be_overridden_via_with
     a = Hive::Tui::Model.initial
     b = a.with(pane_focus: :left)

@@ -149,4 +149,12 @@ class HiveTuiViewsIdeaPreviewTest < Minitest::Test
     assert_includes out, "…"
     refute_includes out, "extra line 20"
   end
+
+  def test_long_original_text_cannot_suppress_stage_extra_title
+    long_text = (1..40).map { |i| "idea body line #{i}" }.join("\n")
+    out = render(state: info_state(original_text: long_text, stage_extra: "# Brainstorm body"), height: 13)
+
+    assert_includes out, "brainstorm.md",
+                    "stage_extra title block must survive a long original_text per IU3 contract"
+  end
 end

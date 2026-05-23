@@ -648,6 +648,16 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "[q] quit"
   end
 
+  def test_default_footer_fits_full_hint_at_exact_boundary_width
+    hint = @model.send(:footer_hint)
+    out = @model.send(:default_footer, hint.length)
+
+    assert_includes out, "[i] info"
+    assert_includes out, "[q] quit"
+    refute out.end_with?("…"),
+           "footer at exact hint width should not truncate, got #{out.inspect}"
+  end
+
   def test_default_footer_truncates_from_right_at_narrow_width
     out = @model.send(:default_footer, 76)
 
@@ -3752,6 +3762,23 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_open_idea_preview_unknown_stage_has_no_extra
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "5-open-pr")
+      write_idea_md(folder, original_text: "PR draft")
+      File.write(File.join(folder, "brainstorm.md"), "# Brainstorm")
+      File.write(File.join(folder, "plan.md"), "# Plan")
+      row = make_task_row(folder: folder, slug: "some-slug", stage: "5-open-pr")
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+
+      assert_nil cmd
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_nil @model.hive_model.info_panel_state.stage_extra,
+                 "unknown stages must fall through to the safe nil default"
+    end
+  end
+
   def test_open_idea_preview_reads_plan_extra
     with_tmp_dir do |root|
       folder = make_task_folder(root, stage: "3-plan")
@@ -3903,17 +3930,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
       File.write(extra_path, "secret\n")
       row = make_task_row(folder: folder, slug: "some-slug", stage: "2-brainstorm")
 
-      # Stub `read_capped` to raise EACCES so the test exercises the
-      # rescue path deterministically. Pre-fix, the test relied on
-      # `File.chmod(0)` which does not block reads as root and breaks
-      # on CI containers that run the suite as root.
-      @model.define_singleton_method(:read_capped) do |path|
-        raise Errno::EACCES if path == extra_path
+      blocked = File.expand_path(extra_path)
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) do |path, *args, **kwargs, &block|
+        raise Errno::EACCES if File.expand_path(path.to_s) == blocked
 
-        nil
+        original_open.call(path, *args, **kwargs, &block)
       end
 
-      _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+      begin
+        _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
+      ensure
+        File.define_singleton_method(:open, original_open)
+      end
 
       assert_nil cmd
       assert_equal :idea_preview, @model.hive_model.mode
@@ -3993,11 +4022,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_open_idea_preview_created_at_falls_back_to_typed_value
-    # When `frontmatter_scalar` cannot extract a verbatim value (block
-    # scalar, multi-line string, etc.), `idea_created_at` falls back to
-    # the YAML-parsed typed value. Constructs a frontmatter shape the
-    # scalar parser cannot represent and asserts the Time branch
-    # formats to a UTC iso8601 string.
     with_tmp_dir do |root|
       folder = make_task_folder(root, stage: "2-brainstorm")
       File.write(File.join(folder, "idea.md"), <<~MD)
@@ -4014,11 +4038,29 @@ class HiveTuiBubbleModelTest < Minitest::Test
       _, cmd = @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: row))
 
       assert_nil cmd
-      # YAML parses the block scalar to "2026-05-22T22:40:00Z\n"; the
-      # fallback path returns the trailing-newline-trimmed iso8601 via
-      # `to_s` since the value is not a Time/Date.
-      assert_match(/\A2026-05-22T22:40:00Z/, @model.hive_model.info_panel_state.created_at.to_s)
+      # Trailing newline from the `|` block scalar must be stripped so the field grid does not wrap.
+      assert_equal "2026-05-22T22:40:00Z", @model.hive_model.info_panel_state.created_at
     end
+  end
+
+  def test_frontmatter_scalar_preserves_hash_inside_quoted_value
+    contents = <<~MD
+      ---
+      created_at: "2026-05-22 #note"
+      ---
+    MD
+
+    assert_equal "2026-05-22 #note", @model.send(:frontmatter_scalar, contents, "created_at")
+  end
+
+  def test_frontmatter_scalar_strips_trailing_comment_after_whitespace
+    contents = <<~MD
+      ---
+      created_at: 2026-05-22T22:40:00Z  # local capture
+      ---
+    MD
+
+    assert_equal "2026-05-22T22:40:00Z", @model.send(:frontmatter_scalar, contents, "created_at")
   end
 
   def test_idea_preview_roundtrip_open_then_i_dismisses

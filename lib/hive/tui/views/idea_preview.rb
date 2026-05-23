@@ -5,16 +5,11 @@ require "hive/tui/views/format"
 module Hive
   module Tui
     module Views
-      # Full-screen, read-only task info panel. All file I/O happens in
-      # BubbleModel when the panel opens; this view only renders the
-      # captured InfoPanelState.
+      # Renders captured InfoPanelState; all file I/O happens in BubbleModel at open time.
       module IdeaPreview
         DISMISS_HINT = "press q / Esc / i to close".freeze
         DIVIDER = "─".freeze
-        # Common label-column width for the `created_at`, `folder`, and
-        # `latest log` rows. Computed from the longest label so a future
-        # rename (e.g. `working_dir` at 11 chars) does not silently
-        # collapse the value-column gap to a single space.
+        # Computed from the longest label so a future rename does not collapse the value gap.
         LABEL_COL = [ "created_at", "folder", "latest log" ].map(&:length).max + 2
 
         module_function
@@ -63,10 +58,13 @@ module Hive
 
         def fit_panel_lines(base, extra, capacity, width)
           return [] if capacity <= 0
-          return truncate_rows(base, capacity, width) if base.length >= capacity
+          return truncate_rows(base, capacity, width) if extra.empty?
 
-          remaining = capacity - base.length
-          base + truncate_rows(extra, remaining, width)
+          # Reserve at least the title block so a long original_text cannot suppress extra entirely.
+          extra_reserve = [ extra.length, 3 ].min
+          base_capacity = [ capacity - extra_reserve, 1 ].max
+          base_rows = truncate_rows(base, base_capacity, width)
+          base_rows + truncate_rows(extra, capacity - base_rows.length, width)
         end
 
         def truncate_rows(rows, capacity, width)
@@ -78,11 +76,7 @@ module Hive
           visible
         end
 
-        # Append the truncation `…` indicator, taking care to insert it
-        # before any trailing ANSI reset escape so a styled line (e.g.
-        # the dim divider rendered via `Styles::HINT.render(DIVIDER * …)`)
-        # keeps the ellipsis inside the same style run. Without this,
-        # the indicator pops outside the dim style on real terminals.
+        # Insert `…` before any trailing ANSI reset so styled lines keep the indicator inside the style run.
         def with_ellipsis(line)
           if (match = line.match(/\A(.*?)(\e\[[\d;]*m)\z/m))
             prefix = match[1].sub(/\s+\z/, "")

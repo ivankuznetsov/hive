@@ -165,6 +165,25 @@ class HiveTuiInputDecoderTest < Minitest::Test
     assert_empty decoder.flush
   end
 
+  def test_incomplete_utf8_sequence_waits_for_continuation_byte
+    assert_empty decoder.drain("\xC3".b)
+
+    messages = decoder.drain("\xA9".b)
+
+    assert_equal 1, messages.size
+    assert_kind_of Bubbletea::KeyMessage, messages.first
+    assert_equal Bubbletea::KeyMessage::KEY_RUNES, messages.first.key_type
+    assert_equal "é", messages.first.char
+  end
+
+  def test_malformed_utf8_byte_before_control_key_is_dropped
+    messages = decoder.drain("\xC3\r".b)
+
+    assert_equal 1, messages.size
+    assert_kind_of Bubbletea::KeyMessage, messages.first
+    assert_equal Bubbletea::KeyMessage::KEY_ENTER, messages.first.key_type
+  end
+
   # ---- Fix 1: unmapped control bytes must not wedge the decoder ----
 
   def test_unmapped_control_byte_does_not_stall_decoder

@@ -566,6 +566,100 @@ class HiveTuiClipboardTest < Minitest::Test
     end
   end
 
+  def test_default_shim_terminate_ignores_missing_process
+    signals = []
+
+    with_process_stubs(
+      kill: ->(signal, pid) { signals << [ signal, pid ]; raise Errno::ESRCH },
+      wait: ->(_pid) { flunk "wait should not run when TERM finds no process" }
+    ) do
+      assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 12_345)
+    end
+
+    assert_equal [ [ "TERM", 12_345 ] ], signals
+  end
+
+  def test_default_shim_terminate_ignores_missing_process_during_initial_wait
+    signals = []
+
+    with_process_stubs(
+      kill: ->(signal, pid) { signals << [ signal, pid ] },
+      wait: ->(_pid) { raise Errno::ECHILD }
+    ) do
+      with_timeout_stub(->(_seconds, &block) { block.call }) do
+        assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 22_222)
+      end
+    end
+
+    assert_equal [ [ "TERM", 22_222 ] ], signals
+  end
+
+  def test_default_shim_terminate_ignores_missing_process_after_timeout
+    signals = []
+
+    with_process_stubs(
+      kill: lambda { |signal, pid|
+        signals << [ signal, pid ]
+        raise Errno::ECHILD if signal == "KILL"
+      },
+      wait: ->(_pid) { flunk "wait should be hidden behind timeout stub" }
+    ) do
+      with_timeout_stub(->(_seconds, &_block) { raise Timeout::Error }) do
+        assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 44_444)
+      end
+    end
+
+    assert_equal [ [ "TERM", 44_444 ], [ "KILL", 44_444 ] ], signals
+  end
+
+  def test_default_shim_terminate_logs_unreaped_process_after_sigkill_timeout
+    signals = []
+    logs = []
+
+    with_process_stubs(
+      kill: ->(signal, pid) { signals << [ signal, pid ] },
+      wait: ->(_pid) { flunk "wait should be hidden behind timeout stub" }
+    ) do
+      with_timeout_stub(->(_seconds, &_block) { raise Timeout::Error }) do
+        with_debug_log_stub(->(topic, message = nil) { logs << [ topic, message ] }) do
+          assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 33_333)
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 33_333 ], [ "KILL", 33_333 ] ], signals
+    assert_equal 1, logs.size
+    assert_equal "clipboard", logs.first.first
+    assert_includes logs.first.last, "unreaped after SIGKILL+wait"
+  end
+
+  def with_process_stubs(kill:, wait:)
+    original_kill = Process.method(:kill)
+    original_wait = Process.method(:wait)
+    Process.define_singleton_method(:kill, &kill)
+    Process.define_singleton_method(:wait, &wait)
+    yield
+  ensure
+    Process.define_singleton_method(:kill, &original_kill)
+    Process.define_singleton_method(:wait, &original_wait)
+  end
+
+  def with_timeout_stub(callable)
+    original_timeout = Timeout.method(:timeout)
+    Timeout.define_singleton_method(:timeout, &callable)
+    yield
+  ensure
+    Timeout.define_singleton_method(:timeout, &original_timeout)
+  end
+
+  def with_debug_log_stub(callable)
+    original_log = Hive::Tui::Debug.method(:log)
+    Hive::Tui::Debug.define_singleton_method(:log, &callable)
+    yield
+  ensure
+    Hive::Tui::Debug.define_singleton_method(:log, &original_log)
+  end
+
   def with_env(updates)
     old = updates.to_h { |key, _value| [ key, ENV.fetch(key, nil) ] }
     updates.each do |key, value|

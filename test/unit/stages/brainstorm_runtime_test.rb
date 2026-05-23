@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/config"
 require "hive/stages/brainstorm"
 
 class BrainstormRuntimeTest < Minitest::Test
@@ -18,5 +19,9 @@ class BrainstormRuntimeTest < Minitest::Test
     end
 
     assert_match(/brainstorm\.runtime/, err.message)
+  end
+
+  def test_action_for_preserves_unknown_marker_name
+    assert_equal "paused", Hive::Stages::Brainstorm.action_for(:paused)
   end
 end

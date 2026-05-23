@@ -36,10 +36,23 @@ class HiveTuiDebugTest < Minitest::Test
           "#{e.class}: #{e.message}"
         end
 
+        swallowed = begin
+          original_open_log = Hive::Tui::Debug.method(:open_log)
+          Hive::Tui::Debug.instance_variable_set(:@file, nil)
+          Hive::Tui::Debug.define_singleton_method(:open_log) { raise IOError, "disk full" }
+          Hive::Tui::Debug.log("broken", "write")
+          "swallowed"
+        rescue StandardError => e
+          "#{e.class}: #{e.message}"
+        ensure
+          Hive::Tui::Debug.define_singleton_method(:open_log, &original_open_log)
+        end
+
         puts JSON.generate(
           path: Hive::Tui::Debug.log_path,
           returned: returned,
           raised: raised,
+          swallowed: swallowed,
           lines: File.readlines(Hive::Tui::Debug.log_path, chomp: true)
         )
       RUBY
@@ -58,6 +71,7 @@ class HiveTuiDebugTest < Minitest::Test
       assert_equal File.join(dir, "hive-tui-debug.log"), payload.fetch("path")
       assert_equal "done", payload.fetch("returned")
       assert_equal "ArgumentError: bad", payload.fetch("raised")
+      assert_equal "swallowed", payload.fetch("swallowed")
 
       lines = payload.fetch("lines")
       assert_match(/\A=== hive tui debug session pid=\d+ started /, lines.fetch(0))

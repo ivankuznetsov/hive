@@ -27,4 +27,5 @@ For 6-review, Claude reviewers run sequentially inside one shared tmux session p
 - `tmux` is now a runtime dependency whenever `claude.mode: tmux`; missing or too-old tmux is a hard failure, not a silent fallback.
 - Switching modes is a config edit plus stage restart.
 - Future Claude-backed stages inherit the launch setting by using `spawn_claude!`.
-- Daemon/service hosts that cannot run tmux should set `claude.mode: headless`.
+- **Daemon / service hosts MUST set `claude.mode: headless`.** The default `tmux` mode requires an attached terminal for trust-prompt and ready-prompt detection; daemon hosts running without a TTY would hard-fail on every Claude-backed task. Auto-fallback to headless is explicitly out of scope (R10) — the operator opts in via config so the launch contract stays a single, inspectable choice.
+- **Legacy env-var prefix `HIVE_BRAINSTORM_TMUX_*` deprecation.** Every tmux tuneable now reads `HIVE_CLAUDE_TMUX_<KEY>` first and falls back to `HIVE_BRAINSTORM_TMUX_<KEY>`. The legacy prefix remains readable for one release and is dropped in the next minor release after the `claude.mode` rollout — service units, CI envs, and `direnv` files that set the legacy form must migrate.

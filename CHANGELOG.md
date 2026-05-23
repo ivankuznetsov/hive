@@ -36,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - In `claude.mode: tmux`, Claude reviewer passes in `6-review` run sequentially inside one shared tmux session for the pass. Non-Claude reviewers still spawn headless.
 - `hive init` now prompts for `claude.mode` instead of the brainstorm-only runtime. Legacy `brainstorm.runtime` remains readable for one release as a deprecated 2-brainstorm fallback, and `hive doctor` warns when it is still present.
 - `hive doctor` reports a `claude/tmux` dependency row whenever `claude.mode: tmux`; missing or too-old tmux is a hard failure, with no silent fallback to headless.
+- **Daemon / service hosts MUST set `claude.mode: headless`** in `.hive-state/config.yml`. The new `tmux` default expects an attached terminal for the trust-prompt and ready-prompt detection; daemons run without a TTY and would hard-fail on every Claude-backed task otherwise (auto-fallback to headless is explicitly out of scope — see ADR-030 Consequences). Existing daemon-driven projects that previously relied on `brainstorm.runtime: headless` MUST migrate to `claude.mode: headless` before the legacy `brainstorm.runtime` fallback is removed (see deprecation note below).
+- **Legacy env-var prefix `HIVE_BRAINSTORM_TMUX_*` is deprecated.** The new `HIVE_CLAUDE_TMUX_*` prefix is preferred for every tmux tuneable (`READY_WAIT_TIMEOUT_SEC`, `POLL_INTERVAL_SEC`, `SENTINEL_INTERVAL_SEC`, `CLAUDE_READY_WAIT_TIMEOUT_SEC`, etc.). The legacy `HIVE_BRAINSTORM_TMUX_*` fallback is kept readable for ONE release and will be dropped in the NEXT minor release after this entry. Update any service unit, CI step, or `direnv` env that sets the legacy form.
 
 ### Changed — PR-first workflow
 

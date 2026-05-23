@@ -70,6 +70,31 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_set_tolerates_fsync_failure
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      original_open = File.method(:open)
+      tmp_marker = ".#{File.basename(file)}.tmp."
+
+      File.define_singleton_method(:open) do |path_arg, *args, **kwargs, &block|
+        if path_arg.to_s.include?(tmp_marker) && block
+          original_open.call(path_arg, *args, **kwargs) do |handle|
+            handle.define_singleton_method(:fsync) { raise IOError, "fsync unavailable" }
+            block.call(handle)
+          end
+        else
+          original_open.call(path_arg, *args, **kwargs, &block)
+        end
+      end
+
+      Hive::Markers.set(file, :waiting)
+
+      assert_equal :waiting, Hive::Markers.current(file).name
+    ensure
+      File.define_singleton_method(:open, original_open)
+    end
+  end
+
   def test_unknown_marker_raises
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

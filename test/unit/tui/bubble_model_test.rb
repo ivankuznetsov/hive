@@ -396,6 +396,52 @@ class HiveTuiBubbleModelTest < Minitest::Test
            "flash row must precede the prompt strip so it is visible"
   end
 
+  def test_red_status_detail_view_renders_header_panels_log_artifacts_and_action_bar
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-view-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      artifact = "/tmp/errors-02.md"
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "review-fix-pass02.log"), (1..8).map { |i| "line-#{i}" }.join("\n") + "\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: "alpha", stage: "6-review", slug: slug,
+        folder: task_folder, state_file: File.join(task_folder, "task.md"),
+        worktree_path: File.join(project_root, "worktrees", slug),
+        marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: {
+          "summary" => "REVIEW_ERROR phase=fix pass=2",
+          "detail" => "Fix agent failed before tests completed.",
+          "artifact_paths" => [ artifact ],
+          "marker_signature" => "sig"
+        }
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(cols: 100, rows: 30),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      output = @model.view
+
+      assert_includes output, "RED · alpha/6-review · #{slug}"
+      assert output.lines.any? { |line| line.start_with?("╭") || line.start_with?("+") },
+             "rendered detail should include a bordered panel"
+      assert_includes output, "Q: Why is this red?"
+      assert_includes output, "Log · last 8 of 8 lines"
+      assert_includes output, "line-1"
+      assert_includes output, "line-8"
+      assert_includes output, artifact
+      assert_includes output, "[Enter] autofix / retry"
+      assert_includes output.lines.last, "[q] back"
+    end
+  end
+
   # Negative: when no active flash, the prompt is the only footer line —
   # no blank flash row, no "nil" rendering.
   def test_view_omits_flash_row_when_no_active_flash_in_new_idea_mode

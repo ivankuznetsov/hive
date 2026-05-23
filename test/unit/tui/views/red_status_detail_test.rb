@@ -245,8 +245,8 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 12))
 
     refute_includes output, "Log ·"
-    assert_includes output, "Why:"
-    assert_includes output, "[Enter] Recover"
+assert_includes output, "Why:"
+assert_includes output, "[Enter] Recover"
   end
 
   def test_narrow_layout_keeps_lines_within_terminal_margin
@@ -270,47 +270,65 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "bad"
   end
 
-  def test_falls_back_when_agent_label_is_missing
-    # Caller resolution failure surfaces as the canonical AGENT_FALLBACK
-    # label on RedStatusDetailState (the rescue in BubbleModel
-    # #resolve_agent_label is exercised in bubble_model_test.rb). Pin
-    # via the constant so a future rewording of the fallback copy stays
-    # in one place.
-    fallback = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, agent_label: fallback))
+def test_falls_back_when_agent_label_is_missing
+  # Caller resolution failure surfaces as the canonical AGENT_FALLBACK
+  # label on RedStatusDetailState (the rescue in BubbleModel
+  # #resolve_agent_label is exercised in bubble_model_test.rb). Pin
+  # via the constant so a future rewording of the fallback copy stays
+  # in one place.
+  fallback = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
+  output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, agent_label: fallback))
 
-    assert_includes output, "Open in agent"
-    assert_includes output, fallback
-  end
+  assert_includes output, "Open in agent"
+  assert_includes output, fallback
+end
 
-  def test_recover_execute_rows_still_show_two_actions_with_enter_affordance
-    output = Hive::Tui::Views::RedStatusDetail.render(
-      model_for(
-        row(
-          action_key: "recover_execute",
-          stage: "4-execute",
-          marker: "execute_stale",
-          attrs: { "pass" => "3" },
-          folder: "/tmp/demo/.hive-state/stages/4-execute/red-task"
-        )
+def test_action_bar_renders_two_action_chips
+  bar = Hive::Tui::Views::RedStatusDetail.action_bar("codex", 100)
+
+  assert_includes bar, "[Enter] Recover"
+  assert_includes bar, "[o]     Open in agent"
+  assert_includes bar, "codex"
+  refute_includes bar, "[f] manual fix"
+  refute_includes bar, "[R] refresh diagnosis"
+end
+
+def test_action_bar_wraps_at_narrow_width
+  bar = Hive::Tui::Views::RedStatusDetail.action_bar("codex", 40)
+
+  assert_operator bar.lines.size, :>, 1
+  bar.lines.each { |line| assert_operator line.chomp.length, :<=, 40 }
+  assert_includes bar, "[o]"
+end
+
+def test_recover_execute_rows_still_show_two_actions_with_enter_affordance
+  output = Hive::Tui::Views::RedStatusDetail.render(
+    model_for(
+      row(
+        action_key: "recover_execute",
+        stage: "4-execute",
+        marker: "execute_stale",
+        attrs: { "pass" => "3" },
+        folder: "/tmp/demo/.hive-state/stages/4-execute/red-task"
       )
     )
+  )
 
-    # The unified contract: [Enter] Recover always shown regardless of
-    # action_key. recover_execute rows route refusals through the
-    # bubble_model flash so the operator's binary gesture never leaves
-    # them stranded on the detail screen.
-    assert_includes output, "[Enter] Recover"
-    assert_includes output, "[o]     Open in agent"
-    refute_includes output, "[f] manual fix"
-    refute_includes output, "[R] refresh diagnosis"
-    refute_includes output, "EXECUTE_STALE"
-  end
+  # The unified contract: [Enter] Recover always shown regardless of
+  # action_key. recover_execute rows route refusals through the
+  # bubble_model flash so the operator's binary gesture never leaves
+  # them stranded on the detail screen.
+  assert_includes output, "[Enter] Recover"
+  assert_includes output, "[o]     Open in agent"
+  refute_includes output, "[f] manual fix"
+  refute_includes output, "[R] refresh diagnosis"
+  refute_includes output, "EXECUTE_STALE"
+end
 
-  def test_recover_review_row_shows_enter_affordance
-    # Positive pin for the unified [Enter] Recover contract — paired
-    # with test_recover_execute_rows_still_show_two_actions_with_enter_affordance
-    # so a future split-by-action_key regression breaks both tests.
+def test_recover_review_row_shows_enter_affordance
+  # Positive pin for the unified [Enter] Recover contract — paired
+  # with test_recover_execute_rows_still_show_two_actions_with_enter_affordance
+  # so a future split-by-action_key regression breaks both tests.
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
 
     assert_includes output, "[Enter] Recover"

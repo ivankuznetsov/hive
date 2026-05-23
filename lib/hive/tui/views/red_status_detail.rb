@@ -39,14 +39,13 @@ module Hive
           return "" if state.nil?
 
           row = state.row
-          header_width = [ model.cols.to_i - 1, 1 ].max
-          outer_width = [ model.cols.to_i - 2, 1 ].max
-          bordered = model.cols.to_i >= 40
-          inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
-          body_height = [ model.rows.to_i - 5, 1 ].max
-          footer_lines = footer_lines_for(inner_width)
-          flash_line = flash_line_for(model, inner_width)
-
+header_width = [ model.cols.to_i - 1, 1 ].max
+outer_width = [ model.cols.to_i - 2, 1 ].max
+bordered = model.cols.to_i >= 40
+inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
+body_height = [ model.rows.to_i - 5, 1 ].max
+footer_lines = footer_lines_for(inner_width)
+flash_line = flash_line_for(model, inner_width)
           # Reserve footer and optional flash rows outside the content
           # trim so action keys remain visible on very short terminals.
           reserved = footer_lines.size + 1 # footer + leading blank
@@ -130,8 +129,42 @@ module Hive
           text = safe(model.flash.to_s).strip
           return nil if text.empty?
 
-          Styles::HINT.render(truncate(text, inner_width))
-        end
+  Styles::HINT.render(truncate(text, inner_width))
+end
+
+def action_bar(agent_label, width)
+  wrap_action_chips(action_chips(agent_label), width).join("\n")
+end
+
+def action_chips(agent_label)
+  label = safe(agent_label || AGENT_FALLBACK)
+  [
+    [ "[Enter] Recover — re-run hive's automated recovery for this task", true ],
+    [ "[o]     Open in agent — launch #{label} in the task worktree", false ]
+  ]
+end
+
+def wrap_action_chips(chips, width)
+  max_width = [ width.to_i, 1 ].max
+  rendered = chips.map do |label, primary|
+    text = truncate(label, max_width)
+    primary ? Styles::ACTION_CHIP_PRIMARY.render(text) : Styles::ACTION_CHIP_MUTED.render(text)
+  end
+
+  lines = []
+  current = +""
+  rendered.each do |chip|
+    candidate = current.empty? ? chip : "#{current} · #{chip}"
+    if candidate.length <= max_width
+      current = candidate
+    else
+      lines << current unless current.empty?
+      current = chip
+    end
+  end
+  lines << current unless current.empty?
+  lines
+end
 
         def header_bar(row, width)
           prefix = "RED · "

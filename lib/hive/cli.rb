@@ -343,9 +343,14 @@ module Hive
 
       Exit codes:
         0  — dropped successfully
-        4  — --from did not match the task's current stage
+        1  — generic / uncategorised failure (error_kind: error)
+        4  — --from did not match the task's current stage (wrong_stage)
         64 — unknown slug, ambiguous slug, or already archived
-        70 — internal error
+              (invalid_task_path / ambiguous_slug / already_archived)
+        70 — internal, git, or worktree failure during cleanup
+              (internal / git / worktree)
+        75 — hive/state commit-lock contention (retryable; error_kind: error)
+        78 — malformed project or global config (config)
     DESC
     option :from, type: :string, enum: APPROVE_TO_ENUM,
                   desc: "expected current stage; raises WRONG_STAGE on mismatch"

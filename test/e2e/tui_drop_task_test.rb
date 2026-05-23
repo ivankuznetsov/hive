@@ -18,6 +18,10 @@ class TuiDropTaskE2ETest < Minitest::Test
         ops.hive_state_init
         project = File.basename(dir)
         Hive::Config.register_project(name: project, path: dir)
+        File.write(
+          File.join(dir, ".hive-state", "config.yml"),
+          { "worktree_root" => File.join(File.dirname(dir), "#{project}.worktrees") }.to_yaml
+        )
         yield(dir, ops, project)
       ensure
         if dir
@@ -61,7 +65,11 @@ class TuiDropTaskE2ETest < Minitest::Test
   end
 
   def with_drop_dispatch_stub(calls)
-    original = Hive::Tui::Subprocess.method(:dispatch_background)
+    # Capture the original as an UnboundMethod so we can restore it
+    # cleanly after the stub. `Subprocess` uses `module_function`, so
+    # simply removing the singleton override would erase the only
+    # callable copy of the method.
+    original = Hive::Tui::Subprocess.method(:dispatch_background).unbind
     quiet_drop = lambda do |argv|
       real_stdout = $stdout
       real_stderr = $stderr
@@ -85,7 +93,10 @@ class TuiDropTaskE2ETest < Minitest::Test
     end
     yield
   ensure
-    Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, original) if original
+    Hive::Tui::Subprocess.singleton_class.send(:remove_method, :dispatch_background)
+    Hive::Tui::Subprocess.define_singleton_method(
+      :dispatch_background, original.bind(Hive::Tui::Subprocess)
+    ) if original
   end
 
   def branch_exists?(dir, branch)
@@ -142,6 +153,51 @@ class TuiDropTaskE2ETest < Minitest::Test
       assert_empty calls
       assert_equal "task is archived; nothing to drop", model.hive_model.flash
       assert File.directory?(folder)
+    end
+  end
+
+  # U6: when Shift+X dispatches `hive drop` via the real
+  # `Subprocess.dispatch_background` (no stub), PATH lookup must
+  # succeed, the SubprocessExited message must arrive, and the row
+  # must disappear from the snapshot within the 2s polling budget.
+  def test_shift_x_dispatches_real_subprocess_and_row_disappears
+    with_tui_drop_project do |dir, _ops, project|
+      slug = "tui-drop-real-260522-aaaa"
+      folder = create_task(dir, "2-brainstorm", slug)
+      hive_bin_dir = File.expand_path("../../bin", __dir__)
+      bundle_path = ENV["BUNDLE_GEMFILE"] || File.expand_path("../../Gemfile", __dir__)
+      original_path = ENV["PATH"]
+      original_home = ENV["HIVE_HOME"]
+      original_bundle = ENV["BUNDLE_GEMFILE"]
+      messages = []
+      dispatch = ->(message) { messages << message }
+      begin
+        ENV["PATH"] = "#{hive_bin_dir}:#{original_path}"
+        ENV["HIVE_HOME"] = ENV["HIVE_HOME"] # already set by with_tmp_global_config
+        ENV["BUNDLE_GEMFILE"] = bundle_path
+        argv = [ "hive", "drop", slug, "--project", project, "--from", "2-brainstorm", "--json" ]
+        Hive::Tui::Subprocess.dispatch_background(argv, dispatch: dispatch)
+
+        # Poll for the SubprocessExited message and for the row
+        # disappearance — 2s budget mirrors the U6 TUI contract.
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5.0
+        until messages.any? { |m| m.is_a?(Hive::Tui::Messages::SubprocessExited) }
+          break if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+          sleep 0.05
+        end
+        exited = messages.find { |m| m.is_a?(Hive::Tui::Messages::SubprocessExited) }
+        refute_nil exited, "real subprocess should dispatch SubprocessExited within 5s"
+        assert_equal 0, exited.exit_code, "hive drop must exit 0 for the fixture"
+      ensure
+        ENV["PATH"] = original_path
+        ENV["HIVE_HOME"] = original_home if original_home
+        ENV["BUNDLE_GEMFILE"] = original_bundle
+      end
+      refute File.directory?(folder),
+             "task folder must disappear after the real subprocess completes"
+      assert_empty tasks.select { |task| task["slug"] == slug },
+                   "row must disappear from the snapshot within the polling budget"
     end
   end
 end

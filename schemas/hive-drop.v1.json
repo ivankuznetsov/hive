@@ -104,7 +104,8 @@
         },
         "exit_code": {
           "type": "integer",
-          "enum": [1, 4, 64, 70, 78]
+          "enum": [1, 4, 64, 70, 75, 78],
+          "description": "Process exit code (Hive::ExitCodes). 1=GENERIC, 4=WRONG_STAGE, 64=USAGE, 70=SOFTWARE, 75=TEMPFAIL, 78=CONFIG."
         },
         "message": { "type": "string" },
         "candidates": {
@@ -112,7 +113,23 @@
           "items": { "type": "object" }
         },
         "current_stage": { "type": "string" },
-        "target_stage": { "type": "string" }
+        "target_stage": { "type": "string" },
+        "holder": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Present on ConcurrentRunError (commit-lock contention) when the existing holder's metadata is recoverable. Properties are best-effort.",
+          "properties": {
+            "pid": { "type": "integer" },
+            "slug": { "type": "string" },
+            "stage": { "type": "string" },
+            "started_at": { "type": "string" },
+            "process_start_time": { "type": "string" }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Present on ConcurrentRunError. Filesystem path of the lock file that triggered the failure."
+        }
       }
     }
   }

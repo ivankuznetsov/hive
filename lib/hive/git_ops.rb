@@ -187,8 +187,18 @@ module Hive
       out, err, status = Open3.capture3("git", "-C", @project_root, "branch", "-D", name)
       return true if status.success?
 
+      # Treat "branch already gone" and "branch is checked out elsewhere"
+      # as best-effort no-ops so a caller cleaning up after a worktree-
+      # remove failure (or an operator-error case where the slug branch
+      # is HEAD) doesn't abort the rest of the cleanup. The worktree
+      # removal step is expected to drop the checkout first; this guard
+      # exists for the cases where it didn't. Modern git phrases the
+      # in-use refusal as "used by worktree at" (>=2.45); older
+      # releases used "checked out at" — both are matched.
       combined = "#{out}\n#{err}"
-      return false if combined.match?(/branch .* not found|not a valid branch name|branch .+ not found/i)
+      return false if combined.match?(
+        /branch .* not found|not a valid branch name|cannot delete branch .* (?:checked out|used by worktree) at/i
+      )
 
       raise GitError, "git -C #{@project_root} branch -D #{name} failed: #{err.strip.empty? ? out : err}"
     end

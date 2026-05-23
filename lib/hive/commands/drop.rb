@@ -20,7 +20,15 @@ module Hive
     class Drop
       include Hive::Schemas::EnvelopeEmitter
 
-      ACTIVE_STAGE_DIRS = Hive::Stages::DIRS.reject { |stage| stage == "9-done" }.freeze
+      # The terminal/archive stage. Derived from `Hive::Stages::DIRS` so a
+      # stage rename (e.g. 8-done → 9-done) updates both the active-stage
+      # list and the archive-guard predicate in lockstep.
+      ARCHIVE_STAGE = Hive::Stages::DIRS.last
+
+      # Aligned with `schemas/hive-drop.v1.json#from_stages.enum`, which
+      # also excludes the archive stage. If a future stage rename hits
+      # one and not the other the schema test will catch the drift.
+      ACTIVE_STAGE_DIRS = Hive::Stages::DIRS.reject { |stage| stage == ARCHIVE_STAGE }.freeze
 
       AlreadyArchived = Class.new(Hive::InvalidTaskPath)
 
@@ -29,6 +37,10 @@ module Hive
         :from_stages, keyword_init: true
       )
 
+      # @param target [String] task slug or task-folder path
+      # @param project [String, nil] registered project name to scope slug lookup
+      # @param from [String, nil] expected current stage ("4-execute" or "execute")
+      # @param json [Boolean] emit a `hive-drop` envelope on stdout when true
       def initialize(target, project: nil, from: nil, json: false)
         @target = target
         @project_filter = project
@@ -71,6 +83,9 @@ module Hive
         path_target? ? resolve_path_context : resolve_slug_context
       end
 
+      # Slugs (Stages::SLUG_RE) are constrained to [a-z0-9-], so any
+      # `/`, `~`, or `.` in @target is unambiguously a path. Windows-
+      # style `\` paths are not supported.
       def path_target?
         @target.to_s.include?("/") || @target.to_s.start_with?("~", ".")
       end
@@ -83,6 +98,14 @@ module Hive
         ).resolve
         project_name = project_name_for(task)
         folders = collect_stage_folders(task.hive_state_path, task.slug, ACTIVE_STAGE_DIRS)
+        # Mirror resolve_slug_context: if the path target landed on the
+        # archive stage (no active folders, but the archive folder exists)
+        # surface the archive match so guard_archived! refuses cleanly
+        # instead of silently dropping nothing.
+        if folders.empty?
+          archived = collect_stage_folders(task.hive_state_path, task.slug, [ ARCHIVE_STAGE ])
+          folders = archived unless archived.empty?
+        end
         TaskContext.new(
           slug: task.slug,
           project_name: project_name,
@@ -121,7 +144,7 @@ module Hive
 
         project, folders = matches_by_project.first
         if @stage_filter.nil?
-          active_folders = folders.reject { |f| f[:stage] == "9-done" }
+          active_folders = folders.reject { |f| f[:stage] == ARCHIVE_STAGE }
           folders = active_folders unless active_folders.empty?
         end
         TaskContext.new(
@@ -185,9 +208,9 @@ module Hive
       end
 
       def guard_archived!(context)
-        return unless context.folders.all? { |f| f[:stage] == "9-done" }
+        return unless context.folders.any? && context.folders.all? { |f| f[:stage] == ARCHIVE_STAGE }
 
-        raise AlreadyArchived, "task #{context.slug} is at 9-done; nothing to drop"
+        raise AlreadyArchived, "task #{context.slug} is at #{ARCHIVE_STAGE}; nothing to drop"
       end
 
       def cleanup_context(context)
@@ -243,31 +266,41 @@ module Hive
         folders.each do |entry|
           lock = lock_payload(File.join(entry[:folder], ".lock"))
           if integer_like?(lock["claude_pid"])
-            by_pid[lock["claude_pid"].to_i] = {
-              pid: lock["claude_pid"].to_i,
-              process_start_time: nil,
-              group: true
-            }
+            register_candidate(by_pid, lock["claude_pid"].to_i,
+                               process_start_time: nil, group: true)
           end
           if integer_like?(lock["pid"])
-            by_pid[lock["pid"].to_i] = {
-              pid: lock["pid"].to_i,
-              process_start_time: lock["process_start_time"],
-              group: false
-            }
+            register_candidate(by_pid, lock["pid"].to_i,
+                               process_start_time: lock["process_start_time"], group: false)
           end
 
           marker = marker_for(entry[:folder])
           marker_pid = marker.attrs["pid"]
           next unless marker.name == :agent_working && integer_like?(marker_pid)
 
-          by_pid[marker_pid.to_i] ||= {
-            pid: marker_pid.to_i,
+          register_candidate(
+            by_pid, marker_pid.to_i,
             process_start_time: lock["pid"].to_i == marker_pid.to_i ? lock["process_start_time"] : nil,
             group: false
-          }
+          )
         end
         by_pid.values
+      end
+
+      # Merge a candidate into `by_pid` so duplicate sources for the same
+      # PID combine cleanly: `group: true` always wins (otherwise a
+      # claude_pid==pid lock would clobber the group-kill into a single-
+      # process kill and orphan the agent's children), and the first
+      # non-nil process_start_time is retained for the pid-reuse guard.
+      def register_candidate(by_pid, pid, process_start_time:, group:)
+        existing = by_pid[pid]
+        merged_start_time = (existing && existing[:process_start_time]) || process_start_time
+        merged_group = (existing && existing[:group]) || group
+        by_pid[pid] = {
+          pid: pid,
+          process_start_time: merged_start_time,
+          group: merged_group
+        }
       end
 
       def lock_payload(path)
@@ -291,7 +324,7 @@ module Hive
       end
 
       def integer_like?(value)
-        value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)
+        value.is_a?(Integer) || value.to_s.match?(/\A\s*\d+\s*\z/)
       end
 
       def close_draft_prs(folders)
@@ -347,14 +380,30 @@ module Hive
       end
 
       def worktree_paths(context, folders)
+        worktree_root = canonical_worktree_root(context)
         paths = folders.filter_map do |entry|
           pointer = Hive::Worktree.read_pointer(entry[:folder])
-          pointer && pointer["path"]
+          next unless pointer && pointer["path"]
+
+          # Mirror Stages::Execute/Review/Diagnosis — never trust the
+          # agent-writable pointer file before a destructive operation.
+          # An out-of-root path is treated as "no worktree to remove"
+          # (best-effort cleanup), not as a fatal error: drop must stay
+          # idempotent even when the pointer was tampered with.
+          Hive::Worktree.validate_pointer_path(pointer["path"], worktree_root)
         rescue Hive::WorktreeError
           nil
         end
-        paths << Hive::Worktree.new(context.project_root, context.slug).path
+        paths << Hive::Worktree.new(context.project_root, context.slug,
+                                    worktree_root: worktree_root).path
         paths.compact.map { |path| File.expand_path(path) }.uniq
+      end
+
+      def canonical_worktree_root(context)
+        cfg = Hive::Config.load(context.project_root)
+        File.expand_path(
+          cfg["worktree_root"] || File.expand_path("~/Dev/#{File.basename(context.project_root)}.worktrees")
+        )
       end
 
       def delete_branch(context)
@@ -371,7 +420,7 @@ module Hive
         rel_paths = context.from_stages.map { |stage| File.join("stages", stage, context.slug) }
         rel_paths << File.join("logs", context.slug)
         body = "Dropped task #{context.slug} from stages: #{context.from_stages.join(', ')}"
-        Hive::Lock.with_commit_lock(context.hive_state_path) do
+        result = Hive::Lock.with_commit_lock(context.hive_state_path) do
           Hive::GitOps.new(context.project_root).hive_commit(
             stage_name: "dropped",
             slug: context.slug,
@@ -381,7 +430,7 @@ module Hive
             allow_empty: true
           )
         end
-        "dropped"
+        result.to_s
       end
 
       def success_payload(context, cleanup, commit_action)

@@ -330,9 +330,10 @@ module Hive
       NewIdeaCancelled = Class.new
       NEW_IDEA_CANCELLED = NewIdeaCancelled.new.freeze
 
-      # `X` in grid mode — hard-drop the focused task. BubbleModel owns
-      # the subprocess dispatch so the shared `hive drop` implementation
-      # handles process/worktree/branch cleanup.
+      # `X` in grid mode — hard-drop the focused task. BubbleModel
+      # consumes this message and constructs a `DispatchCommand` for
+      # `hive drop`, so the shared CLI implementation handles
+      # process/worktree/branch cleanup off the TUI thread.
       DropFocusedTask = Data.define(:row)
 
       # Recurring tick that drains new bytes from the active log_tail.

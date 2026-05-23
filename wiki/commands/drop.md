@@ -23,13 +23,23 @@ Bare slugs use [[modules/task_resolver]] lookup. Pass `--project` to disambiguat
 
 | Case | Exit | `error_kind` |
 |---|---:|---|
+| Dropped successfully | 0 | — |
+| Generic failure (uncategorised) | 1 | `error` |
+| `--from` does not match the resolved active stage | 4 | `wrong_stage` |
 | Unknown slug/path | 64 | `invalid_task_path` |
 | Ambiguous slug across projects | 64 | `ambiguous_slug` |
-| `--from` does not match the resolved active stage | 4 | `wrong_stage` |
 | Task is already in `9-done` | 64 | `already_archived` |
+| Git operation failed (e.g. `branch -D`) | 70 | `git` |
+| Worktree operation failed (e.g. `worktree remove`) | 70 | `worktree` |
 | Internal failure | 70 | `internal` |
+| `hive/state` commit lock contention | 75 | `error` |
+| Malformed project / global config | 78 | `config` |
 
-Tasks in `9-done` are archive records, not active work. Drop refuses them and leaves the folder alone.
+Tasks in the last stage (`9-done`) are archive records, not active work. Drop refuses them and leaves the folder alone.
+
+`--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
+
+When `gh` is not installed on PATH, draft-PR close is skipped silently (warning on stderr, `pr_closed: false`, exit 0). Drop does not require `gh`.
 
 ## Steps Performed
 
@@ -66,7 +76,7 @@ Success emits `schema = "hive-drop"`, version 1:
   "agent_pid": 12345,
   "agent_killed_pids": [12345],
   "agent_kill_skipped_reason": null,
-  "commit_action": "dropped"
+  "commit_action": "committed"
 }
 ```
 

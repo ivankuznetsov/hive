@@ -14,6 +14,11 @@ class DropCommandTest < Minitest::Test
         ops = Hive::GitOps.new(dir)
         ops.hive_state_init
         Hive::Config.register_project(name: File.basename(dir), path: dir)
+        # Drop validates pointer paths against the project's configured
+        # worktree_root before removing a worktree. The fixture creates
+        # worktrees under `<dirname>/<basename>.worktrees`, so config
+        # has to match or the validation drops the cleanup silently.
+        write_project_worktree_root(dir)
         yield(dir, ops, File.basename(dir))
       ensure
         if dir
@@ -21,6 +26,15 @@ class DropCommandTest < Minitest::Test
         end
       end
     end
+  end
+
+  def write_project_worktree_root(dir)
+    state_dir = File.join(dir, ".hive-state")
+    FileUtils.mkdir_p(state_dir)
+    File.write(
+      File.join(state_dir, "config.yml"),
+      { "worktree_root" => File.join(File.dirname(dir), "#{File.basename(dir)}.worktrees") }.to_yaml
+    )
   end
 
   def create_task(dir, stage, slug, body: nil)
@@ -54,27 +68,53 @@ class DropCommandTest < Minitest::Test
       commit_hive_state(ops, "4-execute", slug)
 
       pid = Process.spawn("sleep", "60", pgroup: true, out: File::NULL, err: File::NULL)
-      File.write(File.join(folder, ".lock"), { "claude_pid" => pid }.to_yaml)
+      begin
+        File.write(File.join(folder, ".lock"), { "claude_pid" => pid }.to_yaml)
 
-      out, _err = capture_io do
-        Hive::Commands::Drop.new(slug, project: project, json: true).call
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+
+        assert_equal "hive-drop", payload["schema"]
+        assert_equal true, payload["ok"]
+        assert_equal slug, payload["slug"]
+        assert_equal [ "4-execute" ], payload["from_stages"]
+        assert_equal true, payload["agent_killed"]
+        assert_includes payload["agent_killed_pids"], pid
+        assert_equal true, payload["worktree_removed"]
+        assert_equal true, payload["branch_deleted"]
+        refute File.directory?(folder)
+        refute File.directory?(log_dir)
+        refute File.directory?(wt.path)
+        refute branch_exists?(dir, slug)
+        log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
+        assert_equal "hive: dropped/#{slug} dropped", log
+      ensure
+        # Reap the helper sleep so a failed assertion doesn't leak a
+        # 60s child until the test runner exits.
+        reap_spawn(pid)
       end
-      payload = JSON.parse(out)
+    end
+  end
 
-      assert_equal "hive-drop", payload["schema"]
-      assert_equal true, payload["ok"]
-      assert_equal slug, payload["slug"]
-      assert_equal [ "4-execute" ], payload["from_stages"]
-      assert_equal true, payload["agent_killed"]
-      assert_includes payload["agent_killed_pids"], pid
-      assert_equal true, payload["worktree_removed"]
-      assert_equal true, payload["branch_deleted"]
-      refute File.directory?(folder)
-      refute File.directory?(log_dir)
-      refute File.directory?(wt.path)
-      refute branch_exists?(dir, slug)
-      log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
-      assert_equal "hive: dropped/#{slug} dropped", log
+  # Walk every active stage drop is supposed to clean up so a future
+  # stage rename can't silently drop the per-stage assertion.
+  Hive::Commands::Drop::ACTIVE_STAGE_DIRS.each do |stage|
+    define_method("test_drop_removes_task_from_#{stage.tr('-', '_')}_stage") do
+      with_drop_project do |dir, ops, project|
+        slug = "stage-cov-260522-aaaa"
+        folder = create_task(dir, stage, slug)
+        commit_hive_state(ops, stage, slug)
+
+        out, _err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+
+        assert_equal [ stage ], payload["from_stages"]
+        refute File.directory?(folder), "task folder under #{stage} should be removed"
+      end
     end
   end
 
@@ -205,5 +245,123 @@ class DropCommandTest < Minitest::Test
     yield
   ensure
     Hive::Gh.define_singleton_method(:capture3, original) if original
+  end
+
+  # Best-effort kill + reap of a helper child PID. Used to clean up
+  # spawned `sleep 60` fixtures so a failed assertion doesn't leak a
+  # process until the test runner exits.
+  def reap_spawn(pid)
+    Process.kill("TERM", pid)
+  rescue Errno::ESRCH, Errno::EPERM
+    # already gone or out of reach
+  ensure
+    begin
+      Process.waitpid(pid, Process::WNOHANG) || Process.waitpid(pid)
+    rescue Errno::ECHILD
+      # already reaped
+    end
+  end
+
+  def test_drop_path_target_refuses_archived_task
+    with_drop_project do |dir, _ops, _project|
+      slug = "archived-path-260522-aaaa"
+      folder = create_task(dir, "9-done", slug)
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Drop.new(folder, json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_equal "already_archived", payload["error_kind"]
+      assert File.directory?(folder), "archived folder must be left intact"
+    end
+  end
+
+  # R12: a previous run died after deleting some artifacts. Re-running
+  # drop must converge — already-missing pieces are treated as already
+  # done, no envelope error.
+  def test_drop_is_idempotent_after_partial_cleanup
+    with_drop_project do |dir, ops, project|
+      slug = "idemp-260522-aaaa"
+      folder = create_task(dir, "4-execute", slug)
+      worktree_root = File.join(File.dirname(dir), "#{File.basename(dir)}.worktrees")
+      wt = Hive::Worktree.new(dir, slug, worktree_root: worktree_root)
+      wt.create!(slug, default_branch: "master")
+      wt.write_pointer!(folder, slug)
+      log_dir = File.join(dir, ".hive-state", "logs", slug)
+      FileUtils.mkdir_p(log_dir)
+      commit_hive_state(ops, "4-execute", slug)
+
+      # Simulate a crashed prior drop that already removed the worktree
+      # and branch but left the task folder + logs behind.
+      wt.remove_force!(path: wt.path)
+      Hive::GitOps.new(dir).delete_branch!(slug)
+
+      out, _err = capture_io do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal true, payload["ok"]
+      assert_equal [ "4-execute" ], payload["from_stages"]
+      # branch and worktree were already gone — drop reports the
+      # already-clean state rather than raising.
+      assert_equal false, payload["branch_deleted"]
+      assert_equal false, payload["worktree_removed"]
+      refute File.directory?(folder)
+      refute File.directory?(log_dir)
+    end
+  end
+
+  # Plan U1: when `gh` is not installed, drop must NOT raise — the
+  # `gh pr close` step is best-effort. We trigger the rescue arm by
+  # making `Hive::Gh.capture3` raise GhError directly.
+  def test_drop_skips_pr_close_when_gh_binary_missing
+    with_drop_project do |dir, ops, project|
+      slug = "gh-missing-260522-aaaa"
+      folder = create_task(
+        dir, "5-open-pr", slug,
+        body: "---\npr_url: https://example.com/pr/1\n---\n\n<!-- COMPLETE -->\n"
+      )
+      commit_hive_state(ops, "5-open-pr", slug)
+
+      with_gh_capture_stub(lambda do |*_cmd, **_kwargs|
+        raise Hive::GhError, "failed to run gh pr close: No such file or directory - gh"
+      end) do
+        out, err = capture_io do
+          Hive::Commands::Drop.new(slug, project: project, json: true).call
+        end
+        payload = JSON.parse(out)
+        assert_equal true, payload["ok"]
+        assert_equal false, payload["pr_closed"]
+        assert_includes err, "gh pr close skipped",
+                        "stderr must warn that gh was skipped"
+      end
+      refute File.directory?(folder)
+    end
+  end
+
+  # Plan U1: stray file in worktree dir makes `git worktree remove`
+  # without --force fail; drop must retry with --force and succeed.
+  def test_drop_worktree_force_fallback_succeeds_with_dirty_worktree
+    with_drop_project do |dir, ops, project|
+      slug = "force-wt-260522-aaaa"
+      folder = create_task(dir, "4-execute", slug)
+      worktree_root = File.join(File.dirname(dir), "#{File.basename(dir)}.worktrees")
+      wt = Hive::Worktree.new(dir, slug, worktree_root: worktree_root)
+      wt.create!(slug, default_branch: "master")
+      wt.write_pointer!(folder, slug)
+      File.write(File.join(wt.path, "stray-untracked.txt"), "dirty\n")
+      commit_hive_state(ops, "4-execute", slug)
+
+      out, _err = capture_io do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      payload = JSON.parse(out)
+      assert_equal true, payload["ok"]
+      assert_equal true, payload["worktree_removed"]
+      refute File.directory?(wt.path),
+             "dirty worktree must be removed via the --force retry path"
+    end
   end
 end

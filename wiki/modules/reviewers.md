@@ -3,11 +3,11 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,synthetic_task,plan_context}.rb
 created: 2026-04-26
-updated: 2026-05-13
+updated: 2026-05-22
 tags: [reviewer, dispatch, agent, architecture]
 ---
 
-**TLDR**: Reviewer adapter layer for the 6-review stage's Phase 2. `Hive::Reviewers.dispatch(spec, ctx)` returns an adapter (currently only the agent-based `Reviewers::Agent`) that spawns an LLM CLI with the configured skill and prompt; the agent writes findings to `reviews/<output_basename>-<pass>.md`. `Reviewers::Context` carries per-spawn fields; `Reviewers::Result` is the return shape; `Reviewers::SyntheticTask` is the task-shaped facade `spawn_agent` requires for sub-spawns inside the review stage. `Reviewers::PlanContext` (added 2026-05-13) renders the task's `plan.md` into an authoritative-on-scope block embedded in every reviewer system prompt, so reviewers stop flagging plan-deferred scope as defects. Tool-specific linters are NOT a reviewer kind — they belong in `review.ci.command` per ADR-014. References ADR-014 / ADR-015.
+**TLDR**: Reviewer adapter layer for the 6-review stage's Phase 2. `Hive::Reviewers.dispatch(spec, ctx)` returns an adapter (currently only the agent-based `Reviewers::Agent`) that spawns an LLM CLI with the configured skill and prompt; the agent writes findings to `reviews/<output_basename>-<pass>.md`. `Reviewers::Context` carries per-spawn fields; `Reviewers::Result` is the return shape; `Reviewers::SyntheticTask` is the task-shaped facade `spawn_agent` requires for headless sub-spawns inside the review stage. `Reviewers::PlanContext` renders the task's `plan.md` into an authoritative-on-scope block embedded in every reviewer system prompt, so reviewers stop flagging plan-deferred scope as defects. Tool-specific linters are NOT a reviewer kind — they belong in `review.ci.command` per ADR-014. References ADR-014 / ADR-015.
 
 ## Public API
 
@@ -39,6 +39,8 @@ The v1 reviewer adapter. `run!`:
 3. Renders the prompt with bindings: `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation` (formatted via `profile.format_skill_invocation`, which honors profile-specific syntax — pi receives `/skill:<name>`), `user_supplied_tag`.
 4. Spawns via `Stages::Base.spawn_agent(synthetic_task, prompt:, add_dirs: [task_folder], cwd: worktree_path, profile:, status_mode: :output_file_exists, expected_output: output_path, max_budget_usd: spec["budget_usd"] || 50, timeout_sec: spec["timeout_sec"] || 600, log_label: "review-#{name}-pass#{NN}")`.
 5. Returns `Result.new(status: :ok | :error, ...)`.
+
+When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and still waits on that reviewer's own `output_path`. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
 
 `status_mode: :output_file_exists` is critical: reviewer spawns own a per-pass output file, not the task marker — the orchestrator's `REVIEW_WORKING` marker must persist across each reviewer's spawn (per ADR-021).
 

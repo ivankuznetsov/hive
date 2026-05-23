@@ -188,13 +188,13 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
 
 ## Brainstorm Interactive Tmux Addendum
 
-The matrix above describes headless `AgentProfile` spawns. Brainstorm now
-has one opt-in exception: `brainstorm.runtime: tmux_interactive`.
+The matrix above describes headless `AgentProfile` spawns. Claude now has
+one project-global interactive exception: `claude.mode: tmux`.
 
 That path does not go through `Hive::Agent` and does not use `claude -p`.
-It starts a fresh interactive `claude` process inside
-`tmux` session `hive-2-brainstorm-<slug>`, pastes the same rendered
-`brainstorm_prompt.md.erb`, and waits for the same terminal marker in
-`brainstorm.md`. The wrapper unsets `ANTHROPIC_API_KEY` and
+It starts an interactive `claude` process inside a managed tmux session,
+pastes the rendered stage prompt, and waits for the same artifact/marker
+contract as the headless path. The wrapper unsets `ANTHROPIC_API_KEY` and
 `CLAUDE_API_KEY` so billing follows the operator's logged-in Claude
-subscription. See `docs/notes/brainstorm-interactive-tmux.md`.
+subscription. Non-Claude profiles remain headless, even when
+`claude.mode: tmux`. See `docs/notes/brainstorm-interactive-tmux.md`.

@@ -56,7 +56,7 @@ Review runs the autonomous loop: CI fix, reviewers, triage, fix, guardrail, and 
 
 ### 7-artifacts
 
-Artifacts is the collection handoff after review. The current runner creates `artifact.md` and marks it `COMPLETE`, giving future release-packaging work a stable stage slot without skipping a marker gate. See [wiki/stages/artifacts.md](../wiki/stages/artifacts.md).
+Artifacts is the collection handoff after review. The runner asks the configured artifact agent to write `artifact.md` and mark it `COMPLETE`, giving release-packaging and handoff work a stable stage slot without skipping a marker gate. See [wiki/stages/artifacts.md](../wiki/stages/artifacts.md).
 
 ### 8-finalize
 

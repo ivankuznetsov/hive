@@ -62,7 +62,7 @@ These are not gems but the CLI tools the runtime invokes:
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for secret-scan / dedupe), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
-| `tmux` | 3.0+ (3.6a verified locally) | test-time only; `test/e2e/lib/tmux_driver.rb` drives `hive tui` scenarios on a private socket |
+| `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | `asciinema` | 2.4+ (3.x accepted with v2 output flag) | test-time optional; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.

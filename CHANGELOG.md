@@ -29,11 +29,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `hive tui` now binds `s` to open the focused task in the configured development agent inside its feature worktree, mark it `MANUAL_STEERING` so automation skips it, and archive it under `archived-manual/` when the agent exits.
 
-### Added — opt-in interactive tmux brainstorm runtime
+### Added — global Claude launch mode
 
-- `brainstorm.runtime: tmux_interactive` runs stage `2-brainstorm` in a fresh per-task tmux session (`hive-2-brainstorm-<slug>`) with interactive `claude`, while preserving the existing `brainstorm.md` WAITING/COMPLETE marker contract.
-- Added a Claude Stop-hook signal (`.done` + `result.json`), a conservative pane-tail marker fallback, tmux preflight/doctor reporting, and teardown that kills the session after each task. Default remains the existing headless `claude -p` path.
-- `hive doctor` adds a `2-brainstorm/tmux` row (and `kind: "warning"` rows for non-claude `brainstorm.agent` and exported `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY`) when the project is on `tmux_interactive`. Run `hive doctor` after opting in to confirm tmux is installed and the billing-auth boundary is what you expect.
+- Added top-level `claude.mode` with values `tmux` and `headless`. Fresh projects default to `tmux`, and missing keys in existing projects are treated as `tmux`; switch modes by editing `.hive-state/config.yml` and restarting the stage.
+- Every Claude-driven stage now goes through the shared launcher. `2-brainstorm`, `3-plan`, `4-execute`, `5-open-pr`, `6-review` sub-spawns, `7-artifacts`, and `8-finalize` honor `claude.mode`; stages configured with non-Claude agents keep their existing headless path.
+- In `claude.mode: tmux`, Claude reviewer passes in `6-review` run sequentially inside one shared tmux session for the pass. Non-Claude reviewers still spawn headless.
+- `hive init` now prompts for `claude.mode` instead of the brainstorm-only runtime. Legacy `brainstorm.runtime` remains readable for one release as a deprecated 2-brainstorm fallback, and `hive doctor` warns when it is still present.
+- `hive doctor` reports a `claude/tmux` dependency row whenever `claude.mode: tmux`; missing or too-old tmux is a hard failure, with no silent fallback to headless.
 
 ### Changed — PR-first workflow
 

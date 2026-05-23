@@ -7,7 +7,14 @@ updated: 2026-05-22
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode.
+
+## ADR-030: Global Claude launch mode
+
+**Status:** Active
+**Context:** Hive's first interactive Claude runtime was scoped to `2-brainstorm` via `brainstorm.runtime: tmux_interactive`. That solved OAuth/subscription billing for brainstorm, but left plan, execute, open-pr, review sub-spawns, artifacts, and finalize on the headless `claude -p` path. A per-stage runtime matrix would make operator intent harder to reason about and would not help the common case: "use my logged-in Claude session for every Claude-backed stage on this project."
+**Decision:** Add top-level `claude.mode` with values `tmux` and `headless`, defaulting to `tmux`. Every stage whose resolved `AgentProfile` is Claude calls `Hive::Stages::Base.spawn_claude!`, which routes through `Hive::ClaudeLauncher` and honors the global setting; non-Claude profiles remain on the normal `spawn_agent` path. `brainstorm.runtime` is deprecated and read only as a brainstorm fallback when `claude.mode` is absent. In 6-review, Claude reviewers run sequentially inside one shared tmux session per pass; Codex/Pi reviewers remain headless.
+**Consequences:** `tmux >= 3.0` is a runtime dependency when `claude.mode: tmux`, and missing tmux is a hard error (`ERROR reason=tmux_unavailable` or `REVIEW_ERROR reason=tmux_unavailable`) rather than a silent fallback. Mode switching is an edit to `.hive-state/config.yml` plus a stage restart. Daemon/service-only hosts that cannot run tmux should set `claude.mode: headless`. A longer standalone note lives at `docs/adrs/030-global-claude-launch-mode.md`.
 
 ## ADR-027: Release artifacts are Tebako-packed binaries
 
@@ -343,9 +350,9 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 **Context:** Review completion now needs a stable artifact-collection slot before PR finalization. Without a real `artifacts` runner, the workflow metadata could advertise `hive artifacts` while Thor rejected the command, and markerless `7-artifacts` rows could be shown as ready to finalize even though `StageAction` correctly refuses to advance rows without a terminal marker.
 
-**Decision:** Insert `7-artifacts` between `6-review` and `8-finalize`, making the current stage order `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-artifacts → 8-finalize → 9-done`. The `hive artifacts` workflow verb is a first-class Thor command. `Hive::Stages::Artifacts` is a no-agent runner that creates `artifact.md` and stamps `COMPLETE`, so the existing terminal-marker gate remains intact before `hive finalize` can promote to `8-finalize`.
+**Decision:** Insert `7-artifacts` between `6-review` and `8-finalize`, making the current stage order `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-artifacts → 8-finalize → 9-done`. The `hive artifacts` workflow verb is a first-class Thor command. `Hive::Stages::Artifacts` now runs the configured `artifacts.agent` to write `artifact.md` and stamp `COMPLETE`; Claude-backed artifact collection uses the project-global `claude.mode` launcher. The existing terminal-marker gate remains intact before `hive finalize` can promote to `8-finalize`.
 
-**Consequences:** Daemon, bot, TUI, status JSON, and humans see `ready_to_artifacts` after `REVIEW_COMPLETE`, then `ready_to_finalize` only after `artifact.md` carries `COMPLETE`. `hive migrate` maps both the pre-open-pr layout and the previous canonical `7-finalize` / `8-done` directories to the current names. Future artifact packaging work has a dedicated stage without overloading finalize.
+**Consequences:** Daemon, bot, TUI, status JSON, and humans see `ready_to_artifacts` after `REVIEW_COMPLETE`, then `ready_to_finalize` only after `artifact.md` carries `COMPLETE`. `hive migrate` maps both the pre-open-pr layout and the previous canonical `7-finalize` / `8-done` directories to the current names. Artifact packaging and handoff work has a dedicated agent-backed stage without overloading finalize.
 
 ## Source
 

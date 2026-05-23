@@ -7,18 +7,21 @@ updated: 2026-05-22
 tags: [stage, artifacts, release]
 ---
 
-**TLDR**: Artifact collection is the no-agent handoff between autonomous review and PR finalization. It creates `artifact.md`, stamps `<!-- COMPLETE -->`, and gives future release-packaging work a stable stage slot without letting finalize skip the terminal-marker gate.
+**TLDR**: Artifact collection is the agent-backed handoff between autonomous review and PR finalization. It asks the configured `artifacts.agent` to write `artifact.md`, ending with `<!-- COMPLETE -->`, and gives release/handoff material a stable stage slot without letting finalize skip the terminal-marker gate. When `artifacts.agent` resolves to Claude, the launch path honors project-global `claude.mode`.
 
 ## Preconditions
 
 1. The task must arrive from `6-review` with `REVIEW_COMPLETE` when using `hive artifacts` as a workflow verb.
-2. `artifact.md` may be missing on first run; the runner creates it.
+2. `artifact.md` may be missing on first run; the runner touches it so marker writes have a target.
 
 ## Steps performed (`Stages::Artifacts.run!`)
 
 1. Touch `artifact.md` if it does not exist.
 2. If the current marker is already `COMPLETE`, return without a new commit action.
-3. Otherwise append `<!-- COMPLETE -->` to `artifact.md` and return `{commit: "artifacts_collected", status: :complete}`.
+3. Render `templates/artifacts_prompt.md.erb` with the task folder, worktree path, and target artifact file.
+4. Resolve `artifacts.agent` through `Hive::Stages::Base.stage_profile`.
+5. If the profile is Claude, call `Hive::Stages::Base.spawn_claude!` with session name `hive-7-artifacts-<slug>`; otherwise call the normal `spawn_agent` path.
+6. Re-read the terminal marker from `artifact.md` and return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise.
 
 ## Marker -> next action
 

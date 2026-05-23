@@ -46,7 +46,7 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
 | `6-review` | `task.md` | reused from `4-execute`; markers driven by `Stages::Review` orchestrator |
-| `7-artifacts` | `artifact.md` | `Stages::Artifacts` creates the artifact collection marker file and stamps `COMPLETE` |
+| `7-artifacts` | `artifact.md` | `Stages::Artifacts` asks the configured artifact agent to write the artifact summary and stamp `COMPLETE` |
 | `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
 | `9-done` | `task.md` | reused from `4-execute` |
 
@@ -210,9 +210,13 @@ timeout_sec:
 # fix,browser_test}.agent`. Runtime fallback in stage code stays
 # `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
 # these keys keep working.
-brainstorm: { agent: claude, runtime: headless }  # runtime: headless | tmux_interactive (U6/U7)
+claude:     { mode: tmux }        # tmux | headless; applies to every Claude-backed launch
+brainstorm: { agent: claude, runtime: headless }  # runtime is legacy read-back-compat only
 plan:       { agent: claude }
 execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`
+open_pr:    { agent: claude }
+artifacts:  { agent: claude }
+finalize:   { agent: claude }
 agents:                 # per-CLI profile overrides (claude, codex, pi)
   claude: { bin: claude, env_override: HIVE_CLAUDE_BIN, min_version: 2.1.118 }
   codex:  { bin: codex,  env_override: HIVE_CODEX_BIN,  min_version: 0.125.0 }

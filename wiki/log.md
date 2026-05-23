@@ -1861,3 +1861,45 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[testing]] — documented the CI foreground/daemonization coverage pitfall and reload-safe enum caveat.
+
+## [2026-05-22T00:00:00Z] artifacts-stage — runner and docs follow-up
+
+**Action:** Closed the 7-artifacts workflow gap from PR #120 review. Added `hive artifacts` as a Thor command, wired `Hive::Stages::Artifacts` into `hive run`, made markerless `7-artifacts` rows dispatch artifact collection instead of finalize, and refreshed the live stage docs to the current `7-artifacts` / `8-finalize` / `9-done` tail.
+
+**Refreshed pages:**
+- [[state-model]]
+- [[commands/stage_action]]
+- [[commands/daemon]]
+- [[modules/workflows]]
+- [[modules/stages]]
+- [[stages/artifacts]]
+- [[stages/index]]
+
+## [2026-05-22T18:01:31Z] e2e — fake Codex execute path
+
+**Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
+
+**Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.
+
+## [2026-05-22T22:10:00Z] claude-mode — global tmux/headless launcher
+
+**Action:** Added project-global `claude.mode` for every Claude-backed stage, moved the brainstorm tmux runtime into shared launcher docs, documented sequential shared tmux sessions for Claude reviewers, and kept `brainstorm.runtime` as a deprecated brainstorm-only fallback.
+
+**Refreshed pages:**
+- [[commands/init]]
+- [[commands/doctor]]
+- [[modules/config]]
+- [[stages/brainstorm]]
+- [[stages/index]]
+- [[modules/reviewers]]
+- [[templates]]
+- [[decisions]]
+
+## [2026-05-22T22:35:00Z] artifacts-stage — claude mode integration
+
+**Action:** Updated `7-artifacts` from the placeholder no-agent marker stamp into an agent-backed collection stage. The configured `artifacts.agent` now writes `artifact.md`, and Claude-backed artifact collection uses the project-global `claude.mode` launcher.
+
+**Refreshed pages:**
+- [[stages/artifacts]]
+- [[state-model]]
+- [[decisions]]

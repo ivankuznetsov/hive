@@ -7,7 +7,7 @@ updated: 2026-05-14
 tags: [command, preflight, skills, tmux]
 ---
 
-**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/compound-engineering:ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
+**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/compound-engineering:ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. When `claude.mode: tmux`, it also checks `tmux >= 3.0`; legacy configs with `brainstorm.runtime` get an advisory warning. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
 
 ## Usage
 
@@ -27,7 +27,10 @@ Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
 
 ## Row kinds
 
-`Doctor#call` builds two row kinds and concatenates them:
+`Doctor#call` builds dependency/warning rows plus two skill row kinds and concatenates them:
+
+- **`kind: "dependency"`** — currently `claude/tmux`, present only when `Hive::Config.claude_mode(cfg) == :tmux`; `:missing` and `:version_too_old` make doctor exit 65.
+- **`kind: "warning"`** — advisory rows that do not fail doctor, including exported Claude API-key env vars under tmux mode and legacy `brainstorm.runtime` still present in raw YAML.
 
 - **`kind: "stage"`** — one row per entry in `STAGES = %w[brainstorm plan]`. `label = stage`. Reads `cfg.dig(stage, "agent")` (default `"claude"`) and resolves the skill via `Hive::Config.stage_skill`. Plan defaults are agent-aware: Claude keeps the legacy `/plan` alias, Codex gets `/llm-wiki:wiki-plan`, and Pi gets `/skill:wiki-plan` after profile formatting. A legacy `plan.skill: /plan` config is also mapped to llm-wiki's canonical `wiki-plan` skill for Codex/Pi. The resolved skill is routed through `profile.format_skill_invocation(skill)` before verification.
 - **`kind: "reviewer"`** — one row per entry in `cfg.dig("review", "reviewers")`. `label = "6-review/<name>"`. Reads `agent`, `name`, `kind` (default `"agent"`), and `skill`. The bare config skill is formatted through `profile.format_skill_invocation` to obtain the full invocation before passing to `verify_skill`, so the JSON envelope's `skill` field is uniform across stage and reviewer rows.

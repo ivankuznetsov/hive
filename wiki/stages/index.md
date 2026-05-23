@@ -17,11 +17,11 @@ tags: [stage, index]
 | 4-execute | `Hive::Stages::Execute` | `task.md` (+ `worktree.yml`) | yes (impl-only since U9) | [[stages/execute]] |
 | 5-open-pr | `Hive::Stages::OpenPr` | `pr.md` | yes | [[stages/open-pr]] |
 | 6-review | `Hive::Stages::Review` (orchestrator) + `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | `task.md` (+ `reviews/ce-review-*-NN.md`, `reviews/escalations-NN.md`, `reviews/ci-blocked.md`, `reviews/browser-test-NN.md`, `reviews/fix-guardrail-NN.md`) | yes (CI-fix + reviewers + triage + fix + browser) | [[stages/review]] |
-| 7-artifacts | `Hive::Stages::Artifacts` | `artifact.md` | no | [[stages/artifacts]] |
+| 7-artifacts | `Hive::Stages::Artifacts` | `artifact.md` | yes | [[stages/artifacts]] |
 | 8-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
 | 9-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
 
-All active stages share `Hive::Stages::Base.spawn_agent` for agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.render(template_name, bindings)` for ERB prompt rendering. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns.
+All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns; Claude reviewers use one shared tmux session per pass when `claude.mode: tmux`.
 
 ## 6-review phase order
 

@@ -7,7 +7,7 @@ updated: 2026-05-14
 tags: [template, erb, prompt]
 ---
 
-**TLDR**: Twenty-one ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, Telegram/Codex brainstorm assistance, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, and final PR wrap-up.
+**TLDR**: ERB templates under `templates/` cover config scaffolding, task capture, single-agent stage prompts, Telegram/Codex brainstorm assistance, auto-rebase conflict resolution, 6-review sub-prompts, PR-first draft creation, artifact collection, and final PR wrap-up.
 
 ## Rendering helper
 
@@ -29,6 +29,7 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `plan_prompt.md.erb` | `Stages::Plan.run!` | `project_name`, `task_folder`, `brainstorm_text`, `user_supplied_tag` |
 | `execute_prompt.md.erb` | `Stages::Execute.run!` (impl-only since ADR-014) | `project_name`, `worktree_path`, `task_folder`, `plan_text`, `user_supplied_tag` |
 | `open_pr_prompt.md.erb` | `Stages::OpenPr.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `branch`, `plan_text`, `execute_output_text`, `user_supplied_tag` |
+| `artifacts_prompt.md.erb` | `Stages::Artifacts.run!` | `project_name`, `task_folder`, `worktree_path`, `artifact_file`, `user_supplied_tag` |
 | `review_prompt.md.erb` | (legacy — was used by the U9-removed `Stages::Execute#run_review_pass`. Retained for backwards compat; the active 6-review prompts are the reviewer / triage / fix / ci_fix / browser_test ones below.) | n/a |
 | `fix_prompt.md.erb` | `Stages::Review#spawn_fix_agent` (Phase 4) | `project_name`, `worktree_path`, `task_folder`, `pass`, `accepted_findings`, `task_slug`, `triage_bias`, `reviewer_sources`, `user_supplied_tag` |
 | `ci_fix_prompt.md.erb` | `Stages::Review::CiFix#spawn_fix_agent` (Phase 1) | `project_name`, `worktree_path`, `task_folder`, `task_slug`, `command`, `attempt`, `max_attempts`, `captured_output`, `user_supplied_tag` |

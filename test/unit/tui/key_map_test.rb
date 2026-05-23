@@ -698,16 +698,41 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
-  def test_red_status_detail_keys_route_to_manual_refresh_and_back
+  def test_red_status_detail_keys_route_to_recover_open_in_agent_and_back
     row = make_row(action_key: "error", action_label: "Error",
                    marker: "error", attrs: {}, suggested_command: nil)
 
-    assert_kind_of Hive::Tui::Messages::OpenManualFix,
-      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "f", row: row)
-    assert_kind_of Hive::Tui::Messages::RefreshRedStatusDiagnosis,
-      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "R", row: row)
+    open_msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "o", row: row)
+    assert_kind_of Hive::Tui::Messages::OpenInAgent, open_msg
+    assert_same row, open_msg.row
+
     assert_same Hive::Tui::Messages::BACK,
       Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "q", row: row)
+    assert_same Hive::Tui::Messages::BACK,
+      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_escape, row: row)
+
+    # `f` (old manual-fix) and `R` (old refresh-diagnosis) flash a
+    # refusal hint rather than silently NOOP so a muscle-memory drift
+    # surfaces the new contract instead of returning no signal.
+    f_msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "f", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, f_msg
+
+    r_msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "R", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, r_msg
+  end
+
+  def test_red_status_detail_s_key_flashes_use_o_hint
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+
+    msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "s", row: row)
+
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    # Pin the exact s-key copy so the s-key-specific nudge stays
+    # divergent from the generic f/R refusal — a regression that
+    # collapses both into `red_status_detail_hint` would slip through a
+    # looser `/\bo\b/` match.
+    assert_equal "press o for Open in agent", msg.text
   end
 
   def test_enter_on_needs_input_opens_input_editor_when_command_present

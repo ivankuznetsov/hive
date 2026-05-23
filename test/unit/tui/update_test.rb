@@ -120,42 +120,43 @@ class HiveTuiUpdateTest < Minitest::Test
       "first snapshot must seed cursor at first visible row instead of leaving it nil"
   end
 
-  def test_open_red_status_detail_enters_mode_with_marker_signature
-    # Pin the canonical contract: when row.diagnostic carries a
-    # marker_signature (the producer-side SHA256 hex from
-    # TaskAction#marker_signature), the TUI reads that value verbatim
-    # so producer + consumer can never drift. Without diagnostic on the
-    # row, Update falls back to a locally-computed hash so the
-    # freshness gate still detects rotation across snapshots.
-    sig = Digest::SHA256.hexdigest("review_error\npass=1\nphase=fix")
-    row = red_detail_row(diagnostic: {
-      "summary" => "REVIEW_ERROR", "detail" => "failed", "marker_signature" => sig
-    })
-    new_model, cmd = Hive::Tui::Update.apply(model, Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+  def test_open_red_status_detail_enters_mode_with_agent_label
+    # Pin the unified contract: opening the detail screen flips the
+    # model into :red_status_detail and constructs a state with the
+    # supplied row. The resolved agent_label flows in via the message
+    # (BubbleModel#resolve_agent_label populates it before delegating
+    # to Update.apply) so Update never reads the filesystem.
+    row = red_detail_row(diagnostic: { "summary" => "REVIEW_ERROR" })
+    new_model, cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::OpenRedStatusDetail.new(row: row, agent_label: "codex")
+    )
 
     assert_nil cmd
     assert_equal :red_status_detail, new_model.mode
     assert_same row, new_model.red_status_detail_state.row
-    assert_equal sig, new_model.red_status_detail_state.marker_signature,
-                 "TUI must read the canonical marker_signature off row.diagnostic"
+    assert_equal "codex", new_model.red_status_detail_state.agent_label
   end
 
-  def test_red_status_marker_signature_falls_back_when_diagnostic_absent
+  def test_open_red_status_detail_defaults_agent_label_when_missing
+    # No resolver result (BubbleModel rescued a corrupt config) — the
+    # state falls back to RedStatusDetailState::AGENT_FALLBACK so the
+    # view never has to apply a render-time fallback.
     row = red_detail_row(diagnostic: nil)
-    sig = Hive::Tui::Update.red_status_marker_signature(row)
+    new_model, _cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::OpenRedStatusDetail.new(row: row, agent_label: nil)
+    )
 
-    assert_match(/\Ano-diag:[0-9a-f]{64}\z/, sig,
-                 "missing diagnostic must produce a deterministic locally-namespaced digest")
+    assert_equal Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK,
+                 new_model.red_status_detail_state.agent_label
   end
 
   def test_snapshot_arrived_closes_red_detail_when_row_recovers
     row = red_detail_row
     starting = model.with(
       mode: :red_status_detail,
-      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
-        row: row,
-        marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
-      )
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(row: row)
     )
     recovered = red_detail_row(marker: "review_complete", attrs: {}, action_key: "ready_to_artifacts")
 
@@ -169,14 +170,16 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_match(/recovered/, new_model.flash)
   end
 
-  def test_snapshot_arrived_updates_red_detail_when_marker_signature_changes
+  def test_snapshot_arrived_updates_red_detail_row_without_flash
+    # The red-status detail screen now exposes only two actions; the
+    # "marker changed — refresh (R)" flash relied on R-press which is
+    # no longer in the keymap. A snapshot poll while the screen is
+    # open quietly updates the cached row so the operator sees fresh
+    # diagnosis the next time they re-open the screen.
     row = red_detail_row
     starting = model.with(
       mode: :red_status_detail,
-      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
-        row: row,
-        marker_signature: Hive::Tui::Update.red_status_marker_signature(row)
-      )
+      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(row: row)
     )
     changed = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
 
@@ -187,39 +190,7 @@ class HiveTuiUpdateTest < Minitest::Test
 
     assert_equal :red_status_detail, new_model.mode
     assert_same changed, new_model.red_status_detail_state.row
-    assert_match(/marker changed/, new_model.flash)
-  end
-
-  def test_snapshot_arrived_fires_flash_again_on_second_marker_rotation
-    # The "marker changed" flash must fire on EVERY rotation that
-    # hasn't been operator-acknowledged. Previously the state
-    # rebased marker_signature on every poll, so a second rotation
-    # between polls was silently swallowed and the operator never
-    # saw the warning. See PR #84 review finding #7.
-    row = red_detail_row
-    initial_sig = Hive::Tui::Update.red_status_marker_signature(row)
-    starting = model.with(
-      mode: :red_status_detail,
-      red_status_detail_state: Hive::Tui::Model::RedStatusDetailState.new(
-        row: row,
-        marker_signature: initial_sig
-      )
-    )
-
-    rotated_once = red_detail_row(attrs: { "phase" => "triage", "pass" => "2" })
-    after_first, _cmd = Hive::Tui::Update.apply(
-      starting,
-      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_once))
-    )
-    assert_match(/marker changed/, after_first.flash, "first rotation must flash")
-
-    rotated_twice = red_detail_row(attrs: { "phase" => "fix", "pass" => "3" })
-    after_second, _cmd = Hive::Tui::Update.apply(
-      after_first.with(flash: nil, flash_set_at: nil),
-      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(rotated_twice))
-    )
-    assert_match(/marker changed/, after_second.flash,
-                 "second rotation without operator acknowledgement must also flash")
+    assert_nil new_model.flash
   end
 
   # ---------- PollFailed ----------

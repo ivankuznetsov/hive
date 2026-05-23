@@ -105,12 +105,13 @@ For ambiguous red rows, grid Enter should open a detail view, not immediately mu
 1. Why is this red?
 2. What can Hive do next?
 
-Then offer explicit actions:
+Then offer a deliberately narrow, unified action surface:
 
-- `Enter`: existing autofix/retry path.
-- `f`: open worktree in `$EDITOR` for manual fix.
-- `R`: refresh diagnosis via the headless command.
+- `Enter`: run the automated recovery for this row, then close the detail screen. Rows with no auto-recovery recipe surface a refusal flash that names the manual fallback ("Open in agent") and still close — the operator's binary gesture should never strand them on a stale view.
+- `o`: open the task in the project's configured development agent (the same takeover path the grid `s` key uses), then close the detail screen as the TUI suspends.
 - `q`/`Esc`: return.
+
+Two actions beat three because every additional gesture demands a justification on the screen. Refreshing diagnosis is a shell-level affordance (`hive status --diagnose <slug> --write`) rather than a TUI keybinding — the detail screen is for "act on what we already know", and the headless diagnosis command is for "ask the agent to look again." Separating them keeps the in-TUI action surface boring and predictable.
 
 Preserve direct paths for deterministic states where a detail view would add friction:
 

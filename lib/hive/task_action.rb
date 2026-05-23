@@ -439,14 +439,13 @@ module Hive
     # The diagnostic shape exists for ALL three recovery action keys per
     # ADR-027 and wiki/commands/status.md — recover_review, error, AND
     # recover_execute (EXECUTE_STALE). The TUI's red_status_detail view
-    # renders all three; recover_execute deliberately omits the [Enter]
-    # autofix affordance because EXECUTE_STALE has no auto-retry recipe
-    # (see red_status_detail.rb#FOOTER_NO_ENTER and
-    # suggested_next_action_payload below — manual_fix / command:null).
-    # Bot, daemon, and external `--json` consumers also rely on this
-    # field for EXECUTE_STALE rows the autofix path cannot resolve;
-    # emitting nil would defeat the diagnose-then-act feature for one
-    # of the three red states it covers.
+    # renders all three under a unified [Enter] Recover / [o] Open in
+    # agent contract; recover_execute rows surface the Risk-#3 mitigation
+    # flash when [Enter] Recover is pressed (no auto-retry recipe), then
+    # the screen closes. Bot, daemon, and external `--json` consumers
+    # also rely on this field for EXECUTE_STALE rows the autofix path
+    # cannot resolve; emitting nil would defeat the diagnose-then-act
+    # feature for one of the three red states it covers.
     def diagnostic_action?
       %w[recover_execute recover_review error].include?(key.to_s)
     end

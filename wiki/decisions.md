@@ -310,7 +310,7 @@ The TUI applies "auto-fix first, manual only when needed." Grid Enter opens red-
 1. Why is this red?
 2. What can Hive do next?
 
-Then it offers three explicit gestures: `Enter` for the existing autofix/retry path, `f` for manual worktree editing, and `R` for fresh headless diagnosis. Existing deterministic paths stay direct: wall-clock review stale retries, max-passes review stale with an escalations file opens that file for browse/edit, and kill-class errors open the log tail while auto-heal runs.
+Then it offers a unified two-action contract: `Enter` runs hive's automated recovery for the task and closes the screen (rows without an auto-recovery recipe surface a refusal flash naming `Open in agent` as the manual fallback and still close so the operator's binary gesture never strands them on a stale view), and `o` opens the task in the project's configured development agent (same path as grid `s`) and closes the screen as the TUI suspends. `q` / `Esc` returns to the grid. Existing deterministic paths stay direct: wall-clock review stale retries, max-passes review stale with an escalations file opens that file for browse/edit, and kill-class errors open the log tail while auto-heal runs. The previous `f` / `R` bindings (manual worktree editor + headless diagnosis refresh) were removed alongside `RedStatusDetailState#marker_signature` — refreshing a diagnosis is a `hive status --diagnose <slug> --write` shell affordance now.
 
 **Consequences:**
 - Operators see the concrete artifact/log/marker explanation before retrying.

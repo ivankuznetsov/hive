@@ -14,6 +14,23 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** [[commands/bot]], [[modules/bot]], [[operating]], [[state-model]].
 
+## [2026-05-23T00:00:00Z] tui — red-status detail screen simplified to a two-action contract
+
+**Action:** Documented the simplification of the red-status detail screen to a unified two-action contract. The previous `[f] manual fix` and `[R] refresh diagnosis` bindings are removed; the screen now exposes only `[Enter] Recover` (re-runs hive's automated recovery and closes the screen — rows with no auto-recovery recipe surface a refusal flash naming `Open in agent`) and `[o] Open in agent` (suspends the TUI into the configured development agent — same path as grid `s` — and closes the detail screen). `q` / `Esc` returns to the grid.
+
+The supporting cleanup:
+
+1. **`RedStatusDetailState#marker_signature` is gone.** The freshness gate it served (the "marker changed since you opened this view — refresh (R)" banner) was removed when `R` was dropped; the field was being written on every snapshot poll but never read. Update no longer recomputes a per-snapshot signature.
+2. **`refresh_red_status_diagnosis` and its `@diagnosis_inflight` dedup set were removed from `BubbleModel`.** No `R` keystroke routes here anymore.
+3. **Agent-label resolution moved out of `Views::RedStatusDetail` and `Update.apply`.** It now lives in `BubbleModel#resolve_agent_label`, called from a side-effect handler before delegating to `Update.apply`. The view is a pure projection again; Update stays no-I/O. Rescue list was widened to `Psych::Exception`, `SystemCallError`, and `IOError` so a corrupt project config (chmod 000, hand-edited `!ruby/object:` tag, dangling path) falls back to the canonical `your project's development agent` label instead of crashing the TUI on Enter.
+4. **`Hive::Tui::RedStatusDetailKeys`** is the new shared module for the detail-screen key list — referenced by both the view (footer rendering) and `KeyMap` (refusal-flash hint copy) so a future key rename in one surface cannot drift away from the other.
+
+**Refreshed pages:**
+- `wiki/commands/tui.md` — updated red-status detail mode docs to the new two-action contract.
+- `wiki/modules/diagnosis_agent.md` — removed the TUI `R` key entry-point reference; only `hive status --diagnose <slug> --write` remains as the consumer.
+- `wiki/decisions.md` ADR-027 — replaced the three-gesture (`Enter` / `f` / `R`) action surface with the new unified two-action contract.
+- `docs/solutions/architecture-patterns/red-status-diagnose-then-act-2026-05-16.md` — pattern doc Section 5 reflects the two-action contract; refresh-via-headless-agent is now documented as a CLI-only affordance.
+
 ## [2026-05-22T13:30:00Z] rebase / review — close three post-merge follow-up gaps from PR #104 review
 
 **Action:** Documented three follow-up fixes after the initial PR #104 review pass surfaced sharper failure modes than the first round caught.

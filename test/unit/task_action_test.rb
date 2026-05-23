@@ -253,6 +253,32 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_finalize_complete_with_invalid_pr_frontmatter_reports_missing_url
+    Dir.mktmpdir("task-action-finalize-frontmatter") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "7-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 7,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+      File.write(task.state_file, "---\n: bad\n---\n")
+
+      action = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false")
+      )
+
+      assert_equal "error", action.key
+      assert_match(/FINALIZE_MISSING_PR_URL/, action.diagnostic.fetch("summary"))
+      assert_equal "manual_fix", action.diagnostic.fetch("suggested_next_action").fetch("kind")
+    end
+  end
+
   def test_finalize_missing_pr_md_is_error_not_needs_input
     Dir.mktmpdir("task-action-finalize") do |dir|
       folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")

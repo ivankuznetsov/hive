@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T09:45:00Z] readme - add daemon-first TUI getting started
+
+**Action:** Reworked the README quickstart into a five-minute TUI getting-started path before the Telegram section. The happy path now explains that the daemon advances ready tasks automatically while the TUI is for watching the queue, capturing a rough idea, and answering waiting prompts. Manual stage keys are framed as power-user controls, not the day-one flow.
+
+**Refreshed pages:** None - README-only user-facing onboarding change; existing [[commands/tui]] and [[commands/daemon]] remain the deep references.
+
 ## [2026-05-23T09:20:00Z] bot - default start backgrounds for manual use
 
 **Action:** Simplified Telegram onboarding by making `hive bot start` background the bot by default. `--foreground` is now the explicit mode for systemd, launchd, and terminal debugging; legacy `--detach` remains accepted as a no-op compatibility flag because backgrounding is already the default. README now includes a short BotFather -> numeric chat id -> allowlist -> `hive bot start` path based on the OpenClaw-style quick onboarding pattern.

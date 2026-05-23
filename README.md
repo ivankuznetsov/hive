@@ -47,32 +47,41 @@ If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Veri
 
 To have Claude Code, Codex, or another agent CLI install Hive for you (with OS detection, channel selection, Apache Hive collision handling, and `hive init` follow-up), paste the prompt at [install.md](install.md) into the agent. It's the canonical source for agent-driven install — keep it pinned in your agent's context if you reinstall often.
 
-## Quickstart
+## Five-Minute TUI Getting Started
 
-Hive is driven through a terminal dashboard (`hive tui`) that polls every task in every registered project once a second and dispatches stage commands on a single keystroke. New users should start there.
+The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is where you watch the queue and answer only when Hive needs human input. You do not need to learn the stage commands on day one.
 
-Attach Hive to a project and open the dashboard:
+1. Attach Hive to a real project.
 
-```bash
-cd ~/Dev/your-project
-hive init .                     # creates .hive-state/, registers the project, writes the daemon unit
-hive tui                        # opens the two-pane dashboard
-```
+   ```bash
+   cd ~/Dev/your-project
+   hive init .
+   ```
 
-You see a left pane listing your registered projects (with `★ All projects` on top) and a right pane showing tasks as a compact table — icon, slug, stage, status, age. From there everything is keystrokes:
+   When `hive init` asks about the daemon, keep it enabled and answer `y` to "Enable and start the hive daemon now?" The daemon is the worker: it polls Hive, starts the next stage when a task is ready, and stops at human-input or recovery gates.
 
-| Key | What it does |
-|---|---|
-| `n` | Capture a new idea. The prompt accepts plain text, pasted screenshots, and dragged image paths. |
-| `Enter` | Drive the highlighted task's next action — open its input file for brainstorm/plan/review answers, tail its agent log, or run the suggested recovery on a red row. |
-| `b` / `p` / `d` / `P` / `r` / `F` / `a` | Run brainstorm / plan / develop / open-PR / review / finalize / archive on the highlighted task. |
-| `o` | Open the task's `.hive-state/stages/<n>-<stage>/<slug>/` folder in your editor for read-only browsing. |
-| `/` | Filter the visible rows. |
-| `Tab` / `Shift+Tab` | Toggle focus between the projects pane and the tasks pane. |
-| `?` | Help overlay. |
-| `q` | Quit. |
+2. Open the dashboard.
 
-Workflow keystrokes are non-blocking: dispatching `b` (brainstorm) on one task while another task's agent is still running is fine — both processes run in their own pgroup and the dashboard keeps polling. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full layout, red-status detail, log tail, the new-idea composer with image paste, and the keybinding map per mode.
+   ```bash
+   hive daemon status            # should say running
+   hive tui
+   ```
+
+   If the daemon is not running yet, start it once with `hive daemon start --detach`, then open `hive tui`. The left pane is your registered projects; the right pane is the live queue.
+
+3. Capture one rough idea.
+
+   Press `n`, choose the project if Hive asks, type the thing you want built or investigated, and press `Enter`. The new row starts in `1-inbox`, backed by an `idea.md` file under `.hive-state/`.
+
+4. Watch Hive move it forward.
+
+   Leave the TUI open. The daemon picks up the new row, turns the idea into `brainstorm.md`, promotes completed work into `plan.md`, and keeps moving through the pipeline while each stage is ready. Long stages show as running; completed stages leave files behind for the next stage and for you.
+
+5. Answer only when Hive asks.
+
+   When a row says it needs input, highlight it and press `Enter`. Hive opens the right markdown file in your editor. Fill the answer blocks, save, and close the editor. The daemon sees the edit, waits for the file to settle, and continues the task automatically.
+
+That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
 ## Manage Hive From Telegram in 2 Minutes
 
@@ -156,7 +165,7 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 
 - **[install.md](install.md)** — The canonical agent-installer prompt: OS/arch detection, channel selection (brew / yay / install.sh), Apache Hive collision handling, `hive init` follow-up, and optional skills package wiring. Paste this into your agent CLI when you want it to install or upgrade Hive for you.
 - **[docs/concepts.md](docs/concepts.md)** — The conceptual deep-dive: folder-as-agent, the nine stages in detail, the marker protocol that lets stages negotiate handoff, and what compound engineering looks like in practice. Read this when you want to understand *why* Hive is shaped the way it is, or before extending a stage and needing to know what the artefact contract is.
-- **[docs/getting-started.md](docs/getting-started.md)** — A five-minute first-run walkthrough against a real project, from prerequisites through capturing an idea, watching brainstorm work, and promoting to plan. Read this on day one; come back if you ever forget the `hive init` → `hive new` → `hive brainstorm` shape.
+- **[docs/getting-started.md](docs/getting-started.md)** — A CLI-first walkthrough against a real project, from prerequisites through capturing an idea, running brainstorm, and promoting to plan. Read this when you want to drive stages manually or script the `hive init` → `hive new` → `hive brainstorm` shape.
 - **[wiki/commands/tui.md](wiki/commands/tui.md)** — The TUI deep reference: the two-pane layout, red-status detail, log tail, new-idea composer with image paste, the per-mode keybinding map, the terminal-hostility contract (resize, SIGTSTP, SIGHUP, non-tty rejection), and the subprocess-dispatch model. Read this when the TUI does something surprising or you want the full keystroke surface.
 - **[docs/architecture.md](docs/architecture.md)** — The user-facing architecture: the three trees (project checkout, `.hive-state/` orphan branch, feature worktree), the storage layout `hive init` creates, and how stages, agents, configs, and worktrees compose. Read this when you want to know where files live and which process owns what.
 - **[docs/cli.md](docs/cli.md)** — The full command surface exposed by `bin/hive`: every verb, every flag, every `--json` envelope contract, and every exit code. Read this when you're scripting Hive or wiring it into an agent that needs the full CLI map.

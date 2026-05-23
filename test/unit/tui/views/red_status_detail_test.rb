@@ -92,6 +92,23 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_match(/\ARED ·/, header)
   end
 
+  def test_reason_panel_renders_inside_rounded_border
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+    panel_top = output.lines.find { |line| line.start_with?("╭") || line.start_with?("+") }
+
+    refute_nil panel_top, "reason block must render as a bordered panel"
+    assert_includes output, "Marker: review_error phase=fix pass=2"
+    assert_includes output, "Status: Needs recovery"
+  end
+
+  def test_reason_panel_uses_outer_width_minus_border_for_content
+    model = model_for(row).with(cols: 100)
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
+    panel_top = output.lines.find { |line| line.start_with?("╭") || line.start_with?("+") }.to_s.chomp
+
+    assert_operator panel_top.length, :<=, 99
+  end
+
   def test_sanitizes_ansi_sequences_from_diagnostic_text
     diagnostic = {
       "summary" => "\e[31mbad\e[0m",

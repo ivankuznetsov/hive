@@ -47,6 +47,7 @@ module Hive
           body_lines << ""
           body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
           body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
+          body_lines << Styles::HINT.render(truncate(reason_meta(row), inner_width))
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
           body_lines << ""
           body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
@@ -125,6 +126,16 @@ module Hive
           return truncate(first, width) if width < prefix.length
 
           prefix + truncate(project_stage, width - prefix.length)
+        end
+
+        def reason_meta(row)
+          marker_attrs = attrs_text(row)
+          marker = [ "Marker: #{safe(row.marker)}", marker_attrs ].reject(&:empty?).join(" ")
+          "#{marker}  ·  Status: #{safe(row.action_label)}"
+        end
+
+        def attrs_text(row)
+          (row.attrs || {}).map { |key, value| "#{safe(key)}=#{safe(value)}" }.join(" ")
         end
 
         def summary_text(row)

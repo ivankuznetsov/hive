@@ -30,6 +30,7 @@ class ForgetCommandTest < Minitest::Test
       assert_equal "hive-forget", payload["schema"]
       assert_equal 1, payload["schema_version"]
       assert_equal true, payload["ok"]
+      assert_equal true, payload["removed"]
       assert_equal "drop", payload["name"]
       assert_equal "/tmp/drop", payload["path"]
       assert_equal "/tmp/drop/.hive-state", payload["hive_state_path"]
@@ -64,6 +65,31 @@ class ForgetCommandTest < Minitest::Test
       assert_equal "unknown_project", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/no entry named "ghost"/, payload["message"])
+    end
+  end
+
+  def test_forget_if_exists_unknown_name_exits_success_without_mutating_registry
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "keep", path: "/tmp/keep")
+
+      out, _err = capture_io { Hive::Commands::Forget.new("ghost", if_exists: true).call }
+      assert_match(/already absent/, out)
+      assert_equal [ "keep" ], Hive::Config.registered_projects.map { |p| p["name"] }
+    end
+  end
+
+  def test_forget_if_exists_unknown_name_json_emits_removed_false
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "keep", path: "/tmp/keep")
+
+      out, _err = capture_io { Hive::Commands::Forget.new("ghost", json: true, if_exists: true).call }
+      payload = JSON.parse(out)
+      assert_equal "hive-forget", payload["schema"]
+      assert_equal true, payload["ok"]
+      assert_equal "ghost", payload["name"]
+      assert_equal false, payload["removed"]
+      refute payload.key?("path")
+      refute payload.key?("hive_state_path")
     end
   end
 

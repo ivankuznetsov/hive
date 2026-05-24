@@ -10,7 +10,9 @@ module Hive
     #
     # Symmetric inverse of `hive init`. An unknown name is a USAGE
     # error (64), mirroring `hive metrics --project NAME` for
-    # consistency across the CLI surface. The empty-NAME case
+    # consistency across the CLI surface. Passing `if_exists: true`
+    # makes unknown names a successful no-op for retry-safe wrappers.
+    # The empty-NAME case
     # (positional missing) emits a distinct `missing_name` error_kind
     # so agent retry wrappers can distinguish a typo against a real
     # registry from a missing argv entirely.
@@ -30,9 +32,10 @@ module Hive
         end
       end
 
-      def initialize(name, json: false)
+      def initialize(name, json: false, if_exists: false)
         @name = name
         @json = json
+        @if_exists = if_exists
       end
 
       def call
@@ -57,6 +60,8 @@ module Hive
 
         removed = Hive::Config.unregister_project(name: @name)
         if removed.nil?
+          return emit_absent_success if @if_exists
+
           fail_usage!(
             "hive forget: no entry named #{@name.inspect} in #{Hive::Config.global_config_path}",
             kind: Hive::Schemas::ForgetErrorKind::UNKNOWN_PROJECT
@@ -69,6 +74,25 @@ module Hive
         else
           puts "removed #{removed['name']} (#{removed['path']})"
         end
+      end
+
+      def emit_absent_success
+        if @json
+          puts JSON.generate(absent_success_payload)
+          @stdout_written = true
+        else
+          puts "no entry named #{@name} (already absent)"
+        end
+      end
+
+      def absent_success_payload
+        {
+          "schema" => "hive-forget",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-forget"),
+          "ok" => true,
+          "name" => @name.to_s,
+          "removed" => false
+        }
       end
 
       def success_payload(removed)
@@ -89,6 +113,7 @@ module Hive
           "schema" => "hive-forget",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-forget"),
           "ok" => true,
+          "removed" => true,
           "name" => removed["name"].to_s,
           "path" => abs_path,
           "hive_state_path" => hive_state

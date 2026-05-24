@@ -1866,3 +1866,9 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 **Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
 
 **Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.
+
+## [2026-05-24T07:35:00Z] forget --if-exists retry idempotency
+
+**Action:** Added `hive forget NAME --if-exists` for retry-safe registry cleanup. Unknown names now emit a successful `hive-forget` envelope with `removed: false` when the flag is present, while default `hive forget NAME` keeps strict `unknown_project` / exit 64 behavior.
+
+**Docs:** Refreshed [[commands/forget]] and [[cli]] with the new flag, JSON `removed` field, and idempotency contract.

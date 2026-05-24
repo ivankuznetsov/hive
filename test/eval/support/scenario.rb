@@ -6,6 +6,8 @@ require "hive/bot/status_watcher"
 module Hive
   module Eval
     module ScenarioSupport
+      include Hive::Eval::ContractAssertions if defined?(Hive::Eval::ContractAssertions)
+
       DEFAULT_PROJECT = "hive"
 
       def before_setup

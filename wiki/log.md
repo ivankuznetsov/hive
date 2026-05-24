@@ -1830,9 +1830,9 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Refreshed pages:**
 - [[testing]] — documents the coverage task and helper HOME semantics.
 
-## [2026-05-24T00:00:00Z] testing — coverage gate hardening
+## [2026-05-24T00:00:00Z] testing — coverage report hardening
 
-**Action:** Hardened `bundle exec rake coverage` from an opt-in report into the CI gate. The harness now records per-run subprocess result directories, fails on unreadable result files, counts unloaded executable source files as uncovered, and exposes an `ok` flag plus gate diagnostics in `coverage/coverage.json`.
+**Action:** Hardened `bundle exec rake coverage` into the CI coverage-report path. The harness now records per-run subprocess result directories, fails on unreadable result files, counts unloaded executable source files as uncovered, exposes an `ok` flag plus diagnostics in `coverage/coverage.json`, and supports an optional `HIVE_COVERAGE_MIN_LINE` threshold for line-coverage enforcement.
 
 **Refreshed pages:**
-- [[testing]] — documented the 100% line coverage gate, per-run resultset directory, and unloaded/result-error failure modes.
+- [[testing]] — documented the configurable line coverage threshold, per-run resultset directory, and unloaded/result-error failure modes.

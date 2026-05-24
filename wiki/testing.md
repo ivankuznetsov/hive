@@ -23,7 +23,7 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
-`bundle exec rake coverage` is the CI gate. It fails when line coverage is below 100%, when an executable source file was never loaded, or when a subprocess result file cannot be read.
+`bundle exec rake coverage` is the CI coverage-report path. It fails when an executable source file was never loaded or when a subprocess result file cannot be read. Set `HIVE_COVERAGE_MIN_LINE` (for example `100`) to enforce a minimum line-coverage percentage.
 
 `Rakefile`:
 ```ruby

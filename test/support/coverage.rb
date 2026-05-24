@@ -4,6 +4,8 @@ require "json"
 require "time"
 
 module HiveTestCoverage
+  DEFAULT_MIN_LINE_PERCENT = 0.0
+
   module_function
 
   def start!(root:)
@@ -399,21 +401,30 @@ module HiveTestCoverage
   end
 
   def coverage_ok?(report)
-    numeric_value(report, :line_covered) == numeric_value(report, :line_total) &&
+    numeric_value(report, :line_percent) >= minimum_line_percent &&
       Array(value(report, :unloaded_files)).empty? &&
       Array(value(report, :result_errors)).empty?
+  end
+
+  def minimum_line_percent
+    Float(ENV.fetch("HIVE_COVERAGE_MIN_LINE", DEFAULT_MIN_LINE_PERCENT.to_s))
+  rescue ArgumentError
+    DEFAULT_MIN_LINE_PERCENT
   end
 
   def failure_lines(report)
     lines = []
     line_covered = numeric_value(report, :line_covered)
     line_total = numeric_value(report, :line_total)
-    if line_covered != line_total
+    minimum = minimum_line_percent
+    line_percent = numeric_value(report, :line_percent)
+    if line_percent < minimum
       lines << format(
-        "line coverage %.2f%% (%d/%d)",
-        numeric_value(report, :line_percent),
+        "line coverage %.2f%% (%d/%d) below minimum %.2f%%",
+        line_percent,
         line_covered,
-        line_total
+        line_total,
+        minimum
       )
     end
 

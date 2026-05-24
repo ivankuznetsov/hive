@@ -93,6 +93,22 @@ class HiveTestCoverageTest < Minitest::Test
     assert HiveTestCoverage.coverage_ok?(report)
   end
 
+
+  def test_coverage_gate_honors_min_line_threshold_env
+    report = {
+      "line_total" => 4,
+      "line_covered" => 2,
+      "line_percent" => 50.0,
+      "unloaded_files" => [],
+      "result_errors" => []
+    }
+
+    with_env("HIVE_COVERAGE_MIN_LINE" => "75") do
+      refute HiveTestCoverage.coverage_ok?(report)
+      assert_includes HiveTestCoverage.failure_message(report), "below minimum 75.00%"
+    end
+  end
+
   private
 
   def with_coverage_config(root:)

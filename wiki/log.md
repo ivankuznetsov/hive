@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-24T15:40:33Z] release notes - verified PR merge batch from #121
+
+**Action:** Added `docs/notes/2026-05-24-verified-pr-merge-notes.md` to record the ordered #121-first PR merge pass, final verification evidence, merged PR metadata, and line-change scoreboard. The batch covered #121, #126, #131, #127, and #129; #125 is listed only as same-day context because it was already on `main` before the ordered pass began.
+
+**Refreshed pages:** None - docs-only release note plus this changelog entry.
+
 ## [2026-05-23T18:00:00Z] claude.mode — tmux envelope parity + daemon-headless callout
 
 **Action:** Hardened the `claude.mode: tmux` path after PR review. `Hive::ClaudeLauncher` now emits the same envelope shape as the headless `claude -p` runner so consumers (status/daemon/bot) see identical `{status, error_message, ...}` regardless of mode; the obsolete `HIVE_BRAINSTORM_TMUX_*` env knobs were removed (config is the single source). CLAUDE.md gained an explicit callout that daemon/service hosts that cannot run tmux must set `claude.mode: headless`. G3+G5 tests expand per-stage `allowed_tools` and tmux session-name coverage so reviewers/finalize don't drift from the launcher contract.

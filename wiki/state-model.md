@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/bot/*
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-23
 tags: [state, filesystem, model, architecture, review]
 ---
 
@@ -210,7 +210,7 @@ timeout_sec:
 # fix,browser_test}.agent`. Runtime fallback in stage code stays
 # `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
 # these keys keep working.
-claude:     { mode: tmux }        # tmux | headless; applies to every Claude-backed launch
+claude:     { mode: tmux }        # tmux | headless; DEFAULTS-seeded — always non-nil after Config.load. `Config.explicit_claude_mode?` is a strict `EXPLICIT_CLAUDE_MODE_KEY == true` check (no dig fallback) so synthesised cfgs in tests/daemon helpers must set the flag themselves. Applies to every Claude-backed launch via `Hive::ClaudeLauncher` (shared tmux envelope across brainstorm/plan/execute/open_pr/artifacts/finalize/review). `hive doctor` surfaces the active mode.
 brainstorm: { agent: claude, runtime: headless }  # runtime is legacy read-back-compat only
 plan:       { agent: claude }
 execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`

@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T18:00:00Z] claude.mode — tmux envelope parity + daemon-headless callout
+
+**Action:** Hardened the `claude.mode: tmux` path after PR review. `Hive::ClaudeLauncher` now emits the same envelope shape as the headless `claude -p` runner so consumers (status/daemon/bot) see identical `{status, error_message, ...}` regardless of mode; the obsolete `HIVE_BRAINSTORM_TMUX_*` env knobs were removed (config is the single source). CLAUDE.md gained an explicit callout that daemon/service hosts that cannot run tmux must set `claude.mode: headless`. G3+G5 tests expand per-stage `allowed_tools` and tmux session-name coverage so reviewers/finalize don't drift from the launcher contract.
+
+**Refreshed pages:** No structural changes needed — [[decisions]] ADR-030 already names the daemon-headless guidance and the tmux runtime-dep contract; [[active-areas]] already lists the global Claude launch mode row.
+
 ## [2026-05-23T15:00:00Z] claude.mode — review-pass 1 follow-up fixes
 
 **Action:** Applied the round-1 reviewer findings on `claude.mode`. `Stages::Base.spawn_claude!` now PROPAGATES `Hive::AgentError` (R7 hard-fail contract); a new `spawn_claude_with_tmux_marker!` wraps the top-level Claude stages (brainstorm / plan / execute / open_pr / artifacts / finalize) so the `:error reason="tmux_unavailable"` marker still lands for those, while the 6-review path's outer rescue lands the dedicated `:review_error reason="tmux_unavailable"` marker. `run_reviewer_spec` re-raises tmux-unavailable AgentErrors so they no longer land as N per-reviewer `errors-NN.md` lines plus `:all_failed`. The TMUX_UNAVAILABLE regex was narrowed (a session-startup timeout is transient, not "tmux missing"). Doctor surfaces a row when `.hive-state/config.yml` is unreadable. Renamed `docs/notes/brainstorm-interactive-tmux.md` → `claude-tmux-launch-mode.md` to match its retitled content. Wiki/init.md and Init#collect docs updated to 10 LIMIT_KEYS and to drop the "five sections" undercount.

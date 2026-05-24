@@ -1828,64 +1828,11 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Action:** Added `bundle exec rake coverage` as an opt-in coverage run using Ruby stdlib `Coverage`. The harness loads source files for honest zero-hit accounting, collects child Ruby subprocess coverage via `test/hive_coverage_boot.rb`, merges per-process result files under `coverage/.resultset/`, and writes `coverage/coverage.json` with line and branch summaries. `with_tmp_global_config(home: nil)` now isolates both `HIVE_HOME` and `HOME` by default while still allowing fake HOME fixtures to be passed explicitly.
 
 **Refreshed pages:**
-- `wiki/testing.md` — documents the coverage task and helper HOME semantics.
+- [[testing]] — documents the coverage task and helper HOME semantics.
 
+## [2026-05-24T00:00:00Z] testing — coverage gate hardening
 
-## [2026-05-22T17:00:00Z] tui — remove orphaned findings triage mode
-
-**Note:** This entry recorded an intermediate decision. See the 18:00 entry below — the back-compat carve-out was reversed and the `REVIEW_FINDINGS` constant + schema enum value were dropped in place. The umbrella comment update mentioned here was also reverted. The "Refreshed pages" list below is otherwise accurate.
-
-**Action:** Removed the TUI `:triage` sub-mode (Enter on a `review_findings` row → Space toggle accept/reject → bulk `a`/`r` → `d` re-dispatch develop). The mode was unreachable in the live pipeline: no producer in current 4-execute or 6-review writes the `findings_count=` marker attr that `TaskAction#execute_action` keyed on. The chain `findings_count > 0` → `:execute_findings` → `REVIEW_FINDINGS` action key → `KeyMap#enter_message` `"review_findings"` branch → `Messages::OpenFindings` → triage view was dead.
-
-Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/triage.rb`, the `OpenFindings` / `ToggleFinding` / `BulkAccept` / `BulkReject` / `TriageDevelop` / `TriageCursorDown/Up` `Messages::*` definitions, the `:triage` arms in `KeyMap.message_for` / `Update.apply` / `Update.apply_back` / `BubbleModel#view` / `BubbleModel#handle_side_effect`, `Model.triage_state`, and the help-overlay Triage section. Producer-side: `:execute_findings` action def + `findings_count` predicate dropped from `TaskAction`. Stale references scrubbed from `Styles::ACTION_KEY_COLORS` + `_STYLES`, `Views::TasksPane::ICONS`, `Bot::NotificationBuilders::SKIP_ACTIONS`, `Commands::Status::ACTION_LABEL_ORDER`, `Daemon::Policy` + `ConcurrencyController` comments, and `hive tui --help` text.
-
-**Workflow policy:** Added `## Workflow` section to `CLAUDE.md` requiring all new feature/bugfix/refactor work to start in an isolated git worktree.
+**Action:** Hardened `bundle exec rake coverage` from an opt-in report into the CI gate. The harness now records per-run subprocess result directories, fails on unreadable result files, counts unloaded executable source files as uncovered, and exposes an `ok` flag plus gate diagnostics in `coverage/coverage.json`.
 
 **Refreshed pages:**
-- `wiki/commands/tui.md` — dropped Findings-triage Modes row, scrubbed Enter binding, removed bulk-rebinding paragraph, scrubbed `review_findings` color row.
-- `wiki/architecture.md` — fixed Bubble Tea side-effect message lists (removed `OpenFindings`, `BulkAccept`, `ToggleFinding`).
-- `wiki/modules/task_action.md` — dropped `execute_findings` ACTIONS table row.
-- `wiki/commands/daemon.md` — dropped `review_findings` dispatch table row.
-- `wiki/modules/markers.md` — corrected the "findings_count still parsed for compatibility" claim to clarify no live consumer reads it.
-- `wiki/decisions.md` — added ADR-028. (Rewritten by the 18:00 entry below to record the in-place schema edit instead of the original back-compat carve-out.)
-- `wiki/operating.md` — added Worktree-first workflow section mirroring the CLAUDE.md policy.
-
-## [2026-05-22T18:00:00Z] schemas — drop `review_findings` from hive-status / hive-stage-action v2 enums
-
-**Action:** Follow-up to the 17:00 entry. Resolved the deferral question (issue #123) by editing `schemas/hive-status.v2.json` and `schemas/hive-stage-action.v2.json` in place to remove the orphaned `review_findings` enum value. Dropped `Hive::Schemas::TaskActionKind::REVIEW_FINDINGS`. Kept `SCHEMA_VERSIONS["hive-status"]` at 2 — hive has no external production consumers yet, so the published-schema-stability invariant has no downstream cost. Historical v1 schemas left untouched.
-
-**Refreshed pages:**
-- `wiki/decisions.md` — ADR-028 rewritten to record the in-place edit (was previously "retain as vestigial"). Notes the pre-1.0 affordance vs. post-1.0 convention difference.
-
-## [2026-05-22T18:30:00Z] status — preserve legacy findings recovery without review_findings enum
-
-**Action:** Follow-up to ADR-028 after PR #122 review. Kept `review_findings` removed from v2 schemas, but remapped legacy `EXECUTE_WAITING findings_count>0` markers to the existing `recover_execute` action surface instead of generic `needs_input`. Those pinned state folders now emit `hive findings <slug>` and a manual-fix diagnostic, while ordinary execute waits keep their structured edit `next_action`.
-
-**Docs:** Refreshed README, [[commands/tui]], [[modules/task_action]], and [[decisions]] so they describe the shell/agent findings workflow and the `recover_execute` legacy compatibility path, not the deleted TUI triage mode.
-
-## [2026-05-22T00:00:00Z] artifacts-stage — runner and docs follow-up
-
-**Action:** Closed the 7-artifacts workflow gap from PR #120 review. Added `hive artifacts` as a Thor command, wired `Hive::Stages::Artifacts` into `hive run`, made markerless `7-artifacts` rows dispatch artifact collection instead of finalize, and refreshed the live stage docs to the current `7-artifacts` / `8-finalize` / `9-done` tail.
-
-**Refreshed pages:**
-- [[state-model]]
-- [[commands/stage_action]]
-- [[commands/daemon]]
-- [[modules/workflows]]
-- [[modules/stages]]
-- [[stages/artifacts]]
-- [[stages/index]]
-
-## [2026-05-22T18:01:31Z] e2e — fake Codex execute path
-
-**Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
-
-**Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.
-
-## [2026-05-22T22:01:22Z] drop — hard-delete active task command and TUI Shift+X binding
-
-**Action:** Added `hive drop TARGET [--project NAME] [--from STAGE] [--json]` as the hard-delete surface for active tasks. Drop resolves through `TaskResolver`, refuses `9-done`, kills recorded agent PIDs with the process-start guard, closes draft PRs best-effort, removes task worktrees and branches, deletes every active-stage folder for the slug, removes per-slug logs, and commits a `hive: dropped/<slug> dropped` audit record on `hive/state`. The `hive-drop.v1` schema documents the success fields (`from_stages`, `pr_closed`, `worktree_removed`, `branch_deleted`, `agent_killed`) and error envelope kinds.
-
-**TUI / daemon:** Shift+X in [[commands/tui]] now dispatches `hive drop <slug> --project <project> --from <stage> --json` against the focused right-pane row. Lowercase `x` is unbound; archived and empty-grid cases flash without spawning. The old missing-project registry cleanup binding moved fully to shell commands ([[commands/forget]] / [[commands/prune]]). The daemon dispatcher now re-stats a row's folder immediately before spawning and skips `reason: "folder_missing"` if a stale status snapshot races with a drop.
-
-**Docs:** Added [[commands/drop]], updated [[cli]], [[commands/tui]], and [[commands/forget]].
+- [[testing]] — documented the 100% line coverage gate, per-run resultset directory, and unloaded/result-error failure modes.

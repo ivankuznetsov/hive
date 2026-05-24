@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-24
 tags: [test, minitest, fixtures]
 ---
 
@@ -21,15 +21,16 @@ bundle exec rake test
 bundle exec rake coverage
 ```
 
-The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under `coverage/.resultset/`. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
+The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
+`bundle exec rake coverage` is the CI gate. It fails when line coverage is below 100%, when an executable source file was never loaded, or when a subprocess result file cannot be read.
 
 `Rakefile`:
 ```ruby
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/**/*_test.rb"]
+  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
   t.warning = false
 end
 task default: :test

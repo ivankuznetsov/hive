@@ -46,6 +46,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
     old_editor.nil? ? ENV.delete("EDITOR") : ENV["EDITOR"] = old_editor
   end
 
+  def with_zero_usage
+    with_replaced_singleton_method(Hive::UsageDb, :aggregate, ->(scope:, **_kwargs) {
+      Hive::UsageDb.zero_aggregate
+    }) { yield }
+  end
+
   def write_idea_md(dir, original_text:, slug: "some-slug", created_at: "2026-05-20T00:00:00Z")
     indented_original = original_text.lines.map { |line| "  #{line.chomp}" }
     body = [
@@ -214,6 +220,78 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal 2, @model.hive_model.scope
   end
 
+  def test_usage_footer_uses_task_scope_when_tasks_pane_focused
+    row = make_task_row(slug: "task-one", action_key: "ready_to_plan")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        snapshot: snapshot_with([ row ]),
+        cursor: [ 0, 0 ],
+        pane_focus: :right
+      ),
+      dispatch: @dispatch
+    )
+    scopes = []
+
+    with_replaced_singleton_method(Hive::UsageDb, :aggregate, ->(scope:, **_kwargs) {
+      scopes << scope
+      Hive::UsageDb.zero_aggregate
+    }) do
+      @model.send(:usage_footer_line, 120)
+    end
+
+    assert_equal [ { project_slug: "demo", task_slug: "task-one" } ], scopes
+  end
+
+  def test_usage_footer_uses_project_scope_when_project_pane_focused
+    row = make_task_row(slug: "task-one", action_key: "ready_to_plan")
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        snapshot: snapshot_with([ row ]),
+        cursor: [ 0, 0 ],
+        scope: 1,
+        pane_focus: :left
+      ),
+      dispatch: @dispatch
+    )
+    scopes = []
+
+    with_replaced_singleton_method(Hive::UsageDb, :aggregate, ->(scope:, **_kwargs) {
+      scopes << scope
+      Hive::UsageDb.zero_aggregate
+    }) do
+      @model.send(:usage_footer_line, 120)
+    end
+
+    assert_equal [ { project_slug: "demo" } ], scopes
+  end
+
+  def test_usage_footer_defaults_to_all_scope_without_selection
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(cursor: nil, pane_focus: :right),
+      dispatch: @dispatch
+    )
+    scopes = []
+
+    with_replaced_singleton_method(Hive::UsageDb, :aggregate, ->(scope:, **_kwargs) {
+      scopes << scope
+      Hive::UsageDb.zero_aggregate
+    }) do
+      @model.send(:usage_footer_line, 120)
+    end
+
+    assert_equal [ {} ], scopes
+  end
+
+  def test_narrow_default_footer_drops_hint_but_keeps_usage
+    with_replaced_singleton_method(Hive::UsageDb, :aggregate, ->(scope:, **_kwargs) {
+      Hive::UsageDb.zero_aggregate
+    }) do
+      out = @model.send(:default_footer, 70)
+      assert_includes out, "tokens"
+      refute_includes out, "[Tab]"
+    end
+  end
+
   def test_unknown_keystroke_is_noop
     km = Bubbletea::KeyMessage.new(key_type: 0, runes: [ "x".ord ])
     snapshot_before = @model.hive_model
@@ -338,7 +416,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       hive_model: Hive::Tui::Model.initial.with(mode: :grid),
       dispatch: @dispatch
     )
-    out = @model.view
+    out = with_zero_usage { @model.view }
     assert_includes out, "hive tui"
   end
 
@@ -375,15 +453,16 @@ class HiveTuiBubbleModelTest < Minitest::Test
         mode: :idea_preview,
         info_panel_state: state,
         rows: 20,
-        cols: 100
+        cols: 180
       ),
       dispatch: @dispatch
     )
-    out = @model.view
+    out = with_zero_usage { @model.view }
 
     assert_includes out, "Info: some-slug"
     assert_includes out, "original idea"
     assert_includes out, "brainstorm notes"
+    assert_includes out, "tokens"
     assert_includes out, "[i] info"
     refute_includes out, "Projects"
   end
@@ -642,16 +721,19 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_default_footer_renders_full_hint_at_wide_width
-    out = @model.send(:default_footer, 120)
+    out = with_zero_usage { @model.send(:default_footer, 180) }
 
+    assert_includes out, "tokens"
     assert_includes out, "[i] info"
     assert_includes out, "[q] quit"
   end
 
   def test_default_footer_fits_full_hint_at_exact_boundary_width
     hint = @model.send(:footer_hint)
-    out = @model.send(:default_footer, hint.length)
+    usage = Hive::Tui::Views::UsageFooter.text(Hive::UsageDb.zero_aggregate)
+    out = with_zero_usage { @model.send(:default_footer, "#{usage} · #{hint}".length) }
 
+    assert_includes out, "tokens"
     assert_includes out, "[i] info"
     assert_includes out, "[q] quit"
     refute out.end_with?("…"),
@@ -659,20 +741,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_default_footer_truncates_from_right_at_narrow_width
-    out = @model.send(:default_footer, 76)
+    out = with_zero_usage { @model.send(:default_footer, 76) }
 
-    assert_includes out, "[?] help"
-    assert_includes out, "[i] info"
-    assert out.end_with?("…"), "narrow footer should truncate the right edge, got #{out.inspect}"
-    refute_includes out, "[i] inf…",
-                    "76-column truncation should not split the `[i] info` token"
-    # Pin the surviving tail so a future hint change that silently
-    # clipped `[q] quit` away entirely (or replaced it with a different
-    # token at the right edge) trips a meaningful failure instead of
-    # passing on `end_with?("…")` alone. The truncation lands one char
-    # into `[q] quit` so the visible prefix is `[q] ` plus the ellipsis.
-    assert out.end_with?("[q] …"),
-           "76-column truncation should preserve the `[q] ` prefix before the ellipsis, got #{out.inspect}"
+    assert_includes out, "tokens"
+    refute_includes out, "[Tab]"
+    refute_includes out, "[?] help"
   end
 
   def test_grid_mode_collapses_to_single_pane_below_min_cols

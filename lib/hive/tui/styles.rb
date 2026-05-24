@@ -109,7 +109,12 @@ module Hive
       # it recedes against the active grid content.
       HINT = Lipgloss::Style.new.faint(true)
 
+      # Reverse-video for the chip carrying the [Enter] affordance —
+      # mirrors `CURSOR_HIGHLIGHT` so the primary action pops on
+      # monochrome terminals.
       ACTION_CHIP_PRIMARY = Lipgloss::Style.new.reverse(true).freeze
+      # Faint for non-Enter chips ([f]/[R]/[q]) — same family as `HINT`,
+      # so secondary affordances recede next to the primary one.
       ACTION_CHIP_MUTED = Lipgloss::Style.new.faint(true).freeze
 
       # ---- v2 two-pane border styles ----
@@ -128,7 +133,10 @@ module Hive
         .border_foreground(color(:bright_black))
         .freeze
 
-      # Recovery detail panels use the same dim border as inactive panes.
+      # Recovery detail panels are non-focused; focus lives on the
+      # action bar's primary chip (reverse-video), so the panels share
+      # the same dim border as inactive panes rather than competing for
+      # attention.
       PANEL_BORDER = PANE_DIM_BORDER
     end
   end

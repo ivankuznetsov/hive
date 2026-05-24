@@ -91,21 +91,21 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
 
   def test_header_truncates_worktree_path_before_slug
     long_path = "/tmp/" + ("deep/" * 20) + "red-task-worktree"
-    model = model_for(row(worktree_path: long_path)).with(cols: 41)
+    model = model_for(row(worktree_path: long_path)).with(cols: 40)
 
     header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
 
-    assert_operator header.length, :<=, 40
+    assert_operator header.length, :<=, 39
     assert_includes header, "RED · alpha/6-review · red-task · "
     assert_includes header, "…"
   end
 
   def test_header_keeps_red_prefix_at_tiny_width
-    model = model_for(row(slug: "very-long-red-task-name")).with(cols: 21)
+    model = model_for(row(slug: "very-long-red-task-name")).with(cols: 20)
 
     header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
 
-    assert_operator header.length, :<=, 20
+    assert_operator header.length, :<=, 19
     assert_match(/\ARED ·/, header)
   end
 
@@ -205,6 +205,19 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes block, "… (2 more)"
   end
 
+  # Boundary: exactly 5 artifacts — a regression to `>= 5` instead of
+  # `> 5` would print a spurious "… (0 more)" line. Pin the boundary.
+  def test_artifacts_block_at_exactly_five_paths_omits_remainder_line
+    paths = (1..5).map { |i| "/tmp/artifact-#{i}.md" }
+    block = Hive::Tui::Views::RedStatusDetail.artifacts_block(
+      row(diagnostic: { "artifact_paths" => paths }),
+      80
+    )
+
+    assert_includes block, "/tmp/artifact-5.md"
+    refute_includes block, "more)"
+  end
+
   def test_render_omits_artifacts_section_when_empty
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: { "artifact_paths" => [] })))
 
@@ -247,6 +260,35 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     refute_includes output, "Log ·"
 assert_includes output, "Why:"
 assert_includes output, "[Enter] Recover"
+  end
+
+  # U6 invariant: across every plan-enumerated size, the last rendered
+  # line must be part of the action bar. Pinning this at 80×24, 60×24
+  # and 40×40 — the existing 100×30 / 80×12 cases cover only the wide
+  # full-height and the short-log-dropped paths, so a lipgloss height
+  # drift at the middle sizes would slip past until a screenshot diff.
+  def test_action_bar_is_last_line_at_80x24
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 24))
+    assert_includes output.lines.last, "[q] back"
+  end
+
+  def test_action_bar_is_last_line_at_60x24
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 60, rows: 24))
+    assert_includes output.lines.last, "[q] back"
+  end
+
+  def test_action_bar_is_last_line_at_40x40
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 40, rows: 40))
+    assert_includes output.lines.last, "[q] back"
+  end
+
+  # At 80c the four chips ([Enter] autofix / retry + [f] manual fix +
+  # [R] refresh diagnosis + [q] back) sum to 76 raw chars. " · " (3)
+  # forced a 2-row footer at 80c; " " (1) lets them share one row and
+  # reserves wrap for the <60c case the plan covers.
+  def test_action_bar_fits_on_single_row_at_80_cols
+    bar = Hive::Tui::Views::RedStatusDetail.action_bar(row, 79)
+    assert_equal 1, bar.lines.size, "action bar must be one row at 80c (width=79)"
   end
 
   def test_narrow_layout_keeps_lines_within_terminal_margin

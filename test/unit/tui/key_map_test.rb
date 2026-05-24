@@ -809,9 +809,9 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_equal [ :up, 10 ], [ pgup.direction, pgup.amount ]
     assert_equal [ :down, 10 ], [ pgdn.direction, pgdn.amount ]
     assert_equal :up, home.direction
-    assert_operator home.amount, :>, 50
+    assert_equal Hive::Tui::KeyMap::SCROLL_TO_EDGE, home.amount
     assert_equal :down, end_key.direction
-    assert_operator end_key.amount, :>, 50
+    assert_equal Hive::Tui::KeyMap::SCROLL_TO_EDGE, end_key.amount
   end
 
   def test_red_status_detail_j_and_k_remain_noops

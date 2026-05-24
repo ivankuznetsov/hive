@@ -16,17 +16,8 @@ module Hive
         # same data without the view module exposing rendering surface.
         ACTION_KEYS = Hive::Tui::RedStatusDetailKeys::ACTION_KEYS
         FOOTER = Hive::Tui::RedStatusDetailKeys::FOOTER
-        # Re-export so external readers (tests, KeyMap) can pin against
-        # the canonical fallback string without depending on Model
-        # internals.
         AGENT_FALLBACK = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
 
-        # Detect a `TaskAction#marker_summary`-style string (uppercase
-        # marker name followed by at least one `key=value` attr pair)
-        # that leaked into diagnostic["summary"] from an older artifact.
-        # Requires the attrs portion so a legitimate bare upper-case
-        # verdict like `ABORTED` or a real sentence is not mistakenly
-        # treated as debug copy. See plan Unit 1.
         MARKER_SUMMARY_PATTERN = /\A[A-Z][A-Z0-9_]+(?:\s+[a-z_]+=\S+)+\z/
 
         MIN_LOG_PANEL_ROWS = 4
@@ -39,15 +30,14 @@ module Hive
           return "" if state.nil?
 
           row = state.row
-header_width = [ model.cols.to_i - 1, 1 ].max
-outer_width = [ model.cols.to_i - 2, 1 ].max
-bordered = model.cols.to_i >= 40
-inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
-body_height = [ model.rows.to_i - 5, 1 ].max
-footer_lines = footer_lines_for(inner_width)
-flash_line = flash_line_for(model, inner_width)
-          # Reserve footer and optional flash rows outside the content
-          # trim so action keys remain visible on very short terminals.
+          header_width = [ model.cols.to_i - 1, 1 ].max
+          outer_width = [ model.cols.to_i - 2, 1 ].max
+          bordered = model.cols.to_i >= 40
+          inner_width = bordered ? [ outer_width - 2, 1 ].max : outer_width
+          body_height = [ model.rows.to_i - 5, 1 ].max
+          footer_lines = footer_lines_for(inner_width)
+          flash_line = flash_line_for(model, inner_width)
+
           reserved = footer_lines.size + 1 # footer + leading blank
           reserved += 1 if flash_line
           inner_body_height = [ body_height - reserved, 1 ].max
@@ -76,8 +66,7 @@ flash_line = flash_line_for(model, inner_width)
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
           body_lines << ""
           body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
-          body_lines << truncate("[Enter] Recover — re-run hive's automated recovery for this task", inner_width)
-          body_lines << truncate("[o]     Open in agent — launch #{safe(state.agent_label || AGENT_FALLBACK)} in the task worktree", inner_width)
+          body_lines.concat(action_bar(state.agent_label, inner_width).lines.map(&:chomp))
 
           append_artifacts(body_lines, artifacts_block(row, inner_width), inner_body_height)
           append_log_preview(body_lines, state, inner_width, inner_body_height)
@@ -108,63 +97,54 @@ flash_line = flash_line_for(model, inner_width)
           body_lines.concat(artifact_lines)
         end
 
-
         def footer_lines_for(inner_width)
           return [ Styles::HINT.render(FOOTER) ] if FOOTER.length <= inner_width
 
-          # Narrow terminals: stack one key per line so a `[Esc] back`
-          # affordance never gets truncated off the end of a single
-          # joined footer line.
           ACTION_KEYS.map { |entry| Styles::HINT.render(truncate(entry[:footer], inner_width)) }
         end
 
-        # Surface `model.flash` on the detail screen so a refusal flash
-        # fired by KeyMap (e.g., `s` muscle-memory drift) is observable
-        # without backing out to the grid. Without this, the explicit-
-        # refusal contract documented in `red_status_detail_message` is
-        # invisible until the operator dismisses the screen.
         def flash_line_for(model, inner_width)
           return nil unless model.respond_to?(:flash_active?) && model.flash_active?
 
           text = safe(model.flash.to_s).strip
           return nil if text.empty?
 
-  Styles::HINT.render(truncate(text, inner_width))
-end
+          Styles::HINT.render(truncate(text, inner_width))
+        end
 
-def action_bar(agent_label, width)
-  wrap_action_chips(action_chips(agent_label), width).join("\n")
-end
+        def action_bar(agent_label, width)
+          wrap_action_chips(action_chips(agent_label), width).join("\n")
+        end
 
-def action_chips(agent_label)
-  label = safe(agent_label || AGENT_FALLBACK)
-  [
-    [ "[Enter] Recover — re-run hive's automated recovery for this task", true ],
-    [ "[o]     Open in agent — launch #{label} in the task worktree", false ]
-  ]
-end
+        def action_chips(agent_label)
+          label = safe(agent_label || AGENT_FALLBACK)
+          [
+            [ "[Enter] Recover — re-run hive's automated recovery for this task", true ],
+            [ "[o]     Open in agent — launch #{label} in the task worktree", false ]
+          ]
+        end
 
-def wrap_action_chips(chips, width)
-  max_width = [ width.to_i, 1 ].max
-  rendered = chips.map do |label, primary|
-    text = truncate(label, max_width)
-    primary ? Styles::ACTION_CHIP_PRIMARY.render(text) : Styles::ACTION_CHIP_MUTED.render(text)
-  end
+        def wrap_action_chips(chips, width)
+          max_width = [ width.to_i, 1 ].max
+          rendered = chips.map do |label, primary|
+            text = truncate(label, max_width)
+            primary ? Styles::ACTION_CHIP_PRIMARY.render(text) : Styles::ACTION_CHIP_MUTED.render(text)
+          end
 
-  lines = []
-  current = +""
-  rendered.each do |chip|
-    candidate = current.empty? ? chip : "#{current} · #{chip}"
-    if candidate.length <= max_width
-      current = candidate
-    else
-      lines << current unless current.empty?
-      current = chip
-    end
-  end
-  lines << current unless current.empty?
-  lines
-end
+          lines = []
+          current = +""
+          rendered.each do |chip|
+            candidate = current.empty? ? chip : "#{current} #{chip}"
+            if candidate.length <= max_width
+              current = candidate
+            else
+              lines << current unless current.empty?
+              current = chip
+            end
+          end
+          lines << current unless current.empty?
+          lines
+        end
 
         def header_bar(row, width)
           prefix = "RED · "
@@ -215,12 +195,6 @@ end
           [[ offset.to_i, 0 ].max, max].min
         end
 
-        def reason_meta(row)
-          marker_attrs = attrs_text(row)
-          marker = [ "Marker: #{safe(row.marker)}", marker_attrs ].reject(&:empty?).join(" ")
-          "#{marker}  ·  Status: #{safe(row.action_label)}"
-        end
-
         def artifacts_block(row, width)
           diagnostic = row.diagnostic || {}
           paths = Array(diagnostic["artifact_paths"]).map { |path| safe(path).strip }.reject(&:empty?)
@@ -236,17 +210,10 @@ end
           lines.join("\n")
         end
 
-
-        def attrs_text(row)
-          (row.attrs || {}).map { |key, value| "#{safe(key)}=#{safe(value)}" }.join(" ")
-        end
-
         def summary_text(row)
           diagnostic = row.diagnostic || {}
           summary = safe(diagnostic["summary"]).strip
           return missing_summary_fallback if summary.empty?
-          # marker_summary leaked from TaskAction: strip and use the
-          # plain-English fallback rather than dump debug copy.
           return missing_summary_fallback if summary.match?(MARKER_SUMMARY_PATTERN)
 
           summary

@@ -439,6 +439,69 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_includes output, artifact
       assert_includes output, "[Enter] autofix / retry"
       assert_includes output.lines.last, "[q] back"
+
+      # Pin section ordering — a swap of reason and log panels would
+      # have passed the substring assertions above. Header first, the
+      # reason panel's Q/A second, then the log panel, then artifacts,
+      # then the action bar.
+      header_idx = output.index("RED · alpha/6-review")
+      reason_idx = output.index("Q: Why is this red?")
+      log_idx = output.index("Log · last 8 of 8 lines")
+      artifact_idx = output.index(artifact)
+      action_idx = output.index("[q] back")
+
+      assert_operator header_idx, :<, reason_idx, "header must come before reason panel"
+      assert_operator reason_idx, :<, log_idx, "reason panel must come before log panel"
+      assert_operator log_idx, :<, artifact_idx, "log panel must come before artifacts"
+      assert_operator artifact_idx, :<, action_idx, "artifacts must come before action bar"
+    end
+  end
+
+  # U10 at 80×24: mirror of the 100×30 composition pin so a regression
+  # at the narrower-but-still-tall layout boundary can't slip past.
+  def test_red_status_detail_view_composes_sections_at_80x24
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-view-80x24-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      artifact = "/tmp/errors-02.md"
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "review-fix-pass02.log"), (1..8).map { |i| "line-#{i}" }.join("\n") + "\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: "alpha", stage: "6-review", slug: slug,
+        folder: task_folder, state_file: File.join(task_folder, "task.md"),
+        worktree_path: File.join(project_root, "worktrees", slug),
+        marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: {
+          "summary" => "REVIEW_ERROR phase=fix pass=2",
+          "detail" => "Fix agent failed before tests completed.",
+          "artifact_paths" => [ artifact ],
+          "marker_signature" => "sig"
+        }
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(cols: 80, rows: 24),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      output = @model.view
+
+      header_idx = output.index("RED · alpha/6-review")
+      reason_idx = output.index("Q: Why is this red?")
+      action_idx = output.index("[q] back")
+
+      refute_nil header_idx, "header must render"
+      refute_nil reason_idx, "reason panel must render"
+      refute_nil action_idx, "action bar must render"
+      assert_operator header_idx, :<, reason_idx
+      assert_operator reason_idx, :<, action_idx
+      assert_includes output.lines.last, "[q] back"
     end
   end
 
@@ -5597,6 +5660,47 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal :red_status_detail, @model.hive_model.mode
       assert_nil state.log_path
       assert_equal [], state.log_lines
+    end
+  end
+
+  # U4 unreadable-log branch: a `chmod 000` regression on the snapshot
+  # path must collapse to an empty log panel (EACCES branch), not tear
+  # the TUI down. The happy and no-log cases above don't cover this
+  # rescue arm.
+  def test_open_red_status_detail_handles_unreadable_log_file
+    skip "skip-as-root: chmod 000 doesn't restrict root" if Process.uid.zero?
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-unreadable-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "review-fix-pass02.log")
+      File.write(log_path, "should not be readable\n")
+      File.chmod(0, log_path)
+
+      begin
+        row = Hive::Tui::Snapshot::Row.new(
+          project_name: File.basename(project_root), stage: "6-review", slug: slug,
+          folder: task_folder, state_file: nil, marker: "review_error",
+          attrs: { "pass" => "2" }, mtime: nil, age_seconds: 0,
+          claude_pid: nil, claude_pid_alive: nil,
+          action_key: "recover_review", action_label: "Needs recovery",
+          suggested_command: nil, next_action: nil,
+          diagnostic: { "summary" => "review failed", "marker_signature" => "sig" }
+        )
+
+        _, cmd = @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+        state = @model.hive_model.red_status_detail_state
+
+        assert_nil cmd, "unreadable log must not surface a Cmd; the rescue collapses to empty panel"
+        assert_equal :red_status_detail, @model.hive_model.mode,
+                     "TUI must still enter detail mode even when the log is unreadable"
+        assert_nil state.log_path
+        assert_equal [], state.log_lines
+      ensure
+        File.chmod(0o600, log_path) if File.exist?(log_path)
+      end
     end
   end
 

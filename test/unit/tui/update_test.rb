@@ -155,7 +155,6 @@ class HiveTuiUpdateTest < Minitest::Test
   def test_red_status_detail_scroll_down_reduces_offset
     state = Hive::Tui::Model::RedStatusDetailState.new(
       row: red_detail_row,
-      marker_signature: "sig",
       log_lines: (1..50).map { |i| "line-#{i}" },
       log_scroll_offset: 5
     )
@@ -172,7 +171,6 @@ class HiveTuiUpdateTest < Minitest::Test
   def test_red_status_detail_scroll_up_increases_offset
     state = Hive::Tui::Model::RedStatusDetailState.new(
       row: red_detail_row,
-      marker_signature: "sig",
       log_lines: (1..50).map { |i| "line-#{i}" },
       log_scroll_offset: 0
     )
@@ -189,7 +187,6 @@ class HiveTuiUpdateTest < Minitest::Test
   def test_red_status_detail_scroll_saturates_at_top
     state = Hive::Tui::Model::RedStatusDetailState.new(
       row: red_detail_row,
-      marker_signature: "sig",
       log_lines: (1..50).map { |i| "line-#{i}" },
       log_scroll_offset: 0
     )
@@ -203,10 +200,29 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal 42, new_model.red_status_detail_state.log_scroll_offset
   end
 
+  # Boundary: :down from offset 0 must clamp to 0 (no negative). The
+  # other paths exercise saturation at the top and the empty-log
+  # no-op; this is the only test that pins the `[next, 0].max` floor.
+  def test_red_status_detail_scroll_down_from_zero_clamps_to_zero
+    state = Hive::Tui::Model::RedStatusDetailState.new(
+      row: red_detail_row,
+      log_lines: (1..50).map { |i| "line-#{i}" },
+      log_scroll_offset: 0
+    )
+    starting = model.with(mode: :red_status_detail, red_status_detail_state: state, cols: 100, rows: 24)
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :down, amount: 3)
+    )
+
+    assert_same starting, new_model,
+                ":down from offset 0 must be a no-op (clamped at zero)"
+  end
+
   def test_red_status_detail_scroll_empty_log_is_noop
     state = Hive::Tui::Model::RedStatusDetailState.new(
       row: red_detail_row,
-      marker_signature: "sig",
       log_lines: [],
       log_scroll_offset: 0
     )

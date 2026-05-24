@@ -1384,6 +1384,11 @@ module Hive
         [ new_model.with(red_status_detail_state: state), nil ]
       end
 
+      # Snapshot, not live tail: open the latest log, read the trailing
+      # 64 KiB, return the last 50 lines. The Enter handler holds the
+      # `R` key for refresh — re-tailing on every render thread would
+      # block keystrokes on slow disks (sshfs, network mounts) and the
+      # design path prefers stale-but-fast.
       def red_status_detail_log_snapshot(row)
         task = Hive::Task.new(row.folder)
         log_path = Hive::Tui::LogTail::FileResolver.latest_in_dirs(
@@ -1392,8 +1397,11 @@ module Hive
         tail = Hive::Tui::LogTail::Tail.new(log_path, ring_capacity: 50, backbuffer_bytes: 64 * 1024)
         tail.open!
         [ log_path, tail.lines(50) ]
-      rescue Hive::NoLogFiles, Hive::InvalidTaskPath, Errno::ENOENT, Errno::EACCES, Errno::EBADF, Errno::EIO => e
-        Hive::Tui::Debug.log("red_status_detail", "log snapshot skipped: #{e.class.name.split('::').last}")
+      rescue Hive::NoLogFiles, Hive::InvalidTaskPath, TypeError, *Hive::Tui::LogTail::FILESYSTEM_RESCUE => e
+        Hive::Tui::Debug.log(
+          "red_status_detail",
+          "log snapshot skipped slug=#{row&.slug} path=#{log_path.inspect} err=#{e.class.name.split('::').last}: #{e.message}"
+        )
         [ nil, [] ]
       ensure
         tail&.close!

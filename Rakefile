@@ -77,6 +77,16 @@ namespace :e2e do
   end
 end
 
+namespace :test do
+  Rake::TestTask.new(:eval) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = FileList["test/eval/**/*_test.rb"]
+    t.warning = false
+    t.description = "Run Telegram bot eval harness tests"
+  end
+end
+
 desc "Run real-subprocess CLI/TUI e2e scenarios"
 task :e2e do
   ruby "bin/hive-e2e", "run"

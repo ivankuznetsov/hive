@@ -1,5 +1,6 @@
 require "hive/agent_profile"
 require "hive/skill_check"
+require "hive/agent_profiles/usage_extractors"
 
 module Hive
   module AgentProfiles
@@ -27,6 +28,7 @@ module Hive
       headless_supported: true,
       min_version: Hive::MIN_CLAUDE_VERSION,
       status_detection_mode: :state_file_marker,
+      usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
       skill_verifier: Hive::SkillCheck::Claude.method(:verify)
     )
 

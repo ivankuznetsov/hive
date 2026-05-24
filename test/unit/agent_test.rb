@@ -218,6 +218,82 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_captures_last_usage_from_profile_extractor
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = [
+        JSON.generate(
+          "type" => "stream_event",
+          "event" => {
+            "usage" => {
+              "input_tokens" => 10,
+              "output_tokens" => 5,
+              "cache_read_input_tokens" => 2,
+              "cache_creation_input_tokens" => 3
+            }
+          }
+        ),
+        JSON.generate(
+          "type" => "result",
+          "subtype" => "success",
+          "result" => "done",
+          "usage" => {
+            "input_tokens" => 100,
+            "output_tokens" => 50,
+            "cache_read_input_tokens" => 20,
+            "cache_creation_input_tokens" => 30
+          },
+          "modelUsage" => {
+            "claude-opus-4-7" => { "inputTokens" => 100 }
+          }
+        )
+      ].join("\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal({ input: 100, output: 50, cached: 50, model: "claude-opus-4-7" }, result[:usage])
+      assert_equal "claude-opus-4-7", result[:model]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
+  def test_profile_without_usage_extractor_returns_no_usage
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "result",
+        "usage" => { "input_tokens" => 100, "output_tokens" => 50 }
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      profile = Hive::AgentProfile.new(
+        name: :no_usage,
+        bin_default: FAKE_BIN,
+        env_bin_override_key: "HIVE_CLAUDE_BIN",
+        headless_flag: "-p",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :state_file_marker
+      )
+
+      result = Hive::Agent.new(
+        task: task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile
+      ).run!
+
+      assert_nil result[:usage]
+      assert_nil result[:model]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
   def test_captures_final_message_from_codex_item_completed_json
     with_tmp_dir do |dir|
       task = make_task(dir)

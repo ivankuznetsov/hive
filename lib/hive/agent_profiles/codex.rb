@@ -1,5 +1,6 @@
 require "hive/agent_profile"
 require "hive/skill_check"
+require "hive/agent_profiles/usage_extractors"
 
 module Hive
   module AgentProfiles
@@ -30,6 +31,7 @@ module Hive
       headless_supported: true,
       min_version: "0.125.0",
       status_detection_mode: :output_file_exists,
+      usage_extractor: Hive::AgentProfiles::UsageExtractors::CODEX,
       skill_verifier: Hive::SkillCheck::Codex.method(:verify)
     )
 

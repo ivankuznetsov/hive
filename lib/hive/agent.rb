@@ -109,6 +109,7 @@ module Hive
       log_file = log_path
       final_message = nil
       final_message_source = nil
+      last_usage = nil
       plain_tail = +""
       stdin_file = prompt_stdin_file
       File.open(log_file, "a") do |log|
@@ -136,13 +137,16 @@ module Hive
             log.write("[stream] #{Time.now.utc.iso8601} #{line}")
             log.write("\n") unless line.end_with?("\n")
             log.flush
-            if (message = extract_final_message(line))
+            json = parse_json_line(line)
+            if json && (message = extract_final_message(json))
               final_message = message
               final_message_source = :structured
-            elsif !json_line?(line)
+            elsif json.nil?
               plain_tail << line
               plain_tail = plain_tail.byteslice(-FINAL_MESSAGE_TAIL_BYTES, FINAL_MESSAGE_TAIL_BYTES) || plain_tail
             end
+            usage = json && @profile.extract_usage_event(json)
+            last_usage = usage if usage
           end
         end
       ensure
@@ -209,6 +213,8 @@ module Hive
         log_file: log_file,
         final_message: message,
         final_message_source: message_source,
+        usage: last_usage,
+        model: last_usage && last_usage[:model],
         status: nil
       }
     ensure
@@ -381,8 +387,8 @@ module Hive
       result[:status] = :ok
     end
 
-    def extract_final_message(line)
-      data = JSON.parse(line)
+    def extract_final_message(data)
+      data = parse_json_line(data) if data.is_a?(String)
       return nil unless data.is_a?(Hash)
 
       case data["type"]
@@ -404,8 +410,6 @@ module Hive
       else
         nil
       end
-    rescue JSON::ParserError
-      nil
     end
 
     def text_from_content(content)
@@ -425,11 +429,10 @@ module Hive
       text.empty? ? nil : text
     end
 
-    def json_line?(line)
+    def parse_json_line(line)
       JSON.parse(line)
-      true
     rescue JSON::ParserError
-      false
+      nil
     end
 
     def log_path

@@ -123,6 +123,11 @@ class AgentProfileTest < Minitest::Test
     assert_nil profile.preflight!
   end
 
+  def test_usage_extractor_default_is_noop
+    profile = make_profile
+    assert_nil profile.extract_usage_event("not-json")
+  end
+
   # --- with_overrides ---------------------------------------------------
 
   def test_with_overrides_returns_self_for_nil_or_empty

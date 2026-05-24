@@ -33,7 +33,7 @@ module Hive
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
-                :status_detection_mode
+                :status_detection_mode, :usage_extractor
 
     # Public API — do not break.
     #
@@ -63,6 +63,7 @@ module Hive
     #   headless_supported:    default true
     #   min_version:           default nil (no version gate)
     #   preflight:             default nil (no extra pre-spawn check)
+    #   usage_extractor:       default nil (no token-usage extraction)
     #   status_detection_mode: default :output_file_exists (the most
     #                          common mode across shipped profiles —
     #                          codex and pi both use it; only claude
@@ -84,6 +85,7 @@ module Hive
                    headless_supported: true, min_version: nil,
                    status_detection_mode: :output_file_exists,
                    preflight: nil,
+                   usage_extractor: nil,
                    skill_verifier: nil)
       unless STATUS_DETECTION_MODES.include?(status_detection_mode)
         raise ArgumentError,
@@ -105,6 +107,7 @@ module Hive
       @min_version = min_version
       @status_detection_mode = status_detection_mode
       @preflight = preflight
+      @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
 
       freeze
@@ -247,6 +250,12 @@ module Hive
       nil
     end
 
+    def extract_usage_event(event)
+      @usage_extractor.call(event)
+    rescue StandardError
+      nil
+    end
+
     private
 
     def version_tuple(version_string)
@@ -273,6 +282,7 @@ module Hive
         min_version: @min_version,
         status_detection_mode: @status_detection_mode,
         preflight: @preflight,
+        usage_extractor: @usage_extractor,
         skill_verifier: @skill_verifier
       }
     end

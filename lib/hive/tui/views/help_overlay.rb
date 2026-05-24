@@ -18,6 +18,7 @@ module Hive
         MODE_HEADERS = {
           grid: "Grid mode",
           log_tail: "Log tail mode (Enter on an 'agent_running' row)",
+          token_stats: "Token stats mode (T)",
           filter: "Filter prompt",
           idea_preview: "Idea preview (i)",
           new_idea: "New-idea prompt (n)"

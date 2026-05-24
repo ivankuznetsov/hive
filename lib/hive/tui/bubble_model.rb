@@ -36,6 +36,7 @@ require "hive/tui/views/filter_prompt"
 require "hive/tui/views/idea_preview"
 require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
+require "hive/tui/views/token_stats"
 require "hive/tui/views/usage_footer"
 
 module Hive
@@ -231,6 +232,7 @@ module Hive
         when :grid then compose_two_pane_view
         when :log_tail then Views::LogTail.render(@hive_model)
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
+        when :token_stats then token_stats_view
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
         when :idea_preview then compose_idea_preview_view
@@ -380,6 +382,8 @@ module Hive
           open_log_tail(message.row)
         when Hive::Tui::Messages::OpenRedStatusDetail
           open_red_status_detail(message)
+        when Hive::Tui::Messages::OpenTokenStats
+          open_token_stats
         when Hive::Tui::Messages::RecoverReview
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
@@ -1388,6 +1392,46 @@ module Hive
           log_scroll_offset: 0
         )
         [ new_model.with(red_status_detail_state: state), nil ]
+      end
+
+      def open_token_stats
+        state = token_stats_state_for_current_scope
+        [ @hive_model.with(mode: :token_stats, token_stats_state: state), nil ]
+      end
+
+      def token_stats_state_for_current_scope
+        scope = derive_usage_scope(@hive_model)
+        if scope[:task_slug]
+          Hive::Tui::Model::TokenStatsState.new(
+            scope_level: :task,
+            project_slug: scope[:project_slug],
+            task_slug: scope[:task_slug]
+          )
+        elsif scope[:project_slug]
+          Hive::Tui::Model::TokenStatsState.new(
+            scope_level: :project,
+            project_slug: scope[:project_slug]
+          )
+        else
+          Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+        end
+      end
+
+      def token_stats_view
+        state = @hive_model.token_stats_state || Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+        aggregate = Hive::UsageDb.aggregate(scope: token_stats_scope(state))
+        Views::TokenStats.render(@hive_model.with(token_stats_state: state), aggregate: aggregate)
+      end
+
+      def token_stats_scope(state)
+        case state.scope_level
+        when :task
+          { project_slug: state.project_slug, task_slug: state.task_slug }
+        when :project
+          { project_slug: state.project_slug }
+        else
+          {}
+        end
       end
 
       # Snapshot, not live tail: open the latest log, read the trailing

@@ -174,6 +174,11 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_grid_capital_t_returns_open_token_stats
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "T", row: nil)
+    assert_same Hive::Tui::Messages::OPEN_TOKEN_STATS, msg
+  end
+
   def test_grid_s_with_row_returns_open_in_agent
     row = make_row(action_key: "ready_to_plan")
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "s", row: row)
@@ -282,6 +287,40 @@ class TuiKeyMapMessageForTest < Minitest::Test
 
   def test_log_tail_s_is_noop
     msg = Hive::Tui::KeyMap.message_for(mode: :log_tail, key: "s", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
+  end
+
+  # ---- :token_stats mode keystroke routing ----
+
+  def test_token_stats_q_and_escape_close
+    [ "q", :key_escape, "\e" ].each do |key|
+      msg = Hive::Tui::KeyMap.message_for(mode: :token_stats, key: key, row: nil)
+      assert_same Hive::Tui::Messages::CLOSE_TOKEN_STATS, msg, "#{key.inspect} must close token stats"
+    end
+  end
+
+  def test_token_stats_left_and_right_change_scope
+    out = Hive::Tui::KeyMap.message_for(mode: :token_stats, key: :key_left, row: nil)
+    in_msg = Hive::Tui::KeyMap.message_for(mode: :token_stats, key: "l", row: nil)
+
+    assert_kind_of Hive::Tui::Messages::TokenStatsScopeChanged, out
+    assert_equal :out, out.direction
+    assert_kind_of Hive::Tui::Messages::TokenStatsScopeChanged, in_msg
+    assert_equal :in, in_msg.direction
+  end
+
+  def test_token_stats_up_and_down_move_selection
+    previous = Hive::Tui::KeyMap.message_for(mode: :token_stats, key: "k", row: nil)
+    nxt = Hive::Tui::KeyMap.message_for(mode: :token_stats, key: :key_down, row: nil)
+
+    assert_kind_of Hive::Tui::Messages::TokenStatsSelectionMoved, previous
+    assert_equal :previous, previous.direction
+    assert_kind_of Hive::Tui::Messages::TokenStatsSelectionMoved, nxt
+    assert_equal :next, nxt.direction
+  end
+
+  def test_token_stats_unmapped_keys_are_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :token_stats, key: "x", row: nil)
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 

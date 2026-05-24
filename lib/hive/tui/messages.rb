@@ -194,6 +194,20 @@ module Hive
       # archive-on-exit side effect.
       OpenInAgent = Data.define(:row)
 
+      # `T` in grid mode — open the full-screen token usage matrix.
+      OpenTokenStats = Class.new
+      OPEN_TOKEN_STATS = OpenTokenStats.new.freeze
+
+      # q / Esc in token-stats mode — return to the grid.
+      CloseTokenStats = Class.new
+      CLOSE_TOKEN_STATS = CloseTokenStats.new.freeze
+
+      # Left/right arrows in token-stats mode. direction is :in or :out.
+      TokenStatsScopeChanged = Data.define(:direction)
+
+      # Up/down arrows in token-stats mode. direction is :next or :previous.
+      TokenStatsSelectionMoved = Data.define(:direction)
+
       # Enter on a completed finalize-stage row — browse the final summary
       # document in $EDITOR. Falls back to pr.md if summary.md is missing.
       OpenSummary = Data.define(:row)

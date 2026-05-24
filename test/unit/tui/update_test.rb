@@ -546,6 +546,97 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_equal "auth", new_model.filter
   end
 
+  # ---------- Token stats ----------
+
+  def test_close_token_stats_returns_to_grid_and_clears_state
+    state = Hive::Tui::Model::TokenStatsState.new(
+      scope_level: :project,
+      project_slug: "alpha"
+    )
+    starting = model.with(mode: :token_stats, token_stats_state: state)
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::CLOSE_TOKEN_STATS)
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.token_stats_state
+  end
+
+  def test_token_stats_scope_changed_drills_task_to_project_to_all
+    state = Hive::Tui::Model::TokenStatsState.new(
+      scope_level: :task,
+      project_slug: "alpha",
+      task_slug: "a1"
+    )
+    starting = model.with(mode: :token_stats, token_stats_state: state)
+
+    project_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::TokenStatsScopeChanged.new(direction: :out)
+    )
+    all_model, _cmd = Hive::Tui::Update.apply(
+      project_model,
+      Hive::Tui::Messages::TokenStatsScopeChanged.new(direction: :out)
+    )
+
+    assert_equal :project, project_model.token_stats_state.scope_level
+    assert_equal "alpha", project_model.token_stats_state.project_slug
+    assert_nil project_model.token_stats_state.task_slug
+    assert_equal :all, all_model.token_stats_state.scope_level
+  end
+
+  def test_token_stats_scope_changed_drills_all_to_project_to_task
+    starting = model.with(
+      mode: :token_stats,
+      snapshot: snap_with_two_projects_three_rows_each,
+      token_stats_state: Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+    )
+
+    project_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::TokenStatsScopeChanged.new(direction: :in)
+    )
+    task_model, _cmd = Hive::Tui::Update.apply(
+      project_model,
+      Hive::Tui::Messages::TokenStatsScopeChanged.new(direction: :in)
+    )
+
+    assert_equal :project, project_model.token_stats_state.scope_level
+    assert_equal "alpha", project_model.token_stats_state.project_slug
+    assert_equal :task, task_model.token_stats_state.scope_level
+    assert_equal "alpha", task_model.token_stats_state.project_slug
+    assert_equal "a1", task_model.token_stats_state.task_slug
+  end
+
+  def test_token_stats_selection_moves_between_projects_and_tasks
+    project_state = Hive::Tui::Model::TokenStatsState.new(
+      scope_level: :project,
+      project_slug: "alpha"
+    )
+    project_model = model.with(
+      mode: :token_stats,
+      snapshot: snap_with_two_projects_three_rows_each,
+      token_stats_state: project_state
+    )
+    moved_project, _cmd = Hive::Tui::Update.apply(
+      project_model,
+      Hive::Tui::Messages::TokenStatsSelectionMoved.new(direction: :next)
+    )
+
+    task_state = Hive::Tui::Model::TokenStatsState.new(
+      scope_level: :task,
+      project_slug: "alpha",
+      task_slug: "a1"
+    )
+    task_model = project_model.with(token_stats_state: task_state)
+    moved_task, _cmd = Hive::Tui::Update.apply(
+      task_model,
+      Hive::Tui::Messages::TokenStatsSelectionMoved.new(direction: :previous)
+    )
+
+    assert_equal "beta", moved_project.token_stats_state.project_slug
+    assert_equal "a3", moved_task.token_stats_state.task_slug
+  end
+
   # ---------- KeyPressed (stub) ----------
 
   def test_key_pressed_is_a_noop_in_u4_skeleton

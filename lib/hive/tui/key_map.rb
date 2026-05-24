@@ -402,11 +402,11 @@ module Hive
         Messages::BACK
       end
 
-      # Idea preview is read-only: every key closes it and returns to
-      # grid, whether Bubble Tea emitted a printable String or a
-      # special-key Symbol.
+      # Sticky panel: only explicit close keys dismiss, so accidental typing cannot leave it.
       def idea_preview_message(key:, row:) # rubocop:disable Lint/UnusedMethodArgument
-        Messages::BACK
+        return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q" || key == "i"
+
+        Messages::NOOP
       end
 
       # New-idea prompt mode — same key shape as `:filter` mode but

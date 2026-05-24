@@ -40,8 +40,7 @@ module Hive
       # asset. Resets only on open / cancel / submit.
       :new_idea_attachment_counter,
       :new_idea_broken_labels, # Array<String> — labels highlighted after rich-submit validation fails
-      :idea_preview_text, # String or nil — original_text rendered in :idea_preview mode
-      :idea_preview_slug, # String or nil — slug captured when the preview opened
+      :info_panel_state, # Model::InfoPanelState or nil — read-only :idea_preview payload
       :flash,            # String or nil — current status-line message
       :flash_set_at,     # Time or nil — flash decay timestamp
       :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
@@ -86,6 +85,16 @@ module Hive
       end
     end
 
+    Model::InfoPanelState = Data.define(
+      :slug,
+      :stage,
+      :created_at,
+      :original_text,
+      :folder_path,
+      :latest_log_path,
+      :stage_extra
+    )
+
     Model::RedStatusDetailState = Data.define(
       :row,
       :agent_label,
@@ -128,8 +137,7 @@ module Hive
           new_idea_staging_tmp_root: nil,
           new_idea_attachment_counter: 0,
           new_idea_broken_labels: [],
-          idea_preview_text: nil,
-          idea_preview_slug: nil,
+          info_panel_state: nil,
           flash: nil,
           flash_set_at: nil,
           tail_state: nil,

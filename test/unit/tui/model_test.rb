@@ -26,8 +26,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil model.new_idea_staging_dir
     assert_nil model.new_idea_staging_tmp_root
     assert_equal [], model.new_idea_broken_labels
-    assert_nil model.idea_preview_text
-    assert_nil model.idea_preview_slug
+    assert_nil model.info_panel_state
     assert_nil model.flash
     assert_nil model.flash_set_at
     assert_nil model.tail_state
@@ -65,15 +64,35 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal 2, b.scope
   end
 
-  def test_with_updates_idea_preview_fields
+  def test_with_updates_info_panel_state
     a = Hive::Tui::Model.initial
-    b = a.with(idea_preview_text: "original idea", idea_preview_slug: "ship-preview")
+    state = info_panel_state(slug: "ship-preview", original_text: "original idea")
+    b = a.with(info_panel_state: state)
 
-    assert_nil a.idea_preview_text
-    assert_nil a.idea_preview_slug
-    assert_equal "original idea", b.idea_preview_text
-    assert_equal "ship-preview", b.idea_preview_slug
+    assert_nil a.info_panel_state
+    assert_equal state, b.info_panel_state
     refute_same a, b
+  end
+
+  def test_info_panel_state_round_trips_fields_and_is_frozen
+    state = info_panel_state(
+      slug: "slug-a",
+      stage: "4-execute",
+      created_at: "2026-05-22T22:40:00Z",
+      original_text: "ship it",
+      folder_path: "/project/.hive-state/stages/4-execute/slug-a",
+      latest_log_path: "/project/.hive-state/logs/slug-a/execute.log",
+      stage_extra: "tail"
+    )
+
+    assert_equal "slug-a", state.slug
+    assert_equal "4-execute", state.stage
+    assert_equal "2026-05-22T22:40:00Z", state.created_at
+    assert_equal "ship it", state.original_text
+    assert_equal "/project/.hive-state/stages/4-execute/slug-a", state.folder_path
+    assert_equal "/project/.hive-state/logs/slug-a/execute.log", state.latest_log_path
+    assert_equal "tail", state.stage_extra
+    assert state.frozen?
   end
 
   def test_model_is_immutable
@@ -129,10 +148,15 @@ class HiveTuiModelTest < Minitest::Test
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_project_name
                   new_idea_project_cursor new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
-                  new_idea_broken_labels idea_preview_text idea_preview_slug flash flash_set_at
+                  new_idea_broken_labels info_panel_state flash flash_set_at
                   tail_state red_status_detail_state
                   cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
+  end
+
+  def test_info_panel_state_carries_all_documented_fields
+    expected = %i[slug stage created_at original_text folder_path latest_log_path stage_extra]
+    assert_equal expected, Hive::Tui::Model::InfoPanelState.members
   end
 
   def test_pane_focus_can_be_overridden_via_with
@@ -186,5 +210,19 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil state.log_path
     assert_equal [], state.log_lines
     assert_equal 0, state.log_scroll_offset
+  end
+
+  def info_panel_state(slug: "some-slug", stage: "2-brainstorm", created_at: nil,
+                       original_text: "Original idea", folder_path: "/tmp/hive/some-slug",
+                       latest_log_path: nil, stage_extra: nil)
+    Hive::Tui::Model::InfoPanelState.new(
+      slug: slug,
+      stage: stage,
+      created_at: created_at,
+      original_text: original_text,
+      folder_path: folder_path,
+      latest_log_path: latest_log_path,
+      stage_extra: stage_extra
+    )
   end
 end

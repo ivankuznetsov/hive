@@ -72,6 +72,8 @@ module Hive
       # lives on `Hive::Markers::KILL_CLASS_EXIT_CODES` so KeyMap's
       # Enter-routing predicate and this auto-healer never drift.
       KILL_CLASS_EXIT_CODES = Hive::Markers::KILL_CLASS_EXIT_CODES
+      # Sized for ~32 lines of recent agent output — bounds render-time memory on large logs.
+      INFO_PANEL_EXECUTE_TAIL_BYTES = 4 * 1024
       # Lowercase snapshot-row marker keys → uppercase CLI marker names
       # accepted by `hive markers clear --name`. Mirrors the upcase
       # convention in `Hive::Markers::KNOWN_NAMES`. A new recoverable
@@ -1520,22 +1522,29 @@ module Hive
         idea_path = File.join(row.folder, "idea.md")
         return [ flashed("no idea.md for #{row.slug}"), nil ] unless File.exist?(idea_path)
 
-        data = idea_frontmatter(File.read(idea_path))
+        contents = File.read(idea_path)
+        data = idea_frontmatter(contents)
         original_text = data["original_text"].to_s
         if original_text.empty?
           return [ flashed("idea has no original_text for #{row.slug}"), nil ]
         end
 
         capped_text = original_text[0, Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS]
+        latest_log_path = latest_log_for(row)
+        state = Hive::Tui::Model::InfoPanelState.new(
+          slug: row.slug,
+          stage: row.stage,
+          created_at: idea_created_at(contents, data),
+          original_text: capped_text,
+          folder_path: File.expand_path(row.folder),
+          latest_log_path: latest_log_path,
+          stage_extra: stage_extra_for(row)
+        )
         [
-          @hive_model.with(
-            mode: :idea_preview,
-            idea_preview_text: capped_text,
-            idea_preview_slug: row.slug
-          ),
+          @hive_model.with(mode: :idea_preview, info_panel_state: state),
           nil
         ]
-      rescue Errno::ENOENT, Errno::EACCES, Psych::Exception
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENOTDIR, Errno::ENAMETOOLONG, Encoding::InvalidByteSequenceError, Psych::Exception
         [ flashed("could not read idea for #{row.slug}"), nil ]
       end
 
@@ -1550,6 +1559,130 @@ module Hive
           aliases: false
         ) || {}
         parsed.is_a?(Hash) ? parsed : {}
+      end
+
+      # Verbatim plain scalar preserves non-UTC offsets; YAML-typed fallback normalizes Time to UTC iso8601.
+      def idea_created_at(contents, data)
+        raw = frontmatter_scalar(contents, "created_at")
+        return raw unless raw.to_s.empty?
+
+        value = data["created_at"]
+        return nil if value.nil?
+        return value.utc.iso8601 if value.is_a?(Time)
+        return value.iso8601 if value.respond_to?(:iso8601)
+
+        value.to_s.strip
+      end
+
+      # Narrow plain/matched-quote scalar extractor — block scalars and multi-line strings return nil.
+      def frontmatter_scalar(contents, key)
+        match = contents.match(/\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\z)/m)
+        return nil unless match
+
+        match[1].lines.each do |line|
+          next unless (field = line.match(/\A#{Regexp.escape(key)}:[ \t]*(.*?)\r?\n?\z/))
+
+          raw = field[1].strip
+          return nil if raw.empty? || raw == "|" || raw == ">"
+
+          if raw.length >= 2 && [ "\"", "'" ].include?(raw[0])
+            quote = raw[0]
+            closing = raw.index(quote, 1)
+            return closing ? raw[1...closing] : nil
+          end
+
+          stripped = raw.sub(/[ \t]+#.*\z/, "").strip
+          return stripped.empty? ? nil : stripped
+        end
+        nil
+      end
+
+      # Generic latest log used in the header; 4-execute extra uses `latest_execute_log_for` to avoid stray plan-*.log mtimes.
+      def latest_log_for(row)
+        latest_log_matching(row) { |_path| true }
+      end
+
+      # Restricted to `execute-*` basenames so a fresh plan-*.log mtime cannot masquerade as the execute log.
+      def latest_execute_log_for(row)
+        latest_log_matching(row) { |path| File.basename(path).start_with?("execute-") }
+      end
+
+      def latest_log_matching(row)
+        log_dir = task_log_dir_for(row)
+        return nil if log_dir.nil? || !File.directory?(log_dir)
+
+        candidates = Dir.glob(File.join(log_dir, "*.log")).select { |path| yield(path) }
+        return nil if candidates.empty?
+
+        with_mtimes = candidates.filter_map do |path|
+          [ File.expand_path(path), File.mtime(path) ]
+        rescue Errno::ENOENT, Errno::EACCES
+          nil
+        end
+        if with_mtimes.empty?
+          candidate = candidates.find { |path| File.file?(path) }
+          return candidate ? File.expand_path(candidate) : nil
+        end
+
+        with_mtimes.max_by(&:last).first
+      rescue Errno::ENOENT, Errno::EACCES
+        nil
+      end
+
+      def task_log_dir_for(row)
+        Hive::Task.new(row.folder).log_dir
+      rescue Hive::InvalidTaskPath
+        nil
+      end
+
+      def stage_extra_for(row)
+        case row.stage.to_s
+        when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md"))
+        when "3-plan" then read_capped(File.join(row.folder, "plan.md"))
+        when "4-execute" then tail_capped(latest_execute_log_for(row))
+        else nil
+        end
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO, SystemCallError
+        nil
+      end
+
+      def read_capped(path)
+        return nil if path.to_s.empty? || !File.file?(path)
+
+        text = File.open(path, "rb") { |file| file.read(Hive::Tui::Model::NEW_IDEA_BUFFER_MAX_CHARS) }
+        scrub_utf8(text)
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO
+        nil
+      end
+
+      def tail_capped(path)
+        return nil if path.to_s.empty? || !File.file?(path)
+
+        # Byte-aligned seek — the first rendered line may begin mid-character; do not add line-aware framing.
+        text = File.open(path, "rb") do |file|
+          begin
+            file.seek(-INFO_PANEL_EXECUTE_TAIL_BYTES, IO::SEEK_END)
+            file.read
+          rescue Errno::EINVAL
+            begin
+              file.rewind
+              file.read
+            rescue Errno::ESPIPE
+              nil
+            end
+          end
+        end
+        return nil if text.nil?
+
+        scrub_utf8(text)
+      rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO, Errno::ESPIPE
+        nil
+      end
+
+      # Dup before force_encoding (callers may share); also strips C0/DEL so ANSI escapes cannot corrupt the panel frame.
+      def scrub_utf8(text)
+        scrubbed = text.to_s.dup.force_encoding(Encoding::UTF_8).scrub
+        scrubbed.gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
       end
 
       def resolve_agent_label(row)
@@ -2886,7 +3019,12 @@ module Hive
 
       def compose_idea_preview_view
         usable = [ @hive_model.cols.to_i - 1, 1 ].max
-        compose_two_pane_view(footer: prompt_footer(Views::IdeaPreview.render(@hive_model, width: usable), usable))
+        panel_height = [ @hive_model.rows.to_i - 1, 1 ].max
+        Lipgloss.join_vertical(
+          Lipgloss::TOP,
+          Views::IdeaPreview.render(@hive_model, width: usable, height: panel_height),
+          default_footer(usable)
+        )
       end
 
       # New-idea mode: same composition; footer = the inline prompt with
@@ -3017,7 +3155,7 @@ module Hive
       end
 
       def footer_hint
-        "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [q] quit"
+        "[Tab] switch  [Enter] action  [n] new  [/] filter  [?] help  [i] info  [q] quit"
       end
 
       # Compute pane widths and join horizontally. Left pane is clamped

@@ -13,12 +13,10 @@ module Hive
       def before_setup
         super
         @hive_eval_old_env = {
-          "HIVE_HOME" => ENV["HIVE_HOME"],
-          "HOME" => ENV["HOME"]
+          "HIVE_HOME" => ENV["HIVE_HOME"]
         }
         @scenario_home = Dir.mktmpdir("hive-eval")
         ENV["HIVE_HOME"] = @scenario_home
-        ENV["HOME"] = @scenario_home
         @hive_eval_projects = []
         @hive_eval_assertions = []
         write_global_config

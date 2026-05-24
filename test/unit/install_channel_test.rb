@@ -149,5 +149,4 @@ def test_valid_homebrew_prefix_rejects_relative_paths
 end
 
 private
-
 end

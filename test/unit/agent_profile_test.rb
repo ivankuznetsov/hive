@@ -175,5 +175,4 @@ class AgentProfileTest < Minitest::Test
     overridden = profile.with_overrides("bin" => "/x")
     assert overridden.frozen?
   end
-
 end

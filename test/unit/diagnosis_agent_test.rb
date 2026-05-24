@@ -799,5 +799,4 @@ class FakeStdin
     raise @close_error if @close_error
   end
 end
-
 end

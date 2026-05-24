@@ -1302,5 +1302,4 @@ class TaskActionTest < Minitest::Test
     File.define_singleton_method(:file?, original_file) if original_file
     File.define_singleton_method(:realpath, original_realpath) if original_realpath
   end
-
 end

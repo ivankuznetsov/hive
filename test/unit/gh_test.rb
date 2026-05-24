@@ -321,5 +321,4 @@ class FakeCloseIO
     raise IOError, "already closed"
   end
 end
-
 end

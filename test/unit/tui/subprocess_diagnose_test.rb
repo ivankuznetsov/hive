@@ -576,5 +576,4 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
   ensure
     old.nil? ? ENV.delete("HIVE_TUI_LOG_DIR") : ENV["HIVE_TUI_LOG_DIR"] = old
   end
-
 end

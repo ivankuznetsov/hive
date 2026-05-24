@@ -846,5 +846,4 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal [ 0.5 ], sleeps
   end
-
 end

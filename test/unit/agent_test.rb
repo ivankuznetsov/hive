@@ -408,5 +408,4 @@ class AgentTest < Minitest::Test
       ))
     end
   end
-
 end

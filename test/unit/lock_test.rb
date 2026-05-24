@@ -276,5 +276,4 @@ class LockTest < Minitest::Test
       assert_nil Hive::Lock.ps_lstart_start_time(12_345)
     end
   end
-
 end

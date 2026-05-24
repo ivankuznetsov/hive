@@ -439,5 +439,4 @@ class TriageTest < Minitest::Test
       assert_equal %w[claude-ce-code-review-02.md codex-ce-code-review-02.md], basenames
     end
   end
-
 end

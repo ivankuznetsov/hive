@@ -705,5 +705,4 @@ FakeStatus = Struct.new(:success_value, :exitstatus) do
     success_value
   end
 end
-
 end

@@ -561,5 +561,4 @@ class HiveSkillCheckPiTest < Minitest::Test
     assert_equal :missing, status
     assert_match(/expected/, msg, "malformed invocation surfaces parse error")
   end
-
 end

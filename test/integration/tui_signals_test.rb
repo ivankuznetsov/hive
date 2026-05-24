@@ -54,5 +54,4 @@ class TuiSignalsTest < Minitest::Test
   end
 
   private
-
 end

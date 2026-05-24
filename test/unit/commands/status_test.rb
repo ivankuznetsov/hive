@@ -199,5 +199,4 @@ class CommandsStatusTest < Minitest::Test
   end
 
   private
-
 end

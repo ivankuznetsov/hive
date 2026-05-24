@@ -147,5 +147,4 @@ class HiveStagesExecuteTest < Minitest::Test
       end
     end
   end
-
 end

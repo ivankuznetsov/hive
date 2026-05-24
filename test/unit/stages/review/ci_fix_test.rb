@@ -583,5 +583,4 @@ class CiFixTest < Minitest::Test
       pipe.define_singleton_method(:closed?) { closed }
     end
   end
-
 end

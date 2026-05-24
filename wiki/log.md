@@ -2,6 +2,12 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-24T16:46:47Z] release notes - final verified PR merge batch
+
+**Action:** Refreshed `docs/notes/2026-05-24-verified-pr-merge-notes.md` after #134 and #135 merged. The note now covers the full ordered #121-first pass through #135, includes the docs checkpoint #136, records the PR #135 CI flake fix and verification evidence, and updates the line-change scoreboard/fun stats.
+
+**Refreshed pages:** None - docs-only release note plus this changelog entry.
+
 ## [2026-05-24T15:40:33Z] release notes - verified PR merge batch from #121
 
 **Action:** Added `docs/notes/2026-05-24-verified-pr-merge-notes.md` to record the ordered #121-first PR merge pass, final verification evidence, merged PR metadata, and line-change scoreboard. The batch covered #121, #126, #131, #127, and #129; #125 is listed only as same-day context because it was already on `main` before the ordered pass began.

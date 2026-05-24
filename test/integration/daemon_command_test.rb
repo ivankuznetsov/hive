@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "tmpdir"
+require "rbconfig"
 
 # Integration test for `hive daemon` subcommands. Uses real bin/hive
 # subprocesses against a temporary HIVE_HOME so PID file / log file
@@ -1239,6 +1240,8 @@ class HiveDaemonCommandTest < Minitest::Test
   # ── install: envelope + exit codes ────────────────────────────────────
 
   def with_isolated_install_target(&block)
+    skip "daemon install integration is Linux-only; ServiceInstaller unit tests cover macOS" unless linux_host?
+
     # Install writes to ~/.config/systemd/user/ on Linux; isolate HOME
     # and put a fake non-systemd systemctl first in PATH so this
     # integration layer never restarts the operator's real daemon unit.
@@ -1255,6 +1258,10 @@ class HiveDaemonCommandTest < Minitest::Test
       )
       block.call(home, env)
     end
+  end
+
+  def linux_host?
+    RbConfig::CONFIG["host_os"].match?(/linux/i)
   end
 
   def test_install_drift_exits_64_with_json_envelope

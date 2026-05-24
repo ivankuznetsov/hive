@@ -101,31 +101,31 @@ class HiveBotLifecycleTest < Minitest::Test
 
   def test_start_foreground_creates_pid_file_lockable_and_log_directory
     with_bot_home do |home|
-      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "test-token"
-      pid_path = File.join(home, ".bot.pid")
-      log_dir = File.join(home, "logs")
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "test-token") do
+        pid_path = File.join(home, ".bot.pid")
+        log_dir = File.join(home, "logs")
 
-      cmd = Hive::Commands::Bot.new("start", foreground: true, dry_run: true)
+        cmd = Hive::Commands::Bot.new("start", foreground: true, dry_run: true)
 
-      pid = fork do
-        cmd.send(:start_bot)
-      rescue StandardError
-        exit 1
-      end
+        pid = fork do
+          cmd.send(:start_bot)
+        rescue StandardError
+          exit 1
+        end
 
-      begin
-        wait_until_exists(pid_path)
-        assert File.exist?(pid_path), "start should create the PID file"
-        assert File.directory?(log_dir), "start should create the bot log directory"
+        begin
+          wait_until_exists(pid_path)
+          assert File.exist?(pid_path), "start should create the PID file"
+          assert File.directory?(log_dir), "start should create the bot log directory"
 
-        contender = File.open(pid_path, File::RDWR | File::CREAT)
-        refute contender.flock(File::LOCK_EX | File::LOCK_NB),
-               "second start must not acquire the PID lock"
-      ensure
-        contender&.close
-        Process.kill("TERM", pid) rescue nil
-        Process.wait(pid) rescue nil
-        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+          contender = File.open(pid_path, File::RDWR | File::CREAT)
+          refute contender.flock(File::LOCK_EX | File::LOCK_NB),
+                 "second start must not acquire the PID lock"
+        ensure
+          contender&.close
+          Process.kill("TERM", pid) rescue nil
+          Process.wait(pid) rescue nil
+        end
       end
     end
   end
@@ -155,23 +155,23 @@ class HiveBotLifecycleTest < Minitest::Test
   end
 
   def test_start_refuses_when_pid_file_lock_is_held
-    with_bot_home do |home|
-      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "test-token"
-      cmd = Hive::Commands::Bot.new("start", dry_run: true)
-      FileUtils.mkdir_p(File.dirname(cmd.pid_file))
-      lock = File.open(cmd.pid_file, File::RDWR | File::CREAT, 0o644)
-      lock.flock(File::LOCK_EX)
-      lock.write({ "pid" => 12_345, "started_at" => Time.now.utc.iso8601 }.to_yaml)
-      lock.flush
-      lock.rewind
+    with_bot_home do |_home|
+      with_env("HIVE_TELEGRAM_BOT_TOKEN" => "test-token") do
+        cmd = Hive::Commands::Bot.new("start", dry_run: true)
+        FileUtils.mkdir_p(File.dirname(cmd.pid_file))
+        lock = File.open(cmd.pid_file, File::RDWR | File::CREAT, 0o644)
+        lock.flock(File::LOCK_EX)
+        lock.write({ "pid" => 12_345, "started_at" => Time.now.utc.iso8601 }.to_yaml)
+        lock.flush
+        lock.rewind
 
-      error = assert_raises(Hive::ConcurrentRunError) { cmd.send(:start_bot) }
-      assert_match(/already running/, error.message)
-      assert_equal cmd.pid_file, error.lock_path
-    ensure
-      lock&.flock(File::LOCK_UN)
-      lock&.close
-      ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+        error = assert_raises(Hive::ConcurrentRunError) { cmd.send(:start_bot) }
+        assert_match(/already running/, error.message)
+        assert_equal cmd.pid_file, error.lock_path
+      ensure
+        lock&.flock(File::LOCK_UN)
+        lock&.close
+      end
     end
   end
 

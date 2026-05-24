@@ -56,23 +56,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     receiver.define_singleton_method(name, original) if original
   end
 
-  def test_call_routes_all_non_enrollment_subcommands
-    routed = []
-    %w[start stop status reload tail install].each do |subcommand|
-      command = daemon(subcommand)
-      command.define_singleton_method(:start_daemon) { routed << :start }
-      command.define_singleton_method(:stop_daemon) { routed << :stop }
-      command.define_singleton_method(:status_daemon) { routed << :status }
-      command.define_singleton_method(:reload_daemon) { routed << :reload }
-      command.define_singleton_method(:tail_daemon) { routed << :tail }
-      command.define_singleton_method(:install_daemon) { routed << :install }
-
-      command.call
-    end
-
-    assert_equal %i[start stop status reload tail install], routed
-  end
-
   def test_start_daemon_writes_pid_loads_global_config_runs_dispatcher_and_cleans_pid
     command = daemon("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])

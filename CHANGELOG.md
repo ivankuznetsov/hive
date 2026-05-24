@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed — task drop
+
+- Added `hive drop <slug>` and rebound `hive tui` Shift+X to hard-delete the focused task: kill the active agent, remove active-stage task folders, logs, worktree, branch, locks, and close any draft PR best-effort. This is irreversible and has no confirmation prompt beyond the Shift+X gesture.
+- Breaking TUI binding change: Shift+X no longer drops `(missing)` project registry entries. Use `hive forget NAME` or `hive prune` from the shell for registry cleanup.
+
 ### Changed — `7-artifacts` pipeline stage inserted
 
 - Inserted `7-artifacts` between `6-review` and the existing finalize/done stages. The new stage owns per-task artifact capture (demo reels for visualisable work, PR-description refreshes for backend-only work) before the PR is marked ready. This commit ships the registry plumbing (U1); the stage runner lands in a follow-up unit.

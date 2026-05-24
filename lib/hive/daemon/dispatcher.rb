@@ -352,6 +352,24 @@ module Hive
       end
 
       def dispatch_or_block(row, now:, trigger: "advance")
+        # The task folder may have vanished between status snapshot and
+        # dispatch (concurrent `hive drop` or `hive forget`). A nil
+        # folder is a separate signal — a malformed snapshot row —
+        # so we surface a distinct reason instead of collapsing both
+        # into the same log line.
+        if row.folder.nil? || row.folder.to_s.empty?
+          @logger.event(:skipped, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "folder_missing_nil")
+          return
+        end
+        unless File.directory?(row.folder.to_s)
+          @logger.event(:skipped, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "folder_missing")
+          return
+        end
+
         gate = @controller.can_dispatch?(
           project: row.project, slug: row.slug, now: now,
           external_global_count: @external_active_agent_total,

@@ -111,6 +111,14 @@ module Hive
         return Messages::CURSOR_JUMP_TOP if key == "g"
         return Messages::CURSOR_JUMP_BOTTOM if key == "G"
 
+        if key == "X"
+          return Messages::Flash.new(text: "focus the tasks pane first (Tab or l)") unless pane_focus == :right
+          return Messages::Flash.new(text: "select a task first; press / to filter or 1-9 to scope") if row.nil?
+          return Messages::Flash.new(text: "task is archived; nothing to drop") if row.stage == "9-done"
+
+          return Messages::DropFocusedTask.new(row: row)
+        end
+
         # Enter from the left pane jumps focus to the right pane,
         # regardless of what's under the cursor. This way the operator
         # selects a project on the left, presses Enter, and immediately
@@ -142,7 +150,6 @@ module Hive
         return Messages::SHOW_HELP if key == "?"
         return Messages::OPEN_FILTER_PROMPT if key == "/"
         return Messages::OPEN_NEW_IDEA_PROMPT if key == "n"
-        return Messages::DROP_SCOPED_PROJECT_IF_MISSING if key == "X"
         return Messages::ProjectScope.new(n: key.to_i) if key.is_a?(String) && key.match?(/\A[0-9]\z/)
 
         nil

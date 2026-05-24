@@ -432,6 +432,57 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  # Drop's git_ops contract: a branch checked out by a sibling
+  # worktree (modern git phrasing: "used by worktree at") must be a
+  # benign no-op, NOT a fatal raise. Without this guard a sibling
+  # worktree (e.g. the hive-state worktree, or a leftover from a
+  # crashed prior run) would abort drop mid-cleanup.
+  def test_delete_branch_treats_used_by_worktree_at_as_benign_skip
+    with_tmp_git_repo do |dir|
+      # Create a worktree on a feature branch so `branch -D feat-x`
+      # refuses with "used by worktree at …".
+      worktree = Dir.mktmpdir("hive-used-by-wt-")
+      begin
+        run!("git", "-C", dir, "worktree", "add", "-b", "feat-x", worktree)
+        ops = Hive::GitOps.new(dir)
+        result = nil
+        _out, err = capture_io { result = ops.delete_branch!("feat-x") }
+        assert_equal false, result,
+                     "in-use branch must return false (benign skip), not raise"
+        assert_match(/treated as no-op/, err,
+                     "stderr must surface the benign-skip breadcrumb for postmortems")
+      ensure
+        FileUtils.rm_rf(worktree)
+      end
+    end
+  end
+
+  def test_delete_branch_returns_false_when_branch_already_gone
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      _out, _err = capture_io do
+        assert_equal false, ops.delete_branch!("never-existed-260522")
+      end
+    end
+  end
+
+  # Pruning is idempotent and cheap; a failure here must NOT abort
+  # the rest of drop's cleanup. The implementation rescues GitError
+  # and warns on stderr.
+  def test_prune_worktrees_converges_when_git_returns_non_zero
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.define_singleton_method(:run_git!) do |*_args|
+        raise Hive::GitError, "git worktree prune simulated failure"
+      end
+      result = nil
+      _out, err = capture_io { result = ops.prune_worktrees! }
+      assert_equal :prune_skipped, result
+      assert_match(/worktree prune failed/, err,
+                   "stderr must surface the prune failure for the operator")
+    end
+  end
+
   def test_reset_hard_orig_head_also_runs_git_clean
     # B2: reset --hard ORIG_HEAD does NOT remove untracked files;
     # the cleanup combo IS reset + clean -fd. This test pins that

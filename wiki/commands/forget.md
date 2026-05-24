@@ -3,7 +3,7 @@ title: hive forget
 type: command
 source: lib/hive/commands/forget.rb
 created: 2026-05-06
-updated: 2026-05-06
+updated: 2026-05-22
 tags: [command, registry, cleanup, json]
 ---
 
@@ -20,7 +20,7 @@ hive forget NAME --json     # same, machine-readable envelope
 
 The global registry accumulates entries forever. `mktemp -d`-style test runs leave stale `(missing)` rows that no surface used to clean up — only `hive init` ever wrote to `registered_projects`. `hive forget` is the inverse: drop one named entry without touching the project's on-disk state, even if the path is gone.
 
-For the bulk-of-stale-entries case, prefer `hive prune`. The TUI grid `X` keystroke is gated to `error: "missing_project_path"` rows only; for any other unhealthy state (`not_initialised`, etc.) the TUI's refusal flash points at `hive forget`.
+For the bulk-of-stale-entries case, prefer `hive prune`. The TUI grid Shift+X key now drops the focused task via [[commands/drop]]; registry cleanup stays on the shell surfaces `hive forget` and `hive prune`.
 
 ## Steps performed (`Hive::Commands::Forget#call`)
 

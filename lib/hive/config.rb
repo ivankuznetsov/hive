@@ -482,11 +482,9 @@ module Hive
       raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
       # Stringify both sides of the name match. CLI passes argv as a
-      # String; TUI X-key dispatches against the snapshot's project.name
-      # (also a String). Hand-edited registry entries can carry an
-      # Integer "name" (e.g. `name: 42` in YAML), which would never
-      # match `Integer == "42"` and silently exit `unknown_project`.
-      # `to_s.==.to_s` makes the lookup symmetric across both surfaces.
+      # String; hand-edited registry entries can carry an Integer
+      # "name" (e.g. `name: 42` in YAML), which would never match
+      # `Integer == "42"` and silently exit `unknown_project`.
       key = name.to_s
       entries = Array(data["registered_projects"])
       idx = entries.index { |p| p.is_a?(Hash) && p["name"].to_s == key }

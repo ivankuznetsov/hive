@@ -17,6 +17,7 @@ module Hive
       "hive-metrics-rollback-rate" => 1,
       "hive-markers-clear" => 1,
       "hive-forget" => 1,
+      "hive-drop" => 1,
       "hive-prune" => 1,
       "hive-daemon-status" => 1,
       "hive-daemon-stop" => 1,
@@ -235,6 +236,24 @@ module Hive
       UNKNOWN_PROJECT = "unknown_project".freeze
       CONFIG          = "config".freeze
       INTERNAL        = "internal".freeze
+      ALL = constants.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive drop --json`.
+    # Drop is destructive but idempotent over partial cleanup: task
+    # resolution errors remain USAGE, while cleanup infrastructure
+    # failures surface as git/worktree/internal so operators know
+    # whether anything remains to repair.
+    module DropErrorKind
+      ALREADY_ARCHIVED  = "already_archived".freeze
+      AMBIGUOUS_SLUG    = "ambiguous_slug".freeze
+      WRONG_STAGE       = "wrong_stage".freeze
+      INVALID_TASK_PATH = "invalid_task_path".freeze
+      CONFIG            = "config".freeze
+      GIT               = "git".freeze
+      WORKTREE          = "worktree".freeze
+      INTERNAL          = "internal".freeze
+      ERROR             = "error".freeze
       ALL = constants.map { |c| const_get(c) }.freeze
     end
 

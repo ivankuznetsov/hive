@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T11:30:00Z] drop — pass-1 + pass-2 review-finding fixes hardened hard-delete
+
+**Action:** Recorded the two follow-up fix passes against `hive drop` after the initial feat/U1+U3 commit. Pass-1 (24 findings) and pass-2 (48 findings) tightened idempotency, PID-reuse safety, locale-stable git stderr parsing, worktree-pointer root validation, malformed-YAML rescue in `Worktree.read_pointer`, daemon-row `folder_missing_nil` distinction, and a closed `commit_action` enum on the drop schema. The `9-done` refusal prose in [[commands/drop]] was folded into the refusals-table caption. [[cli]] is already in sync (drop row + exit-code/`--json` envelope row). Schema enum + `holder`/`lock_path` extras were aligned with `DropErrorKind` during pass-1.
+
+**Refreshed pages:**
+- [[commands/drop]] — refusal prose tightened around the table; no surface change to flags, exits, or JSON keys (those were correct from feat commit).
+
 ## [2026-05-23T09:45:00Z] readme - add daemon-first TUI getting started
 
 **Action:** Reworked the README quickstart into a five-minute TUI getting-started path before the Telegram section. The happy path now explains that the daemon advances ready tasks automatically while the TUI is for watching the queue, capturing a rough idea, and answering waiting prompts. Manual stage keys are framed as power-user controls, not the day-one flow.
@@ -1866,3 +1873,11 @@ Deletions (~1100 lines): `lib/hive/tui/triage_state.rb`, `lib/hive/tui/views/tri
 **Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
 
 **Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.
+
+## [2026-05-22T22:01:22Z] drop — hard-delete active task command and TUI Shift+X binding
+
+**Action:** Added `hive drop TARGET [--project NAME] [--from STAGE] [--json]` as the hard-delete surface for active tasks. Drop resolves through `TaskResolver`, refuses `9-done`, kills recorded agent PIDs with the process-start guard, closes draft PRs best-effort, removes task worktrees and branches, deletes every active-stage folder for the slug, removes per-slug logs, and commits a `hive: dropped/<slug> dropped` audit record on `hive/state`. The `hive-drop.v1` schema documents the success fields (`from_stages`, `pr_closed`, `worktree_removed`, `branch_deleted`, `agent_killed`) and error envelope kinds.
+
+**TUI / daemon:** Shift+X in [[commands/tui]] now dispatches `hive drop <slug> --project <project> --from <stage> --json` against the focused right-pane row. Lowercase `x` is unbound; archived and empty-grid cases flash without spawning. The old missing-project registry cleanup binding moved fully to shell commands ([[commands/forget]] / [[commands/prune]]). The daemon dispatcher now re-stats a row's folder immediately before spawning and skips `reason: "folder_missing"` if a stale status snapshot races with a drop.
+
+**Docs:** Added [[commands/drop]], updated [[cli]], [[commands/tui]], and [[commands/forget]].

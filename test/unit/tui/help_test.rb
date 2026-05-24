@@ -135,7 +135,7 @@ class TuiHelpTest < Minitest::Test
       open_contextual open_task_folder open_idea_preview open_in_agent
       filter project_scope help quit
       pane_focus_toggle pane_focus_left pane_focus_right new_idea
-      drop_missing
+      drop_task
     ]
     Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :grid && b[:action].is_a?(Symbol) }.each do |entry|
       action = entry[:action]
@@ -157,6 +157,15 @@ class TuiHelpTest < Minitest::Test
     refute_nil entry, "expected a grid-mode binding for `i`"
     assert_equal :open_idea_preview, entry[:action]
     assert_match(/original idea/i, entry[:description])
+  end
+
+  def test_binding_for_capital_x_documents_task_drop
+    entry = Hive::Tui::Help::BINDINGS.find { |b| b[:mode] == :grid && b[:key] == "X" }
+
+    refute_nil entry, "expected a grid-mode binding for `X`"
+    assert_equal :drop_task, entry[:action]
+    assert_match(/focused task/i, entry[:description])
+    assert_match(/no undo/i, entry[:description])
   end
 
   def test_idea_preview_mode_has_a_dismiss_entry

@@ -150,6 +150,47 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  # Plan R12: drop must converge even when worktree.yml has been
+  # truncated, hand-edited, or corrupted by a crashed prior writer.
+  # read_pointer treats parse failure as "no pointer" (returns nil)
+  # so the caller falls through to the derived path.
+  def test_read_pointer_returns_nil_for_malformed_yaml
+    Dir.mktmpdir do |folder|
+      File.write(File.join(folder, "worktree.yml"), "path: [unterminated\n")
+      assert_nil Hive::Worktree.read_pointer(folder),
+                 "malformed worktree.yml must produce nil, not raise Psych::SyntaxError"
+    end
+  end
+
+  def test_read_pointer_returns_nil_when_file_missing
+    Dir.mktmpdir do |folder|
+      assert_nil Hive::Worktree.read_pointer(folder)
+    end
+  end
+
+  def test_read_pointer_raises_worktree_error_for_non_hash_root
+    Dir.mktmpdir do |folder|
+      File.write(File.join(folder, "worktree.yml"), "just a string\n")
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_pointer(folder)
+      end
+    end
+  end
+
+  # `Worktree.canonical_root` resolves the per-project worktree_root
+  # override, falling back to `~/Dev/<repo>.worktrees`. Drop calls
+  # this via `Hive::Worktree.canonical_root` instead of duplicating
+  # the formula so a future override fallback change has one home.
+  def test_canonical_root_uses_per_project_override_when_set
+    with_initialized_project do |dir, root|
+      File.write(
+        File.join(dir, ".hive-state", "config.yml"),
+        { "worktree_root" => root }.to_yaml
+      )
+      assert_equal File.expand_path(root), Hive::Worktree.canonical_root(dir)
+    end
+  end
+
   def test_master_log_clean_after_feature_commits
     with_initialized_project do |dir, root|
       wt = Hive::Worktree.new(dir, "feat-q", worktree_root: root)

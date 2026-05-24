@@ -54,6 +54,34 @@ class HiveTestCoverageTest < Minitest::Test
     end
   end
 
+  def test_config_mismatch_surfaces_specific_error_not_unloaded_file_avalanche
+    # Simulates a subprocess that wrote a valid marshal whose entries
+    # point at a *different* source tree than @lib_dir. The harness should
+    # fail with a clear configuration error rather than reporting every
+    # file as unloaded.
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      File.write(File.join(dir, "lib", "demo.rb"), "module Demo; end\n")
+
+      with_coverage_config(root: dir) do
+        resultset_dir = HiveTestCoverage.instance_variable_get(:@resultset_dir)
+        FileUtils.mkdir_p(resultset_dir)
+        # Marshal contains a path that doesn't live under dir/lib/ at all.
+        File.binwrite(
+          File.join(resultset_dir, "wrong-tree.marshal"),
+          Marshal.dump({ "/elsewhere/some_other_lib/file.rb" => { lines: [ 1, 1 ], branches: {} } })
+        )
+
+        HiveTestCoverage.merged_results
+        errors = HiveTestCoverage.instance_variable_get(:@result_errors)
+
+        assert_equal 1, errors.size
+        assert_equal "ConfigurationError", errors.first.fetch(:error_class)
+        assert_includes errors.first.fetch(:message), "no entries matched"
+      end
+    end
+  end
+
   def test_coverage_gate_accepts_string_keyed_json_report
     report = {
       "line_total" => 3,

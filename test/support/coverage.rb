@@ -141,13 +141,33 @@ module HiveTestCoverage
     @result_errors = (@startup_errors || []).dup
     collect_dump_errors!
     merged = {}
-    Dir.glob(File.join(@resultset_dir, "*.marshal")).sort.each do |path|
+    marshal_paths = Dir.glob(File.join(@resultset_dir, "*.marshal")).sort
+    marshal_paths.each do |path|
       raw = read_marshal_file(path)
       next unless raw
 
       apply_result_transactionally!(merged, raw, path)
     end
+    detect_config_mismatch!(merged, marshal_paths)
     merged
+  end
+
+  # Surface a clear configuration error when every entry across every
+  # subprocess result was filtered out by the @lib_dir guard. Without this
+  # the symptom is "every lib/ file is unloaded" which masks the real
+  # cause: HIVE_COVERAGE_ROOT not matching the running source tree.
+  def detect_config_mismatch!(merged, marshal_paths)
+    return if merged.any?
+    return if marshal_paths.empty?
+    return unless @result_errors.empty?
+
+    @result_errors << {
+      file: "(configuration)",
+      error_class: "ConfigurationError",
+      message: "no entries matched @lib_dir=#{@lib_dir} across " \
+               "#{marshal_paths.size} subprocess result(s); HIVE_COVERAGE_ROOT " \
+               "may be wrong for this source tree"
+    }
   end
 
   def collect_dump_errors!
@@ -418,7 +438,15 @@ module HiveTestCoverage
   def print_report(report)
     warn ""
     warn "Coverage summary"
-    warn "  Process results: #{report.fetch(:process_results)}"
+    process_results = report.fetch(:process_results)
+    warn "  Process results: #{process_results}"
+    # A single process result means only the parent dumped: no test forks
+    # contributed coverage. That's the silent-failure signal for a forking
+    # test path that quietly stopped forking.
+    if process_results <= 1
+      warn "  WARNING:        only #{process_results} process dumped coverage; " \
+           "if forking tests are expected, a fork block likely failed silently."
+    end
     warn "  Gate:           #{report.fetch(:ok) ? 'passed' : 'failed'}"
     warn format(
       "  Lines:          %.2f%% (%d/%d)",

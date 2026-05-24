@@ -33,6 +33,12 @@ task :coverage do
     ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
 
     Rake::Task[:test].invoke
+    unless File.exist?(report_path)
+      abort "coverage gate aborted: #{report_path} was never written. " \
+            "The test suite likely crashed before the Minitest after_run " \
+            "hook fired (e.g. SIGKILL on a subprocess) - re-run with " \
+            "TESTOPTS=--verbose to surface the failure."
+    end
     report = HiveTestCoverage.read_report(report_path)
     abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
   ensure

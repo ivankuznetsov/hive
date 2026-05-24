@@ -2,12 +2,30 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T18:00:00Z] claude.mode — tmux envelope parity + daemon-headless callout
+
+**Action:** Hardened the `claude.mode: tmux` path after PR review. `Hive::ClaudeLauncher` now emits the same envelope shape as the headless `claude -p` runner so consumers (status/daemon/bot) see identical `{status, error_message, ...}` regardless of mode; the obsolete `HIVE_BRAINSTORM_TMUX_*` env knobs were removed (config is the single source). CLAUDE.md gained an explicit callout that daemon/service hosts that cannot run tmux must set `claude.mode: headless`. G3+G5 tests expand per-stage `allowed_tools` and tmux session-name coverage so reviewers/finalize don't drift from the launcher contract.
+
+**Refreshed pages:** No structural changes needed — [[decisions]] ADR-030 already names the daemon-headless guidance and the tmux runtime-dep contract; [[active-areas]] already lists the global Claude launch mode row.
+
+## [2026-05-23T15:00:00Z] claude.mode — review-pass 1 follow-up fixes
+
+**Action:** Applied the round-1 reviewer findings on `claude.mode`. `Stages::Base.spawn_claude!` now PROPAGATES `Hive::AgentError` (R7 hard-fail contract); a new `spawn_claude_with_tmux_marker!` wraps the top-level Claude stages (brainstorm / plan / execute / open_pr / artifacts / finalize) so the `:error reason="tmux_unavailable"` marker still lands for those, while the 6-review path's outer rescue lands the dedicated `:review_error reason="tmux_unavailable"` marker. `run_reviewer_spec` re-raises tmux-unavailable AgentErrors so they no longer land as N per-reviewer `errors-NN.md` lines plus `:all_failed`. The TMUX_UNAVAILABLE regex was narrowed (a session-startup timeout is transient, not "tmux missing"). Doctor surfaces a row when `.hive-state/config.yml` is unreadable. Renamed `docs/notes/brainstorm-interactive-tmux.md` → `claude-tmux-launch-mode.md` to match its retitled content. Wiki/init.md and Init#collect docs updated to 10 LIMIT_KEYS and to drop the "five sections" undercount.
+
+**Refreshed pages:** [[commands/init]].
+
 ## [2026-05-23T11:30:00Z] drop — pass-1 + pass-2 review-finding fixes hardened hard-delete
 
 **Action:** Recorded the two follow-up fix passes against `hive drop` after the initial feat/U1+U3 commit. Pass-1 (24 findings) and pass-2 (48 findings) tightened idempotency, PID-reuse safety, locale-stable git stderr parsing, worktree-pointer root validation, malformed-YAML rescue in `Worktree.read_pointer`, daemon-row `folder_missing_nil` distinction, and a closed `commit_action` enum on the drop schema. The `9-done` refusal prose in [[commands/drop]] was folded into the refusals-table caption. [[cli]] is already in sync (drop row + exit-code/`--json` envelope row). Schema enum + `holder`/`lock_path` extras were aligned with `DropErrorKind` during pass-1.
 
 **Refreshed pages:**
 - [[commands/drop]] — refusal prose tightened around the table; no surface change to flags, exits, or JSON keys (those were correct from feat commit).
+
+## [2026-05-23T10:00:00Z] claude.mode — global Claude launch mode (tmux | headless)
+
+**Action:** Documented ADR-030 work shipped on `we-added-tmux-mode-for-260519-69be` (U1–U8). Added top-level `claude.mode` config (default `tmux`) honored by every Claude-backed stage via `Hive::Stages::Base.spawn_claude!` + `Hive::ClaudeLauncher`. `hive init` prompts for the mode, `hive doctor` reports it, 6-review shares one tmux session per reviewer pass for Claude reviewers (Codex/Pi remain headless). `brainstorm.runtime` deprecated to brainstorm-only fallback. `tmux >= 3.0` becomes a hard runtime dependency when `claude.mode: tmux`.
+
+**Refreshed pages:** [[decisions]] (ADR-030 already authored), [[active-areas]].
 
 ## [2026-05-23T09:45:00Z] readme - add daemon-first TUI getting started
 
@@ -1861,3 +1879,45 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[testing]] — documented the CI foreground/daemonization coverage pitfall and reload-safe enum caveat.
+
+## [2026-05-22T00:00:00Z] artifacts-stage — runner and docs follow-up
+
+**Action:** Closed the 7-artifacts workflow gap from PR #120 review. Added `hive artifacts` as a Thor command, wired `Hive::Stages::Artifacts` into `hive run`, made markerless `7-artifacts` rows dispatch artifact collection instead of finalize, and refreshed the live stage docs to the current `7-artifacts` / `8-finalize` / `9-done` tail.
+
+**Refreshed pages:**
+- [[state-model]]
+- [[commands/stage_action]]
+- [[commands/daemon]]
+- [[modules/workflows]]
+- [[modules/stages]]
+- [[stages/artifacts]]
+- [[stages/index]]
+
+## [2026-05-22T18:01:31Z] e2e — fake Codex execute path
+
+**Action:** Updated the e2e sandbox so `HIVE_CODEX_BIN` points at the same fake agent fixture as `HIVE_CLAUDE_BIN`. Extended `test/fixtures/fake-claude` with an opt-in commit hook so CLI-only scenarios can exercise the default Codex-backed `4-execute` path without spawning a live Codex agent.
+
+**Docs:** Refreshed [[testing]] with the fake-agent contract and the requirement that execute scenarios create a real worktree commit to reach `EXECUTE_COMPLETE`.
+
+## [2026-05-22T22:10:00Z] claude-mode — global tmux/headless launcher
+
+**Action:** Added project-global `claude.mode` for every Claude-backed stage, moved the brainstorm tmux runtime into shared launcher docs, documented sequential shared tmux sessions for Claude reviewers, and kept `brainstorm.runtime` as a deprecated brainstorm-only fallback.
+
+**Refreshed pages:**
+- [[commands/init]]
+- [[commands/doctor]]
+- [[modules/config]]
+- [[stages/brainstorm]]
+- [[stages/index]]
+- [[modules/reviewers]]
+- [[templates]]
+- [[decisions]]
+
+## [2026-05-22T22:35:00Z] artifacts-stage — claude mode integration
+
+**Action:** Updated `7-artifacts` from the placeholder no-agent marker stamp into an agent-backed collection stage. The configured `artifacts.agent` now writes `artifact.md`, and Claude-backed artifact collection uses the project-global `claude.mode` launcher.
+
+**Refreshed pages:**
+- [[stages/artifacts]]
+- [[state-model]]
+- [[decisions]]

@@ -10,6 +10,9 @@ module Hive
       "worktree_root" => nil,
       "default_branch" => nil,
       "project_name" => nil,
+      "claude" => {
+        "mode" => "tmux"
+      },
       # Budget and timeout caps are GENEROUS sanity caps for runaway agents,
       # not cost targets. Most tasks finish well within them; a stuck loop
       # still gets cut off. Bumped ~5x from the original conservative values
@@ -218,6 +221,9 @@ module Hive
     # and Pi receive llm-wiki's canonical skill name unless a project chooses
     # a non-legacy override.
     LEGACY_WIKI_PLAN_ALIAS = "/plan"
+    CLAUDE_MODES = %w[headless tmux].freeze
+    EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
+    EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
 
     module_function
 
@@ -245,8 +251,58 @@ module Hive
                {}
       end
       merged = merge_defaults(data).merge("project_root" => project_root)
+      merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
+      merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       validate!(merged, candidate)
       merged
+    end
+
+    def claude_mode(cfg)
+      raw = cfg.dig("claude", "mode")
+      raw = DEFAULTS.dig("claude", "mode") if raw.nil?
+      case raw
+      when "tmux" then :tmux
+      when "headless" then :headless
+      else
+        raise ConfigError, "claude.mode must be one of #{CLAUDE_MODES.inspect}; got #{raw.inspect}"
+      end
+    end
+
+    def nested_key?(hash, *path)
+      cursor = hash
+      path.each do |key|
+        return false unless cursor.is_a?(Hash)
+        return false unless cursor.key?(key)
+
+        cursor = cursor[key]
+      end
+      true
+    end
+
+    # Only `Config.load` knows whether the user actually wrote
+    # `claude.mode` in config.yml; merge_defaults inserts the
+    # DEFAULTS value so the merged cfg always carries a non-nil
+    # `claude.mode`. After load, the EXPLICIT_CLAUDE_MODE_KEY flag is
+    # the single source of truth. Callers that synthesise a cfg
+    # in-process (tests, daemon helpers) must set the flag themselves;
+    # the default below is `false` so an unset flag is treated as
+    # "default kicked in", not "user wrote it".
+    def explicit_claude_mode?(cfg)
+      cfg[EXPLICIT_CLAUDE_MODE_KEY] == true
+    end
+
+    # Pairs with `explicit_claude_mode?` but kept on the legacy
+    # explicit-via-cfg.dig fallback intentionally: synthesised cfgs
+    # under tests / daemon helpers that carry `brainstorm.runtime`
+    # without going through `Config.load` still need to opt into the
+    # one-release legacy 2-brainstorm branch. The DEFAULTS path does
+    # NOT seed `brainstorm.runtime`, so the dig-based fallback is
+    # unambiguous here — distinct from claude.mode, which IS seeded
+    # by DEFAULTS and needs the strict flag.
+    def explicit_brainstorm_runtime?(cfg)
+      return cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY] unless cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY].nil?
+
+      cfg.dig("brainstorm", "runtime") != nil
     end
 
     def stage_skill(cfg, stage)
@@ -596,6 +652,7 @@ module Hive
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
+      validate_claude_mode!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
@@ -612,8 +669,12 @@ module Hive
     # load time with a typed ConfigError instead.
     HASH_SHAPED_KEYS = %w[
       brainstorm
+      claude
       plan
       execute
+      open_pr
+      artifacts
+      finalize
       budget_usd
       timeout_sec
       review
@@ -823,6 +884,15 @@ module Hive
     end
 
     BRAINSTORM_RUNTIMES = %w[headless tmux_interactive].freeze
+
+    def validate_claude_mode!(cfg, source_path)
+      mode = cfg.dig("claude", "mode")
+      return if CLAUDE_MODES.include?(mode)
+
+      raise ConfigError,
+            "claude.mode in #{describe_source(source_path)} must be one of " \
+            "#{CLAUDE_MODES.inspect}; got #{mode.inspect} (#{mode.class})"
+    end
 
     def validate_brainstorm_runtime!(cfg, source_path)
       runtime = cfg.dig("brainstorm", "runtime")

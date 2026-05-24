@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "date"
 require "yaml"
+require "hive/claude_launcher"
 require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
@@ -125,7 +126,13 @@ module Hive
           return record_tamper(task, tampered, who: "implementer")
         end
 
-        return { commit: "implementer_failed", status: impl_result[:status] } if agent_failed?(impl_result)
+        if agent_failed?(impl_result)
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "implementer_failed",
+                            status: impl_result&.fetch(:status, nil),
+                            message: impl_result&.fetch(:error_message, nil))
+          return { commit: "implementer_failed", status: :error }
+        end
 
         worktree_state = inspect_worktree_state(task, worktree_git)
         return worktree_git_failed(task) unless worktree_state
@@ -135,9 +142,15 @@ module Hive
         dirty_worktree = worktree_state.fetch(:dirty)
         expected_branch = expected_worktree_branch(task)
         new_commit = head_after != baseline_head
-        structured_final_message_present = impl_result &&
-                                           impl_result[:final_message_source] == :structured &&
-                                           !impl_result[:final_message].to_s.strip.empty?
+        # Research-mode parity across headless + tmux. Headless agents
+        # may emit a :structured (JSON-stream `result` event) OR a
+        # :plain (untagged stdout tail) final message; tmux runs in an
+        # interactive pane and so always lands :plain. Either source is
+        # acceptable proof that the agent said something coherent —
+        # the source tag only matters for headless debugging.
+        final_message_present = impl_result &&
+                                %i[structured plain].include?(impl_result[:final_message_source]) &&
+                                !impl_result[:final_message].to_s.strip.empty?
 
         unless current_branch == expected_branch
           Hive::Markers.set(task.state_file, :execute_waiting, reason: "branch_mismatch")
@@ -162,7 +175,7 @@ module Hive
 
         research_mode = research_execution?(task)
 
-        if research_mode && !new_commit && !structured_final_message_present
+        if research_mode && !new_commit && !final_message_present
           Hive::Markers.set(task.state_file, :execute_waiting, reason: "missing_research_output")
           return { commit: "execute_waiting_missing_research_output", status: :execute_waiting }
         end
@@ -195,24 +208,43 @@ module Hive
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        Hive::Stages::Base.spawn_agent(
-          task,
+        profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        # 4-execute's lifecycle contract is "stage runner writes
+        # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
+        # not "the agent writes its own marker" — `templates/
+        # execute_prompt.md.erb` explicitly forbids the agent from
+        # touching the task.md marker. Headless runs nonetheless used
+        # :state_file_marker because Hive::Agent#run! reads the marker
+        # AFTER the agent exits to derive the envelope status, and the
+        # rules around `Hive::Markers.current(...).name == :none` happen
+        # to land :complete on a happy exit. Under tmux that path
+        # cannot work: ClaudeLauncher.wait_for_terminal_marker
+        # actively WAITS for the agent to stamp EXECUTE_COMPLETE and
+        # times out when it doesn't. Use :exit_code_only here so the
+        # runner gets a non-error envelope on a clean exit and applies
+        # its own marker-write logic. Codex's profile default is
+        # :output_file_exists; this pin overrides it for both modes.
+        kwargs = {
           prompt: prompt,
           add_dirs: [ task.folder ],
           cwd: worktree_path,
           max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
-          profile: Hive::Stages::Base.stage_profile(cfg, "execute"),
-          # Pin :state_file_marker regardless of which profile the user
-          # picked: execute's lifecycle contract is "stage runner writes
-          # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
-          # which depends on the spawn returning a non-error/non-timeout
-          # marker status. Codex's profile default is :output_file_exists,
-          # which would treat a successful run as :error because no
-          # explicit expected_output is supplied here.
-          status_mode: :state_file_marker
-        )
+          profile: profile,
+          status_mode: :exit_code_only
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task),
+            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       def record_tamper(task, tampered, who:)

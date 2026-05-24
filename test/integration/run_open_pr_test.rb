@@ -91,6 +91,7 @@ class RunOpenPrTest < Minitest::Test
 
   def setup_open_pr_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
+    set_project_claude_mode(dir, "headless")
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(dir, ".hive-state", "stages", "5-open-pr", slug)
     FileUtils.mkdir_p(task_dir)

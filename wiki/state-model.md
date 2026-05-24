@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/bot/*
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-23
 tags: [state, filesystem, model, architecture, review]
 ---
 
@@ -46,7 +46,7 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `4-execute` | `task.md` | `Stages::Execute#write_initial_task_md` (with frontmatter `slug`, `started_at`) |
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
 | `6-review` | `task.md` | reused from `4-execute`; markers driven by `Stages::Review` orchestrator |
-| `7-artifacts` | `artifact.md` | `Stages::Artifacts` creates the artifact collection marker file and stamps `COMPLETE` |
+| `7-artifacts` | `artifact.md` | `Stages::Artifacts` asks the configured artifact agent to write the artifact summary and stamp `COMPLETE` |
 | `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
 | `9-done` | `task.md` | reused from `4-execute` |
 
@@ -210,9 +210,13 @@ timeout_sec:
 # fix,browser_test}.agent`. Runtime fallback in stage code stays
 # `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
 # these keys keep working.
-brainstorm: { agent: claude, runtime: headless }  # runtime: headless | tmux_interactive (U6/U7)
+claude:     { mode: tmux }        # tmux | headless; DEFAULTS-seeded — always non-nil after Config.load. `Config.explicit_claude_mode?` is a strict `EXPLICIT_CLAUDE_MODE_KEY == true` check (no dig fallback) so synthesised cfgs in tests/daemon helpers must set the flag themselves. Applies to every Claude-backed launch via `Hive::ClaudeLauncher` (shared tmux envelope across brainstorm/plan/execute/open_pr/artifacts/finalize/review). `hive doctor` surfaces the active mode.
+brainstorm: { agent: claude, runtime: headless }  # runtime is legacy read-back-compat only
 plan:       { agent: claude }
 execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`
+open_pr:    { agent: claude }
+artifacts:  { agent: claude }
+finalize:   { agent: claude }
 agents:                 # per-CLI profile overrides (claude, codex, pi)
   claude: { bin: claude, env_override: HIVE_CLAUDE_BIN, min_version: 2.1.118 }
   codex:  { bin: codex,  env_override: HIVE_CODEX_BIN,  min_version: 0.125.0 }

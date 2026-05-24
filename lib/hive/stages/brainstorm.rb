@@ -1,4 +1,6 @@
 require "hive/stages/base"
+require "hive/config"
+require "hive/claude_launcher"
 
 module Hive
   module Stages
@@ -8,16 +10,33 @@ module Hive
       def run!(task, cfg)
         case runtime_for(cfg)
         when :headless
-          run_headless!(task, cfg)
+          profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+          if profile.name == :claude
+            run_claude!(task, cfg_with_claude_mode(cfg, :headless), profile: profile)
+          else
+            run_headless!(task, cfg, profile: profile)
+          end
         when :tmux_interactive
-          require "hive/stages/brainstorm_tmux"
-          Hive::Stages::BrainstormTmux.run!(task, cfg)
+          run_claude!(task, cfg)
         end
       end
 
       def runtime_for(cfg)
-        runtime = cfg.dig("brainstorm", "runtime") ||
-          Hive::Config::DEFAULTS.dig("brainstorm", "runtime")
+        agent_name = (cfg.dig("brainstorm", "agent") || "claude").to_s
+        return :headless unless agent_name == "claude"
+
+        if !Hive::Config.explicit_claude_mode?(cfg) &&
+           Hive::Config.explicit_brainstorm_runtime?(cfg)
+          return legacy_runtime_for(cfg.dig("brainstorm", "runtime"))
+        end
+
+        case Hive::Config.claude_mode(cfg)
+        when :headless then :headless
+        when :tmux then :tmux_interactive
+        end
+      end
+
+      def legacy_runtime_for(runtime)
         case runtime
         when "headless" then :headless
         when "tmux_interactive" then :tmux_interactive
@@ -28,14 +47,16 @@ module Hive
         end
       end
 
-      def run_headless!(task, cfg)
-        profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+      def run_headless!(task, cfg, profile: nil)
+        profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
         prompt = render_prompt(task, cfg, profile: profile)
         # add_dirs is intentionally limited to the task folder. Brainstorm
         # operates on user-supplied idea text and must not have write access
-        # to the project source code (claude runs with
-        # --dangerously-skip-permissions; widening add-dir would let a
-        # prompt-injected idea reach project files).
+        # to the project source code: widening add-dir would let a
+        # prompt-injected idea reach project files. (Claude-on-tmux is now
+        # routed through `run_claude!`; this method only covers codex / pi
+        # — both run with their own profile permissions, not Claude's
+        # `--dangerously-skip-permissions`.)
         Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -54,6 +75,39 @@ module Hive
         )
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def run_claude!(task, cfg, profile: nil)
+        profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+        prompt = render_prompt(task, cfg, profile: profile)
+        Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+          task,
+          cfg,
+          prompt: prompt,
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
+          timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
+          log_label: "brainstorm",
+          profile: profile,
+          session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task),
+          status_mode: :state_file_marker,
+          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+        )
+        marker = Hive::Markers.current(task.state_file)
+        { commit: action_for(marker.name), status: marker.name }
+      end
+
+      # Returns a new cfg Hash with `claude.mode` overridden, leaving the
+      # caller's cfg untouched (the dispatcher passes its cfg by reference
+      # to many stage helpers; mutating it would surprise unrelated
+      # call-sites that read claude.mode later in the same run).
+      def cfg_with_claude_mode(cfg, mode)
+        desired = mode.to_s
+        return cfg if cfg.dig("claude", "mode") == desired
+
+        existing_claude = cfg["claude"].is_a?(Hash) ? cfg["claude"] : {}
+        cfg.merge("claude" => existing_claude.merge("mode" => desired))
       end
 
       def render_prompt(task, cfg, profile:)

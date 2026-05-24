@@ -1,6 +1,7 @@
 require "json"
 require "fileutils"
 require "hive/agent_profiles"
+require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 
@@ -113,8 +114,8 @@ module Hive
             )
           )
 
-          spawn_result = Hive::Stages::Base.spawn_agent(
-            synthetic_task(ctx),
+          task = synthetic_task(ctx)
+          kwargs = {
             prompt: prompt,
             add_dirs: [ ctx.task_folder ],
             cwd: ctx.worktree_path,
@@ -124,7 +125,19 @@ module Hive
             profile: profile,
             expected_output: result_path,
             status_mode: :output_file_exists
-          )
+          }
+          spawn_result =
+            if profile.name == :claude
+              Hive::Stages::Base.spawn_claude!(
+                task,
+                cfg,
+                **kwargs,
+                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-browser-pass#{ctx.pass}-attempt#{attempt}", task),
+                allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+              )
+            else
+              Hive::Stages::Base.spawn_agent(task, **kwargs)
+            end
 
           if spawn_result[:status] != :ok
             return {

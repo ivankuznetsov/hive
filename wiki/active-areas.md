@@ -31,6 +31,7 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 | Docs | `README.md`, `wiki/` knowledge base | Authored |
 | Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
 | Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. |
+| Global Claude launch mode (ADR-030) | `lib/hive/claude_launcher.rb`, `lib/hive/stages/base.rb` (`spawn_claude!`), `lib/hive/commands/init/prompts.rb`, `lib/hive/commands/doctor.rb`, `docs/adrs/030-global-claude-launch-mode.md`, `docs/notes/claude-tmux-launch-mode.md` | Top-level `claude.mode` (default `tmux`) routes every Claude-backed stage (brainstorm/plan/execute/open-pr/artifacts/finalize + 6-review Claude reviewers) through one shared tmux launcher per pass. `tmux >= 3.0` is a hard runtime dep when mode is `tmux`. `hive init` prompts; `hive doctor` reports. `brainstorm.runtime` deprecated to brainstorm-only fallback. |
 
 ## Phase 1 deferred work
 

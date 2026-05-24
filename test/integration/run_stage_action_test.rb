@@ -18,12 +18,19 @@ class RunStageActionTest < Minitest::Test
   def teardown
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
     ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
-    %w[HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT].each { |k| ENV.delete(k) }
+    %w[
+      HIVE_FAKE_CLAUDE_WRITE_FILE
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT
+      HIVE_FAKE_CLAUDE_COMMIT_FILE
+      HIVE_FAKE_CLAUDE_COMMIT_CONTENT
+      HIVE_FAKE_CLAUDE_COMMIT_MESSAGE
+    ].each { |k| ENV.delete(k) }
   end
 
   def seed_inbox(dir, text = "stage action probe")
     capture_io do
       Hive::Commands::Init.new(dir).call
+      set_project_claude_mode(dir, "headless")
       Hive::Commands::New.new(File.basename(dir), text).call
     end
     inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
@@ -339,6 +346,8 @@ class RunStageActionTest < Minitest::Test
         FileUtils.mv(inbox, review)
         File.write(File.join(review, "task.md"), "# task\n<!-- REVIEW_COMPLETE pass=1 browser=skipped -->\n")
         artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
 
         capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
 
@@ -356,6 +365,8 @@ class RunStageActionTest < Minitest::Test
         artifacts = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)
         FileUtils.mkdir_p(File.dirname(artifacts))
         FileUtils.mv(inbox, artifacts)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
 
         capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
 

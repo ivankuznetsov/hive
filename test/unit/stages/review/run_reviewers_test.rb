@@ -182,20 +182,297 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
-  # Shared test helper: stub Hive::Reviewers.dispatch to return a sequence
-  # of adapters, run the orchestrator, restore dispatch.
+  class SharedSessionReviewer < Hive::Reviewers::Base
+    attr_reader :headless_runs, :session_runs
+
+    def initialize(spec, ctx)
+      super
+      @headless_runs = 0
+      @session_runs = 0
+    end
+
+    def run!(deadline: nil)
+      @headless_runs += 1
+      write_success
+    end
+
+    def run_in_session!(handle:, deadline: nil)
+      @session_runs += 1
+      handle.events << name
+      write_success
+    end
+
+    def write_success
+      ensure_reviews_dir!
+      File.write(output_path, "## #{name}\n\n- [ ] ok\n")
+      Hive::Reviewers::Result.new(
+        name: name,
+        output_path: output_path,
+        status: :ok,
+        error_message: nil
+      )
+    end
+  end
+
+  SharedSessionHandle = Struct.new(:events)
+
+  # Shared test helper: stub Hive::Reviewers.dispatch to return adapters
+  # keyed by spec["name"] (or, when names collide / are absent, by FIFO
+  # order). Indexing-by-name is robust against the orchestrator
+  # processing specs in non-input order (e.g., the claude / non-claude
+  # partition introduced when the shared tmux session covers only the
+  # claude group).
   def with_stubbed_dispatch(adapters)
     orig = Hive::Reviewers.method(:dispatch)
-    idx = 0
-    Hive::Reviewers.define_singleton_method(:dispatch) do |_spec, _ctx, **_kwargs|
-      a = adapters[idx]
-      idx += 1
-      a
+    by_name = {}
+    fifo = adapters.dup
+    adapters.each do |a|
+      name = a.respond_to?(:name) ? a.name : nil
+      by_name[name] ||= [] if name
+      by_name[name] << a if name
+    end
+    Hive::Reviewers.define_singleton_method(:dispatch) do |spec, _ctx, **_kwargs|
+      key = spec.is_a?(Hash) ? spec["name"] : nil
+      if key && by_name[key] && !by_name[key].empty?
+        by_name[key].shift
+      else
+        fifo.shift
+      end
     end
     begin
       yield
     ensure
       Hive::Reviewers.define_singleton_method(:dispatch, orig)
+    end
+  end
+
+  def with_stubbed_claude_session
+    orig = Hive::ClaudeLauncher.method(:with_shared_session)
+    sessions = []
+    Hive::ClaudeLauncher.define_singleton_method(:with_shared_session) do |**kwargs, &block|
+      handle = SharedSessionHandle.new([])
+      sessions << { kwargs: kwargs, handle: handle }
+      block.call(handle)
+    end
+    begin
+      yield sessions
+    ensure
+      Hive::ClaudeLauncher.define_singleton_method(:with_shared_session, orig)
+    end
+  end
+
+  def test_claude_reviewers_share_one_tmux_session_when_claude_mode_tmux
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" },
+            { "name" => "claude-b", "output_basename" => "claude-b", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| SharedSessionReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(cfg, ctx, Task.new(dir, File.join(dir, "task.md")))
+
+          assert_equal :ok, result
+          assert_equal 1, sessions.length
+          assert_equal "hive-6-review-pass1-#{File.basename(dir)}", sessions[0][:kwargs][:session_name]
+          assert_equal [ "claude-a", "claude-b" ], sessions[0][:handle].events
+          assert_equal [ 0, 0 ], adapters.map(&:headless_runs)
+          assert_equal [ 1, 1 ], adapters.map(&:session_runs)
+        end
+      end
+    end
+  end
+
+  def test_tmux_mode_keeps_non_claude_reviewers_headless_inside_shared_pass
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" },
+            { "name" => "codex-a", "output_basename" => "codex-a", "kind" => "agent", "agent" => "codex" },
+            { "name" => "claude-b", "output_basename" => "claude-b", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| SharedSessionReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(cfg, ctx, Task.new(dir, File.join(dir, "task.md")))
+
+          assert_equal :ok, result
+          assert_equal 1, sessions.length
+          assert_equal [ "claude-a", "claude-b" ], sessions[0][:handle].events
+          assert_equal [ 0, 1, 0 ], adapters.map(&:headless_runs)
+          assert_equal [ 1, 0, 1 ], adapters.map(&:session_runs)
+        end
+      end
+    end
+  end
+
+  def test_claude_reviewers_stay_headless_when_claude_mode_headless
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "headless" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| SharedSessionReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(cfg, ctx, Task.new(dir, File.join(dir, "task.md")))
+
+          assert_equal :ok, result
+          assert_empty sessions
+          assert_equal [ 1 ], adapters.map(&:headless_runs)
+          assert_equal [ 0 ], adapters.map(&:session_runs)
+        end
+      end
+    end
+  end
+
+  def test_tmux_session_is_not_opened_when_wall_clock_already_exceeded
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| SharedSessionReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(
+            cfg,
+            ctx,
+            Task.new(dir, File.join(dir, "task.md")),
+            started_at: Time.now - 10,
+            max_wall_clock_sec: 1
+          )
+
+          assert_equal :wall_clock_exceeded, result
+          assert_empty sessions
+          assert_equal [ 0 ], adapters.map(&:headless_runs)
+          assert_equal [ 0 ], adapters.map(&:session_runs)
+        end
+      end
+    end
+  end
+
+  # G1: shared-session mid-pass failure — one claude reviewer raises
+  # inside the shared tmux session, the next one in the group must
+  # still run. A regression that tears down the session on a single
+  # raise would only affect the SHARED branch (the unshared branch is
+  # already covered by `test_first_reviewer_raise_does_not_abort_second`).
+  class SharedSessionRaisingReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      raise RuntimeError, "headless boom"
+    end
+
+    def run_in_session!(handle:, deadline: nil)
+      raise RuntimeError, "shared boom"
+    end
+  end
+
+  def test_shared_session_first_reviewer_raise_does_not_abort_second
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "raises", "output_basename" => "raises", "kind" => "agent", "agent" => "claude" },
+            { "name" => "ok",     "output_basename" => "ok",     "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = [
+        SharedSessionRaisingReviewer.new(cfg["review"]["reviewers"][0], ctx),
+        SharedSessionReviewer.new(cfg["review"]["reviewers"][1], ctx)
+      ]
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(cfg, ctx, Task.new(dir, File.join(dir, "task.md")))
+          assert_equal :ok, result, "shared-session raise must NOT abort surviving reviewer"
+          assert_equal 1, sessions.length
+        end
+      end
+
+      assert File.exist?(File.join(dir, "reviews", "ok-01.md")),
+             "second reviewer in shared session must run after first raises"
+      assert File.exist?(File.join(dir, "reviews", "errors-01.md")),
+             "first reviewer's raise must land in errors-NN.md"
+    end
+  end
+
+  # G7: shared-session :all_failed — when every claude reviewer in
+  # the shared session returns :error, the orchestrator must still
+  # return :all_failed (and the errors-NN.md sink must reflect every
+  # failure, not be silently dropped by the with_shared_session block).
+  class SharedSessionErroringReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      Hive::Reviewers::Result.new(
+        name: name, output_path: output_path, status: :error,
+        error_message: "headless failure"
+      )
+    end
+
+    def run_in_session!(handle:, deadline: nil)
+      Hive::Reviewers::Result.new(
+        name: name, output_path: output_path, status: :error,
+        error_message: "shared failure"
+      )
+    end
+  end
+
+  def test_shared_session_all_failed
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "a", "output_basename" => "a", "kind" => "agent", "agent" => "claude" },
+            { "name" => "b", "output_basename" => "b", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map do |spec|
+        SharedSessionErroringReviewer.new(spec, ctx)
+      end
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do
+          result = Hive::Stages::Review.run_reviewers(cfg, ctx, Task.new(dir, File.join(dir, "task.md")))
+          assert_equal :all_failed, result,
+                       "every shared-session reviewer failing must surface :all_failed"
+        end
+      end
+
+      errors_path = File.join(dir, "reviews", "errors-01.md")
+      assert File.exist?(errors_path), "errors-NN.md must record both failures"
+      contents = File.read(errors_path)
+      assert_includes contents, "[a] reviewer \"a\" failed"
+      assert_includes contents, "[b] reviewer \"b\" failed"
     end
   end
 
@@ -984,6 +1261,50 @@ class RunReviewersTest < Minitest::Test
       assert Hive::Stages::Review.fix_guardrail_approved?(make_ctx(dir).with(pass: 4))
       refute Hive::Stages::Review.fix_guardrail_approved?(make_ctx(dir).with(pass: 5)),
              "pass 5 has its own fix-guardrail-05.md state (absent here = not approved)"
+    end
+  end
+
+  # G2: pin the direct rescue in `Stages::Review.run!` that maps
+  # tmux-unavailable AgentErrors to the dedicated REVIEW_ERROR marker.
+  # The existing claude_launcher_test.rb only covers the launcher-level
+  # envelope produced by `Stages::Base.spawn_claude_with_tmux_marker!`,
+  # which is a different marker family (`:error` vs `:review_error`).
+  class TmuxUnavailableReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      raise Hive::AgentError, "tmux binary not runnable: tmux"
+    end
+  end
+
+  def test_review_run_reviewers_tmux_unavailable_propagates
+    # Drive the non-shared headless branch so the test stays in
+    # run_reviewer_spec's rescue without touching the real tmux
+    # runner. `claude.mode: headless` skips with_shared_session;
+    # an agent reviewer's adapter then raises the tmux AgentError
+    # exactly as a real claude reviewer would in the same situation.
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "headless" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapter = TmuxUnavailableReviewer.new(cfg["review"]["reviewers"][0], ctx)
+
+      err = nil
+      with_stubbed_dispatch([ adapter ]) do
+        err = assert_raises(Hive::AgentError) do
+          Hive::Stages::Review.run_reviewers(
+            cfg, ctx, Task.new(dir, File.join(dir, "task.md"))
+          )
+        end
+      end
+
+      assert Hive::ClaudeLauncher.tmux_unavailable_error?(err),
+             "tmux unavailable AgentError must propagate out of run_reviewers " \
+             "so Stages::Review.run!'s outer rescue can land :review_error"
     end
   end
 

@@ -7,7 +7,7 @@ updated: 2026-05-14
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -17,6 +17,7 @@ tags: [config, yaml, validation]
   "worktree_root"     => nil,
   "default_branch"    => nil,
   "project_name"      => nil,
+  "claude"            => { "mode" => "tmux" },
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
   # caps for runaway agents, not cost targets. The deprecated
   # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
@@ -39,9 +40,12 @@ tags: [config, yaml, validation]
   # browser_test}.agent. Runtime fallback is `cfg.dig("<stage>", "agent")
   # || "claude"` (see Hive::Stages::Base.stage_profile in
   # [[modules/stages]]) so legacy configs keep working.
-  "brainstorm" => { "agent" => "claude" },
+  "brainstorm" => { "agent" => "claude", "runtime" => "headless" }, # runtime is legacy read-back-compat
   "plan"       => { "agent" => "claude" },
   "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
+  "open_pr"    => { "agent" => "claude" },
+  "artifacts"  => { "agent" => "claude" },
+  "finalize"   => { "agent" => "claude" },
   "agents" => {
     "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },
     "codex"  => { "bin" => "codex",  "env_override" => "HIVE_CODEX_BIN",  "min_version" => "0.125.0" },
@@ -95,11 +99,12 @@ Rules:
 
 ## Validation (`Config.validate!`)
 
-Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Three checks (in order):
+Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
 
-1. **`validate_hash_shaped_keys!`** — every key in `HASH_SHAPED_KEYS = %w[brainstorm plan execute budget_usd timeout_sec review agents]` must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` — `deep_merge(default_hash, scalar)` returns the scalar unchanged — and crash later as `TypeError`/`NoMethodError` when stage code calls `cfg.dig("brainstorm", "agent")`. Error message hints either dropping the key (defaults apply) or supplying the right `{ ... }` shape. Closes ce-code-review F1 (P1).
+1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
-3. **`validate_role_agent_names!`** — every path in `ROLE_AGENT_PATHS` (`review.ci.agent`, `review.triage.agent`, `review.fix.agent`, `review.browser_test.agent`, `brainstorm.agent`, `plan.agent`, `execute.agent`) is checked via `validate_agent_name!`.
+3. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
+4. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

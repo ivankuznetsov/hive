@@ -25,7 +25,9 @@ module Hive
 
         DEFAULT_PLANNING_AGENT = "claude".freeze
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
-        DEFAULT_BRAINSTORM_RUNTIME = "headless".freeze
+        DEFAULT_CLAUDE_MODE = "tmux".freeze
+        CLAUDE_MODES = Hive::Config::CLAUDE_MODES
+        CLAUDE_MODE_CHOICES = [ "tmux", "headless" ].freeze
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
 
@@ -51,6 +53,7 @@ module Hive
           plan
           execute_implementation
           open_pr
+          artifacts
           finalize
           review_ci
           review_triage
@@ -92,12 +95,12 @@ module Hive
         # Returns the answers hash with shape:
         #   {
         #     "planning_agent"    => String,           # one of @registered_agents
-        #     "brainstorm_runtime"=> String,           # headless | tmux_interactive
+        #     "claude_mode"      => String,           # tmux | headless
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "triage_bias"       => String,           # courageous | safetyist
-        #     "budgets"  => Hash<String, Integer>,     # 9 keys (LIMIT_KEYS)
-        #     "timeouts" => Hash<String, Integer>,     # 9 keys (LIMIT_KEYS)
+        #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
+        #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
         #     "daemon_autostart"  => Boolean           # start user service now
         #   }
@@ -107,7 +110,7 @@ module Hive
 
           intro
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
-          brainstorm_runtime = prompt_brainstorm_runtime(planning)
+          claude_mode = prompt_claude_mode
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
           triage_bias = prompt_triage_bias
@@ -117,7 +120,7 @@ module Hive
 
           answers = {
             "planning_agent" => planning,
-            "brainstorm_runtime" => brainstorm_runtime,
+            "claude_mode" => claude_mode,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
             "triage_bias" => triage_bias,
@@ -145,7 +148,7 @@ module Hive
         def non_interactive_defaults
           answers = {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
-            "brainstorm_runtime" => DEFAULT_BRAINSTORM_RUNTIME,
+            "claude_mode" => DEFAULT_CLAUDE_MODE,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
@@ -158,7 +161,7 @@ module Hive
           # `summary=$(hive init)` capture has a parseable single line.
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
-            "brainstorm_runtime=#{DEFAULT_BRAINSTORM_RUNTIME}, " \
+            "claude_mode=#{DEFAULT_CLAUDE_MODE}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled, daemon_autostart=disabled"
@@ -212,36 +215,33 @@ module Hive
           @registered_agents.find { |a| a.casecmp(answer).zero? }
         end
 
-        def prompt_brainstorm_runtime(planning_agent)
-          return DEFAULT_BRAINSTORM_RUNTIME unless planning_agent == "claude"
-
+        def prompt_claude_mode
           @output.puts ""
-          @output.puts "Brainstorm runtime — choose how Claude runs 2-brainstorm:"
-          @output.puts "  1) headless         - non-interactive `claude -p`"
-          @output.puts "  2) tmux_interactive - attachable tmux pane using your logged-in Claude session"
+          @output.puts "Claude launch mode — applies to every stage that uses Claude:"
+          @output.puts "  1) tmux     - attachable tmux pane using your logged-in Claude session"
+          @output.puts "  2) headless - non-interactive `claude -p`"
           loop do
-            @output.print "Brainstorm runtime [#{DEFAULT_BRAINSTORM_RUNTIME}]: "
+            @output.print "Claude mode [#{DEFAULT_CLAUDE_MODE}]: "
             @output.flush
             answer = read_line
-            return DEFAULT_BRAINSTORM_RUNTIME if answer.empty?
+            return DEFAULT_CLAUDE_MODE if answer.empty?
 
-            resolved = resolve_brainstorm_runtime_choice(answer)
+            resolved = resolve_claude_mode_choice(answer)
             return resolved if resolved
 
-            @output.puts "  unknown brainstorm runtime #{answer.inspect}; pick " \
-                         "#{Hive::Config::BRAINSTORM_RUNTIMES.join('/')} " \
-                         "or 1..#{Hive::Config::BRAINSTORM_RUNTIMES.size}"
+            @output.puts "  unknown Claude mode #{answer.inspect}; pick " \
+                         "#{CLAUDE_MODES.join('/')} or 1..#{CLAUDE_MODE_CHOICES.size}"
           end
         end
 
-        def resolve_brainstorm_runtime_choice(answer)
+        def resolve_claude_mode_choice(answer)
           if answer =~ /\A\d+\z/
             idx = answer.to_i
-            return Hive::Config::BRAINSTORM_RUNTIMES[idx - 1] if idx.between?(1, Hive::Config::BRAINSTORM_RUNTIMES.size)
+            return CLAUDE_MODE_CHOICES[idx - 1] if idx.between?(1, CLAUDE_MODE_CHOICES.size)
 
             return nil
           end
-          Hive::Config::BRAINSTORM_RUNTIMES.find { |runtime| runtime.casecmp(answer).zero? }
+          CLAUDE_MODES.find { |mode| mode.casecmp(answer).zero? }
         end
 
         def prompt_reviewers
@@ -414,7 +414,7 @@ module Hive
           @output.puts ""
           @output.puts "Summary:"
           @output.puts "  planning_agent    = #{answers['planning_agent']}"
-          @output.puts "  brainstorm_runtime = #{answers['brainstorm_runtime']}"
+          @output.puts "  claude_mode       = #{answers['claude_mode']}"
           @output.puts "  development_agent = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"

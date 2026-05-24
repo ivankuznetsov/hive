@@ -25,6 +25,7 @@ class RunBrainstormTest < Minitest::Test
     project = File.basename(dir)
     capture_io do
       Hive::Commands::Init.new(dir).call
+      set_project_claude_mode(dir, "headless")
       Hive::Commands::New.new(project, "test brainstorm").call
     end
     inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
@@ -98,6 +99,7 @@ class RunBrainstormTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io do
           Hive::Commands::Init.new(dir).call
+          set_project_claude_mode(dir, "headless")
           Hive::Commands::New.new(File.basename(dir), "no run inbox").call
         end
         inbox_task = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first

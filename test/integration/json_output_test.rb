@@ -25,6 +25,11 @@ class JsonOutputTest < Minitest::Test
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT].each { |k| ENV.delete(k) }
   end
 
+  def init_project(dir)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    set_project_claude_mode(dir, "headless")
+  end
+
   def seed_execute_waiting_task(dir, slug:, reason:, worktree_path: dir)
     execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(execute_dir)
@@ -64,7 +69,7 @@ class JsonOutputTest < Minitest::Test
   def test_status_json_emits_task_records_with_stable_keys
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "json status probe").call }
 
@@ -89,7 +94,7 @@ class JsonOutputTest < Minitest::Test
   def test_status_json_execute_waiting_includes_reason_specific_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         dirty_worktree = File.join(dir, "dirty-worktree")
         FileUtils.mkdir_p(dirty_worktree)
         seed_execute_waiting_task(
@@ -123,7 +128,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_emits_marker_and_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "json run probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -157,7 +162,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_complete_marker_returns_approve_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "json complete probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -188,7 +193,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_review_complete_marker_returns_approve_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "review-complete-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
@@ -211,7 +216,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_complete_marker_returns_review_approve_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-complete-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(execute_dir)
@@ -236,7 +241,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_waiting_dirty_worktree_targets_worktree
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-dirty-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         worktree_path = File.join(dir, "worktree")
@@ -274,7 +279,7 @@ class JsonOutputTest < Minitest::Test
     %w[branch_mismatch head_not_descendant].each do |reason|
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          capture_io { Hive::Commands::Init.new(dir).call }
+          init_project(dir)
           slug = "execute-#{reason.tr('_', '-')}-260426-aaaa"
           worktree_path = File.join(dir, "worktree-#{reason}")
           FileUtils.mkdir_p(worktree_path)
@@ -302,7 +307,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_waiting_no_changes_points_to_plan
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-no-change-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(execute_dir)
@@ -335,7 +340,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_waiting_missing_research_output_reruns_agent
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-missing-research-260426-aaaa"
         execute_dir = seed_execute_waiting_task(
           dir,
@@ -360,7 +365,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_waiting_dirty_worktree_targets_worktree
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-dirty-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         worktree_path = File.join(dir, "worktree")
@@ -398,7 +403,7 @@ class JsonOutputTest < Minitest::Test
     %w[branch_mismatch head_not_descendant].each do |reason|
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          capture_io { Hive::Commands::Init.new(dir).call }
+          init_project(dir)
           slug = "execute-#{reason.tr('_', '-')}-260426-aaaa"
           worktree_path = File.join(dir, "worktree-#{reason}")
           FileUtils.mkdir_p(worktree_path)
@@ -426,7 +431,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_waiting_no_changes_points_to_plan
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-no-change-260426-aaaa"
         execute_dir = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(execute_dir)
@@ -459,7 +464,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_execute_waiting_missing_research_output_reruns_agent
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "execute-missing-research-260426-aaaa"
         execute_dir = seed_execute_waiting_task(
           dir,
@@ -488,7 +493,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_error_marker_emits_no_op_and_exits_three
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         capture_io { Hive::Commands::New.new(File.basename(dir), "json error probe").call }
         slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
@@ -519,7 +524,7 @@ class JsonOutputTest < Minitest::Test
     # ability to reach review_waiting from scratch.
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "review-waiting-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
@@ -554,7 +559,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_review_stale_marker_emits_recover_stale_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "review-stale-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
@@ -576,7 +581,7 @@ class JsonOutputTest < Minitest::Test
   def test_run_json_on_review_ci_stale_marker_emits_recover_stale_next_action
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
+        init_project(dir)
         slug = "review-ci-stale-260426-aaaa"
         review_dir = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(review_dir)
@@ -613,7 +618,7 @@ class JsonOutputTest < Minitest::Test
     fixtures.each_with_index do |fixture, i|
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          capture_io { Hive::Commands::Init.new(dir).call }
+          init_project(dir)
           capture_io { Hive::Commands::New.new(File.basename(dir), "kind probe #{i}").call }
           slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
           brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)

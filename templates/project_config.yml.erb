@@ -4,6 +4,11 @@ default_branch: <%= default_branch %>
 worktree_root: <%= worktree_root %>
 hive_state_path: .hive-state
 
+claude:
+  # tmux uses your logged-in Claude session in an attachable pane.
+  # headless keeps the non-interactive `claude -p` path.
+  mode: <%= claude_mode %>
+
 # Stage-level agent for single-agent stages. (6-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
 # below.) Defaults are claude for planning (deeper reasoning) and codex
@@ -19,15 +24,16 @@ hive_state_path: .hive-state
 brainstorm:
   agent: <%= planning_agent %>
   # skill: /compound-engineering:ce-brainstorm
-  # Runtime choices: headless (`claude -p`) or tmux_interactive
-  # (attachable tmux pane using your logged-in Claude session).
-  runtime: <%= brainstorm_runtime %>
+  # Legacy configs may still carry brainstorm.runtime; new projects use
+  # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
   # skill: /plan
 execute:
   agent: <%= development_agent %>
 open_pr:
+  agent: claude
+artifacts:
   agent: claude
 finalize:
   agent: claude

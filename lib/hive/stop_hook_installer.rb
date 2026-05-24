@@ -8,8 +8,27 @@ module Hive
 
     module_function
 
-    def install(stage_dir:)
-      claude_dir = File.join(stage_dir, ".claude")
+    def install(stage_dir:, extra_dirs: [])
+      paths = [ install_at(stage_dir, stage_dir) ]
+      # Claude resolves `.claude/settings.json` from the process cwd, not
+      # from --add-dir paths. Stages that launch with cwd != task.folder
+      # (4-execute / 6-review reviewers run in the feature worktree)
+      # never saw the stop-hook config under task.folder, so the .done
+      # / result.json signal files were never written and waits in
+      # 5-open-pr / 6-review CI-fix could hang until timeout. Install a
+      # second copy in each extra dir so Claude finds the hook
+      # regardless of cwd.
+      Array(extra_dirs).each do |dir|
+        next if dir.to_s.empty?
+        next if File.expand_path(dir) == File.expand_path(stage_dir)
+
+        paths << install_at(dir, stage_dir)
+      end
+      paths
+    end
+
+    def install_at(target_dir, stage_dir)
+      claude_dir = File.join(target_dir, ".claude")
       FileUtils.mkdir_p(claude_dir)
       settings_path = File.join(claude_dir, "settings.json")
       # Brainstorm Claude runs with --permission-mode bypassPermissions

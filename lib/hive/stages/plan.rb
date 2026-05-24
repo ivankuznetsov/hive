@@ -1,4 +1,5 @@
 require "hive/stages/base"
+require "hive/claude_launcher"
 
 module Hive
   module Stages
@@ -22,8 +23,13 @@ module Hive
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
-        Hive::Stages::Base.spawn_agent(
-          task,
+        spawn_plan_agent(task, cfg, prompt, profile)
+        marker = Hive::Markers.current(task.state_file)
+        { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def spawn_plan_agent(task, cfg, prompt, profile)
+        kwargs = {
           prompt: prompt,
           add_dirs: [ task.folder ],
           cwd: task.folder,
@@ -31,12 +37,19 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
-          # Same rationale as brainstorm: plan's lifecycle contract is
-          # the marker the agent writes to plan.md, not an output file.
           status_mode: :state_file_marker
-        )
-        marker = Hive::Markers.current(task.state_file)
-        { commit: action_for(marker.name), status: marker.name }
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task),
+            allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       def action_for(marker_name)

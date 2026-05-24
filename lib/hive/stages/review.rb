@@ -3,7 +3,9 @@ require "fileutils"
 require "open3"
 require "time"
 require "hive/events"
+require "hive/config"
 require "hive/protected_files"
+require "hive/claude_launcher"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
@@ -11,6 +13,7 @@ require "hive/markers"
 require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
+require "hive/stages/review/orchestrator_owned"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/triage"
 require "hive/stages/review/browser_test"
@@ -52,12 +55,13 @@ module Hive
       FIX_PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
 
       # Filenames in `reviews/` that the orchestrator (not a reviewer)
-      # writes. Triage's `discover_reviewer_files` and the runner's
-      # max_review_pass / collect_accepted_findings / reviewer_sources_for
-      # all need to skip these — otherwise a `fix-guardrail-NN.md` user
-      # tick `[x]` would re-flow into the next pass's fix prompt and
-      # over-amplify guardrail findings.
-      ORCHESTRATOR_OWNED_PREFIXES = %w[escalations- ci-blocked browser- fix-guardrail- fix-success- errors-].freeze
+      # writes are listed in `Hive::Stages::Review::ORCHESTRATOR_OWNED_PREFIXES`
+      # (loaded from `orchestrator_owned.rb` so this list and Triage's
+      # consumer can never drift). Triage's `discover_reviewer_files`
+      # and the runner's max_review_pass / collect_accepted_findings /
+      # reviewer_sources_for all need to skip these — otherwise a
+      # `fix-guardrail-NN.md` user tick `[x]` would re-flow into the
+      # next pass's fix prompt and over-amplify guardrail findings.
       ESCALATION_Q_RE = /^\s*###\s+Q(\d+)\.\s*(.*?)\s*$/.freeze
       ESCALATION_A_RE = /^\s*###\s+A(\d+)\.\s*$/.freeze
 
@@ -71,13 +75,9 @@ module Hive
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
 
-      # True for filenames that originate from a reviewer (not the
-      # orchestrator). Used by every consumer of `reviews/*.md` so
-      # adding a new orchestrator-owned file family means changing this
-      # one constant.
-      def reviewer_file?(name)
-        ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
-      end
+      # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
+      # this module and `Review::Triage` share one definition. Re-export
+      # here as a class method so existing callers keep working.
 
       def fix_success_path(task_folder, pass)
         File.join(task_folder, fix_success_relative_path(pass))
@@ -553,16 +553,31 @@ module Hive
                           reason: "config_error",
                           message: e.message)
         raise
+      rescue Hive::AgentError => e
+        raise unless Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+
+        Hive::Markers.set(task.state_file, :review_error,
+                          phase: @current_phase || :pre_flight,
+                          reason: "tmux_unavailable",
+                          message: e.message)
+        { commit: "review_error_tmux_unavailable", status: :review_error }
       rescue StandardError => e
         # Any uncaught helper exception would otherwise leave a stale
         # REVIEW_WORKING marker on disk. Translate to REVIEW_ERROR with
         # the best-known phase so the user (and `hive run --json`) sees
         # the failure state, then re-raise so the runner / test suite
         # still surfaces the underlying bug.
+        #
+        # Truncate `e.message` to a bounded length: when a helper
+        # (e.g. `prepare_claude_session!`) raises with a pane-tail
+        # context, that tail is the single most actionable debug signal
+        # for the operator. Dropping the message entirely (the previous
+        # `exception_class`-only marker) silently hid it.
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "runner_exception",
-                          exception_class: e.class.name)
+                          exception_class: e.class.name,
+                          message: truncate_marker_message(e.message))
         raise
       ensure
         # Close the last open phase event on any exit path (return,
@@ -570,6 +585,17 @@ module Hive
         # stays balanced. Swallow failures here — a torn events file
         # must not mask the underlying control-flow result/exception.
         close_phase_event!(task) if @open_phase_event
+      end
+
+      # Marker attr values are scanned by `hive status --json` and read by
+      # the TUI; an unbounded multi-kilobyte tail in a single attr would
+      # break the line-oriented marker format. 500 bytes is the same cap
+      # `prepare_claude_session!` uses for its own tail capture.
+      def truncate_marker_message(message)
+        return "" if message.nil?
+
+        s = message.to_s
+        s.length <= 500 ? s : "#{s[0, 497]}..."
       end
 
       # --- helpers ---------------------------------------------------------
@@ -848,6 +874,10 @@ module Hive
         clear_reviewer_infra_errors(ctx)
 
         return :ok if specs.empty?
+        if started_at && max_wall_clock_sec &&
+           wall_clock_exceeded?(started_at, max_wall_clock_sec)
+          return :wall_clock_exceeded
+        end
 
         # Derive a monotonic deadline from the caller's wall-clock
         # budget so each reviewer's adapter
@@ -868,61 +898,142 @@ module Hive
         end
 
         statuses = []
-        specs.each do |spec|
-          if started_at && max_wall_clock_sec &&
-             wall_clock_exceeded?(started_at, max_wall_clock_sec)
-            return :wall_clock_exceeded
+        # Partition into claude-tmux specs vs everything else so the
+        # shared tmux session covers ONLY the group that needs it: a
+        # mixed reviewer list keeps non-claude reviewers running in
+        # parallel/headless and limits the session lifetime to the
+        # claude run — extra session-open cost was real (preflight +
+        # trust prompt + pane setup) for reviewers that did not consume it.
+        if shared_claude_reviewer_session?(cfg, specs)
+          claude_specs, other_specs = specs.partition { |spec| claude_tmux_reviewer?(cfg, spec) }
+
+          other_specs.each do |spec|
+            result = run_reviewer_spec(cfg, ctx, spec, deadline,
+                                       started_at: started_at,
+                                       max_wall_clock_sec: max_wall_clock_sec)
+            return :wall_clock_exceeded if result == :wall_clock_exceeded
+
+            statuses << result.status
+            handle_reviewer_result(task, cfg, ctx, spec, result)
           end
 
-          adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
-          # Wrap adapter.run! so a single reviewer raising (spawn-time
-          # SystemCallError, network timeout in a custom adapter, …)
-          # doesn't abort the whole reviewers phase. Treat as :error,
-          # record the failure in errors-NN.md, and continue with the
-          # next reviewer.
-          # Feature-detect whether the adapter accepts a `deadline:`
-          # kwarg via Method#parameters so we don't have to discriminate
-          # ArgumentError-by-message at the rescue site. The previous
-          # form (`rescue ArgumentError; adapter.run!`) silently swallowed
-          # real adapter bugs that happened to raise ArgumentError from
-          # the body (config parsing, Integer() coercion, etc.).
-          accepts_deadline = adapter.method(:run!).parameters.any? do |type, name|
-            name == :deadline && %i[key keyreq keyrest].include?(type)
-          end
-          result =
-            begin
-              if accepts_deadline
-                adapter.run!(deadline: deadline)
-              else
-                adapter.run!
-              end
-            rescue StandardError => e
-              Hive::Reviewers::Result.new(
-                name: spec["name"],
-                output_path: adapter.output_path,
-                status: :error,
-                error_message: "#{e.class}: #{e.message}"
-              )
+          Hive::ClaudeLauncher.with_shared_session(
+            task: task,
+            cfg: cfg,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{ctx.pass}", task),
+            cwd: ctx.worktree_path,
+            add_dirs: [ ctx.task_folder ],
+            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          ) do |handle|
+            claude_specs.each do |spec|
+              result = run_reviewer_spec(cfg, ctx, spec, deadline,
+                                         started_at: started_at,
+                                         max_wall_clock_sec: max_wall_clock_sec,
+                                         handle: handle)
+              return :wall_clock_exceeded if result == :wall_clock_exceeded
+
+              statuses << result.status
+              handle_reviewer_result(task, cfg, ctx, spec, result)
             end
-          statuses << result.status
+          end
+        else
+          specs.each do |spec|
+            result = run_reviewer_spec(cfg, ctx, spec, deadline,
+                                       started_at: started_at,
+                                       max_wall_clock_sec: max_wall_clock_sec)
+            return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-          if result.error?
-            # Guarantee the failed adapter leaves no reviewer file
-            # behind, even if the adapter
-            # raised (Agent#run!'s own final-failure cleanup doesn't
-            # run on the rescue path, and custom adapters may not
-            # implement it). Deleting unconditionally on the
-            # orchestrator side covers both paths uniformly.
-            output_path = result.output_path
-            File.delete(output_path) if output_path && File.exist?(output_path)
-
-            record_reviewer_infra_error(ctx, spec, result)
-          else
-            publish_review_file(task, cfg, ctx.pass, spec["name"] || result.name, result.output_path)
+            statuses << result.status
+            handle_reviewer_result(task, cfg, ctx, spec, result)
           end
         end
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)
+        if started_at && max_wall_clock_sec &&
+           wall_clock_exceeded?(started_at, max_wall_clock_sec)
+          return :wall_clock_exceeded
+        end
+
+        adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
+        # Wrap adapter.run! so a single reviewer raising (spawn-time
+        # SystemCallError, network timeout in a custom adapter, …)
+        # doesn't abort the whole reviewers phase. Treat as :error,
+        # record the failure in errors-NN.md, and continue with the
+        # next reviewer.
+        # pr-review-toolkit round-4 silent-failure-hunter C2 —
+        # feature-detect whether the adapter accepts a `deadline:`
+        # kwarg via Method#parameters so we don't have to discriminate
+        # ArgumentError-by-message at the rescue site. The previous
+        # form (`rescue ArgumentError; adapter.run!`) silently swallowed
+        # real adapter bugs that happened to raise ArgumentError from
+        # the body (config parsing, Integer() coercion, etc.).
+        accepts_deadline = adapter.method(:run!).parameters.any? do |type, name|
+          name == :deadline && %i[key keyreq keyrest].include?(type)
+        end
+        result =
+          begin
+            if handle
+              adapter.run_in_session!(handle: handle, deadline: deadline)
+            elsif accepts_deadline
+              adapter.run!(deadline: deadline)
+            else
+              adapter.run!
+            end
+          rescue Hive::AgentError => e
+            # R7: tmux unavailable is a hard-fail for `claude.mode: tmux`,
+            # not a per-reviewer infra error. Re-raise so the outer
+            # `Stages::Review.run!` rescue lands the dedicated
+            # `:review_error reason="tmux_unavailable"` marker instead
+            # of recording N per-reviewer errors-NN.md lines and an
+            # `:all_failed` envelope.
+            raise if Hive::ClaudeLauncher.tmux_unavailable_error?(e)
+
+            Hive::Reviewers::Result.new(
+              name: spec["name"],
+              output_path: adapter.output_path,
+              status: :error,
+              error_message: "#{e.class}: #{e.message}"
+            )
+          rescue StandardError => e
+            Hive::Reviewers::Result.new(
+              name: spec["name"],
+              output_path: adapter.output_path,
+              status: :error,
+              error_message: "#{e.class}: #{e.message}"
+            )
+          end
+        result
+      end
+
+      def handle_reviewer_result(task, cfg, ctx, spec, result)
+        if result.error?
+          # ce-review round-3 P2 #6 — guarantee the failed adapter
+          # leaves no reviewer file behind, even if the adapter
+          # raised (Agent#run!'s own final-failure cleanup doesn't
+          # run on the rescue path, and custom adapters may not
+          # implement it). Deleting unconditionally on the
+          # orchestrator side covers both paths uniformly.
+          output_path = result.output_path
+          File.delete(output_path) if output_path && File.exist?(output_path)
+
+          record_reviewer_infra_error(ctx, spec, result)
+        else
+          publish_review_file(task, cfg, ctx.pass, spec["name"] || result.name, result.output_path)
+        end
+      end
+
+      def shared_claude_reviewer_session?(cfg, specs)
+        Hive::Config.claude_mode(cfg) == :tmux &&
+          specs.any? { |spec| claude_tmux_reviewer?(cfg, spec) }
+      end
+
+      def claude_tmux_reviewer?(cfg, spec)
+        Hive::Config.claude_mode(cfg) == :tmux &&
+          (spec["kind"] || "agent").to_s == "agent" &&
+          spec["agent"].to_s == "claude"
       end
 
       # NOTE: no outer rescue here — `GithubPublisher.publish!` has
@@ -1172,8 +1283,7 @@ module Hive
           )
         )
 
-        Hive::Stages::Base.spawn_agent(
-          task,
+        kwargs = {
           prompt: prompt,
           add_dirs: [ ctx.task_folder ],
           cwd: ctx.worktree_path,
@@ -1182,7 +1292,18 @@ module Hive
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           status_mode: :exit_code_only
-        )
+        }
+        if profile.name == :claude
+          Hive::Stages::Base.spawn_claude!(
+            task,
+            cfg,
+            **kwargs,
+            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task),
+            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          )
+        else
+          Hive::Stages::Base.spawn_agent(task, **kwargs)
+        end
       end
 
       # The triage bias configured for this run, surfaced into commit

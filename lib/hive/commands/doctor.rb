@@ -6,8 +6,7 @@ require "hive/agent_profiles"
 require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
-require "hive/stages/brainstorm"
-require "hive/stages/brainstorm_tmux"
+require "hive/claude_launcher"
 
 module Hive
   module Commands
@@ -53,7 +52,7 @@ module Hive
       end
 
       def call
-        @rows = check_tmux + check_stages + check_reviewers
+        @rows = check_tmux + check_legacy_brainstorm_runtime + check_stages + check_reviewers
         if @json
           @output.puts JSON.generate(envelope(@rows))
         else
@@ -81,16 +80,16 @@ module Hive
       end
 
       def check_tmux
-        return [] unless Hive::Stages::Brainstorm.runtime_for(@config) == :tmux_interactive
+        return [] unless Hive::Config.claude_mode(@config) == :tmux
 
-        status, message = Hive::Stages::BrainstormTmux.tmux_status
+        status, message = Hive::ClaudeLauncher.tmux_status
         rows = [
           {
             kind: "dependency",
-            stage: "2-brainstorm",
-            label: "2-brainstorm/tmux",
+            stage: "claude",
+            label: "claude/tmux",
             agent: "tmux",
-            configured_skill: "tmux >= #{Hive::Stages::BrainstormTmux::MIN_TMUX_VERSION}",
+            configured_skill: "tmux >= #{Hive::ClaudeLauncher::MIN_TMUX_VERSION}",
             skill: "tmux",
             status: status.to_s,
             message: message
@@ -100,34 +99,92 @@ module Hive
         rows
       end
 
+      def check_legacy_brainstorm_runtime
+        rows = []
+        if config_yml_unreadable?
+          rows << warning_row(
+            stage: "2-brainstorm",
+            label: ".hive-state/config.yml",
+            agent: "config",
+            configured_skill: "config.yml",
+            skill: ".hive-state/config.yml",
+            message: "could not parse .hive-state/config.yml (#{@config_yml_error}); " \
+                     "any brainstorm.runtime → claude.mode migration warning is suppressed " \
+                     "until the file parses cleanly"
+          )
+          return rows
+        end
+
+        return rows unless legacy_brainstorm_runtime_present?
+
+        rows << warning_row(
+          stage: "2-brainstorm",
+          label: "2-brainstorm/brainstorm.runtime",
+          agent: "claude",
+          configured_skill: "brainstorm.runtime",
+          skill: "claude.mode",
+          message: "brainstorm.runtime is superseded by claude.mode (project-global); " \
+                   "migrate by adding the following YAML and removing the brainstorm.runtime key:\n" \
+                   "  claude:\n    mode: tmux"
+        )
+        rows
+      end
+
+      def legacy_brainstorm_runtime_present?
+        return true if Hive::Config.explicit_brainstorm_runtime?(@config)
+
+        return false unless @project_root
+
+        path = File.join(@project_root, ".hive-state", "config.yml")
+        return false unless File.exist?(path)
+
+        raw = YAML.safe_load(File.read(path)) || {}
+        Hive::Config.nested_key?(raw, "brainstorm", "runtime")
+      rescue Psych::SyntaxError, Errno::ENOENT
+        false
+      end
+
+      # Detect a config.yml that cannot be loaded (corrupt YAML, perms,
+      # etc.) and remember the underlying error message so the operator
+      # sees a row explaining why doctor cannot evaluate the migration
+      # warning. Without this, a corrupt config.yml silently hid the
+      # legacy_brainstorm_runtime warning AND any other config-derived
+      # check that depends on the file.
+      def config_yml_unreadable?
+        return @config_yml_unreadable unless @config_yml_unreadable.nil?
+
+        @config_yml_unreadable =
+          if @project_root
+            path = File.join(@project_root, ".hive-state", "config.yml")
+            if File.exist?(path)
+              begin
+                YAML.safe_load(File.read(path))
+                false
+              rescue Psych::SyntaxError, Errno::EACCES, Errno::EISDIR => e
+                @config_yml_error = "#{e.class.name.split('::').last}: #{e.message}"
+                true
+              end
+            else
+              false
+            end
+          else
+            false
+          end
+      end
+
       # Operator-visible warnings for the tmux runtime. Each warning is a
       # `kind: "warning"` row — it does NOT contribute to the missing-skill
       # exit code, but renders in the human table with a "!" marker and in
-      # the JSON envelope under `summary.warning`. Two checks today:
+      # the JSON envelope under `summary.warning`.
       #
-      #   1. `brainstorm.agent` ≠ claude — the tmux runtime hardcodes claude
-      #      at the wrapper level (`interactive_claude_wrapper.sh`), so a
-      #      project that picked codex/pi for brainstorm would get a green
-      #      doctor and then fail on the first tmux run with a missing
-      #      claude install.
-      #
-      #   2. `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` exported — the wrapper
-      #      unsets these before exec'ing claude, but a parent shell that
-      #      exports either still implies the operator may be confused
-      #      about the billing-auth boundary. Surface the boundary loudly.
+      # Currently surfaces a single check: when the parent shell exports
+      # `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY`. The tmux wrapper unsets
+      # both before exec'ing claude, but an exported value at this scope
+      # hints the operator may be confused about the billing-auth
+      # boundary — flag it loudly so OAuth/subscription vs API-key
+      # billing intent is explicit.
       def tmux_runtime_warnings
         warnings = []
-        agent_name = (@config.dig("brainstorm", "agent") || "claude").to_s
-        if agent_name != "claude"
-          warnings << warning_row(
-            label: "2-brainstorm/tmux",
-            agent: agent_name,
-            configured_skill: "brainstorm.agent",
-            skill: agent_name,
-            message: "brainstorm.runtime=tmux_interactive hardcodes the claude binary, " \
-                     "but brainstorm.agent=#{agent_name}; the tmux run will try to launch claude regardless"
-          )
-        end
 
         leaked = %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].select { |k| ENV[k] && !ENV[k].empty? }
         unless leaked.empty?
@@ -136,7 +193,8 @@ module Hive
           # billing-auth boundary, not tmux itself. Labelling this as a
           # "tmux warning" misreads the actual subject.
           warnings << warning_row(
-            label: "2-brainstorm/tmux",
+            stage: "claude",
+            label: "claude/tmux",
             agent: "claude",
             configured_skill: "billing-auth",
             skill: leaked.join(","),
@@ -148,10 +206,10 @@ module Hive
         warnings
       end
 
-      def warning_row(label:, agent:, configured_skill:, skill:, message:)
+      def warning_row(label:, agent:, configured_skill:, skill:, message:, stage: "claude")
         {
           kind: "warning",
-          stage: "2-brainstorm",
+          stage: stage,
           label: label,
           agent: agent,
           configured_skill: configured_skill,

@@ -181,7 +181,7 @@ class HiveTuiModelTest < Minitest::Test
 
   def test_red_status_detail_state_defaults_log_snapshot_fields
     row = Object.new
-    state = Hive::Tui::Model::RedStatusDetailState.new(row: row, marker_signature: "sig")
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
 
     assert_nil state.log_path
     assert_equal [], state.log_lines

@@ -82,15 +82,17 @@ class TuiHelpTest < Minitest::Test
     assert_match(/MANUAL_STEERING/, entry[:description])
   end
 
-  def test_red_status_detail_mode_pins_two_action_contract
+  def test_red_status_detail_mode_pins_action_and_scroll_contract
     # Pin the operator-visible contract for red_status_detail mode:
-    # exactly Enter / o / q / Esc — and the removed [f] / [R] bindings
-    # must NOT come back without an explicit help-overlay update.
+    # Enter / o / q / Esc plus the scroll-only log-preview bindings.
+    # The removed [f] / [R] bindings must NOT come back without an
+    # explicit help-overlay update.
     entries = Hive::Tui::Help::BINDINGS.select { |b| b[:mode] == :red_status_detail }
     keys = entries.map { |b| b[:key] }
 
-    assert_equal %w[Enter o q Esc].sort, keys.sort,
-                 "red_status_detail mode must expose exactly Enter / o / q / Esc"
+    expected_keys = %w[Enter o q Esc Up Down PgUp PgDn Home End]
+    assert_equal expected_keys.sort, keys.sort,
+                 "red_status_detail mode must expose recovery, close, and log scroll keys"
 
     enter = entries.find { |b| b[:key] == "Enter" }
     assert_equal :recover, enter[:action]

@@ -18,7 +18,7 @@ module Hive
         @now = now
         @bot_config = default_bot_config.merge(bot_config || {})
         @telegram = telegram || Hive::Eval::FakeTelegram.new(now: -> { current_time })
-        @logger = logger || NullLogger.new
+        @logger = logger || Hive::Eval::CapturingLogger.new(now: -> { current_time })
         @status_watcher = status_watcher || QueueStatusWatcher.new
         @child_supervisor = child_supervisor || NullChildSupervisor.new
         @conversation_store = conversation_store ||
@@ -151,11 +151,6 @@ module Hive
           message.source = :status_row
           message.row = row
         end
-      end
-
-      class NullLogger
-        def event(_name, **_attrs); end
-        def close; end
       end
 
       class QueueStatusWatcher

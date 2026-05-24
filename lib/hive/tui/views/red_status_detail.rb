@@ -50,9 +50,9 @@ module Hive
           body = Lipgloss.join_vertical(Lipgloss::TOP, *visible)
           panel = if bordered
                     Styles::PANE_FOCUSED_BORDER.width(inner_width).render(body)
-                  else
+          else
                     body
-                  end
+          end
 
           Lipgloss.join_vertical(Lipgloss::TOP, header_bar(row, header_width), panel)
         end
@@ -199,7 +199,7 @@ module Hive
 
         def clamp_log_offset(offset, line_count, capacity)
           max = [ line_count - capacity, 0 ].max
-          [[ offset.to_i, 0 ].max, max].min
+          [ [ offset.to_i, 0 ].max, max ].min
         end
 
         def artifacts_block(row, width)

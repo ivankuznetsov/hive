@@ -738,7 +738,7 @@ module Hive
           state.log_scroll_offset.to_i
         end
         max_offset = [ lines.length - capacity, 0 ].max
-        clamped = [[ next_offset, 0 ].max, max_offset].min
+        clamped = [ [ next_offset, 0 ].max, max_offset ].min
         return model if clamped == state.log_scroll_offset
 
         model.with(red_status_detail_state: state.with(log_scroll_offset: clamped))

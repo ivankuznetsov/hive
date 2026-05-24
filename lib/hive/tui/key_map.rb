@@ -326,12 +326,12 @@ module Hive
       # `:red_status_detail` scroll bindings — mirror of `VERB_KEYS`
       # style so the scroll surface reads as one frozen table.
       RED_STATUS_DETAIL_SCROLL_KEYS = {
-        :key_up   => [ :up,   1 ],
-        :key_down => [ :down, 1 ],
-        :key_pgup => [ :up,   10 ],
-        :key_pgdn => [ :down, 10 ],
-        :key_home => [ :up,   SCROLL_TO_EDGE ],
-        :key_end  => [ :down, SCROLL_TO_EDGE ]
+        key_up: [ :up,   1 ],
+        key_down: [ :down, 1 ],
+        key_pgup: [ :up,   10 ],
+        key_pgdn: [ :down, 10 ],
+        key_home: [ :up,   SCROLL_TO_EDGE ],
+        key_end: [ :down, SCROLL_TO_EDGE ]
       }.freeze
 
       def red_status_detail_message(key:, row:)

@@ -61,7 +61,7 @@ module Hive
       end
 
       def log_height_budget(available_rows)
-        [[ available_rows - 2, MIN_LOG_PANEL_ROWS ].max, MAX_LOG_PANEL_ROWS ].min
+        [ [ available_rows - 2, MIN_LOG_PANEL_ROWS ].max, MAX_LOG_PANEL_ROWS ].min
       end
     end
   end

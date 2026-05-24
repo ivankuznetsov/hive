@@ -822,7 +822,6 @@ class TuiKeyMapMessageForTest < Minitest::Test
       Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "j", row: row)
     assert_same Hive::Tui::Messages::NOOP,
       Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "k", row: row)
-
   end
 
   def test_enter_on_needs_input_opens_input_editor_when_command_present

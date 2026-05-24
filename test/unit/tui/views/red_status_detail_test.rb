@@ -368,9 +368,9 @@ def test_recover_execute_rows_still_show_two_actions_with_enter_affordance
 end
 
 def test_recover_review_row_shows_enter_affordance
-  # Positive pin for the unified [Enter] Recover contract — paired
-  # with test_recover_execute_rows_still_show_two_actions_with_enter_affordance
-  # so a future split-by-action_key regression breaks both tests.
+    # Positive pin for the unified [Enter] Recover contract — paired
+    # with test_recover_execute_rows_still_show_two_actions_with_enter_affordance
+    # so a future split-by-action_key regression breaks both tests.
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
 
     assert_includes output, "[Enter] Recover"

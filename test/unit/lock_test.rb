@@ -32,6 +32,10 @@ class LockTest < Minitest::Test
         writer.close
         sleep 5
       end
+      # Detach immediately so the child is reaped even if the test body
+      # raises before reaching the ensure block - prevents a zombie if
+      # acquire_task_lock or the IO.pipe handshake fails unexpectedly.
+      Process.detach(child)
       writer.close
       assert_equal "ready\n", reader.gets
       reader.close
@@ -42,8 +46,11 @@ class LockTest < Minitest::Test
       assert_raises(Hive::ConcurrentRunError) { Hive::Lock.acquire_task_lock(dir) }
     ensure
       if child
-        Process.kill("KILL", child)
-        Process.wait(child)
+        begin
+          Process.kill("KILL", child)
+        rescue Errno::ESRCH
+          # Already gone.
+        end
       end
       Hive::Lock.release_task_lock(dir)
     end
@@ -270,11 +277,4 @@ class LockTest < Minitest::Test
     end
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, original) if original
-  end
 end

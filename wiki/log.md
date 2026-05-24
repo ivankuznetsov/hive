@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-23T11:30:00Z] drop — pass-1 + pass-2 review-finding fixes hardened hard-delete
+
+**Action:** Recorded the two follow-up fix passes against `hive drop` after the initial feat/U1+U3 commit. Pass-1 (24 findings) and pass-2 (48 findings) tightened idempotency, PID-reuse safety, locale-stable git stderr parsing, worktree-pointer root validation, malformed-YAML rescue in `Worktree.read_pointer`, daemon-row `folder_missing_nil` distinction, and a closed `commit_action` enum on the drop schema. The `9-done` refusal prose in [[commands/drop]] was folded into the refusals-table caption. [[cli]] is already in sync (drop row + exit-code/`--json` envelope row). Schema enum + `holder`/`lock_path` extras were aligned with `DropErrorKind` during pass-1.
+
+**Refreshed pages:**
+- [[commands/drop]] — refusal prose tightened around the table; no surface change to flags, exits, or JSON keys (those were correct from feat commit).
+
 ## [2026-05-23T09:45:00Z] readme - add daemon-first TUI getting started
 
 **Action:** Reworked the README quickstart into a five-minute TUI getting-started path before the Telegram section. The happy path now explains that the daemon advances ready tasks automatically while the TUI is for watching the queue, capturing a rough idea, and answering waiting prompts. Manual stage keys are framed as power-user controls, not the day-one flow.

@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   test:
-    name: rake test (Ruby ${{ matrix.ruby }})
+    name: rake coverage (Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -28,8 +28,8 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
-      - name: Run minitest suite
-        run: bundle exec rake test
+      - name: Run coverage-gated minitest suite
+        run: bundle exec rake coverage
 
   rubocop:
     name: rubocop (37signals omakase)

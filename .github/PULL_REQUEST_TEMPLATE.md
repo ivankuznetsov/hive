@@ -5,7 +5,7 @@
 ## Test plan
 
 <!-- Bulleted checklist a reviewer can run.
-- [ ] `bundle exec rake test` green
+- [ ] `bundle exec rake coverage` green
 - [ ] `bundle exec rubocop` green
 - [ ] new behavior covered by unit + integration test
 - [ ] manual: `hive init` / `hive new` / `mv` / `hive run` smoke against a real project (if applicable)

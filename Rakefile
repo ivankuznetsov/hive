@@ -1,5 +1,7 @@
 require "rake/testtask"
 require "fileutils"
+require "securerandom"
+require_relative "test/support/coverage"
 
 # Default suite — everything under test/{unit,integration}. Self-contained,
 # uses fake-claude / fake-gh, no network or paid API calls.
@@ -10,15 +12,29 @@ Rake::TestTask.new do |t|
   t.warning = false
 end
 
-desc "Run the default suite with stdlib Coverage over lib/**/*.rb"
+desc "Run the default suite with stdlib Coverage over lib/**/*.rb and enforce 100% line coverage"
 task :coverage do
   root = File.expand_path(__dir__)
-  FileUtils.rm_rf(File.join(root, "coverage", ".resultset"))
-  ENV["HIVE_COVERAGE"] = "1"
-  ENV["HIVE_COVERAGE_ROOT"] = root
-  coverage_rubyopt = "-I#{File.join(root, "test")} -rhive_coverage_boot"
-  ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
-  Rake::Task[:test].invoke
+  run_id = "#{Process.pid}-#{SecureRandom.hex(4)}"
+  report_path = File.join(root, "coverage", "coverage.json")
+  env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+  old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
+
+  begin
+    FileUtils.rm_rf(File.join(root, "coverage", ".resultset", run_id))
+    FileUtils.rm_f(report_path)
+    ENV["HIVE_COVERAGE"] = "1"
+    ENV["HIVE_COVERAGE_ROOT"] = root
+    ENV["HIVE_COVERAGE_RUN_ID"] = run_id
+    coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
+    ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
+
+    Rake::Task[:test].invoke
+    report = HiveTestCoverage.read_report(report_path)
+    abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
+  ensure
+    old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
 end
 
 # Smoke suite — opt-in, runs against real `claude` and a tmp git repo. Costs

@@ -104,6 +104,31 @@ module Hive
                      "#{harness.sent.map(&:text).inspect}"
       end
 
+      def assert_judge_rubric_passes(rubric:, text:)
+        verdict = if ENV["HIVE_EVAL_NO_JUDGE"] == "1"
+                    Hive::Eval::CodexJudge::Verdict.new(
+                      pass: true,
+                      score: nil,
+                      reason: "skipped by --no-judge",
+                      transcript: "",
+                      model_used: nil,
+                      skipped: true
+                    )
+                  else
+                    Hive::Eval::CodexJudge.new(rubric: rubric).verdict(text: text)
+                  end
+        eval_assertions << {
+          kind: "judge",
+          reason: "rubric",
+          expected: rubric,
+          actual: { pass: verdict.pass, score: verdict.score, reason: verdict.reason, skipped: verdict.skipped },
+          passed: verdict.pass,
+          judge_transcript: verdict.transcript
+        }
+        assert verdict.pass, "judge failed: score=#{verdict.score.inspect} reason=#{verdict.reason}"
+        verdict
+      end
+
       def eval_assertions
         @hive_eval_assertions
       end

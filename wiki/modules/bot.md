@@ -57,6 +57,10 @@ inserts the literal confirmed text. Two devices racing the same question
 therefore produce one answer and one "already answered" reply, not a
 merged or overwritten block.
 
+## Eval harness
+
+`test/eval/` exercises this module through the same supervisor entrypoints production uses, with only Telegram and child-process I/O replaced by in-process fakes. The harness classifies outbound messages into the eval contract reasons (`agent_blocked_question`, `status_response`, `task_finished`, `fatal_error`) from observable status rows, handler intents, and child exits. That mapping stays test-only; production bot payloads are unchanged.
+
 ## Backlinks
 
 - [[commands/bot]]

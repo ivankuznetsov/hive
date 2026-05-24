@@ -176,11 +176,4 @@ class AgentProfileTest < Minitest::Test
     assert overridden.frozen?
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, &original)
-  end
 end

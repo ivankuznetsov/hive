@@ -847,17 +847,4 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal [ 0.5 ], sleeps
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    singleton = class << receiver; self; end
-    had_method = singleton.method_defined?(name) || singleton.private_method_defined?(name)
-    original = receiver.method(name) if had_method
-    singleton.define_method(name, replacement)
-    yield
-  ensure
-    if had_method
-      singleton.define_method(name, original)
-    else
-      singleton.remove_method(name) if singleton.method_defined?(name) || singleton.private_method_defined?(name)
-    end
-  end
 end

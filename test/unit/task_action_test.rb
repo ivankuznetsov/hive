@@ -9,6 +9,8 @@ require "hive/markers"
 # grouping and `next_action.command` strings emitted by every other
 # command, so a typo in ACTIONS would silently misroute agents.
 class TaskActionTest < Minitest::Test
+  include HiveTestHelper
+
   Marker = Hive::Markers::State
   FakeTask = Struct.new(
     :stage_name, :stage_index, :slug, :project_root, :project_name, :folder, :state_file,
@@ -1301,11 +1303,4 @@ class TaskActionTest < Minitest::Test
     File.define_singleton_method(:realpath, original_realpath) if original_realpath
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, original) if original
-  end
 end

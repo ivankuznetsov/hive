@@ -69,13 +69,6 @@ class HiveCommandsBotTest < Minitest::Test
     File.write(command.pid_file, { "pid" => pid, "started_at" => started_at }.to_yaml)
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, original) if original
-  end
 
   def test_call_routes_start_and_tail_subcommands
     routed = []

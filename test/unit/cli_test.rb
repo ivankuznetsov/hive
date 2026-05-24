@@ -30,13 +30,6 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, original) if original
-  end
 
   def with_command_new_stub(klass, return_value: true)
     calls = []

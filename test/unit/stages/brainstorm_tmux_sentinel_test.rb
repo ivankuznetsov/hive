@@ -403,14 +403,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
   private
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.singleton_class.instance_method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.singleton_class.send(:define_method, name, original) if original
-  end
-
   def fake_status(success:, exitstatus:)
     Struct.new(:success_value, :exitstatus) do
       def success?

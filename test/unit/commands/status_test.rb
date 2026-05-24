@@ -200,13 +200,4 @@ class CommandsStatusTest < Minitest::Test
 
   private
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name) do |*args, **kwargs, &block|
-      original.call(*args, **kwargs, &block)
-    end
-  end
 end

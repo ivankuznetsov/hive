@@ -21,6 +21,8 @@ require "hive/task_action"
 #     artifact write instead of describing the stale state
 #   * marker_signature wire-compatible with TaskAction (canonical impl)
 class DiagnosisAgentTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(
     :slug, :stage_name, :stage_index, :folder, :state_file,
     :project_root, :worktree_path,
@@ -798,11 +800,4 @@ class FakeStdin
   end
 end
 
-def with_replaced_singleton_method(receiver, name, replacement)
-  original = receiver.method(name)
-  receiver.define_singleton_method(name, &replacement)
-  yield
-ensure
-  receiver.define_singleton_method(name, original) if original
-end
 end

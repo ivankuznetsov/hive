@@ -48,13 +48,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     }
   end
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, original) if original
-  end
 
   def test_start_daemon_writes_pid_loads_global_config_runs_dispatcher_and_cleans_pid
     command = daemon("start", dry_run: true)

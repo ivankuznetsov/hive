@@ -65,6 +65,19 @@ FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze
 
+  # Temporarily replace `receiver.name` with `replacement` for the duration
+  # of the block; restore the original singleton method in `ensure`. Used
+  # to stub module-level methods like `Hive::Gh.push_branch!` or class
+  # methods like `Hive::Lock.process_start_time` without reaching for a
+  # mocking library. Both name forms work: pass a lambda or a method object.
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
+  end
+
   def with_env(overrides)
     old = overrides.keys.to_h { |key| [ key, ENV.key?(key) ? ENV[key] : UNSET_ENV ] }
     overrides.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }

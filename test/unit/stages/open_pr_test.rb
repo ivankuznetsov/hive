@@ -7,13 +7,6 @@ class HiveStagesOpenPrTest < Minitest::Test
   Task = Struct.new(:folder, :state_file, :project_root, :slug, keyword_init: true)
   Scan = Struct.new(:fetch_failed, :fetch_error, :hits, keyword_init: true)
 
-  def with_replaced_singleton_method(receiver, name, replacement)
-    original = receiver.method(name)
-    receiver.define_singleton_method(name, &replacement)
-    yield
-  ensure
-    receiver.define_singleton_method(name, original) if original
-  end
 
   def make_task(root)
     folder = File.join(root, ".hive-state", "stages", "5-open-pr", "open-pr-task")

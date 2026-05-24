@@ -236,7 +236,7 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
                     "active flash must surface on the detail screen so refusal hints are observable"
   end
 
-  def test_unknown_action_explains_that_no_autofix_is_available
+  def test_unknown_action_still_offers_recover_and_open_agent
     unknown_row = Hive::Tui::Snapshot::Row.new(
       project_name: "alpha", stage: "9-archive", slug: "red-task",
       folder: "/tmp/red-task", state_file: "/tmp/red-task/task.md",
@@ -248,8 +248,9 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
 
     output = Hive::Tui::Views::RedStatusDetail.render(model_for(unknown_row))
 
-    assert_includes output, "This row has no autofix action in the detail view."
-    refute_includes output, "[Enter] autofix / retry"
-    assert_includes output, "[f] manual fix"
+    assert_includes output, "[Enter] Recover"
+    assert_includes output, "[o]     Open in agent"
+    assert_includes output, "Hive does not have a diagnosis yet"
+    refute_includes output, "[f] manual fix"
   end
 end

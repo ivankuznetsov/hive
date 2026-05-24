@@ -410,26 +410,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "no spurious blank flash row when flash is nil")
   end
 
-  def test_view_renders_triage_mode
-    finding = Hive::Findings::Finding.new(
-      id: 1, severity: "high", accepted: false,
-      title: "Fix issue", justification: "because it matters", line_index: 1
-    )
-    state = Hive::Tui::TriageState.new(
-      slug: "some-slug", folder: "/tmp/some-slug",
-      findings: [ finding ], review_path: "/tmp/ce-review-01.md"
-    )
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
-      dispatch: @dispatch
-    )
-
-    out = @model.view
-
-    assert_includes out, "ce-review-01.md"
-    assert_includes out, "#1 Fix issue"
-  end
-
   def test_view_renders_log_tail_mode
     tail_state = Struct.new(:path, :claude_pid_alive) do
       def lines(count)
@@ -455,9 +435,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       action_key: "error", action_label: "Error", marker: "error",
       attrs: { "exit_code" => "1" }
     )
-    state = Hive::Tui::Model::RedStatusDetailState.new(
-      row: row, marker_signature: "error:1"
-    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
         mode: :red_status_detail,
@@ -470,7 +448,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     out = @model.view
 
-    assert_includes out, "Red status"
+    assert_includes out, "Task needs attention"
     assert_includes out, "some-slug"
     assert_includes out, "Project: demo"
   end
@@ -1752,83 +1730,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_nil @model.hive_model.new_idea_staging_dir
       assert_equal "new_idea_staging", logs.dig(0, 0)
       assert_match(/ensure cleanup: Errno::EACCES/, logs.dig(0, 1).to_s)
-    end
-  end
-
-  def test_open_findings_enters_triage_from_review_file
-    with_tmp_dir do |project_root|
-      folder = File.join(project_root, ".hive-state", "stages", "4-execute", "review-me")
-      reviews_dir = File.join(folder, "reviews")
-      FileUtils.mkdir_p(reviews_dir)
-      review_path = File.join(reviews_dir, "ce-review-01.md")
-      write_review_doc(review_path)
-      row = make_task_row(
-        action_key: "review_findings", slug: "review-me", stage: "4-execute", folder: folder
-      )
-
-      @model.update(Hive::Tui::Messages::OpenFindings.new(row: row))
-
-      assert_equal :triage, @model.hive_model.mode
-      assert_equal "review-me", @model.hive_model.triage_state.slug
-      assert_equal review_path, @model.hive_model.triage_state.review_path
-      assert_equal 1, @model.hive_model.triage_state.findings.size
-    end
-  end
-
-  def test_triage_toggle_and_bulk_actions_use_captured_state
-    with_tmp_dir do |dir|
-      review_path = File.join(dir, "ce-review-01.md")
-      document = write_review_doc(review_path)
-      state = Hive::Tui::TriageState.new(
-        slug: "some-slug", folder: dir,
-        findings: document.findings, review_path: review_path
-      )
-      @model = Hive::Tui::BubbleModel.new(
-        hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
-        dispatch: @dispatch
-      )
-      row = make_task_row(slug: "some-slug", folder: dir)
-      calls = []
-
-      with_run_quiet_stub(->(argv) { calls << argv; [ 0, "", "" ] }) do
-        @model.update(Hive::Tui::Messages::ToggleFinding.new(row: row))
-        @model.update(Hive::Tui::Messages::BULK_ACCEPT)
-        @model.update(Hive::Tui::Messages::BULK_REJECT)
-      end
-
-      assert_equal(
-        [
-          [ "hive", "accept-finding", dir, "1" ],
-          [ "hive", "accept-finding", dir, "--all" ],
-          [ "hive", "reject-finding", dir, "--all" ]
-        ],
-        calls
-      )
-    end
-  end
-
-  def test_triage_develop_dispatches_captured_state_command
-    with_tmp_dir do |dir|
-      review_path = File.join(dir, "ce-review-01.md")
-      document = write_review_doc(review_path)
-      state = Hive::Tui::TriageState.new(
-        slug: "some-slug", folder: dir,
-        findings: document.findings, review_path: review_path
-      )
-      @model = Hive::Tui::BubbleModel.new(
-        hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
-        dispatch: @dispatch
-      )
-      @model.define_singleton_method(:verb_interactive?) { |_verb| false }
-      calls = []
-
-      with_dispatch_background_stub(->(argv, **_kwargs) { calls << argv; nil }) do
-        _, cmd = @model.update(Hive::Tui::Messages::TRIAGE_DEVELOP)
-        assert_nil cmd
-      end
-
-      assert_equal [ [ "hive", "develop", dir, "--from", "4-execute" ] ], calls
-      assert_match(/running `hive develop /, @model.hive_model.flash.to_s)
     end
   end
 
@@ -5928,17 +5829,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_stage66_open_handlers_flash_for_missing_resources
-    with_tmp_dir do |project_root|
-      folder = File.join(project_root, ".hive-state", "stages", "4-execute", "missing-review")
-      FileUtils.mkdir_p(folder)
-      row = make_task_row(action_key: "review_findings", slug: "missing-review", stage: "4-execute", folder: folder)
-
-      _, cmd = @model.update(Hive::Tui::Messages::OpenFindings.new(row: row))
-
-      assert_nil cmd
-      assert_match(/no review file for missing-review/, @model.hive_model.flash.to_s)
-    end
-
     bad_row = make_task_row(action_key: "agent_running", slug: "bad-log", folder: "/tmp/not-a-task")
     _, cmd = @model.update(Hive::Tui::Messages::OpenLogTail.new(row: bad_row))
 
@@ -6120,7 +6010,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     $stdout = original_stdout if original_stdout
   end
 
-  def test_stage66_log_tail_and_triage_failure_helpers
+  def test_stage66_log_tail_helper_wraps_tail_state
     tail = Struct.new(:path) do
       def lines(_count)
         [ "raw log\n" ]
@@ -6130,35 +6020,6 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
     assert_equal "/tmp/hive.log", wrapper.path
     assert_equal [ "raw log\n" ], wrapper.lines(1)
-
-    state = Object.new
-    state.define_singleton_method(:current_finding) { :finding }
-    state.define_singleton_method(:toggle_command) { |_finding| [ "hive", "accept-finding", "/tmp/task", "1" ] }
-    @model = Hive::Tui::BubbleModel.new(
-      hive_model: Hive::Tui::Model.initial.with(mode: :triage, triage_state: state),
-      dispatch: @dispatch
-    )
-    with_run_quiet_stub(->(_argv) { [ 1, "", "toggle broke\n" ] }) do
-      _, cmd = @model.update(Hive::Tui::Messages::ToggleFinding.new(row: make_task_row))
-
-      assert_nil cmd
-      assert_match(/toggle failed: toggle broke/, @model.hive_model.flash.to_s)
-    end
-
-    state.define_singleton_method(:bulk_command) { |_direction| [ "hive", "accept-finding", "/tmp/task", "--all" ] }
-    with_run_quiet_stub(->(_argv) { [ 2, "", "bulk broke\n" ] }) do
-      _, cmd = @model.update(Hive::Tui::Messages::BULK_ACCEPT)
-
-      assert_nil cmd
-      assert_match(/accept failed: bulk broke/, @model.hive_model.flash.to_s)
-    end
-
-    missing_state = Struct.new(:review_path).new("/tmp/missing-review.md")
-    model, cmd = @model.send(:reload_findings_into_state, missing_state, nil)
-
-    assert_nil cmd
-    assert_equal :grid, model.mode
-    assert_match(/review file gone/, model.flash.to_s)
   end
 
   def test_stage66_attachment_and_scope_helpers_cover_defensive_paths

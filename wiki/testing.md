@@ -25,6 +25,8 @@ The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch c
 
 `bundle exec rake coverage` is the CI coverage-report path. It fails when an executable source file was never loaded or when a subprocess result file cannot be read. Set `HIVE_COVERAGE_MIN_LINE` (for example `100`) to enforce a minimum line-coverage percentage.
 
+In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Coverage also reloads `lib/hive.rb`, so self-derived enum constants must exclude `:ALL` to stay reload-safe.
+
 `Rakefile`:
 ```ruby
 Rake::TestTask.new do |t|

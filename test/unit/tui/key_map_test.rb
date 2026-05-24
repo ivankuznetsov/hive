@@ -772,7 +772,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
                    marker: "error", attrs: {}, suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "r", row: row)
     assert_kind_of Hive::Tui::Messages::Flash, msg
-    assert_match(/grid-mode only/, msg.text)
+    assert_equal "press Enter to recover, o to open in agent, Esc or q to close", msg.text
   end
 
   def test_red_status_detail_unknown_key_returns_noop

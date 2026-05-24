@@ -1836,3 +1836,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[testing]] — documented the configurable line coverage threshold, per-run resultset directory, and unloaded/result-error failure modes.
+
+## [2026-05-24T13:30:00Z] testing — CI coverage report stabilization
+
+**Action:** Stabilized the merged coverage CI path after PR #121 exposed CI-only failures. Bot start tests now force foreground execution so `CI=true bundle exec rake coverage` cannot daemonize before the Minitest coverage reporter writes `coverage/coverage.json`. Stale TUI triage-mode assertions from the coverage branch were removed or updated to the current red-status detail contract, and `DropErrorKind::ALL` now follows the reload-safe self-derived enum pattern used by the other schema enums.
+
+**Refreshed pages:**
+- [[testing]] — documented the CI foreground/daemonization coverage pitfall and reload-safe enum caveat.

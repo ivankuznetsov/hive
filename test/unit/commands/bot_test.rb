@@ -84,7 +84,7 @@ class HiveCommandsBotTest < Minitest::Test
   end
 
   def test_start_cleans_up_when_pid_payload_cleanup_fails
-    command = configured_bot("start", dry_run: true)
+    command = configured_bot("start", foreground: true, dry_run: true)
     supervisor = FakeSupervisor.new([])
     command.define_singleton_method(:pid_file_payload) { raise "cannot parse pid payload" }
 
@@ -98,7 +98,7 @@ class HiveCommandsBotTest < Minitest::Test
   end
 
   def test_start_ignores_lock_close_failures
-    command = configured_bot("start", dry_run: true)
+    command = configured_bot("start", foreground: true, dry_run: true)
     supervisor = FakeSupervisor.new([])
     fake_lock_file = FakeLockFile.new([])
     original_file_open = File.method(:open)

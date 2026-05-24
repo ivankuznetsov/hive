@@ -254,7 +254,7 @@ module Hive
       WORKTREE          = "worktree".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive daemon enable`

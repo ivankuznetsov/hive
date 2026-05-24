@@ -194,7 +194,7 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Bot) do |calls|
       Hive::CLI.start([ "bot", "start", "--detach", "--dry-run", "--json" ])
       assert_equal [ "start" ], calls.first.fetch(:args)
-      assert_equal({ detach: true, dry_run: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ foreground: false, dry_run: true, json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Metrics) do |calls|

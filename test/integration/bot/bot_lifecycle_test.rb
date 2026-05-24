@@ -7,7 +7,8 @@ class HiveBotLifecycleTest < Minitest::Test
   include HiveTestHelper
 
   def with_bot_home
-    Dir.mktmpdir("hive-bot-home") do |home|
+    home = Dir.mktmpdir("hive-bot-home")
+    begin
       old_home = ENV["HIVE_HOME"]
       ENV["HIVE_HOME"] = home
       File.write(File.join(home, "config.yml"), {
@@ -17,6 +18,7 @@ class HiveBotLifecycleTest < Minitest::Test
       yield(home)
     ensure
       ENV["HIVE_HOME"] = old_home
+      FileUtils.rm_rf(home) if home
     end
   end
 

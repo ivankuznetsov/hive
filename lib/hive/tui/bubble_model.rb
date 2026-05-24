@@ -1385,22 +1385,34 @@ module Hive
       end
 
       # Snapshot, not live tail: open the latest log, read the trailing
-      # 64 KiB, return the last 50 lines. The Enter handler holds the
-      # `R` key for refresh — re-tailing on every render thread would
+      # `LOG_SNAPSHOT_BACKBUFFER_BYTES`, return the last 50 lines. The
+      # `R` key triggers a refresh path (`diagnose_subprocess_exit` on
+      # success re-runs this) — re-tailing on every render thread would
       # block keystrokes on slow disks (sshfs, network mounts) and the
       # design path prefers stale-but-fast.
       def red_status_detail_log_snapshot(row)
+        # Explicit guard so the rescue chain doesn't need to swallow a
+        # broad TypeError just to cover the nil-folder case.
+        return [ nil, [] ] if row&.folder.to_s.empty?
+
         task = Hive::Task.new(row.folder)
         log_path = Hive::Tui::LogTail::FileResolver.latest_in_dirs(
           [ task.log_dir, File.join(task.folder, "logs") ]
         )
-        tail = Hive::Tui::LogTail::Tail.new(log_path, ring_capacity: 50, backbuffer_bytes: 64 * 1024)
+        tail = Hive::Tui::LogTail::Tail.new(
+          log_path,
+          ring_capacity: 50,
+          backbuffer_bytes: Hive::Tui::RedStatusDetailLayout::LOG_SNAPSHOT_BACKBUFFER_BYTES
+        )
         tail.open!
         [ log_path, tail.lines(50) ]
-      rescue Hive::NoLogFiles, Hive::InvalidTaskPath, TypeError, *Hive::Tui::LogTail::FILESYSTEM_RESCUE => e
+      # Hive::NoLogFiles      → log dir empty / no log files yet.
+      # Hive::InvalidTaskPath → row.folder is shaped wrong (Task.new rejects).
+      # *LogTail::FILESYSTEM_RESCUE → IO failures opening the resolved log file.
+      rescue Hive::NoLogFiles, Hive::InvalidTaskPath, *Hive::Tui::LogTail::FILESYSTEM_RESCUE => e
         Hive::Tui::Debug.log(
           "red_status_detail",
-          "log snapshot skipped slug=#{row&.slug} path=#{log_path.inspect} err=#{e.class.name.split('::').last}: #{e.message}"
+          "log snapshot skipped slug=#{row&.slug} folder=#{row&.folder.inspect} path=#{log_path.inspect} err=#{e.class.name.split('::').last}: #{e.message}"
         )
         [ nil, [] ]
       ensure

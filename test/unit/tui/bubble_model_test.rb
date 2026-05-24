@@ -432,28 +432,30 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_includes output, "RED · alpha/6-review · #{slug}"
       assert output.lines.any? { |line| line.start_with?("╭") || line.start_with?("+") },
              "rendered detail should include a bordered panel"
-      assert_includes output, "Q: Why is this red?"
-      assert_includes output, "Log · last 8 of 8 lines"
-      assert_includes output, "line-1"
+      assert_includes output, "Why:"
+      assert_includes output, "Log · last 7 of 8 lines"
+      assert_includes output, "line-2"
       assert_includes output, "line-8"
       assert_includes output, artifact
-      assert_includes output, "[Enter] autofix / retry"
-      assert_includes output.lines.last, "[q] back"
+      assert_includes output, "[Enter] Recover"
+      assert_includes output, "Open in agent"
+      assert_includes output.lines[-2], "[Esc] back"
 
-      # Pin section ordering — a swap of reason and log panels would
-      # have passed the substring assertions above. Header first, the
-      # reason panel's Q/A second, then the log panel, then artifacts,
-      # then the action bar.
-      header_idx = output.index("RED · alpha/6-review")
-      reason_idx = output.index("Q: Why is this red?")
-      log_idx = output.index("Log · last 8 of 8 lines")
-      artifact_idx = output.index(artifact)
-      action_idx = output.index("[q] back")
+      # Pin section ordering: header, reason summary, action chips,
+      # artifacts, then the log snapshot. Use line-index lookups rather
+      # than byte offsets so two sections collapsing onto the same row
+      # cannot pass the ordering chain.
+      lines = output.lines
+      header_idx = lines.find_index { |line| line.include?("RED · alpha/6-review") }
+      reason_idx = lines.find_index { |line| line.include?("Why:") }
+      action_idx = lines.find_index { |line| line.include?("[Enter] Recover") }
+      artifact_idx = lines.find_index { |line| line.include?(artifact) }
+      log_idx = lines.find_index { |line| line.include?("Log · last 7 of 8 lines") }
 
-      assert_operator header_idx, :<, reason_idx, "header must come before reason panel"
-      assert_operator reason_idx, :<, log_idx, "reason panel must come before log panel"
-      assert_operator log_idx, :<, artifact_idx, "log panel must come before artifacts"
-      assert_operator artifact_idx, :<, action_idx, "artifacts must come before action bar"
+      assert_operator header_idx, :<, reason_idx, "header must come before the reason summary"
+      assert_operator reason_idx, :<, action_idx, "reason summary must come before actions"
+      assert_operator action_idx, :<, artifact_idx, "actions must come before artifacts"
+      assert_operator artifact_idx, :<, log_idx, "artifacts must come before the log snapshot"
     end
   end
 
@@ -493,15 +495,15 @@ class HiveTuiBubbleModelTest < Minitest::Test
       output = @model.view
 
       header_idx = output.index("RED · alpha/6-review")
-      reason_idx = output.index("Q: Why is this red?")
-      action_idx = output.index("[q] back")
+      reason_idx = output.index("Why:")
+      action_idx = output.index("[Enter] Recover")
 
       refute_nil header_idx, "header must render"
-      refute_nil reason_idx, "reason panel must render"
+      refute_nil reason_idx, "reason summary must render"
       refute_nil action_idx, "action bar must render"
       assert_operator header_idx, :<, reason_idx
       assert_operator reason_idx, :<, action_idx
-      assert_includes output.lines.last, "[q] back"
+      assert_includes output.lines[-2], "[Esc] back"
     end
   end
 

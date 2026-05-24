@@ -733,7 +733,9 @@ module Hive
         next_offset = case msg.direction
         when :up then state.log_scroll_offset.to_i + amount
         when :down then state.log_scroll_offset.to_i - amount
-        else state.log_scroll_offset.to_i
+        else
+          Hive::Tui::Debug.log("red_status_detail", "scroll skipped: unknown direction=#{msg.direction.inspect}")
+          state.log_scroll_offset.to_i
         end
         max_offset = [ lines.length - capacity, 0 ].max
         clamped = [[ next_offset, 0 ].max, max_offset].min
@@ -768,8 +770,7 @@ def red_status_detail_log_capacity(model)
   [ log_height - 2, 1 ].max
 end
 
-# Esc / `q` from a sub-mode
- returns to grid. Clears tail_state on
+      # Esc / `q` from a sub-mode returns to grid. Clears tail_state on
       # exit so the next entry starts clean. Help overlay dismisses to
       # grid; filter mode goes through FilterCancelled (still routes
       # through Back symmetrically here for the keystroke that produced

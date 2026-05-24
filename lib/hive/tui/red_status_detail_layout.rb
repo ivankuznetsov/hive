@@ -7,6 +7,12 @@ module Hive
     # `Views::RedStatusDetail` and `Update` so log-scroll clamping
     # follows the same two-action detail-screen composition.
     module RedStatusDetailLayout
+      # Trailing byte window the log-panel snapshot pulls from the file.
+      # Shared with `BubbleModel#red_status_detail_log_snapshot` and the
+      # rendered panel title so a tuning bump propagates without drift.
+      LOG_SNAPSHOT_BACKBUFFER_BYTES = 64 * 1024
+      LOG_SNAPSHOT_BACKBUFFER_LABEL = "#{LOG_SNAPSHOT_BACKBUFFER_BYTES / 1024} KiB tail".freeze
+
       MIN_LOG_PANEL_ROWS = 4
       MAX_LOG_PANEL_ROWS = 12
       AGENT_FALLBACK = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK

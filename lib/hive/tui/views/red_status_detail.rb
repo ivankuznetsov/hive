@@ -1,6 +1,7 @@
 require "lipgloss"
 require "hive/tui/model"
 require "hive/tui/red_status_detail_keys"
+require "hive/tui/red_status_detail_layout"
 require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/log_tail"
@@ -20,8 +21,8 @@ module Hive
 
         MARKER_SUMMARY_PATTERN = /\A[A-Z][A-Z0-9_]+(?:\s+[a-z_]+=\S+)+\z/
 
-        MIN_LOG_PANEL_ROWS = 4
-        MAX_LOG_PANEL_ROWS = 12
+        MIN_LOG_PANEL_ROWS = Hive::Tui::RedStatusDetailLayout::MIN_LOG_PANEL_ROWS
+        MAX_LOG_PANEL_ROWS = Hive::Tui::RedStatusDetailLayout::MAX_LOG_PANEL_ROWS
 
         module_function
 
@@ -153,25 +154,29 @@ module Hive
           path = safe(row.worktree_path || row.folder)
 
           line = header_line(prefix, project_stage, slug, path, width)
-          Styles::RECOVERY_HEADER_BAR.render(line)
+          Styles::RECOVERY_HEADER_STYLE.render(line)
         end
 
+        # Single fall-through axis: try the longest stem that still fits
+        # and append a truncated final field.
         def header_line(prefix, project_stage, slug, path, width)
           first = "#{prefix}#{project_stage}"
           with_slug = "#{first} · #{slug}"
           with_path_prefix = "#{with_slug} · "
 
-          if with_path_prefix.length < width
-            return with_path_prefix + truncate(path, width - with_path_prefix.length)
+          candidates = [
+            [ with_path_prefix, path ],
+            [ "#{first} · ", slug ],
+            [ prefix, project_stage ]
+          ]
+
+          candidates.each do |stem, value|
+            next unless stem.length < width
+
+            return stem + truncate(value, width - stem.length)
           end
 
-          if "#{first} · ".length < width
-            return "#{first} · " + truncate(slug, width - "#{first} · ".length)
-          end
-
-          return truncate(first, width) if width < prefix.length
-
-          prefix + truncate(project_stage, width - prefix.length)
+          truncate(first, width)
         end
 
         def log_panel(state, outer_width, height_budget)
@@ -185,7 +190,9 @@ module Hive
           start_index = [ end_index - capacity, 0 ].max
           visible = lines[start_index...end_index] || []
           body = visible.map { |line| truncate(safe(Hive::Tui::LogTail::Formatter.format(line)), content_width) }.join("\n")
-          title = Styles::HEADER.render(truncate("Log · last #{visible.length} of #{lines.length} lines", outer_width))
+          title_text = "Log · last #{visible.length} of #{lines.length} lines " \
+                       "(#{Hive::Tui::RedStatusDetailLayout::LOG_SNAPSHOT_BACKBUFFER_LABEL}, snapshot)"
+          title = Styles::HEADER.render(truncate(title_text, outer_width))
           border = Styles::PANEL_BORDER.width(content_width).render(body)
           Lipgloss.join_vertical(Lipgloss::TOP, title, border)
         end

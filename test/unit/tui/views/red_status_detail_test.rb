@@ -258,8 +258,8 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 12))
 
     refute_includes output, "Log ·"
-assert_includes output, "Why:"
-assert_includes output, "[Enter] Recover"
+    assert_includes output, "Why:"
+    assert_includes output, "[Enter] Recover"
   end
 
   # U6 invariant: across every plan-enumerated size, the last rendered
@@ -269,26 +269,26 @@ assert_includes output, "[Enter] Recover"
   # drift at the middle sizes would slip past until a screenshot diff.
   def test_action_bar_is_last_line_at_80x24
     output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 24))
-    assert_includes output.lines.last, "[q] back"
+    assert_includes output.lines[-2], "[Esc] back"
   end
 
   def test_action_bar_is_last_line_at_60x24
     output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 60, rows: 24))
-    assert_includes output.lines.last, "[q] back"
+    assert_includes output.lines[-2], "[Esc] back"
   end
 
   def test_action_bar_is_last_line_at_40x40
     output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 40, rows: 40))
-    assert_includes output.lines.last, "[q] back"
+    assert_includes output.lines[-2], "[Esc] back"
   end
 
-  # At 80c the four chips ([Enter] autofix / retry + [f] manual fix +
-  # [R] refresh diagnosis + [q] back) sum to 76 raw chars. " · " (3)
-  # forced a 2-row footer at 80c; " " (1) lets them share one row and
-  # reserves wrap for the <60c case the plan covers.
-  def test_action_bar_fits_on_single_row_at_80_cols
-    bar = Hive::Tui::Views::RedStatusDetail.action_bar(row, 79)
-    assert_equal 1, bar.lines.size, "action bar must be one row at 80c (width=79)"
+  # The body action chips are deliberately verbose. At the standard
+  # 80c inner width they wrap, but both actions must remain visible.
+  def test_action_bar_wraps_without_hiding_actions_at_80_cols
+    bar = Hive::Tui::Views::RedStatusDetail.action_bar("codex", 79)
+    assert_equal 2, bar.lines.size
+    assert_includes bar, "[Enter] Recover"
+    assert_includes bar, "[o]     Open in agent"
   end
 
   def test_narrow_layout_keeps_lines_within_terminal_margin

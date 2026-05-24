@@ -131,9 +131,9 @@ class HiveTuiStylesTest < Minitest::Test
     assert Hive::Tui::Styles::HEADER.bold?, "HEADER must be bold for visual hierarchy"
   end
 
-  def test_recovery_header_bar_is_red_and_bold
-    assert_equal "1", Hive::Tui::Styles::RECOVERY_HEADER_BAR.get_foreground
-    assert Hive::Tui::Styles::RECOVERY_HEADER_BAR.bold?
+  def test_recovery_header_style_is_red_and_bold
+    assert_equal "1", Hive::Tui::Styles::RECOVERY_HEADER_STYLE.get_foreground
+    assert Hive::Tui::Styles::RECOVERY_HEADER_STYLE.bold?
   end
 
   def test_cursor_highlight_uses_reverse_video

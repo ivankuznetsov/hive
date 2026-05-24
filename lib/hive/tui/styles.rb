@@ -82,8 +82,10 @@ module Hive
       HEADER = Lipgloss::Style.new.bold(true)
 
       # Red-status detail header — bold red foreground so recovery
-      # urgency matches the grid's red action-key palette.
-      RECOVERY_HEADER_BAR = Lipgloss::Style.new
+      # urgency matches the grid's red action-key palette. Named
+      # *_STYLE (not *_BAR) because the style emits no width/background,
+      # just inline bold-red text.
+      RECOVERY_HEADER_STYLE = Lipgloss::Style.new
         .foreground(color(:red))
         .bold(true)
         .freeze
@@ -137,7 +139,7 @@ module Hive
       # action bar's primary chip (reverse-video), so the panels share
       # the same dim border as inactive panes rather than competing for
       # attention.
-      PANEL_BORDER = PANE_DIM_BORDER
+      PANEL_BORDER = PANE_DIM_BORDER.freeze
     end
   end
 end

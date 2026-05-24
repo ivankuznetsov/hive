@@ -197,7 +197,7 @@ class HiveTuiUpdateTest < Minitest::Test
       Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :up, amount: 100)
     )
 
-    assert_equal 42, new_model.red_status_detail_state.log_scroll_offset
+    assert_equal 46, new_model.red_status_detail_state.log_scroll_offset
   end
 
   # Boundary: :down from offset 0 must clamp to 0 (no negative). The

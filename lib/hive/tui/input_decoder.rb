@@ -28,6 +28,8 @@ module Hive
         "\eOF".b => Bubbletea::KeyMessage::KEY_END,
         "\e[1~".b => Bubbletea::KeyMessage::KEY_HOME,
         "\e[4~".b => Bubbletea::KeyMessage::KEY_END,
+        "\e[5~".b => Bubbletea::KeyMessage::KEY_PGUP,
+        "\e[6~".b => Bubbletea::KeyMessage::KEY_PGDOWN,
         "\e[3~".b => Bubbletea::KeyMessage::KEY_DELETE,
         "\e[Z".b => Bubbletea::KeyMessage::KEY_SHIFT_TAB
       }.freeze

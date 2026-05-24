@@ -8,6 +8,14 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None - docs-only release note plus this changelog entry.
 
+## [2026-05-24T15:40:00Z] testing - Telegram bot eval harness
+
+**Action:** Added an opt-in `test/eval/` suite and `bin/hive-eval` runner for the Telegram bot. The harness drives the real `Hive::Bot::Supervisor` through fake Telegram/status/child-process boundaries, captures structured bot logs, classifies every outbound payload into the v1 typed-reason contract, and writes JSON reports for agent consumption. Scenario `s3_noise` is intentionally baseline-failing today because proactive ready/finished notifications are classified as `task_finished`, while the v1 contract permits only `agent_blocked_question` and `fatal_error` proactively.
+
+**Refreshed pages:**
+- [[testing]] - documented `rake test:eval`, `bin/hive-eval`, JSON reporting, `--no-judge`, and the expected S3 failure.
+- [[modules/bot]] - documented that the eval harness is test-only and does not change production bot behavior.
+
 ## [2026-05-23T18:00:00Z] claude.mode — tmux envelope parity + daemon-headless callout
 
 **Action:** Hardened the `claude.mode: tmux` path after PR review. `Hive::ClaudeLauncher` now emits the same envelope shape as the headless `claude -p` runner so consumers (status/daemon/bot) see identical `{status, error_message, ...}` regardless of mode; the obsolete `HIVE_BRAINSTORM_TMUX_*` env knobs were removed (config is the single source). CLAUDE.md gained an explicit callout that daemon/service hosts that cannot run tmux must set `claude.mode: headless`. G3+G5 tests expand per-stage `allowed_tools` and tmux session-name coverage so reviewers/finalize don't drift from the launcher contract.

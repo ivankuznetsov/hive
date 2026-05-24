@@ -377,8 +377,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   end
 
   def test_orphan_sweep_pattern_is_valid_pgrep_regex
-    skip "pgrep is not installed" unless system("pgrep", "-V", out: File::NULL, err: File::NULL)
-
     with_tmp_task_folder do |task|
       pattern = Hive::Stages::BrainstormTmux.orphan_sweep_pattern(task)
 

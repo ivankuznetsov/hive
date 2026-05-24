@@ -7,8 +7,6 @@ class RunBrainstormTmuxTest < Minitest::Test
   include HiveTestHelper
 
   def setup
-    skip "tmux is not installed" unless system("tmux", "-V", out: File::NULL, err: File::NULL)
-
     @socket = "hive-brainstorm-test-#{Process.pid}-#{object_id}"
     @old_socket = ENV["HIVE_TMUX_SOCKET"]
     @old_bin = ENV["HIVE_CLAUDE_BIN"]

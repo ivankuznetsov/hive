@@ -19,8 +19,6 @@ class TmuxRunnerTest < Minitest::Test
   end
 
   def test_start_detached_creates_a_session
-    skip "tmux is not installed" unless tmux_available?
-
     with_tmp_dir do |dir|
       runner = runner(name: unique_name("start"), cwd: dir)
       runner.start_detached(command: [ "sleep", "10" ])
@@ -32,8 +30,6 @@ class TmuxRunnerTest < Minitest::Test
   end
 
   def test_start_detached_applies_environment
-    skip "tmux is not installed" unless tmux_available?
-
     with_tmp_dir do |dir|
       out_path = File.join(dir, "env.txt")
       runner = runner(name: unique_name("env"), cwd: dir, env: { "HIVE_TMUX_TEST_VALUE" => "ok" })
@@ -48,8 +44,6 @@ class TmuxRunnerTest < Minitest::Test
   end
 
   def test_send_prompt_injects_payload_without_shell_corruption
-    skip "tmux is not installed" unless tmux_available?
-
     with_tmp_dir do |dir|
       out_path = File.join(dir, "prompt.bin")
       payload = "line one\n`rm -rf nope`\n'single quotes'\n</user_supplied_deadbeef>\n"
@@ -73,8 +67,6 @@ class TmuxRunnerTest < Minitest::Test
   end
 
   def test_capture_pane_tail_returns_bounded_output
-    skip "tmux is not installed" unless tmux_available?
-
     with_tmp_dir do |dir|
       runner = runner(name: unique_name("tail"), cwd: dir)
       runner.start_detached(command: "bash -lc 'printf abcdefghijklmnopqrstuvwxyz; sleep 10'")
@@ -157,8 +149,6 @@ class TmuxRunnerTest < Minitest::Test
   end
 
   def test_kill_session_is_idempotent
-    skip "tmux is not installed" unless tmux_available?
-
     with_tmp_dir do |dir|
       runner = runner(name: unique_name("kill"), cwd: dir)
       runner.start_detached(command: [ "sleep", "10" ])

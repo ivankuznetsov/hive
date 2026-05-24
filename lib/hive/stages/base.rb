@@ -6,6 +6,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/events"
 require "hive/markers"
+require "hive/usage_db"
 
 module Hive
   module Stages
@@ -257,7 +258,8 @@ module Hive
           warn_isolation_reduced(task, profile, add_dirs)
         end
 
-        Hive::Agent.new(
+        started_at = Time.now.utc.iso8601
+        result = Hive::Agent.new(
           task: task,
           prompt: prompt,
           max_budget_usd: max_budget_usd,
@@ -269,6 +271,8 @@ module Hive
           expected_output: expected_output,
           status_mode: status_mode
         ).run!
+        record_usage(task, profile, result, started_at)
+        result
       end
 
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
@@ -383,6 +387,51 @@ module Hive
           # don't raise, since the warning is informational.
           warn message
         end
+      end
+
+      def record_usage(task, profile, result, started_at)
+        usage = result && result[:usage]
+        return unless usage
+
+        Hive::UsageDb.record!(
+          agent: profile.name.to_s,
+          model: usage[:model] || result[:model],
+          project_slug: usage_project_slug(task),
+          task_slug: usage_task_slug(task),
+          stage: usage_stage_label(task),
+          started_at: started_at,
+          ended_at: Time.now.utc.iso8601,
+          input: usage[:input] || 0,
+          output: usage[:output] || 0,
+          cached: usage[:cached] || 0
+        )
+      rescue StandardError => e
+        warn "[hive] usage record failed: #{e.message}"
+      end
+
+      def usage_project_slug(task)
+        return task.project_name if task.respond_to?(:project_name)
+        return File.basename(task.project_root.to_s) if task.respond_to?(:project_root) && task.project_root
+
+        nil
+      end
+
+      def usage_task_slug(task)
+        return task.slug if task.respond_to?(:slug)
+
+        basename = File.basename(task.folder.to_s)
+        basename.empty? ? nil : basename
+      end
+
+      def usage_stage_label(task)
+        if task.respond_to?(:stage_index) && task.respond_to?(:stage_name) && task.stage_index
+          return "#{task.stage_index}-#{task.stage_name}"
+        end
+        return task.stage_name.to_s if task.respond_to?(:stage_name) && !task.stage_name.to_s.empty?
+
+        folder = task.respond_to?(:folder) ? task.folder.to_s : ""
+        parent = File.basename(File.dirname(folder))
+        parent.empty? ? nil : parent
       end
     end
   end

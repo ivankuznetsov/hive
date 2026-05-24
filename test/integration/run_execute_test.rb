@@ -199,7 +199,7 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
-  def test_research_mode_ignores_plain_progress_output_for_completion
+  def test_research_mode_accepts_plain_agent_output_for_completion
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
@@ -217,8 +217,8 @@ class RunExecuteTest < Minitest::Test
         assert_includes task_md, "warning: transient progress only"
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :execute_waiting, marker.name
-        assert_equal "missing_research_output", marker.attrs["reason"]
+        assert_equal :execute_complete, marker.name
+        assert_equal "research", marker.attrs["mode"]
       ensure
         wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
         FileUtils.rm_rf(wt_path) if wt_path

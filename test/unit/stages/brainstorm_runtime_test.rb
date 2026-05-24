@@ -27,6 +27,7 @@ class BrainstormRuntimeTest < Minitest::Test
 
   def test_runtime_for_ignores_legacy_runtime_when_global_mode_is_present
     cfg = {
+      Hive::Config::EXPLICIT_CLAUDE_MODE_KEY => true,
       "claude" => { "mode" => "tmux" },
       "brainstorm" => { "runtime" => "headless" }
     }

@@ -297,7 +297,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_triage_bias_index_out_of_range_reprompts
-    input = ([ "", "", "", "", "7", "2" ] + ([ "" ] * 12)).join("\n") + "\n"
+    input = ([ "", "", "", "", "7", "2" ] + ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 3))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
     assert_equal "safetyist", answers["triage_bias"]
@@ -456,7 +456,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_daemon_autostart_unknown_reprompts
-    input = ([ "" ] * 15 + [ "maybe", "y", "" ]).join("\n") + "\n"
+    input = ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 6) + [ "maybe", "y", "" ]).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
     assert_equal true, answers["daemon_autostart"]
@@ -554,7 +554,7 @@ class InitPromptsTest < Minitest::Test
     # Truncate the input transcript right before confirmation. read_line
     # must distinguish nil-from-gets (EOF) from an empty line and bubble
     # Aborted up the stack rather than silently confirming.
-    inputs = ([ "" ] * 15).join("\n") + "\n"  # 15 blank reads, then EOF
+    inputs = ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 7)).join("\n") + "\n"  # all pre-confirmation reads, then EOF
     prompts, _output, _summary = make_prompts(inputs)
     assert_raises(Hive::Commands::Init::Prompts::Aborted) { prompts.collect }
   end

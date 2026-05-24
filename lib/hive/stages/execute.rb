@@ -126,7 +126,13 @@ module Hive
           return record_tamper(task, tampered, who: "implementer")
         end
 
-        return { commit: "implementer_failed", status: impl_result[:status] } if agent_failed?(impl_result)
+        if agent_failed?(impl_result)
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "implementer_failed",
+                            status: impl_result&.fetch(:status, nil),
+                            message: impl_result&.fetch(:error_message, nil))
+          return { commit: "implementer_failed", status: :error }
+        end
 
         worktree_state = inspect_worktree_state(task, worktree_git)
         return worktree_git_failed(task) unless worktree_state

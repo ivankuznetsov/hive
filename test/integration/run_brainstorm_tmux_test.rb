@@ -3,6 +3,7 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
 require "hive/claude_launcher"
+require "hive/stages/brainstorm_tmux"
 
 class RunBrainstormTmuxTest < Minitest::Test
   include HiveTestHelper
@@ -153,8 +154,11 @@ class RunBrainstormTmuxTest < Minitest::Test
 
         _out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
 
-        assert_equal Hive::ExitCodes::SOFTWARE, status
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         assert_match(/already exists/, err)
+        marker = Hive::Markers.current(File.join(folder, "brainstorm.md"))
+        assert_equal :error, marker.name
+        assert_equal "claude_launch_failed", marker.attrs["reason"]
         assert_includes tmux_sessions, name
       end
     end

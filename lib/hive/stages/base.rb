@@ -4,6 +4,8 @@ require "securerandom"
 require "time"
 require "hive/agent"
 require "hive/agent_profiles"
+require "hive/events"
+require "hive/markers"
 
 module Hive
   module Stages
@@ -109,6 +111,118 @@ module Hive
       def stage_profile(cfg, stage_name)
         name = cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
+      end
+
+      def with_stage_events(task)
+        stage = stage_label(task)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :stage_enter,
+          message: "run started"
+        )
+        result = yield
+        marker = Hive::Markers.current(task.state_file)
+        emit_marker_event(task, stage, marker)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :stage_exit,
+          message: stage_exit_message(marker)
+        )
+        result
+      rescue SystemExit => e
+        emit_rescue_close(task, stage, "system_exit status=#{e.status}")
+        raise
+      rescue StandardError => e
+        emit_rescue_close(task, stage, "#{e.class}: #{e.message}")
+        raise
+      end
+
+      # `error` + closing `stage_exit` pair so drill-down readers see a
+      # balanced bracket on failure paths. Without the trailing stage_exit
+      # an operator scanning events.jsonl would observe an open stage
+      # bracket per raise — confusing in the TUI and breaks any future
+      # consumer that depends on enter/exit symmetry.
+      #
+      # Body wrapped in its own rescue so a secondary failure here (e.g.
+      # Hive::Markers.current on a corrupt state file feeding stage_label,
+      # or Events.emit raising on a programmer bug) can never escape and
+      # mask the original exception the caller is propagating.
+      def emit_rescue_close(task, stage, error_message)
+        stage ||= stage_label(task)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :error,
+          message: error_message
+        )
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage,
+          event_type: :stage_exit,
+          message: "status=error #{error_message}"
+        )
+      rescue StandardError
+        nil
+      end
+
+      def stage_label(task)
+        "#{task.stage_index}-#{task.stage_name}"
+      end
+
+      # Stage runners that publish `round_waiting` / `round_complete`
+      # events when their state-file marker lands on `:waiting` /
+      # `:complete`. Adding a new stage that wants the round events
+      # must add itself here. Kept on Base as a single registry so the
+      # `emit_marker_event` allow-list can never drift away from the
+      # stage-runner site that produces those markers.
+      ROUND_EVENT_STAGES = %w[brainstorm plan].freeze
+
+      def emit_marker_event(task, stage, marker)
+        if ROUND_EVENT_STAGES.include?(task.stage_name)
+          case marker.name
+          when :waiting
+            Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
+                              event_type: :round_waiting, message: "status=waiting")
+          when :complete
+            Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
+                              event_type: :round_complete, message: "status=complete")
+          end
+        end
+
+        return unless error_marker?(marker.name)
+
+        Hive::Events.emit(task_folder: task.folder, slug: task.slug, stage: stage,
+                          event_type: :error, message: marker_event_message(marker))
+      end
+
+      def error_marker?(name)
+        %i[error review_error review_ci_stale review_stale].include?(name)
+      end
+
+      def marker_event_message(marker)
+        attrs = marker.attrs
+        detail = attrs["reason"] || attrs["phase"] || attrs["attempts"] || attrs["pass"]
+        return "#{marker.name} #{detail}" if detail
+
+        marker.name.to_s
+      end
+
+      # Stage_exit message includes reason / phase / pass when present so
+      # a drill-down reader scanning events.jsonl for "what closed this
+      # stage" sees the actionable context, not just the marker name.
+      # Falls back to the marker name alone when no relevant attrs landed.
+      def stage_exit_message(marker)
+        attrs = marker.attrs
+        details = %w[phase reason pass].map { |key| attrs[key] && "#{key}=#{attrs[key]}" }.compact
+        return "status=#{marker.name}" if details.empty?
+
+        "status=#{marker.name} #{details.join(' ')}"
       end
 
       # Spawn an agent and return its result hash.

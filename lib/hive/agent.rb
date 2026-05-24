@@ -4,6 +4,7 @@ require "open3"
 require "tempfile"
 require "time"
 require "hive/agent_profiles"
+require "hive/events"
 require "hive/lock"
 
 module Hive
@@ -81,6 +82,8 @@ module Hive
 
     def run!
       ensure_log_dir
+      emit_agent_event(:agent_start, message: agent_start_message)
+      result = nil
       # Marker writes on task.state_file are gated by the profile's
       # status_detection_mode. Only the :state_file_marker mode (today's
       # claude path for 4-execute / brainstorm / plan / pr) writes
@@ -97,6 +100,8 @@ module Hive
       result = spawn_and_wait
       handle_exit(result)
       result
+    ensure
+      emit_agent_event(:agent_end, message: agent_end_message(result, $!))
     end
 
     def spawn_and_wait
@@ -434,6 +439,57 @@ module Hive
 
     def ensure_log_dir
       FileUtils.mkdir_p(@task.log_dir)
+    end
+
+    def emit_agent_event(event_type, message:)
+      Hive::Events.emit(
+        task_folder: @task.folder,
+        slug: event_slug,
+        stage: event_stage,
+        agent: event_agent_label,
+        event_type: event_type,
+        message: message
+      )
+    end
+
+    def event_agent_label
+      [ @profile.name, @log_label ].compact.map(&:to_s).reject(&:empty?).join(" ")
+    end
+
+    # @task is a Hive::Task on stage-runner-owned spawns (4-execute,
+    # brainstorm, plan, open-pr) but a Hive::Reviewers::SyntheticTask
+    # on 6-review sub-spawns (reviewers, triage, ci-fix, browser-test).
+    # SyntheticTask is a Struct that intentionally omits `slug` /
+    # `stage_index` and stores the full "6-review" label in `stage_name`.
+    # The respond_to? fallback covers both shapes from one call site.
+    def event_slug
+      @task.respond_to?(:slug) ? @task.slug : File.basename(@task.folder)
+    end
+
+    def event_stage
+      if @task.respond_to?(:stage_index) && @task.respond_to?(:stage_name) && @task.stage_index
+        "#{@task.stage_index}-#{@task.stage_name}"
+      else
+        @task.respond_to?(:stage_name) && !@task.stage_name.to_s.empty? ?
+          @task.stage_name.to_s :
+          File.basename(File.dirname(@task.folder))
+      end
+    end
+
+    def agent_start_message
+      # Full @cwd path per the plan U3 contract: basename collapses the
+      # worktree-vs-task-folder distinction (e.g. worktree-feat-x vs
+      # feat-x-260424-aaaa) and loses that signal in the event log.
+      "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd}"
+    end
+
+    def agent_end_message(result, exception)
+      if exception
+        return "status=exception exit_code=#{result&.dig(:exit_code)} pid=#{result&.dig(:pid)} " \
+               "error=#{exception.class}: #{exception.message}"
+      end
+
+      "status=#{result&.dig(:status)} exit_code=#{result&.dig(:exit_code)} pid=#{result&.dig(:pid)}"
     end
   end
 end

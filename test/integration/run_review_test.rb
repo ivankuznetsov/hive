@@ -389,6 +389,11 @@ class RunReviewTest < Minitest::Test
         # ci-blocked.md is written for the user to inspect.
         assert File.exist?(File.join(folder, "reviews", "ci-blocked.md"))
         assert_includes File.read(File.join(folder, "reviews", "ci-blocked.md")), "FAIL"
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        assert_includes events.map { |event| event.fetch("event_type") }, "stage_enter"
+        assert events.any? { |event| event["event_type"] == "error" && event["message"].include?("review_ci_stale") },
+               "review_ci_stale should be mirrored to events.jsonl"
+        assert_equal "stage_exit", events.last.fetch("event_type")
       end
     end
   end
@@ -434,6 +439,39 @@ class RunReviewTest < Minitest::Test
         escalations = File.read(File.join(folder, "reviews", "escalations-01.md"))
         assert_includes escalations, "Triage disabled"
         assert_includes escalations, "needs human review"
+
+        # Plan U2 green-path acceptance: events.jsonl must carry the
+        # phase-level agent_start/agent_end pairs that `mark_working`
+        # emits, PLUS the per-reviewer pair that `Hive::Agent#run!`
+        # brackets around the reviewer spawn. The per-reviewer event
+        # MUST carry the reviewer's configured name ("local-reviewer")
+        # in the `agent` field so the drill-down view can show
+        # "claude review-local-reviewer-pass01" on its own line.
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        assert_equal "stage_enter", events.first.fetch("event_type")
+        assert_equal "stage_exit", events.last.fetch("event_type")
+
+        phase_starts = events.select do |e|
+          e["event_type"] == "agent_start" && e["agent"].to_s.start_with?("phase=")
+        end
+        phase_ends = events.select do |e|
+          e["event_type"] == "agent_end" && e["agent"].to_s.start_with?("phase=")
+        end
+        assert phase_starts.any? { |e| e["agent"].include?("phase=reviewers") },
+               "expected a phase=reviewers agent_start emitted via mark_working"
+        assert_equal phase_starts.size, phase_ends.size,
+                     "phase-level agent_start/agent_end pairs must balance (#{phase_starts.size} vs #{phase_ends.size})"
+
+        reviewer_starts = events.select do |e|
+          e["event_type"] == "agent_start" && e["agent"].to_s.include?("local-reviewer")
+        end
+        reviewer_ends = events.select do |e|
+          e["event_type"] == "agent_end" && e["agent"].to_s.include?("local-reviewer")
+        end
+        assert_equal 1, reviewer_starts.size,
+                     "expected exactly one per-reviewer agent_start carrying the reviewer name"
+        assert_equal 1, reviewer_ends.size,
+                     "expected exactly one per-reviewer agent_end carrying the reviewer name"
       end
     end
   end

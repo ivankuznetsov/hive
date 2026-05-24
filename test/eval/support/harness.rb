@@ -6,6 +6,7 @@ require "hive/bot/notification_dispatcher"
 require "hive/bot/router"
 require "hive/bot/status_watcher"
 require "hive/bot/supervisor"
+require_relative "programmable_status_watcher"
 
 module Hive
   module Eval
@@ -19,7 +20,7 @@ module Hive
         @bot_config = default_bot_config.merge(bot_config || {})
         @telegram = telegram || Hive::Eval::FakeTelegram.new(now: -> { current_time })
         @logger = logger || Hive::Eval::CapturingLogger.new(now: -> { current_time })
-        @status_watcher = status_watcher || QueueStatusWatcher.new
+        @status_watcher = status_watcher || Hive::Eval::ProgrammableStatusWatcher.new
         @child_supervisor = child_supervisor ||
           Hive::Eval::FakeChildSupervisor.new(logger: @logger, now: -> { current_time })
         @conversation_store = conversation_store ||
@@ -151,20 +152,6 @@ module Hive
           row = row_idx ? unmatched_rows.delete_at(row_idx) : nil
           message.source = :status_row
           message.row = row
-        end
-      end
-
-      class QueueStatusWatcher
-        def initialize
-          @queued = []
-        end
-
-        def queue(rows:)
-          @queued << rows
-        end
-
-        def fetch
-          Hive::Bot::StatusWatcher::Result.new(ok: true, rows: @queued.shift || [], error: nil)
         end
       end
 

@@ -16,6 +16,15 @@ Append-only log of all wiki operations.
 - [[testing]] - documented `rake test:eval`, `bin/hive-eval`, JSON reporting, `--no-judge`, and the expected S3 failure.
 - [[modules/bot]] - documented that the eval harness is test-only and does not change production bot behavior.
 
+## [2026-05-24T15:36:02Z] observability - token usage stats
+
+**Action:** Documented the new hive-driven token usage capture path. The reader thread extracts profile-specific usage events, `Stages::Base.spawn_agent` writes rows to `Hive::UsageDb`, and `hive tui` reads scoped aggregates for the footer and `T` matrix view.
+
+**Refreshed pages:**
+- [[token-usage]] - new page covering capture boundaries, SQLite schema/location, aggregation buckets, TUI surfaces, and tests.
+- [[index]] - added the page to the catalog.
+- [[gaps]] - tracked the Codex/Pi real-stream extractor refinement follow-up.
+
 ## [2026-05-23T18:00:00Z] claude.mode — tmux envelope parity + daemon-headless callout
 
 **Action:** Hardened the `claude.mode: tmux` path after PR review. `Hive::ClaudeLauncher` now emits the same envelope shape as the headless `claude -p` runner so consumers (status/daemon/bot) see identical `{status, error_message, ...}` regardless of mode; the obsolete `HIVE_BRAINSTORM_TMUX_*` env knobs were removed (config is the single source). CLAUDE.md gained an explicit callout that daemon/service hosts that cannot run tmux must set `claude.mode: headless`. G3+G5 tests expand per-stage `allowed_tools` and tmux session-name coverage so reviewers/finalize don't drift from the launcher contract.

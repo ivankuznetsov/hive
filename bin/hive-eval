@@ -1,0 +1,51 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+require "English"
+require "optparse"
+
+root = File.expand_path("..", __dir__)
+options = {
+  report: File.join(root, "tmp", "hive-eval-report.json"),
+  scenario: nil,
+  no_judge: false
+}
+
+OptionParser.new do |parser|
+  parser.banner = "Usage: bin/hive-eval [--scenario NAME] [--report PATH] [--no-judge]"
+  parser.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
+    options[:scenario] = value
+  end
+  parser.on("--report PATH", "Write JSON report to PATH") do |value|
+    options[:report] = value
+  end
+  parser.on("--no-judge", "Skip Codex judge assertions") do
+    options[:no_judge] = true
+  end
+end.parse!
+
+def scenario_path(root, value)
+  return nil if value.nil?
+  return File.expand_path(value, root) if value.end_with?(".rb")
+
+  basename = value.sub(/_test\z/, "")
+  File.join(root, "test", "eval", "scenarios", "#{basename}_test.rb")
+end
+
+env = {
+  "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
+  "HIVE_EVAL_SCENARIOS_ONLY" => "1"
+}
+env["HIVE_EVAL_NO_JUDGE"] = "1" if options[:no_judge]
+
+if (path = scenario_path(root, options[:scenario]))
+  unless File.exist?(path)
+    warn "hive-eval: scenario not found: #{path}"
+    exit 64
+  end
+  env["TEST"] = path
+end
+
+FileUtils.mkdir_p(File.dirname(env.fetch("HIVE_EVAL_REPORT")))
+ok = system(env, "bundle", "exec", "rake", "test:eval", chdir: root)
+exit($CHILD_STATUS&.exitstatus || (ok ? 0 : 1))

@@ -12,6 +12,7 @@ module Hive
 
       def before_setup
         super
+        @hive_eval_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         @hive_eval_old_env = {
           "HIVE_HOME" => ENV["HIVE_HOME"]
         }
@@ -23,6 +24,7 @@ module Hive
       end
 
       def after_teardown
+        Hive::Eval::ReportStore.record(self) if defined?(Hive::Eval::ReportStore)
         FileUtils.rm_rf(@scenario_home) if @scenario_home
         @hive_eval_old_env&.each do |key, value|
           value.nil? ? ENV.delete(key) : ENV[key] = value
@@ -104,17 +106,17 @@ module Hive
 
       def assert_judge_rubric_passes(rubric:, text:)
         verdict = if ENV["HIVE_EVAL_NO_JUDGE"] == "1"
-                    Hive::Eval::CodexJudge::Verdict.new(
-                      pass: true,
-                      score: nil,
-                      reason: "skipped by --no-judge",
-                      transcript: "",
-                      model_used: nil,
-                      skipped: true
-                    )
-                  else
-                    Hive::Eval::CodexJudge.new(rubric: rubric).verdict(text: text)
-                  end
+          Hive::Eval::CodexJudge::Verdict.new(
+            pass: true,
+            score: nil,
+            reason: "skipped by --no-judge",
+            transcript: "",
+            model_used: nil,
+            skipped: true
+          )
+        else
+          Hive::Eval::CodexJudge.new(rubric: rubric).verdict(text: text)
+        end
         eval_assertions << {
           kind: "judge",
           reason: "rubric",

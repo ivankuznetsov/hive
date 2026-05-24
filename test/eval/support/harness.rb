@@ -154,7 +154,6 @@ module Hive
           message.row = row
         end
       end
-
     end
   end
 end

@@ -7,7 +7,7 @@ updated: 2026-05-24
 tags: [test, minitest, fixtures]
 ---
 
-**TLDR**: Minitest for unit/integration coverage, plus an opt-in outer e2e layer. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, and `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios.
+**TLDR**: Minitest for unit/integration coverage, plus opt-in outer e2e and eval layers. `test/unit/` covers modules, `test/integration/` covers command/stage behaviour in-process, `test/e2e/` drives the real `bin/hive` subprocess plus tmux for TUI scenarios, and `test/eval/` evaluates the Telegram bot signal contract.
 
 ## Run all
 
@@ -91,6 +91,19 @@ bin/hive-e2e run
 ```
 
 The six starter scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+
+## Eval suite (`test/eval/`)
+
+The Telegram bot eval harness is opt-in and separate from the default suite:
+
+```bash
+bundle exec rake test:eval
+bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
+```
+
+`test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, a CLI child-supervisor capture, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior.
+
+`bin/hive-eval` runs only scenario files, writes a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and exits non-zero on scenario failure. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is intentionally baseline-failing today: it demonstrates that proactive ready/finished notifications violate the v1 signal contract where only `agent_blocked_question` and `fatal_error` may be proactive.
 
 ## Lint
 

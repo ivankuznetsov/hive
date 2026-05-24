@@ -1861,3 +1861,11 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[testing]] — documented the CI foreground/daemonization coverage pitfall and reload-safe enum caveat.
+
+## [2026-05-24T15:40:00Z] testing — Telegram bot eval harness
+
+**Action:** Added an opt-in `test/eval/` suite and `bin/hive-eval` runner for the Telegram bot. The harness drives the real `Hive::Bot::Supervisor` through fake Telegram/status/child-process boundaries, captures structured bot logs, classifies every outbound payload into the v1 typed-reason contract, and writes JSON reports for agent consumption. Scenario `s3_noise` is intentionally baseline-failing today because proactive ready/finished notifications are classified as `task_finished`, while the v1 contract permits only `agent_blocked_question` and `fatal_error` proactively.
+
+**Refreshed pages:**
+- [[testing]] — documented `rake test:eval`, `bin/hive-eval`, JSON reporting, `--no-judge`, and the expected S3 failure.
+- [[modules/bot]] — documented that the eval harness is test-only and does not change production bot behavior.

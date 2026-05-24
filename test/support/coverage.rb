@@ -4,14 +4,13 @@ require "json"
 require "time"
 
 module HiveTestCoverage
-  LINE_REQUIRED_PERCENT = 100.0
-
   module_function
 
   def start!(root:)
     configure!(root: root)
     return if @started
 
+    refuse_populated_resultset!
     Coverage.start(lines: true, branches: true)
     @started = true
   end
@@ -22,6 +21,23 @@ module HiveTestCoverage
     @coverage_dir = File.join(@root, "coverage")
     run_id = ENV.fetch("HIVE_COVERAGE_RUN_ID", "default")
     @resultset_dir = File.join(@coverage_dir, ".resultset", run_id)
+  end
+
+  # Guard against stale marshal files merging into the unmanaged "default"
+  # run id. The Rakefile always exports a unique HIVE_COVERAGE_RUN_ID and
+  # subprocesses inherit it, so when the env var is set we trust the caller
+  # to own the directory (subprocesses appending alongside their siblings
+  # is the intended pattern). The check only fires when nobody set the var.
+  def refuse_populated_resultset!
+    return if ENV.key?("HIVE_COVERAGE_RUN_ID")
+    return unless File.directory?(@resultset_dir)
+
+    stale = Dir.glob(File.join(@resultset_dir, "*.{marshal,error.json}"))
+    return if stale.empty?
+
+    raise "HIVE_COVERAGE_RUN_ID is unset and the default resultset directory " \
+          "(#{@resultset_dir}) already contains files; remove the directory or " \
+          "set a fresh HIVE_COVERAGE_RUN_ID"
   end
 
   def install_reporter!
@@ -37,9 +53,19 @@ module HiveTestCoverage
 
   def load_all_sources!
     reload_preloaded_entrypoint!
+    @startup_errors ||= []
     source_files.each do |path|
       feature = path.delete_prefix("#{@lib_dir}/").delete_suffix(".rb")
-      require feature
+      begin
+        require feature
+      rescue LoadError, StandardError => e
+        @startup_errors << {
+          file: path.delete_prefix("#{@root}/"),
+          error_class: e.class.name,
+          message: "require failed: #{e.message}"
+        }
+        warn "hive coverage: failed to require #{feature}: #{e.class}: #{e.message}"
+      end
     end
   end
 
@@ -50,8 +76,10 @@ module HiveTestCoverage
 
     # Bundler evaluates the gemspec before RUBYOPT coverage boots, and the
     # gemspec requires lib/hive.rb for Hive::VERSION. Reload only the entrypoint
-    # under coverage so the unloaded-file gate can stay strict.
-    $VERBOSE = nil
+    # under coverage so the unloaded-file gate can stay strict. $VERBOSE = false
+    # suppresses "already initialized constant" warnings only; real warnings
+    # (deprecation, circular require) still print.
+    $VERBOSE = false
     load path
   ensure
     $VERBOSE = old_verbose
@@ -67,9 +95,35 @@ module HiveTestCoverage
     File.binwrite(tmp_path, Marshal.dump(Coverage.result))
     File.rename(tmp_path, path)
     @dumped = true
-  rescue RuntimeError
-    # Coverage.result raises if another at_exit hook already stopped it.
+  rescue RuntimeError => e
+    # Coverage.result raises this specific message when measurement was
+    # already stopped (another at_exit hook drained it first). That's the
+    # only RuntimeError we want to swallow silently.
+    raise unless e.message.include?("coverage measurement is not enabled")
     @dumped = true
+  rescue StandardError => e
+    # Any other failure (disk full, EACCES on tmp_path, Marshal.dump on an
+    # unmarshalable object) loses this process's coverage. Drop an error
+    # marker so the parent surfaces the loss via the gate instead of
+    # silently producing a too-low coverage number.
+    record_dump_error!(e)
+    @dumped = true
+  end
+
+  def record_dump_error!(error)
+    FileUtils.mkdir_p(@resultset_dir)
+    marker = File.join(@resultset_dir, "#{Process.pid}-#{object_id}.error.json")
+    payload = {
+      pid: Process.pid,
+      error_class: error.class.name,
+      message: error.message,
+      script: $PROGRAM_NAME
+    }
+    File.write(marker, JSON.dump(payload))
+    warn "hive coverage: failed to dump process #{Process.pid}: #{error.class}: #{error.message}"
+  rescue StandardError
+    # If even writing the marker fails (e.g. ENOSPC), the warn above is our
+    # last line of defense; do not crash the at_exit hook.
   end
 
   def report!
@@ -80,28 +134,79 @@ module HiveTestCoverage
   end
 
   def merged_results
-    @result_errors = []
+    # Fresh per call. Startup require failures live in @startup_errors and
+    # are spliced in once; subprocess marshal / dump-marker errors are
+    # collected here. unloaded_line_stub may append further entries while
+    # build_report iterates files, sharing this same array.
+    @result_errors = (@startup_errors || []).dup
+    collect_dump_errors!
     merged = {}
     Dir.glob(File.join(@resultset_dir, "*.marshal")).sort.each do |path|
-      merge_result!(merged, Marshal.load(File.binread(path)))
-    rescue StandardError => e
-      @result_errors << {
-        file: path.delete_prefix("#{@root}/"),
-        error_class: e.class.name,
-        message: e.message
-      }
-      warn "hive coverage: unreadable result #{path}: #{e.class}: #{e.message}"
+      raw = read_marshal_file(path)
+      next unless raw
+
+      apply_result_transactionally!(merged, raw, path)
     end
     merged
   end
 
-  def merge_result!(merged, result)
-    result.each do |path, entry|
-      expanded = File.expand_path(path)
-      next unless expanded.start_with?("#{@lib_dir}/") || expanded == File.join(@root, "lib", "hive.rb")
+  def collect_dump_errors!
+    Dir.glob(File.join(@resultset_dir, "*.error.json")).sort.each do |path|
+      data = begin
+        JSON.parse(File.read(path))
+      rescue StandardError => e
+        @result_errors << {
+          file: path.delete_prefix("#{@root}/"),
+          error_class: e.class.name,
+          message: "unreadable error marker: #{e.message}"
+        }
+        next
+      end
 
-      merged[expanded] = merge_entry(merged[expanded], entry)
+      @result_errors << {
+        file: "process #{data['pid']}",
+        error_class: data["error_class"],
+        message: data["message"]
+      }
     end
+  end
+
+  def read_marshal_file(path)
+    Marshal.load(File.binread(path))
+  rescue TypeError, ArgumentError, IOError, SystemCallError => e
+    @result_errors << {
+      file: path.delete_prefix("#{@root}/"),
+      error_class: e.class.name,
+      message: e.message
+    }
+    warn "hive coverage: unreadable result #{path}: #{e.class}: #{e.message}"
+    nil
+  end
+
+  # Apply a parsed marshal payload to `merged` only if every filtered entry
+  # merges cleanly. If any single entry raises, the whole file is rejected
+  # and `merged` is left untouched, so partial mutations cannot inflate
+  # coverage of early-merged files.
+  def apply_result_transactionally!(merged, result, path)
+    delta = {}
+    result.each do |entry_path, entry|
+      expanded = File.expand_path(entry_path)
+      next unless in_tree?(expanded)
+
+      delta[expanded] = merge_entry(merged[expanded], entry)
+    end
+    merged.merge!(delta)
+  rescue StandardError => e
+    @result_errors << {
+      file: path.delete_prefix("#{@root}/"),
+      error_class: e.class.name,
+      message: "merge failed: #{e.message}"
+    }
+    warn "hive coverage: failed to merge #{path}: #{e.class}: #{e.message}"
+  end
+
+  def in_tree?(expanded)
+    expanded.start_with?("#{@lib_dir}/") || expanded == File.join(@root, "lib", "hive.rb")
   end
 
   def merge_entry(existing, incoming)
@@ -154,7 +259,6 @@ module HiveTestCoverage
     report = {
       generated_at: Time.now.utc.iso8601,
       process_results: Dir.glob(File.join(@resultset_dir, "*.marshal")).size,
-      line_required_percent: LINE_REQUIRED_PERCENT,
       line_total: line_total,
       line_covered: line_covered,
       line_percent: percent(line_covered, line_total),
@@ -226,7 +330,20 @@ module HiveTestCoverage
       stripped = line.strip
       stripped.empty? || stripped.start_with?("#") ? nil : 0
     end
-  rescue StandardError
+  rescue Errno::ENOENT
+    # File disappeared between Dir.glob and readlines. Truly gone, so the
+    # absence is correct - return [] and let the unloaded-files gate skip it.
+    []
+  rescue StandardError => e
+    # Encoding errors, EACCES, etc. The file exists but we cannot read it;
+    # do not let that silently treat it as zero-executable-line. Surface as
+    # a result error so the gate fails.
+    @result_errors ||= []
+    @result_errors << {
+      file: path.delete_prefix("#{@root}/"),
+      error_class: e.class.name,
+      message: "unreadable source: #{e.message}"
+    }
     []
   end
 
@@ -273,11 +390,10 @@ module HiveTestCoverage
     line_total = numeric_value(report, :line_total)
     if line_covered != line_total
       lines << format(
-        "line coverage %.2f%% (%d/%d), required %.2f%%",
+        "line coverage %.2f%% (%d/%d)",
         numeric_value(report, :line_percent),
         line_covered,
-        line_total,
-        numeric_value(report, :line_required_percent)
+        line_total
       )
     end
 

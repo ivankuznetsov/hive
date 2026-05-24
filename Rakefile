@@ -21,7 +21,10 @@ task :coverage do
   old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
 
   begin
-    FileUtils.rm_rf(File.join(root, "coverage", ".resultset", run_id))
+    # Wipe the entire resultset tree, not just the current run id (which
+    # is fresh per invocation and therefore never exists yet). Without this
+    # every local `rake coverage` left stale per-run directories behind.
+    FileUtils.rm_rf(File.join(root, "coverage", ".resultset"))
     FileUtils.rm_f(report_path)
     ENV["HIVE_COVERAGE"] = "1"
     ENV["HIVE_COVERAGE_ROOT"] = root

@@ -20,7 +20,8 @@ module Hive
         @telegram = telegram || Hive::Eval::FakeTelegram.new(now: -> { current_time })
         @logger = logger || Hive::Eval::CapturingLogger.new(now: -> { current_time })
         @status_watcher = status_watcher || QueueStatusWatcher.new
-        @child_supervisor = child_supervisor || NullChildSupervisor.new
+        @child_supervisor = child_supervisor ||
+          Hive::Eval::FakeChildSupervisor.new(logger: @logger, now: -> { current_time })
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: @bot_config.fetch("conversation_ttl_sec"))
         @router = Hive::Bot::Router.new(
@@ -167,29 +168,6 @@ module Hive
         end
       end
 
-      class NullChildSupervisor
-        attr_reader :commands
-
-        def initialize
-          @commands = []
-          @next_pid = 10_000
-        end
-
-        def dispatch(command_argv:, **opts)
-          @commands << { command_argv: command_argv, opts: opts }
-          @next_pid += 1
-        end
-
-        def reap_all
-          []
-        end
-
-        def terminate_all(grace_sec:); end
-
-        def in_flight_count
-          0
-        end
-      end
     end
   end
 end

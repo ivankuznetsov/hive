@@ -72,13 +72,15 @@ module Hive
     end
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
+    option :if_exists, type: :boolean, default: false, desc: "Exit successfully when NAME is already absent"
     long_desc <<~DESC
       Drops the entry whose `name` matches NAME from ~/Dev/hive/config.yml.
       The project's .hive-state directory on disk (if any) is left alone.
 
       An unknown name is a USAGE error (64), mirroring `hive metrics
-      --project NAME`. To bulk-remove every entry whose path no longer
-      exists, use `hive prune` instead.
+      --project NAME`. Pass --if-exists for retry-safe cleanup where an
+      already-absent entry should exit 0. To bulk-remove every entry whose
+      path no longer exists, use `hive prune` instead.
 
       Exit codes: 0 success; 64 unknown project / missing NAME positional;
       70 internal error; 78 bad config (malformed config.yml or typoed
@@ -88,11 +90,12 @@ module Hive
 
         hive forget demo                  # remove the entry named 'demo'
         hive forget demo --json           # same, machine-readable envelope
+        hive forget demo --if-exists      # exit 0 even if demo is already absent
         hive forget nonexistent --json    # error envelope w/ error_kind: unknown_project
     DESC
     def forget(name = nil)
       require "hive/commands/forget"
-      Hive::Commands::Forget.new(name, json: options[:json]).call
+      Hive::Commands::Forget.new(name, json: options[:json], if_exists: options[:if_exists]).call
     end
 
     desc "prune", "Drop registry entries whose project path no longer exists"

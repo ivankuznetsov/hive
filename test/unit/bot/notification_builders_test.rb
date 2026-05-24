@@ -86,6 +86,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
 
     assert_match(/Brainstorm questions/, notification.text)
+    assert_match(/provide input/, notification.text)
+    assert_match(%r{/answer slug-260514-abcd}, notification.text)
     assert_equal "Answer in chat", notification.keyboard.first.first[:text]
     assert_equal "Ask Codex", notification.keyboard[1].first[:text]
   end

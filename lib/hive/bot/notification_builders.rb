@@ -84,7 +84,9 @@ module Hive
 
       def brainstorm_waiting(row)
         Notification.new(
-          text: header(row) + "\nBrainstorm questions are waiting.",
+          text: header(row) + "\n" \
+                "Brainstorm questions are waiting. " \
+                "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
           keyboard: [
             [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ],
             [ button("Ask Codex", "path_a_yes:#{row.project}:#{row.slug}") ],

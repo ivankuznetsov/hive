@@ -23,6 +23,8 @@ tags: [gap, todo]
 | `lib/hive/worktree.rb` | ✓ [[modules/worktree]] |
 | `lib/hive/git_ops.rb` | ✓ [[modules/git_ops]] |
 | `lib/hive/agent.rb` | ✓ [[modules/agent]] |
+| `lib/hive/agent_profiles/usage_extractors.rb` | ✓ [[token-usage]] |
+| `lib/hive/usage_db.rb` | ✓ [[token-usage]] |
 | `lib/hive/llm_wiki_bootstrap*.rb` | ✓ [[commands/init]] |
 | `lib/hive/commands/init.rb` | ✓ [[commands/init]] |
 | `lib/hive/commands/new.rb` | ✓ [[commands/new]] |
@@ -49,6 +51,7 @@ tags: [gap, todo]
 6. **E2E surface matrix** — `bin/hive-e2e run` is green locally on Linux with tmux 3.6a, but the follow-up matrix across macOS and a different tmux minor version is still open.
 7. ~~**Asciinema local verification**~~ — closed 2026-04-30. `/usr/bin/asciinema` 3.2.0 is visible on this shell's PATH, and a smoke run created an asciicast v2 file. `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema` remains the fallback for installs outside PATH.
 8. **R2 misdiagnosis artifact validation** — e2e artifacts exist, but the "fresh agent course-corrects from a wrong first diagnosis" case needs the first organic failure or a third-party synthetic failure.
+9. **Codex and Pi token usage payloads need real-stream refinement.** [[token-usage]] ships zero-fill extractors for missing or unrecognized usage payloads so hive-driven spawns still record rows, but the exact non-zero JSON shapes should be updated after one captured Codex and one captured Pi spawn.
 
 ## Release install follow-ups
 

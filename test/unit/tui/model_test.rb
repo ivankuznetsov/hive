@@ -31,6 +31,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil model.flash_set_at
     assert_nil model.tail_state
     assert_nil model.red_status_detail_state
+    assert_nil model.token_stats_state
     assert_nil model.last_error
   end
 
@@ -149,7 +150,7 @@ class HiveTuiModelTest < Minitest::Test
                   new_idea_project_cursor new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
                   new_idea_broken_labels info_panel_state flash flash_set_at
-                  tail_state red_status_detail_state
+                  tail_state red_status_detail_state token_stats_state
                   cols rows last_error]
     assert_equal expected, Hive::Tui::Model.members
   end
@@ -210,6 +211,15 @@ class HiveTuiModelTest < Minitest::Test
     assert_nil state.log_path
     assert_equal [], state.log_lines
     assert_equal 0, state.log_scroll_offset
+  end
+
+  def test_token_stats_state_defaults_optional_scope_fields
+    state = Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+
+    assert_equal :all, state.scope_level
+    assert_nil state.project_slug
+    assert_nil state.task_slug
+    assert state.frozen?
   end
 
   def info_panel_state(slug: "some-slug", stage: "2-brainstorm", created_at: nil,

@@ -1,5 +1,6 @@
 require "hive/agent_profile"
 require "hive/skill_check"
+require "hive/agent_profiles/usage_extractors"
 
 module Hive
   module AgentProfiles
@@ -88,6 +89,7 @@ module Hive
       min_version: "0.70.2",
       status_detection_mode: :output_file_exists,
       preflight: PI_PREFLIGHT,
+      usage_extractor: Hive::AgentProfiles::UsageExtractors::PI,
       skill_verifier: Hive::SkillCheck::Pi.method(:verify)
     )
 

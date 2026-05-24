@@ -20,7 +20,7 @@ module Hive
     # Lifted out of the Data.define block because Ruby's Data.define
     # block-scope doesn't bind constants to the resulting class.
     Model = Data.define(
-      :mode,             # Symbol: :grid / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview / :red_status_detail
+      :mode,             # Symbol: :grid / :log_tail / :filter / :help / :new_idea_project / :new_idea / :idea_preview / :red_status_detail / :token_stats
       :snapshot,         # Hive::Tui::Snapshot (or nil before first poll)
       :cursor,           # [project_idx, row_idx] (or nil for empty grid)
       :filter,           # String or nil — committed substring filter
@@ -45,6 +45,7 @@ module Hive
       :flash_set_at,     # Time or nil — flash decay timestamp
       :tail_state,       # Hive::Tui::LogTail::Tail or nil — :log_tail mode only
       :red_status_detail_state, # Model::RedStatusDetailState or nil — :red_status_detail mode only
+      :token_stats_state, # Model::TokenStatsState or nil — :token_stats mode only
       :cols,             # Integer — terminal width (set on WindowSized)
       :rows,             # Integer — terminal height
       :last_error        # Exception or nil — last poll failure
@@ -113,6 +114,16 @@ module Hive
       end
     end
 
+    Model::TokenStatsState = Data.define(:scope_level, :project_slug, :task_slug) do
+      def initialize(scope_level:, project_slug: nil, task_slug: nil)
+        super(
+          scope_level: scope_level,
+          project_slug: project_slug,
+          task_slug: task_slug
+        )
+      end
+    end
+
     class Model
       # Boot state. App.run constructs the runner with this Model.
       # `pane_focus` defaults to `:right` so the table is the first
@@ -142,6 +153,7 @@ module Hive
           flash_set_at: nil,
           tail_state: nil,
           red_status_detail_state: nil,
+          token_stats_state: nil,
           cols: cols,
           rows: rows,
           last_error: nil

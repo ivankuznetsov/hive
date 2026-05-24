@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added — token usage stats
+
+- Hive now records one SQLite `token_usage` row for each hive-driven agent spawn that emits structured usage, with per-agent/profile extractors for Claude, Codex, and Pi. `hive tui` shows scoped token aggregates in the footer and opens a full-screen token matrix with `T`.
+
 ### Changed — task drop
 
 - Added `hive drop <slug>` and rebound `hive tui` Shift+X to hard-delete the focused task: kill the active agent, remove active-stage task folders, logs, worktree, branch, locks, and close any draft PR best-effort. This is irreversible and has no confirmation prompt beyond the Shift+X gesture.

@@ -78,6 +78,23 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_raises(ArgumentError) { Hive::Tui::Messages::OpenInAgent.new }
   end
 
+  def test_token_stats_singletons_are_frozen
+    assert Hive::Tui::Messages::OPEN_TOKEN_STATS.frozen?
+    assert_kind_of Hive::Tui::Messages::OpenTokenStats,
+                   Hive::Tui::Messages::OPEN_TOKEN_STATS
+    assert Hive::Tui::Messages::CLOSE_TOKEN_STATS.frozen?
+    assert_kind_of Hive::Tui::Messages::CloseTokenStats,
+                   Hive::Tui::Messages::CLOSE_TOKEN_STATS
+  end
+
+  def test_token_stats_navigation_messages_carry_direction
+    scope = Hive::Tui::Messages::TokenStatsScopeChanged.new(direction: :in)
+    selection = Hive::Tui::Messages::TokenStatsSelectionMoved.new(direction: :previous)
+
+    assert_equal :in, scope.direction
+    assert_equal :previous, selection.direction
+  end
+
   def test_drop_focused_task_carries_row
     row = Object.new
     msg = Hive::Tui::Messages::DropFocusedTask.new(row: row)

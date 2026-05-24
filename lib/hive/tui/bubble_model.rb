@@ -14,6 +14,7 @@ require "hive/commands/new"
 require "hive/markers"
 require "hive/stages"
 require "hive/task"
+require "hive/usage_db"
 require "hive/tui/debug"
 require "hive/tui/model"
 require "hive/tui/messages"
@@ -35,6 +36,8 @@ require "hive/tui/views/filter_prompt"
 require "hive/tui/views/idea_preview"
 require "hive/tui/views/new_idea_prompt"
 require "hive/tui/views/new_idea_project_picker"
+require "hive/tui/views/token_stats"
+require "hive/tui/views/usage_footer"
 
 module Hive
   module Tui
@@ -149,6 +152,8 @@ module Hive
         # is plausibly a stalled compositor; two-in-a-row warrants a
         # flash so the operator knows paste is wedged.
         @clipboard_consecutive_timeouts = 0
+        @usage_footer_cache_key = nil
+        @usage_footer_cache_aggregate = nil
       end
 
       # Late binding so App.run_charm can wire the runner reference
@@ -227,6 +232,7 @@ module Hive
         when :grid then compose_two_pane_view
         when :log_tail then Views::LogTail.render(@hive_model)
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
+        when :token_stats then token_stats_view
         when :help then Views::HelpOverlay.render(@hive_model)
         when :filter then compose_filter_view
         when :idea_preview then compose_idea_preview_view
@@ -376,6 +382,8 @@ module Hive
           open_log_tail(message.row)
         when Hive::Tui::Messages::OpenRedStatusDetail
           open_red_status_detail(message)
+        when Hive::Tui::Messages::OpenTokenStats
+          open_token_stats
         when Hive::Tui::Messages::RecoverReview
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
@@ -1384,6 +1392,46 @@ module Hive
           log_scroll_offset: 0
         )
         [ new_model.with(red_status_detail_state: state), nil ]
+      end
+
+      def open_token_stats
+        state = token_stats_state_for_current_scope
+        [ @hive_model.with(mode: :token_stats, token_stats_state: state), nil ]
+      end
+
+      def token_stats_state_for_current_scope
+        scope = derive_usage_scope(@hive_model)
+        if scope[:task_slug]
+          Hive::Tui::Model::TokenStatsState.new(
+            scope_level: :task,
+            project_slug: scope[:project_slug],
+            task_slug: scope[:task_slug]
+          )
+        elsif scope[:project_slug]
+          Hive::Tui::Model::TokenStatsState.new(
+            scope_level: :project,
+            project_slug: scope[:project_slug]
+          )
+        else
+          Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+        end
+      end
+
+      def token_stats_view
+        state = @hive_model.token_stats_state || Hive::Tui::Model::TokenStatsState.new(scope_level: :all)
+        aggregate = Hive::UsageDb.aggregate(scope: token_stats_scope(state))
+        Views::TokenStats.render(@hive_model.with(token_stats_state: state), aggregate: aggregate)
+      end
+
+      def token_stats_scope(state)
+        case state.scope_level
+        when :task
+          { project_slug: state.project_slug, task_slug: state.task_slug }
+        when :project
+          { project_slug: state.project_slug }
+        else
+          {}
+        end
       end
 
       # Snapshot, not live tail: open the latest log, read the trailing
@@ -3148,10 +3196,52 @@ module Hive
           line = Views::Format.truncate(line, usable_width) if usable_width
           Hive::Tui::Styles::FLASH.render(line)
         else
-          line = footer_hint
+          aggregate = usage_footer_aggregate
+          if usable_width && usable_width < 80
+            return Views::UsageFooter.render(aggregate: aggregate, width: usable_width)
+          end
+
+          line = "#{Views::UsageFooter.text(aggregate)} · #{footer_hint}"
           line = Views::Format.truncate(line, usable_width) if usable_width
           Hive::Tui::Styles::HINT.render(line)
         end
+      end
+
+      def usage_footer_line(usable_width = nil)
+        Views::UsageFooter.render(aggregate: usage_footer_aggregate, width: usable_width)
+      end
+
+      def usage_footer_aggregate
+        scope = derive_usage_scope(@hive_model)
+        key = [
+          @hive_model.snapshot&.object_id,
+          @hive_model.snapshot&.generated_at,
+          scope[:project_slug],
+          scope[:task_slug]
+        ]
+        unless key == @usage_footer_cache_key
+          @usage_footer_cache_key = key
+          @usage_footer_cache_aggregate = Hive::UsageDb.aggregate(scope: scope)
+        end
+        @usage_footer_cache_aggregate
+      end
+
+      def derive_usage_scope(model)
+        if model.pane_focus == :left && model.scope.positive?
+          project = project_name_for_scope(model)
+          return project ? { project_slug: project } : {}
+        end
+
+        row = current_row if model.pane_focus == :right
+        return { project_slug: row.project_name, task_slug: row.slug } if row
+
+        {}
+      end
+
+      def project_name_for_scope(model)
+        return nil if model.snapshot.nil? || model.scope.to_i <= 0
+
+        model.snapshot.projects[model.scope - 1]&.name
       end
 
       def footer_hint

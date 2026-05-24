@@ -50,6 +50,7 @@ Gem::Specification.new do |spec|
   # they have no business being installed for end users.
   spec.add_dependency "bubbletea", "= 0.1.4"
   spec.add_dependency "lipgloss", "~> 0.2.2"
+  spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"
 end

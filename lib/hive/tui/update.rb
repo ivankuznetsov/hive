@@ -79,6 +79,12 @@ module Hive
           [ apply_red_status_detail_scroll(model, message), nil ]
         when Messages::Back
           [ apply_back(model), nil ]
+        when Messages::CloseTokenStats
+          [ apply_close_token_stats(model), nil ]
+        when Messages::TokenStatsScopeChanged
+          [ apply_token_stats_scope_changed(model, message), nil ]
+        when Messages::TokenStatsSelectionMoved
+          [ apply_token_stats_selection_moved(model, message), nil ]
         when Messages::ProjectScope
           [ apply_project_scope(model, message), nil ]
         when Messages::PaneFocusToggled
@@ -788,6 +794,90 @@ end
         when :new_idea_project then apply_new_idea_cancelled(model)
         else model
         end
+      end
+
+      def apply_close_token_stats(model)
+        return model unless model.mode == :token_stats
+
+        model.with(mode: :grid, token_stats_state: nil)
+      end
+
+      def apply_token_stats_scope_changed(model, msg)
+        return model unless model.mode == :token_stats
+
+        state = model.token_stats_state || Model::TokenStatsState.new(scope_level: :all)
+        next_state = case msg.direction
+        when :out then token_stats_scope_out(state)
+        when :in then token_stats_scope_in(model, state)
+        else state
+        end
+        model.with(token_stats_state: next_state)
+      end
+
+      def token_stats_scope_out(state)
+        case state.scope_level
+        when :task
+          Model::TokenStatsState.new(scope_level: :project, project_slug: state.project_slug)
+        when :project
+          Model::TokenStatsState.new(scope_level: :all)
+        else
+          state
+        end
+      end
+
+      def token_stats_scope_in(model, state)
+        case state.scope_level
+        when :all
+          project = state.project_slug || token_stats_project_candidates(model).first
+          project ? Model::TokenStatsState.new(scope_level: :project, project_slug: project) : state
+        when :project
+          task = state.task_slug || token_stats_task_candidates(model, state.project_slug).first
+          task ? Model::TokenStatsState.new(scope_level: :task, project_slug: state.project_slug, task_slug: task) : state
+        else
+          state
+        end
+      end
+
+      def apply_token_stats_selection_moved(model, msg)
+        return model unless model.mode == :token_stats
+
+        state = model.token_stats_state || Model::TokenStatsState.new(scope_level: :all)
+        next_state = case state.scope_level
+        when :project
+          project = cycle_token_stats_value(
+            token_stats_project_candidates(model),
+            state.project_slug,
+            msg.direction
+          )
+          project ? Model::TokenStatsState.new(scope_level: :project, project_slug: project) : state
+        when :task
+          task = cycle_token_stats_value(
+            token_stats_task_candidates(model, state.project_slug),
+            state.task_slug,
+            msg.direction
+          )
+          task ? Model::TokenStatsState.new(scope_level: :task, project_slug: state.project_slug, task_slug: task) : state
+        else
+          state
+        end
+        model.with(token_stats_state: next_state)
+      end
+
+      def cycle_token_stats_value(candidates, current, direction)
+        return nil if candidates.empty?
+
+        idx = candidates.index(current) || 0
+        delta = direction == :previous ? -1 : 1
+        candidates[(idx + delta) % candidates.size]
+      end
+
+      def token_stats_project_candidates(model)
+        Array(model.snapshot&.projects).map(&:name)
+      end
+
+      def token_stats_task_candidates(model, project_slug)
+        project = Array(model.snapshot&.projects).find { |candidate| candidate.name == project_slug }
+        Array(project&.rows).map(&:slug)
       end
 
       def new_idea_project_choices(model)

@@ -93,21 +93,28 @@ class HiveBotSupervisorTest < Minitest::Test
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [])
-    @supervisor = Hive::Bot::Supervisor.allocate
-    @supervisor.instance_variable_set(:@telegram, @telegram)
-    @supervisor.instance_variable_set(:@logger, @logger)
-    @supervisor.instance_variable_set(:@status_watcher, @status_watcher)
-    @supervisor.instance_variable_set(:@child_supervisor, @child_supervisor)
-    @supervisor.instance_variable_set(:@conversation_store, @conversation_store)
-    @supervisor.instance_variable_set(:@notification_dispatcher, @notification_dispatcher)
-    @supervisor.instance_variable_set(:@router, FakeRouter.new)
-    @supervisor.instance_variable_set(:@dry_run, false)
-    @supervisor.instance_variable_set(:@config, {
+    # Drive the real constructor so any future invariant added to
+    # Supervisor#initialize is exercised by every test in this file. We
+    # inject all collaborators so the constructor's `||=` defaults never
+    # touch disk or the network.
+    @config = {
       "chat_id_allowlist" => [ 42, 43 ],
       "clear_retry_grace_sec" => 1,
       "conversation_ttl_sec" => 60,
       "poll_interval_sec" => 1
-    })
+    }
+    @supervisor = Hive::Bot::Supervisor.new(
+      config: @config,
+      token: "test-token",
+      logger: @logger,
+      telegram: @telegram,
+      status_watcher: @status_watcher,
+      notification_dispatcher: @notification_dispatcher,
+      router: FakeRouter.new,
+      child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store,
+      dry_run: false
+    )
   end
 
   def child_exit(exit_code: 0, envelope: nil, log_path: "/tmp/hive-bot.log", pid: 123)

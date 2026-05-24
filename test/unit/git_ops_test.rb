@@ -500,4 +500,209 @@ class GitOpsTest < Minitest::Test
              "untracked agent-created file must be removed by reset_hard_orig_head + git clean -fd"
     end
   end
+def test_ancestor_returns_false_for_non_ancestor_and_raises_on_git_error
+  ops = Hive::GitOps.new("/tmp/project")
+  statuses = [ FakeStatus.new(false, 1), FakeStatus.new(false, 128) ]
+
+  with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "", "fatal\n", statuses.shift ] }) do
+    refute ops.ancestor?("old", "new")
+    error = assert_raises(Hive::GitError) { ops.ancestor?("old", "new") }
+    assert_match(/merge-base --is-ancestor failed/, error.message)
+  end
+end
+
+def test_ensure_hive_state_worktree_attached_adds_missing_worktree
+  ops = Hive::GitOps.new("/tmp/project")
+  commands = []
+  ops.define_singleton_method(:hive_state_worktree_exists?) { false }
+  ops.define_singleton_method(:run_git!) { |*args| commands << args }
+
+  ops.ensure_hive_state_worktree_attached
+
+  assert_equal [ [ "-C", "/tmp/project", "worktree", "add", "/tmp/project/.hive-state", Hive::GitOps::HIVE_BRANCH ] ],
+               commands
+end
+
+def test_detect_default_branch_uses_git_config_then_master_fallback
+  ops = Hive::GitOps.new("/tmp/project")
+  ops.define_singleton_method(:origin_default_branch) { nil }
+  responses = [
+    [ "", "", FakeStatus.new(false, 1) ],
+    [ "trunk\n", "", FakeStatus.new(true, 0) ]
+  ]
+
+  with_replaced_singleton_method(Open3, :capture3, ->(*_args) { responses.shift }) do
+    assert_equal "trunk", ops.detect_default_branch
+  end
+
+  responses = [
+    [ "", "", FakeStatus.new(false, 1) ],
+    [ "\n", "", FakeStatus.new(true, 0) ]
+  ]
+  with_replaced_singleton_method(Open3, :capture3, ->(*_args) { responses.shift }) do
+    assert_equal "master", ops.detect_default_branch
+  end
+end
+
+def test_commits_behind_returns_zero_for_malformed_count
+  ops = Hive::GitOps.new("/tmp/project")
+
+  with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "not-a-number\n", "", FakeStatus.new(true, 0) ] }) do
+    assert_equal 0, ops.commits_behind("origin/main")
+  end
+end
+
+def test_fetch_default_branch_times_out_and_kills_child
+  ops = Hive::GitOps.new("/tmp/project")
+  ops.define_singleton_method(:sleep) { |_seconds| nil }
+  signals = []
+  waited = []
+  times = [ 0.0, 2.0 ]
+
+  with_replaced_singleton_method(Process, :spawn, ->(*_args, **_kwargs) { 1234 }) do
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock) { times.shift || 2.0 }) do
+      with_replaced_singleton_method(Process, :waitpid2, ->(_pid, _flags) { [ nil, nil ] }) do
+        with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+          with_replaced_singleton_method(Process, :waitpid, ->(pid) { waited << pid }) do
+            refute ops.fetch_default_branch("main", timeout_sec: 1)
+          end
+        end
+      end
+    end
+  end
+
+  assert_equal [ [ "TERM", 1234 ], [ "KILL", 1234 ] ], signals
+  assert_equal [ 1234 ], waited
+end
+
+def test_fetch_default_branch_returns_false_on_spawn_error
+  ops = Hive::GitOps.new("/tmp/project")
+
+  with_replaced_singleton_method(Process, :spawn, ->(*_args, **_kwargs) { raise "spawn failed" }) do
+    refute ops.fetch_default_branch("main", timeout_sec: 1)
+  end
+end
+
+def test_rebase_in_progress_returns_false_when_git_dir_lookup_fails
+  ops = Hive::GitOps.new("/tmp/project")
+  ops.define_singleton_method(:run_git!) { |*_args| raise Hive::GitError, "bad git dir" }
+
+  refute ops.rebase_in_progress?
+end
+
+def test_rebase_onto_reports_timeout_and_empty_stderr_details
+  ops = Hive::GitOps.new("/tmp/project")
+  ops.define_singleton_method(:rebase_in_progress?) { false }
+  outcomes = [ [ false, "", true ], [ false, "", false ] ]
+  ops.define_singleton_method(:run_git_with_timeout) { |*_args, **_kwargs| outcomes.shift }
+
+  timeout = assert_raises(Hive::GitError) { ops.rebase_onto("origin/main") }
+  assert_match(/timed out after/, timeout.message)
+
+  empty = assert_raises(Hive::GitError) { ops.rebase_onto("origin/main") }
+  assert_match(/\(no stderr\)/, empty.message)
+end
+
+def test_rebase_continue_sets_editor_env_and_reports_failure_details
+  ops = Hive::GitOps.new("/tmp/project")
+  captured_envs = []
+  outcomes = [
+    [ false, "", true ],
+    [ false, "", false ],
+    [ false, "fatal continue", false ]
+  ]
+  ops.define_singleton_method(:rebase_in_progress?) { false }
+  ops.define_singleton_method(:run_git_with_timeout) do |*_args, env: {}, **_kwargs|
+    captured_envs << env
+    outcomes.shift
+  end
+
+  timeout = assert_raises(Hive::GitError) { ops.rebase_continue }
+  assert_match(/timed out after/, timeout.message)
+  empty = assert_raises(Hive::GitError) { ops.rebase_continue }
+  assert_match(/\(no stderr\)/, empty.message)
+  stderr = assert_raises(Hive::GitError) { ops.rebase_continue }
+  assert_match(/fatal continue/, stderr.message)
+  assert captured_envs.all? { |env| env == { "GIT_EDITOR" => "true" } }
+end
+
+def test_rebase_continue_raises_rebase_conflict_when_rebase_remains_in_progress
+  ops = Hive::GitOps.new("/tmp/project")
+  ops.define_singleton_method(:run_git_with_timeout) { |*_args, **_kwargs| [ false, "conflict", false ] }
+  ops.define_singleton_method(:rebase_in_progress?) { true }
+
+  assert_raises(Hive::RebaseConflict) { ops.rebase_continue }
+end
+
+def test_run_git_with_timeout_drains_remaining_stdout_and_stderr_after_exit
+  ops = Hive::GitOps.new("/tmp/project")
+
+  with_replaced_singleton_method(Process, :spawn, lambda { |*_args, **kwargs|
+    kwargs.fetch(:out).write("stdout-drain")
+    kwargs.fetch(:err).write("stderr-drain")
+    1234
+  }) do
+    with_replaced_singleton_method(IO, :select, ->(_readers, *_rest) { nil }) do
+      with_replaced_singleton_method(Process, :waitpid2, ->(_pid, _flags) { [ 1234, FakeStatus.new(true, 0) ] }) do
+        success, err, timed_out = ops.run_git_with_timeout([ "git", "status" ])
+        assert success
+        assert_equal "stderr-drain", err
+        refute timed_out
+      end
+    end
+  end
+end
+
+def test_run_git_with_timeout_returns_spawn_error_as_failure
+  ops = Hive::GitOps.new("/tmp/project")
+
+  with_replaced_singleton_method(Process, :spawn, ->(*_args, **_kwargs) { raise "spawn failed" }) do
+    success, err, timed_out = ops.run_git_with_timeout([ "git", "status" ])
+    refute success
+    assert_includes err, "spawn failed"
+    refute timed_out
+  end
+end
+
+def test_rebase_abort_and_reset_hard_fail_soft_on_errors
+  ops = Hive::GitOps.new("/tmp/project")
+
+  with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise "git unavailable" }) do
+    refute ops.rebase_abort
+    refute ops.reset_hard_orig_head
+  end
+
+  calls = 0
+  with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+    calls += 1
+    [ "", "", FakeStatus.new(false, 1) ]
+  }) do
+    refute ops.reset_hard_orig_head
+  end
+  assert_equal 1, calls, "git clean must not run when reset fails"
+end
+
+def test_rebase_merge_message_path_returns_apply_message_and_fail_soft_on_errors
+  with_tmp_dir do |dir|
+    git_dir = File.join(dir, ".gitdir")
+    FileUtils.mkdir_p(File.join(git_dir, "rebase-apply"))
+    apply_msg = File.join(git_dir, "rebase-apply", "msg-clean")
+    File.write(apply_msg, "message\n")
+    ops = Hive::GitOps.new(dir)
+    ops.define_singleton_method(:run_git!) { |*_args| git_dir }
+
+    assert_equal apply_msg, ops.rebase_merge_message_path
+
+    ops.define_singleton_method(:run_git!) { |*_args| raise Hive::GitError, "no git dir" }
+    assert_nil ops.rebase_merge_message_path
+  end
+end
+
+private
+
+FakeStatus = Struct.new(:success_value, :exitstatus) do
+  def success?
+    success_value
+  end
+end
 end

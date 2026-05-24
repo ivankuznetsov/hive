@@ -459,6 +459,26 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_run_raises_named_error_when_output_clear_delete_fails
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 1)
+      original_delete = File.method(:delete)
+
+      File.define_singleton_method(:delete) do |*paths|
+        raise Errno::EACCES, reviewer.output_path if paths.include?(reviewer.output_path)
+
+        original_delete.call(*paths)
+      end
+
+      error = assert_raises(Hive::Error) { reviewer.run! }
+      assert_includes error.message, "failed to clear partial output_path"
+      assert_includes error.message, "(pre_attempt)"
+      assert_includes error.message, reviewer.output_path
+    ensure
+      File.define_singleton_method(:delete, original_delete)
+    end
+  end
+
   def test_run_falls_back_to_default_when_max_attempts_absent
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir) # no max_attempts override

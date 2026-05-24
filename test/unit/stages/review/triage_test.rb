@@ -311,6 +311,75 @@ class TriageTest < Minitest::Test
     end
   end
 
+  # --- context helper edge paths ------------------------------------------
+
+  def test_protected_paths_expand_under_task_folder
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+
+      expected = Hive::Stages::Review::Triage::PROTECTED_FILES.map do |name|
+        File.join(task_folder, name)
+      end
+
+      assert_equal expected, Hive::Stages::Review::Triage.protected_paths(ctx)
+    end
+  end
+
+  def test_context_file_section_reports_unreadable_file
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      target = File.join(task_folder, "task.md")
+      File.write(target, "Task body
+")
+      original_read = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |read_path, *args, **kwargs, &block|
+        raise Errno::EACCES, "denied" if File.expand_path(read_path) == File.expand_path(target)
+
+        original_read.call(read_path, *args, **kwargs, &block)
+      }) do
+        section = Hive::Stages::Review::Triage.build_context_file_section(
+          ctx,
+          "task.md",
+          "Task context",
+          "task_md",
+          "tag1"
+        )
+
+        assert_equal "Task context: task.md could not be read.", section
+      end
+    end
+  end
+
+  def test_prior_escalations_context_substitutes_unreadable_placeholder
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder, pass: 2)
+      reviews_dir = File.join(task_folder, "reviews")
+      unreadable = File.join(reviews_dir, "escalations-01.md")
+      current = File.join(reviews_dir, "escalations-02.md")
+      future = File.join(reviews_dir, "escalations-03.md")
+      File.write(unreadable, "secret
+")
+      File.write(current, "current answer
+")
+      File.write(future, "future answer
+")
+      original_read = File.method(:read)
+
+      with_replaced_singleton_method(File, :read, lambda { |read_path, *args, **kwargs, &block|
+        raise Errno::EACCES, "denied" if File.expand_path(read_path) == File.expand_path(unreadable)
+
+        original_read.call(read_path, *args, **kwargs, &block)
+      }) do
+        block = Hive::Stages::Review::Triage.build_prior_escalations_context(ctx, "tag1")
+
+        assert_includes block, "prior escalation file unreadable: Permission denied"
+        assert_includes block, "current answer"
+        refute_includes block, "future answer"
+      end
+    end
+  end
+
   # --- discovery -------------------------------------------------------
 
   # --- R1: reviewer-file read failure is tolerated --------------------

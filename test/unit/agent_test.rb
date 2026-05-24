@@ -271,4 +271,141 @@ class AgentTest < Minitest::Test
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
     end
   end
+
+  def test_rejects_unknown_status_mode
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+
+      err = assert_raises(ArgumentError) do
+        Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5, status_mode: :unknown)
+      end
+
+      assert_match(/unknown status_mode/, err.message)
+    end
+  end
+
+  def test_legacy_class_method_warning_emits_once_outside_test_context
+    old_hive_test = ENV.delete("HIVE_TEST")
+    old_warned = Hive::Agent.instance_variable_get(:@legacy_warned)
+    minitest = Object.const_get(:Minitest) if Object.const_defined?(:Minitest)
+    Object.send(:remove_const, :Minitest) if minitest
+    Hive::Agent.instance_variable_set(:@legacy_warned, {})
+
+    _out, err = capture_io do
+      Hive::Agent.maybe_warn_legacy_class_method(:bin)
+      Hive::Agent.maybe_warn_legacy_class_method(:bin)
+    end
+
+    assert_equal 1, err.scan(/Hive::Agent\.bin/).size
+  ensure
+    ENV["HIVE_TEST"] = old_hive_test if old_hive_test
+    Object.const_set(:Minitest, minitest) if minitest && !Object.const_defined?(:Minitest)
+    Hive::Agent.instance_variable_set(:@legacy_warned, old_warned || {})
+  end
+
+  def test_spawn_and_wait_uses_pid_when_process_group_disappears
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = with_replaced_singleton_method(Process, :getpgid, ->(_pid) { raise Errno::ESRCH }) do
+        Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+      end
+
+      assert_equal result[:pid], result[:pgid]
+      assert_equal :waiting, result[:status]
+    end
+  end
+
+  def test_signaled_subprocess_reports_negative_exit_code
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      signal_bin = File.join(dir, "signal-agent")
+      File.write(signal_bin, <<~RUBY)
+        #!/usr/bin/env ruby
+        Process.kill("TERM", Process.pid)
+        sleep 1
+      RUBY
+      File.chmod(0o755, signal_bin)
+      ENV["HIVE_CLAUDE_BIN"] = signal_bin
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal(-Signal.list.fetch("TERM"), result[:exit_code])
+      assert_equal :error, result[:status]
+      assert_equal((-Signal.list.fetch("TERM")).to_s, Hive::Markers.current(task.state_file).attrs["exit_code"])
+    end
+  end
+
+  def test_kill_group_ignores_process_errors
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _target) { raise Errno::EPERM }) do
+        assert_nil agent.kill_group(123)
+      end
+    end
+  end
+
+  def test_sleep_grace_then_kill_ignores_kill_errors
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      start = Time.now
+      times = [ start, start + 4 ]
+
+      with_replaced_singleton_method(Time, :now, -> { times.shift || start + 4 }) do
+        with_replaced_singleton_method(Process, :kill, ->(_signal, _target) { raise Errno::ESRCH }) do
+          assert_nil agent.sleep_grace_then_kill(123, 456)
+        end
+      end
+    end
+  end
+
+  def test_sleep_grace_then_kill_ignores_missing_child
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+
+      with_replaced_singleton_method(Process, :wait, ->(_pid, _flags) { raise Errno::ECHILD }) do
+        assert_nil agent.sleep_grace_then_kill(123, 456)
+      end
+    end
+  end
+
+  def test_state_file_marker_nil_exit_without_marker_sets_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = { timed_out: false, exit_code: nil }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "no_marker_no_exit_code", marker.attrs["reason"]
+    end
+  end
+
+  def test_extract_final_message_handles_agent_and_assistant_shapes
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+
+      assert_equal "agent says hi", agent.send(:extract_final_message, JSON.generate(
+        "type" => "agent_message",
+        "text" => " agent says hi "
+      ))
+      assert_nil agent.send(:extract_final_message, JSON.generate(
+        "type" => "assistant",
+        "message" => "not-a-hash"
+      ))
+      assert_equal "assistant content", agent.send(:extract_final_message, JSON.generate(
+        "type" => "assistant",
+        "message" => { "content" => [ { "type" => "text", "text" => "assistant content" } ] }
+      ))
+    end
+  end
 end

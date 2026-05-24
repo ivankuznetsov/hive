@@ -128,6 +128,79 @@ class RunFindingsTest < Minitest::Test
     end
   end
 
+  def test_findings_no_review_file_without_json_raises_without_envelope
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        capture_io { Hive::Commands::New.new(File.basename(dir), "no reviews here").call }
+        slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
+
+        out, err, status = with_captured_exit { Hive::Commands::Findings.new(slug).call }
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_equal "", out
+        assert_includes err, "no review files"
+      end
+    end
+  end
+
+  def test_findings_text_reports_no_findings
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, _execute, slug = seed_execute_task_with_reviews(
+          dir,
+          body: "# ce-review pass 02\n\n## High\nNo actionable findings.\n"
+        )
+
+        out, err = capture_io { Hive::Commands::Findings.new(slug).call }
+
+        assert_includes out, "findings for #{slug}"
+        assert_includes out, "no findings"
+        assert_equal "", err
+      end
+    end
+  end
+
+  def test_findings_internal_error_json_emits_error_envelope
+    cmd = Hive::Commands::Findings.new("slug", json: true)
+    cmd.define_singleton_method(:do_call) { raise RuntimeError, "boom" }
+
+    out, err, status = with_captured_exit { cmd.call }
+
+    assert_equal Hive::ExitCodes::SOFTWARE, status
+    payload = JSON.parse(out)
+    assert_equal "hive-findings", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "error", payload["error_kind"]
+    assert_equal "InternalError", payload["error_class"]
+    assert_match(/internal error: RuntimeError: boom/, payload["message"])
+    assert_match(/internal error: RuntimeError: boom/, err)
+  end
+
+  def test_findings_internal_error_without_json_raises_without_envelope
+    cmd = Hive::Commands::Findings.new("slug")
+    cmd.define_singleton_method(:do_call) { raise RuntimeError, "boom" }
+
+    out, err, status = with_captured_exit { cmd.call }
+
+    assert_equal Hive::ExitCodes::SOFTWARE, status
+    assert_equal "", out
+    assert_match(/internal error: RuntimeError: boom/, err)
+  end
+
+  def test_findings_error_kind_classifier_covers_typed_errors
+    cmd = Hive::Commands::Findings.new("slug")
+
+    assert_equal "ambiguous_slug", cmd.send(
+      :error_kind_for,
+      Hive::AmbiguousSlug.new("ambiguous", slug: "slug", candidates: [])
+    )
+    assert_equal "no_review_file", cmd.send(:error_kind_for, Hive::NoReviewFile.new("none"))
+    assert_equal "unknown_finding", cmd.send(:error_kind_for, Hive::UnknownFinding.new("missing", id: 99))
+    assert_equal "invalid_task_path", cmd.send(:error_kind_for, Hive::InvalidTaskPath.new("bad"))
+    assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("generic"))
+  end
+
   # ── accept-finding ─────────────────────────────────────────────────────
 
   def test_accept_finding_by_id_flips_checkbox_and_commits

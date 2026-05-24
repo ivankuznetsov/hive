@@ -28,8 +28,8 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
-      - name: Run minitest suite
-        run: bundle exec rake test
+      - name: Run minitest suite with merged coverage report
+        run: bundle exec rake coverage
 
   rubocop:
     name: rubocop (37signals omakase)

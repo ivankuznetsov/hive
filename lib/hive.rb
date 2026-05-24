@@ -101,7 +101,7 @@ module Hive
       # Self-derived: every constant in this module other than ALL itself.
       # Defined last so the `constants` lookup runs after every value-bearing
       # constant is in place but before ALL is added.
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `tasks[].action` (and `tasks[].action_label` lookup
@@ -128,7 +128,7 @@ module Hive
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive run --json` when
@@ -151,7 +151,7 @@ module Hive
       INVALID_TASK_PATH = "invalid_task_path".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive status --json`
@@ -162,7 +162,7 @@ module Hive
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze
       ERROR    = "error".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive status --diagnose --json`.
@@ -179,7 +179,7 @@ module Hive
       IN_FLIGHT       = "in_flight".freeze
       SLUG_NOT_FOUND  = "slug_not_found".freeze
       AMBIGUOUS_SLUG  = "ambiguous_slug".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Mixin for command classes that emit a versioned JSON envelope
@@ -236,7 +236,7 @@ module Hive
       UNKNOWN_PROJECT = "unknown_project".freeze
       CONFIG          = "config".freeze
       INTERNAL        = "internal".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive drop --json`.
@@ -254,7 +254,7 @@ module Hive
       WORKTREE          = "worktree".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive daemon enable`
@@ -286,7 +286,7 @@ module Hive
       # `--force` on `hive daemon stop`). Distinct from PROJECT_AND_ALL
       # so automation branching on error_kind can act differently.
       WRONG_SUBCOMMAND_FLAG = "wrong_subcommand_flag".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
     # Closed enum of `error_kind` values emitted by `hive prune --json`.
@@ -297,7 +297,7 @@ module Hive
       USAGE    = "usage".freeze
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze
-      ALL = constants.map { |c| const_get(c) }.freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
   end
 

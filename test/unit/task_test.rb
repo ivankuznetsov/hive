@@ -18,6 +18,18 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_path_helpers_use_task_and_state_directories
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "4-execute", "add-foo")
+      FileUtils.mkdir_p(folder)
+
+      task = Hive::Task.new(folder)
+
+      assert_equal File.join(folder, ".lock"), task.lock_file
+      assert_equal File.join(dir, ".hive-state", ".commit-lock"), task.commit_lock_file
+    end
+  end
+
   def test_state_file_per_stage
     with_tmp_dir do |dir|
       mappings = {

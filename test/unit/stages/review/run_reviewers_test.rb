@@ -168,6 +168,20 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  # A legacy/custom reviewer adapter that does not accept deadline:.
+  class NoDeadlineReviewer < Hive::Reviewers::Base
+    def run!
+      ensure_reviews_dir!
+      File.write(output_path, "## Low\n\n- [ ] no deadline kwarg\n")
+      Hive::Reviewers::Result.new(
+        name: name,
+        output_path: output_path,
+        status: :ok,
+        error_message: nil
+      )
+    end
+  end
+
   # Shared test helper: stub Hive::Reviewers.dispatch to return a sequence
   # of adapters, run the orchestrator, restore dispatch.
   def with_stubbed_dispatch(adapters)
@@ -227,6 +241,49 @@ class RunReviewersTest < Minitest::Test
       assert_includes contents, "[raises] reviewer \"raises\" failed"
       assert_includes contents, "RuntimeError"
       assert_includes contents, "boom"
+    end
+  end
+
+  def test_reviewer_without_deadline_kwarg_still_runs
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [ { "name" => "legacy", "output_basename" => "legacy" } ]
+        }
+      }
+      adapters = [ NoDeadlineReviewer.new(cfg["review"]["reviewers"].first, make_ctx(dir)) ]
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        assert_equal :ok, result
+      end
+
+      assert File.exist?(File.join(dir, "reviews", "legacy-01.md"))
+    end
+  end
+
+  def test_run_reviewers_returns_wall_clock_exceeded_before_dispatch_when_budget_spent
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [ { "name" => "late", "output_basename" => "late" } ]
+        }
+      }
+      original_dispatch = Hive::Reviewers.method(:dispatch)
+      Hive::Reviewers.define_singleton_method(:dispatch) do |_spec, _ctx, **_kwargs|
+        flunk "dispatch must not run after wall-clock budget is spent"
+      end
+
+      result = Hive::Stages::Review.run_reviewers(
+        cfg,
+        make_ctx(dir),
+        Task.new(dir, File.join(dir, "task.md")),
+        started_at: Time.now - 2,
+        max_wall_clock_sec: 1
+      )
+      assert_equal :wall_clock_exceeded, result
+    ensure
+      Hive::Reviewers.define_singleton_method(:dispatch, original_dispatch) if original_dispatch
     end
   end
 
@@ -428,6 +485,69 @@ class RunReviewersTest < Minitest::Test
     refute Hive::Stages::Review.reviewer_file?("errors-99.md")
     # Sanity: a real reviewer file is still recognized.
     assert Hive::Stages::Review.reviewer_file?("claude-ce-code-review-01.md")
+  end
+
+  def test_clear_reviewer_infra_errors_raises_named_error_on_delete_failure
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      original_delete = File.method(:delete)
+      File.define_singleton_method(:delete) do |target|
+        if target.end_with?("errors-01.md")
+          raise Errno::EACCES, target
+        end
+
+        original_delete.call(target)
+      end
+
+      error = assert_raises(Hive::Error) do
+        Hive::Stages::Review.clear_reviewer_infra_errors(ctx)
+      end
+      assert_match(/failed to clear stale .*errors-01\.md/, error.message)
+    ensure
+      File.define_singleton_method(:delete, original_delete) if original_delete
+    end
+  end
+
+  def test_record_reviewer_infra_error_raises_named_error_on_write_failure
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      spec = { "name" => "broken", "output_basename" => "broken" }
+      result = Hive::Reviewers::Result.new(
+        name: "broken",
+        output_path: nil,
+        status: :error,
+        error_message: "boom"
+      )
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) do |target, *args, **kwargs, &block|
+        if target.end_with?("errors-01.md") && args.first == "a"
+          raise Errno::ENOSPC, target
+        end
+
+        original_open.call(target, *args, **kwargs, &block)
+      end
+
+      error = assert_raises(Hive::Error) do
+        Hive::Stages::Review.record_reviewer_infra_error(ctx, spec, result)
+      end
+      assert_match(/failed to write reviews\/errors-01\.md/, error.message)
+      assert_match(/reviewer "broken"/, error.message)
+    ensure
+      File.define_singleton_method(:open, original_open) if original_open
+    end
+  end
+
+  def test_incomplete_triage_pass_shim_reports_only_triage_incomplete
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "reviewer-04.md"), "## High\n- [ ] finding\n")
+
+      assert Hive::Stages::Review.incomplete_triage_pass?(dir, 4)
+
+      File.write(File.join(reviews, "escalations-04.md"), "# Escalations\n")
+      refute Hive::Stages::Review.incomplete_triage_pass?(dir, 4)
+    end
   end
 
   def test_errors_file_is_not_picked_up_by_triage_discover_reviewer_files

@@ -122,6 +122,35 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_migrate_reports_already_migrated_noop
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+
+        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "target stage directories look already-migrated"
+      end
+    end
+  end
+
+  def test_migrate_reports_plain_noop_when_legacy_dirs_only_have_non_slug_entries
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        stages = File.join(dir, ".hive-state", "stages")
+        ignored = File.join(stages, "5-review", ".DS_Store")
+        FileUtils.mkdir_p(ignored)
+
+        out, _err = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "hive: migrate found nothing to move"
+        refute_includes out, "already-migrated"
+        assert File.directory?(ignored), "non-slug entry must remain in the legacy stage directory"
+      end
+    end
+  end
+
   # Commit-message assertion (round-1 finding): regression that drops
   # the commit (or changes the message) would otherwise be invisible.
   def test_migrate_writes_a_commit_with_descriptive_message

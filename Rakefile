@@ -1,4 +1,7 @@
 require "rake/testtask"
+require "fileutils"
+require "securerandom"
+require_relative "test/support/coverage"
 
 # Default suite — everything under test/{unit,integration}. Self-contained,
 # uses fake-claude / fake-gh, no network or paid API calls.
@@ -7,6 +10,40 @@ Rake::TestTask.new do |t|
   t.libs << "lib"
   t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
   t.warning = false
+end
+
+desc "Run the default suite with merged stdlib Coverage reporting (set HIVE_COVERAGE_MIN_LINE to enforce a line threshold)"
+task :coverage do
+  root = File.expand_path(__dir__)
+  run_id = "#{Process.pid}-#{SecureRandom.hex(4)}"
+  report_path = File.join(root, "coverage", "coverage.json")
+  env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+  old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
+
+  begin
+    # Wipe the entire resultset tree, not just the current run id (which
+    # is fresh per invocation and therefore never exists yet). Without this
+    # every local `rake coverage` left stale per-run directories behind.
+    FileUtils.rm_rf(File.join(root, "coverage", ".resultset"))
+    FileUtils.rm_f(report_path)
+    ENV["HIVE_COVERAGE"] = "1"
+    ENV["HIVE_COVERAGE_ROOT"] = root
+    ENV["HIVE_COVERAGE_RUN_ID"] = run_id
+    coverage_rubyopt = "-I#{File.join(root, 'test')} -rhive_coverage_boot"
+    ENV["RUBYOPT"] = [ coverage_rubyopt, ENV["RUBYOPT"] ].compact.join(" ")
+
+    Rake::Task[:test].invoke
+    unless File.exist?(report_path)
+      abort "coverage gate aborted: #{report_path} was never written. " \
+            "The test suite likely crashed before the Minitest after_run " \
+            "hook fired (e.g. SIGKILL on a subprocess) - re-run with " \
+            "TESTOPTS=--verbose to surface the failure."
+    end
+    report = HiveTestCoverage.read_report(report_path)
+    abort HiveTestCoverage.failure_message(report) unless HiveTestCoverage.coverage_ok?(report)
+  ensure
+    old_env.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
 end
 
 # Smoke suite — opt-in, runs against real `claude` and a tmp git repo. Costs

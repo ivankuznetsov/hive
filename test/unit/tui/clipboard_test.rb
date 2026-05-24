@@ -452,4 +452,223 @@ class HiveTuiClipboardTest < Minitest::Test
       assert_equal "jpg", result.ext
     end
   end
+  def test_probe_result_rejects_unknown_kind
+    error = assert_raises(ArgumentError) do
+      Hive::Tui::Clipboard::ProbeResult.new(kind: :surprise, bytes: nil, path: nil, ext: nil)
+    end
+
+    assert_match(/unknown probe result kind/, error.message)
+  end
+
+  def test_probe_clipboard_image_timeout_exception_returns_timeout_result
+    kernel = Object.new
+    kernel.define_singleton_method(:command_available?) { |_name, env:| true }
+    kernel.define_singleton_method(:capture3) do |_argv, timeout:, max_bytes:|
+      raise Timeout::Error, "slow clipboard"
+    end
+
+    result = Hive::Tui::Clipboard.probe_clipboard_image(
+      env: { "XDG_SESSION_TYPE" => "wayland", "PATH" => "/bin" },
+      kernel: kernel
+    )
+
+    assert_equal :clipboard_timeout, result.kind
+  end
+
+  def test_fixture_clipboard_clamps_to_last_fixture_by_default
+    fixture_path = File.expand_path("../../../test/fixtures/composer/screenshot-1.png", __dir__)
+    kernel = FakeKernel.new(files: { fixture_path => { size: 1, file: true } })
+    Hive::Tui::Clipboard.reset_test_clipboard!
+    env = { "HIVE_TUI_TEST_CLIPBOARD" => "fixture://screenshot-1.png", "PATH" => "" }
+
+    first = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
+    second = Hive::Tui::Clipboard.probe(pasted_text: "", env: env, kernel: kernel)
+
+    assert_equal :image_file, first.kind
+    assert_equal :image_file, second.kind
+    assert_equal first.path, second.path
+  ensure
+    Hive::Tui::Clipboard.reset_test_clipboard!
+  end
+
+  def test_webp_signature_accepts_riff_webp_header
+    with_tmp_dir do |dir|
+      path = File.join(dir, "shot.webp")
+      kernel = FakeKernel.new(files: fake_file(path, head: "RIFFxxxxWEBPmore".b))
+
+      result = Hive::Tui::Clipboard.probe(pasted_text: path, env: { "PATH" => "" }, kernel: kernel)
+
+      assert_equal :image_file, result.kind
+      assert_equal "webp", result.ext
+      refute Hive::Tui::Clipboard.webp_signature?("RIFFshort".b)
+    end
+  end
+
+  def test_default_shim_command_available_checks_path_entries
+    with_tmp_dir do |dir|
+      executable = File.join(dir, "wl-paste")
+      File.write(executable, "#!/bin/sh\n")
+      File.chmod(0o755, executable)
+
+      assert Hive::Tui::Clipboard::DefaultShim.command_available?("wl-paste", env: { "PATH" => dir })
+      refute Hive::Tui::Clipboard::DefaultShim.command_available?("xclip", env: { "PATH" => dir })
+    end
+  end
+
+  def test_default_shim_capture3_success_and_timeout_paths
+    out, err, status = Hive::Tui::Clipboard::DefaultShim.capture3(
+      [ RbConfig.ruby, "-e", "STDOUT.write('abc'); STDERR.write('err')" ],
+      timeout: 2,
+      max_bytes: nil
+    )
+
+    assert_equal "abc", out
+    assert_equal "err", err
+    assert status.success?
+
+    out, err, status = Hive::Tui::Clipboard::DefaultShim.capture3(
+      [ RbConfig.ruby, "-e", "sleep 1" ],
+      timeout: 0.05,
+      max_bytes: 8
+    )
+
+    assert_equal "", out
+    assert_equal "", err
+    assert_same Hive::Tui::Clipboard::TIMEOUT_STATUS, status
+  end
+
+  def test_default_shim_read_capped_includes_one_overflow_byte_and_drains
+    capped = Hive::Tui::Clipboard::DefaultShim.read_capped(StringIO.new("abcdef"), 2)
+    uncapped = Hive::Tui::Clipboard::DefaultShim.read_capped(StringIO.new("xyz"), nil)
+
+    assert_equal "abc", capped
+    assert_equal "xyz", uncapped
+  end
+
+  def test_default_shim_file_helpers_read_head_and_fixture_base
+    with_tmp_dir do |dir|
+      path = File.join(dir, "head.bin")
+      File.write(path, "abcdef")
+
+      assert_equal File.expand_path(path), Hive::Tui::Clipboard::DefaultShim.expand_path(path)
+      assert Hive::Tui::Clipboard::DefaultShim.file_exist?(path)
+      assert Hive::Tui::Clipboard::DefaultShim.file_file?(path)
+      assert_equal 6, Hive::Tui::Clipboard::DefaultShim.file_size(path)
+      assert_equal "abc", Hive::Tui::Clipboard::DefaultShim.read_head(path, max_bytes: 3)
+      assert_nil Hive::Tui::Clipboard::DefaultShim.read_head(File.join(dir, "missing"), max_bytes: 3)
+
+      with_env("HIVE_TUI_TEST_CLIPBOARD_BASE" => dir) do
+        assert_equal File.join(dir, "shot.png"), Hive::Tui::Clipboard::DefaultShim.test_fixture_path("shot.png")
+      end
+      with_env("HIVE_TUI_TEST_CLIPBOARD_BASE" => nil) do
+        assert_nil Hive::Tui::Clipboard::DefaultShim.test_fixture_path("shot.png")
+      end
+    end
+  end
+
+  def test_default_shim_terminate_ignores_missing_process
+    signals = []
+
+    with_process_stubs(
+      kill: ->(signal, pid) { signals << [ signal, pid ]; raise Errno::ESRCH },
+      wait: ->(_pid) { flunk "wait should not run when TERM finds no process" }
+    ) do
+      assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 12_345)
+    end
+
+    assert_equal [ [ "TERM", 12_345 ] ], signals
+  end
+
+  def test_default_shim_terminate_ignores_missing_process_during_initial_wait
+    signals = []
+
+    with_process_stubs(
+      kill: ->(signal, pid) { signals << [ signal, pid ] },
+      wait: ->(_pid) { raise Errno::ECHILD }
+    ) do
+      with_timeout_stub(->(_seconds, &block) { block.call }) do
+        assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 22_222)
+      end
+    end
+
+    assert_equal [ [ "TERM", 22_222 ] ], signals
+  end
+
+  def test_default_shim_terminate_ignores_missing_process_after_timeout
+    signals = []
+
+    with_process_stubs(
+      kill: lambda { |signal, pid|
+        signals << [ signal, pid ]
+        raise Errno::ECHILD if signal == "KILL"
+      },
+      wait: ->(_pid) { flunk "wait should be hidden behind timeout stub" }
+    ) do
+      with_timeout_stub(->(_seconds, &_block) { raise Timeout::Error }) do
+        assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 44_444)
+      end
+    end
+
+    assert_equal [ [ "TERM", 44_444 ], [ "KILL", 44_444 ] ], signals
+  end
+
+  def test_default_shim_terminate_logs_unreaped_process_after_sigkill_timeout
+    signals = []
+    logs = []
+
+    with_process_stubs(
+      kill: ->(signal, pid) { signals << [ signal, pid ] },
+      wait: ->(_pid) { flunk "wait should be hidden behind timeout stub" }
+    ) do
+      with_timeout_stub(->(_seconds, &_block) { raise Timeout::Error }) do
+        with_debug_log_stub(->(topic, message = nil) { logs << [ topic, message ] }) do
+          assert_nil Hive::Tui::Clipboard::DefaultShim.send(:terminate, 33_333)
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 33_333 ], [ "KILL", 33_333 ] ], signals
+    assert_equal 1, logs.size
+    assert_equal "clipboard", logs.first.first
+    assert_includes logs.first.last, "unreaped after SIGKILL+wait"
+  end
+
+  def with_process_stubs(kill:, wait:)
+    original_kill = Process.method(:kill)
+    original_wait = Process.method(:wait)
+    Process.define_singleton_method(:kill, &kill)
+    Process.define_singleton_method(:wait, &wait)
+    yield
+  ensure
+    Process.define_singleton_method(:kill, &original_kill)
+    Process.define_singleton_method(:wait, &original_wait)
+  end
+
+  def with_timeout_stub(callable)
+    original_timeout = Timeout.method(:timeout)
+    Timeout.define_singleton_method(:timeout, &callable)
+    yield
+  ensure
+    Timeout.define_singleton_method(:timeout, &original_timeout)
+  end
+
+  def with_debug_log_stub(callable)
+    original_log = Hive::Tui::Debug.method(:log)
+    Hive::Tui::Debug.define_singleton_method(:log, &callable)
+    yield
+  ensure
+    Hive::Tui::Debug.define_singleton_method(:log, &original_log)
+  end
+
+  def with_env(updates)
+    old = updates.to_h { |key, _value| [ key, ENV.fetch(key, nil) ] }
+    updates.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    old.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+  end
 end

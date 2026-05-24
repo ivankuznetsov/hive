@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "hive/tui/paste_aware_runner"
 require "hive/tui/bubble_model"
 require "hive/tui/model"
@@ -24,6 +26,34 @@ class HiveTuiPasteAwareRunnerTest < Minitest::Test
 
   def set_mode(bubble, mode)
     bubble.instance_variable_set(:@hive_model, bubble.hive_model.with(mode: mode))
+  end
+
+  def test_bubbletea_version_guard_raises_on_unreviewed_version
+    source = File.expand_path("../../../lib/hive/tui/paste_aware_runner.rb", __dir__)
+    script = <<~RUBY
+      require "test_helper"
+      require "bubbletea"
+
+      Bubbletea.send(:remove_const, :VERSION)
+      Bubbletea.const_set(:VERSION, "9.9.9")
+
+      begin
+        load #{source.inspect}
+      rescue RuntimeError => e
+        unless e.message.include?("bound to bubbletea") && e.message.include?("9.9.9")
+          warn e.message
+          exit 2
+        end
+        exit 0
+      end
+
+      warn "version guard did not raise"
+      exit 1
+    RUBY
+
+    _out, err, status = Open3.capture3(RbConfig.ruby, "-Itest", "-Ilib", "-e", script)
+
+    assert status.success?, err
   end
 
   def test_reset_fires_on_transition_out_of_new_idea

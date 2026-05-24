@@ -47,6 +47,20 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
+  def test_append_adds_newline_when_answer_slot_is_final_line
+    with_brainstorm("## Round 1\n\n### Q1. First?\n\n### A1.") do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "One"
+      )
+
+      assert_equal :written, result
+      assert_equal "One", Hive::Bot::BrainstormParser.parse(path).first.answer
+      assert_equal "## Round 1\n\n### Q1. First?\n\n### A1.\nOne\n", File.read(path)
+    end
+  end
+
   def test_sequential_writes_land_in_their_own_slots
     with_brainstorm(sample) do |path|
       Hive::Bot::BrainstormAnswerWriter.append!(brainstorm_path: path, question_n: 1, answer_text: "One")

@@ -94,6 +94,16 @@ class ReviewersTest < Minitest::Test
     end
   end
 
+  def test_base_reviewer_run_must_be_implemented_by_subclasses
+    with_tmp_dir do |dir|
+      spec = { "name" => "base", "output_basename" => "base" }
+      reviewer = Hive::Reviewers::Base.new(spec, make_ctx(dir))
+
+      error = assert_raises(NotImplementedError) { reviewer.run! }
+      assert_match(/Hive::Reviewers::Base must implement #run!/, error.message)
+    end
+  end
+
   # ── Context alias coverage ─────────────────────────────────────────────
 
   # The canonical home of the per-spawn Context Data type is

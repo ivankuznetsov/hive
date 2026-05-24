@@ -315,6 +315,12 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
 
   # ---- Cursor placement ----
 
+  def test_render_rows_plain_continuation_without_capacity
+    out = Hive::Tui::Views::NewIdeaPrompt.render_rows("New: ", [ "abc", "def" ], 0, 1, cursor: "|")
+
+    assert_equal "New: a|bc\n     def", out
+  end
+
   def test_render_rows_places_cursor_at_start
     out = Hive::Tui::Views::NewIdeaPrompt.render_rows("New: ", [ "abc" ], 0, 0, cursor: "|")
     assert_equal "New: |abc", out

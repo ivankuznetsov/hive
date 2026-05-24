@@ -126,6 +126,100 @@ class HiveBotTelegramTest < Minitest::Test
     assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
   end
 
+  def test_poll_updates_logs_generic_error_and_returns_empty
+    api = FakeApi.new
+    api.raise_on_get_updates = RuntimeError.new("boom")
+
+    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal [], updates
+    assert_equal :poll_failure, logger.events.first.first
+    assert_equal "RuntimeError", logger.events.first.last[:error_class]
+    assert_equal "boom", logger.events.first.last[:message]
+  end
+
+  def test_poll_updates_accepts_object_shaped_updates
+    chat = Struct.new(:id).new(12345)
+    from = Struct.new(:id).new(54321)
+    message = Struct.new(:chat, :from, :message_id, :text).new(chat, from, 88, "hello")
+    raw = Struct.new(:update_id, :message).new(2001, message)
+    api = FakeApi.new(updates: [ raw ])
+
+    update = telegram(api).poll_updates(timeout: 25, since_update_id: nil).first
+
+    assert_equal 2001, update.update_id
+    assert_equal 12345, update.chat_id
+    assert_equal 54321, update.from_id
+    assert_equal 88, update.message_id
+    assert_equal "hello", update.text
+    assert_equal [], update.entities
+  end
+
+  def test_poll_updates_logs_build_update_backtrace_once_per_error_class
+    exploding = Class.new do
+      def update_id
+        raise RuntimeError, "cannot decode"
+      end
+    end
+    api = FakeApi.new(updates: [ exploding.new, exploding.new ])
+
+    updates = telegram(api).poll_updates(timeout: 25, since_update_id: nil)
+
+    assert_equal [], updates
+    assert_equal [ :poll_failure, :poll_failure ], logger.events.map(&:first)
+    first_attrs = logger.events.first.last
+    second_attrs = logger.events.last.last
+    assert_equal "RuntimeError", first_attrs[:error_class]
+    assert_match(/cannot decode/, first_attrs[:message])
+    assert first_attrs[:backtrace].to_s.include?("update_id")
+    refute second_attrs.key?(:backtrace)
+  end
+
+  def test_send_message_accepts_parse_mode_variants
+    api = FakeApi.new
+    bot = telegram(api)
+
+    bot.send_message(chat_id: 12345, text: "markdown", parse_mode: :markdown)
+    bot.send_message(chat_id: 12345, text: "markdown_v2", parse_mode: :markdown_v2)
+    bot.send_message(chat_id: 12345, text: "html", parse_mode: :html)
+    bot.send_message(chat_id: 12345, text: "custom", parse_mode: "Custom")
+
+    parse_modes = api.calls.filter_map do |kind, params|
+      params[:parse_mode] if kind == :send_message
+    end
+    assert_equal %w[Markdown MarkdownV2 HTML Custom], parse_modes
+  end
+
+  def test_send_message_handles_empty_text_and_newline_splitting
+    api = FakeApi.new
+    bot = telegram(api)
+
+    bot.send_message(chat_id: 12345, text: "")
+    newline_text = "a" * 10 + "\n" + "b" * Hive::Bot::Telegram::MAX_MESSAGE_CHARS
+    bot.send_message(chat_id: 12345, text: newline_text)
+
+    sends = api.calls.select { |kind, _| kind == :send_message }
+    assert_equal "", sends.first.last[:text]
+    assert_equal "a" * 10, sends[1].last[:text]
+    assert_equal "b" * Hive::Bot::Telegram::MAX_MESSAGE_CHARS, sends[2].last[:text]
+  end
+
+  def test_edit_message_reply_markup_can_remove_markup
+    api = FakeApi.new
+
+    telegram(api).edit_message_reply_markup(chat_id: 12345, message_id: 50)
+
+    _, params = api.calls.last
+    assert_equal :edit_message_reply_markup, api.calls.last.first
+    assert_equal({ chat_id: 12345, message_id: 50 }, params)
+  end
+
+  def test_value_returns_nil_for_unsupported_objects
+    object = Object.new
+
+    assert_nil telegram(FakeApi.new).send(:value, object, :missing)
+  end
+
   class StubLogger
     attr_reader :events
 

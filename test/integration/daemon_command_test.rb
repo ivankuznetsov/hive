@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "tmpdir"
+require "rbconfig"
 
 # Integration test for `hive daemon` subcommands. Uses real bin/hive
 # subprocesses against a temporary HIVE_HOME so PID file / log file
@@ -14,7 +15,7 @@ class HiveDaemonCommandTest < Minitest::Test
 
   def with_isolated_hive_home(&block)
     Dir.mktmpdir("hive-daemon-test") do |home|
-      env = ENV.to_h.merge("HIVE_HOME" => home)
+      env = ENV.to_h.merge("HIVE_HOME" => home, "HOME" => home)
       block.call(home, env)
     end
   end
@@ -928,7 +929,7 @@ class HiveDaemonCommandTest < Minitest::Test
   end
 
   def assert_nothing_raised(&block)
-    block.call
+      block.call
     pass
   rescue StandardError => e
     flunk "expected no exception, got: #{e.class}: #{e.message}"
@@ -1239,16 +1240,28 @@ class HiveDaemonCommandTest < Minitest::Test
   # ── install: envelope + exit codes ────────────────────────────────────
 
   def with_isolated_install_target(&block)
-    # Install writes to ~/.config/systemd/user/ on Linux; we isolate
-    # HOME so the test never touches the user's real systemd config.
-    # systemctl_available is forced false via the runner stub by using
-    # a non-systemd env (or relying on the installer's ENOENT detection
-    # on a sandboxed PATH). Tests that need to assert systemctl-failed
-    # outcomes use the unit-level installer test instead.
+    skip "daemon install integration is Linux-only; ServiceInstaller unit tests cover macOS" unless linux_host?
+
+    # Install writes to ~/.config/systemd/user/ on Linux; isolate HOME
+    # and put a fake non-systemd systemctl first in PATH so this
+    # integration layer never restarts the operator's real daemon unit.
     Dir.mktmpdir("hive-install-home") do |home|
-      env = ENV.to_h.merge("HOME" => home, "HIVE_HOME" => home)
+      bin = File.join(home, "bin")
+      FileUtils.mkdir_p(bin)
+      systemctl = File.join(bin, "systemctl")
+      File.write(systemctl, "#!/bin/sh\nexit 1\n")
+      FileUtils.chmod(0755, systemctl)
+      env = ENV.to_h.merge(
+        "HOME" => home,
+        "HIVE_HOME" => home,
+        "PATH" => [ bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      )
       block.call(home, env)
     end
+  end
+
+  def linux_host?
+    RbConfig::CONFIG["host_os"].match?(/linux/i)
   end
 
   def test_install_drift_exits_64_with_json_envelope
@@ -1301,25 +1314,10 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_equal 1, backups.size, "force must write exactly one timestamped backup"
       assert_equal "stale-pre-existing-content\n", File.read(backups.first)
 
-      # Branch on whether systemctl-user is actually available so the
-      # assertion is deterministic per environment. On hosts where
-      # systemctl IS available, exit 0 is the only acceptable outcome;
-      # accepting exit 70 there would silently mask a real systemctl
-      # failure regression.
-      expected_exit = systemctl_user_available? ? 0 : 70
-      assert_equal expected_exit, status.exitstatus,
-                   "expected exit #{expected_exit} on this host (systemctl_user_available? = #{systemctl_user_available?}); " \
-                   "got #{status.exitstatus}, doc=#{doc.inspect}"
-
-      if status.exitstatus.zero?
-        assert_equal true, doc["ok"]
-        assert_equal "upgraded", doc["outcome"]
-        assert_equal backups.first, doc["backup_path"]
-      else
-        assert_equal false, doc["ok"]
-        assert_equal "failed", doc["outcome"]
-        assert_equal 70, doc["exit_code"]
-      end
+      assert_equal 0, status.exitstatus, "fake non-systemd systemctl keeps install hermetic"
+      assert_equal true, doc["ok"]
+      assert_equal "upgraded", doc["outcome"]
+      assert_equal backups.first, doc["backup_path"]
     end
   end
 

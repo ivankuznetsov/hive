@@ -182,6 +182,20 @@ class BrowserTestTest < Minitest::Test
     end
   end
 
+  def test_blocked_markdown_uses_placeholder_when_attempt_details_are_empty
+    with_browser_dir(pass: 3) do |_dir, _task_folder, ctx|
+      md = Hive::Stages::Review::BrowserTest.render_blocked_md(
+        ctx,
+        [ { summary: "flow timed out", details: "", duration_sec: nil } ]
+      )
+
+      assert_includes md, "Browser test blocked for pass 03"
+      assert_includes md, "**Summary:** flow timed out"
+      assert_includes md, "**Details:**\n\n_(no details)_"
+      refute_includes md, "```\n\n```"
+    end
+  end
+
   # --- malformed result handling ---------------------------------------
 
   def test_missing_json_result_counts_as_failed_attempt

@@ -81,6 +81,18 @@ class HiveBotCodexConversationTest < Minitest::Test
     end
   end
 
+  def test_unknown_bot_marker_returns_unparseable_error
+    with_task do |task|
+      result = conversation(status: :ok, exit_code: 0,
+                            final_message: "BOT_UNKNOWN: unsupported marker").next_turn(
+                              task: task, question: question, history: [], draft: "", user_input: "x"
+                            )
+
+      assert_equal :error, result.kind
+      assert_equal :unparseable, result.reason
+    end
+  end
+
   def test_timeout_returns_error
     with_task do |task|
       result = conversation(status: :timeout, timed_out: true, final_message: "").next_turn(
@@ -90,6 +102,84 @@ class HiveBotCodexConversationTest < Minitest::Test
       assert_equal :error, result.kind
       assert_equal :timeout, result.reason
     end
+  end
+
+  def test_nonzero_exit_returns_error_with_message
+    with_task do |task|
+      result = conversation(status: :failed, exit_code: 7,
+                            error_message: "quota exhausted", final_message: "").next_turn(
+                              task: task, question: question, history: [], draft: "", user_input: "x"
+                            )
+
+      assert_equal :error, result.kind
+      assert_equal "quota exhausted", result.reason
+      assert_equal :codex_failed, logger.events.last.first
+      assert_equal "quota exhausted", logger.events.last.last.fetch(:reason)
+    end
+  end
+
+  def test_error_marker_returns_explicit_reason
+    with_task do |task|
+      result = conversation(status: :ok, exit_code: 0,
+                            final_message: "notes\nBOT_ERROR: missing context").next_turn(
+                              task: task, question: question, history: [], draft: "", user_input: "x"
+                            )
+
+      assert_equal :error, result.kind
+      assert_equal "missing context", result.reason
+      assert_equal :codex_failed, logger.events.last.first
+      assert_equal "missing context", logger.events.last.last.fetch(:reason)
+    end
+  end
+
+  def test_empty_error_marker_uses_default_codex_error_reason
+    with_task do |task|
+      result = conversation(status: :ok, exit_code: 0, final_message: "BOT_ERROR:").next_turn(
+        task: task, question: question, history: [], draft: "", user_input: "x"
+      )
+
+      assert_equal :error, result.kind
+      assert_equal "codex_error", result.reason
+    end
+  end
+
+  def test_default_spawner_uses_develop_profile_and_bot_limits
+    cfg = Hive::Config.merge_defaults(
+      "bot" => { "codex_budget_usd" => 3, "codex_timeout_sec" => 9 }
+    )
+    profile_obj = Object.new
+    captured = {}
+    convo = Hive::Bot::CodexConversation.new(config: cfg, logger: logger)
+    original_stage_profile = Hive::Stages::Base.method(:stage_profile)
+    original_spawn_agent = Hive::Stages::Base.method(:spawn_agent)
+
+    Hive::Stages::Base.define_singleton_method(:stage_profile) do |actual_config, stage|
+      captured[:stage_profile] = [ actual_config, stage ]
+      profile_obj
+    end
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |task_arg, **kwargs|
+      captured[:spawn] = kwargs.merge(task: task_arg)
+      { status: :ok, exit_code: 0 }
+    end
+
+    with_task do |task|
+      convo.send(:spawn_with_base, task: task, prompt: "prompt", config: cfg)
+
+      assert_equal [ cfg, "develop" ], captured.fetch(:stage_profile)
+      spawn = captured.fetch(:spawn)
+      assert_same task, spawn.fetch(:task)
+      assert_equal "prompt", spawn.fetch(:prompt)
+      assert_equal 3, spawn.fetch(:max_budget_usd)
+      assert_equal 9, spawn.fetch(:timeout_sec)
+      assert_equal [ task.folder ], spawn.fetch(:add_dirs)
+      assert_equal task.folder, spawn.fetch(:cwd)
+      assert_equal "bot-codex", spawn.fetch(:log_label)
+      assert_same profile_obj, spawn.fetch(:profile)
+      assert_equal :exit_code_only, spawn.fetch(:status_mode)
+    end
+  ensure
+    Hive::Stages::Base.define_singleton_method(:stage_profile, original_stage_profile)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent, original_spawn_agent)
   end
 
   def test_prompt_wraps_user_input_with_fresh_user_supplied_tag

@@ -103,6 +103,30 @@ class HiveDaemonLoggerTest < Minitest::Test
     end
   end
 
+  def test_file_size_failure_does_not_prevent_logging
+    with_tmp_dir do |dir|
+      path = File.join(dir, "daemon.log")
+      logger = Hive::Daemon::Logger.new(path: path)
+      logger.close
+      writes = []
+      fake_file = Object.new
+      fake_file.define_singleton_method(:size) { raise IOError, "stat failed" }
+      fake_file.define_singleton_method(:puts) { |line| writes << line }
+      fake_file.define_singleton_method(:flush) { true }
+      fake_file.define_singleton_method(:close) { true }
+      logger.instance_variable_set(:@file, fake_file)
+
+      logger.event(:tick_end, sequence: 1)
+
+      assert_equal 1, writes.size
+      doc = JSON.parse(writes.first)
+      assert_equal "tick_end", doc["event"]
+      assert_equal 1, doc["sequence"]
+    ensure
+      logger&.close
+    end
+  end
+
   # ── stderr fallback when file is unwritable ───────────────────────────
 
   def test_unwritable_log_path_falls_back_to_stderr_without_crashing

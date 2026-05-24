@@ -103,4 +103,40 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       assert_equal 1, Hive::Stages::Review.count_escalations(ctx)
     end
   end
+
+  def with_readlines_failure(target)
+    original_readlines = File.method(:readlines)
+    File.define_singleton_method(:readlines) do |path, *args, **kwargs, &block|
+      if path == target
+        raise Errno::EIO, path
+      end
+
+      original_readlines.call(path, *args, **kwargs, &block)
+    end
+    yield
+  ensure
+    File.define_singleton_method(:readlines, original_readlines) if original_readlines
+  end
+
+  def test_collect_legacy_checked_escalations_returns_empty_on_read_failure
+    with_tmp_dir do |dir|
+      path = File.join(dir, "escalations-01.md")
+      File.write(path, "- [x] accepted legacy finding\n")
+
+      with_readlines_failure(path) do
+        assert_equal "", Hive::Stages::Review.collect_legacy_checked_escalations(path)
+      end
+    end
+  end
+
+  def test_parse_escalation_questions_returns_empty_on_read_failure
+    with_tmp_dir do |dir|
+      path = File.join(dir, "escalations-01.md")
+      File.write(path, "### Q1. Pick one\n### A1.\n")
+
+      with_readlines_failure(path) do
+        assert_equal [], Hive::Stages::Review.parse_escalation_questions(path)
+      end
+    end
+  end
 end

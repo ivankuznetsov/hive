@@ -368,9 +368,11 @@ module Hive
         rescue Errno::ESRCH, Errno::ECHILD
           nil
         rescue Timeout::Error
-          Process.kill("KILL", pid)
           begin
+            Process.kill("KILL", pid)
             Timeout.timeout(0.2) { Process.wait(pid) }
+          rescue Errno::ESRCH, Errno::ECHILD
+            nil
           rescue Timeout::Error
             # SIGKILL+wait still hung — the PID may be a D-state zombie
             # wedged on an uninterruptible syscall. Surface a breadcrumb
@@ -382,8 +384,6 @@ module Hive
             )
             nil
           end
-        rescue Errno::ESRCH, Errno::ECHILD
-          nil
         end
 
         def expand_path(path)

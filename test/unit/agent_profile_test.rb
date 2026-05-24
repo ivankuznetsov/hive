@@ -84,6 +84,15 @@ class AgentProfileTest < Minitest::Test
     assert_match(/not headless-supported/, err.message)
   end
 
+  def test_check_version_raises_when_version_check_times_out
+    profile = make_profile(min_version: "1.0.0")
+
+    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &_block) { raise Timeout::Error }) do
+      err = assert_raises(Hive::AgentError) { profile.check_version! }
+      assert_match(/version check timed out/, err.message)
+    end
+  end
+
   def test_check_version_caches_result
     profile = make_profile(min_version: "1.0.0")
     ENV["HIVE_FAKE_CLAUDE_VERSION"] = "2.0.0"
@@ -141,6 +150,16 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile(env_bin_override_key: "HIVE_CLAUDE_BIN")
     overridden = profile.with_overrides("env_override" => "MY_CUSTOM_BIN")
     assert_equal "MY_CUSTOM_BIN", overridden.env_bin_override_key
+  end
+
+  def test_with_overrides_raises_for_non_hash
+    profile = make_profile
+
+    err = assert_raises(Hive::ConfigError) do
+      profile.with_overrides("not-a-hash")
+    end
+
+    assert_match(/override must be a Hash/, err.message)
   end
 
   def test_with_overrides_raises_for_unknown_key

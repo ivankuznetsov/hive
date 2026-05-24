@@ -820,7 +820,224 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "rebuilt healer must carry the reloaded grace value"
   end
 
+def test_run_forever_reloads_ticks_and_shuts_down_cleanly
+  dispatcher, supervisor, _ctrl, logger, _mw = make_dispatcher
+  ticks = 0
+  reloads = 0
+  sleeps = []
+
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:reload_config!) { reloads += 1 }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |seconds| sleeps << seconds }
+  dispatcher.define_singleton_method(:tick) do
+    ticks += 1
+    request_reload! if ticks == 1
+    request_shutdown! if ticks == 2
+  end
+
+  dispatcher.run_forever
+
+  assert_equal 2, ticks
+  assert_equal 1, reloads
+  assert_equal [ 30, 30 ], sleeps
+  assert events_include?(logger, :dispatcher_started)
+  assert events_include?(logger, :dispatcher_stopping)
+  assert_equal 0, supervisor.spawned.size
+end
+
+def test_request_methods_flip_lifecycle_flags
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+
+  dispatcher.request_reload!
+  dispatcher.request_shutdown!
+
+  assert_equal true, dispatcher.instance_variable_get(:@reload)
+  assert_equal true, dispatcher.instance_variable_get(:@shutdown)
+end
+
+def test_install_signal_handlers_sets_shutdown_and_reload_flags
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  old_handlers = {}
+  %w[TERM INT HUP].each { |signal| old_handlers[signal] = Signal.trap(signal, "IGNORE") }
+
+  begin
+    dispatcher.send(:install_signal_handlers!)
+    Process.kill("HUP", Process.pid)
+    sleep 0.01
+    assert_equal true, dispatcher.instance_variable_get(:@reload)
+
+    dispatcher.instance_variable_set(:@shutdown, false)
+    Process.kill("INT", Process.pid)
+    sleep 0.01
+    assert_equal true, dispatcher.instance_variable_get(:@shutdown)
+
+    dispatcher.instance_variable_set(:@shutdown, false)
+    Process.kill("TERM", Process.pid)
+    sleep 0.01
+    assert_equal true, dispatcher.instance_variable_get(:@shutdown)
+  ensure
+    old_handlers.each { |signal, handler| Signal.trap(signal, handler) }
+  end
+end
+
+def test_refresh_post_completion_mtime_records_existing_state_file
+  dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher
+
+  Dir.mktmpdir("dispatcher-completion-mtime") do |dir|
+    state_file = File.join(dir, "task.md")
+    File.write(state_file, "# task\n")
+    File.utime(T0 - 10, T0 - 10, state_file)
+    child = ChildExit.new(
+      pid: 999, exit_code: 0, project: "p1", slug: "s1", stage: "6-review",
+      command: "hive review s1", state_file_path: state_file,
+      started_at: T0 - 100, finished_at: T0, json_envelope: nil
+    )
+
+    dispatcher.send(:refresh_post_completion_mtime, child)
+
+    assert_equal File.mtime(state_file),
+                 ctrl.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
+  end
+end
+
+def test_resolve_post_completion_path_finds_advanced_stage_state_file
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+
+  Dir.mktmpdir("dispatcher-post-advance") do |dir|
+    hive_state_path = File.join(dir, ".hive-state")
+    slug_dir = File.join(hive_state_path, "stages", "6-review", "s1")
+    FileUtils.mkdir_p(slug_dir)
+    older = File.join(slug_dir, "old.md")
+    newer = File.join(slug_dir, "review.md")
+    File.write(older, "old\n")
+    File.write(newer, "new\n")
+    File.utime(T0 - 20, T0 - 20, older)
+    File.utime(T0 - 10, T0 - 10, newer)
+    child = ChildExit.new(
+      pid: 999, exit_code: 0, project: "p1", slug: "s1", stage: "4-execute",
+      command: "hive develop s1", state_file_path: File.join(dir, "missing.md"),
+      started_at: T0 - 100, finished_at: T0, json_envelope: nil
+    )
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "hive_state_path" => hive_state_path } }) do
+      assert_equal newer, dispatcher.send(:resolve_post_completion_path, child)
+    end
+  end
+end
+
+def test_find_post_advance_state_file_handles_missing_and_empty_layouts
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+
+  Dir.mktmpdir("dispatcher-empty-post-advance") do |dir|
+    hive_state_path = File.join(dir, ".hive-state")
+    FileUtils.mkdir_p(File.join(hive_state_path, "stages", "6-review", "s1"))
+
+    assert_nil dispatcher.send(:find_post_advance_state_file, nil, "s1")
+    assert_nil dispatcher.send(:find_post_advance_state_file, hive_state_path, "s1")
+  end
+end
+
+def test_dry_run_reaps_pseudo_children_and_logs_completion
+  dispatcher, _sup, ctrl, logger, _mw = make_dispatcher(rows: [], dry_run: true)
+  child = ChildExit.new(
+    pid: -1, exit_code: 0, project: "p1", slug: "s1", stage: "3-plan",
+    command: "hive plan s1", state_file_path: nil,
+    started_at: T0, finished_at: T0, json_envelope: nil
+  )
+  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
+  ctrl.record_dispatch(pid: -1, project: "p1", slug: "s1", stage: "3-plan",
+                       command: "hive plan s1", started_at: T0, state_file_mtime: T0 - 60)
+
+  dispatcher.tick(now: T0)
+
+  assert_equal 0, ctrl.in_flight_count
+  event = logger.events.find { |(name, attrs)| name == :child_exited && attrs[:dry_run] == true }
+  refute_nil event
+end
+
+def test_archive_dispatch_reenqueue_errors_are_logged_as_fatal
+  dispatcher, _sup, ctrl, logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
+  ctrl.instance_variable_set(:@max_concurrent_runs, 1)
+  ctrl.record_dispatch(pid: 999, project: "p1", slug: "running", stage: "6-review",
+                       command: "hive review running", started_at: T0, state_file_mtime: T0 - 60)
+  mw.next_archives = [ {
+    project: "p1", slug: "s1", stage: "7-finalize",
+    command: "hive archive s1 --from 7-finalize --project p1 --json",
+    state_file_mtime: nil, hive_state_path: nil
+  } ]
+
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { raise "registry unavailable" }) do
+    dispatcher.tick(now: T0)
+  end
+
+  fatal = logger.events.find { |(name, attrs)| name == :fatal && attrs[:message].include?("archive dispatch error") }
+  refute_nil fatal
+  assert_includes fatal[1][:message], "registry unavailable"
+end
+
+def test_project_enabled_reads_project_config_and_caches_result
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  dispatcher.singleton_class.send(:remove_method, :project_enabled?)
+  load_calls = []
+
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/project" } }) do
+    with_replaced_singleton_method(Hive::Config, :load, lambda { |path|
+      load_calls << path
+      { "daemon" => { "enabled" => true } }
+    }) do
+      assert_equal true, dispatcher.send(:project_enabled?, "p1")
+      assert_equal true, dispatcher.send(:project_enabled?, "p1")
+    end
+  end
+
+  assert_equal [ "/tmp/project" ], load_calls
+end
+
+def test_project_enabled_returns_false_for_missing_or_invalid_project_config
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  dispatcher.singleton_class.send(:remove_method, :project_enabled?)
+
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { nil }) do
+    assert_equal false, dispatcher.send(:project_enabled?, "missing")
+  end
+
+  dispatcher.instance_variable_get(:@enabled_cache).clear
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/project" } }) do
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_equal false, dispatcher.send(:project_enabled?, "bad")
+    end
+  end
+end
+
+def test_reload_config_error_logs_and_keeps_previous_config
+  dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+  original_cfg = dispatcher.instance_variable_get(:@daemon_cfg)
+
+  with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { raise Hive::ConfigError, "broken yaml" }) do
+    dispatcher.send(:reload_config!)
+  end
+
+  assert_same original_cfg, dispatcher.instance_variable_get(:@daemon_cfg)
+  fatal = logger.events.find { |(name, attrs)| name == :fatal && attrs[:message].include?("config reload failed") }
+  refute_nil fatal
+  assert_includes fatal[1][:message], "broken yaml"
+end
+
+def test_interruptible_sleep_stops_after_shutdown_request
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  sleeps = []
+  dispatcher.define_singleton_method(:sleep) do |seconds|
+    sleeps << seconds
+    request_shutdown!
+  end
+
+  dispatcher.send(:interruptible_sleep, 30)
+
+  assert_equal [ 0.5 ], sleeps
+end
+
   private
+
 
   def events_include?(logger, name)
     logger.events.any? { |(n, _)| n == name }

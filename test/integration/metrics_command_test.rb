@@ -197,4 +197,76 @@ class MetricsCommandTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
     end
   end
+
+  def test_rollback_rate_text_output_renders_bias_and_phase_buckets
+    with_registered_project do |dir, _project|
+      commit_trailered(dir, file: "a.rb", subject: "fix(a): one",
+                       trailers: { "Hive-Fix-Pass" => "01", "Hive-Triage-Bias" => "courageous", "Hive-Fix-Phase" => "fix" })
+
+      out, _err = capture_io { Hive::Commands::Metrics.new("rollback-rate").call }
+
+      assert_match(/by bias:/, out)
+      assert_match(/courageous: total=1 reverted=0 rate=0\.00%/, out)
+      assert_match(/by phase:/, out)
+      assert_match(/fix: total=1 reverted=0 rate=0\.00%/, out)
+    end
+  end
+
+  def test_project_filter_json_success_covers_project_match_branch
+    with_registered_project do |_dir, project|
+      out, _err = capture_io do
+        Hive::Commands::Metrics.new("rollback-rate", project: project, json: true).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal [ project ], payload["projects"].map { |entry| entry["project"] }
+    end
+  end
+
+  def test_hive_error_json_emits_config_envelope_when_no_stdout_written
+    cmd = Hive::Commands::Metrics.new("rollback-rate", json: true)
+    cmd.define_singleton_method(:do_call) { raise Hive::ConfigError, "bad config" }
+
+    out, _err, status = with_captured_exit { cmd.call }
+
+    assert_equal Hive::ExitCodes::CONFIG, status
+    payload = JSON.parse(out)
+    assert_equal "hive-metrics-rollback-rate", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "config", payload["error_kind"]
+    assert_equal Hive::ExitCodes::CONFIG, payload["exit_code"]
+    assert_equal "bad config", payload["message"]
+  end
+
+  def test_internal_error_json_emits_internal_error_envelope
+    cmd = Hive::Commands::Metrics.new("rollback-rate", json: true)
+    cmd.define_singleton_method(:do_call) { raise RuntimeError, "boom" }
+
+    out, _err, status = with_captured_exit { cmd.call }
+
+    assert_equal Hive::ExitCodes::SOFTWARE, status
+    payload = JSON.parse(out)
+    assert_equal "hive-metrics-rollback-rate", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "internal", payload["error_kind"]
+    assert_equal Hive::ExitCodes::SOFTWARE, payload["exit_code"]
+    assert_match(/internal error: RuntimeError: boom/, payload["message"])
+  end
+
+  def test_error_kind_for_covers_usage_and_generic_errors
+    cmd = Hive::Commands::Metrics.new("rollback-rate")
+    usage = Hive::Commands::Metrics::UsageError.new("bad", error_kind: "custom_usage")
+
+    assert_equal "custom_usage", cmd.send(:error_kind_for, usage)
+    assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("plain"))
+  end
+
+  def test_emit_error_envelope_swallows_broken_stdout
+    cmd = Hive::Commands::Metrics.new("rollback-rate", json: true)
+    cmd.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "pipe closed" }
+
+    cmd.send(:emit_error_envelope, Hive::ConfigError.new("pipe closed"))
+
+    assert_equal true, cmd.instance_variable_get(:@stdout_written)
+  end
 end

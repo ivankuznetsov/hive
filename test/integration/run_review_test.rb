@@ -91,6 +91,7 @@ class RunReviewTest < Minitest::Test
     base
   end
 
+
   # --- pre-flight terminal markers short-circuit -----------------------
 
   def test_review_complete_marker_short_circuits
@@ -1047,6 +1048,257 @@ class RunReviewTest < Minitest::Test
           Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run!)
           Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run!)
         end
+      end
+    end
+  end
+
+  # --- Stage 72: review orchestrator branch coverage -------------------
+
+  def test_ci_error_result_yields_review_error_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        result = Hive::Stages::Review::CiFix::Result.new(
+          status: :error, attempts: 1, last_output: "ci failed", error_message: "no runner"
+        )
+
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "ci", marker.attrs["phase"]
+        assert_equal "ci_unrunnable", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_loop_wall_clock_boundary_yields_review_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_wall_clock_sec" => 1 }
+        })
+        calls = 0
+
+        with_replaced_singleton_method(Hive::Stages::Review, :wall_clock_exceeded?, lambda { |_started_at, _max|
+          calls += 1
+          calls == 2
+        }) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        assert_equal "wall_clock", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_pass_above_max_passes_yields_review_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 4 }
+        })
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 5, escalations: 1)
+
+        capture_io { Hive::Commands::Run.new(folder).call }
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        assert_equal "4", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_run_reviewers_wall_clock_status_yields_review_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(_cfg, _ctx, _task, **_kwargs) {
+          :wall_clock_exceeded
+        }) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        assert_equal "wall_clock", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_reviewers_all_failed_yields_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(_cfg, _ctx, _task, **_kwargs) {
+          :all_failed
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "reviewers", marker.attrs["phase"]
+        assert_equal "all_failed", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_wall_clock_after_reviewers_yields_review_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_wall_clock_sec" => 1 }
+        })
+        calls = 0
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(_cfg, _ctx, _task, **_kwargs) { :ok }) do
+          with_replaced_singleton_method(Hive::Stages::Review, :wall_clock_exceeded?, lambda { |_started_at, _max|
+            calls += 1
+            calls == 3
+          }) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        assert_equal "wall_clock", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_triage_tampered_and_error_statuses_yield_review_error
+    cases = [
+      [ :tampered, "triage_tampered", [ "reviews/stub-reviewer-01.md" ] ],
+      [ :error, "triage_failed", [] ]
+    ]
+
+    cases.each do |triage_status, expected_reason, tampered_files|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir)
+
+          with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **_kwargs|
+            reviews = File.join(ctx.task_folder, "reviews")
+            FileUtils.mkdir_p(reviews)
+            File.write(File.join(reviews, "stub-reviewer-01.md"), "## High\n- [ ] needs human\n")
+            :ok
+          }) do
+            with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+              Hive::Stages::Review::Triage::Result.new(
+                status: triage_status,
+                escalations_path: nil,
+                error_message: "triage #{triage_status}",
+                tampered_files: tampered_files
+              )
+            }) do
+              _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+              assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+            end
+          end
+
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "triage", marker.attrs["phase"]
+          assert_equal expected_reason, marker.attrs["reason"]
+          assert_equal "1", marker.attrs["pass"]
+          assert_equal tampered_files.join(","), marker.attrs["files"] if triage_status == :tampered
+        end
+      end
+    end
+  end
+
+  def test_reviewer_partial_failure_with_no_findings_yields_review_waiting
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **_kwargs|
+          reviews = File.join(ctx.task_folder, "reviews")
+          FileUtils.mkdir_p(reviews)
+          File.write(File.join(reviews, "stub-reviewer-01.md"), "# Clean\n")
+          File.write(File.join(reviews, "errors-01.md"), "# Reviewer infra errors for pass 01\n")
+          :ok
+        }) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+            escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
+            File.write(escalations, "# Escalations for pass 01\n")
+            Hive::Stages::Review::Triage::Result.new(
+              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
+            )
+          }) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        assert_equal "reviewer_partial_failure", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_fix_agent_failure_yields_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          { status: :error, error_message: "fix failed" }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "fix_failed", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_unexpected_browser_status_yields_review_error
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "browser_test" => { "enabled" => true } }
+        })
+        result = Hive::Stages::Review::BrowserTest::Result.new(
+          status: :failed, attempts: 1, summary: "failed", details: nil, error_message: "browser failed"
+        )
+
+        with_replaced_singleton_method(Hive::Stages::Review::BrowserTest, :run!, ->(**_kwargs) { result }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "browser", marker.attrs["phase"]
+        assert_equal "browser_unexpected", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
       end
     end
   end

@@ -91,6 +91,96 @@ class HiveBotLoggerTest < Minitest::Test
     end
   end
 
+  def test_rotation_noops_when_file_is_already_unavailable
+    with_log do |logger, _path|
+      logger.instance_variable_set(:@file, nil)
+
+      logger.send(:rotate_if_needed!)
+
+      refute logger.stderr_fallback?
+    end
+  end
+
+  def test_rotation_handles_missing_active_log_path
+    with_tmp_dir do |dir|
+      path = File.join(dir, "missing-active.log")
+      logger = Hive::Bot::Logger.new(path: path, max_bytes: 1, max_files: 2)
+      logger.close
+      FileUtils.rm_f(path)
+
+      fake_file = Object.new
+      fake_file.define_singleton_method(:size) { 99 }
+      fake_file.define_singleton_method(:close) { @closed = true }
+      fake_file.define_singleton_method(:closed?) { @closed }
+      logger.instance_variable_set(:@file, fake_file)
+
+      logger.send(:rotate_if_needed!)
+
+      assert fake_file.closed?
+      assert File.exist?(path)
+      logger.close
+    end
+  end
+
+  def test_rotation_reopens_current_log_after_rename_failure
+    with_tmp_dir do |dir|
+      path = File.join(dir, "rename-failure.log")
+      logger = Hive::Bot::Logger.new(path: path, max_bytes: 1, max_files: 2)
+      logger.event(:bot_started, padding: "x" * 100)
+
+      with_replaced_singleton_method(File, :rename, ->(*_args) { raise Errno::EACCES, "blocked" }) do
+        logger.send(:rotate_if_needed!)
+      end
+
+      refute logger.stderr_fallback?
+      logger.close
+    end
+  end
+
+  def test_rotation_falls_back_to_stderr_when_reopen_also_fails
+    with_tmp_dir do |dir|
+      path = File.join(dir, "reopen-failure.log")
+      logger = Hive::Bot::Logger.new(path: path, max_bytes: 1, max_files: 2)
+      logger.event(:bot_started, padding: "x" * 100)
+      original_open = File.method(:open)
+      failing_open = lambda do |target, *args, &block|
+        raise Errno::ENOSPC, "full" if target == path && args.first == "a"
+
+        original_open.call(target, *args, &block)
+      end
+
+      err = capture_stderr do
+        with_replaced_singleton_method(File, :rename, ->(*_args) { raise Errno::EACCES, "blocked" }) do
+          with_replaced_singleton_method(File, :open, failing_open) do
+            logger.send(:rotate_if_needed!)
+          end
+        end
+      end
+
+      assert logger.stderr_fallback?
+      assert_includes err, "log rotation failed"
+      assert_includes err, "falling back to stderr"
+      logger.close
+    end
+  end
+
+  def test_file_size_warning_is_emitted_once_when_stat_fails
+    with_log do |logger, _path|
+      fake_file = Object.new
+      fake_file.define_singleton_method(:size) { raise IOError, "stat failed" }
+      fake_file.define_singleton_method(:close) { }
+      logger.instance_variable_set(:@file, fake_file)
+
+      err = capture_stderr do
+        assert_equal 0, logger.send(:file_size_for_rotation)
+        assert_equal 0, logger.send(:file_size_for_rotation)
+      end
+
+      assert_equal 1, err.lines.count
+      assert_includes err, "cannot read log file size for rotation"
+    end
+  end
+
   private
 
   def capture_stderr

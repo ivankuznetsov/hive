@@ -66,4 +66,114 @@ class TuiAppTest < Minitest::Test
   def test_charm_uses_paste_aware_runner
     assert_equal "Hive::Tui::PasteAwareRunner", Hive::Tui::App.runner_class.name
   end
+  def test_snapshot_poller_dispatches_poll_failures
+    require "hive/tui/messages"
+    state_source = PollerStateSource.new(error: RuntimeError.new("poll failed"))
+    runner = RecordingRunner.new
+    poller = Hive::Tui::App.start_snapshot_poller(state_source, runner)
+
+    wait_until { runner.messages.any? }
+
+    message = runner.messages.first
+    assert_kind_of Hive::Tui::Messages::PollFailed, message
+    assert_equal "poll failed", message.error.message
+  ensure
+    poller&.kill
+    poller&.join
+  end
+
+  def test_snapshot_poller_rescues_state_source_errors_and_stays_alive
+    state_source = RaisingStateSource.new
+    runner = RecordingRunner.new
+    poller = Hive::Tui::App.start_snapshot_poller(state_source, runner)
+
+    wait_until { state_source.calls.positive? }
+
+    assert poller.alive?, "poller should continue after a transient StateSource exception"
+  ensure
+    poller&.kill
+    poller&.join
+  end
+
+  def test_install_terminate_hook_enqueues_terminate_requested
+    require "hive/tui/messages"
+    runner = RecordingRunner.new
+    captured = nil
+    original = Signal.singleton_class.instance_method(:trap)
+    Signal.define_singleton_method(:trap) do |signal_name, *_args, &block|
+      captured = block if signal_name == "HUP"
+      :previous_hup
+    end
+
+    previous = Hive::Tui::App.install_terminate_hook(runner)
+    captured.call
+
+    assert_equal :previous_hup, previous
+    assert_equal [ Hive::Tui::Messages::TERMINATE_REQUESTED ], runner.messages
+  ensure
+    Signal.singleton_class.define_method(:trap, original) if original
+  end
+
+  def test_restore_terminate_hook_swallows_invalid_previous_handler
+    original = Signal.singleton_class.instance_method(:trap)
+    Signal.define_singleton_method(:trap) do |_signal_name, _handler|
+      raise ArgumentError, "invalid signal handler"
+    end
+
+    assert_nil Hive::Tui::App.restore_terminate_hook(:bad_handler)
+  ensure
+    Signal.singleton_class.define_method(:trap, original) if original
+  end
+
+  def wait_until(timeout: 2)
+    deadline = Time.now + timeout
+    until yield
+      raise "condition not met within #{timeout}s" if Time.now >= deadline
+
+      sleep 0.01
+    end
+  end
+
+  class RecordingRunner
+    attr_reader :messages
+
+    def initialize
+      @messages = []
+      @mutex = Mutex.new
+    end
+
+    def send(message)
+      @mutex.synchronize { @messages << message }
+    end
+  end
+
+  class PollerStateSource
+    attr_reader :last_error
+
+    def initialize(current: nil, error: nil)
+      @current = current
+      @last_error = error
+    end
+
+    def current
+      @current
+    end
+  end
+
+  class RaisingStateSource
+    attr_reader :calls
+
+    def initialize
+      @calls = 0
+    end
+
+    def current
+      @calls += 1
+      raise RuntimeError, "snapshot unavailable"
+    end
+
+    def last_error
+      nil
+    end
+  end
 end

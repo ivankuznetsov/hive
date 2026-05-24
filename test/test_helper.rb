@@ -1,5 +1,10 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
+if ENV["HIVE_COVERAGE"]
+  require_relative "support/coverage"
+  HiveTestCoverage.start!(root: File.expand_path("..", __dir__))
+end
+
 require "minitest/autorun"
 require "tmpdir"
 require "fileutils"
@@ -8,6 +13,11 @@ require "yaml"
 require "shellwords"
 require "English"
 require "hive"
+
+if ENV["HIVE_COVERAGE"]
+  HiveTestCoverage.install_reporter!
+  HiveTestCoverage.load_all_sources! unless ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+end
 
 module HiveTestStdinIsolation
   # Keep tests hermetic when the suite is launched from a real terminal:
@@ -53,6 +63,31 @@ FAKE_GH_FIXTURE = File.expand_path("fixtures/fake-gh", __dir__).freeze
 FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
 
 module HiveTestHelper
+  UNSET_ENV = Object.new.freeze
+
+  # Temporarily replace `receiver.name` with `replacement` for the duration
+  # of the block; restore the original singleton method in `ensure`. Used
+  # to stub module-level methods like `Hive::Gh.push_branch!` or class
+  # methods like `Hive::Lock.process_start_time` without reaching for a
+  # mocking library. Both name forms work: pass a lambda or a method object.
+  def with_replaced_singleton_method(receiver, name, replacement)
+    original = receiver.method(name)
+    receiver.define_singleton_method(name, &replacement)
+    yield
+  ensure
+    receiver.define_singleton_method(name, original) if original
+  end
+
+  def with_env(overrides)
+    old = overrides.keys.to_h { |key| [ key, ENV.key?(key) ? ENV[key] : UNSET_ENV ] }
+    overrides.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    old&.each do |key, value|
+      value.equal?(UNSET_ENV) ? ENV.delete(key) : ENV[key] = value
+    end
+  end
+
   # Tests run real `git` inside the tmpdir; pack-objects renames internal
   # state like `bitmap-ref-tips_*` between scan and unlink, so `Dir.mktmpdir`'s
   # built-in cleanup (which uses `FileUtils.remove_entry`) intermittently
@@ -86,42 +121,18 @@ module HiveTestHelper
     out
   end
 
-  def with_tmp_global_config
+  def with_tmp_global_config(home: nil)
     dir = Dir.mktmpdir("hive-global")
-    old_hive_home = ENV["HIVE_HOME"]
-    ENV["HIVE_HOME"] = dir
-    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
     begin
-      yield(dir)
+      with_env("HIVE_HOME" => dir, "HOME" => home || dir) do
+        File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
+        yield(dir)
+      end
     ensure
-      old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
       # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
       # tmpdir invoke `hive`/git subprocesses that can leave the tree
       # mid-rename.
-      FileUtils.rm_rf(dir)
-    end
-  end
-
-  # Variant that also overrides HOME — needed by tests that exercise
-  # daemon ServiceInstaller, which anchors on the real user home for
-  # launchd/systemd paths and would otherwise write units to the
-  # developer's actual $HOME.
-  def with_tmp_global_config_and_home
-    dir = Dir.mktmpdir("hive-global")
-    old_hive_home = ENV["HIVE_HOME"]
-    old_home = ENV["HOME"]
-    ENV["HIVE_HOME"] = dir
-    ENV["HOME"] = dir
-    File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
-    begin
-      yield(dir)
-    ensure
-      old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
-      old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
-      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
-      # tmpdir invoke `hive`/git subprocesses that can leave the tree
-      # mid-rename.
-      FileUtils.rm_rf(dir)
+      FileUtils.rm_rf(dir) if dir
     end
   end
 

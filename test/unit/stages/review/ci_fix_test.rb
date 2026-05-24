@@ -430,4 +430,157 @@ class CiFixTest < Minitest::Test
       FileUtils.rm_rf(log_dir) if log_dir
     end
   end
+
+  def test_returns_error_when_fix_agent_exits_nonzero
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, "echo fail >&2\nexit 1")
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "42"
+      cfg = cfg_with(ci, "review" => { "ci" => { "max_attempts" => 2 } })
+
+      result = Hive::Stages::Review::CiFix.run!(
+        cfg: cfg,
+        ctx: make_ctx(dir, task_folder)
+      )
+
+      assert_equal :error, result.status
+      assert_equal 1, result.attempts
+      assert_equal "exit_code=42", result.error_message
+    end
+  end
+
+  def test_run_ci_once_reports_empty_command_after_shell_parsing
+    result = Hive::Stages::Review::CiFix.run_ci_once("   ", Dir.pwd, 1024, 1)
+
+    assert_instance_of Hive::Stages::Review::CiFix::CommandError, result
+    assert_equal "CI command is empty after parsing", result.reason
+  end
+
+  def test_run_ci_once_reports_pipe_launch_failure
+    with_replaced_singleton_method(IO, :pipe, -> { raise "pipe exploded" }) do
+      result = Hive::Stages::Review::CiFix.run_ci_once([ "ci" ], Dir.pwd, 1024, 1)
+
+      assert_instance_of Hive::Stages::Review::CiFix::CommandError, result
+      assert_equal "CI command failed to launch: pipe exploded", result.reason
+    end
+  end
+
+  def test_run_ci_once_closes_pipes_after_spawn_launch_failure
+    reader = pipe_double
+    writer = pipe_double
+
+    with_replaced_singleton_method(IO, :pipe, -> { [ reader, writer ] }) do
+      with_replaced_singleton_method(Process, :spawn, ->(*_args, **_kwargs) { raise "spawn exploded" }) do
+        result = Hive::Stages::Review::CiFix.run_ci_once([ "ci" ], Dir.pwd, 1024, 1)
+
+        assert_instance_of Hive::Stages::Review::CiFix::CommandError, result
+        assert_equal "CI command failed to launch: spawn exploded", result.reason
+        assert reader.closed?
+        assert writer.closed?
+      end
+    end
+  end
+
+  def test_run_ci_once_reader_io_error_still_returns_run_result
+    reader = pipe_double(read_error: IOError.new("pipe closed"))
+    writer = pipe_double
+    status = Struct.new(:exitstatus).new(0)
+
+    with_replaced_singleton_method(IO, :pipe, -> { [ reader, writer ] }) do
+      with_replaced_singleton_method(Process, :spawn, ->(*_args, **_kwargs) { 12_345 }) do
+        with_replaced_singleton_method(Process, :getpgid, ->(_pid) { 12_345 }) do
+          with_replaced_singleton_method(Process, :wait2, ->(_pid, _flags) { [ 12_345, status ] }) do
+            result = Hive::Stages::Review::CiFix.run_ci_once([ "ci" ], Dir.pwd, 1024, 1)
+
+            assert_instance_of Hive::Stages::Review::CiFix::Run, result
+            assert_equal 0, result.exit_code
+            assert_equal "", result.combined
+            assert reader.closed?
+          end
+        end
+      end
+    end
+  end
+
+  def test_run_ci_once_falls_back_to_pid_when_getpgid_process_is_gone
+    with_ci_dir do |dir, _task_folder|
+      ci = write_ci_script(dir, "echo ok\nexit 0")
+
+      with_replaced_singleton_method(Process, :getpgid, ->(_pid) { raise Errno::ESRCH }) do
+        result = Hive::Stages::Review::CiFix.run_ci_once([ ci ], dir, 1024, 5)
+
+        assert_instance_of Hive::Stages::Review::CiFix::Run, result
+        assert_equal 0, result.exit_code
+        assert_includes result.combined, "ok"
+      end
+    end
+  end
+
+  def test_kill_process_group_ignores_term_permission_errors
+    calls = []
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, target|
+      calls << [ signal, target ]
+      raise Errno::EPERM if signal == "TERM"
+    }) do
+      with_replaced_singleton_method(Process, :wait, ->(_pid, _flags = nil) { 12_345 }) do
+        Hive::Stages::Review::CiFix.kill_process_group(55, 12_345)
+      end
+    end
+
+    assert_equal [ [ "TERM", -55 ] ], calls
+  end
+
+  def test_kill_process_group_treats_echild_as_reaped
+    calls = []
+
+    with_replaced_singleton_method(Process, :kill, ->(signal, target) { calls << [ signal, target ] }) do
+      with_replaced_singleton_method(Process, :wait, ->(_pid, _flags = nil) { raise Errno::ECHILD }) do
+        Hive::Stages::Review::CiFix.kill_process_group(55, 12_345)
+      end
+    end
+
+    assert_equal [ [ "TERM", -55 ] ], calls
+  end
+
+  def test_kill_process_group_kills_after_grace_and_ignores_missing_child
+    base = Time.at(0)
+    times = [ base, base, base + 4 ]
+    calls = []
+    waits = []
+
+    with_replaced_singleton_method(Time, :now, -> { times.shift || base + 4 }) do
+      with_replaced_singleton_method(Process, :kill, lambda { |signal, target|
+        calls << [ signal, target ]
+        raise Errno::ESRCH if signal == "KILL"
+      }) do
+        with_replaced_singleton_method(Process, :wait, lambda { |_pid, flags = nil|
+          waits << flags
+          raise Errno::ECHILD unless flags == Process::WNOHANG
+
+          nil
+        }) do
+          with_replaced_singleton_method(Hive::Stages::Review::CiFix, :sleep, ->(_seconds) { }) do
+            Hive::Stages::Review::CiFix.kill_process_group(77, 12_345)
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", -77 ], [ "KILL", -77 ] ], calls
+    assert_includes waits, Process::WNOHANG
+    assert_includes waits, nil
+  end
+
+  def pipe_double(read_error: nil)
+    closed = false
+    Object.new.tap do |pipe|
+      pipe.define_singleton_method(:read_nonblock) do |*_args, **_kwargs|
+        raise read_error if read_error
+
+        nil
+      end
+      pipe.define_singleton_method(:close) { closed = true }
+      pipe.define_singleton_method(:closed?) { closed }
+    end
+  end
 end

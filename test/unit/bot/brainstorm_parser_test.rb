@@ -157,6 +157,29 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal 2, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
   end
 
+  def test_unanswered_questions_and_question_lookup_helpers
+    questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 1
+
+      ### Q1. First?
+
+      ### A1.
+      Yes.
+
+      ### Q2. Second?
+
+      ### A2.
+
+      ### Q3. Third?
+    MARKDOWN
+
+    unanswered = Hive::Bot::BrainstormParser.unanswered_questions(questions)
+
+    assert_equal [ 2, 3 ], unanswered.map(&:n)
+    assert_equal "Second?", Hive::Bot::BrainstormParser.question_for(questions, 2).text
+    assert_nil Hive::Bot::BrainstormParser.question_for(questions, 99)
+  end
+
   def test_answered_predicate_reflects_presence_of_answer
     questions = Hive::Bot::BrainstormParser.parse_text(<<~MARKDOWN)
       ## Round 1

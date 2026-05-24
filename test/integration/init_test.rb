@@ -19,11 +19,10 @@ class InitTest < Minitest::Test
   end
 
   def test_initializes_project_with_orphan_branch_and_global_registration
-    # `with_tmp_global_config_and_home` overrides HOME alongside
-    # HIVE_HOME so ServiceInstaller (which writes launchd/systemd units
-    # under the real user home, not HIVE_HOME) lands the unit inside
-    # the sandbox.
-    with_tmp_global_config_and_home do |home|
+    # `with_tmp_global_config` overrides HOME alongside HIVE_HOME so
+    # ServiceInstaller (which writes launchd/systemd units under the
+    # real user home, not HIVE_HOME) lands the unit inside the sandbox.
+    with_tmp_global_config do |home|
       with_tmp_git_repo do |dir|
         out, _err = capture_io { Hive::Commands::Init.new(dir).call }
 
@@ -68,9 +67,8 @@ class InitTest < Minitest::Test
   def test_initializes_managed_llm_wiki_with_codex_headless_agent_and_scheduler
     with_tmp_home do |home|
       ENV.delete("HIVE_SKIP_LLM_WIKI_SCHEDULER")
-      FileUtils.mkdir_p(File.join(home, "wikis", "master", "wiki"))
-
-      with_tmp_global_config do
+      with_tmp_global_config do |global_home|
+        FileUtils.mkdir_p(File.join(global_home, "wikis", "master", "wiki"))
         with_tmp_git_repo do |dir|
           capture_io { Hive::Commands::Init.new(dir).call }
 
@@ -78,7 +76,7 @@ class InitTest < Minitest::Test
           assert_equal "codex", llm_wiki_config.fetch("headless_agent")
           assert_equal %w[claude codex pi], llm_wiki_config.fetch("context_agents")
           assert_equal "hive", llm_wiki_config.fetch("created_by")
-          assert_equal File.join(home, "wikis", "master", "wiki"), llm_wiki_config.fetch("main_wiki_path")
+          assert_equal File.join(global_home, "wikis", "master", "wiki"), llm_wiki_config.fetch("main_wiki_path")
 
           assert File.exist?(File.join(dir, "wiki", "index.md"))
           assert File.exist?(File.join(dir, "wiki", "log.md"))
@@ -130,7 +128,7 @@ class InitTest < Minitest::Test
           assert_includes hook, "# BEGIN LLM WIKI POST-COMMIT"
           assert_includes hook, ".llm-wiki/post-commit-refresh.sh"
 
-          assert_llm_wiki_scheduler_files(home, dir)
+          assert_llm_wiki_scheduler_files(global_home, dir)
         end
       end
     ensure

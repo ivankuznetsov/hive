@@ -139,6 +139,34 @@ class HiveCommandsDaemonEnvelopeTest < Minitest::Test
     end
   end
 
+
+  def test_emit_envelope_marks_stdout_written_when_pipe_is_closed
+    emitter = Class.new do
+      include Hive::Schemas::EnvelopeEmitter
+
+      def envelope_schema
+        "hive-daemon-enroll"
+      end
+
+      def envelope_error_kind(_error)
+        Hive::Schemas::EnrollErrorKind::INTERNAL
+      end
+
+      def puts(_payload)
+        raise Errno::EPIPE
+      end
+
+      def stdout_written?
+        @stdout_written
+      end
+    end.new
+
+    emitter.send(:emit_envelope, Hive::Error.new("broken pipe"))
+
+    assert emitter.stdout_written?, "closed stdout must still mark the envelope as written"
+  end
+
+
   # Disk-class errors during the atomic rewrite (ENOSPC / EROFS / EACCES /
   # EXDEV / EDQUOT / EIO) must surface as Hive::ConfigError (exit 78),
   # mirroring Hive::Config.write_global_config!. Otherwise an agent retry

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, .rubocop.yml
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-24
 tags: [test, minitest, fixtures]
 ---
 
@@ -15,12 +15,24 @@ tags: [test, minitest, fixtures]
 bundle exec rake test
 ```
 
+## Coverage
+
+```bash
+bundle exec rake coverage
+```
+
+The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
+
+`bundle exec rake coverage` is the CI coverage-report path. It fails when an executable source file was never loaded or when a subprocess result file cannot be read. Set `HIVE_COVERAGE_MIN_LINE` (for example `100`) to enforce a minimum line-coverage percentage.
+
+In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Coverage also reloads `lib/hive.rb`, so self-derived enum constants must exclude `:ALL` to stay reload-safe.
+
 `Rakefile`:
 ```ruby
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/**/*_test.rb"]
+  t.test_files = FileList["test/{unit,integration}/**/*_test.rb"]
   t.warning = false
 end
 task default: :test
@@ -30,7 +42,7 @@ task default: :test
 
 - `with_tmp_dir` — `Dir.mktmpdir("hive-test", &block)`.
 - `with_tmp_git_repo` — `git init -b master`, configures user/email and disables GPG signing, makes one initial commit, yields the path.
-- `with_tmp_global_config` — overrides `ENV["HIVE_HOME"]` to a tmp dir and writes an empty `registered_projects: []` YAML so tests don't touch `~/Dev/hive/config.yml`.
+- `with_tmp_global_config(home: nil)` — overrides `ENV["HIVE_HOME"]` to a tmp dir, writes an empty `registered_projects: []` YAML, and defaults `HOME` to the same tmp dir so subprocesses and service-installer tests do not touch the operator's real home. Pass `home:` when a test intentionally installs fake user-level skills or plugins under a separate fake HOME.
 - `run!(*cmd)` — shells out and raises on non-zero exit (used in setup helpers; not for testing the CLI itself).
 
 ## Fixtures

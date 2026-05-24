@@ -340,6 +340,11 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_help_regular_key_returns_back
+    msg = Hive::Tui::KeyMap.message_for(mode: :help, key: "?", row: nil)
+    assert_same Hive::Tui::Messages::BACK, msg
+  end
+
   def test_new_idea_delete_routes_to_forward_delete
     msg = Hive::Tui::KeyMap.message_for(mode: :new_idea, key: :key_delete, row: nil)
     assert_same Hive::Tui::Messages::NEW_IDEA_CHAR_DELETED_FORWARD, msg
@@ -369,6 +374,11 @@ class TuiKeyMapMessageForTest < Minitest::Test
       Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: :key_up, row: nil)
     assert_same Hive::Tui::Messages::NEW_IDEA_CANCELLED,
       Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: "q", row: nil)
+  end
+
+  def test_new_idea_project_unknown_key_returns_noop
+    msg = Hive::Tui::KeyMap.message_for(mode: :new_idea_project, key: "x", row: nil)
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   # Same regression for filter mode — slug filters with spaces like
@@ -594,6 +604,15 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same row, msg.row
   end
 
+  def test_error_message_non_kill_class_returns_recover_error
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.error_message(row)
+    assert_kind_of Hive::Tui::Messages::RecoverError, msg
+    assert_same row, msg.row
+  end
+
   def test_enter_on_recover_review_opens_red_status_detail
     row = make_row(action_key: "recover_review", action_label: "Needs recovery",
                    marker: "review_error", attrs: { "phase" => "fix", "pass" => "1" },
@@ -615,6 +634,19 @@ class TuiKeyMapMessageForTest < Minitest::Test
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
     assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg
     assert_same row, msg.row
+  end
+
+  def test_enter_on_archived_row_flashes_archived_message
+    row = make_row(action_key: "archived", action_label: "Archived", suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_match(/task is archived/, msg.text)
+  end
+
+  def test_enter_on_unmapped_row_without_command_returns_noop
+    row = make_row(action_key: "unknown_action", action_label: "Unknown", suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   def test_enter_on_wall_clock_review_stale_keeps_direct_recover_review
@@ -733,6 +765,21 @@ class TuiKeyMapMessageForTest < Minitest::Test
     # collapses both into `red_status_detail_hint` would slip through a
     # looser `/\bo\b/` match.
     assert_equal "press o for Open in agent", msg.text
+  end
+
+  def test_red_status_detail_verb_key_flashes_mode_boundary
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "r", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash, msg
+    assert_equal "press Enter to recover, o to open in agent, Esc or q to close", msg.text
+  end
+
+  def test_red_status_detail_unknown_key_returns_noop
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "z", row: row)
+    assert_same Hive::Tui::Messages::NOOP, msg
   end
 
   def test_enter_on_needs_input_opens_input_editor_when_command_present

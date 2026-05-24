@@ -44,6 +44,23 @@ class HiveBotConversationStoreTest < Minitest::Test
     end
   end
 
+  def test_update_ttl_changes_prune_window
+    store.start(chat_id: 123, slug: "slug", question_n: 1)
+    store.update_ttl(5)
+    @now += 6
+
+    assert_nil store.get(chat_id: 123, slug: "slug")
+  end
+
+  def test_start_rejects_unknown_mode
+    error = assert_raises(ArgumentError) do
+      store.start(chat_id: 123, slug: "slug", question_n: 1, mode: :surprise)
+    end
+
+    assert_match(/conversation mode must be one of/, error.message)
+    assert_match(/:surprise/, error.message)
+  end
+
   def test_ttl_prunes_old_state
     store.start(chat_id: 123, slug: "slug", question_n: 1)
     @now += 61

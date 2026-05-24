@@ -133,6 +133,31 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_invalid_row_mtime_falls_back_to_state_file_mtime
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "idea.md")
+      File.write(state_file, "<!-- WAITING -->\n")
+      expected = File.mtime(state_file)
+
+      task = task_row(slug: "mtime-fallback", mtime: "not-a-time")
+      task["state_file"] = state_file
+      payload = make_envelope(projects: [ {
+        "name" => "writero",
+        "path" => dir,
+        "hive_state_path" => File.join(dir, ".hive-state"),
+        "tasks" => [ task ]
+      } ])
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+        result = consumer.fetch
+
+        assert result.ok, "expected ok=true; got error #{result.error.inspect}"
+        assert_in_delta expected.to_f, result.rows.first.state_file_mtime.to_f, 0.001
+      end
+    end
+  end
+
   # ── failure modes ─────────────────────────────────────────────────────
 
   def test_non_zero_exit_returns_not_ok

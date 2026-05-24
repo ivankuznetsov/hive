@@ -116,6 +116,33 @@ class UpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_unknown_channel_raises_config_error
+    err = assert_raises(Hive::ConfigError) do
+      Hive::Commands::Update.new(dry_run: true, channel: "tarball").call
+    end
+
+    assert_match(/unknown hive install channel \"tarball\"/, err.message)
+  end
+
+  def test_runner_enoent_is_wrapped_as_unavailable
+    with_tmp_dir do |dir|
+      brew = File.join(dir, "brew")
+      File.write(brew, "#!/bin/sh\n")
+      FileUtils.chmod(0755, brew)
+
+      err = assert_raises(Hive::UnavailableError) do
+        Hive::Commands::Update.new(
+          channel: "brew",
+          env: { "PATH" => dir },
+          runner: ->(_argv) { raise Errno::ENOENT, "missing-brew" }
+        ).call
+      end
+
+      assert_match(/hive update: No such file or directory/, err.message)
+      assert_match(/missing-brew/, err.message)
+    end
+  end
+
   def test_brew_missing_helper_raises_unavailable
     err = assert_raises(Hive::UnavailableError) do
       Hive::Commands::Update.new(channel: "brew", env: { "PATH" => "" }).call

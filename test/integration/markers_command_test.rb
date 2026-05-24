@@ -32,6 +32,116 @@ class MarkersCommandTest < Minitest::Test
     [ project, review, File.basename(review) ]
   end
 
+  def test_missing_target_and_name_raise_usage_errors
+    _out, err, status = with_captured_exit do
+      Hive::Commands::Markers.new("clear", nil, name: "ERROR").call
+    end
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/missing FOLDER/, err)
+
+    _out, err, status = with_captured_exit do
+      Hive::Commands::Markers.new("clear", "some-slug", name: nil).call
+    end
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/missing --name/, err)
+  end
+
+  def test_clear_by_slug_resolves_registered_project_filter
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, _folder, slug = seed_review_task(dir, marker: :review_stale)
+
+        capture_io do
+          Hive::Commands::Markers.new("clear", slug, name: "REVIEW_STALE", project: project).call
+        end
+
+        review = File.join(dir, ".hive-state", "stages", "6-review", slug)
+        assert_equal :none, Hive::Markers.current(File.join(review, "task.md")).name
+      end
+    end
+  end
+
+  def test_slug_resolution_error_includes_project_hint
+    with_tmp_global_config do
+      _out, err, status = with_captured_exit do
+        Hive::Commands::Markers.new("clear", "missing-slug", name: "ERROR", project: "hive").call
+      end
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/missing-slug/, err)
+      assert_match(/in project 'hive'/, err)
+    end
+  end
+
+  def test_path_target_with_mismatched_project_is_rejected
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, folder, _slug = seed_review_task(dir, marker: :review_stale)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", folder, name: "REVIEW_STALE", project: "other").call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_match(/FOLDER path is in project/, err)
+        assert_match(/other/, err)
+      end
+    end
+  end
+
+  def test_slug_ambiguous_across_projects_emits_candidates_in_json
+    with_tmp_global_config do
+      with_tmp_dir do |root|
+        matches = %w[alpha beta].map do |name|
+          dir = File.join(root, name)
+          FileUtils.mkdir_p(dir)
+          run!("git", "-C", dir, "init", "-b", "master", "--quiet")
+          run!("git", "-C", dir, "config", "user.email", "test@example.com")
+          run!("git", "-C", dir, "config", "user.name", "Test")
+          File.write(File.join(dir, "README.md"), "#{name}\n")
+          run!("git", "-C", dir, "add", ".")
+          run!("git", "-C", dir, "commit", "-m", "initial", "--quiet")
+          seed_review_task(dir, marker: :review_stale)
+        end
+        slug = matches.first.last
+        matches.each do |_project, folder, other_slug|
+          next if other_slug == slug
+
+          FileUtils.mv(folder, File.join(File.dirname(folder), slug))
+        end
+
+        out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", slug, name: "REVIEW_STALE", json: true).call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        payload = JSON.parse(out)
+        assert_equal "ambiguous_slug", payload["error_kind"]
+        assert_equal %w[alpha beta], payload.fetch("candidates").map { |candidate| candidate.fetch("project") }.sort
+      end
+    end
+  end
+
+  def test_slug_ambiguous_across_stages_mentions_absolute_folder_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, folder, slug = seed_review_task(dir, marker: :review_stale)
+        execute = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+        FileUtils.mkdir_p(execute)
+        File.write(File.join(execute, "task.md"), "# duplicate\n")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new("clear", slug, name: "REVIEW_STALE").call
+        end
+
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_match(/multiple stages/, err)
+        assert_match(/absolute folder path/, err)
+        refute_equal :none, Hive::Markers.current(File.join(folder, "task.md")).name
+      end
+    end
+  end
+
   # ── Happy path ─────────────────────────────────────────────────────────
 
   def test_clears_review_stale_and_preserves_surrounding_content
@@ -425,6 +535,35 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  def test_json_error_envelope_on_invalid_task_path
+    out, _err, status = with_captured_exit do
+      Hive::Commands::Markers.new("clear", nil, name: "ERROR", json: true).call
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    payload = JSON.parse(out)
+    assert_equal false, payload["ok"]
+    assert_equal "InvalidTaskPath", payload["error_class"]
+    assert_equal "invalid_task_path", payload["error_kind"]
+    assert_match(/missing FOLDER/, payload["message"])
+  end
+
+  def test_json_error_envelope_on_internal_error
+    command = Hive::Commands::Markers.new("clear", "task", name: "ERROR", json: true)
+    command.define_singleton_method(:do_call) { raise RuntimeError, "boom" }
+
+    out, err, status = with_captured_exit { command.call }
+
+    assert_equal Hive::ExitCodes::SOFTWARE, status
+    assert_match(/internal error: RuntimeError: boom/, err)
+
+    payload = JSON.parse(out)
+    assert_equal false, payload["ok"]
+    assert_equal "InternalError", payload["error_class"]
+    assert_equal "error", payload["error_kind"]
+    assert_equal Hive::ExitCodes::SOFTWARE, payload["exit_code"]
+    assert_match(/RuntimeError: boom/, payload["message"])
+  end
   # ── Subcommand dispatch ─────────────────────────────────────────────────
 
   def test_unknown_subcommand_raises_invalid_task_path

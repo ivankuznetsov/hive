@@ -21,6 +21,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     )
   end
 
+
   # ── spawn + reap_all (real subprocess) ────────────────────────────────
 
   def test_spawn_and_reap_returns_completed_child_with_envelope
@@ -129,6 +130,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     )
     assert pid < 0, "dry-run returns a synthetic non-positive PID"
     assert_equal 1, sup.in_flight_count
+    assert_equal [ pid ], sup.in_flight_pids
 
     # No real child to reap; reap_dry_run synthesises an exit.
     completed = sup.reap_dry_run
@@ -197,6 +199,52 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       sup = make
       assert_nil sup.send(:parse_envelope, log_path)
     end
+  end
+
+  def test_parse_envelope_skips_malformed_json_lines
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "malformed.log")
+      File.write(log_path, "[hive-daemon] header\n{not-json}\n")
+      sup = make
+
+      assert_nil sup.send(:parse_envelope, log_path)
+    end
+  end
+
+  def test_read_tail_returns_nil_on_io_errors
+    sup = make
+
+    with_replaced_singleton_method(File, :open, ->(*_args, **_kwargs) { raise Errno::EACCES, "blocked" }) do
+      assert_nil sup.send(:read_tail, "blocked.log", 64)
+    end
+  end
+
+  def test_terminate_all_escalates_survivors_to_kill
+    sup = make
+    sup.instance_variable_set(:@running, {
+      123 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a" },
+      456 => { project: "p1", slug: "b", stage: "6-review", command: "hive run b" }
+    })
+    kills = []
+    reap_calls = 0
+
+    sup.define_singleton_method(:collect_pgids) { [ 99 ] }
+    sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
+    sup.define_singleton_method(:reap_all) do
+      reap_calls += 1
+      []
+    end
+
+    with_replaced_singleton_method(Process, :getpgid, lambda { |pid|
+      raise Errno::ESRCH if pid == 456
+
+      1000 + pid
+    }) do
+      sup.terminate_all(grace_sec: 0)
+    end
+
+    assert_equal [ [ :TERM, -99 ], [ :KILL, -1123 ], [ :KILL, -456 ] ], kills
+    assert_equal 1, reap_calls
   end
 
   def test_terminate_all_signals_running_children

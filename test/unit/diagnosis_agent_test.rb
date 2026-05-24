@@ -21,6 +21,8 @@ require "hive/task_action"
 #     artifact write instead of describing the stale state
 #   * marker_signature wire-compatible with TaskAction (canonical impl)
 class DiagnosisAgentTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(
     :slug, :stage_name, :stage_index, :folder, :state_file,
     :project_root, :worktree_path,
@@ -397,8 +399,8 @@ class DiagnosisAgentTest < Minitest::Test
   end
 
   def test_run_with_timeout_succeeds_when_descendant_drains_within_grace
-    # Pre-fix this test pinned the false-timeout bug: a descendant
-    # holding stdio open for 2s would trip a timeout even though the
+    # Pre-fix this test pinned the false-timeout bug: a fast shell parent plus descendant
+    # holding stdio open past the runtime deadline would trip a timeout even though the
     # parent had exited successfully and only the pipe drain was
     # outstanding. The drain phase now uses its own TERMINATE_GRACE
     # budget rather than the runtime timeout, so a successful parent
@@ -409,10 +411,10 @@ class DiagnosisAgentTest < Minitest::Test
     Timeout.timeout(8) do
       out = agent.send(
         :run_with_timeout,
-        [ RbConfig.ruby, "-e", "fork { sleep 2 }; puts 'done'" ],
+        [ "sh", "-c", "sleep 2 & echo done" ],
         Dir.pwd,
         nil,
-        0.5
+        1.0
       )
     end
 
@@ -484,4 +486,317 @@ class DiagnosisAgentTest < Minitest::Test
     Hive::AgentProfiles.reset_for_tests!
     originals&.each { |name, profile| Hive::AgentProfiles.register(name, profile) }
   end
+def test_class_run_delegates_to_instance_run
+  constructed = nil
+  fake = Object.new
+  fake.define_singleton_method(:run!) { :ran }
+
+  result = with_replaced_singleton_method(Hive::DiagnosisAgent, :new, lambda { |**kwargs|
+    constructed = kwargs
+    fake
+  }) do
+    Hive::DiagnosisAgent.run!(task: @task, local_diagnostic: "local")
+  end
+
+  assert_equal :ran, result
+  assert_equal @task, constructed[:task]
+  assert_equal "local", constructed[:local_diagnostic]
+end
+
+def test_production_spawn_path_checks_profile_version_and_preflight
+  profile = FakeProfile.new(name: :codex)
+  agent = Hive::DiagnosisAgent.new(task: @task)
+  agent.instance_variable_set(:@spawn, ->(**_kwargs) { "agent body" })
+
+  with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { profile }) do
+    agent.run!
+  end
+
+  assert_equal %i[check_version preflight], profile.calls
+end
+
+def test_diagnose_lock_warns_when_unlock_fails_but_closes_file
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  lock_path = File.join(@folder, "diagnostics", Hive::DiagnosisAgent::LOCK_FILENAME)
+  fake_lock = FakeLockFile.new(unlock_error: Errno::EIO.new("unlock failed"))
+  original_file_open = File.method(:open)
+
+  _out, err = capture_io do
+    with_replaced_singleton_method(File, :open, lambda { |path, *args, &block|
+      if path == lock_path && args.first == (File::RDWR | File::CREAT)
+        fake_lock
+      else
+        original_file_open.call(path, *args, &block)
+      end
+    }) do
+      agent.send(:with_diagnose_lock) { :ok }
+    end
+  end
+
+  assert_includes err, "flock unlock"
+  assert_equal true, fake_lock.closed
+end
+
+def test_local_diagnostic_text_formats_strings_and_hashes
+  plain = Hive::DiagnosisAgent.new(task: @task, local_diagnostic: "plain text", spawn: spy_spawn)
+  assert_equal "plain text", plain.send(:local_diagnostic_text)
+
+  structured = Hive::DiagnosisAgent.new(
+    task: @task,
+    local_diagnostic: {
+      "summary" => "failed",
+      "detail" => nil,
+      "source" => "local",
+      "updated_at" => "2026-05-22T12:00:00Z"
+    },
+    spawn: spy_spawn
+  )
+  assert_equal "summary: failed\nsource: local\nupdated_at: 2026-05-22T12:00:00Z",
+               structured.send(:local_diagnostic_text)
+end
+
+def test_write_artifact_errors_are_wrapped_as_hive_error
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+
+  error = with_replaced_singleton_method(Tempfile, :create, ->(*_args) { raise Errno::ENOSPC, "full" }) do
+    assert_raises(Hive::Error) { agent.send(:write_artifact, "body") }
+  end
+
+  assert_match(/could not write .*red-status\.md/, error.message)
+  assert_includes error.message, "ENOSPC"
+end
+
+def test_fsync_dir_ignores_unsupported_directory_fsync
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+
+  result = with_replaced_singleton_method(File, :open, ->(_path, *_args) { raise Errno::EINVAL, "unsupported" }) do
+    agent.send(:fsync_dir, @folder)
+  end
+
+  assert_nil result
+end
+
+def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  profile = CommandProfile.new(
+    name: :codex,
+    bin: "codex",
+    headless_flag: "exec",
+    permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox",
+    add_dir_flag: "--add-dir",
+    budget_flag: "--budget"
+  )
+  captured = nil
+  agent.define_singleton_method(:run_with_timeout) do |cmd, cwd, stdin_data, timeout_sec|
+    captured = { cmd: cmd, cwd: cwd, stdin_data: stdin_data, timeout_sec: timeout_sec }
+    "ok"
+  end
+
+  result = agent.send(
+    :spawn_profile,
+    profile: profile, prompt: "diagnose", cwd: @project_root,
+    add_dirs: [ @folder ], timeout_sec: 12, max_budget_usd: 3
+  )
+
+  assert_equal "ok", result
+  assert_equal [ "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--add-dir", @folder, "--budget", "3", "-" ],
+               captured[:cmd]
+  assert_equal "diagnose", captured[:stdin_data]
+  assert_equal 12, captured[:timeout_sec]
+end
+
+def test_build_cmd_omits_optional_flags_for_plain_prompt_profiles
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  profile = CommandProfile.new(name: :claude, bin: "claude")
+
+  cmd = agent.send(:build_cmd, profile, "diagnose", [ @folder ], nil)
+
+  assert_equal [ "claude", "diagnose" ], cmd
+end
+
+def test_run_with_timeout_traps_term_and_kills_pgroup_on_sigterm
+  skip "Process.kill not supported on this platform" if RUBY_PLATFORM =~ /mswin|mingw/
+
+  agent = Hive::DiagnosisAgent.new(task: @task)
+  raised = nil
+  thr = Thread.new do
+    begin
+      agent.send(:run_with_timeout, [ "sleep", "30" ], Dir.pwd, nil, 60)
+    rescue Interrupt, Hive::Error => e
+      raised = e
+    end
+  end
+
+  sleep 0.3
+  Process.kill("TERM", Process.pid)
+  thr.join(10)
+
+  refute thr.alive?, "run_with_timeout must not hang past SIGTERM"
+  assert raised, "SIGTERM must surface as Interrupt or Hive::Error from run_with_timeout"
+end
+
+def test_run_with_timeout_times_out_and_terminates_pgroup
+  agent = Hive::DiagnosisAgent.new(task: @task)
+
+  error = assert_raises(Hive::Error) do
+    agent.send(:run_with_timeout, [ "sleep", "30" ], Dir.pwd, nil, 0.1)
+  end
+
+  assert_match(/timed out after 0.1s/, error.message)
+end
+
+def test_drain_reader_threads_timeout_terminates_child_and_kills_readers
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  alive_reader = FakeReaderThread.new(alive: true)
+  killed = []
+  terminated = []
+  agent.define_singleton_method(:terminate_process_group) { |pid| terminated << pid }
+  agent.define_singleton_method(:kill_reader_threads) { |*threads| killed.concat(threads) }
+
+  error = assert_raises(Hive::Error) do
+    agent.send(
+      :drain_reader_threads_or_timeout,
+      1234, alive_reader, alive_reader,
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - 1,
+      9
+    )
+  end
+
+  assert_equal [ 1234 ], terminated
+  assert_equal [ alive_reader, alive_reader ], killed
+  assert_match(/timed out after 9s/, error.message)
+end
+
+def test_feed_stdin_ignores_epipe_and_close_errors
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  stdin = FakeStdin.new(write_error: Errno::EPIPE.new, close_error: IOError.new("already closed"))
+
+  assert_nil agent.send(:feed_stdin, stdin, "prompt")
+  assert_equal true, stdin.closed
+end
+
+def test_read_stream_returns_empty_string_for_io_error
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  stream = Object.new
+  stream.define_singleton_method(:read) { raise IOError, "closed" }
+
+  assert_equal "", agent.send(:read_stream, stream)
+end
+
+def test_terminate_process_group_returns_when_process_is_already_gone
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  agent.instance_variable_set(:@kill_threads_queue, Queue.new)
+
+  with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+    assert_nil agent.send(:terminate_process_group, 1234)
+  end
+
+  assert_raises(ThreadError) { agent.instance_variable_get(:@kill_threads_queue).pop(true) }
+end
+
+def test_terminate_process_group_waits_then_escalates_to_kill
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  agent.instance_variable_set(:@kill_threads_queue, Queue.new)
+  signals = []
+  wait_results = [ nil, [ 1234, Object.new ] ]
+
+  with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+    with_replaced_singleton_method(Process, :waitpid2, ->(_pid, _flags) { wait_results.shift }) do
+      agent.send(:terminate_process_group, 1234)
+      agent.send(:join_kill_threads)
+    end
+  end
+
+  assert_equal [ [ "TERM", -1234 ], [ "KILL", -1234 ] ], signals
+end
+
+def test_kill_reader_threads_only_kills_live_threads
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  live = FakeReaderThread.new(alive: true)
+  dead = FakeReaderThread.new(alive: false)
+
+  agent.send(:kill_reader_threads, live, dead)
+
+  assert_equal true, live.killed
+  assert_equal false, dead.killed
+end
+
+private
+
+FakeProfile = Struct.new(:name, keyword_init: true) do
+  attr_reader :calls
+
+  def initialize(**kwargs)
+    super
+    @calls = []
+  end
+
+  def check_version!
+    calls << :check_version
+  end
+
+  def preflight!
+    calls << :preflight
+  end
+end
+
+CommandProfile = Struct.new(
+  :name, :bin, :headless_flag, :permission_skip_flag, :add_dir_flag, :budget_flag,
+  keyword_init: true
+)
+
+class FakeLockFile
+  attr_reader :closed
+
+  def initialize(unlock_error: nil)
+    @unlock_error = unlock_error
+    @closed = false
+  end
+
+  def flock(mode)
+    raise @unlock_error if mode == File::LOCK_UN && @unlock_error
+
+    true
+  end
+
+  def close
+    @closed = true
+  end
+end
+
+class FakeReaderThread
+  attr_reader :killed
+
+  def initialize(alive:)
+    @alive = alive
+    @killed = false
+  end
+
+  def alive?
+    @alive
+  end
+
+  def kill
+    @killed = true
+  end
+end
+
+class FakeStdin
+  attr_reader :closed
+
+  def initialize(write_error: nil, close_error: nil)
+    @write_error = write_error
+    @close_error = close_error
+    @closed = false
+  end
+
+  def write(_data)
+    raise @write_error if @write_error
+  end
+
+  def close
+    @closed = true
+    raise @close_error if @close_error
+  end
+end
 end

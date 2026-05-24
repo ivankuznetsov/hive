@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   test:
-    name: rake coverage report (Ruby ${{ matrix.ruby }})
+    name: rake test (Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

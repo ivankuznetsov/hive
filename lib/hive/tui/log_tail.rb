@@ -21,6 +21,22 @@ module Hive
     # keystrokes on the same loop, so the buffer stays fresh without
     # the synchronisation footprint of a worker thread.
     module LogTail
+      # Shared filesystem error surface for log-tailing operations.
+      # Consumers (`Tail#poll!`, `Tail#close!`, the red-status detail
+      # snapshot) all rescue this list so a malformed log path
+      # (directory, symlink loop, gone path) collapses to an empty
+      # buffer instead of tearing the TUI down.
+      FILESYSTEM_RESCUE = [
+        Errno::ENOENT,
+        Errno::EACCES,
+        Errno::EBADF,
+        Errno::EIO,
+        Errno::EISDIR,
+        Errno::ENAMETOOLONG,
+        Errno::ELOOP,
+        Errno::ENOTDIR
+      ].freeze
+
       module Formatter
         STREAM_LINE = /\A\[stream\]\s+(\S+)\s+(.+)\z/
         HIVE_LINE = /\A\[hive\]\s+(\S+)\s+(.+)\z/
@@ -236,7 +252,7 @@ module Hive
           # scratch. Other Errno::* are swallowed so the renderer keeps
           # painting cached state instead of crashing.
           reopen
-        rescue Errno::ENOENT, Errno::EACCES, Errno::EBADF, Errno::EIO => e
+        rescue *FILESYSTEM_RESCUE => e
           # Transient filesystem trouble; leave buffer intact and try
           # again on the next poll. Logged so an EBADF (FD closed
           # behind our back — view freezes until reopen) can be
@@ -264,8 +280,12 @@ module Hive
 
         def close!
           @file&.close
-        rescue IOError => e
-          Hive::Tui::Debug.log("log_tail", "close! IOError: #{e.message}")
+        rescue IOError, *FILESYSTEM_RESCUE => e
+          # Rescue extends beyond IOError so an `ensure tail&.close!`
+          # block following a partially-opened tail (e.g. File.stat raced
+          # to ENOENT after File.open succeeded) can't escape an EBADF/EIO
+          # past the caller's own rescue.
+          Hive::Tui::Debug.log("log_tail", "close! #{e.class.name.split('::').last}: #{e.message}")
           nil
         ensure
           @file = nil

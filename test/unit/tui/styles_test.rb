@@ -131,6 +131,11 @@ class HiveTuiStylesTest < Minitest::Test
     assert Hive::Tui::Styles::HEADER.bold?, "HEADER must be bold for visual hierarchy"
   end
 
+  def test_recovery_header_style_is_red_and_bold
+    assert_equal "1", Hive::Tui::Styles::RECOVERY_HEADER_STYLE.get_foreground
+    assert Hive::Tui::Styles::RECOVERY_HEADER_STYLE.bold?
+  end
+
   def test_cursor_highlight_uses_reverse_video
     # Reverse video is the cursor signal that survives monochrome /
     # 16-color / TrueColor terminals consistently — chosen over a
@@ -158,6 +163,16 @@ class HiveTuiStylesTest < Minitest::Test
   def test_hint_style_is_faint
     assert Hive::Tui::Styles::HINT.faint?,
            "HINT footer must be faint so it recedes against active grid content"
+  end
+
+  def test_action_chip_primary_uses_reverse_video
+    assert Hive::Tui::Styles::ACTION_CHIP_PRIMARY.reverse?,
+           "primary recovery action chip must remain visible on monochrome terminals"
+  end
+
+  def test_action_chip_muted_is_faint
+    assert Hive::Tui::Styles::ACTION_CHIP_MUTED.faint?,
+           "secondary recovery action chips must recede against the primary chip"
   end
 
   # ---------- ACTION_KEY_COLORS table ----------
@@ -207,5 +222,10 @@ class HiveTuiStylesTest < Minitest::Test
   def test_pane_borders_are_frozen
     assert Hive::Tui::Styles::PANE_FOCUSED_BORDER.frozen?
     assert Hive::Tui::Styles::PANE_DIM_BORDER.frozen?
+  end
+
+  def test_panel_border_aliases_dim_pane_border
+    assert_same Hive::Tui::Styles::PANE_DIM_BORDER,
+                Hive::Tui::Styles::PANEL_BORDER
   end
 end

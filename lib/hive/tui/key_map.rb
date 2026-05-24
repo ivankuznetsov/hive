@@ -314,8 +314,32 @@ module Hive
         Messages::NOOP
       end
 
+      # Saturating-large amount used by Home/End to mean "scroll to the
+      # edge". `apply_red_status_detail_scroll` clamps via `[next,0].max`
+      # / `[next,max].min` so any value past the log's line count
+      # collapses to the boundary. Picked instead of Float::INFINITY
+      # because `apply_red_status_detail_scroll` does integer arithmetic
+      # on the amount.
+      SCROLL_TO_EDGE = 1_000_000
+
+      # @api private
+      # `:red_status_detail` scroll bindings — mirror of `VERB_KEYS`
+      # style so the scroll surface reads as one frozen table.
+      RED_STATUS_DETAIL_SCROLL_KEYS = {
+        key_up: [ :up,   1 ],
+        key_down: [ :down, 1 ],
+        key_pgup: [ :up,   10 ],
+        key_pgdn: [ :down, 10 ],
+        key_home: [ :up,   SCROLL_TO_EDGE ],
+        key_end: [ :down, SCROLL_TO_EDGE ]
+      }.freeze
+
       def red_status_detail_message(key:, row:)
         return Messages::BACK if ESCAPE_KEYS.include?(key) || key == "q"
+        if (scroll = RED_STATUS_DETAIL_SCROLL_KEYS[key])
+          direction, amount = scroll
+          return Messages::RedStatusDetailScroll.new(direction: direction, amount: amount)
+        end
         return Messages::RedStatusAutofix.new(row: row) if ENTER_KEYS.include?(key) && row
         return Messages::OpenInAgent.new(row: row) if key == "o" && row
         # The grid-mode steer key is `s`; in detail mode the equivalent

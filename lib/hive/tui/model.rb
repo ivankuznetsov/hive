@@ -86,14 +86,20 @@ module Hive
       end
     end
 
-    Model::RedStatusDetailState = Data.define(:row, :agent_label)
+    Model::RedStatusDetailState = Data.define(
+      :row,
+      :agent_label,
+      :log_path,
+      :log_lines,
+      :log_scroll_offset
+    )
     # Single source of truth for the "no resolved label" copy. The
     # resolver in BubbleModel falls back to this string when project
     # config / agent lookup fails, so the view can render `agent_label`
     # directly without re-applying a render-time `|| AGENT_FALLBACK`.
     Model::RedStatusDetailState::AGENT_FALLBACK = "your project's development agent".freeze
     class Model::RedStatusDetailState
-      def initialize(row:, agent_label: AGENT_FALLBACK)
+      def initialize(row:, agent_label: AGENT_FALLBACK, log_path: nil, log_lines: [], log_scroll_offset: 0)
         super
       end
     end

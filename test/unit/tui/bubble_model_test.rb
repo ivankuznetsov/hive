@@ -236,6 +236,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       Bubbletea::KeyMessage::KEY_RIGHT => :key_right,
       Bubbletea::KeyMessage::KEY_HOME => :key_home,
       Bubbletea::KeyMessage::KEY_END => :key_end,
+      Bubbletea::KeyMessage::KEY_PGUP => :key_pgup,
+      Bubbletea::KeyMessage::KEY_PGDOWN => :key_pgdn,
       Bubbletea::KeyMessage::KEY_DELETE => :key_delete,
       Bubbletea::KeyMessage::KEY_CTRL_A => :key_ctrl_a,
       Bubbletea::KeyMessage::KEY_CTRL_E => :key_ctrl_e,
@@ -392,6 +394,117 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "title truncated", "active flash must surface above the prompt"
     assert out.index("title truncated") < out.index("rss feeds"),
            "flash row must precede the prompt strip so it is visible"
+  end
+
+  def test_red_status_detail_view_renders_header_panels_log_artifacts_and_action_bar
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-view-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      artifact = "/tmp/errors-02.md"
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "review-fix-pass02.log"), (1..8).map { |i| "line-#{i}" }.join("\n") + "\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: "alpha", stage: "6-review", slug: slug,
+        folder: task_folder, state_file: File.join(task_folder, "task.md"),
+        worktree_path: File.join(project_root, "worktrees", slug),
+        marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: {
+          "summary" => "REVIEW_ERROR phase=fix pass=2",
+          "detail" => "Fix agent failed before tests completed.",
+          "artifact_paths" => [ artifact ],
+          "marker_signature" => "sig"
+        }
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(cols: 100, rows: 30),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      output = @model.view
+
+      assert_includes output, "RED · alpha/6-review · #{slug}"
+      assert output.lines.any? { |line| line.start_with?("╭") || line.start_with?("+") },
+             "rendered detail should include a bordered panel"
+      assert_includes output, "Why:"
+      assert_includes output, "Log · last 7 of 8 lines"
+      assert_includes output, "line-2"
+      assert_includes output, "line-8"
+      assert_includes output, artifact
+      assert_includes output, "[Enter] Recover"
+      assert_includes output, "Open in agent"
+      assert_includes output.lines[-2], "[Esc] back"
+
+      # Pin section ordering: header, reason summary, action chips,
+      # artifacts, then the log snapshot. Use line-index lookups rather
+      # than byte offsets so two sections collapsing onto the same row
+      # cannot pass the ordering chain.
+      lines = output.lines
+      header_idx = lines.find_index { |line| line.include?("RED · alpha/6-review") }
+      reason_idx = lines.find_index { |line| line.include?("Why:") }
+      action_idx = lines.find_index { |line| line.include?("[Enter] Recover") }
+      artifact_idx = lines.find_index { |line| line.include?(artifact) }
+      log_idx = lines.find_index { |line| line.include?("Log · last 7 of 8 lines") }
+
+      assert_operator header_idx, :<, reason_idx, "header must come before the reason summary"
+      assert_operator reason_idx, :<, action_idx, "reason summary must come before actions"
+      assert_operator action_idx, :<, artifact_idx, "actions must come before artifacts"
+      assert_operator artifact_idx, :<, log_idx, "artifacts must come before the log snapshot"
+    end
+  end
+
+  # U10 at 80×24: mirror of the 100×30 composition pin so a regression
+  # at the narrower-but-still-tall layout boundary can't slip past.
+  def test_red_status_detail_view_composes_sections_at_80x24
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-view-80x24-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      artifact = "/tmp/errors-02.md"
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "review-fix-pass02.log"), (1..8).map { |i| "line-#{i}" }.join("\n") + "\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: "alpha", stage: "6-review", slug: slug,
+        folder: task_folder, state_file: File.join(task_folder, "task.md"),
+        worktree_path: File.join(project_root, "worktrees", slug),
+        marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
+        mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: {
+          "summary" => "REVIEW_ERROR phase=fix pass=2",
+          "detail" => "Fix agent failed before tests completed.",
+          "artifact_paths" => [ artifact ],
+          "marker_signature" => "sig"
+        }
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(cols: 80, rows: 24),
+        dispatch: @dispatch
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      output = @model.view
+
+      header_idx = output.index("RED · alpha/6-review")
+      reason_idx = output.index("Why:")
+      action_idx = output.index("[Enter] Recover")
+
+      refute_nil header_idx, "header must render"
+      refute_nil reason_idx, "reason summary must render"
+      refute_nil action_idx, "action bar must render"
+      assert_operator header_idx, :<, reason_idx
+      assert_operator reason_idx, :<, action_idx
+      assert_includes output.lines[-2], "[Esc] back"
+    end
   end
 
   # Negative: when no active flash, the prompt is the only footer line —
@@ -5490,6 +5603,106 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_match(/no logs yet for #{slug}/, @model.hive_model.flash)
       assert_equal :grid, @model.hive_model.mode,
         "must stay in grid mode, not flip to :log_tail with a missing log"
+    end
+  end
+
+  def test_open_red_status_detail_captures_last_50_lines_from_latest_log
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-tail-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "review-fix-pass02.log")
+      File.write(log_path, (1..100).map { |i| "line-#{i}" }.join("\n") + "\n")
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: "review_error",
+        attrs: { "pass" => "2" }, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: { "summary" => "review failed", "marker_signature" => "sig" }
+      )
+
+      _, cmd = @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      state = @model.hive_model.red_status_detail_state
+
+      assert_nil cmd
+      assert_equal :red_status_detail, @model.hive_model.mode
+      assert_equal log_path, state.log_path
+      assert_equal 50, state.log_lines.length
+      assert_equal "line-51", state.log_lines.first
+      assert_equal "line-100", state.log_lines.last
+      assert_equal 0, state.log_scroll_offset
+    end
+  end
+
+  def test_open_red_status_detail_omits_log_state_when_no_log_exists
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-no-log-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      FileUtils.mkdir_p(task_folder)
+
+      row = Hive::Tui::Snapshot::Row.new(
+        project_name: File.basename(project_root), stage: "6-review", slug: slug,
+        folder: task_folder, state_file: nil, marker: "review_error",
+        attrs: { "pass" => "2" }, mtime: nil, age_seconds: 0,
+        claude_pid: nil, claude_pid_alive: nil,
+        action_key: "recover_review", action_label: "Needs recovery",
+        suggested_command: nil, next_action: nil,
+        diagnostic: { "summary" => "review failed", "marker_signature" => "sig" }
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      state = @model.hive_model.red_status_detail_state
+
+      assert_equal :red_status_detail, @model.hive_model.mode
+      assert_nil state.log_path
+      assert_equal [], state.log_lines
+    end
+  end
+
+  # U4 unreadable-log branch: a `chmod 000` regression on the snapshot
+  # path must collapse to an empty log panel (EACCES branch), not tear
+  # the TUI down. The happy and no-log cases above don't cover this
+  # rescue arm.
+  def test_open_red_status_detail_handles_unreadable_log_file
+    skip "skip-as-root: chmod 000 doesn't restrict root" if Process.uid.zero?
+    require "tmpdir"
+    Dir.mktmpdir do |project_root|
+      slug = "detail-unreadable-260523-aaaa"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      logs = File.join(task_folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "review-fix-pass02.log")
+      File.write(log_path, "should not be readable\n")
+      File.chmod(0, log_path)
+
+      begin
+        row = Hive::Tui::Snapshot::Row.new(
+          project_name: File.basename(project_root), stage: "6-review", slug: slug,
+          folder: task_folder, state_file: nil, marker: "review_error",
+          attrs: { "pass" => "2" }, mtime: nil, age_seconds: 0,
+          claude_pid: nil, claude_pid_alive: nil,
+          action_key: "recover_review", action_label: "Needs recovery",
+          suggested_command: nil, next_action: nil,
+          diagnostic: { "summary" => "review failed", "marker_signature" => "sig" }
+        )
+
+        _, cmd = @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+        state = @model.hive_model.red_status_detail_state
+
+        assert_nil cmd, "unreadable log must not surface a Cmd; the rescue collapses to empty panel"
+        assert_equal :red_status_detail, @model.hive_model.mode,
+                     "TUI must still enter detail mode even when the log is unreadable"
+        assert_nil state.log_path
+        assert_equal [], state.log_lines
+      ensure
+        File.chmod(0o600, log_path) if File.exist?(log_path)
+      end
     end
   end
 

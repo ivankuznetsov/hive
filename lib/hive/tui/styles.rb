@@ -81,6 +81,15 @@ module Hive
       # Header line — bold default-fg. Works on monochrome terminals.
       HEADER = Lipgloss::Style.new.bold(true)
 
+      # Red-status detail header — bold red foreground so recovery
+      # urgency matches the grid's red action-key palette. Named
+      # *_STYLE (not *_BAR) because the style emits no width/background,
+      # just inline bold-red text.
+      RECOVERY_HEADER_STYLE = Lipgloss::Style.new
+        .foreground(color(:red))
+        .bold(true)
+        .freeze
+
       # Cursor row indicator: reverse video. Chosen because it survives
       # monochrome / 16-color / TrueColor consistently — the brainstorm's
       # "Linux way" hardware floor doesn't assume color is available.
@@ -102,6 +111,14 @@ module Hive
       # it recedes against the active grid content.
       HINT = Lipgloss::Style.new.faint(true)
 
+      # Reverse-video for the chip carrying the [Enter] affordance —
+      # mirrors `CURSOR_HIGHLIGHT` so the primary action pops on
+      # monochrome terminals.
+      ACTION_CHIP_PRIMARY = Lipgloss::Style.new.reverse(true).freeze
+      # Faint for non-Enter chips ([f]/[R]/[q]) — same family as `HINT`,
+      # so secondary affordances recede next to the primary one.
+      ACTION_CHIP_MUTED = Lipgloss::Style.new.faint(true).freeze
+
       # ---- v2 two-pane border styles ----
       # Both panes carry a rounded border. The focused pane uses a bright
       # cyan accent; the inactive pane uses faint default-fg so the
@@ -117,6 +134,12 @@ module Hive
         .border(Lipgloss::ROUNDED_BORDER)
         .border_foreground(color(:bright_black))
         .freeze
+
+      # Recovery detail panels are non-focused; focus lives on the
+      # action bar's primary chip (reverse-video), so the panels share
+      # the same dim border as inactive panes rather than competing for
+      # attention.
+      PANEL_BORDER = PANE_DIM_BORDER.freeze
     end
   end
 end

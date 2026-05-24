@@ -6,9 +6,11 @@ require "hive/tui/views/red_status_detail"
 class HiveTuiViewsRedStatusDetailTest < Minitest::Test
   def row(diagnostic: nil, action_key: "recover_review", stage: "6-review",
           marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
-          folder: "/tmp/demo/.hive-state/stages/6-review/red-task")
+          folder: nil, slug: "red-task", worktree_path: "/tmp/red-task-worktree")
+    folder ||= "/tmp/demo/.hive-state/stages/#{stage}/#{slug}"
     Hive::Tui::Snapshot::Row.new(
-      project_name: "alpha", stage: stage, slug: "red-task", folder: folder,
+      project_name: "alpha", stage: stage, slug: slug, folder: folder,
+      worktree_path: worktree_path,
       state_file: File.join(folder, "task.md"), marker: marker,
       attrs: attrs, mtime: nil, age_seconds: 0,
       claude_pid: nil, claude_pid_alive: nil,
@@ -28,6 +30,23 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
       agent_label: agent_label
     )
     Hive::Tui::Model.initial.with(mode: :red_status_detail, red_status_detail_state: state, cols: cols, rows: rows)
+  end
+
+  def state_with_log(lines, offset: 0)
+    model_for(row).red_status_detail_state.with(
+      log_path: "/tmp/red-task/logs/review.log",
+      log_lines: lines,
+      log_scroll_offset: offset
+    )
+  end
+
+  def model_with_log(lines, cols: 100, rows: 30)
+    model = model_for(row).with(cols: cols, rows: rows)
+    model.with(red_status_detail_state: model.red_status_detail_state.with(
+      log_path: "/tmp/red-task/logs/review.log",
+      log_lines: lines,
+      log_scroll_offset: 0
+    ))
   end
 
   def test_renders_user_facing_summary_with_two_actions
@@ -62,6 +81,225 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     refute_includes output, "Q: What can Hive do next?"
   end
 
+  def test_header_bar_is_single_row_with_status_project_stage_slug_and_worktree
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+    header = output.lines.first.to_s.chomp
+
+    assert_includes header, "RED · alpha/6-review · red-task · /tmp/red-task-worktree"
+    assert_equal 1, header.lines.size
+  end
+
+  def test_header_truncates_worktree_path_before_slug
+    long_path = "/tmp/" + ("deep/" * 20) + "red-task-worktree"
+    model = model_for(row(worktree_path: long_path)).with(cols: 40)
+
+    header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
+
+    assert_operator header.length, :<=, 39
+    assert_includes header, "RED · alpha/6-review · red-task · "
+    assert_includes header, "…"
+  end
+
+  def test_header_keeps_red_prefix_at_tiny_width
+    model = model_for(row(slug: "very-long-red-task-name")).with(cols: 20)
+
+    header = Hive::Tui::Views::RedStatusDetail.render(model).lines.first.to_s.chomp
+
+    assert_operator header.length, :<=, 19
+    assert_match(/\ARED ·/, header)
+  end
+
+  def test_body_renders_inside_rounded_border
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+    panel_top = output.lines.find { |line| line.start_with?("╭") || line.start_with?("+") }
+
+    refute_nil panel_top, "detail body must render as a bordered panel"
+    assert_includes output, "Task needs attention"
+    assert_includes output, "Why:"
+  end
+
+  def test_body_border_uses_outer_width_minus_border_for_content
+    model = model_for(row).with(cols: 100)
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
+    panel_top = output.lines.find { |line| line.start_with?("╭") || line.start_with?("+") }.to_s.chomp
+
+    assert_operator panel_top.length, :<=, 99
+  end
+
+  def test_log_panel_renders_trailing_lines_with_height_budget
+    lines = (1..50).map { |i| "line-#{i}" }
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log(lines), 80, 10)
+
+    assert_includes panel, "Log · last 8 of 50 lines"
+    assert_includes panel, "line-43"
+    assert_includes panel, "line-50"
+    refute_includes panel, "line-42"
+  end
+
+  def test_log_panel_scroll_offset_moves_window_toward_older_lines
+    lines = (1..50).map { |i| "line-#{i}" }
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log(lines, offset: 5), 80, 10)
+
+    assert_includes panel, "line-38"
+    assert_includes panel, "line-45"
+    refute_includes panel, "line-46"
+  end
+
+  def test_log_panel_clamps_offset_to_available_lines
+    lines = (1..12).map { |i| "line-#{i}" }
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log(lines, offset: 100), 80, 10)
+
+    assert_includes panel, "line-1"
+    assert_includes panel, "line-8"
+    refute_includes panel, "line-9"
+  end
+
+  def test_log_panel_returns_nil_when_log_lines_empty
+    assert_nil Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log([]), 80, 10)
+  end
+
+  def test_render_omits_log_panel_when_no_log_lines_exist
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row))
+
+    refute_includes output, "Log ·"
+  end
+
+  def test_render_includes_log_panel_when_log_lines_fit
+    state = state_with_log((1..20).map { |i| "line-#{i}" })
+    model = Hive::Tui::Model.initial.with(
+      mode: :red_status_detail,
+      red_status_detail_state: state,
+      cols: 100,
+      rows: 30
+    )
+
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
+
+    assert_includes output, "Log · last"
+    assert_includes output, "line-20"
+  end
+
+  def test_artifacts_block_returns_nil_when_empty
+    assert_nil Hive::Tui::Views::RedStatusDetail.artifacts_block(row(diagnostic: { "artifact_paths" => [] }), 80)
+  end
+
+  def test_artifacts_block_lists_available_paths
+    diagnostic = { "artifact_paths" => [ "/tmp/a.md", "/tmp/b.md", "/tmp/c.md" ] }
+    block = Hive::Tui::Views::RedStatusDetail.artifacts_block(row(diagnostic: diagnostic), 80)
+
+    assert_includes block, "Artifacts"
+    assert_includes block, "• /tmp/a.md"
+    assert_includes block, "• /tmp/b.md"
+    assert_includes block, "• /tmp/c.md"
+  end
+
+  def test_artifacts_block_caps_list_and_shows_remainder_count
+    paths = (1..7).map { |i| "/tmp/artifact-#{i}.md" }
+    block = Hive::Tui::Views::RedStatusDetail.artifacts_block(
+      row(diagnostic: { "artifact_paths" => paths }),
+      80
+    )
+
+    assert_includes block, "/tmp/artifact-5.md"
+    refute_includes block, "/tmp/artifact-6.md"
+    assert_includes block, "… (2 more)"
+  end
+
+  # Boundary: exactly 5 artifacts — a regression to `>= 5` instead of
+  # `> 5` would print a spurious "… (0 more)" line. Pin the boundary.
+  def test_artifacts_block_at_exactly_five_paths_omits_remainder_line
+    paths = (1..5).map { |i| "/tmp/artifact-#{i}.md" }
+    block = Hive::Tui::Views::RedStatusDetail.artifacts_block(
+      row(diagnostic: { "artifact_paths" => paths }),
+      80
+    )
+
+    assert_includes block, "/tmp/artifact-5.md"
+    refute_includes block, "more)"
+  end
+
+  def test_render_omits_artifacts_section_when_empty
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(diagnostic: { "artifact_paths" => [] })))
+
+    refute_includes output, "Artifacts"
+    refute_includes output, "Artifacts: none"
+  end
+
+
+  def test_log_panel_sanitizes_ansi_sequences
+    panel = Hive::Tui::Views::RedStatusDetail.log_panel(state_with_log([ "\e[31mbad\e[0m" ]), 80, 5)
+
+    refute_includes panel, "\e["
+    assert_includes panel, "bad"
+  end
+
+  def test_full_height_layout_shows_header_summary_log_artifacts_and_footer
+    diagnostic = {
+      "summary" => "REVIEW_ERROR phase=fix pass=2",
+      "detail" => "Fix agent failed before tests completed.",
+      "artifact_paths" => [ "/tmp/red-task/reviews/errors-02.md" ]
+    }
+    model = model_for(row(diagnostic: diagnostic)).with(cols: 100, rows: 30)
+    model = model.with(red_status_detail_state: model.red_status_detail_state.with(
+      log_lines: (1..50).map { |i| "line-#{i}" },
+      log_path: "/tmp/red-task/logs/review.log"
+    ))
+    output = Hive::Tui::Views::RedStatusDetail.render(model)
+
+    assert_includes output, "RED · alpha/6-review"
+    assert_includes output, "Task needs attention"
+    assert_includes output, "Why: Hive does not have a diagnosis yet"
+    assert_includes output, "Log ·"
+    assert_includes output, "/tmp/red-task/reviews/errors-02.md"
+    assert_includes output, "[Esc] back"
+  end
+
+  def test_short_layout_drops_log_panel_and_keeps_footer_visible
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 12))
+
+    refute_includes output, "Log ·"
+    assert_includes output, "Why:"
+    assert_includes output, "[Enter] Recover"
+  end
+
+  # U6 invariant: across every plan-enumerated size, the last rendered
+  # line must be part of the action bar. Pinning this at 80×24, 60×24
+  # and 40×40 — the existing 100×30 / 80×12 cases cover only the wide
+  # full-height and the short-log-dropped paths, so a lipgloss height
+  # drift at the middle sizes would slip past until a screenshot diff.
+  def test_action_bar_is_last_line_at_80x24
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 80, rows: 24))
+    assert_includes output.lines[-2], "[Esc] back"
+  end
+
+  def test_action_bar_is_last_line_at_60x24
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 60, rows: 24))
+    assert_includes output.lines[-2], "[Esc] back"
+  end
+
+  def test_action_bar_is_last_line_at_40x40
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..50).map { |i| "line-#{i}" }, cols: 40, rows: 40))
+    assert_includes output.lines[-2], "[Esc] back"
+  end
+
+  # The body action chips are deliberately verbose. At the standard
+  # 80c inner width they wrap, but both actions must remain visible.
+  def test_action_bar_wraps_without_hiding_actions_at_80_cols
+    bar = Hive::Tui::Views::RedStatusDetail.action_bar("codex", 79)
+    assert_equal 2, bar.lines.size
+    assert_includes bar, "[Enter] Recover"
+    assert_includes bar, "[o]     Open in agent"
+  end
+
+  def test_narrow_layout_keeps_lines_within_terminal_margin
+    output = Hive::Tui::Views::RedStatusDetail.render(model_with_log((1..12).map { |i| "line-#{i}" }, cols: 60, rows: 24))
+
+    output.lines.each do |line|
+      assert_operator line.chomp.length, :<=, 59
+    end
+    assert_match(/\ARED ·/, output.lines.first)
+  end
+
   def test_sanitizes_ansi_sequences_from_diagnostic_text
     diagnostic = {
       "summary" => "\e[31mbad\e[0m",
@@ -74,44 +312,62 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     assert_includes output, "bad"
   end
 
-  def test_falls_back_when_agent_label_is_missing
-    # Caller resolution failure surfaces as the canonical AGENT_FALLBACK
-    # label on RedStatusDetailState (the rescue in BubbleModel
-    # #resolve_agent_label is exercised in bubble_model_test.rb). Pin
-    # via the constant so a future rewording of the fallback copy stays
-    # in one place.
-    fallback = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
-    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, agent_label: fallback))
+def test_falls_back_when_agent_label_is_missing
+  # Caller resolution failure surfaces as the canonical AGENT_FALLBACK
+  # label on RedStatusDetailState (the rescue in BubbleModel
+  # #resolve_agent_label is exercised in bubble_model_test.rb). Pin
+  # via the constant so a future rewording of the fallback copy stays
+  # in one place.
+  fallback = Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK
+  output = Hive::Tui::Views::RedStatusDetail.render(model_for(row, agent_label: fallback))
 
-    assert_includes output, "Open in agent"
-    assert_includes output, fallback
-  end
+  assert_includes output, "Open in agent"
+  assert_includes output, fallback
+end
 
-  def test_recover_execute_rows_still_show_two_actions_with_enter_affordance
-    output = Hive::Tui::Views::RedStatusDetail.render(
-      model_for(
-        row(
-          action_key: "recover_execute",
-          stage: "4-execute",
-          marker: "execute_stale",
-          attrs: { "pass" => "3" },
-          folder: "/tmp/demo/.hive-state/stages/4-execute/red-task"
-        )
+def test_action_bar_renders_two_action_chips
+  bar = Hive::Tui::Views::RedStatusDetail.action_bar("codex", 100)
+
+  assert_includes bar, "[Enter] Recover"
+  assert_includes bar, "[o]     Open in agent"
+  assert_includes bar, "codex"
+  refute_includes bar, "[f] manual fix"
+  refute_includes bar, "[R] refresh diagnosis"
+end
+
+def test_action_bar_wraps_at_narrow_width
+  bar = Hive::Tui::Views::RedStatusDetail.action_bar("codex", 40)
+
+  assert_operator bar.lines.size, :>, 1
+  bar.lines.each { |line| assert_operator line.chomp.length, :<=, 40 }
+  assert_includes bar, "[o]"
+end
+
+def test_recover_execute_rows_still_show_two_actions_with_enter_affordance
+  output = Hive::Tui::Views::RedStatusDetail.render(
+    model_for(
+      row(
+        action_key: "recover_execute",
+        stage: "4-execute",
+        marker: "execute_stale",
+        attrs: { "pass" => "3" },
+        folder: "/tmp/demo/.hive-state/stages/4-execute/red-task"
       )
     )
+  )
 
-    # The unified contract: [Enter] Recover always shown regardless of
-    # action_key. recover_execute rows route refusals through the
-    # bubble_model flash so the operator's binary gesture never leaves
-    # them stranded on the detail screen.
-    assert_includes output, "[Enter] Recover"
-    assert_includes output, "[o]     Open in agent"
-    refute_includes output, "[f] manual fix"
-    refute_includes output, "[R] refresh diagnosis"
-    refute_includes output, "EXECUTE_STALE"
-  end
+  # The unified contract: [Enter] Recover always shown regardless of
+  # action_key. recover_execute rows route refusals through the
+  # bubble_model flash so the operator's binary gesture never leaves
+  # them stranded on the detail screen.
+  assert_includes output, "[Enter] Recover"
+  assert_includes output, "[o]     Open in agent"
+  refute_includes output, "[f] manual fix"
+  refute_includes output, "[R] refresh diagnosis"
+  refute_includes output, "EXECUTE_STALE"
+end
 
-  def test_recover_review_row_shows_enter_affordance
+def test_recover_review_row_shows_enter_affordance
     # Positive pin for the unified [Enter] Recover contract — paired
     # with test_recover_execute_rows_still_show_two_actions_with_enter_affordance
     # so a future split-by-action_key regression breaks both tests.

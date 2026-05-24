@@ -782,6 +782,48 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_red_status_detail_arrow_keys_scroll_log
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+
+    up = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_up, row: row)
+    down = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_down, row: row)
+
+    assert_kind_of Hive::Tui::Messages::RedStatusDetailScroll, up
+    assert_equal :up, up.direction
+    assert_equal 1, up.amount
+    assert_kind_of Hive::Tui::Messages::RedStatusDetailScroll, down
+    assert_equal :down, down.direction
+    assert_equal 1, down.amount
+  end
+
+  def test_red_status_detail_page_and_home_end_keys_scroll_log
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+
+    pgup = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_pgup, row: row)
+    pgdn = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_pgdn, row: row)
+    home = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_home, row: row)
+    end_key = Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: :key_end, row: row)
+
+    assert_equal [ :up, 10 ], [ pgup.direction, pgup.amount ]
+    assert_equal [ :down, 10 ], [ pgdn.direction, pgdn.amount ]
+    assert_equal :up, home.direction
+    assert_equal Hive::Tui::KeyMap::SCROLL_TO_EDGE, home.amount
+    assert_equal :down, end_key.direction
+    assert_equal Hive::Tui::KeyMap::SCROLL_TO_EDGE, end_key.amount
+  end
+
+  def test_red_status_detail_j_and_k_remain_noops
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: {}, suggested_command: nil)
+
+    assert_same Hive::Tui::Messages::NOOP,
+      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "j", row: row)
+    assert_same Hive::Tui::Messages::NOOP,
+      Hive::Tui::KeyMap.message_for(mode: :red_status_detail, key: "k", row: row)
+  end
+
   def test_enter_on_needs_input_opens_input_editor_when_command_present
     # Enter on `needs_input` opens the row's input file in $EDITOR —
     # the agent emitted `<!-- WAITING -->` because it wants human

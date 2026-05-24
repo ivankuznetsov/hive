@@ -1,6 +1,8 @@
 require "hive"
+require "hive/tui/debug"
 require "hive/tui/model"
 require "hive/tui/messages"
+require "hive/tui/red_status_detail_layout"
 require "hive/tui/subprocess"
 
 module Hive
@@ -73,6 +75,8 @@ module Hive
           [ apply_open_filter_prompt(model), nil ]
         when Messages::OpenRedStatusDetail
           [ apply_open_red_status_detail(model, message), nil ]
+        when Messages::RedStatusDetailScroll
+          [ apply_red_status_detail_scroll(model, message), nil ]
         when Messages::Back
           [ apply_back(model), nil ]
         when Messages::ProjectScope
@@ -708,6 +712,63 @@ module Hive
         end
         model.with(mode: :red_status_detail, red_status_detail_state: state)
       end
+
+      def apply_red_status_detail_scroll(model, msg)
+        state = model.red_status_detail_state
+        if model.mode != :red_status_detail || state.nil?
+          Hive::Tui::Debug.log("red_status_detail", "scroll skipped: mode=#{model.mode} state_nil=#{state.nil?}")
+          return model
+        end
+
+        lines = Array(state.log_lines)
+        return model if lines.empty?
+
+        capacity = red_status_detail_log_capacity(model)
+        if capacity <= 0
+          Hive::Tui::Debug.log("red_status_detail", "scroll skipped: capacity<=0 lines=#{lines.length}")
+          return model
+        end
+
+        amount = msg.amount.to_i
+        next_offset = case msg.direction
+        when :up then state.log_scroll_offset.to_i + amount
+        when :down then state.log_scroll_offset.to_i - amount
+        else
+          Hive::Tui::Debug.log("red_status_detail", "scroll skipped: unknown direction=#{msg.direction.inspect}")
+          state.log_scroll_offset.to_i
+        end
+        max_offset = [ lines.length - capacity, 0 ].max
+        clamped = [ [ next_offset, 0 ].max, max_offset ].min
+        return model if clamped == state.log_scroll_offset
+
+        model.with(red_status_detail_state: state.with(log_scroll_offset: clamped))
+      end
+
+def red_status_detail_log_capacity(model)
+  state = model.red_status_detail_state
+  if state.nil?
+    Hive::Tui::Debug.log("red_status_detail", "log_capacity: state nil")
+    return 0
+  end
+  return 0 if Array(state.log_lines).empty?
+
+  cols = model.cols.to_i
+  outer_width = [ cols - 2, 1 ].max
+  inner_width = cols >= 40 ? [ outer_width - 2, 1 ].max : outer_width
+  body_height = [ model.rows.to_i - 5, 1 ].max
+  footer_rows = RedStatusDetailLayout.footer_row_count(inner_width)
+  inner_body_height = [ body_height - (footer_rows + 1), 1 ].max
+
+  base_rows = 7 # title, blank, project, stage, summary, blank, actions header
+  base_rows += RedStatusDetailLayout.action_row_count(state.agent_label, inner_width)
+  base_rows += RedStatusDetailLayout.artifact_row_count(state.row)
+
+  available = inner_body_height - base_rows
+  return 0 unless RedStatusDetailLayout.log_panel_visible?(available, true)
+
+  log_height = RedStatusDetailLayout.log_height_budget(available)
+  [ log_height - 2, 1 ].max
+end
 
       # Esc / `q` from a sub-mode returns to grid. Clears tail_state on
       # exit so the next entry starts clean. Help overlay dismisses to

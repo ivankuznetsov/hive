@@ -178,4 +178,13 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal "/tmp", b.new_idea_staging_tmp_root
     assert attachment.frozen?
   end
+
+  def test_red_status_detail_state_defaults_log_snapshot_fields
+    row = Object.new
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
+
+    assert_nil state.log_path
+    assert_equal [], state.log_lines
+    assert_equal 0, state.log_scroll_offset
+  end
 end

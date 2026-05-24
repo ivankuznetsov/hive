@@ -125,6 +125,13 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_same row, Hive::Tui::Messages::RedStatusAutofix.new(row: row).row
   end
 
+  def test_red_status_detail_scroll_carries_direction_and_amount
+    msg = Hive::Tui::Messages::RedStatusDetailScroll.new(direction: :up, amount: 10)
+
+    assert_equal :up, msg.direction
+    assert_equal 10, msg.amount
+  end
+
   def test_terminate_requested_singleton
     # Parameterless messages use a frozen singleton so callers don't
     # allocate per-trigger and so identity comparisons work.

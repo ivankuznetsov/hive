@@ -55,14 +55,18 @@ module Hive
         :action_label,
         :suggested_command,
         :next_action,
-        :diagnostic
+        :diagnostic,
+        :live_task_lock
       ) do
         # worktree_path defaults to nil so existing test factories that
         # predate PR #84 finding #8 can keep their existing Row.new
         # calls; production code in build_row always passes the value
         # explicitly. New tests should pass it explicitly too.
-        def initialize(worktree_path: nil, **rest)
-          super(worktree_path: worktree_path, **rest)
+        # live_task_lock defaults to false so older JSON payloads (and
+        # tests written before issue #144) keep classifying correctly;
+        # production payloads always emit the boolean explicitly.
+        def initialize(worktree_path: nil, live_task_lock: false, **rest)
+          super(worktree_path: worktree_path, live_task_lock: live_task_lock, **rest)
         end
       end
 
@@ -130,7 +134,8 @@ module Hive
           action_label: payload["action_label"],
           suggested_command: payload["suggested_command"],
           next_action: payload["next_action"],
-          diagnostic: payload["diagnostic"]
+          diagnostic: payload["diagnostic"],
+          live_task_lock: payload["live_task_lock"] == true
         ).freeze
       end
 

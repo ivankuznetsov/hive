@@ -157,4 +157,35 @@ class StagesBaseUsageTest < Minitest::Test
       assert_match(/usage record failed/, err)
     end
   end
+  def test_base_usage_helpers_handle_synthetic_task_shapes
+    project_task = Struct.new(:project_root, :folder).new("/tmp/project-alpha", "/tmp/project-alpha/.hive-state/stages/6-review/slug")
+    folder_task = Struct.new(:folder).new("/tmp/project/.hive-state/stages/6-review/slug")
+    stage_task = Struct.new(:stage_name, :folder).new("6-review", "/tmp/project/.hive-state/stages/6-review/slug")
+
+    assert_equal "project-alpha", Hive::Stages::Base.usage_project_slug(project_task)
+    assert_nil Hive::Stages::Base.usage_project_slug(folder_task)
+    assert_equal "slug", Hive::Stages::Base.usage_task_slug(folder_task)
+    assert_equal "6-review", Hive::Stages::Base.usage_stage_label(stage_task)
+    assert_equal "6-review", Hive::Stages::Base.usage_stage_label(folder_task)
+  end
+
+  def test_record_usage_warns_and_continues_when_usage_db_fails
+    task = Struct.new(:project_name, :slug, :stage_index, :stage_name, :folder).new(
+      "alpha", "slug", 6, "review", "/tmp/slug"
+    )
+    profile = Struct.new(:name).new(:claude)
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(Hive::UsageDb, :record!, ->(**_kwargs) { raise "db locked" }) do
+        assert_nil Hive::Stages::Base.record_usage(
+          task,
+          profile,
+          { usage: { input: 1, output: 2, cached: 3 }, model: "m" },
+          Time.utc(2026, 5, 25)
+        )
+      end
+    end
+
+    assert_match(/usage record failed: db locked/, err)
+  end
 end

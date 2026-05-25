@@ -301,4 +301,191 @@ class ClaudeLauncherTest < Minitest::Test
       mod.define_singleton_method(method_name, original_unbound_or_method)
     end
   end
+
+  public
+
+  def test_prepare_claude_session_fails_when_session_disappears_before_ready
+    runner = Struct.new(:name) do
+      def session_exists? = false
+    end.new("gone-session")
+
+    err = assert_raises(Hive::AgentError) do
+      Hive::ClaudeLauncher.prepare_claude_session!(runner)
+    end
+
+    assert_match(/terminated before becoming ready/, err.message)
+  end
+
+  def test_wait_for_status_dispatches_exit_output_and_unknown_modes
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new("Claude Code\n❯")
+      output = File.join(task.folder, "expected.md")
+      File.write(output, "done")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+
+      output_result = Hive::ClaudeLauncher.wait_for_status(
+        task, runner, 1, :output_file_exists, output, "reviewer"
+      )
+      assert_equal :ok, output_result.fetch(:status)
+      assert_equal "reviewer", output_result.fetch(:log_label)
+
+      done_result = Hive::ClaudeLauncher.wait_for_status(
+        task, runner, 1, :exit_code_only, output, "ci"
+      )
+      assert_equal :ok, done_result.fetch(:status)
+      assert_equal "ci", done_result.fetch(:log_label)
+
+      assert_raises(ArgumentError) do
+        Hive::ClaudeLauncher.wait_for_status(task, runner, 1, :mystery, output, "x")
+      end
+    end
+  end
+
+  def test_wait_for_expected_output_accepts_ready_prompt_without_done_file
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new("Claude Code v2\n❯")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 1, output, "review")
+
+      assert_equal({ status: :ok, log_label: "review" }, result)
+    end
+  end
+
+  def test_wait_for_expected_output_reports_repeated_tmux_errors
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      runner = Struct.new(:name) do
+        def capture_pane_tail(bytes:)
+          raise Hive::TmuxError, "pane unreadable"
+        end
+      end.new("broken")
+
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+        result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+        assert_equal :error, result.fetch(:status)
+        assert_match(/tmux_pane_unreadable: pane unreadable/, result.fetch(:error_message))
+      end
+    end
+  end
+
+  def test_wait_for_expected_output_times_out_when_file_missing
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new("")
+      output = File.join(task.folder, "missing.md")
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 0, output, "review")
+
+      assert_equal :timeout, result.fetch(:status)
+      assert_match(/missing or empty/, result.fetch(:error_message))
+    end
+  end
+
+  def test_wait_for_done_signal_uses_result_json_status_and_timeout
+    with_tmp_task do |task|
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      File.write(Hive::ClaudeLauncher.result_path(task), JSON.generate("status" => "failed"))
+
+      failed = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 1, "ci")
+      assert_equal :failed, failed.fetch(:status)
+      assert_match(/failed/, failed.fetch(:error_message))
+    end
+
+    with_tmp_task do |task|
+      timeout = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 0, "ci")
+      assert_equal :timeout, timeout.fetch(:status)
+      assert_match(/stop hook did not signal/, timeout.fetch(:error_message))
+    end
+  end
+
+  def test_read_result_json_status_handles_all_fallback_shapes
+    with_tmp_task do |task|
+      assert_nil Hive::ClaudeLauncher.read_result_json_status(task)
+
+      FileUtils.touch(Hive::ClaudeLauncher.result_path(task))
+      assert_nil Hive::ClaudeLauncher.read_result_json_status(task)
+
+      File.write(Hive::ClaudeLauncher.result_path(task), JSON.generate("status" => "success"))
+      assert_equal :ok, Hive::ClaudeLauncher.read_result_json_status(task)
+
+      File.write(Hive::ClaudeLauncher.result_path(task), JSON.generate("status" => ""))
+      assert_nil Hive::ClaudeLauncher.read_result_json_status(task)
+
+      File.write(Hive::ClaudeLauncher.result_path(task), JSON.generate("status" => "cancelled"))
+      assert_equal :cancelled, Hive::ClaudeLauncher.read_result_json_status(task)
+
+      File.write(Hive::ClaudeLauncher.result_path(task), JSON.generate([ "not", "a", "hash" ]))
+      assert_nil Hive::ClaudeLauncher.read_result_json_status(task)
+
+      File.write(Hive::ClaudeLauncher.result_path(task), "{")
+      assert_nil Hive::ClaudeLauncher.read_result_json_status(task)
+    end
+  end
+
+  def test_wait_for_terminal_marker_preserves_pane_unreadable_error_on_timeout
+    with_tmp_task do |task|
+      Hive::Markers.set(task.state_file, :error, reason: "tmux_pane_unreadable", message: "pane gone")
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new("")
+
+      marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 0)
+
+      assert_equal :error, marker.name
+      assert_equal "tmux_pane_unreadable", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_signal_cleanup_helpers_ignore_unlink_races
+    with_tmp_task do |task|
+      File.write(Hive::ClaudeLauncher.result_path(task), "{}")
+      result_path = Hive::ClaudeLauncher.result_path(task)
+      with_replaced_singleton_method(File, :delete, lambda { |path|
+        raise Errno::ENOENT if path == result_path
+        true
+      }) do
+        assert_nil Hive::ClaudeLauncher.reset_signal_files(task)
+      end
+    end
+
+    with_tmp_task do |task|
+      output = File.join(task.folder, "expected.md")
+      File.write(output, "x")
+      with_replaced_singleton_method(File, :delete, ->(_path) { raise Errno::ENOENT }) do
+        assert_nil Hive::ClaudeLauncher.cleanup_expected_output(output)
+      end
+    end
+  end
+
+  def test_cleanup_scratch_ignores_directory_races
+    with_tmp_task do |task|
+      scratch = File.join(task.folder, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(scratch))
+      File.write(scratch, "{}")
+
+      with_replaced_singleton_method(Dir, :rmdir, ->(_dir) { raise Errno::ENOTEMPTY }) do
+        assert_nil Hive::ClaudeLauncher.cleanup_scratch(scratch)
+      end
+    end
+  end
+
+  def test_safe_with_log_mentions_task_folder_when_available
+    task = Struct.new(:folder).new("/tmp/example-task")
+
+    _out, err = capture_io do
+      result = Hive::ClaudeLauncher.safe_with_log(task, "cleanup") { raise "boom" }
+      assert_nil result
+    end
+
+    assert_match(/example-task/, err)
+    assert_match(/cleanup/, err)
+  end
 end

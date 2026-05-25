@@ -180,4 +180,9 @@ class AgentProfileTest < Minitest::Test
     overridden = profile.with_overrides("bin" => "/x")
     assert overridden.frozen?
   end
+  def test_usage_extractor_errors_are_ignored
+    profile = make_profile(usage_extractor: ->(_event) { raise "bad usage payload" })
+
+    assert_nil profile.extract_usage_event({ "type" => "result" })
+  end
 end

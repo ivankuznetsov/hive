@@ -130,4 +130,65 @@ class EventsTest < Minitest::Test
       lines.each { |line| assert_kind_of Hash, JSON.parse(line) }
     end
   end
+  def test_truncate_message_preserves_utf8_boundary_and_suffix
+    message = "ø" * Hive::Events::MAX_MESSAGE_BYTES
+
+    truncated = Hive::Events.truncate_message(message)
+
+    assert truncated.valid_encoding?
+    assert truncated.end_with?(Hive::Events::MESSAGE_TRUNCATION_SUFFIX)
+    assert_operator truncated.bytesize, :<=, Hive::Events::MAX_MESSAGE_BYTES
+  end
+
+  def test_render_status_body_handles_empty_event_list
+    body = Hive::Events.render_status_body(
+      {
+        "slug" => "empty-events",
+        "stage" => "2-brainstorm",
+        "ts" => "2026-05-25T00:00:00Z",
+        "event_type" => "stage_enter",
+        "message" => nil
+      },
+      []
+    )
+
+    assert_includes body, "- (no events yet)"
+    assert_includes body, "Current agent: #{Hive::Events::EM_DASH}"
+  end
+
+  def test_read_recent_events_skips_malformed_lines_and_handles_read_errors
+    with_tmp_dir do |dir|
+      path = File.join(dir, "events.jsonl")
+      File.write(path, "not-json\n#{JSON.generate('event_type' => 'stage_enter')}\n")
+
+      events = Hive::Events.read_recent_events(path, 10)
+      assert_equal [ "stage_enter" ], events.map { |event| event.fetch("event_type") }
+
+      with_replaced_singleton_method(File, :open, ->(*_args) { raise Errno::EACCES }) do
+        assert_equal [], Hive::Events.read_recent_events(path, 10)
+      end
+    end
+  end
+
+  def test_write_atomic_tolerates_fsync_unsupported
+    with_tmp_dir do |dir|
+      path = File.join(dir, "status.md")
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) do |*args, **kwargs, &block|
+        if block && args.first.to_s.include?(".status.md.tmp")
+          original_open.call(*args, **kwargs) do |file|
+            file.define_singleton_method(:fsync) { raise Errno::EINVAL }
+            block.call(file)
+          end
+        else
+          original_open.call(*args, **kwargs, &block)
+        end
+      end
+
+      Hive::Events.write_atomic(path, "body\n")
+      assert_equal "body\n", File.read(path)
+    ensure
+      File.define_singleton_method(:open, original_open) if original_open
+    end
+  end
 end

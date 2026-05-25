@@ -1833,4 +1833,12 @@ class ConfigTest < Minitest::Test
       assert_match(/rebase.*must be a Hash/, err.message)
     end
   end
+  def test_claude_mode_rejects_unknown_value
+    err = assert_raises(Hive::ConfigError) do
+      Hive::Config.claude_mode("claude" => { "mode" => "warm_pool" })
+    end
+
+    assert_match(/claude\.mode must be one of/, err.message)
+    assert_match(/warm_pool/, err.message)
+  end
 end

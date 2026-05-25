@@ -141,4 +141,20 @@ class UsageDbTest < Minitest::Test
       assert_equal({ input: 3, output: 3, cached: 3 }, usage_at(aggregate, :claude, :all))
     end
   end
+  def test_aggregate_with_broken_path_warns_and_returns_zero_tree
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = dir
+
+      _out, err = capture_io do
+        aggregate = Hive::UsageDb.aggregate(scope: {}, now: Time.utc(2026, 5, 24, 12))
+        assert_equal({ input: 0, output: 0, cached: 0 }, usage_at(aggregate, :claude, :all))
+      end
+
+      assert_match(/usage aggregate failed/, err)
+    end
+  end
+
+  def test_iso8601_returns_original_text_when_parse_fails
+    assert_equal "not-a-time", Hive::UsageDb.iso8601("not-a-time")
+  end
 end

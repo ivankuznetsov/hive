@@ -5,15 +5,19 @@ class HiveBotSupervisorTest < Minitest::Test
   include HiveTestHelper
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
-  Update = Struct.new(:chat_id, :update_id, keyword_init: true)
+  Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, keyword_init: true)
 
-  FakeTelegram = Struct.new(:messages, :raise_on_send, keyword_init: true) do
+  FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
       raise raise_on_send if raise_on_send
 
       messages << { chat_id: chat_id, text: text, reply_markup: reply_markup }
+    end
+
+    def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
+      (self.keyboard_clears ||= []) << { chat_id: chat_id, message_id: message_id, reply_markup: reply_markup }
     end
   end
 
@@ -44,7 +48,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, :alert_reset, keyword_init: true)
+                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, keyword_init: true)
   end
 
   FakeChildSupervisor = Struct.new(:dispatch_pid, :dispatched, :completed, :reap_batches, keyword_init: true) do
@@ -363,6 +367,37 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], @notification_dispatcher.reset_tasks
     assert_equal [ "hive", "review", "task", "--json" ], @child_supervisor.dispatched.first.fetch(:command_argv)
+  end
+
+  def test_dispatch_command_sequence_clears_inline_keyboard_when_requested
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "review", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      clear_keyboard: true
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12, message_id: 777))
+
+    assert_equal 1, @telegram.keyboard_clears.size, "edit_message_reply_markup must be called once"
+    clear = @telegram.keyboard_clears.first
+    assert_equal 42, clear.fetch(:chat_id)
+    assert_equal 777, clear.fetch(:message_id)
+    assert_nil clear.fetch(:reply_markup), "reply_markup must be nil to remove the inline keyboard"
+  end
+
+  def test_dispatch_command_sequence_does_not_clear_keyboard_without_flag
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "develop", "task", "--json" ] ],
+      project: "hive",
+      slug: "task"
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12, message_id: 777))
+
+    assert_nil @telegram.keyboard_clears, "edit_message_reply_markup must not be called when clear_keyboard is false/nil"
   end
 
   def test_queued_updates_filters_by_last_seen_and_allowlist

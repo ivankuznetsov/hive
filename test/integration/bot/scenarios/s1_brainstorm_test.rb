@@ -111,6 +111,8 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
     def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
       @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
     end
+
+    def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil); end
   end
 
   class FakeStatusWatcher

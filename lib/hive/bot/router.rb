@@ -42,7 +42,7 @@ module Hive
 
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                           :project, :slug, :question_n, :answer_text, :mode,
-                          :intent, :alert_reset, keyword_init: true)
+                          :intent, :alert_reset, :clear_keyboard, keyword_init: true)
 
       ALLOWED_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer

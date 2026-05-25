@@ -9,7 +9,7 @@ require "hive/bot/handlers/callback_handlers"
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
-                      :intent, :alert_reset, keyword_init: true)
+                      :intent, :alert_reset, :clear_keyboard, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)
       events << { name: name, payload: payload }
@@ -241,6 +241,8 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       result.commands
     )
     assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review" }, result.alert_reset)
+    assert_equal true, result.clear_keyboard,
+                 "Autofix must request keyboard removal to prevent double-tap dispatch."
   end
 
   def test_autofix_execute_stale_replies_without_dispatch

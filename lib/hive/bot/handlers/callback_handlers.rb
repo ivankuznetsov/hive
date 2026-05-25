@@ -57,7 +57,7 @@ module Hive
           commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker,
                                     match_attr: match_attr)
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
-                            alert_reset: alert_reset(project, slug, stage))
+                            alert_reset: alert_reset(project, slug, stage), clear_keyboard: true)
         end
 
         def autofix(data)
@@ -79,7 +79,8 @@ module Hive
             slug: slug,
             commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker,
                                      match_attr: match_attr),
-            alert_reset: alert_reset(project, slug, stage)
+            alert_reset: alert_reset(project, slug, stage),
+            clear_keyboard: true
           )
         end
 

@@ -200,6 +200,7 @@ module Hive
       end
 
       def dispatch_command_sequence(result, update)
+        clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
         reset_alert_for_result(result) unless @dry_run
         commands = Array(result.commands)
         commands.each_with_index do |argv, idx|
@@ -226,6 +227,17 @@ module Hive
         return unless reset && @notification_dispatcher.respond_to?(:reset_task)
 
         @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug], stage: reset[:stage])
+      end
+
+      def clear_inline_keyboard(update)
+        return unless update.respond_to?(:message_id) && update.message_id && update.chat_id
+
+        @telegram.edit_message_reply_markup(chat_id: update.chat_id, message_id: update.message_id,
+                                            reply_markup: nil)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "edit_message_reply_markup",
+                                      chat_id: update.chat_id, message_id: update.message_id,
+                                      error_class: e.class.name, message: e.message)
       end
 
       def wait_for_child_success(pid, deadline:)

@@ -27,6 +27,37 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_emits_live_task_lock_as_strict_boolean
+    # Fix #144 regression guard: external consumers (TUI, daemon, bots)
+    # rely on `live_task_lock` to render the runner badge without
+    # re-parsing the .lock file. Must be a strict boolean — never null —
+    # even when the underlying classifier returned nil (no .lock file).
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      live_folder = File.join(hive_state, "stages", "4-execute", "live-task-260525-aaaa")
+      idle_folder = File.join(hive_state, "stages", "4-execute", "idle-task-260525-bbbb")
+      FileUtils.mkdir_p(live_folder)
+      FileUtils.mkdir_p(idle_folder)
+      File.write(File.join(live_folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      File.write(File.join(live_folder, ".lock"), YAML.dump(
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
+      ))
+      File.write(File.join(idle_folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+
+      payload = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ])
+      tasks = payload.fetch("projects").first.fetch("tasks")
+      live = tasks.find { |t| t.fetch("slug") == "live-task-260525-aaaa" }
+      idle = tasks.find { |t| t.fetch("slug") == "idle-task-260525-bbbb" }
+
+      assert_equal true, live.fetch("live_task_lock")
+      assert_equal false, idle.fetch("live_task_lock"),
+                   "rows without a .lock must serialise as false, never nil"
+    end
+  end
+
   def test_call_rejects_empty_diagnose_and_write_without_diagnose
     error = assert_raises(Hive::Error) { Hive::Commands::Status.new(diagnose: "  ").call }
     assert_match(/--diagnose requires a non-empty task slug/, error.message)
@@ -191,6 +222,96 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_live_task_lock_with_recorded_but_unreadable_live_start_time_is_stale
+    # PID-reuse defense: a .lock written with a recorded process_start_time
+    # whose live counterpart can no longer be read (containerised /proc,
+    # PID has since exited and the kernel reused it) must be treated as
+    # stale. Otherwise we'd misclassify a freshly-reused PID as live.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "4-execute", "phantom-task-260525-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      File.write(File.join(folder, ".lock"), YAML.dump(
+        "pid" => Process.pid,
+        "process_start_time" => "recorded-but-unreadable-now",
+        "slug" => "phantom-task-260525-abcd",
+        "stage" => "execute"
+      ))
+
+      cmd = Hive::Commands::Status.new
+      rows = nil
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { nil }) do
+        rows = cmd.send(:annotate_actions,
+                        cmd.send(:collect_rows, hive_state),
+                        { "name" => "demo" },
+                        1,
+                        with_diagnostic: false)
+      end
+      row = rows.find { |candidate| candidate[:slug] == "phantom-task-260525-abcd" }
+
+      assert_equal false, row.fetch(:live_task_lock),
+                   "recorded start time + nil live start time must be classified as stale (PID may have been reused)"
+    end
+  end
+
+  def test_live_task_lock_with_legacy_lock_omitting_process_start_time_is_live
+    # Backwards-compat: .lock files written before the start-time guard
+    # was introduced have no `process_start_time` key. Treat those as
+    # live when the PID is alive — the alternative (treating legacy locks
+    # as stale) would auto-classify in-flight runs from older hive
+    # versions as recoverable, racing the daemon's auto-heal.
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "4-execute", "legacy-task-260525-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      File.write(File.join(folder, ".lock"), YAML.dump(
+        "pid" => Process.pid,
+        "slug" => "legacy-task-260525-abcd",
+        "stage" => "execute"
+      ))
+
+      cmd = Hive::Commands::Status.new
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      { "name" => "demo" },
+                      1,
+                      with_diagnostic: false)
+      row = rows.find { |candidate| candidate[:slug] == "legacy-task-260525-abcd" }
+
+      assert_equal true, row.fetch(:live_task_lock),
+                   "legacy lock without process_start_time must stay live while PID is alive"
+      assert_equal "agent_running", row.fetch(:action_key)
+    end
+  end
+
+  def test_live_task_lock_with_mismatched_process_start_time_is_treated_as_stale
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "4-execute", "executing-task-260524-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      File.write(File.join(folder, ".lock"), YAML.dump(
+        "pid" => Process.pid,
+        "process_start_time" => "wrong-start-1234",
+        "slug" => "executing-task-260524-abcd",
+        "stage" => "execute"
+      ))
+
+      cmd = Hive::Commands::Status.new
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      { "name" => "demo" },
+                      1,
+                      with_diagnostic: false)
+      row = rows.find { |candidate| candidate[:slug] == "executing-task-260524-abcd" }
+
+      assert_equal false, row.fetch(:live_task_lock)
+      assert_equal "ready_to_open_pr", row.fetch(:action_key)
+    end
+  end
+
   def test_render_project_skips_empty_action_label_groups
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -235,9 +356,9 @@ class CommandsStatusTest < Minitest::Test
     with_tmp_dir do |dir|
       task = Struct.new(:folder).new(dir)
       File.write(File.join(dir, ".lock"), "- not\n- a\n- hash\n")
-      assert_nil cmd.send(:lookup_claude_pid, task)
+      assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
       File.write(File.join(dir, ".lock"), "[")
-      assert_nil cmd.send(:lookup_claude_pid, task)
+      assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
     end
   end
 

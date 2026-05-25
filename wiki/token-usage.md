@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/usage_db.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb
 created: 2026-05-24
-updated: 2026-05-24
+updated: 2026-05-25
 tags: [observability, tui, sqlite, agent]
 ---
 

@@ -146,6 +146,11 @@ module Hive
       attrs
     end
 
+    # The three gsubs below are boundary escapes, not data transformations.
+    # `"` -> `'` keeps the outer attr quoting unambiguous for parse_attrs.
+    # `<!--` -> `< !--` and `-->` -> `-- >` prevent attr-value text from
+    # being mistaken for a marker boundary by MARKER_RE. The mapping is
+    # lossy/one-way; readers may see `< !--` in state files and that is intentional.
     def format_attr(value)
       str = value.to_s.gsub('"', "'").gsub("<!--", "< !--").gsub("-->", "-- >")
       str =~ /\s/ ? "\"#{str}\"" : str

@@ -182,6 +182,7 @@
         "age_seconds",
         "claude_pid",
         "claude_pid_alive",
+        "live_task_lock",
         "action",
         "action_label",
         "suggested_command",
@@ -263,6 +264,10 @@
             "boolean",
             "null"
           ]
+        },
+        "live_task_lock": {
+          "description": "True when the task's .lock file points at a process that is still running (PID alive + start time matches). False when the lock is absent, the PID is dead, or PID reuse was detected. Coerced from nil/true/false to a strict boolean so external consumers (TUI, bots) never see JSON null.",
+          "type": "boolean"
         },
         "action": {
           "type": "string",

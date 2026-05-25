@@ -180,6 +180,12 @@ module Hive
           "age_seconds" => (Time.now - row[:mtime]).to_i,
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
+          # Coerced to boolean so nil never leaks into JSON: live_task_lock is
+          # a tri-state internally (nil = no .lock, true/false = liveness),
+          # but external consumers only need "is the runner still holding it"
+          # and would have to handle JSON null otherwise. Additive field per
+          # the SCHEMA_VERSIONS policy in lib/hive.rb — no version bump.
+          "live_task_lock" => row[:live_task_lock] == true,
           "action" => row[:action_key],
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
@@ -487,17 +493,19 @@ module Hive
         true
       end
 
-      def lookup_claude_pid(task)
-        claude_pid_from_lock(task_lock_holder(task))
-      end
-
       def task_lock_holder(task)
         lock_file = File.join(task.folder, ".lock")
         return nil unless File.exist?(lock_file)
 
         data = YAML.safe_load(File.read(lock_file), permitted_classes: [ Time ]) || {}
         data.is_a?(Hash) ? data : nil
-      rescue StandardError
+      rescue StandardError => e
+        # A corrupt or unparseable .lock used to silently drop us into the
+        # "no lock" branch; ops would then see a row classified as ready
+        # despite the disk state showing something was running. Emit a
+        # warn so the inconsistency is visible without changing classifier
+        # semantics (still returning nil).
+        warn "hive: status: failed to read .lock at #{File.join(task.folder, '.lock')}: #{e.class}: #{e.message}"
         nil
       end
 
@@ -509,10 +517,12 @@ module Hive
 
         recorded = holder["process_start_time"]
         live = Hive::Lock.process_start_time(pid)
-        return nil if recorded && live && recorded != live
+        # When recorded is set, a missing or differing live start time means the original process is gone (PID may be reused).
+        return nil if recorded && live != recorded
 
         holder
-      rescue StandardError
+      rescue StandardError => e
+        warn "hive: status: failed to check liveness for lock pid=#{holder['pid'].inspect}: #{e.class}: #{e.message}"
         nil
       end
 

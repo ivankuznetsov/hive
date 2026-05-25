@@ -174,7 +174,6 @@ module Hive
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
-        "notification_dedupe_window_sec" => 300,
         # alert_state_file is intentionally omitted from DEFAULTS — the
         # path is state_home-derived and resolved at runtime by
         # `global_bot_defaults` / `Config.load` so a HIVE_HOME / XDG
@@ -1023,7 +1022,6 @@ module Hive
     BOT_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
-      [ "notification_dedupe_window_sec", 0, nil ],
       [ "recovery_reminder_window_sec", 3600, 604_800 ],
       [ "conversation_ttl_sec", 60, nil ],
       [ "codex_budget_usd", 0, nil ],

@@ -62,7 +62,8 @@ module Hive
           _prefix, project, slug, stage, marker = split_callback(data, 5)
           verb = retry_verb_for_stage(stage)
           unless verb
-            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage}.")
+            stage_label = stage.to_s.empty? ? "(empty)" : stage
+            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
           end
 
           @result_class.new(

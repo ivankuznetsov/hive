@@ -262,6 +262,17 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal "No retry verb for stage 9-done.", result.text
   end
 
+  def test_autofix_empty_stage_reply_labels_stage_as_empty
+    result = @handlers.handle(
+      :callback_autofix,
+      update("autofix:alpha:some-task-260519-abcd::ERROR")
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "No retry verb for stage (empty).", result.text,
+                 "empty stage must be labelled (empty) rather than leaving a blank in the reply"
+  end
+
   def test_refresh_diagnose_rejects_malformed_callback_data
     # Defense against malformed callback round-trips. Any non-3-part
     # callback (legacy data, manual postback fuzzing) should fall back

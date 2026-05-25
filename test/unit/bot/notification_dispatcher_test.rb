@@ -129,6 +129,26 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_match(/\A⚠ Still stuck \(8 h\) — "Stuck task…" — Review/, telegram.messages.last[:text])
   end
 
+  def test_ninety_minute_reminder_fires_with_minutes_label
+    d = Hive::Bot::NotificationDispatcher.new(
+      telegram: telegram,
+      logger: logger,
+      bot_config: {
+        "chat_id_allowlist" => [ 12345 ],
+        "recovery_reminder_window_sec" => 5400
+      },
+      now: -> { @clock ||= Time.utc(2026, 5, 25, 10, 0, 0) }
+    )
+    @clock = Time.utc(2026, 5, 25, 10, 0, 0)
+    d.process_rows([ recovery_row ])
+    @clock += 5400
+    d.process_rows([ recovery_row ])
+
+    assert_equal 2, telegram.messages.size, "reminder should fire after 90 min"
+    assert_match(/Still stuck \(90 min\)/, telegram.messages.last[:text],
+                 "reminder label must use minutes form for non-whole-hour windows")
+  end
+
   def test_restart_simulation_does_not_refire_same_active_row
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")

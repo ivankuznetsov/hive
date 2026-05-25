@@ -1583,7 +1583,8 @@ class ConfigTest < Minitest::Test
       assert_equal [], cfg.dig("bot", "chat_id_allowlist")
       assert_equal 30, cfg.dig("bot", "poll_interval_sec")
       assert_equal 25, cfg.dig("bot", "long_poll_timeout_sec")
-      assert_equal 300, cfg.dig("bot", "notification_dedupe_window_sec")
+      assert_nil cfg.dig("bot", "notification_dedupe_window_sec"),
+                 "notification_dedupe_window_sec is deprecated and must be absent from DEFAULTS"
       assert_equal File.join(Hive::Paths.state_home, ".bot.alert_state.json"), cfg.dig("bot", "alert_state_file")
       assert_equal 28_800, cfg.dig("bot", "recovery_reminder_window_sec")
       assert_equal 3600, cfg.dig("bot", "conversation_ttl_sec")
@@ -1843,5 +1844,27 @@ class ConfigTest < Minitest::Test
 
     assert_match(/claude\.mode must be one of/, err.message)
     assert_match(/warm_pool/, err.message)
+  end
+
+  # ── deprecated_bot_keys ──────────────────────────────────────────────────
+
+  def test_deprecated_bot_keys_returns_empty_array_when_bot_is_nil
+    result = Hive::Config.deprecated_bot_keys(nil)
+    assert_equal [], result,
+                   "nil bot config must return empty deprecated list"
+  end
+
+  def test_deprecated_bot_keys_returns_empty_array_when_key_absent
+    result = Hive::Config.deprecated_bot_keys({})
+    assert_equal [], result,
+                   "bot config without notification_dedupe_window_sec must return empty deprecated list"
+  end
+
+  def test_deprecated_bot_keys_flags_non_default_notification_dedupe_window_sec
+    result = Hive::Config.deprecated_bot_keys({ "notification_dedupe_window_sec" => 600 })
+    assert_equal 1, result.size,
+                 "non-default notification_dedupe_window_sec must appear in deprecated list"
+    assert_equal "bot.notification_dedupe_window_sec", result.first[:key]
+    assert_includes result.first[:replacement], "alert_state_file"
   end
 end

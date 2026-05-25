@@ -166,6 +166,30 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  Hive::Bot::NotificationBuilders.resolve_callback(button[:callback_data])
   end
 
+  def test_cause_sentence_for_execute_stale
+    r = row(action: "recover_review", marker: "execute_stale")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The execute agent stalled before it could finish."
+  end
+
+  def test_cause_sentence_for_review_stale
+    r = row(action: "recover_review", marker: "review_stale")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The review run stalled before it could finish."
+  end
+
+  def test_cause_sentence_for_review_ci_stale
+    r = row(action: "recover_review", marker: "review_ci_stale")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The review run stalled before it could finish."
+  end
+
+  def test_cause_sentence_for_unknown_marker_uses_generic_fallback
+    r = row(action: "recover_review", marker: "totally_unknown_marker")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The agent crashed before it could finish."
+  end
+
   def test_fingerprint_changes_when_marker_attrs_change
     first = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" })
     second = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "3" })

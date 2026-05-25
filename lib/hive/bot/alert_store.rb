@@ -73,7 +73,14 @@ module Hive
       def load!
         return unless @path && File.exist?(@path)
 
-        parsed = JSON.parse(File.read(@path))
+        raw = begin
+          File.read(@path)
+        rescue SystemCallError, IOError => e
+          handle_corrupt!(e)
+          return
+        end
+
+        parsed = JSON.parse(raw)
         unless parsed.is_a?(Hash) &&
                parsed["schema_version"] == SCHEMA_VERSION &&
                parsed["entries"].is_a?(Hash)
@@ -85,6 +92,10 @@ module Hive
           "entries" => parsed["entries"]
         }
       rescue JSON::ParserError, TypeError => e
+        handle_corrupt!(e)
+      end
+
+      def handle_corrupt!(error)
         corrupt_path = corrupt_path_for(@path)
         begin
           File.rename(@path, corrupt_path) if @path && File.exist?(@path)
@@ -92,7 +103,7 @@ module Hive
           corrupt_path = nil
         end
         @logger&.event(:alert_store_corrupt, path: @path, corrupt_path: corrupt_path,
-                                             error_class: e.class.name, message: e.message)
+                                             error_class: error.class.name, message: error.message)
         @data = empty_data
       end
 

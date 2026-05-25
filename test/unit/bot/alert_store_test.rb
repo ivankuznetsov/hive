@@ -86,6 +86,41 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_schema_version_mismatch_is_treated_as_corrupt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      File.write(path, JSON.generate({ "schema_version" => 2, "entries" => {} }))
+      logger = StubLogger.new
+
+      store = Hive::Bot::AlertStore.new(path: path, logger: logger)
+
+      assert_equal [], store.each_fingerprint.to_a, "mismatched schema_version must yield empty store"
+      refute File.exist?(path), "original file must be renamed away on schema mismatch"
+      assert Dir.glob("#{path}.corrupt-*").any?, "corrupt-* sibling must exist after schema mismatch"
+      event = logger.events.last
+      assert_equal :alert_store_corrupt, event.first, "logger must receive :alert_store_corrupt event"
+      assert_equal path, event.last[:path], ":path attribute must match the original file path"
+    end
+  end
+
+  def test_unreadable_file_is_treated_as_corrupt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      File.write(path, JSON.generate({ "schema_version" => 1, "entries" => {} }))
+      File.chmod(0o000, path)
+      logger = StubLogger.new
+
+      store = Hive::Bot::AlertStore.new(path: path, logger: logger)
+
+      assert_equal [], store.each_fingerprint.to_a, "unreadable file must yield empty store"
+      event = logger.events.last
+      assert_equal :alert_store_corrupt, event.first, "logger must receive :alert_store_corrupt event"
+      assert_equal path, event.last[:path], ":path must match original file path"
+    ensure
+      File.chmod(0o644, path) if path && File.exist?(path)
+    end
+  end
+
   def test_concurrent_add_and_remove_smoke
     with_tmp_dir do |dir|
       store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))

@@ -18,6 +18,7 @@ module Hive
       SLUG_SUFFIX = /-\d{6}-[a-f0-9]{4,}\z/
       TITLE_LIMIT = 60
       ACRONYMS = %w[PR CI CD DB UI UX API URL HTTP].freeze
+      ACRONYM_REGEXPS = ACRONYMS.map { |a| [ /\b#{Regexp.escape(a.downcase)}\b/, a ] }.freeze
       UNKNOWN_STAGE_LABELS_LOCK = Monitor.new
 
       module_function
@@ -54,8 +55,8 @@ module Hive
       end
 
       def preserve_acronyms(sentence)
-        ACRONYMS.each do |acronym|
-          sentence = sentence.gsub(/\b#{Regexp.escape(acronym.downcase)}\b/, acronym)
+        ACRONYM_REGEXPS.each do |pattern, replacement|
+          sentence = sentence.gsub(pattern, replacement)
         end
         sentence
       end

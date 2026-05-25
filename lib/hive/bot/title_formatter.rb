@@ -18,7 +18,7 @@ module Hive
       SLUG_SUFFIX = /-\d{6}-[a-f0-9]{4,}\z/
       TITLE_LIMIT = 60
       ACRONYMS = %w[PR CI CD DB UI UX API URL HTTP].freeze
-      ACRONYM_REGEXPS = ACRONYMS.map { |a| [ /\b#{Regexp.escape(a.downcase)}\b/, a ] }.freeze
+      ACRONYM_REGEXPS = ACRONYMS.map { |a| [ /\b#{Regexp.escape(a)}\b/i, a ] }.freeze
       UNKNOWN_STAGE_LABELS_LOCK = Monitor.new
 
       module_function

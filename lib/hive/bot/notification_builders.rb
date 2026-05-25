@@ -162,7 +162,6 @@ module Hive
         attrs = row.attrs.to_h.transform_keys(&:to_s)
         marker = row.marker.to_s.downcase
         marker == "execute_stale" ||
-          marker == "agent_working" ||
           marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
       end
 

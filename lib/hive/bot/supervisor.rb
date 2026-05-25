@@ -514,7 +514,7 @@ module Hive
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
-          lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks (use /status for full list)"
+          lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
         ([ header ] + lines).join("\n")
       end

@@ -56,7 +56,7 @@ Autofix callbacks carry a marker attribute such as `pass=2` when one is
 available, so stale Telegram buttons cannot clear a newer marker, and
 the dispatcher clears the persisted alert entry for that task before
 spawning the retry sequence. `/status [project]` is an explicit pull
-surface and renders actionable rows as `Title... — Stage` without inline
+surface and renders actionable rows as `Title… — Stage` without inline
 buttons.
 
 ## Trust boundary

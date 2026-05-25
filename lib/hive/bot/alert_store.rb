@@ -136,8 +136,16 @@ module Hive
 
         FileUtils.mkdir_p(File.dirname(@path))
         tmp_path = File.join(File.dirname(@path), ".#{File.basename(@path)}.#{$$}.#{Thread.current.object_id}.tmp")
-        File.write(tmp_path, JSON.pretty_generate(@data))
+        File.open(tmp_path, "w") do |f|
+          f.write(JSON.pretty_generate(@data))
+          f.fsync
+        end
         File.rename(tmp_path, @path)
+        begin
+          Dir.open(File.dirname(@path)) { |dir| dir.fsync }
+        rescue StandardError
+          nil
+        end
       ensure
         FileUtils.rm_f(tmp_path) if tmp_path && File.exist?(tmp_path)
       end

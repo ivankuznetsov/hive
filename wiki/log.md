@@ -1992,7 +1992,7 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 ## [2026-05-25T15:45:00Z] bot — human-readable recovery alerts
 
-**Action:** Replaced bot recovery push alerts with a short human-readable template and a single Autofix button, moved alert dedupe to a persistent status-driven store, added one 8 h reminder per unchanged recovery fingerprint, and made `/status [project]` render clean `Title... — Stage` lines without inline buttons.
+**Action:** Replaced bot recovery push alerts with a short human-readable template and a single Autofix button, moved alert dedupe to a persistent status-driven store, added one 8 h reminder per unchanged recovery fingerprint, and made `/status [project]` render clean `Title… — Stage` lines without inline buttons.
 
 **Refreshed pages:**
 - [[modules/bot]]

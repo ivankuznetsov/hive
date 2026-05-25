@@ -80,6 +80,33 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  # Issue #144: the daemon healer and dispatcher use `row.live_task_lock`
+  # to recognise a live `hive run` during the pre-claude_pid window. Pin
+  # the parse of the JSON key here so a regression in `task_payload`
+  # (Hive::Commands::Status) or the Row struct surfaces as a structured
+  # test failure rather than a silent classification change downstream.
+  def test_parses_live_task_lock_field_and_coerces_to_strict_boolean
+    task_true = task_row(slug: "live-runner").merge("live_task_lock" => true)
+    task_false = task_row(slug: "no-runner").merge("live_task_lock" => false)
+    task_missing = task_row(slug: "legacy-payload")
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_true, task_false, task_missing ]
+    } ])
+    with_fake_status(JSON.generate(payload)) do |bin|
+      consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
+      result = consumer.fetch
+      assert result.ok
+      rows = result.rows.each_with_object({}) { |r, h| h[r.slug] = r }
+      assert_equal true, rows.fetch("live-runner").live_task_lock,
+                   "explicit true must propagate"
+      assert_equal false, rows.fetch("no-runner").live_task_lock,
+                   "explicit false must propagate"
+      assert_equal false, rows.fetch("legacy-payload").live_task_lock,
+                   "missing key must coerce to false, not nil — downstream callers compare with ==true"
+    end
+  end
+
   def test_parses_multiple_projects_and_tasks
     payload = make_envelope(projects: [
       {

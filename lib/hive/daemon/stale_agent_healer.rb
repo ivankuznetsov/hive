@@ -28,6 +28,10 @@ module Hive
     # Skip cases:
     #   - controller.running_task? returns true (an in-process dispatch
     #     is live; do not race it)
+    #   - row.live_task_lock is true (an externally-spawned `hive run` is
+    #     holding the per-task .lock with a verified PID + start-time
+    #     match; the runner is still inside the task even if its
+    #     claude_pid is not yet recorded — do not race it). Issue #144.
     #   - project's legacy_stage_dirs is non-empty (we never touch markers
     #     in a half-migrated layout — the dispatcher already refuses to
     #     advance these)
@@ -64,6 +68,11 @@ module Hive
           next unless row.marker.to_s == "agent_working"
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
+          # Externally-spawned `hive run` is holding the per-task .lock;
+          # claude_pid_alive may still be nil because the runner has not
+          # written its claude_pid yet (auto-rebase, etc.). Healing here
+          # would race the live runner. Issue #144.
+          next if row.live_task_lock == true
 
           reason = classify_stale(row, now: now)
           next unless reason

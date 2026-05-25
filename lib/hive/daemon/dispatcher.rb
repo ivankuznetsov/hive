@@ -416,8 +416,7 @@ module Hive
       def observe_external_running_rows(rows)
         per_project = Hash.new(0)
         rows.each do |row|
-          next unless row.action == "agent_running"
-          next if row.claude_pid_alive == false
+          next unless externally_running?(row)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
           per_project[row.project] += 1
@@ -568,8 +567,26 @@ module Hive
       end
 
       def active_agent_row?(row)
-        row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING &&
-          row.claude_pid_alive == true
+        externally_running?(row)
+      end
+
+      # A row counts as externally running when `Hive::TaskAction` has
+      # classified it as `agent_running` AND we have positive evidence
+      # that the run is in flight — either the .lock recorded a live
+      # claude_pid, OR `Hive::Commands::Status` verified the .lock
+      # holder PID + process_start_time still match (`live_task_lock`).
+      # Both the dispatcher's global concurrency counter
+      # (`@external_active_agent_total`) and the controller's per-project
+      # counter (`set_external_running_counts`) use this predicate so
+      # they agree on which rows count against the cap. Issue #144
+      # narrowed the predicate from "claude_pid_alive != false" (which
+      # over-counted rows with no liveness signal) and broadened the
+      # strict "claude_pid_alive == true" path (which silently dropped
+      # live_task_lock-only rows during the pre-claude window).
+      def externally_running?(row)
+        return false unless row.action == Hive::Schemas::TaskActionKind::AGENT_RUNNING
+
+        row.claude_pid_alive == true || row.live_task_lock == true
       end
 
       def external_active_agent_count_for(project)

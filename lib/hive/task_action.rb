@@ -183,7 +183,8 @@ module Hive
 
     def initialize(task, marker, project_name: nil, project_count: 1, stage_collision: false,
                    pid_alive: nil, state_file_mtime: nil,
-                   agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC)
+                   agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC,
+                   live_task_lock: false)
       @task = task
       @marker = marker
       @project_name = project_name
@@ -192,6 +193,7 @@ module Hive
       @pid_alive = pid_alive
       @state_file_mtime = state_file_mtime
       @agent_marker_grace_sec = agent_marker_grace_sec
+      @live_task_lock = live_task_lock
     end
 
     def self.for(task, marker, **)
@@ -236,6 +238,12 @@ module Hive
     private
 
     def action
+      # A live task lock means `hive run` is already inside this task,
+      # including pre-stage work such as auto-rebase. It must pre-empt
+      # marker-derived workflow advice; otherwise status can offer a
+      # duplicate runnable command that immediately hits ConcurrentRunError.
+      return ACTIONS.fetch(:agent_running) if @live_task_lock
+
       # `:agent_working` overrides every (stage, marker) pair — a live
       # agent run on the task pre-empts whatever workflow advice the
       # state-machine would otherwise produce. When liveness signal is

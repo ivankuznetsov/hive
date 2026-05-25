@@ -131,6 +131,15 @@ class TaskActionTest < Minitest::Test
     assert_match(/\Ahive review demo-260426-aaaa --from 6-review\z/, action.command)
   end
 
+  def test_live_task_lock_overrides_review_ready_marker
+    task = fake_task(stage_name: "review", stage_index: 6)
+    action = Hive::TaskAction.for(task, marker(:execute_complete), live_task_lock: true)
+
+    assert_equal "agent_running", action.key
+    assert_equal "Agent running", action.label
+    assert_nil action.command
+  end
+
   def test_review_waiting_is_needs_input
     task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:review_waiting, "pass" => "2"))

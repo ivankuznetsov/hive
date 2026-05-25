@@ -5,6 +5,7 @@ require "hive/protected_files"
 require "hive/secret_patterns"
 require "hive/claude_launcher"
 require "hive/stages/base"
+require "hive/task"
 require "hive/worktree"
 
 module Hive
@@ -19,7 +20,25 @@ module Hive
 
         Hive::Gh.ensure_authenticated!(cfg)
 
-        existing = Hive::Gh.lookup_existing_pr(worktree_path, branch, cfg: cfg)
+        # Single `gh pr list` round-trip per stage entry. Earlier passes
+        # called `lookup_existing_pr` and `lookup_merged_pr` separately,
+        # each shelling out to `gh pr list --state all` — two network
+        # hits with identical filter args. Pull the list once and branch
+        # in-process. The OPEN-arm filter ALSO requires headRefOid to
+        # match the local HEAD so a stale OPEN PR on a re-pushed branch
+        # is not silently adopted; the merged-arm has carried that check
+        # since the merged-recovery fix.
+        #
+        # Note: `Hive::Gh.lookup_existing_pr` and `lookup_merged_pr` are
+        # still exported on the Gh module because callers like
+        # `validate_complete_marker` (below) invoke them directly. The
+        # de-duplication above only collapses the two-call pattern *inside*
+        # `run!` — the helpers remain available for other call sites.
+        prs = Hive::Gh.lookup_prs_for_branch(worktree_path, branch, cfg: cfg)
+        head_oid = local_head_oid(worktree_path)
+        existing = prs.find do |pr|
+          pr["state"] == "OPEN" && (head_oid.nil? || pr["headRefOid"].to_s == head_oid.to_s)
+        end
         if existing
           write_pr_md(task, existing, idempotent: true)
           marker = Hive::Markers.current(task.state_file)
@@ -29,6 +48,50 @@ module Hive
           return handle_secret_scan_result(task, marker.attrs["pr_url"], scan, "open_pr") if scan.fetch_failed || scan.hits.any?
 
           return { commit: "open_pr_already_open", status: :complete }
+        end
+
+        merged = head_oid && prs.find { |pr| pr["state"] == "MERGED" && pr["headRefOid"].to_s == head_oid.to_s }
+        if merged
+          pr_url = merged["url"].to_s
+          if pr_url.empty?
+            warn "hive: `gh pr list` returned a merged PR with an empty url; refusing to recover"
+            exit 1
+          end
+
+          # Write pr.md body upfront WITHOUT a terminal marker so
+          # `scan_pr_for_secrets` (which `File.read`s state_file) has content
+          # to scan. The COMPLETE marker is the commit point below — keeping
+          # it last means any mid-sequence failure leaves pr.md non-terminal
+          # and recovery re-enters on the next `hive run` instead of
+          # advancing into a half-written cascade.
+          File.write(task.state_file, pr_md_body(
+            pr_url: pr_url,
+            pr_number: merged["number"],
+            summary_text: "PR already merged for this task.",
+            task_folder: task.folder,
+            marker_text: ""
+          ))
+
+          scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
+                                              pr_url: pr_url,
+                                              cfg: cfg)
+          return handle_secret_scan_result(task, pr_url, scan, "open_pr") if scan.fetch_failed || scan.hits.any?
+
+          # Downstream short-circuit markers BEFORE the open-pr terminal
+          # marker. They only become observable once the folder is advanced
+          # past 5-open-pr, so writing them first is safe — and if either
+          # File.write raises, pr.md is still non-terminal so the next run
+          # re-enters the recovery path instead of advancing.
+          write_merged_downstream_markers(task)
+
+          # Commit point. Once this terminal marker lands, the open-pr stage
+          # is "done" from the state-machine's perspective. write_merged_summary
+          # is documentation only; its failure does not corrupt state.
+          Hive::Markers.set(task.state_file, :complete,
+                            pr_url: pr_url, is_draft: "false", merged: "true")
+
+          write_merged_summary(task, merged)
+          return { commit: "open_pr_already_merged", status: :complete }
         end
 
         Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
@@ -203,6 +266,16 @@ module Hive
         nil
       end
 
+      def local_head_oid(worktree_path)
+        out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
+        unless status.success?
+          warn "hive: open_pr: failed to read worktree HEAD at #{worktree_path}: #{err.to_s.strip}"
+          return nil
+        end
+
+        out.strip.empty? ? nil : out.strip
+      end
+
       def write_pr_md(task, existing, idempotent: false)
         pr_url = existing["url"].to_s
         pr_number = existing["number"]
@@ -212,19 +285,88 @@ module Hive
         end
         is_draft = existing["isDraft"] == false ? "false" : "true"
         suffix = idempotent ? " idempotent=true" : ""
-        File.write(task.state_file, <<~MD)
+        File.write(task.state_file, pr_md_body(
+          pr_url: pr_url,
+          pr_number: pr_number,
+          summary_text: "PR already open for this task.",
+          task_folder: task.folder,
+          marker_text: "<!-- COMPLETE pr_url=#{pr_url} is_draft=#{is_draft}#{suffix} -->"
+        ))
+      end
+
+      # Shared body for pr.md. The already-open arm passes a baked-in
+      # COMPLETE marker via `marker_text:`; the merged-recovery arm passes
+      # an empty `marker_text:` and commits the COMPLETE marker via
+      # `Hive::Markers.set` after downstream short-circuit markers land
+      # (so a partial failure leaves pr.md non-terminal — see the
+      # commit-point comment in `run!`).
+      def pr_md_body(pr_url:, pr_number:, summary_text:, task_folder:, marker_text:)
+        <<~MD
           ---
           pr_url: #{pr_url}
           pr_number: #{pr_number}
           ---
 
           ## Summary
-          PR already open for this task.
+          #{summary_text}
 
           ## Linked task
-          #{task.folder}
+          #{task_folder}
 
-          <!-- COMPLETE pr_url=#{pr_url} is_draft=#{is_draft}#{suffix} -->
+          #{marker_text}
+        MD
+      end
+
+      # Merged-recovery short-circuits 6-review and 7-artifacts so we don't
+      # rerun reviewers / collect artifacts against an already-merged PR.
+      # Without these markers, a user advancing the folder to 6-review
+      # would see `Hive::Stages::Review.run!` ignore the absent task.md
+      # terminal marker and re-spawn reviewers + CI against the merged PR.
+      # Same logic for 7-artifacts and its artifact.md. The COMPLETE marker
+      # used here mirrors what those stages would emit on their own happy
+      # path so downstream consumers (Workflows, status) see one consistent
+      # terminal shape.
+      #
+      # Cross-references for the short-circuit hand-off:
+      # - `lib/hive/stages/review.rb` (~:102 case-when on `marker.name`,
+      #   `:review_complete` branch) — observes the REVIEW_COMPLETE marker
+      #   we land here on task.md and returns early without spawning.
+      # - `lib/hive/stages/artifacts.rb` (~:14 `:complete` short-circuit
+      #   guard) — observes the COMPLETE marker we land here on artifact.md.
+      def write_merged_downstream_markers(task)
+        review_state_file = File.join(task.folder, Hive::Task::STATE_FILES.fetch("review"))
+        File.write(review_state_file, <<~MD)
+          # Review skipped — PR merged before open-pr finished
+
+          The PR for this task was merged on GitHub before the open-pr stage
+          completed. The 6-review and 7-artifacts loops would otherwise re-run
+          against the merged PR; this terminal marker short-circuits them.
+
+          <!-- REVIEW_COMPLETE pass=0 browser=skipped merged=true -->
+        MD
+
+        artifact_state_file = File.join(task.folder, Hive::Task::STATE_FILES.fetch("artifacts"))
+        File.write(artifact_state_file, <<~MD)
+          # Artifacts skipped — PR merged before open-pr finished
+
+          <!-- COMPLETE merged=true -->
+        MD
+      end
+
+      def write_merged_summary(task, existing)
+        pr_url = existing["url"].to_s
+        pr_number = existing["number"]
+        File.write(File.join(task.folder, "summary.md"), <<~MD)
+          ## Summary
+          PR ##{pr_number} was already merged before Hive finished the open-pr stage.
+
+          PR: #{pr_url}
+
+          ## Review
+          Hive recovered the task from a stale open-pr state after confirming the PR is merged on GitHub.
+
+          ## Open Escalations
+          None.
         MD
       end
 

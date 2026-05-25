@@ -61,23 +61,16 @@ module Hive
       raise Hive::GhError, "git push failed: #{result.stderr.strip.empty? ? result.stdout : result.stderr}"
     end
 
-    # Look up an OPEN pull request for `branch`. Returns:
-    #   - the PR hash when an OPEN PR exists for this branch
-    #   - nil when `gh pr list` succeeds and reports no OPEN PR
+    # Look up all pull requests for `branch`. Returns the raw array from
+    # `gh pr list --state all`; callers decide which states matter.
     # Raises Hive::GhError when `gh pr list` itself fails or returns
     # unparseable JSON — the caller can't safely decide between
-    # "no PR exists" and "remote unavailable" without this signal,
-    # and silently falling through opens a second PR for the same
-    # branch on retry (Plan R5).
+    # "no PR exists" and "remote unavailable" without this signal.
     #
-    # CLOSED/MERGED PRs are explicitly NOT returned: a stale URL
-    # would propagate into pr.md and downstream `gh pr edit` /
-    # `gh pr ready` calls would target a dead PR.
-    #
-    # The returned hash may omit `isDraft` on older/future gh JSON
-    # shapes. Stage code treats a missing key as draft for forward
-    # compatibility; only an explicit false means "already ready".
-    def lookup_existing_pr(worktree_path, branch, cfg: nil)
+    # The returned hashes may omit optional fields on older/future gh JSON
+    # shapes. Stage code treats a missing `isDraft` key as draft for
+    # forward compatibility; only an explicit false means "already ready".
+    def lookup_prs_for_branch(worktree_path, branch, cfg: nil)
       # `gh -R` accepts a `owner/repo` slug but not a worktree path;
       # `--repo` likewise. `gh` resolves the remote from cwd's git
       # config, so route through chdir. Earlier passes flagged the
@@ -86,7 +79,7 @@ module Hive
       # `-C` flag), not stylistic. Kept here with a comment so the
       # next reader doesn't "fix" it.
       out, err, status = capture3("gh", "pr", "list", "--head", branch,
-                                  "--state", "all", "--json", "url,number,state,isDraft",
+                                  "--state", "all", "--json", "url,number,state,isDraft,headRefName,headRefOid",
                                   chdir: worktree_path, cfg: cfg)
       unless status.success?
         raise Hive::GhError, "`gh pr list` failed for branch #{branch}: #{err.to_s.strip.empty? ? out : err.strip}"
@@ -96,9 +89,22 @@ module Hive
       unless list.is_a?(Array)
         raise Hive::GhError, "`gh pr list` returned #{list.class} for branch #{branch}; expected Array"
       end
-      list.find { |p| p["state"] == "OPEN" }
+      list
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr list` returned unparseable JSON for branch #{branch}: #{e.message}"
+    end
+
+    # Normal open-PR path: return only OPEN pull requests. CLOSED/MERGED
+    # PRs are handled by explicit recovery paths so a stale URL cannot
+    # silently flow into draft-finalization commands.
+    def lookup_existing_pr(worktree_path, branch, cfg: nil)
+      lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
+    end
+
+    def lookup_merged_pr(worktree_path, branch, cfg: nil, head_oid: nil)
+      lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find do |p|
+        p["state"] == "MERGED" && (head_oid.nil? || p["headRefOid"].to_s == head_oid.to_s)
+      end
     end
 
     def pr_frontmatter(path)

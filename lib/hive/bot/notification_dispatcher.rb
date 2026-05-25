@@ -1,47 +1,80 @@
 require "time"
 require "hive/config"
+require "hive/bot/alert_store"
 require "hive/bot/notification_builders"
+require "hive/bot/title_formatter"
 
 module Hive
   module Bot
     class NotificationDispatcher
       def initialize(telegram:, logger:, bot_config:,
-                     daemon_enabled: nil, now: -> { Time.now })
+                     daemon_enabled: nil, now: -> { Time.now },
+                     alert_store: nil)
         @telegram = telegram
         @logger = logger
         @bot_config = bot_config
         @daemon_enabled = daemon_enabled
         @now = now
-        @seen = {}
-        @recent_dispatches = {}
-        @mutex = Mutex.new
+        @alert_store = alert_store || AlertStore.new(path: bot_config["alert_state_file"], logger: logger)
       end
 
       def process_rows(rows)
-        synchronize { prune_seen! }
-        rows.each { |row| process_row(row) }
-      end
-
-      def record_dispatch(project:, slug:, fingerprint: nil)
-        synchronize { @recent_dispatches[fingerprint || [ project, slug ]] = @now.call }
+        current = current_notifications(rows)
+        process_recoveries(current)
+        process_current(current)
       end
 
       private
 
-      def process_row(row)
-        return if suppress_ready_action?(row)
+      def current_notifications(rows)
+        Array(rows).each_with_object({}) do |row, out|
+          next if suppress_ready_action?(row)
 
-        notification = NotificationBuilders.build(row)
-        return unless notification
+          notification = NotificationBuilders.build(row)
+          next unless notification
 
-        fingerprint = NotificationBuilders.fingerprint(row)
-        if synchronize { @seen.key?(fingerprint) || @recent_dispatches.key?(fingerprint) }
-          @logger.event(:notification_skipped_dedupe, project: row.project,
-                                                       slug: row.slug,
-                                                       marker: row.marker)
-          return
+          fingerprint = NotificationBuilders.fingerprint(row)
+          out[fingerprint] ||= { row: row, notification: notification }
         end
+      end
 
+      def process_recoveries(current)
+        @alert_store.each_fingerprint do |fingerprint|
+          next if current.key?(fingerprint)
+
+          entry = @alert_store.entry(fingerprint)
+          row = entry&.row
+          if row && NotificationBuilders.recovery?(row)
+            @alert_store.remove(fingerprint) if send_notification(recovered_message(row))
+          else
+            @alert_store.remove(fingerprint)
+          end
+        end
+      end
+
+      def process_current(current)
+        current.each do |fingerprint, payload|
+          row = payload.fetch(:row)
+          entry = @alert_store.entry(fingerprint)
+          if entry.nil?
+            next unless send_notification(payload.fetch(:notification))
+
+            @alert_store.add(fingerprint, row, @now.call)
+            log_notification_sent(row)
+          elsif reminder_due?(entry, row)
+            next unless send_notification(reminder_notification(row))
+
+            @alert_store.mark_reminded(fingerprint, @now.call)
+            log_notification_sent(row, reminder: true)
+          else
+            @logger.event(:notification_skipped_dedupe, project: row.project,
+                                                         slug: row.slug,
+                                                         marker: row.marker)
+          end
+        end
+      end
+
+      def send_notification(notification)
         any_sent = false
         chat_ids.each do |chat_id|
           @telegram.send_message(chat_id: chat_id, text: notification.text,
@@ -50,15 +83,38 @@ module Hive
         rescue StandardError => e
           @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
         end
-        return unless any_sent
 
-        synchronize { @seen[fingerprint] = @now.call }
-        @logger.event(:notification_sent, project: row.project, slug: row.slug,
-                                          marker: row.marker, action: row.action)
+        any_sent
       end
 
-      def synchronize(&block)
-        @mutex.synchronize(&block)
+      def log_notification_sent(row, reminder: false)
+        @logger.event(:notification_sent, project: row.project, slug: row.slug,
+                                          marker: row.marker, action: row.action,
+                                          reminder: reminder)
+      end
+
+      def reminder_due?(entry, row)
+        return false unless NotificationBuilders.recovery?(row)
+        return false unless entry.first_seen_at
+        return false if entry.reminded_at
+
+        @now.call - entry.first_seen_at >= recovery_reminder_window
+      end
+
+      def reminder_notification(row)
+        notification = NotificationBuilders.recovery(row)
+        lines = notification.text.lines(chomp: true)
+        lines[0] = "⚠ Still stuck (8 h) — \"#{TitleFormatter.title_from_slug(row.slug)}\" — " \
+                   "#{TitleFormatter.stage_label(row.stage)}"
+        NotificationBuilders::Notification.new(text: lines.join("\n"), keyboard: notification.keyboard)
+      end
+
+      def recovered_message(row)
+        NotificationBuilders::Notification.new(
+          text: "✅ Recovered: \"#{TitleFormatter.title_from_slug(row.slug)}\" — " \
+                "#{TitleFormatter.stage_label(row.stage)}",
+          keyboard: nil
+        )
       end
 
       def suppress_ready_action?(row)
@@ -80,18 +136,12 @@ module Hive
         false
       end
 
-      def prune_seen!
-        cutoff = @now.call - dedupe_window
-        @seen.delete_if { |_fingerprint, seen_at| seen_at < cutoff }
-        @recent_dispatches.delete_if { |_key, seen_at| seen_at < cutoff }
-      end
-
       def chat_ids
         Array(@bot_config.fetch("chat_id_allowlist"))
       end
 
-      def dedupe_window
-        @bot_config.fetch("notification_dedupe_window_sec", 300)
+      def recovery_reminder_window
+        @bot_config.fetch("recovery_reminder_window_sec", 28_800)
       end
     end
   end

@@ -3,13 +3,15 @@ require "hive/bot/status_watcher"
 require "hive/bot/notification_dispatcher"
 
 class HiveBotNotificationDispatcherTest < Minitest::Test
+  include HiveTestHelper
+
   Row = Hive::Bot::StatusWatcher::Row
 
-  def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd")
+  def row(action: "needs_input", marker: "waiting", attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm")
     Row.new(
       project: "hive",
       slug: slug,
-      stage: "2-brainstorm",
+      stage: stage,
       marker: marker,
       attrs: attrs,
       action: action,
@@ -19,12 +21,21 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     )
   end
 
-  def dispatcher(now: Time.utc(2026, 5, 14, 12, 0, 0), daemon_enabled: ->(_project) { false })
+  def recovery_row(attrs: { "pass" => "1" }, slug: "stuck-task-260525-abcd", stage: "6-review")
+    row(action: "recover_review", marker: "review_error", attrs: attrs, slug: slug, stage: stage)
+  end
+
+  def dispatcher(path: nil, now: Time.utc(2026, 5, 25, 10, 0, 0), daemon_enabled: ->(_project) { false },
+                 telegram: self.telegram)
     @clock = now
     Hive::Bot::NotificationDispatcher.new(
       telegram: telegram,
       logger: logger,
-      bot_config: { "chat_id_allowlist" => [ 12345 ], "notification_dedupe_window_sec" => 300 },
+      bot_config: {
+        "chat_id_allowlist" => [ 12345 ],
+        "alert_state_file" => path,
+        "recovery_reminder_window_sec" => 28_800
+      },
       daemon_enabled: daemon_enabled,
       now: -> { @clock }
     )
@@ -47,7 +58,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal :notification_sent, logger.events.last.first
   end
 
-  def test_process_rows_dedupes_same_marker_fingerprint
+  def test_same_row_twice_sends_one_notification
     d = dispatcher
     d.process_rows([ row ])
     d.process_rows([ row ])
@@ -56,12 +67,91 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal :notification_skipped_dedupe, logger.events.last.first
   end
 
+  def test_recovery_row_disappears_sends_recovered_message_and_removes_entry
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      d.process_rows([ recovery_row ])
+
+      d.process_rows([])
+
+      assert_equal 2, telegram.messages.size
+      assert_equal "✅ Recovered: \"Stuck task…\" — Review", telegram.messages.last[:text]
+      assert_nil Hive::Bot::AlertStore.new(path: path).entry(
+        Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
+      )
+    end
+  end
+
+  def test_non_recovery_row_disappears_silently_drops_entry
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path)
+      d.process_rows([ row ])
+
+      d.process_rows([])
+
+      assert_equal 1, telegram.messages.size
+      assert_equal [], Hive::Bot::AlertStore.new(path: path).each_fingerprint.to_a
+    end
+  end
+
+  def test_same_fingerprint_reappears_after_recovery_refires
+    d = dispatcher
+    d.process_rows([ recovery_row ])
+    d.process_rows([])
+    d.process_rows([ recovery_row ])
+
+    assert_equal 3, telegram.messages.size
+    assert_match(/Review stuck/, telegram.messages.first[:text])
+    assert_match(/Recovered/, telegram.messages[1][:text])
+    assert_match(/Review stuck/, telegram.messages.last[:text])
+  end
+
   def test_marker_attr_change_renotifies
     d = dispatcher
-    d.process_rows([ row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" }) ])
-    d.process_rows([ row(action: "recover_review", marker: "review_error", attrs: { "pass" => "3" }) ])
+    d.process_rows([ recovery_row(attrs: { "pass" => "2" }) ])
+    d.process_rows([ recovery_row(attrs: { "pass" => "3" }) ])
+
+    assert_equal 3, telegram.messages.size
+    assert_match(/Recovered/, telegram.messages[1][:text])
+  end
+
+  def test_eight_hour_reminder_fires_exactly_once
+    d = dispatcher
+    d.process_rows([ recovery_row ])
+    @clock += 28_800
+    d.process_rows([ recovery_row ])
+    @clock += 28_800
+    d.process_rows([ recovery_row ])
 
     assert_equal 2, telegram.messages.size
+    assert_match(/\A⚠ Still stuck \(8 h\) — "Stuck task…" — Review/, telegram.messages.last[:text])
+  end
+
+  def test_restart_simulation_does_not_refire_same_active_row
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      dispatcher(path: path).process_rows([ recovery_row ])
+
+      fresh = dispatcher(path: path)
+      fresh.process_rows([ recovery_row ])
+
+      assert_equal 1, telegram.messages.size
+    end
+  end
+
+  def test_corrupt_store_starts_fresh_without_crashing
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      File.write(path, "{")
+
+      dispatcher(path: path).process_rows([ recovery_row ])
+
+      assert_equal 1, telegram.messages.size
+      assert_equal :alert_store_corrupt, logger.events.first.first
+      assert Dir.glob("#{path}.corrupt-*").any?
+    end
   end
 
   def test_ready_action_suppressed_when_daemon_enabled
@@ -71,52 +161,16 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal [], telegram.messages
   end
 
-  def test_recent_dispatch_does_not_suppress_unrelated_state_change
-    d = dispatcher
-    d.record_dispatch(project: "hive", slug: "slug-260514-abcd")
-    d.process_rows([ row(action: "needs_input", marker: "waiting") ])
-
-    assert_equal 1, telegram.messages.size,
-                 "post-dispatch state-change notifications must not be suppressed (plan R6)"
-  end
-
-  def test_record_dispatch_with_fingerprint_suppresses_same_fingerprint
-    d = dispatcher
-    target_row = row(action: "needs_input", marker: "waiting")
-    fp = Hive::Bot::NotificationBuilders.fingerprint(target_row)
-    d.record_dispatch(project: "hive", slug: "slug-260514-abcd", fingerprint: fp)
-    d.process_rows([ target_row ])
-
-    assert_equal [], telegram.messages,
-                 "same-fingerprint dispatch should suppress re-notification of the marker that just transitioned"
-  end
-
   def test_multi_chat_fanout_delivers_to_all_allowed_chats
     multi = Hive::Bot::NotificationDispatcher.new(
-      telegram: telegram, logger: logger,
-      bot_config: { "chat_id_allowlist" => [ 12345, 67890 ], "notification_dedupe_window_sec" => 300 }
+      telegram: telegram,
+      logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345, 67890 ], "recovery_reminder_window_sec" => 28_800 },
+      now: -> { @clock ||= Time.utc(2026, 5, 25, 10, 0, 0) }
     )
     multi.process_rows([ row ])
 
     assert_equal [ 12345, 67890 ], telegram.messages.map { |msg| msg[:chat_id] }
-  end
-
-  def test_prune_window_lets_repeated_fingerprint_re_notify_after_dedupe_window
-    advancing_clock = Time.utc(2026, 5, 14, 12, 0, 0)
-    clock = -> { advancing_clock }
-    d = Hive::Bot::NotificationDispatcher.new(
-      telegram: telegram, logger: logger,
-      bot_config: { "chat_id_allowlist" => [ 12345 ], "notification_dedupe_window_sec" => 60 },
-      now: clock
-    )
-
-    d.process_rows([ row ])
-    assert_equal 1, telegram.messages.size
-
-    advancing_clock += 120
-    d.process_rows([ row ])
-    assert_equal 2, telegram.messages.size,
-                 "dedupe entry should expire after the window so the same fingerprint re-notifies"
   end
 
   def test_rows_without_notification_are_ignored
@@ -128,12 +182,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   def test_send_failures_are_logged_without_marking_seen
     flaky_telegram = FlakyTelegram.new
-    d = Hive::Bot::NotificationDispatcher.new(
-      telegram: flaky_telegram,
-      logger: logger,
-      bot_config: { "chat_id_allowlist" => [ 12345 ], "notification_dedupe_window_sec" => 300 },
-      now: -> { @clock ||= Time.utc(2026, 5, 14, 12, 0, 0) }
-    )
+    d = dispatcher(telegram: flaky_telegram)
 
     d.process_rows([ row ])
 
@@ -168,7 +217,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     loads = []
     with_config_stubs(
       find_project: ->(project) { projects << project; nil },
-      load: ->(path) { loads << path; raise "Config.load should not be called" }
+      load: ->(_path) { loads << path; raise "Config.load should not be called" }
     ) do
       d = dispatcher(daemon_enabled: nil)
       d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])

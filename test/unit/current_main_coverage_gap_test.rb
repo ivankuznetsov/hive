@@ -41,6 +41,12 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
+  ReviewCommandStatus = Struct.new(:success_value) do
+    def success?
+      success_value
+    end
+  end
+
   def row(stage: "6-review", slug: "red-task", folder: "/tmp/red-task", diagnostic: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: "alpha", stage: stage, slug: slug, folder: folder,
@@ -329,6 +335,82 @@ class CurrentMainCoverageGapTest < Minitest::Test
 
         assert_equal :error, result.status
         assert_includes result.error_message, "quota exhausted"
+      end
+    end
+  end
+
+  def test_review_run_marks_auto_commit_failure_after_fix_agent_edit
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task = Hive::Task.new(folder)
+      File.write(task.state_file, "---\nslug: #{File.basename(folder)}\n---\n")
+      File.write(task.worktree_yml_path, { "path" => worktree }.to_yaml)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
+
+      dirty_checks = [ false, true ]
+      with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
+        with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { { "path" => worktree } }) do
+          with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
+              with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
+                with_replaced_singleton_method(Hive::Stages::Review, :worktree_dirty?, ->(_path) { dirty_checks.shift }) do
+                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:) { { status: :ok } }) do
+                    with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_fix_worktree, ->(_task, _cfg, _ctx, _accepted) {
+                      { success: false, message: "git add -A failed: permission denied" }
+                    }) do
+                      result = Hive::Stages::Review.run!(task, { "review" => {} })
+
+                      assert_equal :review_error, result[:status]
+                      assert_equal "fix_auto_commit_failed_pass_01", result[:commit]
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :review_error, marker.name
+      assert_equal "fix", marker.attrs["phase"]
+      assert_equal "fix_auto_commit_failed", marker.attrs["reason"]
+      assert_equal "git add -A failed: permission denied", marker.attrs["message"]
+    end
+  end
+
+  def test_review_auto_commit_reports_git_add_and_commit_failures
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => {} }
+
+      fail_status = ReviewCommandStatus.new(false)
+      ok_status = ReviewCommandStatus.new(true)
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "", fail_status ] }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+
+        refute result[:success]
+        assert_equal "git add -A failed", result[:message]
+      end
+
+      responses = [
+        [ "", "", ok_status ],
+        [ "stdout detail", "stderr detail", fail_status ]
+      ]
+      with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { responses.shift }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+
+        refute result[:success]
+        assert_equal "git commit failed: stderr detail\nstdout detail", result[:message]
       end
     end
   end

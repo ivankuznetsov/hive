@@ -20,6 +20,7 @@ module Hive
         slash_help
         callback_approve
         callback_reject
+        callback_autofix
         callback_clear_and_retry
         callback_open_laptop
         callback_show_details
@@ -160,6 +161,7 @@ module Hive
         case data
         when /\Aapprove:/ then :callback_approve
         when /\Areject:/ then :callback_reject
+        when /\Aautofix:/ then :callback_autofix
         when /\Aclear_retry:/ then :callback_clear_and_retry
         when /\Aopen_laptop:/ then :callback_open_laptop
         when /\Adetails:/ then :callback_show_details

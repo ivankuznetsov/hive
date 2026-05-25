@@ -18,6 +18,7 @@ module Hive
           case intent
           when :callback_approve then approve(data)
           when :callback_reject then @result_class.new(action: :reply, text: "Left unchanged.")
+          when :callback_autofix then autofix(data)
           when :callback_clear_and_retry then clear_and_retry(data)
           when :callback_open_laptop then @result_class.new(action: :reply, text: "Open laptop for this one.")
           when :callback_show_details then show_details(data)
@@ -53,13 +54,23 @@ module Hive
 
         def clear_and_retry(data)
           _prefix, project, slug, stage, marker = split_callback(data, 5)
-          verb = retry_verb_for_stage(stage)
-          commands = []
-          unless marker.to_s.casecmp("none").zero?
-            commands << [ "hive", "markers", "clear", slug, "--name", marker.upcase, "--project", project, "--json" ]
-          end
-          commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ] if verb
+          commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker)
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands)
+        end
+
+        def autofix(data)
+          _prefix, project, slug, stage, marker = split_callback(data, 5)
+          verb = retry_verb_for_stage(stage)
+          unless verb
+            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage}.")
+          end
+
+          @result_class.new(
+            action: :dispatch_commands,
+            project: project,
+            slug: slug,
+            commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker)
+          )
         end
 
         def answer(data)
@@ -168,11 +179,26 @@ module Hive
         end
 
         def retry_verb_for_stage(stage)
+          return nil if stage.to_s == "9-done"
+
           Hive::Workflows.verb_arriving_at(stage) || {
             "4-execute" => "develop",
             "5-review" => "review",
             "6-pr" => "pr"
           }[stage]
+        end
+
+        def retry_commands(project:, slug:, stage:, marker:)
+          verb = retry_verb_for_stage(stage)
+          return [] unless verb
+
+          commands = []
+          marker_name = marker.to_s
+          unless marker_name.casecmp("none").zero? || marker_name.casecmp("agent_working").zero?
+            commands << [ "hive", "markers", "clear", slug, "--name", marker_name.upcase, "--project", project, "--json" ]
+          end
+          commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ]
+          commands
         end
 
         def split_callback(data, expected)

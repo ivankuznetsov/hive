@@ -211,6 +211,57 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
+  def test_autofix_marker_dispatches_clear_then_retry
+    result = @handlers.handle(
+      :callback_autofix,
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
+    )
+
+    assert_equal :dispatch_commands, result.action
+    assert_equal(
+      [
+        [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
+          "REVIEW_ERROR", "--project", "alpha", "--json" ],
+        [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ]
+      ],
+      result.commands
+    )
+  end
+
+  def test_autofix_none_marker_dispatches_retry_only
+    result = @handlers.handle(
+      :callback_autofix,
+      update("autofix:alpha:plan-task-260519-abcd:3-plan:NONE")
+    )
+
+    assert_equal(
+      [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
+      result.commands
+    )
+  end
+
+  def test_autofix_agent_working_marker_dispatches_retry_only
+    result = @handlers.handle(
+      :callback_autofix,
+      update("autofix:alpha:exec-task-260519-abcd:4-execute:AGENT_WORKING")
+    )
+
+    assert_equal(
+      [ [ "hive", "develop", "exec-task-260519-abcd", "--from", "4-execute", "--project", "alpha", "--json" ] ],
+      result.commands
+    )
+  end
+
+  def test_autofix_unknown_stage_replies_without_dispatch
+    result = @handlers.handle(
+      :callback_autofix,
+      update("autofix:alpha:done-task-260519-abcd:9-done:ERROR")
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "No retry verb for stage 9-done.", result.text
+  end
+
   def test_refresh_diagnose_rejects_malformed_callback_data
     # Defense against malformed callback round-trips. Any non-3-part
     # callback (legacy data, manual postback fuzzing) should fall back

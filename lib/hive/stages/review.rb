@@ -425,6 +425,16 @@ module Hive
           # --- Phase 4: fix ---
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
+          if worktree_dirty?(worktree_path)
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :fix,
+                              reason: "fix_dirty_worktree",
+                              message: "worktree was dirty before fix agent; refusing to auto-commit pre-existing changes",
+                              pass: pass)
+            return { commit: "fix_dirty_worktree_pass_#{format('%02d', pass)}",
+                     status: :review_error }
+          end
+
           # Protect orchestrator-owned files PLUS the current pass's
           # escalations doc — only Triage may write that file, so a fix
           # agent rewriting it (e.g. flipping `[ ]` → `[x]` to short-

@@ -2005,3 +2005,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/reviewers]]
 - [[commands/daemon]]
 - [[operating]]
+
+## [2026-05-25T19:30:41Z] review — reject pre-existing dirty fix worktrees
+
+**Action:** Tightened the Phase 4 auto-commit path so Hive refuses worktrees that are already dirty before the fix agent runs. Auto-commit now only captures edits introduced by a successful fix-agent spawn from a clean tree, preventing unrelated manual changes from being bundled into rollback-rate trailered fix commits.
+
+**Refreshed pages:**
+- [[stages/review]]

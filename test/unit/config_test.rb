@@ -219,6 +219,20 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_non_string_stage_skill_by_agent_value
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          skill_by_agent:
+            codex: 42
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/plan\.skill_by_agent\.codex.*must be a String/, err.message)
+    end
+  end
+
   def test_load_raises_when_stage_agent_is_unknown_profile
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

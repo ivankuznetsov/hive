@@ -457,6 +457,17 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_delete_branch_raises_for_unexpected_git_failure
+    dir = Dir.mktmpdir("hive-missing-git-root-")
+    FileUtils.rm_rf(dir)
+    ops = Hive::GitOps.new(dir)
+
+    err = assert_raises(Hive::GitError) do
+      ops.delete_branch!("still-fatal-260525")
+    end
+    assert_match(/branch -D still-fatal-260525 failed/, err.message)
+  end
+
   def test_delete_branch_returns_false_when_branch_already_gone
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

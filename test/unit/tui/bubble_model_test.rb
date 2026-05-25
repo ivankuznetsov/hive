@@ -2825,6 +2825,39 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "no-recipe refusal must nudge operator toward the manual fallback")
   end
 
+  def test_open_red_status_detail_resolves_agent_label_from_task_project_config
+    with_tmp_dir do |dir|
+      slug = "red-detail-260525-aaaa"
+      folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(dir, ".hive-state", "config.yml"), { "execute" => { "agent" => "codex" } }.to_yaml)
+      File.write(File.join(folder, "task.md"), "# task\n<!-- ERROR -->\n")
+      row = make_task_row(
+        action_key: "error", action_label: "Error", slug: slug, stage: "4-execute",
+        folder: folder, marker: "error", attrs: { "reason" => "exit_code" }, suggested_command: nil
+      )
+
+      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+
+      assert_equal :red_status_detail, @model.hive_model.mode
+      assert_equal "codex", @model.hive_model.red_status_detail_state.agent_label
+      assert_same row, @model.hive_model.red_status_detail_state.row
+    end
+  end
+
+  def test_open_red_status_detail_uses_fallback_agent_label_for_malformed_folder
+    row = make_task_row(
+      action_key: "error", action_label: "Error", slug: "bad-folder", stage: "4-execute",
+      folder: "/tmp/not-a-hive-task", marker: "error", attrs: {}, suggested_command: nil
+    )
+
+    @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+
+    assert_equal :red_status_detail, @model.hive_model.mode
+    assert_equal Hive::Tui::Model::RedStatusDetailState::AGENT_FALLBACK,
+                 @model.hive_model.red_status_detail_state.agent_label
+  end
+
   def test_red_status_autofix_from_detail_mode_closes_screen_on_recovery_success
     # Happy-path pin for plan Unit 4: a recoverable recover_review row
     # dispatched from :red_status_detail must flip the mode back to
@@ -2853,6 +2886,35 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :grid, @model.hive_model.mode
     assert_nil @model.hive_model.red_status_detail_state
     assert_match(/clearing/, @model.hive_model.flash.to_s)
+  end
+
+  def test_close_red_status_detail_on_dispatch_reclamps_cursor_when_snapshot_visible
+    row = make_task_row(
+      action_key: "recover_review", action_label: "Needs recovery",
+      slug: "visible-row", stage: "6-review", folder: "/tmp/hive/visible-row",
+      marker: "review_error", attrs: {}, suggested_command: nil
+    )
+    snapshot = Hive::Tui::Snapshot.new(
+      generated_at: "now",
+      projects: [ Hive::Tui::Snapshot::ProjectView.new(
+        name: "demo", path: "/tmp/demo", hive_state_path: "/tmp/demo/.hive-state",
+        error: nil, rows: [ row ]
+      ) ]
+    )
+    state = Hive::Tui::Model::RedStatusDetailState.new(row: row)
+    starting = Hive::Tui::Model.initial.with(
+      mode: :red_status_detail,
+      red_status_detail_state: state,
+      snapshot: snapshot,
+      cursor: [ 0, 99 ]
+    )
+
+    closed, cmd = @model.send(:close_red_status_detail_on_dispatch, starting, nil)
+
+    assert_nil cmd
+    assert_equal :grid, closed.mode
+    assert_nil closed.red_status_detail_state
+    assert_equal [ 0, 0 ], closed.cursor
   end
 
   def test_close_red_status_detail_on_dispatch_passes_through_in_grid_mode

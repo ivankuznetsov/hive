@@ -139,15 +139,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
-          mtime: T0 - 600, claude_pid_alive: nil, state_file: nil,
-          folder: nil)
+          mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
+          state_file: nil, folder: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
       folder: folder,
       state_file: state_file || File.join(folder, "idea.md"),
       state_file_mtime: mtime, action: action,
-      suggested_command: command, claude_pid_alive: claude_pid_alive
+      suggested_command: command, claude_pid_alive: claude_pid_alive,
+      live_task_lock: live_task_lock
     )
   end
 
@@ -563,6 +564,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 0, sup.spawned.size
     blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
     refute_nil blocked, "visible running agents must consume capacity after daemon restart"
+    assert_equal "global_cap", blocked[1][:reason]
+  end
+
+  # Issue #144: a row whose only liveness signal is `live_task_lock`
+  # (runner is in the pre-claude_pid window — auto-rebase or other
+  # pre-stage work) must consume capacity, otherwise the daemon will
+  # dispatch more work and breach the global cap.
+  def test_live_task_lock_only_row_counts_toward_global_cap
+    rows = [
+      row(slug: "rebasing", action: "agent_running", command: nil, mtime: T0 - 60,
+          claude_pid_alive: nil, live_task_lock: true),
+      row(slug: "ready", action: "ready_to_plan", command: "hive plan ready --from 2-brainstorm")
+    ]
+    dispatcher, sup, ctrl, logger, _mw = make_dispatcher(rows: rows)
+    ctrl.instance_variable_set(:@max_concurrent_runs, 1)
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 0, sup.spawned.size
+    blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:slug] == "ready" }
+    refute_nil blocked, "live_task_lock=true row must consume a global cap slot"
     assert_equal "global_cap", blocked[1][:reason]
   end
 

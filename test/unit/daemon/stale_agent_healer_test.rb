@@ -62,13 +62,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   # on-disk marker name), not row.action, so we use the production-
   # accurate combo by default. Tests can override via the action: kwarg.
   def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
-               marker: "agent_working", action: "error")
+               marker: "agent_working", action: "error", live_task_lock: nil)
     Row.new(
       project: project, slug: slug, stage: stage,
       marker: marker, folder: File.dirname(state_file), state_file: state_file,
       state_file_mtime: mtime,
       action: action, suggested_command: nil,
-      claude_pid_alive: pid_alive, diagnostic: nil
+      claude_pid_alive: pid_alive, live_task_lock: live_task_lock, diagnostic: nil
     )
   end
 
@@ -116,6 +116,23 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       heal([ row ])
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
+      assert_match(/AGENT_WORKING/, File.read(state_file))
+    end
+  end
+
+  # Issue #144: an externally-spawned `hive run` may hold the per-task
+  # .lock with a verified PID + process_start_time match while it does
+  # pre-stage work (e.g. auto-rebase) — the marker is still AGENT_WORKING
+  # and claude_pid_alive is still nil because the runner has not written
+  # its claude_pid yet. Without the live_task_lock skip, the healer
+  # races the live runner once mtime exceeds grace.
+  def test_skips_row_with_live_task_lock_even_when_grace_exceeded
+    with_marker_file do |state_file|
+      row = make_row(state_file, pid_alive: nil, mtime: NOW - 600, live_task_lock: true)
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "live_task_lock=true must pre-empt grace-exceeded heal so the healer does not race the live runner; events: #{@logger.events.inspect}"
       assert_match(/AGENT_WORKING/, File.read(state_file))
     end
   end

@@ -9,9 +9,16 @@ module Hive
     # as a structured `{ok: false}` rather than raising, so a transient
     # status hiccup doesn't crash the daemon.
     class StatusConsumer
+      # `live_task_lock` is the per-task `.lock`-holder-alive signal
+      # `Hive::Commands::Status` derives from a PID + process_start_time
+      # match. It is true while a `hive run` invocation is actively inside
+      # the task — including pre-stage work like auto-rebase — even before
+      # the runner has written its claude_pid to the lock. The daemon
+      # healer and dispatcher both need this so they don't race the runner
+      # during the pre-claude window (issue #144).
       Row = Struct.new(:project, :slug, :stage, :marker, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
-                       :diagnostic,
+                       :live_task_lock, :diagnostic,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -86,6 +93,7 @@ module Hive
               action: task["action"],
               suggested_command: task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
+              live_task_lock: task["live_task_lock"] == true,
               diagnostic: task["diagnostic"]
             )
           end

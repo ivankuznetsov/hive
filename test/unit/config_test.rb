@@ -1584,6 +1584,8 @@ class ConfigTest < Minitest::Test
       assert_equal 30, cfg.dig("bot", "poll_interval_sec")
       assert_equal 25, cfg.dig("bot", "long_poll_timeout_sec")
       assert_equal 300, cfg.dig("bot", "notification_dedupe_window_sec")
+      assert_equal File.expand_path("~/Dev/hive/.bot.alert_state.json"), cfg.dig("bot", "alert_state_file")
+      assert_equal 28_800, cfg.dig("bot", "recovery_reminder_window_sec")
       assert_equal 3600, cfg.dig("bot", "conversation_ttl_sec")
       assert_equal 1, cfg.dig("bot", "codex_budget_usd")
       assert_equal 120, cfg.dig("bot", "codex_timeout_sec")
@@ -1671,6 +1673,7 @@ class ConfigTest < Minitest::Test
 
       assert_equal File.join(dir, ".bot.pid"), cfg["pid_file"]
       assert_equal File.join(dir, "logs", "bot.log"), cfg["log_file"]
+      assert_equal File.join(dir, ".bot.alert_state.json"), cfg["alert_state_file"]
       assert_equal File.join(dir, ".bot.last_seen_update_id"), cfg["last_seen_state_file"]
     ensure
       ENV["HIVE_HOME"] = old

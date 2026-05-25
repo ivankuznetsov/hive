@@ -175,6 +175,8 @@ module Hive
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
         "notification_dedupe_window_sec" => 300,
+        "alert_state_file" => "~/Dev/hive/.bot.alert_state.json",
+        "recovery_reminder_window_sec" => 28_800,
         "conversation_ttl_sec" => 3600,
         "codex_budget_usd" => 1,
         "codex_timeout_sec" => 120,
@@ -486,6 +488,7 @@ module Hive
       defaults = deep_dup(DEFAULTS["bot"])
       defaults["pid_file"] = File.join(Hive::Paths.state_home, ".bot.pid")
       defaults["log_file"] = File.join(Hive::Paths.state_home, "logs", "bot.log")
+      defaults["alert_state_file"] = File.join(Hive::Paths.state_home, ".bot.alert_state.json")
       defaults["last_seen_state_file"] = File.join(Hive::Paths.state_home, ".bot.last_seen_update_id")
       defaults
     end
@@ -1002,6 +1005,7 @@ module Hive
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
       [ "notification_dedupe_window_sec", 0, nil ],
+      [ "recovery_reminder_window_sec", 3600, 604_800 ],
       [ "conversation_ttl_sec", 60, nil ],
       [ "codex_budget_usd", 0, nil ],
       [ "codex_timeout_sec", 10, nil ],
@@ -1013,6 +1017,7 @@ module Hive
     BOT_PATH_KEYS = %w[
       pid_file
       log_file
+      alert_state_file
       last_seen_state_file
     ].freeze
 
@@ -1028,6 +1033,7 @@ module Hive
       end
 
       validate_bot_allowlist!(bot, source_path)
+      warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
     end
@@ -1071,6 +1077,15 @@ module Hive
                 "got #{value.inspect} (#{value.class})"
         end
       end
+    end
+
+    def warn_deprecated_bot_dedupe!(bot, source_path)
+      value = bot["notification_dedupe_window_sec"]
+      default = DEFAULTS.dig("bot", "notification_dedupe_window_sec")
+      return if value.nil? || value == default
+
+      warn "hive: bot.notification_dedupe_window_sec in #{describe_source(source_path)} is deprecated; " \
+           "alert lifecycle now uses bot.alert_state_file and bot.recovery_reminder_window_sec"
     end
 
     def validate_bot_paths!(bot, source_path)

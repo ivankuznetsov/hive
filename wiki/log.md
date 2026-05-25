@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
+
+**Action:** Dogfooded the merged project-global `claude.mode: tmux` path against real Claude in a disposable project. The run used a temporary `HIVE_HOME` plus private `HIVE_TMUX_SOCKET`, verified `hive doctor --json`, ran brainstorm to `marker_after=waiting`, filled the answer, reran to `marker_after=complete`, confirmed `round_waiting`/`round_complete` events, `hive status --json` `ready_to_plan`, and tmux cleanup.
+
+**Refreshed pages:**
+- [[testing]] - recorded the live dogfood shape and evidence for global Claude tmux mode.
+
 ## [2026-05-25T00:00:00Z] testing - default 100 percent coverage gate
 
 **Action:** Made `bundle exec rake coverage` enforce 100% line coverage by default, with CI also exporting `HIVE_COVERAGE_MIN_LINE=100` explicitly. Added unit coverage for the default threshold and updated the ProcessKill permission-denied tests to exercise production-reachable `EPERM` behavior.

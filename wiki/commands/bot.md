@@ -35,8 +35,8 @@ hive bot tail
 
 | Slash command | Behavior |
 |--------------|----------|
-| `/status` | Renders the active cross-project queue from `hive status --json`. |
-| `/queue` | Same queue view, focused on actionable waiting/recovery rows. |
+| `/status [project]` | Renders actionable rows from `hive status --json` as `Title... — Stage`; when a project name is supplied, filters to that project. |
+| `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
@@ -48,12 +48,12 @@ Free text outside an active answer conversation is rejected with a
 
 ## Inline actions
 
-Notifications and `/queue` rows use callback data that routes to:
+Push notifications use callback data that routes to:
 
 - Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
 - Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
-- Recovery markers: `Clear and retry` dispatches `hive markers clear ... --name <MARKER> --json`, then dispatches the stage's workflow verb when one exists.
+- Recovery markers: `Autofix` dispatches `hive markers clear ... --name <MARKER> --json` when the marker is clearable, then dispatches the stage's workflow verb when one exists. Legacy `Clear and retry` buttons from older messages still route to the same recovery sequence.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -67,10 +67,16 @@ bot:
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
+  alert_state_file: ~/.local/state/hive/.bot.alert_state.json
+  recovery_reminder_window_sec: 28800
   pid_file: ~/.local/state/hive/.bot.pid
   log_file: ~/.local/state/hive/logs/bot.log
   last_seen_state_file: ~/.local/state/hive/.bot.last_seen_update_id
 ```
+
+`notification_dedupe_window_sec` is legacy compatibility surface; current
+alert lifecycle dedupe is status-driven and persisted in
+`alert_state_file`.
 
 `HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
 token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`

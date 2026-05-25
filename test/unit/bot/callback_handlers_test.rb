@@ -208,7 +208,8 @@ class HiveBotCallbackHandlersTest < Minitest::Test
         "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
       result.commands.first
     )
-    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review" }, result.alert_reset)
+    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
+                   marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
   end
 
   def test_clear_and_retry_none_marker_skips_marker_clear_and_runs_stage
@@ -240,7 +241,8 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       ],
       result.commands
     )
-    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review" }, result.alert_reset)
+    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
+                   marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
     assert_equal true, result.clear_keyboard,
                  "Autofix must request keyboard removal to prevent double-tap dispatch."
   end
@@ -265,7 +267,11 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
       result.commands
     )
-    assert_equal({ project: "alpha", slug: "plan-task-260519-abcd", stage: "3-plan" }, result.alert_reset)
+    # NONE marker is the synthetic markerless retry — alert_reset omits
+    # marker/match_attr fields so the existing broad-delete behaviour
+    # applies (back-compat path).
+    assert_equal({ project: "alpha", slug: "plan-task-260519-abcd", stage: "3-plan",
+                   marker: "NONE" }, result.alert_reset)
   end
 
   def test_autofix_agent_working_marker_dispatches_retry_only

@@ -187,6 +187,62 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_remove_matching_with_marker_only_removes_matching_marker
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      store.add("fp1", row(slug: "task", stage: "6-review", attrs: { "pass" => "2" }), now)
+      store.add(
+        "fp2",
+        Row.new(project: "hive", slug: "task", stage: "6-review", marker: "review_ci_stale",
+                attrs: { "pass" => "2" }, action: "recover_review"),
+        now
+      )
+
+      removed = store.remove_matching(project: "hive", slug: "task", stage: "6-review", marker: "review_error")
+
+      assert_equal 1, removed, "only the review_error fingerprint should have been removed"
+      assert_nil store.entry("fp1"), "review_error entry must be cleared"
+      refute_nil store.entry("fp2"), "review_ci_stale entry must remain — different marker, different fingerprint"
+    end
+  end
+
+  def test_remove_matching_with_match_attr_only_removes_matching_attr
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      store.add("fp1", row(attrs: { "pass" => "2", "phase" => "fix" }), now)
+      store.add("fp2", row(attrs: { "pass" => "3", "phase" => "fix" }), now)
+
+      removed = store.remove_matching(project: "hive", slug: "stuck-task-260525-abcd", stage: "6-review",
+                                       marker: "review_error", match_attr: "pass=2")
+
+      assert_equal 1, removed, "only the pass=2 entry should be removed"
+      assert_nil store.entry("fp1")
+      refute_nil store.entry("fp2"), "pass=3 entry remains because the match_attr differs"
+    end
+  end
+
+  def test_remove_matching_with_no_marker_filter_still_removes_all_for_tuple
+    # Backward compat: callers that pass project/slug/stage but no marker
+    # should keep the old broad-delete behaviour.
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      store.add("fp1", row(attrs: { "pass" => "2" }), now)
+      store.add(
+        "fp2",
+        Row.new(project: "hive", slug: "stuck-task-260525-abcd", stage: "6-review", marker: "review_ci_stale",
+                attrs: {}, action: "recover_review"),
+        now
+      )
+
+      removed = store.remove_matching(project: "hive", slug: "stuck-task-260525-abcd", stage: "6-review")
+
+      assert_equal 2, removed
+    end
+  end
+
   def test_record_send_failure_sets_exponential_backoff
     with_tmp_dir do |dir|
       store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))

@@ -24,8 +24,9 @@ module Hive
         process_current(current)
       end
 
-      def reset_task(project:, slug:, stage: nil)
-        @alert_store.remove_matching(project: project, slug: slug, stage: stage)
+      def reset_task(project:, slug:, stage: nil, marker: nil, match_attr: nil)
+        @alert_store.remove_matching(project: project, slug: slug, stage: stage,
+                                     marker: marker, match_attr: match_attr)
       end
 
       private

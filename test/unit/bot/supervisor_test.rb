@@ -395,7 +395,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], @notification_dispatcher.reset_tasks
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 @notification_dispatcher.reset_tasks
     assert_equal [ "hive", "review", "task", "--json" ], @child_supervisor.dispatched.first.fetch(:command_argv)
   end
 
@@ -429,9 +430,11 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal 2, @child_supervisor.dispatched.length
     assert_equal [], reset_snapshot_at_dispatch[0],
                  "reset_task must NOT have been called when the first command (markers clear) dispatches"
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], reset_snapshot_at_dispatch[1],
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 reset_snapshot_at_dispatch[1],
                  "reset_task must have been called exactly once before the retry verb dispatches"
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], @notification_dispatcher.reset_tasks
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 @notification_dispatcher.reset_tasks
   end
 
   def test_dispatch_command_sequence_skips_alert_reset_when_markers_clear_fails

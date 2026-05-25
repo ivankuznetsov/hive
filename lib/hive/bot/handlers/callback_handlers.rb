@@ -57,7 +57,8 @@ module Hive
           commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker,
                                     match_attr: match_attr)
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
-                            alert_reset: alert_reset(project, slug, stage), clear_keyboard: true)
+                            alert_reset: alert_reset(project, slug, stage, marker, match_attr),
+                            clear_keyboard: true)
         end
 
         def autofix(data)
@@ -79,7 +80,7 @@ module Hive
             slug: slug,
             commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker,
                                      match_attr: match_attr),
-            alert_reset: alert_reset(project, slug, stage),
+            alert_reset: alert_reset(project, slug, stage, marker, match_attr),
             clear_keyboard: true
           )
         end
@@ -224,8 +225,11 @@ module Hive
           marker.to_s.casecmp("execute_stale").zero?
         end
 
-        def alert_reset(project, slug, stage)
-          { project: project, slug: slug, stage: stage }
+        def alert_reset(project, slug, stage, marker = nil, match_attr = nil)
+          payload = { project: project, slug: slug, stage: stage }
+          payload[:marker] = marker if marker && !marker.to_s.empty?
+          payload[:match_attr] = match_attr if match_attr && !match_attr.to_s.empty?
+          payload
         end
 
         def split_callback(data, expected)

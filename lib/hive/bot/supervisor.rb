@@ -250,7 +250,9 @@ module Hive
         reset = result.alert_reset
         return unless reset && @notification_dispatcher.respond_to?(:reset_task)
 
-        @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug], stage: reset[:stage])
+        @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug],
+                                            stage: reset[:stage], marker: reset[:marker],
+                                            match_attr: reset[:match_attr])
       end
 
       def project_filter_miss_text(project, rows)

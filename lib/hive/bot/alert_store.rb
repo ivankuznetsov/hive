@@ -130,14 +130,19 @@ module Hive
         end
       end
 
-      def remove_matching(project:, slug:, stage: nil)
+      def remove_matching(project:, slug:, stage: nil, marker: nil, match_attr: nil)
+        attr_key, attr_value = parse_match_attr(match_attr)
         synchronize do
           before = entries.size
           entries.delete_if do |_fingerprint, raw|
             row = row_from_raw(raw.is_a?(Hash) ? raw["row"] : nil)
-            row.project.to_s == project.to_s &&
-              row.slug.to_s == slug.to_s &&
-              (stage.nil? || row.stage.to_s == stage.to_s)
+            next false unless row.project.to_s == project.to_s
+            next false unless row.slug.to_s == slug.to_s
+            next false unless stage.nil? || row.stage.to_s == stage.to_s
+            next false unless marker.nil? || marker.to_s.empty? || row.marker.to_s.casecmp(marker.to_s).zero?
+            next false if attr_key && row.attrs.to_h.transform_keys(&:to_s)[attr_key].to_s != attr_value.to_s
+
+            true
           end
           removed = before - entries.size
           persist_locked! if removed.positive?
@@ -156,6 +161,15 @@ module Hive
 
       def synchronize(&block)
         @mutex.synchronize(&block)
+      end
+
+      def parse_match_attr(match_attr)
+        return [ nil, nil ] if match_attr.nil? || match_attr.to_s.empty?
+
+        key, value = match_attr.to_s.split("=", 2)
+        return [ nil, nil ] if key.to_s.empty? || value.nil?
+
+        [ key.to_s, value.to_s ]
       end
 
       def load!

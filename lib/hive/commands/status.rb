@@ -517,7 +517,17 @@ module Hive
 
         recorded = holder["process_start_time"]
         live = Hive::Lock.process_start_time(pid)
-        # When recorded is set, a missing or differing live start time means the original process is gone (PID may be reused).
+        # PID-reuse defense: when the lock recorded a start time and the
+        # live counterpart differs (or cannot be read at all), assume the
+        # original process is gone and the PID may have been recycled.
+        # We deliberately lose liveness signal in environments where both
+        # /proc and `ps -o lstart=` are unreadable (e.g. heavily-sandboxed
+        # containers) — see `Hive::Lock.process_start_time` (lib/hive/lock.rb:128-134)
+        # for the nil-return contract. A phantom-live row masking a
+        # recycled PID is the worse failure mode than under-reporting
+        # liveness, so we err toward "stale". Regression coverage:
+        # `test_live_task_lock_with_recorded_but_unreadable_live_start_time_is_stale`
+        # and `test_live_task_lock_with_mismatched_process_start_time_is_treated_as_stale`.
         return nil if recorded && live != recorded
 
         holder

@@ -61,7 +61,11 @@ class HiveStagesOpenPrTest < Minitest::Test
         with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
           with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [ "worktree.yml" ] }) do
             with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { }) do
-              result = Hive::Stages::OpenPr.run!(task, cfg)
+              # capture_io swallows the expected `local_head_oid` warn —
+              # this test uses a plain dir, not a git repo, so the new
+              # rev-parse warn fires by design. Keep it out of test output.
+              result = nil
+              capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
 
               marker = Hive::Markers.current(task.state_file)
               assert_equal({ commit: "open_pr_tampered", status: :error }, result)
@@ -88,7 +92,8 @@ class HiveStagesOpenPrTest < Minitest::Test
             with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
               Hive::Markers.set(task.state_file, :review_waiting, reason: "human")
             }) do
-              result = Hive::Stages::OpenPr.run!(task, cfg)
+              result = nil
+              capture_io { result = Hive::Stages::OpenPr.run!(task, cfg) }
 
               assert_equal({ commit: nil, status: :review_waiting }, result)
               assert_equal :review_waiting, Hive::Markers.current(task.state_file).name
@@ -137,10 +142,14 @@ class HiveStagesOpenPrTest < Minitest::Test
                 # Fix #142: merged recovery also lands terminal markers on
                 # the downstream stage state files so 6-review and 7-artifacts
                 # short-circuit instead of re-running against a merged PR.
-                review_file = File.join(task.folder, "task.md")
-                artifact_file = File.join(task.folder, "artifact.md")
-                assert File.exist?(review_file), "task.md (6-review state file) must be written"
-                assert File.exist?(artifact_file), "artifact.md (7-artifacts state file) must be written"
+                # Look up the file names via Hive::Task::STATE_FILES (the
+                # same source production uses) so a future rename in
+                # lib/hive/task.rb breaks this assertion instead of letting
+                # the test silently pass while production diverges.
+                review_file = File.join(task.folder, Hive::Task::STATE_FILES.fetch("review"))
+                artifact_file = File.join(task.folder, Hive::Task::STATE_FILES.fetch("artifacts"))
+                assert File.exist?(review_file), "review state file must be written"
+                assert File.exist?(artifact_file), "artifacts state file must be written"
                 review_marker = Hive::Markers.current(review_file)
                 assert_equal :review_complete, review_marker.name
                 assert_equal "true", review_marker.attrs.fetch("merged")
@@ -327,6 +336,135 @@ class HiveStagesOpenPrTest < Minitest::Test
                 end
               end
             end
+          end
+        end
+      end
+    end
+  end
+
+  def test_run_ignores_open_pr_when_head_oid_does_not_match_local_head
+    # Symmetric coverage to test_run_ignores_merged_pr_when_head_oid_does_not_match_local_head.
+    # If a future cleanup pass drops the OPEN-arm headRefOid filter (assuming
+    # `gh pr list --head <branch>` is "good enough" on its own), a stale OPEN
+    # PR on a re-pushed branch could silently be adopted — this test catches
+    # that regression.
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_tmp_git_repo do |worktree|
+        write_pointer(task, worktree)
+        local_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+        # Stale OPEN PR on the same branch but a different HEAD — must NOT
+        # short-circuit into `open_pr_already_open`.
+        stale_open = {
+          "url" => "https://example.com/pr/stale-open",
+          "number" => 200,
+          "state" => "OPEN",
+          "isDraft" => true,
+          "headRefOid" => "0" * 40
+        }
+        new_pr = {
+          "url" => "https://example.com/pr/fresh",
+          "number" => 201,
+          "state" => "OPEN",
+          "isDraft" => true,
+          "headRefOid" => local_head
+        }
+        list_calls = 0
+        pushed = false
+        scan = Scan.new(fetch_failed: false, fetch_error: nil, hits: [])
+
+        with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(_cfg) { }) do
+          with_replaced_singleton_method(Hive::Gh, :lookup_prs_for_branch, lambda { |_worktree_path, _branch, cfg:|
+            list_calls += 1
+            list_calls == 1 ? [ stale_open ] : [ new_pr ]
+          }) do
+            with_replaced_singleton_method(Hive::Gh, :push_branch!, ->(_worktree_path, _branch, cfg:) { pushed = true }) do
+              with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
+                with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
+                  with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
+                    with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
+                      with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [] }) do
+                        with_replaced_singleton_method(Hive::Gh, :lookup_existing_pr, lambda { |_worktree, _branch, cfg:| new_pr }) do
+                          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+                            Hive::Markers.set(spawned_task.state_file, :complete,
+                                              pr_url: new_pr.fetch("url"), is_draft: "true")
+                          }) do
+                            result = Hive::Stages::OpenPr.run!(task, cfg)
+
+                            assert_equal({ commit: "pr_opened_draft", status: :complete }, result)
+                            assert pushed, "stale OPEN PR with mismatched headRefOid must not skip the normal push/create path"
+                            marker = Hive::Markers.current(task.state_file)
+                            assert_equal :complete, marker.name
+                            assert_equal "https://example.com/pr/fresh", marker.attrs.fetch("pr_url"),
+                                         "the freshly-opened PR's url must land on the marker, not the stale OPEN PR's"
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_run_lands_error_when_open_pr_recovery_secret_scan_fetch_fails
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_tmp_git_repo do |worktree|
+        head_oid = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+        write_pointer(task, worktree)
+        existing = {
+          "url" => "https://example.com/pr/300",
+          "number" => 300,
+          "state" => "OPEN",
+          "isDraft" => true,
+          "headRefOid" => head_oid
+        }
+        fetch_failed = Scan.new(fetch_failed: true, fetch_error: "simulated", hits: [])
+
+        with_basic_open_pr_run_stubs(existing_pr: existing, scan: fetch_failed) do
+          result = Hive::Stages::OpenPr.run!(task, cfg)
+
+          assert_equal({ commit: "open_pr_secret_scan_failed", status: :error }, result)
+          marker = Hive::Markers.current(task.state_file)
+          assert_equal :error, marker.name
+          assert_equal "secret_scan_fetch_failed", marker.attrs.fetch("reason")
+          assert_equal "simulated", marker.attrs.fetch("detail")
+        end
+      end
+    end
+  end
+
+  def test_run_lands_error_when_open_pr_recovery_secret_scan_hits
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_tmp_git_repo do |worktree|
+        head_oid = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+        write_pointer(task, worktree)
+        existing = {
+          "url" => "https://example.com/pr/301",
+          "number" => 301,
+          "state" => "OPEN",
+          "isDraft" => true,
+          "headRefOid" => head_oid
+        }
+        hit_scan = Scan.new(fetch_failed: false, fetch_error: nil, hits: [ { name: :aws_key } ])
+        remediated = []
+
+        with_basic_open_pr_run_stubs(existing_pr: existing, scan: hit_scan) do
+          with_replaced_singleton_method(Hive::Stages::OpenPr, :remediate_secret_leak!, ->(url) { remediated << url }) do
+            result = Hive::Stages::OpenPr.run!(task, cfg)
+
+            assert_equal({ commit: "open_pr_secret_blocked", status: :error }, result)
+            marker = Hive::Markers.current(task.state_file)
+            assert_equal :error, marker.name
+            assert_equal "secret_in_pr_body", marker.attrs.fetch("reason")
+            assert_equal "aws_key", marker.attrs.fetch("patterns")
+            assert_equal [ "https://example.com/pr/301" ], remediated
           end
         end
       end

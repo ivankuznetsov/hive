@@ -28,6 +28,12 @@ module Hive
         # match the local HEAD so a stale OPEN PR on a re-pushed branch
         # is not silently adopted; the merged-arm has carried that check
         # since the merged-recovery fix.
+        #
+        # Note: `Hive::Gh.lookup_existing_pr` and `lookup_merged_pr` are
+        # still exported on the Gh module because callers like
+        # `validate_complete_marker` (below) invoke them directly. The
+        # de-duplication above only collapses the two-call pattern *inside*
+        # `run!` — the helpers remain available for other call sites.
         prs = Hive::Gh.lookup_prs_for_branch(worktree_path, branch, cfg: cfg)
         head_oid = local_head_oid(worktree_path)
         existing = prs.find do |pr|
@@ -261,8 +267,11 @@ module Hive
       end
 
       def local_head_oid(worktree_path)
-        out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
-        return nil unless status.success?
+        out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
+        unless status.success?
+          warn "hive: open_pr: failed to read worktree HEAD at #{worktree_path}: #{err.to_s.strip}"
+          return nil
+        end
 
         out.strip.empty? ? nil : out.strip
       end
@@ -317,6 +326,13 @@ module Hive
       # used here mirrors what those stages would emit on their own happy
       # path so downstream consumers (Workflows, status) see one consistent
       # terminal shape.
+      #
+      # Cross-references for the short-circuit hand-off:
+      # - `lib/hive/stages/review.rb` (~:102 case-when on `marker.name`,
+      #   `:review_complete` branch) — observes the REVIEW_COMPLETE marker
+      #   we land here on task.md and returns early without spawning.
+      # - `lib/hive/stages/artifacts.rb` (~:14 `:complete` short-circuit
+      #   guard) — observes the COMPLETE marker we land here on artifact.md.
       def write_merged_downstream_markers(task)
         review_state_file = File.join(task.folder, Hive::Task::STATE_FILES.fetch("review"))
         File.write(review_state_file, <<~MD)

@@ -355,10 +355,23 @@ class CommandsStatusTest < Minitest::Test
 
     with_tmp_dir do |dir|
       task = Struct.new(:folder).new(dir)
+      # Array-shaped (parseable but not a Hash) → silently nil, no warn.
       File.write(File.join(dir, ".lock"), "- not\n- a\n- hash\n")
-      assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+      _out, err = capture_io do
+        assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+      end
+      assert_equal "", err,
+                   "a parseable non-Hash .lock must not trigger the corrupt-lock warn"
+
+      # Malformed YAML → rescue path, must emit warn so the degraded
+      # classification ("no lock" despite something being on disk) is
+      # observable in operator output.
       File.write(File.join(dir, ".lock"), "[")
-      assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+      _out, err = capture_io do
+        assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+      end
+      assert_includes err, "hive: status: failed to read .lock"
+      assert_includes err, "Psych"
     end
   end
 

@@ -224,6 +224,48 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  # If a write between the scan success and the COMPLETE marker raises
+  # (ENOSPC, EROFS, SIGTERM mid-write), pr.md must NOT be left with a
+  # terminal :complete marker — otherwise the open-pr stage looks done
+  # on disk while task.md / artifact.md are missing, and the user
+  # advancing the folder will cascade exactly the way the merged-recovery
+  # path was designed to prevent.
+  def test_merged_recovery_leaves_pr_md_non_terminal_when_downstream_markers_fail
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_tmp_git_repo do |worktree|
+        head_oid = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+        write_pointer(task, worktree)
+        merged = {
+          "url" => "https://example.com/pr/200",
+          "number" => 200,
+          "state" => "MERGED",
+          "isDraft" => false,
+          "headRefOid" => head_oid
+        }
+        clean_scan = Scan.new(fetch_failed: false, fetch_error: nil, hits: [])
+
+        with_basic_open_pr_run_stubs(merged_pr: merged, scan: clean_scan) do
+          with_replaced_singleton_method(Hive::Stages::OpenPr, :write_merged_downstream_markers, ->(_t) { raise Errno::ENOSPC, "simulated disk full" }) do
+            assert_raises(Errno::ENOSPC) { Hive::Stages::OpenPr.run!(task, cfg) }
+
+            marker = Hive::Markers.current(task.state_file)
+            refute_equal :complete, marker.name,
+                         "pr.md must NOT carry a terminal :complete marker after a downstream-markers write fails"
+            refute File.exist?(File.join(task.folder, "task.md")),
+                   "task.md should not exist when downstream-markers helper raised before writing it"
+            refute File.exist?(File.join(task.folder, "artifact.md")),
+                   "artifact.md should not exist when downstream-markers helper raised before writing it"
+            refute File.exist?(File.join(task.folder, "summary.md")),
+                   "summary.md should not exist when downstream-markers helper raised"
+            assert_includes File.read(task.state_file), "PR already merged for this task.",
+                            "pr.md body should still be written so a re-run finds expected content"
+          end
+        end
+      end
+    end
+  end
+
   def test_run_ignores_merged_pr_when_head_oid_does_not_match_local_head
     with_tmp_dir do |root|
       task = make_task(root)

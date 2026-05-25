@@ -46,14 +46,44 @@ module Hive
 
         merged = head_oid && prs.find { |pr| pr["state"] == "MERGED" && pr["headRefOid"].to_s == head_oid.to_s }
         if merged
-          write_merged_pr_md(task, merged)
-          marker = Hive::Markers.current(task.state_file)
-          scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
-                                              pr_url: marker.attrs["pr_url"],
-                                              cfg: cfg)
-          return handle_secret_scan_result(task, marker.attrs["pr_url"], scan, "open_pr") if scan.fetch_failed || scan.hits.any?
+          pr_url = merged["url"].to_s
+          if pr_url.empty?
+            warn "hive: `gh pr list` returned a merged PR with an empty url; refusing to recover"
+            exit 1
+          end
 
+          # Write pr.md body upfront WITHOUT a terminal marker so
+          # `scan_pr_for_secrets` (which `File.read`s state_file) has content
+          # to scan. The COMPLETE marker is the commit point below — keeping
+          # it last means any mid-sequence failure leaves pr.md non-terminal
+          # and recovery re-enters on the next `hive run` instead of
+          # advancing into a half-written cascade.
+          File.write(task.state_file, pr_md_body(
+            pr_url: pr_url,
+            pr_number: merged["number"],
+            summary_text: "PR already merged for this task.",
+            task_folder: task.folder,
+            marker_text: ""
+          ))
+
+          scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
+                                              pr_url: pr_url,
+                                              cfg: cfg)
+          return handle_secret_scan_result(task, pr_url, scan, "open_pr") if scan.fetch_failed || scan.hits.any?
+
+          # Downstream short-circuit markers BEFORE the open-pr terminal
+          # marker. They only become observable once the folder is advanced
+          # past 5-open-pr, so writing them first is safe — and if either
+          # File.write raises, pr.md is still non-terminal so the next run
+          # re-enters the recovery path instead of advancing.
           write_merged_downstream_markers(task)
+
+          # Commit point. Once this terminal marker lands, the open-pr stage
+          # is "done" from the state-machine's perspective. write_merged_summary
+          # is documentation only; its failure does not corrupt state.
+          Hive::Markers.set(task.state_file, :complete,
+                            pr_url: pr_url, is_draft: "false", merged: "true")
+
           write_merged_summary(task, merged)
           return { commit: "open_pr_already_merged", status: :complete }
         end
@@ -255,26 +285,12 @@ module Hive
         ))
       end
 
-      def write_merged_pr_md(task, existing)
-        pr_url = existing["url"].to_s
-        pr_number = existing["number"]
-        if pr_url.empty?
-          warn "hive: `gh pr list` returned a merged PR with an empty url; refusing to write pr.md"
-          exit 1
-        end
-        File.write(task.state_file, pr_md_body(
-          pr_url: pr_url,
-          pr_number: pr_number,
-          summary_text: "PR already merged for this task.",
-          task_folder: task.folder,
-          marker_text: "<!-- COMPLETE pr_url=#{pr_url} is_draft=false merged=true -->"
-        ))
-      end
-
-      # Shared body for pr.md emitted by both the already-open and merged-
-      # recovery arms. Same frontmatter + Summary + Linked task layout; the
-      # caller supplies the human-readable summary text and the trailing
-      # marker. Extracted in fix #149 so the two heredocs cannot drift.
+      # Shared body for pr.md. The already-open arm passes a baked-in
+      # COMPLETE marker via `marker_text:`; the merged-recovery arm passes
+      # an empty `marker_text:` and commits the COMPLETE marker via
+      # `Hive::Markers.set` after downstream short-circuit markers land
+      # (so a partial failure leaves pr.md non-terminal — see the
+      # commit-point comment in `run!`).
       def pr_md_body(pr_url:, pr_number:, summary_text:, task_folder:, marker_text:)
         <<~MD
           ---

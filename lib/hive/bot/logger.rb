@@ -29,6 +29,9 @@ module Hive
         send_failure
         callback_malformed
         pid_file_corrupted
+        unknown_stage_label
+        alert_store_corrupt
+        deprecated_config
         fatal
       ].freeze
 

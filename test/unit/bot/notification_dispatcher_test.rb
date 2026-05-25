@@ -207,7 +207,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal [ 12345, 67890 ], telegram.messages.map { |msg| msg[:chat_id] }
   end
 
-  def test_partial_multi_chat_failure_does_not_mark_fingerprint_delivered
+  def test_partial_multi_chat_failure_retries_only_undelivered_chats
     flaky = PartiallyFlakyTelegram.new(fail_chat_id: 67890)
     multi = Hive::Bot::NotificationDispatcher.new(
       telegram: flaky,
@@ -219,8 +219,8 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     multi.process_rows([ row ])
     multi.process_rows([ row ])
 
-    assert_equal [ 12345, 67890, 12345, 67890 ], flaky.calls
-    assert_equal [ 12345, 12345, 67890 ], flaky.messages.map { |msg| msg[:chat_id] }
+    assert_equal [ 12345, 67890, 67890 ], flaky.calls
+    assert_equal [ 12345, 67890 ], flaky.messages.map { |msg| msg[:chat_id] }
     assert_equal :notification_sent, logger.events.last.first
   end
 

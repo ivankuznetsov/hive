@@ -153,6 +153,40 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_add_persists_delivered_to_chat_ids
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      Hive::Bot::AlertStore.new(path: path).add(
+        "fp1", row, Time.utc(2026, 5, 25, 10, 0, 0), delivered_to: [ 12345, 67890 ]
+      )
+
+      reopened = Hive::Bot::AlertStore.new(path: path)
+      assert_equal [ "12345", "67890" ], reopened.entry("fp1").delivered_to
+    end
+  end
+
+  def test_record_delivery_appends_new_chat_ids_only
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      store.add("fp1", row, Time.utc(2026, 5, 25, 10, 0, 0), delivered_to: [ 12345 ])
+
+      assert store.record_delivery("fp1", [ 67890 ]),
+             "record_delivery must return true when chat is newly added"
+      assert_equal [ "12345", "67890" ], store.entry("fp1").delivered_to
+
+      refute store.record_delivery("fp1", [ 12345, 67890 ]),
+             "record_delivery must return false when all chats already delivered"
+    end
+  end
+
+  def test_record_delivery_on_missing_fingerprint_returns_false
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+
+      refute store.record_delivery("missing", [ 12345 ])
+    end
+  end
+
   def test_concurrent_add_and_remove_smoke
     with_tmp_dir do |dir|
       store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))

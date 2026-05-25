@@ -7,7 +7,7 @@ module Hive
     class AlertStore
       SCHEMA_VERSION = 1
 
-      Entry = Data.define(:first_seen_at, :reminded_at, :row)
+      Entry = Data.define(:first_seen_at, :reminded_at, :delivered_to, :row)
       RowSnapshot = Data.define(:project, :slug, :stage, :marker, :attrs, :action) do
         def initialize(project:, slug:, stage:, marker:, attrs: {}, action: nil)
           super
@@ -28,14 +28,30 @@ module Hive
         synchronize { entries.keys }.each { |fingerprint| yield fingerprint }
       end
 
-      def add(fingerprint, row, now)
+      def add(fingerprint, row, now, delivered_to: [])
         synchronize do
           entries[fingerprint] = {
             "first_seen_at" => timestamp(now),
             "reminded_at" => nil,
+            "delivered_to" => normalize_chat_ids(delivered_to),
             "row" => serialize_row(row)
           }
           persist_locked!
+        end
+      end
+
+      def record_delivery(fingerprint, chat_ids)
+        synchronize do
+          entry = entries[fingerprint]
+          return false unless entry
+
+          existing = Array(entry["delivered_to"]).map(&:to_s)
+          additions = normalize_chat_ids(chat_ids) - existing
+          return false if additions.empty?
+
+          entry["delivered_to"] = existing + additions
+          persist_locked!
+          true
         end
       end
 
@@ -165,8 +181,13 @@ module Hive
         Entry.new(
           first_seen_at: parse_time(raw["first_seen_at"]),
           reminded_at: parse_time(raw["reminded_at"]),
+          delivered_to: Array(raw["delivered_to"]).map(&:to_s),
           row: row_from_raw(raw["row"])
         )
+      end
+
+      def normalize_chat_ids(chat_ids)
+        Array(chat_ids).map(&:to_s).uniq
       end
 
       def row_from_raw(raw)

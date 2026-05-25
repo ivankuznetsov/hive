@@ -24,7 +24,7 @@ class HiveBotScenarioQueueTest < Minitest::Test
     assert_match(/4 active tasks/, text)
     assert_match(/Brainstorm a… — Brainstorm/, text)
     assert_match(/Review a… — Brainstorm/, text)
-    assert_match(/Pr a… — Brainstorm/, text)
+    assert_match(/PR a… — Brainstorm/, text)
     refute_match(/hive\/brainstorm-a/, text)
     refute_match(/archived-a/, text)
 

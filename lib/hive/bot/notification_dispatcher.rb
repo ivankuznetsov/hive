@@ -51,7 +51,7 @@ module Hive
           if row && NotificationBuilders.recovery?(row)
             if current_recovery_for_same_row?(current, row)
               @alert_store.remove(fingerprint)
-            elsif send_notification(recovered_message(row))
+            elsif send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
               log_notification_sent(row, recovered: true)
             end
@@ -66,12 +66,19 @@ module Hive
           row = payload.fetch(:row)
           entry = @alert_store.entry(fingerprint)
           if entry.nil?
-            next unless send_notification(payload.fetch(:notification))
+            delivered = send_notification(payload.fetch(:notification))
+            next if delivered.empty?
 
-            @alert_store.add(fingerprint, row, @now.call)
+            @alert_store.add(fingerprint, row, @now.call, delivered_to: delivered)
+            log_notification_sent(row)
+          elsif (pending = pending_chat_ids(entry)).any?
+            newly_delivered = send_notification(payload.fetch(:notification), to: pending)
+            next if newly_delivered.empty?
+
+            @alert_store.record_delivery(fingerprint, newly_delivered)
             log_notification_sent(row)
           elsif reminder_due?(entry, row)
-            next unless send_notification(reminder_notification(row))
+            next if send_notification(reminder_notification(row)).empty?
 
             @alert_store.mark_reminded(fingerprint, @now.call)
             log_notification_sent(row, reminder: true)
@@ -83,19 +90,30 @@ module Hive
         end
       end
 
-      def send_notification(notification)
-        attempted = false
-        all_sent = true
-        chat_ids.each do |chat_id|
-          attempted = true
+      def pending_chat_ids(entry)
+        delivered = Array(entry.delivered_to).map(&:to_s)
+        chat_ids.reject { |c| delivered.include?(c.to_s) }
+      end
+
+      def send_notification(notification, to: nil)
+        targets = filter_chats(to)
+        succeeded = []
+        targets.each do |chat_id|
           @telegram.send_message(chat_id: chat_id, text: notification.text,
                                  reply_markup: notification.keyboard)
+          succeeded << chat_id
         rescue StandardError => e
-          all_sent = false
           @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
         end
 
-        attempted && all_sent
+        succeeded
+      end
+
+      def filter_chats(to)
+        return chat_ids if to.nil?
+
+        allow = Array(to).map(&:to_s)
+        chat_ids.select { |c| allow.include?(c.to_s) }
       end
 
       def log_notification_sent(row, reminder: false, recovered: false)

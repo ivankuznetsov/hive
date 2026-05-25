@@ -229,6 +229,24 @@ module Hive
         @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug], stage: reset[:stage])
       end
 
+      def project_filter_miss_text(project, rows)
+        registered = registered_project_names
+        active = rows.map { |row| row.project.to_s }.uniq
+        if registered.include?(project.to_s) || active.include?(project.to_s)
+          "No tasks for project #{project}."
+        else
+          known = (registered + active).uniq.sort
+          known_list = known.empty? ? "(none registered)" : known.join(", ")
+          "Unknown project #{project}. Known: #{known_list}."
+        end
+      end
+
+      def registered_project_names
+        Array(Hive::Config.registered_projects).map { |entry| entry.is_a?(Hash) ? entry["name"].to_s : entry.to_s }
+      rescue StandardError
+        []
+      end
+
       def clear_inline_keyboard(update)
         return unless update.respond_to?(:message_id) && update.message_id && update.chat_id
 
@@ -261,13 +279,22 @@ module Hive
 
       def execute_dispatch(result, update)
         if status_command?(result.command_argv)
-          rows = @status_watcher.fetch.rows
+          fetch_result = @status_watcher.fetch
+          unless fetch_result.ok
+            error = fetch_result.error.to_s.strip
+            error = "unknown error" if error.empty?
+            safe_send_message(chat_id: update.chat_id, text: "hive status unavailable: #{error}")
+            return nil
+          end
+
+          rows = fetch_result.rows
           if result.project && !result.project.to_s.empty?
-            rows = rows.select { |row| row.project == result.project }
-            if rows.empty?
-              safe_send_message(chat_id: update.chat_id, text: "No tasks for project #{result.project}.")
+            filtered = rows.select { |row| row.project == result.project }
+            if filtered.empty?
+              safe_send_message(chat_id: update.chat_id, text: project_filter_miss_text(result.project, rows))
               return nil
             end
+            rows = filtered
           end
           if result.slug
             safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))

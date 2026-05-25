@@ -7,7 +7,7 @@ class HiveBotSupervisorTest < Minitest::Test
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :error, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
@@ -298,7 +298,7 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil @telegram.messages.last.fetch(:reply_markup)
   end
 
-  def test_execute_dispatch_reports_no_tasks_for_filtered_project
+  def test_execute_dispatch_reports_unknown_project_with_known_list
     @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
     result = FakeRouter::Result.new(
       action: :dispatch_then_reply,
@@ -308,7 +308,37 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
 
-    assert_equal "No tasks for project missing.", @telegram.messages.last.fetch(:text)
+    text = @telegram.messages.last.fetch(:text)
+    assert_match(/Unknown project missing/, text)
+    assert_match(/hive/, text)
+  end
+
+  def test_execute_dispatch_reports_no_tasks_for_known_but_empty_project
+    with_registered_projects([ { "name" => "hive" }, { "name" => "other" } ]) do
+      @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
+      result = FakeRouter::Result.new(
+        action: :dispatch_then_reply,
+        command_argv: [ "hive", "status", "--json", "--project", "other" ],
+        project: "other"
+      )
+
+      @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+      assert_equal "No tasks for project other.", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_dispatch_surfaces_status_fetch_failure
+    @status_watcher.result = StatusResult.new(ok: false, rows: [], error: "envelope ok=false: pipeline timeout")
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ]
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    assert_equal "hive status unavailable: envelope ok=false: pipeline timeout",
+                 @telegram.messages.last.fetch(:text)
   end
 
   def test_execute_dispatch_renders_status_details_when_slug_is_present
@@ -911,6 +941,14 @@ class HiveBotSupervisorTest < Minitest::Test
     with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
       assert_equal 1, @supervisor.send(:next_unanswered_question_n, path)
     end
+  end
+
+  def with_registered_projects(projects)
+    original = Hive::Config.method(:registered_projects)
+    Hive::Config.define_singleton_method(:registered_projects) { projects }
+    yield
+  ensure
+    Hive::Config.define_singleton_method(:registered_projects, original)
   end
 
   def test_interruptible_sleep_sleeps_until_flag_changes

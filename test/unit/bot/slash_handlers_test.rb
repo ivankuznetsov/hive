@@ -32,6 +32,14 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "hive", result.project
   end
 
+  def test_status_preserves_multi_word_project_names
+    result = @handlers.status(Update.new(text: "/status my project"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "status", "--json", "--project", "my project" ], result.command_argv
+    assert_equal "my project", result.project
+  end
+
   def test_help_documents_project_status_argument
     result = @handlers.help(Update.new(text: "/help"))
 

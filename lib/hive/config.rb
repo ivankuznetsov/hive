@@ -175,7 +175,11 @@ module Hive
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
         "notification_dedupe_window_sec" => 300,
-        "alert_state_file" => "~/Dev/hive/.bot.alert_state.json",
+        # alert_state_file is intentionally omitted from DEFAULTS — the
+        # path is state_home-derived and resolved at runtime by
+        # `global_bot_defaults` / `Config.load` so a HIVE_HOME / XDG
+        # override propagates correctly. A hardcoded developer-specific
+        # path here would be misleading for direct DEFAULTS readers.
         "recovery_reminder_window_sec" => 28_800,
         "conversation_ttl_sec" => 3600,
         "codex_budget_usd" => 1,
@@ -255,8 +259,23 @@ module Hive
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
+      inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
+    end
+
+    # DEFAULTS["bot"] intentionally omits state_home-derived path keys
+    # so direct readers cannot get a stale developer-specific path. We
+    # fill those in here after merge so the consumer-facing cfg always
+    # carries the same path that `global_bot_defaults` would resolve.
+    def inject_bot_runtime_path_defaults!(cfg)
+      # Skip when "bot" is not a Hash — `validate!` runs next and turns
+      # the malformed scalar into a proper ConfigError. Injecting first
+      # would crash with IndexError on String#[]= and lose that signal.
+      bot = cfg["bot"]
+      return unless bot.is_a?(Hash)
+
+      bot["alert_state_file"] ||= File.join(Hive::Paths.state_home, ".bot.alert_state.json")
     end
 
     def claude_mode(cfg)

@@ -107,6 +107,10 @@ module Hive
       def reminder_notification(row)
         notification = NotificationBuilders.recovery(row)
         lines = notification.text.lines(chomp: true)
+        unless lines[0].to_s.start_with?("⚠ ")
+          raise "reminder_notification expected NotificationBuilders.recovery to emit a leading \"⚠ \" headline; " \
+                "got #{lines[0].inspect} — update reminder_notification together with the recovery builder."
+        end
         lines[0] = "⚠ Still stuck (#{reminder_window_label}) — \"#{TitleFormatter.title_from_slug(row.slug)}\" — " \
                    "#{TitleFormatter.stage_label(row.stage, logger: @logger)}"
         NotificationBuilders::Notification.new(text: lines.join("\n"), keyboard: notification.keyboard)

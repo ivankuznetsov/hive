@@ -1584,7 +1584,7 @@ class ConfigTest < Minitest::Test
       assert_equal 30, cfg.dig("bot", "poll_interval_sec")
       assert_equal 25, cfg.dig("bot", "long_poll_timeout_sec")
       assert_equal 300, cfg.dig("bot", "notification_dedupe_window_sec")
-      assert_equal File.expand_path("~/Dev/hive/.bot.alert_state.json"), cfg.dig("bot", "alert_state_file")
+      assert_equal File.join(Hive::Paths.state_home, ".bot.alert_state.json"), cfg.dig("bot", "alert_state_file")
       assert_equal 28_800, cfg.dig("bot", "recovery_reminder_window_sec")
       assert_equal 3600, cfg.dig("bot", "conversation_ttl_sec")
       assert_equal 1, cfg.dig("bot", "codex_budget_usd")

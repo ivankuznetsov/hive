@@ -25,7 +25,7 @@ class ConfigBotIntegrationTest < Minitest::Test
         with_env("HOME" => home) do
           cfg = Hive::Config.load(project)
 
-          assert_equal File.join(home, "Dev", "hive", ".bot.alert_state.json"),
+          assert_equal File.join(Hive::Paths.state_home, ".bot.alert_state.json"),
                        cfg.dig("bot", "alert_state_file")
           assert_equal 28_800, cfg.dig("bot", "recovery_reminder_window_sec")
         end

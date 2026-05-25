@@ -1996,3 +1996,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[stages/review]]
+
+## [2026-05-25T18:55:00Z] review/daemon — longer review timeout, lower daemon concurrency
+
+**Action:** Changed the default per-reviewer timeout from 600 seconds to 3600 seconds in both the reviewer adapter fallback and fresh-project reviewer template, and lowered daemon default parallel task caps from 5 to 3 globally/per project.
+
+**Refreshed pages:**
+- [[modules/reviewers]]
+- [[commands/daemon]]
+- [[operating]]

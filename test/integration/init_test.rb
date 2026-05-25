@@ -203,6 +203,7 @@ class InitTest < Minitest::Test
         assert_kind_of Array, reviewers
         names = reviewers.map { |r| r["name"] }.sort
         assert_equal %w[claude-ce-code-review codex-ce-code-review pr-review-toolkit], names
+        assert_equal [ 3600 ], reviewers.map { |r| r["timeout_sec"] }.uniq
 
         # Each entry references a registered AgentProfile.
         reviewers.each do |entry|

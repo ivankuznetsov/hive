@@ -1088,6 +1088,23 @@ module Hive
            "alert lifecycle now uses bot.alert_state_file and bot.recovery_reminder_window_sec"
     end
 
+    # Returns deprecated bot keys whose value differs from default so callers
+    # (e.g. the bot supervisor) can emit structured :deprecated_config events.
+    def deprecated_bot_keys(bot)
+      return [] unless bot.is_a?(Hash)
+
+      result = []
+      value = bot["notification_dedupe_window_sec"]
+      default = DEFAULTS.dig("bot", "notification_dedupe_window_sec")
+      unless value.nil? || value == default
+        result << {
+          key: "bot.notification_dedupe_window_sec",
+          replacement: "bot.alert_state_file and bot.recovery_reminder_window_sec"
+        }
+      end
+      result
+    end
+
     def validate_bot_paths!(bot, source_path)
       BOT_PATH_KEYS.each do |key|
         value = bot[key]

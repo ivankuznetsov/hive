@@ -15,7 +15,7 @@ module Hive
         end
 
         def status(update)
-          project = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          project = update.text.to_s.split(/\s+/)[1].to_s.strip
           argv = [ "hive", "status", "--json" ]
           argv += [ "--project", project ] unless project.empty?
           @result_class.new(action: :dispatch_then_reply,

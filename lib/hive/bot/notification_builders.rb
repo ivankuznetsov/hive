@@ -146,42 +146,6 @@ module Hive
         end
       end
 
-      def open_laptop_only_recovery?(row)
-        attrs = row.attrs.to_h.transform_keys(&:to_s)
-        diagnostic_manual_fix?(row) ||
-          stale_agent_working_pending_heal?(row) ||
-          row.marker.to_s == "review_error" &&
-            attrs["phase"] == "fix" &&
-            attrs["reason"] == "fix_tampered"
-      end
-
-      # Stale AGENT_WORKING that TaskAction has reclassified as :error
-      # but the daemon hasn't yet rewritten on disk. Rendering "Clear
-      # and retry" here would dispatch `hive markers clear --name
-      # AGENT_WORKING`, which is not in the markers-clear allowlist
-      # (lib/hive/commands/markers.rb#ALLOWED_NAMES) and exits 4. Hide
-      # the button; the daemon heals within one tick anyway, after
-      # which the normal ERROR-recovery affordance fires.
-      def stale_agent_working_pending_heal?(row)
-        row.marker.to_s == "agent_working" && row.action.to_s == "error"
-      end
-
-      def markerless_retry_recovery?(row)
-        row.marker.to_s == "none" && diagnostic_suggested_action(row)["kind"].to_s == "retry"
-      end
-
-      def diagnostic_manual_fix?(row)
-        diagnostic_suggested_action(row)["kind"].to_s == "manual_fix"
-      end
-
-      def diagnostic_suggested_action(row)
-        diagnostic = row.diagnostic
-        return {} unless diagnostic.is_a?(Hash)
-
-        suggested = diagnostic["suggested_next_action"]
-        suggested.is_a?(Hash) ? suggested : {}
-      end
-
       def header(row)
         "#{row.project}/#{row.slug} (#{row.stage})"
       end
@@ -194,10 +158,6 @@ module Hive
 
       def details_callback(row)
         callback_with_stage("details", row)
-      end
-
-      def refresh_diagnose_callback(row)
-        callback_with_stage("refresh_diagnose", row)
       end
 
       def callback_with_stage(prefix, row)

@@ -35,7 +35,7 @@ hive bot tail
 
 | Slash command | Behavior |
 |--------------|----------|
-| `/status [project]` | Renders actionable rows from `hive status --json` as `Title... — Stage`; when a project name is supplied, filters to that project. |
+| `/status [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |

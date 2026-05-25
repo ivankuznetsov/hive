@@ -45,7 +45,10 @@ module Hive
           entry = @alert_store.entry(fingerprint)
           row = entry&.row
           if row && NotificationBuilders.recovery?(row)
-            @alert_store.remove(fingerprint) if send_notification(recovered_message(row))
+            if send_notification(recovered_message(row))
+              @alert_store.remove(fingerprint)
+              log_notification_sent(row, recovered: true)
+            end
           else
             @alert_store.remove(fingerprint)
           end
@@ -87,10 +90,10 @@ module Hive
         any_sent
       end
 
-      def log_notification_sent(row, reminder: false)
+      def log_notification_sent(row, reminder: false, recovered: false)
         @logger.event(:notification_sent, project: row.project, slug: row.slug,
                                           marker: row.marker, action: row.action,
-                                          reminder: reminder)
+                                          reminder: reminder, recovered: recovered)
       end
 
       def reminder_due?(entry, row)
@@ -104,17 +107,26 @@ module Hive
       def reminder_notification(row)
         notification = NotificationBuilders.recovery(row)
         lines = notification.text.lines(chomp: true)
-        lines[0] = "⚠ Still stuck (8 h) — \"#{TitleFormatter.title_from_slug(row.slug)}\" — " \
-                   "#{TitleFormatter.stage_label(row.stage)}"
+        lines[0] = "⚠ Still stuck (#{reminder_window_label}) — \"#{TitleFormatter.title_from_slug(row.slug)}\" — " \
+                   "#{TitleFormatter.stage_label(row.stage, logger: @logger)}"
         NotificationBuilders::Notification.new(text: lines.join("\n"), keyboard: notification.keyboard)
       end
 
       def recovered_message(row)
         NotificationBuilders::Notification.new(
           text: "✅ Recovered: \"#{TitleFormatter.title_from_slug(row.slug)}\" — " \
-                "#{TitleFormatter.stage_label(row.stage)}",
+                "#{TitleFormatter.stage_label(row.stage, logger: @logger)}",
           keyboard: nil
         )
+      end
+
+      def reminder_window_label
+        seconds = recovery_reminder_window.to_i
+        hours = seconds / 3600
+        return "#{hours} h" if hours >= 1 && seconds % 3600 == 0
+
+        minutes = (seconds / 60.0).round
+        "#{minutes} min"
       end
 
       def suppress_ready_action?(row)

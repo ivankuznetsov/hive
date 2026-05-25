@@ -188,6 +188,10 @@ module Hive
           }[stage]
         end
 
+        # 9-done returns an empty command list (no retry verb), and AGENT_WORKING
+        # markers skip `hive markers clear` because that name is outside the clear
+        # allowlist (markers.rb#ALLOWED_NAMES) and would exit 4. Both branches
+        # intentionally diverge from the pre-U7 `clear_and_retry` path.
         def retry_commands(project:, slug:, stage:, marker:)
           verb = retry_verb_for_stage(stage)
           return [] unless verb

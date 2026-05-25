@@ -51,6 +51,7 @@ module Hive
         last_seen = read_last_seen_update_id
         @next_update_id = last_seen ? last_seen + 1 : nil
         @started_at = Time.now
+        emit_deprecated_config_events!
       end
 
       def run_forever
@@ -608,11 +609,18 @@ module Hive
         )
         @conversation_store.update_ttl(@config.fetch("conversation_ttl_sec")) if @conversation_store.respond_to?(:update_ttl)
         @logger.event(:config_reloaded)
+        emit_deprecated_config_events!
         @reload = false
       rescue Hive::ConfigError => e
         @logger.event(:fatal, message: "config reload failed: #{e.message}",
                               keeping_previous: true)
         @reload = false
+      end
+
+      def emit_deprecated_config_events!
+        Hive::Config.deprecated_bot_keys(@config).each do |entry|
+          @logger.event(:deprecated_config, key: entry[:key], replacement: entry[:replacement])
+        end
       end
 
       def install_signal_handlers!

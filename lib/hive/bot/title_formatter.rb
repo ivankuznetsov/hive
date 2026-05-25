@@ -1,3 +1,5 @@
+require "monitor"
+
 module Hive
   module Bot
     module TitleFormatter
@@ -15,6 +17,8 @@ module Hive
 
       SLUG_SUFFIX = /-\d{6}-[a-f0-9]{4,}\z/
       TITLE_LIMIT = 60
+      ACRONYMS = %w[PR CI CD DB UI UX API URL HTTP].freeze
+      UNKNOWN_STAGE_LABELS_LOCK = Monitor.new
 
       module_function
 
@@ -23,6 +27,7 @@ module Hive
         sentence = words.empty? ? "Task" : words.downcase
         sentence = sentence[0].upcase + sentence[1..].to_s
         sentence = sentence[0, TITLE_LIMIT] if sentence.length > TITLE_LIMIT
+        sentence = preserve_acronyms(sentence)
         "#{sentence}…"
       end
 
@@ -38,10 +43,21 @@ module Hive
       end
 
       def log_unknown_stage_once(key, logger)
-        return unless logger && !unknown_stage_labels.key?(key)
+        return unless logger
 
-        unknown_stage_labels[key] = true
-        logger.event(:unknown_stage_label, stage: key)
+        UNKNOWN_STAGE_LABELS_LOCK.synchronize do
+          return if unknown_stage_labels.key?(key)
+
+          unknown_stage_labels[key] = true
+          logger.event(:unknown_stage_label, stage: key)
+        end
+      end
+
+      def preserve_acronyms(sentence)
+        ACRONYMS.each do |acronym|
+          sentence = sentence.gsub(/\b#{Regexp.escape(acronym.downcase)}\b/, acronym)
+        end
+        sentence
       end
 
       def unknown_stage_labels

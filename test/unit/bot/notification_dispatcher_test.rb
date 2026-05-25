@@ -238,13 +238,39 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     d.process_rows([ row ])
 
     assert_empty flaky_telegram.messages
-    assert_equal :send_failure, logger.events.last.first
-    assert_equal "IOError", logger.events.last.last[:error_class]
+    assert_equal :send_failure, logger.events.map(&:first).find { |e| e == :send_failure }
+    failure_event = logger.events.find { |e| e.first == :send_failure }
+    assert_equal "IOError", failure_event.last[:error_class]
 
+    @clock += 60
     d.process_rows([ row ])
 
     assert_equal 1, flaky_telegram.messages.size
     assert_equal :notification_sent, logger.events.last.first
+  end
+
+  def test_send_failure_applies_exponential_backoff_skipping_subsequent_ticks
+    flaky_telegram = AlwaysFailingTelegram.new
+    d = dispatcher(telegram: flaky_telegram)
+
+    d.process_rows([ row ])
+    assert_equal 1, flaky_telegram.calls, "first tick must attempt one send"
+
+    # Immediately retry — backoff is 60s, should skip.
+    d.process_rows([ row ])
+    assert_equal 1, flaky_telegram.calls, "second tick within backoff window must skip the send"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_backoff },
+           "skipped tick must emit :notification_skipped_backoff")
+
+    # Advance past first backoff (60s) — try again, still fails, schedules 120s backoff.
+    @clock += 61
+    d.process_rows([ row ])
+    assert_equal 2, flaky_telegram.calls
+
+    # 60s later, still within 120s backoff window — skip.
+    @clock += 60
+    d.process_rows([ row ])
+    assert_equal 2, flaky_telegram.calls
   end
 
   def test_ready_action_uses_config_fallback_when_no_daemon_probe
@@ -321,6 +347,19 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       end
 
       @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
+    end
+  end
+
+  class AlwaysFailingTelegram
+    attr_reader :calls
+
+    def initialize
+      @calls = 0
+    end
+
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
+      @calls += 1
+      raise IOError, "delivery failed"
     end
   end
 

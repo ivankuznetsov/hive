@@ -187,6 +187,60 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_record_send_failure_sets_exponential_backoff
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      store.add("fp1", row, now)
+
+      store.record_send_failure("fp1", now)
+      assert_equal 1, store.entry("fp1").consecutive_failures
+      assert_equal now + 60, store.entry("fp1").next_attempt_after
+
+      store.record_send_failure("fp1", now)
+      assert_equal 2, store.entry("fp1").consecutive_failures
+      assert_equal now + 120, store.entry("fp1").next_attempt_after
+
+      4.times { store.record_send_failure("fp1", now) }
+      assert_equal 6, store.entry("fp1").consecutive_failures
+      assert_equal now + 1800, store.entry("fp1").next_attempt_after, "backoff must cap at 1800s"
+    end
+  end
+
+  def test_record_send_success_resets_failures_and_backoff
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      store.add("fp1", row, now)
+      store.record_send_failure("fp1", now)
+      assert_equal 1, store.entry("fp1").consecutive_failures
+
+      assert store.record_send_success("fp1"),
+             "record_send_success must return true when state was reset"
+      assert_equal 0, store.entry("fp1").consecutive_failures
+      assert_nil store.entry("fp1").next_attempt_after
+
+      refute store.record_send_success("fp1"),
+             "record_send_success must return false when there is nothing to reset"
+    end
+  end
+
+  def test_record_delivery_resets_failures_and_backoff
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      store.add("fp1", row, now, delivered_to: [ 12345 ])
+      store.record_send_failure("fp1", now)
+      assert_equal 1, store.entry("fp1").consecutive_failures
+
+      store.record_delivery("fp1", [ 67890 ])
+
+      assert_equal 0, store.entry("fp1").consecutive_failures,
+                   "successful delivery must reset the failure counter"
+      assert_nil store.entry("fp1").next_attempt_after
+    end
+  end
+
   def test_concurrent_add_and_remove_smoke
     with_tmp_dir do |dir|
       store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))

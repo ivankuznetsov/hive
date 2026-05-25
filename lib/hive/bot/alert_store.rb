@@ -7,7 +7,8 @@ module Hive
     class AlertStore
       SCHEMA_VERSION = 1
 
-      Entry = Data.define(:first_seen_at, :reminded_at, :delivered_to, :row)
+      Entry = Data.define(:first_seen_at, :reminded_at, :delivered_to,
+                          :consecutive_failures, :next_attempt_after, :row)
       RowSnapshot = Data.define(:project, :slug, :stage, :marker, :attrs, :action) do
         def initialize(project:, slug:, stage:, marker:, attrs: {}, action: nil)
           super
@@ -34,6 +35,8 @@ module Hive
             "first_seen_at" => timestamp(now),
             "reminded_at" => nil,
             "delivered_to" => normalize_chat_ids(delivered_to),
+            "consecutive_failures" => 0,
+            "next_attempt_after" => nil,
             "row" => serialize_row(row)
           }
           persist_locked!
@@ -50,6 +53,35 @@ module Hive
           return false if additions.empty?
 
           entry["delivered_to"] = existing + additions
+          entry["consecutive_failures"] = 0
+          entry["next_attempt_after"] = nil
+          persist_locked!
+          true
+        end
+      end
+
+      def record_send_failure(fingerprint, now, backoff_for: nil)
+        synchronize do
+          entry = entries[fingerprint]
+          return false unless entry
+
+          failures = entry["consecutive_failures"].to_i + 1
+          delay = backoff_for || backoff_seconds(failures)
+          entry["consecutive_failures"] = failures
+          entry["next_attempt_after"] = timestamp(now + delay)
+          persist_locked!
+          true
+        end
+      end
+
+      def record_send_success(fingerprint)
+        synchronize do
+          entry = entries[fingerprint]
+          return false unless entry
+          return false if entry["consecutive_failures"].to_i.zero? && entry["next_attempt_after"].nil?
+
+          entry["consecutive_failures"] = 0
+          entry["next_attempt_after"] = nil
           persist_locked!
           true
         end
@@ -182,12 +214,24 @@ module Hive
           first_seen_at: parse_time(raw["first_seen_at"]),
           reminded_at: parse_time(raw["reminded_at"]),
           delivered_to: Array(raw["delivered_to"]).map(&:to_s),
+          consecutive_failures: raw["consecutive_failures"].to_i,
+          next_attempt_after: parse_time(raw["next_attempt_after"]),
           row: row_from_raw(raw["row"])
         )
       end
 
       def normalize_chat_ids(chat_ids)
         Array(chat_ids).map(&:to_s).uniq
+      end
+
+      BACKOFF_BASE_SEC = 60
+      BACKOFF_MAX_SEC = 1800
+
+      def backoff_seconds(failures)
+        # 1=60, 2=120, 3=240, 4=480, 5=960, 6=1800, cap 1800
+        exponent = [ failures - 1, 5 ].min
+        delay = BACKOFF_BASE_SEC * (2**exponent)
+        [ delay, BACKOFF_MAX_SEC ].min
       end
 
       def row_from_raw(raw)

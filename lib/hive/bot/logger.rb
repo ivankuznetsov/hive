@@ -16,6 +16,7 @@ module Hive
         update_rejected_unauthorized
         notification_sent
         notification_skipped_dedupe
+        notification_skipped_backoff
         dispatched_command
         command_completed
         codex_spawned

@@ -48,12 +48,20 @@ module Hive
 
           entry = @alert_store.entry(fingerprint)
           row = entry&.row
-          if row && NotificationBuilders.recovery?(row)
+          next if row.nil?
+
+          if NotificationBuilders.recovery?(row)
             if current_recovery_for_same_row?(current, row)
               @alert_store.remove(fingerprint)
-            elsif send_notification(recovered_message(row)).any?
+              next
+            end
+            next if backoff_active?(entry)
+
+            if send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
               log_notification_sent(row, recovered: true)
+            else
+              @alert_store.record_send_failure(fingerprint, @now.call)
             end
           else
             @alert_store.remove(fingerprint)
@@ -67,27 +75,48 @@ module Hive
           entry = @alert_store.entry(fingerprint)
           if entry.nil?
             delivered = send_notification(payload.fetch(:notification))
-            next if delivered.empty?
-
-            @alert_store.add(fingerprint, row, @now.call, delivered_to: delivered)
-            log_notification_sent(row)
+            if delivered.any?
+              @alert_store.add(fingerprint, row, @now.call, delivered_to: delivered)
+              log_notification_sent(row)
+            else
+              # Persist the entry with no delivered chats so the backoff
+              # window applies to subsequent ticks during the outage.
+              @alert_store.add(fingerprint, row, @now.call, delivered_to: [])
+              @alert_store.record_send_failure(fingerprint, @now.call)
+            end
+          elsif backoff_active?(entry)
+            @logger.event(:notification_skipped_backoff, project: row.project, slug: row.slug,
+                                                          marker: row.marker,
+                                                          consecutive_failures: entry.consecutive_failures.to_i)
           elsif (pending = pending_chat_ids(entry)).any?
             newly_delivered = send_notification(payload.fetch(:notification), to: pending)
-            next if newly_delivered.empty?
-
-            @alert_store.record_delivery(fingerprint, newly_delivered)
-            log_notification_sent(row)
+            if newly_delivered.any?
+              @alert_store.record_delivery(fingerprint, newly_delivered)
+              log_notification_sent(row)
+            else
+              @alert_store.record_send_failure(fingerprint, @now.call)
+            end
           elsif reminder_due?(entry, row)
-            next if send_notification(reminder_notification(row)).empty?
-
-            @alert_store.mark_reminded(fingerprint, @now.call)
-            log_notification_sent(row, reminder: true)
+            if send_notification(reminder_notification(row)).any?
+              @alert_store.mark_reminded(fingerprint, @now.call)
+              @alert_store.record_send_success(fingerprint)
+              log_notification_sent(row, reminder: true)
+            else
+              @alert_store.record_send_failure(fingerprint, @now.call)
+            end
           else
             @logger.event(:notification_skipped_dedupe, project: row.project,
                                                          slug: row.slug,
                                                          marker: row.marker)
           end
         end
+      end
+
+      def backoff_active?(entry)
+        next_attempt = entry.next_attempt_after
+        return false unless next_attempt
+
+        @now.call < next_attempt
       end
 
       def pending_chat_ids(entry)

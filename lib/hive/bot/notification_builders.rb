@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "hive"
+require "hive/bot/title_formatter"
 
 module Hive
   module Bot
@@ -44,7 +45,7 @@ module Hive
 
       def fingerprint(row)
         normalized_attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.marker, normalized_attrs ]))
+        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, normalized_attrs ]))
       end
 
       def recovery?(row)
@@ -120,45 +121,29 @@ module Hive
       end
 
       def recovery(row)
-        # The "Refresh diagnosis" button is the bot-side parity of the
-        # TUI's R keystroke: dispatches `hive status --diagnose <slug>
-        # --write --force --json` so the configured execute AgentProfile
-        # produces a fresh diagnostic verdict. Pairs with Show details
-        # (which just reads the current verdict). Resolves issue #91.
-        details_row = [
-          button("Show details", details_callback(row)),
-          button("Refresh diagnosis", refresh_diagnose_callback(row))
-        ]
-        keyboard =
-          if open_laptop_only_recovery?(row)
-            [
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              details_row
-            ]
-          elsif markerless_retry_recovery?(row)
-            [
-              [ button("Retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:NONE") ],
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              details_row
-            ]
-          else
-            [
-              [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              details_row
-            ]
-          end
-        # Append the bounded diagnostic summary so the operator sees the
-        # one-line "why is this red" without an extra round-trip through
-        # the Show-details callback. StatusWatcher::Row carries the
-        # diagnostic hash from `hive status --json`; nil when the row is
-        # green or the snapshot pre-dates the schema. See PR #84 review
-        # row 23.
-        text = header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}"
-        if row.diagnostic.is_a?(Hash) && !row.diagnostic["summary"].to_s.empty?
-          text += "\n\n#{row.diagnostic['summary']}"
+        Notification.new(
+          text: [
+            "⚠ #{TitleFormatter.stage_label(row.stage)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
+            cause_sentence_for(row),
+            "Tap Autofix to retry the stage cleanly."
+          ].join("\n"),
+          keyboard: [
+            [ button("🔧 Autofix", "autofix:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ]
+          ]
+        )
+      end
+
+      def cause_sentence_for(row)
+        case row.marker.to_s.downcase
+        when "review_error"
+          "The review agent crashed before it could finish."
+        when "execute_stale"
+          "The execute agent stalled before it could finish."
+        when "review_stale", "review_ci_stale"
+          "The review run stalled before it could finish."
+        else
+          "The agent crashed before it could finish."
         end
-        Notification.new(text: text, keyboard: keyboard)
       end
 
       def open_laptop_only_recovery?(row)

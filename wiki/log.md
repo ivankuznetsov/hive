@@ -1950,3 +1950,19 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[stages/artifacts]]
 - [[state-model]]
 - [[decisions]]
+
+## [2026-05-24T21:05:40Z] status — marker attrs and live task locks
+
+**Action:** Fixed status classification for two runtime edge cases: marker parsing now tolerates Git stderr attrs containing `>` such as `branch -> branch`, and status treats a live per-task `.lock` as `Agent running` even before a working marker is written. This prevents finalize errors from appearing as "Needs your input" and prevents pre-review rebase work from appearing as runnable review work.
+
+**Refreshed pages:**
+- [[modules/markers]]
+- [[modules/task_action]]
+- [[commands/status]]
+
+## [2026-05-25T07:34:24Z] tui — compact token footer
+
+**Action:** Updated the grid-mode token footer to show only `today`, `7d`, and `all`, with the `tokens` label at the end of the compact legend instead of the beginning. The full `T` token matrix still exposes `30d`.
+
+**Refreshed pages:**
+- [[token-usage]]

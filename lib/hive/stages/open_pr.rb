@@ -31,6 +31,19 @@ module Hive
           return { commit: "open_pr_already_open", status: :complete }
         end
 
+        merged = Hive::Gh.lookup_merged_pr(worktree_path, branch, cfg: cfg)
+        if merged
+          write_merged_pr_md(task, merged)
+          marker = Hive::Markers.current(task.state_file)
+          scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
+                                              pr_url: marker.attrs["pr_url"],
+                                              cfg: cfg)
+          return handle_secret_scan_result(task, marker.attrs["pr_url"], scan, "open_pr") if scan.fetch_failed || scan.hits.any?
+
+          write_merged_summary(task, merged)
+          return { commit: "open_pr_already_merged", status: :complete }
+        end
+
         Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
 
         prompt = render_prompt(task, worktree_path, branch)
@@ -225,6 +238,46 @@ module Hive
           #{task.folder}
 
           <!-- COMPLETE pr_url=#{pr_url} is_draft=#{is_draft}#{suffix} -->
+        MD
+      end
+
+      def write_merged_pr_md(task, existing)
+        pr_url = existing["url"].to_s
+        pr_number = existing["number"]
+        if pr_url.empty?
+          warn "hive: `gh pr list` returned a merged PR with an empty url; refusing to write pr.md"
+          exit 1
+        end
+        File.write(task.state_file, <<~MD)
+          ---
+          pr_url: #{pr_url}
+          pr_number: #{pr_number}
+          ---
+
+          ## Summary
+          PR already merged for this task.
+
+          ## Linked task
+          #{task.folder}
+
+          <!-- COMPLETE pr_url=#{pr_url} is_draft=false merged=true -->
+        MD
+      end
+
+      def write_merged_summary(task, existing)
+        pr_url = existing["url"].to_s
+        pr_number = existing["number"]
+        File.write(File.join(task.folder, "summary.md"), <<~MD)
+          ## Summary
+          PR ##{pr_number} was already merged before Hive finished the open-pr stage.
+
+          PR: #{pr_url}
+
+          ## Review
+          Hive recovered the task from a stale open-pr state after confirming the PR is merged on GitHub.
+
+          ## Open Escalations
+          None.
         MD
       end
 

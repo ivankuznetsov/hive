@@ -77,7 +77,7 @@ module Hive
     # The returned hash may omit `isDraft` on older/future gh JSON
     # shapes. Stage code treats a missing key as draft for forward
     # compatibility; only an explicit false means "already ready".
-    def lookup_existing_pr(worktree_path, branch, cfg: nil)
+    def lookup_prs_for_branch(worktree_path, branch, cfg: nil)
       # `gh -R` accepts a `owner/repo` slug but not a worktree path;
       # `--repo` likewise. `gh` resolves the remote from cwd's git
       # config, so route through chdir. Earlier passes flagged the
@@ -96,9 +96,17 @@ module Hive
       unless list.is_a?(Array)
         raise Hive::GhError, "`gh pr list` returned #{list.class} for branch #{branch}; expected Array"
       end
-      list.find { |p| p["state"] == "OPEN" }
+      list
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr list` returned unparseable JSON for branch #{branch}: #{e.message}"
+    end
+
+    def lookup_existing_pr(worktree_path, branch, cfg: nil)
+      lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
+    end
+
+    def lookup_merged_pr(worktree_path, branch, cfg: nil)
+      lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "MERGED" }
     end
 
     def pr_frontmatter(path)

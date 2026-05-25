@@ -69,10 +69,10 @@ The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is 
 
 ## TUI Surfaces
 
-`hive tui` shows a usage footer in grid mode:
+`hive tui` shows a compact usage footer in grid mode. The compact footer intentionally omits the `30d` bucket; use the full `T` matrix for that window:
 
 ```text
-tokens — today 1.2M/400k/200k • 7d ... • 30d ... • all ...
+today 1.2M/400k/200k • 7d ... • all ... • tokens
 ```
 
 The tuple is `input/output/cached`. Units use `k` and `M` with compact one-decimal formatting. Footer scope follows the current selection:

@@ -20,7 +20,8 @@ class HiveTuiViewsUsageFooterTest < Minitest::Test
       width: 120
     )
 
-    assert_equal "tokens — today 0/0/0 • 7d 0/0/0 • 30d 0/0/0 • all 0/0/0", out
+    assert_equal "today 0/0/0 • 7d 0/0/0 • all 0/0/0 • tokens", out
+    refute_includes out, "30d"
   end
 
   def test_formats_k_and_m_units
@@ -38,6 +39,6 @@ class HiveTuiViewsUsageFooterTest < Minitest::Test
     )
 
     assert_operator out.length, :<=, 30
-    assert_match(/\A(tokens|token)/, out)
+    assert_match(/\Atoday /, out)
   end
 end

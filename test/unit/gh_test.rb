@@ -169,12 +169,30 @@ class GhUnitTest < Minitest::Test
   def test_lookup_existing_pr_skips_closed_and_merged
     # Plan correctness: even when a CLOSED/MERGED PR exists for the
     # branch, lookup_existing_pr returns nil so the caller does not
-    # propagate a stale URL into pr.md.
+    # propagate a stale URL into normal open-PR downstream handling.
     with_tmp_git_repo do |dir|
       ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
       ENV["HIVE_FAKE_GH_PR_STATE"] = "CLOSED"
       assert_nil Hive::Gh.lookup_existing_pr(dir, "feat-x-260424-aaaa"),
                  "CLOSED PR must not be returned"
+
+      ENV["HIVE_FAKE_GH_PR_STATE"] = "MERGED"
+      assert_nil Hive::Gh.lookup_existing_pr(dir, "feat-x-260424-aaaa"),
+                 "MERGED PR must not be returned by normal open lookup"
+    ensure
+      ENV.delete("HIVE_FAKE_GH_PR_EXISTS")
+      ENV.delete("HIVE_FAKE_GH_PR_STATE")
+    end
+  end
+
+  def test_lookup_merged_pr_returns_merged_pr
+    with_tmp_git_repo do |dir|
+      ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
+      ENV["HIVE_FAKE_GH_PR_STATE"] = "MERGED"
+
+      pr = Hive::Gh.lookup_merged_pr(dir, "feat-x-260424-aaaa")
+      assert_equal "MERGED", pr.fetch("state")
+      assert_equal "https://example.com/pr/1", pr.fetch("url")
     ensure
       ENV.delete("HIVE_FAKE_GH_PR_EXISTS")
       ENV.delete("HIVE_FAKE_GH_PR_STATE")

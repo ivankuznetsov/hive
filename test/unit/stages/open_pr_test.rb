@@ -27,14 +27,16 @@ class HiveStagesOpenPrTest < Minitest::Test
     { "budget_usd" => {}, "timeout_sec" => {} }
   end
 
-  def with_basic_open_pr_run_stubs(existing_pr: nil, scan: Scan.new(fetch_failed: false, fetch_error: nil, hits: []), &block)
+  def with_basic_open_pr_run_stubs(existing_pr: nil, merged_pr: nil, scan: Scan.new(fetch_failed: false, fetch_error: nil, hits: []), &block)
     with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(_cfg) { }) do
       with_replaced_singleton_method(Hive::Gh, :lookup_existing_pr, ->(_worktree_path, _branch, cfg:) { existing_pr }) do
-        with_replaced_singleton_method(Hive::Gh, :push_branch!, ->(_worktree_path, _branch, cfg:) { }) do
-          with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
-            with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
-              with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
-                yield
+        with_replaced_singleton_method(Hive::Gh, :lookup_merged_pr, ->(_worktree_path, _branch, cfg:) { merged_pr }) do
+          with_replaced_singleton_method(Hive::Gh, :push_branch!, ->(_worktree_path, _branch, cfg:) { }) do
+            with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
+              with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage) { :profile }) do
+                with_replaced_singleton_method(Hive::Stages::Base, :render, ->(_template, _bindings) { "prompt" }) do
+                  yield
+                end
               end
             end
           end
@@ -85,6 +87,43 @@ class HiveStagesOpenPrTest < Minitest::Test
 
               assert_equal({ commit: nil, status: :review_waiting }, result)
               assert_equal :review_waiting, Hive::Markers.current(task.state_file).name
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_run_recovers_when_branch_pr_is_already_merged
+    with_tmp_dir do |root|
+      task = make_task(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      write_pointer(task, worktree)
+      merged = {
+        "url" => "https://example.com/pr/134",
+        "number" => 134,
+        "state" => "MERGED",
+        "isDraft" => false
+      }
+      scan = Scan.new(fetch_failed: false, fetch_error: nil, hits: [])
+
+      with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(_cfg) { }) do
+        with_replaced_singleton_method(Hive::Gh, :lookup_existing_pr, ->(_worktree_path, _branch, cfg:) { nil }) do
+          with_replaced_singleton_method(Hive::Gh, :lookup_merged_pr, ->(_worktree_path, _branch, cfg:) { merged }) do
+            with_replaced_singleton_method(Hive::Gh, :push_branch!, ->(_worktree_path, _branch, cfg:) { flunk "merged recovery must not push" }) do
+              with_replaced_singleton_method(Hive::Gh, :scan_pr_for_secrets, ->(state_file:, pr_url:, cfg:) { scan }) do
+                result = Hive::Stages::OpenPr.run!(task, cfg)
+
+                assert_equal({ commit: "open_pr_already_merged", status: :complete }, result)
+                marker = Hive::Markers.current(task.state_file)
+                assert_equal :complete, marker.name
+                assert_equal "https://example.com/pr/134", marker.attrs.fetch("pr_url")
+                assert_equal "false", marker.attrs.fetch("is_draft")
+                assert_equal "true", marker.attrs.fetch("merged")
+                assert_includes File.read(task.state_file), "PR already merged for this task."
+                assert_includes File.read(File.join(task.folder, "summary.md")), "PR #134 was already merged"
+              end
             end
           end
         end

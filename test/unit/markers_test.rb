@@ -41,6 +41,36 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_parses_git_error_detail_with_branch_arrow
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      File.write(file, <<~MD)
+        <!-- ERROR reason=unpushed_commits detail="To https://github.com/example/repo.git
+         ! [rejected]          branch-a -> branch-a (non-fast-forward)
+        error: failed to push some refs to 'origin'" -->
+      MD
+
+      state = Hive::Markers.current(file)
+
+      assert_equal :error, state.name
+      assert_equal "unpushed_commits", state.attrs["reason"]
+      assert_includes state.attrs.fetch("detail"), "branch-a -> branch-a"
+    end
+  end
+
+  def test_set_sanitizes_quotes_and_comment_close_in_attr_values
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      Hive::Markers.set(file, :error, reason: "boom", detail: 'bad "quoted" --> payload')
+
+      state = Hive::Markers.current(file)
+
+      assert_equal :error, state.name
+      assert_equal "boom", state.attrs["reason"]
+      assert_equal "bad 'quoted' -- > payload", state.attrs["detail"]
+    end
+  end
+
   def test_set_appends_marker_to_empty_file
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

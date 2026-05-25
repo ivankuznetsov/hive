@@ -237,13 +237,16 @@ module Hive
       # diagnostic=nil and the `--write` path would refuse with "not
       # in a red recovery state."
       def liveness_kwargs_for(task)
-        claude_pid = lookup_claude_pid(task)
+        lock_holder = task_lock_holder(task)
+        live_holder = live_task_lock_holder(lock_holder)
+        claude_pid = claude_pid_from_lock(lock_holder)
         state_file = task.state_file
         mtime = File.exist?(state_file) ? File.mtime(state_file) : nil
         {
           pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
           state_file_mtime: mtime,
-          agent_marker_grace_sec: agent_marker_grace_sec_from_config
+          agent_marker_grace_sec: agent_marker_grace_sec_from_config,
+          live_task_lock: !live_holder.nil?
         }
       end
 
@@ -337,8 +340,10 @@ module Hive
             end
             marker = Hive::Markers.current(task.state_file)
             mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : File.mtime(entry)
-            icon, state_label = decorate(task, marker)
-            claude_pid = lookup_claude_pid(task)
+            lock_holder = task_lock_holder(task)
+            live_holder = live_task_lock_holder(lock_holder)
+            icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
+            claude_pid = claude_pid_from_lock(lock_holder)
             # Resolve once per row so JSON consumers (bot / daemon / agents)
             # get the absolute worktree path without re-implementing the
             # branch.yml lookup. Pre-execute stages legitimately return
@@ -363,23 +368,27 @@ module Hive
               mtime: mtime,
               age: humanise_age(mtime),
               claude_pid: claude_pid,
-              claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil
+              claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
+              live_task_lock: !live_holder.nil?
             }
           end
         end
         rows
       end
 
-      def decorate(task, marker)
+      def decorate(task, marker, lock_holder: nil, live_task_lock: false)
         if marker.name == :agent_working
           # Marker only carries the hive runner PID; the claude subprocess PID
           # is recorded in the per-task .lock file by Hive::Agent.
-          pid = lookup_claude_pid(task) || marker.attrs["pid"]
+          pid = claude_pid_from_lock(lock_holder) || marker.attrs["pid"]
           if pid && pid_alive?(pid.to_i)
             [ "🤖", "agent_working pid=#{pid}" ]
           else
             [ "⚠", "stale lock pid=#{pid}" ]
           end
+        elsif live_task_lock
+          pid = lock_holder && lock_holder["pid"]
+          [ "🤖", pid ? "run_lock pid=#{pid}" : "run_lock" ]
         else
           [ ICON.fetch(marker.name, "·"), label_for(marker) ]
         end
@@ -391,6 +400,7 @@ module Hive
         "Ready to plan",
         "Ready to develop",
         "Needs recovery",
+        "Agent running",
         "Ready to open PR",
         "Ready for review",
         "Ready to collect artifacts",
@@ -413,7 +423,8 @@ module Hive
             stage_collision: slug_counts[row[:slug]] > 1,
             pid_alive: row[:claude_pid_alive],
             state_file_mtime: row[:mtime],
-            agent_marker_grace_sec: grace_sec
+            agent_marker_grace_sec: grace_sec,
+            live_task_lock: row[:live_task_lock]
           )
           row.merge(
             action_key: action.key,
@@ -456,8 +467,12 @@ module Hive
       end
 
       def label_for(marker)
-        attrs = marker.attrs.map { |k, v| "#{k}=#{v}" }.join(" ")
+        attrs = marker.attrs.map { |k, v| "#{k}=#{status_attr_value(v)}" }.join(" ")
         attrs.empty? ? marker.name.to_s : "#{marker.name} #{attrs}"
+      end
+
+      def status_attr_value(value)
+        value.to_s.gsub(/\s+/, " ").strip
       end
 
       def pid_alive?(pid)
@@ -470,13 +485,36 @@ module Hive
       end
 
       def lookup_claude_pid(task)
+        claude_pid_from_lock(task_lock_holder(task))
+      end
+
+      def task_lock_holder(task)
         lock_file = File.join(task.folder, ".lock")
         return nil unless File.exist?(lock_file)
 
-        data = YAML.safe_load(File.read(lock_file)) || {}
-        data.is_a?(Hash) ? data["claude_pid"] : nil
+        data = YAML.safe_load(File.read(lock_file), permitted_classes: [ Time ]) || {}
+        data.is_a?(Hash) ? data : nil
       rescue StandardError
         nil
+      end
+
+      def live_task_lock_holder(holder)
+        return nil unless holder.is_a?(Hash)
+
+        pid = holder["pid"]
+        return nil unless pid.is_a?(Integer) && pid_alive?(pid)
+
+        recorded = holder["process_start_time"]
+        live = Hive::Lock.process_start_time(pid)
+        return nil if recorded && live && recorded != live
+
+        holder
+      rescue StandardError
+        nil
+      end
+
+      def claude_pid_from_lock(holder)
+        holder.is_a?(Hash) ? holder["claude_pid"] : nil
       end
 
       def humanise_age(mtime)

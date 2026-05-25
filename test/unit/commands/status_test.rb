@@ -102,6 +102,36 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_live_task_lock_overrides_marker_derived_action
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "6-review", "reviewing-task-260524-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      File.write(File.join(folder, ".lock"), YAML.dump(
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "slug" => "reviewing-task-260524-abcd",
+        "stage" => "review"
+      ))
+
+      cmd = Hive::Commands::Status.new
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      { "name" => "demo" },
+                      1,
+                      with_diagnostic: false)
+      row = rows.find { |candidate| candidate[:slug] == "reviewing-task-260524-abcd" }
+
+      assert_equal :execute_complete, row.fetch(:marker_name)
+      assert_equal true, row.fetch(:live_task_lock)
+      assert_equal "agent_running", row.fetch(:action_key)
+      assert_equal "Agent running", row.fetch(:action_label)
+      assert_nil row.fetch(:suggested_command)
+      assert_match(/run_lock pid=#{Process.pid}/, row.fetch(:state_label))
+    end
+  end
+
   def test_render_project_skips_empty_action_label_groups
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -126,6 +156,8 @@ class CommandsStatusTest < Minitest::Test
     assert_equal [], cmd.send(:detect_legacy_stage_dirs, "/tmp/no-such-hive-state")
     assert_match(/h ago/, cmd.send(:humanise_age, Time.now - 7_200))
     assert_match(/d ago/, cmd.send(:humanise_age, Time.now - 172_800))
+    marker = Hive::Markers::State.new(name: :error, attrs: { "detail" => "line 1\nline 2" }, raw: nil)
+    assert_equal "error detail=line 1 line 2", cmd.send(:label_for, marker)
     assert_equal Hive::Schemas::StatusErrorKind::ERROR,
                  cmd.send(:error_kind_for, Hive::Error.new("generic"))
 

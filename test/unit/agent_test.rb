@@ -543,4 +543,11 @@ class AgentTest < Minitest::Test
       ))
     end
   end
+  def test_event_stage_falls_back_to_parent_folder_for_synthetic_task_without_stage_name
+    task = Struct.new(:folder).new("/tmp/project/.hive-state/stages/6-review/synthetic")
+    agent = Hive::Agent.allocate
+    agent.instance_variable_set(:@task, task)
+
+    assert_equal "6-review", agent.send(:event_stage)
+  end
 end

@@ -4,7 +4,7 @@ require "json"
 require "time"
 
 module HiveTestCoverage
-  DEFAULT_MIN_LINE_PERCENT = 0.0
+  DEFAULT_MIN_LINE_PERCENT = 100.0
 
   module_function
 
@@ -78,13 +78,27 @@ module HiveTestCoverage
 
     # Bundler evaluates the gemspec before RUBYOPT coverage boots, and the
     # gemspec requires lib/hive.rb for Hive::VERSION. Reload only the entrypoint
-    # under coverage so the unloaded-file gate can stay strict. $VERBOSE = false
-    # suppresses "already initialized constant" warnings only; real warnings
-    # (deprecation, circular require) still print.
+    # under coverage so the unloaded-file gate can stay strict. Filter just the
+    # expected constant redefinition warnings; ordinary warnings still print.
     $VERBOSE = false
-    load path
+    without_constant_redefinition_warnings { load path }
   ensure
     $VERBOSE = old_verbose
+  end
+
+  def without_constant_redefinition_warnings
+    original_warn = Warning.method(:warn)
+    Warning.define_singleton_method(:warn) do |message, **kwargs|
+      text = message.to_s
+      if text.include?("already initialized constant") || text.include?("previous definition of")
+        nil
+      else
+        original_warn.call(message, **kwargs)
+      end
+    end
+    yield
+  ensure
+    Warning.define_singleton_method(:warn, original_warn) if original_warn
   end
 
   def dump_process_result!
@@ -401,7 +415,7 @@ module HiveTestCoverage
   end
 
   def coverage_ok?(report)
-    numeric_value(report, :line_percent) >= minimum_line_percent &&
+    line_percent_for(report) >= minimum_line_percent &&
       Array(value(report, :unloaded_files)).empty? &&
       Array(value(report, :result_errors)).empty?
   end
@@ -417,7 +431,7 @@ module HiveTestCoverage
     line_covered = numeric_value(report, :line_covered)
     line_total = numeric_value(report, :line_total)
     minimum = minimum_line_percent
-    line_percent = numeric_value(report, :line_percent)
+    line_percent = line_percent_for(report)
     if line_percent < minimum
       lines << format(
         "line coverage %.2f%% (%d/%d) below minimum %.2f%%",
@@ -514,6 +528,13 @@ module HiveTestCoverage
 
   def numeric_value(hash, key)
     value(hash, key).to_f
+  end
+
+  def line_percent_for(report)
+    explicit = value(report, :line_percent)
+    return explicit.to_f unless explicit.nil?
+
+    percent(numeric_value(report, :line_covered), numeric_value(report, :line_total))
   end
 
   def percent(covered, total)

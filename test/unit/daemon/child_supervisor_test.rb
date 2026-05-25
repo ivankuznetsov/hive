@@ -247,6 +247,64 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal 1, reap_calls
   end
 
+  def test_terminate_all_wait_loop_reaps_before_deadline
+    sup = make
+    sup.instance_variable_set(:@running, {
+      123 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a" }
+    })
+    reap_calls = 0
+    kills = []
+
+    sup.define_singleton_method(:collect_pgids) { [] }
+    sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
+    sup.define_singleton_method(:reap_all) do
+      reap_calls += 1
+      if reap_calls == 1
+        [ Object.new ]
+      else
+        instance_variable_get(:@running).clear
+        []
+      end
+    end
+
+    sup.terminate_all(grace_sec: 1)
+
+    assert_equal 2, reap_calls
+    assert_empty kills
+    assert_equal 0, sup.in_flight_count
+  end
+
+  def test_collect_pgids_deduplicates_and_ignores_exited_children
+    sup = make
+    sup.instance_variable_set(:@running, {
+      111 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a" },
+      222 => { project: "p1", slug: "b", stage: "6-review", command: "hive run b" },
+      333 => { project: "p1", slug: "gone", stage: "6-review", command: "hive run gone" }
+    })
+
+    with_replaced_singleton_method(Process, :getpgid, lambda { |pid|
+      raise Errno::ESRCH if pid == 333
+
+      42
+    }) do
+      assert_equal [ 42 ], sup.send(:collect_pgids)
+    end
+  end
+
+  def test_safe_kill_sends_signal_to_target
+    sup = make
+    calls = []
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, target|
+      calls << [ signal, target ]
+      1
+    }) do
+      assert_equal 1, sup.send(:safe_kill, :TERM, -123)
+    end
+
+    assert_equal [ [ :TERM, -123 ] ], calls
+  end
+
   def test_terminate_all_signals_running_children
     skip "skipping signal test under CI containers" if ENV["CI"] == "true"
 

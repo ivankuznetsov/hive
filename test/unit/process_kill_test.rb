@@ -8,6 +8,7 @@ require "hive/lock"
 # permission_denied, kill_failed) so a regression in any of them
 # fails here instead of letting drop signal a foreign PID silently.
 class ProcessKillTest < Minitest::Test
+  include HiveTestHelper
   def test_terminate_process_refuses_pid_zero_as_invalid
     result = Hive::ProcessKill.terminate_process(0)
     assert_equal 0, result.pid
@@ -109,6 +110,129 @@ class ProcessKillTest < Minitest::Test
       end
     end
   end
+
+  def test_pid_alive_treats_permission_denied_as_alive
+    with_replaced_singleton_method(Process, :kill, lambda { |_signal, _pid| raise Errno::EPERM }) do
+      assert Hive::ProcessKill.pid_alive?(1234)
+    end
+  end
+
+  def test_process_start_time_returns_nil_for_malformed_pid
+    assert_nil Hive::ProcessKill.process_start_time("not-a-pid")
+  end
+
+  def test_terminate_process_escalates_to_kill_when_term_does_not_stop_process
+    alive_sequence = [ true, true, false ]
+    signals = []
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| alive_sequence.shift }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, lambda { |signal, pid| signals << [ signal, pid ] }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, lambda { |_pid, _seconds| false }) do
+          result = Hive::ProcessKill.terminate_process(1234, grace_seconds: 0)
+
+          assert_equal [ [ "TERM", 1234 ], [ "KILL", 1234 ] ], signals
+          assert result.killed
+          assert_nil result.skipped_reason
+        end
+      end
+    end
+  end
+
+  def test_terminate_process_reports_permission_denied_when_signal_fails
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, lambda { |_signal, _pid| raise Errno::EPERM }) do
+        result = Hive::ProcessKill.terminate_process(1234, grace_seconds: 0)
+
+        refute result.killed
+        assert_equal "permission_denied", result.skipped_reason
+      end
+    end
+  end
+
+  def test_terminate_process_group_pid_reuse_guard_when_start_time_does_not_match
+    with_process_start_time_stub("live-start-time") do
+      result = Hive::ProcessKill.terminate_process_group(
+        Process.pid, recorded_start_time: "different-recorded-time"
+      )
+
+      refute result.killed
+      assert_equal "pid_reuse_guard", result.skipped_reason
+    end
+  end
+
+  def test_terminate_process_group_returns_invalid_pid_for_nil_argument
+    result = Hive::ProcessKill.terminate_process_group(nil)
+
+    assert_nil result.pid
+    refute result.killed
+    assert_equal "invalid_pid", result.skipped_reason
+  end
+
+  def test_terminate_process_group_escalates_to_kill_when_term_does_not_stop_process
+    alive_sequence = [ true, true, false ]
+    signals = []
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| alive_sequence.shift }) do
+      with_replaced_singleton_method(Process, :getpgid, lambda { |pid| pid }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, lambda { |signal, target| signals << [ signal, target ] }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, lambda { |_pid, _seconds| false }) do
+            result = Hive::ProcessKill.terminate_process_group(1234, grace_seconds: 0)
+
+            assert_equal [ [ "TERM", -1234 ], [ "KILL", -1234 ] ], signals
+            assert result.killed
+            assert_nil result.skipped_reason
+          end
+        end
+      end
+    end
+  end
+
+  def test_terminate_process_group_reports_not_alive_when_group_disappears
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| true }) do
+      with_replaced_singleton_method(Process, :getpgid, lambda { |_pid| raise Errno::ESRCH }) do
+        result = Hive::ProcessKill.terminate_process_group(1234, grace_seconds: 0)
+
+        refute result.killed
+        assert_equal "not_alive", result.skipped_reason
+      end
+    end
+  end
+
+  def test_terminate_process_group_reports_permission_denied_when_signal_fails
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| true }) do
+      with_replaced_singleton_method(Process, :getpgid, lambda { |pid| pid }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, lambda { |_signal, _target| raise Errno::EPERM }) do
+          result = Hive::ProcessKill.terminate_process_group(1234, grace_seconds: 0)
+
+          refute result.killed
+          assert_equal "permission_denied", result.skipped_reason
+        end
+      end
+    end
+  end
+
+  def test_safe_kill_ignores_missing_targets
+    with_replaced_singleton_method(Process, :kill, lambda { |_signal, _target| raise Errno::ESRCH }) do
+      assert_nil Hive::ProcessKill.safe_kill("TERM", 1234)
+    end
+  end
+
+  def test_safe_kill_propagates_permission_denied
+    with_replaced_singleton_method(Process, :kill, lambda { |_signal, _target| raise Errno::EPERM }) do
+      assert_raises(Errno::EPERM) { Hive::ProcessKill.safe_kill("TERM", 1234) }
+    end
+  end
+
+  def test_wait_until_dead_checks_final_state_after_deadline
+    with_replaced_singleton_method(Hive::ProcessKill, :reap_if_child_exited, lambda { |_pid| false }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, lambda { |_pid| false }) do
+        assert Hive::ProcessKill.wait_until_dead(1234, 0)
+      end
+    end
+  end
+
+  def test_reap_if_child_exited_returns_false_for_non_child
+    refute Hive::ProcessKill.reap_if_child_exited(999_999)
+  end
+
 
   private
 

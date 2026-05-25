@@ -41,4 +41,16 @@ class HiveTuiViewsTokenStatsTest < Minitest::Test
     assert_includes out, "scope: empty"
     assert_includes out, "0/0/0"
   end
+  def test_column_widths_shrink_usage_columns_for_narrow_inner_width
+    rows = [
+      Hive::Tui::Views::TokenStats::HEADER,
+      [ "claude", "123456789", "123456789", "123456789", "123456789" ]
+    ]
+
+    widths = Hive::Tui::Views::TokenStats.column_widths(rows, 24)
+
+    assert_equal 6, widths.first
+    assert_operator widths[1], :<, 9
+    assert_operator widths[1..].min, :>=, 6
+  end
 end

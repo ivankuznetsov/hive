@@ -82,6 +82,33 @@ class HiveTestCoverageTest < Minitest::Test
     end
   end
 
+  def test_reload_preloaded_entrypoint_filters_constant_redefinition_warnings_only
+    with_tmp_dir do |dir|
+      lib = File.join(dir, "lib")
+      FileUtils.mkdir_p(lib)
+      path = File.join(lib, "hive.rb")
+      File.write(path, <<~RUBY)
+        module CoverageReloadProbe
+          VALUE = 1
+        end
+        warn "real reload warning"
+      RUBY
+
+      _out, _err = capture_io { load path }
+      $LOADED_FEATURES << path
+      with_coverage_config(root: dir) do
+        _out, err = capture_io { HiveTestCoverage.send(:reload_preloaded_entrypoint!) }
+
+        assert_includes err, "real reload warning"
+        refute_includes err, "already initialized constant"
+        refute_includes err, "previous definition of VALUE"
+      end
+    ensure
+      $LOADED_FEATURES.delete(path) if path
+      Object.send(:remove_const, :CoverageReloadProbe) if Object.const_defined?(:CoverageReloadProbe)
+    end
+  end
+
   def test_coverage_gate_accepts_string_keyed_json_report
     report = {
       "line_total" => 3,
@@ -93,6 +120,18 @@ class HiveTestCoverageTest < Minitest::Test
     assert HiveTestCoverage.coverage_ok?(report)
   end
 
+  def test_coverage_gate_defaults_to_full_line_coverage
+    report = {
+      "line_total" => 4,
+      "line_covered" => 3,
+      "line_percent" => 75.0,
+      "unloaded_files" => [],
+      "result_errors" => []
+    }
+
+    refute HiveTestCoverage.coverage_ok?(report)
+    assert_includes HiveTestCoverage.failure_message(report), "below minimum 100.00%"
+  end
 
   def test_coverage_gate_honors_min_line_threshold_env
     report = {

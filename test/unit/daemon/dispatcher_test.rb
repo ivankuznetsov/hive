@@ -278,6 +278,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "hive archive s1 --from 8-finalize --project p1 --json", sup.spawned.first[:command]
   end
 
+  def test_merge_watcher_dropped_entries_are_logged
+    dispatcher, _sup, _ctrl, logger, mw = make_dispatcher(rows: [], with_merge_watcher: true)
+    mw.next_dropped = [ {
+      project: "p1", slug: "s1", pr_url: "https://example.com/pull/1",
+      failure_count: 3, last_error: "gh api failed"
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find { |(name, _attrs)| name == :merge_watcher_dropped }
+    refute_nil event
+    assert_equal({
+      project: "p1", slug: "s1", pr_url: "https://example.com/pull/1",
+      failure_count: 3, last_error: "gh api failed"
+    }, event[1])
+  end
+
   def test_merged_pr_archive_skips_when_project_disabled_after_enqueue
     # PR-40 review P2 #4: a project disabled between merge-watch
     # enqueue and the merge-completion tick must NOT be archived.

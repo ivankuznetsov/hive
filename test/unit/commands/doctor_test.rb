@@ -658,4 +658,33 @@ class HiveCommandsDoctorTest < Minitest::Test
     assert_match(/✗ version_too_old/, old_line)
     assert_match(/\? mystery/, unknown_line)
   end
+  def test_legacy_runtime_warning_reports_unreadable_config_yml
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p(File.join(project, ".hive-state"))
+        File.write(File.join(project, ".hive-state", "config.yml"), "brainstorm: [broken\n")
+        out = StringIO.new
+        cfg = base_config(
+          "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+          "plan" => { "agent" => "claude", "skill" => "/x" }
+        )
+
+        exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
+
+        assert_equal 0, exit_code
+        assert_match(/could not parse \.hive-state\/config\.yml/, out.string)
+      end
+    end
+  end
+
+  def test_legacy_runtime_probe_ignores_invalid_yaml_when_called_directly
+    with_tmp_dir do |project|
+      FileUtils.mkdir_p(File.join(project, ".hive-state"))
+      File.write(File.join(project, ".hive-state", "config.yml"), "brainstorm: [broken\n")
+      doctor = Hive::Commands::Doctor.new(config: base_config, project_root: project)
+
+      refute doctor.send(:legacy_brainstorm_runtime_present?)
+    end
+  end
 end

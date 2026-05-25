@@ -12,7 +12,7 @@ Rake::TestTask.new do |t|
   t.warning = false
 end
 
-desc "Run the default suite with merged stdlib Coverage reporting (set HIVE_COVERAGE_MIN_LINE to enforce a line threshold)"
+desc "Run the default suite with merged stdlib Coverage reporting and a 100% line threshold"
 task :coverage do
   root = File.expand_path(__dir__)
   run_id = "#{Process.pid}-#{SecureRandom.hex(4)}"

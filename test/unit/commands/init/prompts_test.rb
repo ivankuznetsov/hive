@@ -653,4 +653,9 @@ class InitPromptsTest < Minitest::Test
     assert_match(/claude/, err.message)
     assert_match(/codex/, err.message)
   end
+  def test_resolve_claude_mode_choice_rejects_numeric_out_of_range
+    prompts, _output = make_prompts(interactive_input)
+
+    assert_nil prompts.send(:resolve_claude_mode_choice, "99")
+  end
 end

@@ -219,6 +219,20 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_non_string_stage_skill_by_agent_value
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          skill_by_agent:
+            codex: 42
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/plan\.skill_by_agent\.codex.*must be a String/, err.message)
+    end
+  end
+
   def test_load_raises_when_stage_agent_is_unknown_profile
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -1818,5 +1832,13 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/rebase.*must be a Hash/, err.message)
     end
+  end
+  def test_claude_mode_rejects_unknown_value
+    err = assert_raises(Hive::ConfigError) do
+      Hive::Config.claude_mode("claude" => { "mode" => "warm_pool" })
+    end
+
+    assert_match(/claude\.mode must be one of/, err.message)
+    assert_match(/warm_pool/, err.message)
   end
 end

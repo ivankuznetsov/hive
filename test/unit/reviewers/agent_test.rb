@@ -665,4 +665,17 @@ class ReviewersAgentTest < Minitest::Test
       FileUtils.rm_rf(log_dir) if log_dir
     end
   end
+  def test_run_in_shared_session_rejects_non_claude_profile
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(make_spec("agent" => "codex"), ctx)
+
+      err = assert_raises(Hive::AgentError) do
+        reviewer.run_in_session!(handle: Object.new)
+      end
+
+      assert_match(/shared Claude reviewer session cannot run :codex/, err.message)
+    end
+  end
 end

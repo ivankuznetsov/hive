@@ -58,11 +58,15 @@ case "${1:-}" in
           isdraft="${HIVE_FAKE_GH_PR_ISDRAFT:-true}"
           url="${HIVE_FAKE_GH_PR_EXISTS_URL:-https://example.com/pr/9}"
           num="${HIVE_FAKE_GH_PR_EXISTS_NUMBER:-9}"
-          printf '[{"url":"%s","number":%s,"state":"%s","isDraft":%s}]\n' "$url" "$num" "$state" "$isdraft"
+          head_oid="${HIVE_FAKE_GH_HEAD_REF_OID:-fake-head-oid}"
+          head_name="${HIVE_FAKE_GH_HEAD_REF_NAME:-fake-head}"
+          printf '[{"url":"%s","number":%s,"state":"%s","isDraft":%s,"headRefOid":"%s","headRefName":"%s"}]\n' "$url" "$num" "$state" "$isdraft" "$head_oid" "$head_name"
         elif [[ -n "${HIVE_FAKE_GH_PR_EXISTS:-}" ]]; then
           state="${HIVE_FAKE_GH_PR_STATE:-OPEN}"
           isdraft="${HIVE_FAKE_GH_PR_ISDRAFT:-true}"
-          printf '[{"url":"https://example.com/pr/1","number":1,"state":"%s","isDraft":%s}]\n' "$state" "$isdraft"
+          head_oid="${HIVE_FAKE_GH_HEAD_REF_OID:-fake-head-oid}"
+          head_name="${HIVE_FAKE_GH_HEAD_REF_NAME:-fake-head}"
+          printf '[{"url":"https://example.com/pr/1","number":1,"state":"%s","isDraft":%s,"headRefOid":"%s","headRefName":"%s"}]\n' "$state" "$isdraft" "$head_oid" "$head_name"
         else
           printf '[]\n'
         fi

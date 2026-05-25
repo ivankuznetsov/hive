@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-05-22
+updated: 2026-05-24
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -12,7 +12,7 @@ tags: [module, status, action, classifier, diagnostic]
 ## Public surface
 
 ```ruby
-action = Hive::TaskAction.for(task, marker, project_name: nil, project_count: 1, stage_collision: false)
+action = Hive::TaskAction.for(task, marker, project_name: nil, project_count: 1, stage_collision: false, live_task_lock: false)
 action.key         # closed enum string per Hive::Schemas::TaskActionKind
 action.label       # human label, e.g. "Ready to plan"
 action.command     # copy-paste shell command, or nil
@@ -64,8 +64,9 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 
 ## Marker carve-outs
 
-Two markers short-circuit the per-stage dispatch:
+Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 
+- **`live_task_lock: true`** → `agent_running` (label "Agent running", command nil). `Hive::Commands::Status` sets this when a task `.lock` holder PID is alive and its recorded process start time still matches. This covers pre-marker work inside `hive run`, such as auto-rebase before `REVIEW_WORKING` is written, so status and the TUI do not offer a duplicate runnable command that would immediately hit `ConcurrentRunError`.
 - **`:agent_working`** → `agent_running` (label "Agent running", command nil) when the agent is actually alive. A `hive run` is in flight; surfacing a workflow command would send the user (or an agent retry loop) straight into `ConcurrentRunError`. **Stale carve-out:** when the caller passes `pid_alive:` and `state_file_mtime:` kwargs and either (a) `pid_alive` is `false` (the per-task `.lock` recorded a `claude_pid` that's now dead), or (b) `pid_alive` is `nil` (no `.lock` claude_pid), the marker has no `pid` attr, and the state-file mtime is older than `agent_marker_grace_sec` (default 300s; threaded from `daemon.agent_marker_grace_sec` by `Hive::Commands::Status`), the action is reclassified as `:error` with a synthesized diagnostic (summary describes "agent process not alive" / "agent never attached"; detail explains the daemon will heal the on-disk marker within ~30s). This makes the row a recoverable red status immediately, without waiting for the daemon's `StaleAgentHealer` to rewrite the marker on disk.
 - **`:error`** → always `error`. The stage agent recorded a failure; recovery is manual (edit reviews/, lower frontmatter pass:, remove EXECUTE_STALE marker, etc.). The healer-written subset (`reason=agent_died` / `reason=agent_orphaned`) recovers via the standard `hive markers clear <slug> --name ERROR` flow once the on-disk rewrite lands.
 

@@ -28,6 +28,7 @@ class RunOpenPrTest < Minitest::Test
         HIVE_FAKE_GH_PR_BODY HIVE_FAKE_GH_PR_STATE
         HIVE_FAKE_GH_PR_ISDRAFT HIVE_FAKE_GH_READY_STDERR
         HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
+        HIVE_FAKE_GH_HEAD_REF_OID
       ].each { |k| ENV.delete(k) }
     end
 
@@ -40,6 +41,9 @@ class RunOpenPrTest < Minitest::Test
           run!("git", "-C", worktree_path, "push", "-u", "origin", slug, "--quiet")
           ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
           ENV["HIVE_FAKE_GH_PR_ISDRAFT"] = "false"
+          # PR #138 fix #146: pin fake-gh's headRefOid to local HEAD so
+          # the already-open short-circuit triggers under the new filter.
+          ENV["HIVE_FAKE_GH_HEAD_REF_OID"] = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
 
           capture_io { Hive::Commands::Run.new(task_dir).call }
           pr_md = File.join(task_dir, "pr.md")
@@ -126,6 +130,11 @@ class RunOpenPrTest < Minitest::Test
         task_dir, worktree_path = setup_open_pr_task(dir)
         stub_push(worktree_path)
         ENV["HIVE_FAKE_GH_PR_EXISTS"] = "1"
+        # PR #138 fix #146: open-pr now requires headRefOid to match the
+        # local HEAD before adopting an OPEN PR as already-open. Pin
+        # fake-gh's reported headRefOid to the worktree's current HEAD
+        # so the idempotent short-circuit still triggers.
+        ENV["HIVE_FAKE_GH_HEAD_REF_OID"] = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
         # Set a tripwire content the fake-claude WOULD write if invoked —
         # the test then asserts pr.md does NOT have it.
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(task_dir, "pr.md")

@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-05-20
+updated: 2026-05-25
 tags: [command, status, observability, json, diagnostics, legacy-dirs]
 ---
 
@@ -17,8 +17,8 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs]
     ⏸ add-inbox-filter-260424-7a3b   waiting                  hive brainstorm add-inbox-filter-260424-7a3b 2h ago
   Ready to develop
     ✓ refactor-auth-260423-1c2d      complete                 hive develop refactor-auth-260423-1c2d 1d ago
-  Needs your input
-    🤖 add-cache-260424-9a8b          agent_working pid=1234   hive develop add-cache-260424-9a8b 5m ago
+  Agent running
+    🤖 add-cache-260424-9a8b          agent_working pid=1234   - 5m ago
 ```
 
 `hive status` prints one block per project. Action buckets without active tasks are skipped. Within a bucket, rows are sorted by state-file mtime (newest first). Raw stage and folder remain available in `--json`. JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows.
@@ -46,10 +46,10 @@ The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hiv
 | `·` | `:none` (no marker yet, e.g. fresh `1-inbox` capture before WAITING was added) |
 | `⏸` | `:waiting`, `:execute_waiting`, `:review_waiting` |
 | `✓` | `:complete`, `:execute_complete`, `:review_complete` |
-| `🤖` | `:agent_working` with a live PID, `:review_working` |
+| `🤖` | `:agent_working` with a live PID, `:review_working`, or a live per-task `.lock` holder before a Claude PID is recorded |
 | `⚠` | `:execute_stale`, `:review_ci_stale`, `:review_stale`, `:review_error`, `:error`, or `:agent_working` with a dead PID |
 
-`decorate` (`lib/hive/commands/status.rb:95`) special-cases `:agent_working`: reads `claude_pid` (or fallback `pid`) from the marker attrs and runs `Process.kill(0, pid)` to decide between 🤖 and ⚠ "stale lock".
+`decorate` special-cases `:agent_working`: reads `claude_pid` from the per-task `.lock` (or fallback marker `pid`) and runs `Process.kill(0, pid)` to decide between 🤖 and ⚠ "stale lock". If the task lock is live but the Claude PID is not attached yet, status renders `🤖 run_lock pid=<pid>` instead of a stale warning. This is internal display state, not an added JSON field.
 
 ## Rendering rules
 
@@ -57,7 +57,7 @@ The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hiv
 - Project path missing → `"<name>: missing project path <path>"`.
 - `.hive-state` missing → `"<name>: not initialised (no .hive-state)"`.
 - Action bucket with no tasks → header omitted entirely.
-- Slug is left-padded to 36 chars; state label to 24 chars; then the suggested command and humanised age.
+- Slug is left-padded to 36 chars; state label to 24 chars; then the suggested command and humanised age. Marker attr values in the state label collapse internal whitespace so multi-line stderr details do not break the table.
 
 `humanise_age` thresholds: `<60s → Ns ago`, `<3600s → Nm ago`, `<86400s → Nh ago`, else `Nd ago`.
 
@@ -65,7 +65,7 @@ The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hiv
 
 For each stage in `Hive::Stages::DIRS = %w[1-inbox 2-brainstorm 3-plan 4-execute 5-open-pr 6-review 7-artifacts 8-finalize 9-done]` (single source of truth — see [[modules/stages]]), `collect_rows` globs `<hive_state>/stages/<stage>/*` directories. Each is parsed via `Hive::Task.new(entry)`; non-conforming directories (no slug match) are silently skipped via `rescue InvalidTaskPath`. Marker is read with `Hive::Markers.current(task.state_file)`; mtime falls back to the directory mtime if the state file doesn't exist yet.
 
-Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
+Rows are then classified by `Hive::TaskAction`, which emits an action key, label, suggested command, and optional row-local `next_action` such as `kind=edit target=<worktree>` for dirty execute worktrees or `kind=run` for `missing_research_output`. `collect_rows` also reads each task `.lock`, verifies the holder PID and recorded process start time through `Hive::Lock`, and passes `live_task_lock: true` to `TaskAction` while `hive run` is active even if the stage has not written an `AGENT_WORKING` or `REVIEW_WORKING` marker yet. If one project has the same slug in multiple stages, workflow commands include `--from <stage>` and generic findings commands include `--stage <stage>`.
 
 ## Red-row diagnostics
 
@@ -108,6 +108,7 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
+- `test/unit/commands/status_test.rb` — status row collection, legacy dir warnings, and live task-lock action override.
 - `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 

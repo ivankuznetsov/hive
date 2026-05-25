@@ -8,7 +8,6 @@ module Hive
         BUCKET_LABELS = {
           today: "today",
           "7d": "7d",
-          "30d": "30d",
           all: "all"
         }.freeze
 
@@ -25,7 +24,7 @@ module Hive
           parts = BUCKET_LABELS.map do |bucket, label|
             "#{label} #{format_usage(buckets.fetch(bucket, zero_usage))}"
           end
-          "tokens — #{parts.join(' • ')}"
+          parts.join(" • ") + " • tokens"
         end
 
         def format_usage(usage)

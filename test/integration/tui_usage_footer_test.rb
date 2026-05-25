@@ -71,8 +71,9 @@ class TuiUsageFooterTest < Minitest::Test
 
       out = bubble.send(:default_footer, 180)
 
-      assert_includes out, "tokens"
       assert_includes out, "today 1.5k/100/0"
+      assert_includes out, " • all 1.5k/100/0 • tokens"
+      refute_includes out, "30d"
       assert_includes out, "[Tab] switch"
     end
   end

@@ -345,6 +345,16 @@ class CommandsStatusTest < Minitest::Test
       assert_equal true, cmd.send(:pid_alive?, 12_345)
     end
 
+    holder = { "pid" => 12_345, "process_start_time" => "recorded" }
+    cmd.define_singleton_method(:pid_alive?) { |_pid| true }
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise RuntimeError, "blocked" }) do
+      _out, err = capture_io do
+        assert_nil cmd.send(:live_task_lock_holder, holder)
+      end
+      assert_includes err, "hive: status: failed to check liveness"
+      assert_includes err, "RuntimeError: blocked"
+    end
+
     with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { { "agent_marker_grace_sec" => "not-int" } }) do
       _out, err = capture_io do
         assert_equal Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC,

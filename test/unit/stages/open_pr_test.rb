@@ -104,6 +104,33 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_run_refuses_merged_pr_recovery_with_empty_url
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_tmp_git_repo do |worktree|
+        head_oid = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+        write_pointer(task, worktree)
+        merged = {
+          "url" => "",
+          "number" => 134,
+          "state" => "MERGED",
+          "isDraft" => false,
+          "headRefOid" => head_oid
+        }
+
+        with_basic_open_pr_run_stubs(merged_pr: merged) do
+          _out, err, status = with_captured_exit do
+            Hive::Stages::OpenPr.run!(task, cfg)
+          end
+
+          assert_equal 1, status
+          assert_match(/merged PR with an empty url/, err)
+          refute File.exist?(task.state_file)
+        end
+      end
+    end
+  end
+
   def test_run_recovers_when_branch_pr_is_already_merged
     with_tmp_dir do |root|
       task = make_task(root)

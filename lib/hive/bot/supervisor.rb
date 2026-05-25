@@ -13,6 +13,7 @@ require "hive/bot/child_supervisor"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/codex_conversation"
+require "hive/bot/title_formatter"
 require "hive/task"
 
 module Hive
@@ -236,13 +237,19 @@ module Hive
       end
 
       def execute_dispatch(result, update)
-        if result.command_argv == [ "hive", "status", "--json" ]
+        if status_command?(result.command_argv)
           rows = @status_watcher.fetch.rows
+          if result.project && !result.project.to_s.empty?
+            rows = rows.select { |row| row.project == result.project }
+            if rows.empty?
+              safe_send_message(chat_id: update.chat_id, text: "No tasks for project #{result.project}.")
+              return nil
+            end
+          end
           if result.slug
             safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
           else
-            safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
-                              reply_markup: queue_inline_keyboard(rows))
+            safe_send_message(chat_id: update.chat_id, text: render_queue(rows))
           end
           return nil
         end
@@ -497,35 +504,14 @@ module Hive
         return "No active Hive tasks." if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{row.project}/#{row.slug} #{row.stage} #{row.action_label || row.action} #{row.marker}"
+          "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
+            "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks (use /status for full list)"
         end
         ([ header ] + lines).join("\n")
-      end
-
-      def queue_inline_keyboard(rows)
-        actionable = actionable_queue_rows(rows).first(QUEUE_DISPLAY_CAP)
-        return nil if actionable.empty?
-
-        actionable.flat_map do |row|
-          notification = Hive::Bot::NotificationBuilders.build(row)
-          buttons = Array(notification&.keyboard).flatten
-          primary = buttons.find { |button| button[:callback_data].to_s !~ /\Aopen_laptop:|details:/ } ||
-            buttons.first ||
-            { text: "Details", callback_data: details_callback_for(row) }
-          [ [ { text: "#{primary[:text]}: #{row.project}/#{row.slug}",
-                callback_data: primary[:callback_data] } ] ]
-        end
-      end
-
-      def details_callback_for(row)
-        parts = [ "details", row.project, row.slug ]
-        stage = row.respond_to?(:stage) ? row.stage.to_s : ""
-        parts << stage unless stage.empty?
-        parts.join(":")
       end
 
       def render_details(rows, project, slug)
@@ -544,6 +530,13 @@ module Hive
 
       def actionable_queue_rows(rows)
         Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
+      end
+
+      def status_command?(argv)
+        argv = Array(argv)
+        return true if argv == [ "hive", "status", "--json" ]
+
+        argv.length == 5 && argv[0, 3] == [ "hive", "status", "--json" ] && argv[3] == "--project"
       end
 
       def next_unanswered_question_n(brainstorm_path)

@@ -239,8 +239,10 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @supervisor.send(:render_queue, rows)
 
     assert_includes text, "12 active tasks"
-    assert_includes text, "hive/task-0 3-plan Develop COMPLETE"
+    assert_includes text, "Task 0… — Plan"
     assert_includes text, "+ 2 more tasks"
+    refute_includes text, "hive/task-0"
+    refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
   end
@@ -267,7 +269,37 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil pid
     assert_empty @child_supervisor.dispatched
     assert_includes @telegram.messages.last.fetch(:text), "1 active task"
-    refute_nil @telegram.messages.last.fetch(:reply_markup)
+    assert_nil @telegram.messages.last.fetch(:reply_markup)
+  end
+
+  def test_execute_dispatch_filters_status_by_project
+    rows = [ row(project: "hive", slug: "alpha-260525-abcd"), row(project: "other", slug: "beta-260525-abcd") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json", "--project", "other" ],
+      project: "other"
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    assert_includes text, "Beta… — Plan"
+    refute_includes text, "Alpha"
+    assert_nil @telegram.messages.last.fetch(:reply_markup)
+  end
+
+  def test_execute_dispatch_reports_no_tasks_for_filtered_project
+    @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json", "--project", "missing" ],
+      project: "missing"
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    assert_equal "No tasks for project missing.", @telegram.messages.last.fetch(:text)
   end
 
   def test_execute_dispatch_renders_status_details_when_slug_is_present
@@ -442,14 +474,6 @@ class HiveBotSupervisorTest < Minitest::Test
     ok = @supervisor.send(:wait_for_child_success, 999, deadline: Time.now - 1)
 
     assert_equal false, ok
-  end
-
-  def test_queue_inline_keyboard_falls_back_to_details_callback_with_stage
-    keyboard = @supervisor.send(:queue_inline_keyboard, [ row(action: "unknown", action_label: nil) ])
-
-    button = keyboard.first.first
-    assert_equal "Details: hive/task", button.fetch(:text)
-    assert_equal "details:hive:task:3-plan", button.fetch(:callback_data)
   end
 
   def test_project_and_brainstorm_paths_resolve_registered_project

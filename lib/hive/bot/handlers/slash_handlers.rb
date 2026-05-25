@@ -14,9 +14,13 @@ module Hive
           @now = now
         end
 
-        def status(_update)
+        def status(update)
+          project = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          argv = [ "hive", "status", "--json" ]
+          argv += [ "--project", project ] unless project.empty?
           @result_class.new(action: :dispatch_then_reply,
-                            command_argv: [ "hive", "status", "--json" ])
+                            command_argv: argv,
+                            project: project.empty? ? nil : project)
         end
 
         def queue(_update)
@@ -75,7 +79,7 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status, /queue, /idea <text>, /answer <slug>, /approve <slug>, /done, /help"
+            text: "Commands: /status [project], /queue, /idea <text>, /answer <slug>, /approve <slug>, /done, /help"
           )
         end
 

@@ -120,6 +120,18 @@ class HiveTestCoverageTest < Minitest::Test
     assert HiveTestCoverage.coverage_ok?(report)
   end
 
+  def test_coverage_gate_defaults_to_full_line_coverage
+    report = {
+      "line_total" => 4,
+      "line_covered" => 3,
+      "line_percent" => 75.0,
+      "unloaded_files" => [],
+      "result_errors" => []
+    }
+
+    refute HiveTestCoverage.coverage_ok?(report)
+    assert_includes HiveTestCoverage.failure_message(report), "below minimum 100.00%"
+  end
 
   def test_coverage_gate_honors_min_line_threshold_env
     report = {

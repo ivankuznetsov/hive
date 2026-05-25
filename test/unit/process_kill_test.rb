@@ -209,9 +209,15 @@ class ProcessKillTest < Minitest::Test
     end
   end
 
-  def test_safe_kill_ignores_missing_or_forbidden_targets
+  def test_safe_kill_ignores_missing_targets
     with_replaced_singleton_method(Process, :kill, lambda { |_signal, _target| raise Errno::ESRCH }) do
       assert_nil Hive::ProcessKill.safe_kill("TERM", 1234)
+    end
+  end
+
+  def test_safe_kill_propagates_permission_denied
+    with_replaced_singleton_method(Process, :kill, lambda { |_signal, _target| raise Errno::EPERM }) do
+      assert_raises(Errno::EPERM) { Hive::ProcessKill.safe_kill("TERM", 1234) }
     end
   end
 

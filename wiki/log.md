@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-25T00:00:00Z] testing - default 100 percent coverage gate
+
+**Action:** Made `bundle exec rake coverage` enforce 100% line coverage by default, with CI also exporting `HIVE_COVERAGE_MIN_LINE=100` explicitly. Added unit coverage for the default threshold and updated the ProcessKill permission-denied tests to exercise production-reachable `EPERM` behavior.
+
+**Refreshed pages:**
+- [[testing]] - documented the default 100% coverage threshold and the override role of `HIVE_COVERAGE_MIN_LINE`.
+
 ## [2026-05-24T16:46:47Z] release notes - final verified PR merge batch
 
 **Action:** Refreshed `docs/notes/2026-05-24-verified-pr-merge-notes.md` after #134 and #135 merged. The note now covers the full ordered #121-first pass through #135, includes the docs checkpoint #136, records the PR #135 CI flake fix and verification evidence, and updates the line-change scoreboard/fun stats.

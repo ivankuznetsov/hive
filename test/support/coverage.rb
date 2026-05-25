@@ -4,7 +4,7 @@ require "json"
 require "time"
 
 module HiveTestCoverage
-  DEFAULT_MIN_LINE_PERCENT = 0.0
+  DEFAULT_MIN_LINE_PERCENT = 100.0
 
   module_function
 

@@ -29,6 +29,8 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
       - name: Run minitest suite with merged coverage report
+        env:
+          HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
   rubocop:

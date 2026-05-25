@@ -323,22 +323,29 @@ class ClaudeLauncherTest < Minitest::Test
       end.new("Claude Code\n❯")
       output = File.join(task.folder, "expected.md")
       File.write(output, "done")
-      File.write(Hive::ClaudeLauncher.done_path(task), "done")
 
       output_result = Hive::ClaudeLauncher.wait_for_status(
-        task, runner, 1, :output_file_exists, output, "reviewer"
+        task, runner, 0, :output_file_exists, output, "reviewer"
       )
       assert_equal :ok, output_result.fetch(:status)
       assert_equal "reviewer", output_result.fetch(:log_label)
+    end
+
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new("")
+      missing_output = File.join(task.folder, "missing.md")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
 
       done_result = Hive::ClaudeLauncher.wait_for_status(
-        task, runner, 1, :exit_code_only, output, "ci"
+        task, runner, 0, :exit_code_only, missing_output, "ci"
       )
       assert_equal :ok, done_result.fetch(:status)
       assert_equal "ci", done_result.fetch(:log_label)
 
       assert_raises(ArgumentError) do
-        Hive::ClaudeLauncher.wait_for_status(task, runner, 1, :mystery, output, "x")
+        Hive::ClaudeLauncher.wait_for_status(task, runner, 0, :mystery, missing_output, "x")
       end
     end
   end

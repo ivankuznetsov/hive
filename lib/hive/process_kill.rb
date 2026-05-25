@@ -103,7 +103,7 @@ module Hive
 
     def safe_kill(signal, target)
       Process.kill(signal, target)
-    rescue Errno::ESRCH, Errno::EPERM
+    rescue Errno::ESRCH
       nil
     end
 

@@ -8,7 +8,7 @@ module Hive
       SCHEMA_VERSION = 1
 
       Entry = Data.define(:first_seen_at, :reminded_at, :delivered_to,
-                          :consecutive_failures, :next_attempt_after, :row)
+                          :consecutive_failures, :next_attempt_after, :absent_since, :row)
       RowSnapshot = Data.define(:project, :slug, :stage, :marker, :attrs, :action) do
         def initialize(project:, slug:, stage:, marker:, attrs: {}, action: nil)
           super
@@ -37,9 +37,34 @@ module Hive
             "delivered_to" => normalize_chat_ids(delivered_to),
             "consecutive_failures" => 0,
             "next_attempt_after" => nil,
+            "absent_since" => nil,
             "row" => serialize_row(row)
           }
           persist_locked!
+        end
+      end
+
+      def mark_absent(fingerprint, now)
+        synchronize do
+          entry = entries[fingerprint]
+          return false unless entry
+          return false if entry["absent_since"]
+
+          entry["absent_since"] = timestamp(now)
+          persist_locked!
+          true
+        end
+      end
+
+      def mark_present(fingerprint)
+        synchronize do
+          entry = entries[fingerprint]
+          return false unless entry
+          return false if entry["absent_since"].nil?
+
+          entry["absent_since"] = nil
+          persist_locked!
+          true
         end
       end
 
@@ -216,6 +241,7 @@ module Hive
           delivered_to: Array(raw["delivered_to"]).map(&:to_s),
           consecutive_failures: raw["consecutive_failures"].to_i,
           next_attempt_after: parse_time(raw["next_attempt_after"]),
+          absent_since: parse_time(raw["absent_since"]),
           row: row_from_raw(raw["row"])
         )
       end

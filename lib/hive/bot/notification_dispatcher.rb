@@ -57,6 +57,10 @@ module Hive
             end
             next if backoff_active?(entry)
 
+            unless absence_passed_grace?(entry, fingerprint)
+              next
+            end
+
             if send_notification(recovered_message(row)).any?
               @alert_store.remove(fingerprint)
               log_notification_sent(row, recovered: true)
@@ -69,10 +73,25 @@ module Hive
         end
       end
 
+      def absence_passed_grace?(entry, fingerprint)
+        if entry.absent_since.nil?
+          @alert_store.mark_absent(fingerprint, @now.call)
+          return false
+        end
+
+        (@now.call - entry.absent_since) >= recovery_grace_seconds
+      end
+
+      def recovery_grace_seconds
+        @bot_config.fetch("recovery_grace_sec", 60).to_i
+      end
+
       def process_current(current)
         current.each do |fingerprint, payload|
           row = payload.fetch(:row)
           entry = @alert_store.entry(fingerprint)
+          @alert_store.mark_present(fingerprint) if entry && entry.absent_since
+          entry = @alert_store.entry(fingerprint) if entry
           if entry.nil?
             delivered = send_notification(payload.fetch(:notification))
             if delivered.any?

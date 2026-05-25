@@ -73,6 +73,13 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d = dispatcher(path: path)
       d.process_rows([ recovery_row ])
 
+      # First absence tick — within grace, no Recovered fires yet.
+      d.process_rows([])
+      assert_equal 1, telegram.messages.size,
+                   "Recovered must not fire while absence is within recovery_grace_sec"
+
+      # Advance past grace and re-evaluate — now Recovered fires.
+      @clock += 61
       d.process_rows([])
 
       assert_equal 2, telegram.messages.size
@@ -81,6 +88,17 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
         Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
       )
     end
+  end
+
+  def test_transient_row_absence_within_grace_does_not_fire_recovered
+    d = dispatcher
+    d.process_rows([ recovery_row ])
+    d.process_rows([])               # tick 2: row absent → mark_absent, no Recovered
+    d.process_rows([ recovery_row ]) # tick 3: row re-appears within grace
+
+    assert_equal 1, telegram.messages.size,
+                 "Transient agent_running flicker must NOT produce a false Recovered + re-stuck pair"
+    refute_match(/Recovered/, telegram.messages.first[:text])
   end
 
   def test_non_recovery_row_disappears_silently_drops_entry
@@ -99,8 +117,10 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   def test_same_fingerprint_reappears_after_recovery_refires
     d = dispatcher
     d.process_rows([ recovery_row ])
+    d.process_rows([])               # absence tick — within grace
+    @clock += 61                     # past grace, next absent-tick fires Recovered
     d.process_rows([])
-    d.process_rows([ recovery_row ])
+    d.process_rows([ recovery_row ]) # reappears as a fresh alert
 
     assert_equal 3, telegram.messages.size
     assert_match(/Review stuck/, telegram.messages.first[:text])

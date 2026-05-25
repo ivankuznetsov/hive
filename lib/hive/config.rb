@@ -180,6 +180,7 @@ module Hive
         # override propagates correctly. A hardcoded developer-specific
         # path here would be misleading for direct DEFAULTS readers.
         "recovery_reminder_window_sec" => 28_800,
+        "recovery_grace_sec" => 60,
         "conversation_ttl_sec" => 3600,
         "codex_budget_usd" => 1,
         "codex_timeout_sec" => 120,
@@ -1023,6 +1024,7 @@ module Hive
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
       [ "recovery_reminder_window_sec", 3600, 604_800 ],
+      [ "recovery_grace_sec", 0, 3600 ],
       [ "conversation_ttl_sec", 60, nil ],
       [ "codex_budget_usd", 0, nil ],
       [ "codex_timeout_sec", 10, nil ],

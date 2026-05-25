@@ -7,11 +7,12 @@ class HiveBotAlertStoreTest < Minitest::Test
 
   Row = Hive::Bot::StatusWatcher::Row
 
-  def row(attrs: { "pass" => "1" }, action: "recover_review")
+  def row(attrs: { "pass" => "1" }, action: "recover_review", project: "hive",
+          slug: "stuck-task-260525-abcd", stage: "6-review")
     Row.new(
-      project: "hive",
-      slug: "stuck-task-260525-abcd",
-      stage: "6-review",
+      project: project,
+      slug: slug,
+      stage: stage,
       marker: "review_error",
       attrs: attrs,
       action: action
@@ -103,6 +104,21 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_shape_invalid_entries_are_treated_as_corrupt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      File.write(path, JSON.generate({ "schema_version" => 1, "entries" => { "fp1" => 1 } }))
+      logger = StubLogger.new
+
+      store = Hive::Bot::AlertStore.new(path: path, logger: logger)
+
+      assert_equal [], store.each_fingerprint.to_a
+      refute File.exist?(path)
+      assert Dir.glob("#{path}.corrupt-*").any?
+      assert_equal :alert_store_corrupt, logger.events.last.first
+    end
+  end
+
   def test_unreadable_file_is_treated_as_corrupt
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
@@ -118,6 +134,22 @@ class HiveBotAlertStoreTest < Minitest::Test
       assert_equal path, event.last[:path], ":path must match original file path"
     ensure
       File.chmod(0o644, path) if path && File.exist?(path)
+    end
+  end
+
+  def test_remove_matching_removes_matching_rows_only
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      store.add("fp1", row(slug: "target-task-260525-abcd", stage: "6-review"), Time.utc(2026, 5, 25, 10, 0, 0))
+      store.add("fp2", row(slug: "target-task-260525-abcd", stage: "5-open-pr"), Time.utc(2026, 5, 25, 10, 0, 0))
+      store.add("fp3", row(slug: "other-task-260525-abcd", stage: "6-review"), Time.utc(2026, 5, 25, 10, 0, 0))
+
+      removed = store.remove_matching(project: "hive", slug: "target-task-260525-abcd", stage: "6-review")
+
+      assert_equal 1, removed
+      assert_nil store.entry("fp1")
+      assert_equal "target-task-260525-abcd", store.entry("fp2").row.slug
+      assert_equal "other-task-260525-abcd", store.entry("fp3").row.slug
     end
   end
 

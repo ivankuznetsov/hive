@@ -53,13 +53,20 @@ module Hive
         end
 
         def clear_and_retry(data)
-          _prefix, project, slug, stage, marker = split_callback(data, 5)
-          commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker)
-          @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands)
+          _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
+          commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker,
+                                    match_attr: match_attr)
+          @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
+                            alert_reset: alert_reset(project, slug, stage))
         end
 
         def autofix(data)
-          _prefix, project, slug, stage, marker = split_callback(data, 5)
+          _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
+          if manual_only_marker?(marker)
+            return @result_class.new(action: :reply,
+                                     text: "Hive has no automatic recovery for this state - open it on a laptop.")
+          end
+
           verb = retry_verb_for_stage(stage)
           unless verb
             stage_label = stage.to_s.empty? ? "(empty)" : stage
@@ -70,7 +77,9 @@ module Hive
             action: :dispatch_commands,
             project: project,
             slug: slug,
-            commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker)
+            commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker,
+                                     match_attr: match_attr),
+            alert_reset: alert_reset(project, slug, stage)
           )
         end
 
@@ -193,17 +202,29 @@ module Hive
         # markers skip `hive markers clear` because that name is outside the clear
         # allowlist (markers.rb#ALLOWED_NAMES) and would exit 4. Both branches
         # intentionally diverge from the pre-U7 `clear_and_retry` path.
-        def retry_commands(project:, slug:, stage:, marker:)
+        def retry_commands(project:, slug:, stage:, marker:, match_attr: nil)
           verb = retry_verb_for_stage(stage)
           return [] unless verb
 
           commands = []
           marker_name = marker.to_s
           unless marker_name.casecmp("none").zero? || marker_name.casecmp("agent_working").zero?
-            commands << [ "hive", "markers", "clear", slug, "--name", marker_name.upcase, "--project", project, "--json" ]
+            clear_argv = [ "hive", "markers", "clear", slug, "--name", marker_name.upcase,
+                           "--project", project ]
+            clear_argv += [ "--match-attr", match_attr ] if match_attr.to_s.include?("=")
+            clear_argv << "--json"
+            commands << clear_argv
           end
           commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ]
           commands
+        end
+
+        def manual_only_marker?(marker)
+          marker.to_s.casecmp("execute_stale").zero?
+        end
+
+        def alert_reset(project, slug, stage)
+          { project: project, slug: slug, stage: stage }
         end
 
         def split_callback(data, expected)

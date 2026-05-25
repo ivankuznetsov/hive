@@ -24,6 +24,10 @@ module Hive
         process_current(current)
       end
 
+      def reset_task(project:, slug:, stage: nil)
+        @alert_store.remove_matching(project: project, slug: slug, stage: stage)
+      end
+
       private
 
       def current_notifications(rows)
@@ -45,7 +49,9 @@ module Hive
           entry = @alert_store.entry(fingerprint)
           row = entry&.row
           if row && NotificationBuilders.recovery?(row)
-            if send_notification(recovered_message(row))
+            if current_recovery_for_same_row?(current, row)
+              @alert_store.remove(fingerprint)
+            elsif send_notification(recovered_message(row))
               @alert_store.remove(fingerprint)
               log_notification_sent(row, recovered: true)
             end
@@ -78,22 +84,35 @@ module Hive
       end
 
       def send_notification(notification)
-        any_sent = false
+        attempted = false
+        all_sent = true
         chat_ids.each do |chat_id|
+          attempted = true
           @telegram.send_message(chat_id: chat_id, text: notification.text,
                                  reply_markup: notification.keyboard)
-          any_sent = true
         rescue StandardError => e
+          all_sent = false
           @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
         end
 
-        any_sent
+        attempted && all_sent
       end
 
       def log_notification_sent(row, reminder: false, recovered: false)
         @logger.event(:notification_sent, project: row.project, slug: row.slug,
                                           marker: row.marker, action: row.action,
                                           reminder: reminder, recovered: recovered)
+      end
+
+      def current_recovery_for_same_row?(current, stored_row)
+        current.values.any? do |payload|
+          row = payload.fetch(:row)
+          NotificationBuilders.recovery?(row) && recovery_identity(row) == recovery_identity(stored_row)
+        end
+      end
+
+      def recovery_identity(row)
+        [ row.project.to_s, row.slug.to_s, row.stage.to_s ]
       end
 
       def reminder_due?(entry, row)

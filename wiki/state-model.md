@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/bot/*
 created: 2026-04-25
-updated: 2026-05-23
+updated: 2026-05-25
 tags: [state, filesystem, model, architecture, review]
 ---
 
@@ -157,6 +157,8 @@ bot:
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
+  alert_state_file: ~/.local/state/hive/.bot.alert_state.json
+  recovery_reminder_window_sec: 28800
   conversation_ttl_sec: 3600
   codex_budget_usd: 1
   codex_timeout_sec: 120
@@ -172,7 +174,7 @@ Managed by `Hive::Config.register_project` (`lib/hive/config.rb:79`); deregister
 
 Loader tolerance (`Config.registered_projects` / `load_global_config`): a non-Hash row, a row missing `name`, or a row whose `path` isn't a String is *skipped silently* instead of raising — a single hand-edit accident can no longer brick `status`/`forget`/`prune`/TUI. `Psych::Exception` (any malformed YAML — syntax, disallowed-class, alias-not-enabled) plus `Errno::EACCES`/`EISDIR` are rewrapped as `ConfigError` (exit 78); `chmod 000 ~/Dev/hive/config.yml` no longer leaks as exit-70 InternalError. `prune` is the cleanup verb for invalid rows surfaced this way (predicate `Config.droppable_registry_entry?` covers both missing-path and invalid-shape; `valid_registry_entry?` is the shared shape gate). All writes go through `write_global_config!` so the read/write classification is symmetric and a future flock upgrade (Issue #31) lands in one place. See [[commands/forget]] · [[commands/prune]] · [[modules/config]]. All writers (`register_project`, `unregister_project`, `prune_missing_projects!`) go through `Hive::Config.write_global_config!`, which rewraps `Errno::EACCES`/`EROFS`/`ENOSPC` as `Hive::ConfigError` (exit 78). The reader (`load_global_config`) likewise rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` to `ConfigError` so a `chmod 000` on `~/Dev/hive/config.yml` surfaces as exit 78, not exit 70. Name matching in `unregister_project` is `to_s`-symmetric so a hand-edited Integer `name:` in YAML still resolves. `forget`/`prune` `--json` envelopes use `Hive::Schemas::EnvelopeEmitter` (`lib/hive.rb`) and `File.expand_path` raw `path` / `hive_state_path` to honor the schemas' "Absolute path" contract regardless of how the registry row was hand-edited.
 
-`bot:` is a global operator-surface block, not a per-project enrollment knob. `Config.load_global_bot(require_runtime: true)` merges it over `Config.global_bot_defaults`, validates integer chat IDs, poll bounds, and path strings, then requires both a non-empty allowlist and `HIVE_TELEGRAM_BOT_TOKEN` before `hive bot start` can run. Runtime files are global under `~/.local/state/hive/`: `.bot.pid` for the single-instance lock, `logs/bot.log` for structured JSON lines, and `.bot.last_seen_update_id` for Telegram reconnect summaries.
+`bot:` is a global operator-surface block, not a per-project enrollment knob. `Config.load_global_bot(require_runtime: true)` merges it over `Config.global_bot_defaults`, validates integer chat IDs, poll bounds, and path strings, then requires both a non-empty allowlist and `HIVE_TELEGRAM_BOT_TOKEN` before `hive bot start` can run. Runtime files are global under `~/.local/state/hive/`: `.bot.pid` for the single-instance lock, `logs/bot.log` for structured JSON lines, `.bot.last_seen_update_id` for Telegram reconnect summaries, and `.bot.alert_state.json` for persisted notification fingerprints, row snapshots, first-seen timestamps, and reminder timestamps.
 
 ### Per-project: `<project>/.hive-state/config.yml`
 

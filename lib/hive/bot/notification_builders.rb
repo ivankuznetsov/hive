@@ -121,16 +121,73 @@ module Hive
       end
 
       def recovery(row)
+        retryable = retryable_recovery?(row)
         Notification.new(
           text: [
             "⚠ #{TitleFormatter.stage_label(row.stage)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
             cause_sentence_for(row),
-            "Tap Autofix to retry the stage cleanly."
+            retryable ? "Tap Autofix to retry the stage cleanly." :
+              "Open this task on a laptop before retrying."
           ].join("\n"),
-          keyboard: [
-            [ button("🔧 Autofix", "autofix:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ]
-          ]
+          keyboard: recovery_keyboard(row, retryable: retryable)
         )
+      end
+
+      def recovery_keyboard(row, retryable:)
+        if retryable
+          [ [ button("🔧 Autofix", autofix_callback(row)) ] ]
+        else
+          [
+            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+            [ button("Show details", details_callback(row)) ]
+          ]
+        end
+      end
+
+      def autofix_callback(row)
+        parts = [ "autofix", row.project, row.slug, row.stage, row.marker ]
+        match_attr = recovery_match_attr(row)
+        parts << match_attr if match_attr
+        parts.join(":")
+      end
+
+      def retryable_recovery?(row)
+        return false if manual_only_recovery?(row)
+
+        suggested = suggested_next_action(row)
+        suggested && suggested["kind"].to_s == "retry"
+      end
+
+      def manual_only_recovery?(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        marker = row.marker.to_s.downcase
+        marker == "execute_stale" ||
+          marker == "agent_working" ||
+          marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
+      end
+
+      def suggested_next_action(row)
+        diagnostic = row.respond_to?(:diagnostic) ? row.diagnostic : nil
+        return nil unless diagnostic.is_a?(Hash)
+
+        suggested = diagnostic["suggested_next_action"]
+        suggested.is_a?(Hash) ? suggested : nil
+      end
+
+      def recovery_match_attr(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        keys = case row.marker.to_s.downcase
+               when "review_error", "review_ci_stale"
+                 %w[pass phase reason]
+               when "review_stale"
+                 %w[pass reason]
+               when "error"
+                 %w[exit_code]
+               else
+                 []
+               end
+        key = keys.find { |candidate| !attrs[candidate].to_s.empty? }
+        key ? "#{key}=#{attrs[key]}" : nil
       end
 
       def cause_sentence_for(row)

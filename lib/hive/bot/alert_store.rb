@@ -57,6 +57,21 @@ module Hive
         end
       end
 
+      def remove_matching(project:, slug:, stage: nil)
+        synchronize do
+          before = entries.size
+          entries.delete_if do |_fingerprint, raw|
+            row = row_from_raw(raw.is_a?(Hash) ? raw["row"] : nil)
+            row.project.to_s == project.to_s &&
+              row.slug.to_s == slug.to_s &&
+              (stage.nil? || row.stage.to_s == stage.to_s)
+          end
+          removed = before - entries.size
+          persist_locked! if removed.positive?
+          removed
+        end
+      end
+
       def entry(fingerprint)
         synchronize do
           raw = entries[fingerprint]
@@ -83,7 +98,8 @@ module Hive
         parsed = JSON.parse(raw)
         unless parsed.is_a?(Hash) &&
                parsed["schema_version"] == SCHEMA_VERSION &&
-               parsed["entries"].is_a?(Hash)
+               parsed["entries"].is_a?(Hash) &&
+               parsed["entries"].all? { |fingerprint, entry| fingerprint.is_a?(String) && entry.is_a?(Hash) }
           raise JSON::ParserError, "invalid alert store schema"
         end
 

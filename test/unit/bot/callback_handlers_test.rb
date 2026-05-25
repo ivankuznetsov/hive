@@ -9,7 +9,7 @@ require "hive/bot/handlers/callback_handlers"
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
-                      :intent, keyword_init: true)
+                      :intent, :alert_reset, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)
       events << { name: name, payload: payload }
@@ -197,6 +197,20 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
+  def test_clear_and_retry_passes_marker_match_attr_when_present
+    result = @handlers.handle(
+      :callback_clear_and_retry,
+      update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
+    )
+
+    assert_equal(
+      [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
+        "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
+      result.commands.first
+    )
+    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review" }, result.alert_reset)
+  end
+
   def test_clear_and_retry_none_marker_skips_marker_clear_and_runs_stage
     result = @handlers.handle(
       :callback_clear_and_retry,
@@ -214,18 +228,29 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   def test_autofix_marker_dispatches_clear_then_retry
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
     )
 
     assert_equal :dispatch_commands, result.action
     assert_equal(
       [
         [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-          "REVIEW_ERROR", "--project", "alpha", "--json" ],
+          "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
         [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ]
       ],
       result.commands
     )
+    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review" }, result.alert_reset)
+  end
+
+  def test_autofix_execute_stale_replies_without_dispatch
+    result = @handlers.handle(
+      :callback_autofix,
+      update("autofix:alpha:exec-task-260519-abcd:4-execute:EXECUTE_STALE")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic recovery/i, result.text)
   end
 
   def test_autofix_none_marker_dispatches_retry_only
@@ -238,6 +263,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
       result.commands
     )
+    assert_equal({ project: "alpha", slug: "plan-task-260519-abcd", stage: "3-plan" }, result.alert_reset)
   end
 
   def test_autofix_agent_working_marker_dispatches_retry_only

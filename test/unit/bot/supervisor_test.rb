@@ -32,15 +32,19 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
 
-  FakeNotificationDispatcher = Struct.new(:processed, keyword_init: true) do
+  FakeNotificationDispatcher = Struct.new(:processed, :reset_tasks, keyword_init: true) do
     def process_rows(rows)
       processed << rows
+    end
+
+    def reset_task(**kwargs)
+      reset_tasks << kwargs
     end
   end
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, keyword_init: true)
+                        :question_n, :answer_text, :mode, :alert_reset, keyword_init: true)
   end
 
   FakeChildSupervisor = Struct.new(:dispatch_pid, :dispatched, :completed, :reap_batches, keyword_init: true) do
@@ -92,7 +96,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @status_watcher = FakeStatusWatcher.new(result: StatusResult.new(ok: true, rows: []))
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
-    @notification_dispatcher = FakeNotificationDispatcher.new(processed: [])
+    @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
     # Drive the real constructor so any future invariant added to
     # Supervisor#initialize is exercised by every test in this file. We
     # inject all collaborators so the constructor's `||=` defaults never
@@ -175,9 +179,10 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_includes text, "REVIEW_ERROR phase=fix pass=1"
-    assert_includes text, "fix attempt timed out"
-    assert_includes text, "Path: /tmp/red-status.md"
+    assert_equal 'Diagnosis is available for "Red task…". Open this task on a laptop for full details.', text
+    refute_includes text, "REVIEW_ERROR"
+    refute_includes text, "fix attempt timed out"
+    refute_includes text, "/tmp/red-status.md"
     refute_includes text, "Command completed"
   end
 
@@ -343,6 +348,21 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal 1, @child_supervisor.dispatched.length
     assert_equal "Stopped because the previous command failed.", @telegram.messages.last.fetch(:text)
+  end
+
+  def test_dispatch_command_sequence_resets_alert_before_dispatch
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "review", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], @notification_dispatcher.reset_tasks
+    assert_equal [ "hive", "review", "task", "--json" ], @child_supervisor.dispatched.first.fetch(:command_argv)
   end
 
   def test_queued_updates_filters_by_last_seen_and_allowlist

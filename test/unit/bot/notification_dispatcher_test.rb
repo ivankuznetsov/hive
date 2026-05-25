@@ -108,13 +108,27 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_match(/Review stuck/, telegram.messages.last[:text])
   end
 
-  def test_marker_attr_change_renotifies
+  def test_marker_attr_change_renotifies_without_false_recovered_message
     d = dispatcher
     d.process_rows([ recovery_row(attrs: { "pass" => "2" }) ])
     d.process_rows([ recovery_row(attrs: { "pass" => "3" }) ])
 
-    assert_equal 3, telegram.messages.size
-    assert_match(/Recovered/, telegram.messages[1][:text])
+    assert_equal 2, telegram.messages.size
+    assert_match(/Review stuck/, telegram.messages.first[:text])
+    assert_match(/Review stuck/, telegram.messages.last[:text])
+    refute_match(/Recovered/, telegram.messages.map { |message| message[:text] }.join("\n"))
+  end
+
+  def test_reset_task_allows_same_fingerprint_to_refire
+    d = dispatcher
+    task = recovery_row(attrs: { "pass" => "2" })
+
+    d.process_rows([ task ])
+    d.reset_task(project: "hive", slug: "stuck-task-260525-abcd", stage: "6-review")
+    d.process_rows([ task ])
+
+    assert_equal 2, telegram.messages.size
+    assert telegram.messages.all? { |message| message[:text].include?("Review stuck") }
   end
 
   def test_eight_hour_reminder_fires_exactly_once
@@ -191,6 +205,23 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     multi.process_rows([ row ])
 
     assert_equal [ 12345, 67890 ], telegram.messages.map { |msg| msg[:chat_id] }
+  end
+
+  def test_partial_multi_chat_failure_does_not_mark_fingerprint_delivered
+    flaky = PartiallyFlakyTelegram.new(fail_chat_id: 67890)
+    multi = Hive::Bot::NotificationDispatcher.new(
+      telegram: flaky,
+      logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345, 67890 ], "recovery_reminder_window_sec" => 28_800 },
+      now: -> { @clock ||= Time.utc(2026, 5, 25, 10, 0, 0) }
+    )
+
+    multi.process_rows([ row ])
+    multi.process_rows([ row ])
+
+    assert_equal [ 12345, 67890, 12345, 67890 ], flaky.calls
+    assert_equal [ 12345, 12345, 67890 ], flaky.messages.map { |msg| msg[:chat_id] }
+    assert_equal :notification_sent, logger.events.last.first
   end
 
   def test_rows_without_notification_are_ignored
@@ -286,6 +317,27 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
       if @fail_next
         @fail_next = false
+        raise IOError, "delivery failed"
+      end
+
+      @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
+    end
+  end
+
+  class PartiallyFlakyTelegram
+    attr_reader :messages, :calls
+
+    def initialize(fail_chat_id:)
+      @fail_chat_id = fail_chat_id
+      @failed = false
+      @messages = []
+      @calls = []
+    end
+
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
+      @calls << chat_id
+      if chat_id == @fail_chat_id && !@failed
+        @failed = true
         raise IOError, "delivery failed"
       end
 

@@ -200,6 +200,7 @@ module Hive
       end
 
       def dispatch_command_sequence(result, update)
+        reset_alert_for_result(result) unless @dry_run
         commands = Array(result.commands)
         commands.each_with_index do |argv, idx|
           per_command = @router.class::Result.new(
@@ -216,6 +217,15 @@ module Hive
             end
           end
         end
+      end
+
+      def reset_alert_for_result(result)
+        return unless result.respond_to?(:alert_reset)
+
+        reset = result.alert_reset
+        return unless reset && @notification_dispatcher.respond_to?(:reset_task)
+
+        @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug], stage: reset[:stage])
       end
 
       def wait_for_child_success(pid, deadline:)
@@ -462,19 +472,13 @@ module Hive
       def diagnose_reply_for_child(child)
         envelope = child.json_envelope
         return nil unless envelope.is_a?(Hash) && envelope["schema"] == "hive-status-diagnose"
-
         if envelope["ok"] == true
           diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
-          lines = []
-          summary = diagnostic["summary"].to_s.strip
-          detail = diagnostic["detail"].to_s.strip
-          path = envelope["path"].to_s.strip
-          lines << summary unless summary.empty?
-          lines << detail unless detail.empty? || detail == summary
-          lines << "Path: #{path}" unless path.empty?
-          return lines.join("\n\n") unless lines.empty?
+          slug = envelope["slug"] || child.slug
+          return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
-          return "No diagnostic available for #{envelope['slug'] || child.slug}."
+          return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
+                 "Open this task on a laptop for full details."
         end
 
         kind = envelope["error_kind"].to_s.strip

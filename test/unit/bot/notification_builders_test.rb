@@ -21,6 +21,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
   end
 
+  def retry_diagnostic(command: "hive review slug --json")
+    { "suggested_next_action" => { "kind" => "retry", "command" => command } }
+  end
+
+  def manual_diagnostic
+    { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
+  end
+
   def test_ready_to_plan_builds_approval_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "ready_to_plan", marker: "complete")
@@ -136,7 +144,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
         attrs: { "phase" => "fix", "reason" => "timeout", "exception_class" => "Encoding::CompatibilityError" },
         slug: "we-need-to-improve-this-260522-db23",
         stage: "6-review",
-        diagnostic: { "summary" => "REVIEW_ERROR phase=fix reason=timeout" }
+        diagnostic: retry_diagnostic(command: "hive review we-need-to-improve-this-260522-db23 --json")
       )
     )
 
@@ -154,16 +162,41 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def test_recovery_keyboard_is_single_autofix_button
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error",
-          slug: "we-need-to-improve-this-260522-db23", stage: "6-review")
+      row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" },
+          slug: "we-need-to-improve-this-260522-db23", stage: "6-review",
+          diagnostic: retry_diagnostic)
     )
 
     assert_equal 1, notification.keyboard.length
     assert_equal 1, notification.keyboard.first.length
     button = notification.keyboard.first.first
     assert_equal "🔧 Autofix", button[:text]
-    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error",
+    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error:pass=2",
                  Hive::Bot::NotificationBuilders.resolve_callback(button[:callback_data])
+  end
+
+  def test_manual_recovery_diagnostic_does_not_offer_autofix
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_execute", marker: "execute_stale", stage: "4-execute",
+          diagnostic: manual_diagnostic)
+    )
+
+    assert_includes notification.text, "Open this task on a laptop before retrying."
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Open laptop", "Show details" ], labels
+    refute_includes labels, "🔧 Autofix"
+  end
+
+  def test_fix_tampered_review_error_does_not_offer_autofix
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "phase" => "fix", "reason" => "fix_tampered" },
+          stage: "6-review", diagnostic: retry_diagnostic)
+    )
+
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    refute_includes labels, "🔧 Autofix"
+    assert_includes labels, "Open laptop"
   end
 
   def test_cause_sentence_for_execute_stale

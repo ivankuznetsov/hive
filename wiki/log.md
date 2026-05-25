@@ -1989,3 +1989,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/markers]]
 - [[commands/status]]
 - [[stages/open-pr]]
+
+## [2026-05-25T18:40:00Z] review — auto-commit successful fix-agent edits
+
+**Action:** Changed Phase 4 review recovery so a successful fix agent that leaves dirty worktree files is auto-committed by Hive with the rollback-rate trailers before fix guardrails run, instead of landing repeated `fix_dirty_worktree` errors.
+
+**Refreshed pages:**
+- [[stages/review]]

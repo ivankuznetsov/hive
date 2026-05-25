@@ -91,7 +91,7 @@ The escalations digest is mirrored to the PR with the same publisher path and du
 
 ## Phase 4 — fix (`spawn_fix_agent`)
 
-Spawns the fix agent (`cfg.review.fix.agent`, default `claude`) with the concatenated `[x]` lines from every per-reviewer file for the current pass, wrapped in the `<user_supplied>` nonce. The fix prompt requires git trailers on every commit (`Hive-Task-Slug`, `Hive-Fix-Pass`, `Hive-Fix-Findings`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase: fix`) — consumed by `hive metrics rollback-rate` (U14).
+Spawns the fix agent (`cfg.review.fix.agent`, default `claude`) with the concatenated `[x]` lines from every per-reviewer file for the current pass, wrapped in the `<user_supplied>` nonce. The fix prompt requires git trailers on every commit (`Hive-Task-Slug`, `Hive-Fix-Pass`, `Hive-Fix-Findings`, `Hive-Triage-Bias`, `Hive-Reviewer-Sources`, `Hive-Fix-Phase: fix`) — consumed by `hive metrics rollback-rate` (U14). If a successful fix agent exits with uncommitted worktree changes, the runner stages and commits those changes with the same trailers before guardrail evaluation; commit failure yields `REVIEW_ERROR phase=fix reason=fix_auto_commit_failed`.
 
 Plan / worktree.yml / task.md are SHA-256 protected around the fix spawn; tampering → `REVIEW_ERROR phase=fix reason=fix_tampered`.
 

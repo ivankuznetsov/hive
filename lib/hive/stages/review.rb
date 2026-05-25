@@ -471,10 +471,17 @@ module Hive
           end
 
           if worktree_dirty?(worktree_path)
-            Hive::Markers.set(task.state_file, :review_error,
-                              phase: :fix, reason: "fix_dirty_worktree", pass: pass)
-            return { commit: "fix_dirty_worktree_pass_#{format('%02d', pass)}",
-                     status: :review_error }
+            auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted)
+            unless auto_commit[:success]
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :fix, reason: "fix_auto_commit_failed",
+                                message: truncate_marker_message(auto_commit[:message]),
+                                pass: pass)
+              return { commit: "fix_auto_commit_failed_pass_#{format('%02d', pass)}",
+                       status: :review_error }
+            end
+
+            after_fix_head = auto_commit[:head]
           end
 
           # Post-fix diff guardrail (U13 stub today).
@@ -1458,6 +1465,67 @@ module Hive
       def git_head(worktree_path)
         out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
         status.success? ? out.strip : nil
+      end
+
+      def auto_commit_fix_worktree(task, cfg, ctx, accepted)
+        # `git add -A` (not `-u`) is intentional: fix-agent fixes
+        # routinely include new files (added test cases, extracted
+        # helpers, new modules) that must land in the same commit as the
+        # tracked-file edits they support. `Hive::ProtectedFiles` already
+        # guards task.md / plan.md / worktree.yml; the worktree's own
+        # .gitignore is the line of defense against debris. The
+        # integration test `test_review_fix_agent_dirty_worktree_is_auto_committed`
+        # locks in the untracked-file behaviour.
+        add_out, add_err, add_status = Open3.capture3("git", "-C", ctx.worktree_path, "add", "-A")
+        unless add_status.success?
+          return {
+            success: false,
+            message: git_command_message("git add -A", add_out, add_err)
+          }
+        end
+
+        message = fix_auto_commit_message(task, cfg, ctx, accepted)
+        commit_out, commit_err, commit_status = Open3.capture3(
+          "git", "-C", ctx.worktree_path,
+          "-c", "commit.gpgsign=false",
+          "commit", "-m", message
+        )
+        unless commit_status.success?
+          return {
+            success: false,
+            message: git_command_message("git commit", commit_out, commit_err)
+          }
+        end
+
+        { success: true, head: git_head(ctx.worktree_path) }
+      end
+
+      def fix_auto_commit_message(task, cfg, ctx, accepted)
+        pass = format("%02d", ctx.pass)
+        <<~MSG.chomp
+          fix(review): apply pass #{pass} findings
+
+          Hive-Task-Slug: #{task.slug}
+          Hive-Fix-Pass: #{pass}
+          Hive-Fix-Findings: #{accepted_finding_count(accepted)}
+          Hive-Triage-Bias: #{triage_bias_for(cfg)}
+          Hive-Reviewer-Sources: #{reviewer_sources_for(ctx)}
+          Hive-Fix-Phase: fix
+        MSG
+      end
+
+      def accepted_finding_count(accepted)
+        count = accepted.to_s.lines.count do |line|
+          line.match?(/^\[[^\]]+\]\s+-\s+\[x\]\s+/) ||
+            line.match?(/^\[[^\]]+\]\s+USER-ANSWERED ESCALATION\b/)
+        end
+
+        count.positive? ? count : 1
+      end
+
+      def git_command_message(command, out, err)
+        details = [ err, out ].map(&:to_s).reject(&:empty?).join("\n").strip
+        details.empty? ? "#{command} failed" : "#{command} failed: #{details}"
       end
 
       def worktree_dirty?(worktree_path)

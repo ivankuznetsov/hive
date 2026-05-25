@@ -477,7 +477,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_review_fix_agent_dirty_worktree_yields_review_error
+  def test_review_fix_agent_dirty_worktree_is_auto_committed
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
@@ -499,13 +499,23 @@ class RunReviewTest < Minitest::Test
         SH
         File.chmod(0o755, @driver_bin)
 
-        # `hive run` raises TaskInErrorState (exit 3) for :review_error
-        # markers (Finding #5) so polling agents see the failure.
         _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        assert_equal 0, status
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_error, marker.name
-        assert_equal "fix_dirty_worktree", marker.attrs["reason"]
+        assert_equal :review_complete, marker.name
+
+        git_status = `git -C #{worktree} status --porcelain`
+        assert_equal "", git_status
+        assert_equal "uncommitted\n", File.read(dirty_file)
+
+        commit = `git -C #{worktree} log -1 --pretty=%B`
+        assert_includes commit, "fix(review): apply pass 01 findings"
+        assert_includes commit, "Hive-Task-Slug: feat-x-260424-aaaa"
+        assert_includes commit, "Hive-Fix-Pass: 01"
+        assert_includes commit, "Hive-Fix-Findings: 1"
+        assert_includes commit, "Hive-Triage-Bias: courageous"
+        assert_includes commit, "Hive-Reviewer-Sources: local-reviewer"
+        assert_includes commit, "Hive-Fix-Phase: fix"
       end
     end
   end

@@ -132,6 +132,65 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_agent_working_with_live_runner_lock_is_not_rendered_stale_before_claude_pid
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "5-open-pr", "opening-task-260524-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "pr.md"), "<!-- AGENT_WORKING -->\n")
+      File.write(File.join(folder, ".lock"), YAML.dump(
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "slug" => "opening-task-260524-abcd",
+        "stage" => "open-pr"
+      ))
+
+      cmd = Hive::Commands::Status.new
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      { "name" => "demo" },
+                      1,
+                      with_diagnostic: false)
+      row = rows.find { |candidate| candidate[:slug] == "opening-task-260524-abcd" }
+
+      assert_equal :agent_working, row.fetch(:marker_name)
+      assert_equal true, row.fetch(:live_task_lock)
+      assert_nil row.fetch(:claude_pid)
+      assert_equal "agent_running", row.fetch(:action_key)
+      assert_equal "Agent running", row.fetch(:action_label)
+      assert_nil row.fetch(:suggested_command)
+      assert_match(/run_lock pid=#{Process.pid}/, row.fetch(:state_label))
+    end
+  end
+
+  def test_dead_task_lock_does_not_override_marker_derived_action
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(hive_state, "stages", "4-execute", "ready-task-260524-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      File.write(File.join(folder, ".lock"), YAML.dump(
+        "pid" => 12_345,
+        "process_start_time" => "old-start",
+        "slug" => "ready-task-260524-abcd",
+        "stage" => "execute"
+      ))
+
+      cmd = Hive::Commands::Status.new
+      cmd.define_singleton_method(:pid_alive?) { |_pid| false }
+      rows = cmd.send(:annotate_actions,
+                      cmd.send(:collect_rows, hive_state),
+                      { "name" => "demo" },
+                      1,
+                      with_diagnostic: false)
+      row = rows.find { |candidate| candidate[:slug] == "ready-task-260524-abcd" }
+
+      assert_equal false, row.fetch(:live_task_lock)
+      assert_equal "ready_to_open_pr", row.fetch(:action_key)
+      assert_equal "hive open-pr ready-task-260524-abcd --from 4-execute", row.fetch(:suggested_command)
+    end
+  end
+
   def test_render_project_skips_empty_action_label_groups
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

@@ -41,6 +41,33 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_rejects_marker_names_that_only_prefix_known_names
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      File.write(file, "<!-- COMPLETED -->\n<!-- ERROR_DETAIL reason=boom -->\n<!-- REVIEW_COMPLETE_SUFFIX -->\n")
+
+      state = Hive::Markers.current(file)
+
+      assert_equal :none, state.name
+      assert_empty state.attrs
+    end
+  end
+
+  def test_ignores_unterminated_marker_before_later_valid_marker
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      File.write(file, <<~MD)
+        <!-- ERROR reason="unterminated
+        <!-- COMPLETE -->
+      MD
+
+      state = Hive::Markers.current(file)
+
+      assert_equal :complete, state.name
+      assert_empty state.attrs
+    end
+  end
+
   def test_parses_git_error_detail_with_branch_arrow
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
@@ -58,16 +85,16 @@ class MarkersTest < Minitest::Test
     end
   end
 
-  def test_set_sanitizes_quotes_and_comment_close_in_attr_values
+  def test_set_sanitizes_quotes_and_comment_delimiters_in_attr_values
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
-      Hive::Markers.set(file, :error, reason: "boom", detail: 'bad "quoted" --> payload')
+      Hive::Markers.set(file, :error, reason: "boom", detail: 'bad "quoted" <!-- marker --> payload')
 
       state = Hive::Markers.current(file)
 
       assert_equal :error, state.name
       assert_equal "boom", state.attrs["reason"]
-      assert_equal "bad 'quoted' -- > payload", state.attrs["detail"]
+      assert_equal "bad 'quoted' < !-- marker -- > payload", state.attrs["detail"]
     end
   end
 

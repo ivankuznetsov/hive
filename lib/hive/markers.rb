@@ -19,7 +19,7 @@ module Hive
       REVIEW_WORKING REVIEW_WAITING REVIEW_CI_STALE
       REVIEW_STALE REVIEW_COMPLETE REVIEW_ERROR
     ].freeze
-    MARKER_RE = /<!--\s*(?<name>WAITING|COMPLETE|AGENT_WORKING|ERROR|MANUAL_STEERING|EXECUTE_WAITING|EXECUTE_COMPLETE|EXECUTE_STALE|REVIEW_WORKING|REVIEW_WAITING|REVIEW_CI_STALE|REVIEW_STALE|REVIEW_COMPLETE|REVIEW_ERROR)(?<attrs>.*?)\s*-->/m
+    MARKER_RE = /<!--\s*(?<name>WAITING|COMPLETE|AGENT_WORKING|ERROR|MANUAL_STEERING|EXECUTE_WAITING|EXECUTE_COMPLETE|EXECUTE_STALE|REVIEW_WORKING|REVIEW_WAITING|REVIEW_CI_STALE|REVIEW_STALE|REVIEW_COMPLETE|REVIEW_ERROR)(?=\s|-->)(?<attrs>(?:(?!<!--).)*?)\s*-->/m
     # Markers whose presence means "this stage is done; the next verb
     # may advance the task". Single source of truth — previously this
     # list was duplicated across `Hive::Commands::StageAction#terminal_marker?`,
@@ -147,7 +147,7 @@ module Hive
     end
 
     def format_attr(value)
-      str = value.to_s.gsub('"', "'").gsub("-->", "-- >")
+      str = value.to_s.gsub('"', "'").gsub("<!--", "< !--").gsub("-->", "-- >")
       str =~ /\s/ ? "\"#{str}\"" : str
     end
 

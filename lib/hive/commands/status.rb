@@ -383,6 +383,9 @@ module Hive
           pid = claude_pid_from_lock(lock_holder) || marker.attrs["pid"]
           if pid && pid_alive?(pid.to_i)
             [ "🤖", "agent_working pid=#{pid}" ]
+          elsif live_task_lock
+            pid = lock_holder && lock_holder["pid"]
+            [ "🤖", pid ? "run_lock pid=#{pid}" : "run_lock" ]
           else
             [ "⚠", "stale lock pid=#{pid}" ]
           end

@@ -31,7 +31,8 @@ module Hive
           return { commit: "open_pr_already_open", status: :complete }
         end
 
-        merged = Hive::Gh.lookup_merged_pr(worktree_path, branch, cfg: cfg)
+        head_oid = local_head_oid(worktree_path)
+        merged = head_oid && Hive::Gh.lookup_merged_pr(worktree_path, branch, cfg: cfg, head_oid: head_oid)
         if merged
           write_merged_pr_md(task, merged)
           marker = Hive::Markers.current(task.state_file)
@@ -214,6 +215,13 @@ module Hive
         end
 
         nil
+      end
+
+      def local_head_oid(worktree_path)
+        out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
+        return nil unless status.success?
+
+        out.strip.empty? ? nil : out.strip
       end
 
       def write_pr_md(task, existing, idempotent: false)

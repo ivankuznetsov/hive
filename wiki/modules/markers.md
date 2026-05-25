@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-05-24
+updated: 2026-05-25
 tags: [marker, protocol, flock]
 ---
 
@@ -31,11 +31,11 @@ tags: [marker, protocol, flock]
 <!-- REVIEW_ERROR phase=reviewers reason=all_failed -->          # terminal — agent-level failure
 ```
 
-Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb` (twelve names total — six pre-U3, six REVIEW_* added in U3).
+Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
 
 `KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). When an `ERROR` marker's `exit_code` attr is in this list the task was interrupted, not broken. Single source of truth shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears them) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
 
-Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES` and captures attrs until the terminating `-->`, so quoted error details may contain `>` (for example Git stderr `branch -> branch`) and newlines. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
+Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-name boundary, and captures attrs until the terminating `-->` without crossing another `<!--`. Quoted error details may contain `>` (for example Git stderr `branch -> branch`) and newlines. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
 
 ### EXECUTE_* attribute schemas
 
@@ -75,7 +75,7 @@ State = Struct.new(:name, :attrs, :raw, keyword_init: true)
 ## `set(path, name, attrs = {})`
 
 - `name` is upcased; raises `ArgumentError` if not in `KNOWN_NAMES`.
-- Builds the marker text via `build_marker`. Attribute values containing whitespace get double-quoted. Double quotes are normalized to single quotes and `-->` is rewritten to `-- >` so generated attrs cannot terminate the HTML comment early.
+- Builds the marker text via `build_marker`. Attribute values containing whitespace get double-quoted. Double quotes are normalized to single quotes, `<!--` is rewritten to `< !--`, and `-->` is rewritten to `-- >` so generated attrs cannot confuse HTML-comment marker boundaries.
 - Opens the file with `RDWR | CREAT, 0o644`, takes `LOCK_EX`, reads the full body, replaces the *last* marker via `replace_last_marker`, or appends if none. Truncates and rewrites in place.
 - This locking is what makes concurrent writes from `Hive::Agent` (during a run) and `Markers.set` (from tests or recovery) safe.
 

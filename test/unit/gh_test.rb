@@ -199,6 +199,23 @@ class GhUnitTest < Minitest::Test
     end
   end
 
+  def test_lookup_merged_pr_can_filter_by_head_oid
+    with_tmp_git_repo do |dir|
+      ENV["HIVE_FAKE_GH_LIST_JSON"] = <<~JSON
+        [
+          {"url":"https://example.com/pr/old","number":1,"state":"MERGED","isDraft":false,"headRefOid":"old"},
+          {"url":"https://example.com/pr/current","number":2,"state":"MERGED","isDraft":false,"headRefOid":"current"}
+        ]
+      JSON
+
+      pr = Hive::Gh.lookup_merged_pr(dir, "feat-x-260424-aaaa", head_oid: "current")
+      assert_equal "https://example.com/pr/current", pr.fetch("url")
+      assert_nil Hive::Gh.lookup_merged_pr(dir, "feat-x-260424-aaaa", head_oid: "missing")
+    ensure
+      ENV.delete("HIVE_FAKE_GH_LIST_JSON")
+    end
+  end
+
   # --- push_branch returns PushResult, push_branch! hard-fails ---------
 
   def test_push_branch_returns_push_result_on_failure

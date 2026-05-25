@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-05-13
+updated: 2026-05-25
 tags: [stage, pr, github]
 ---
 
@@ -17,18 +17,20 @@ tags: [stage, pr, github]
 
 ## Steps performed (`Stages::OpenPr.run!`)
 
-1. Check for an existing PR for the branch with `gh pr list --head <branch> --state all`.
-2. If one exists, write `pr.md` with `idempotent=true` and `is_draft=true` and finish without spawning an agent.
-3. Push the branch with `git push -u origin <branch>`.
-4. Render `templates/open_pr_prompt.md.erb` with the plan and execute output wrapped in a per-spawn `<user_supplied>` nonce.
-5. Spawn the open-pr agent in the worktree. The prompt invokes `compound-engineering:ce-commit-push-pr`, requires `gh pr create --draft`, forbids another push, and requires `pr.md` frontmatter with `pr_url` / `pr_number`.
-6. Secret-scan the resulting `pr.md` and PR body before returning success.
+1. Check pull requests for the branch with `gh pr list --head <branch> --state all`.
+2. If an OPEN PR exists, write `pr.md` with `idempotent=true`, secret-scan it, and finish without spawning an agent.
+3. If a MERGED PR exists for the current local `HEAD` (`headRefOid` match), write `pr.md` with `merged=true`, secret-scan it, write `summary.md`, and finish without spawning an agent.
+4. Push the branch with `git push -u origin <branch>`.
+5. Render `templates/open_pr_prompt.md.erb` with the plan and execute output wrapped in a per-spawn `<user_supplied>` nonce.
+6. Spawn the open-pr agent in the worktree. The prompt invokes `compound-engineering:ce-commit-push-pr`, requires `gh pr create --draft`, forbids another push, and requires `pr.md` frontmatter with `pr_url` / `pr_number`.
+7. Secret-scan the resulting `pr.md` and PR body before returning success.
 
 ## Marker → commit action
 
 - `:complete` → `pr_opened_draft`.
-- Existing PR → `open_pr_already_open`.
-- Secret scan failure → `ERROR reason=secret_in_pr_body`.
+- Existing OPEN PR → `open_pr_already_open` with `idempotent=true`.
+- Existing MERGED PR for local HEAD → `open_pr_already_merged` with `merged=true` and `summary.md` written.
+- Secret scan failure → `ERROR reason=secret_in_pr_body` or `ERROR reason=secret_scan_fetch_failed`.
 
 ## Backlinks
 

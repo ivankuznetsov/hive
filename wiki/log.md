@@ -1966,3 +1966,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[token-usage]]
+
+## [2026-05-25T08:18:06Z] review follow-up — marker parsing and open-pr recovery
+
+**Action:** Tightened marker parsing around marker-name boundaries and nested comment starts, clarified live-lock status rendering before a Claude PID is attached, and made 5-open-pr merged-PR recovery require a `headRefOid` match with the current local worktree HEAD.
+
+**Refreshed pages:**
+- [[modules/markers]]
+- [[commands/status]]
+- [[stages/open-pr]]

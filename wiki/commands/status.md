@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-05-24
+updated: 2026-05-25
 tags: [command, status, observability, json, diagnostics, legacy-dirs]
 ---
 
@@ -46,10 +46,10 @@ The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hiv
 | `·` | `:none` (no marker yet, e.g. fresh `1-inbox` capture before WAITING was added) |
 | `⏸` | `:waiting`, `:execute_waiting`, `:review_waiting` |
 | `✓` | `:complete`, `:execute_complete`, `:review_complete` |
-| `🤖` | `:agent_working` with a live PID, `:review_working`, or a live per-task `.lock` holder before a working marker is written |
+| `🤖` | `:agent_working` with a live PID, `:review_working`, or a live per-task `.lock` holder before a Claude PID is recorded |
 | `⚠` | `:execute_stale`, `:review_ci_stale`, `:review_stale`, `:review_error`, `:error`, or `:agent_working` with a dead PID |
 
-`decorate` special-cases `:agent_working`: reads `claude_pid` from the per-task `.lock` (or fallback marker `pid`) and runs `Process.kill(0, pid)` to decide between 🤖 and ⚠ "stale lock". It also renders a live non-marker `.lock` as `🤖 run_lock pid=<pid>`; this is internal display state, not an added JSON field.
+`decorate` special-cases `:agent_working`: reads `claude_pid` from the per-task `.lock` (or fallback marker `pid`) and runs `Process.kill(0, pid)` to decide between 🤖 and ⚠ "stale lock". If the task lock is live but the Claude PID is not attached yet, status renders `🤖 run_lock pid=<pid>` instead of a stale warning. This is internal display state, not an added JSON field.
 
 ## Rendering rules
 

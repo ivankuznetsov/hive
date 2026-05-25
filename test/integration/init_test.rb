@@ -136,6 +136,20 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_llm_wiki_bootstrap_recovers_from_invalid_existing_config_json
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".llm-wiki"))
+      File.write(File.join(dir, ".llm-wiki", "config.json"), "not-json")
+
+      Hive::LlmWikiBootstrap.install!(dir, post_commit_hook: false, scheduler: false)
+
+      cfg = JSON.parse(File.read(File.join(dir, ".llm-wiki", "config.json")))
+      assert_equal "codex", cfg.fetch("headless_agent")
+      assert_equal %w[claude codex pi], cfg.fetch("context_agents")
+      assert_equal "hive", cfg.fetch("created_by")
+    end
+  end
+
   def assert_llm_wiki_scheduler_files(home, project_dir)
     skip "systemd user timers are Linux-only" unless RbConfig::CONFIG["host_os"].include?("linux")
 

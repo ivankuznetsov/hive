@@ -562,4 +562,97 @@ class DropCommandTest < Minitest::Test
              "dirty worktree must be removed via the --force retry path"
     end
   end
+  def test_drop_prints_human_success_without_json
+    with_drop_project do |dir, ops, project|
+      slug = "plain-drop-260525-aaaa"
+      folder = create_task(dir, "3-plan", slug)
+      commit_hive_state(ops, "3-plan", slug)
+
+      out, _err = capture_io do
+        Hive::Commands::Drop.new(slug, project: project).call
+      end
+
+      assert_includes out, "dropped #{slug} from #{project} (3-plan)"
+      refute File.directory?(folder)
+    end
+  end
+
+  def test_drop_ignores_corrupt_lock_payload_as_no_pid
+    with_drop_project do |dir, ops, project|
+      slug = "bad-lock-260525-aaaa"
+      folder = create_task(dir, "4-execute", slug)
+      File.write(File.join(folder, ".lock"), "pid: [unterminated\n")
+      commit_hive_state(ops, "4-execute", slug)
+
+      out, _err = capture_io do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal true, payload["ok"]
+      assert_equal "no_pid", payload["agent_kill_skipped_reason"]
+    end
+  end
+
+  def test_collect_stage_folders_collapses_concurrent_unlink
+    with_drop_project do |dir, _ops, _project|
+      slug = "gone-during-realpath-260525-aaaa"
+      folder = create_task(dir, "3-plan", slug)
+      original = File.method(:realpath)
+
+      with_replaced_singleton_method(File, :realpath, lambda { |path, *args, **kwargs|
+        raise Errno::ENOENT if path == folder
+
+        original.call(path, *args, **kwargs)
+      }) do
+        drop = Hive::Commands::Drop.new(slug)
+        assert_equal [], drop.send(:collect_stage_folders, File.join(dir, ".hive-state"), slug, [ "3-plan" ])
+      end
+    end
+  end
+
+  def test_marker_for_returns_none_for_malformed_task_folder
+    state = Hive::Commands::Drop.new("bad-folder-260525-aaaa").send(:marker_for, "/tmp/not-a-hive-task")
+
+    assert_equal :none, state.name
+    assert_equal({}, state.attrs)
+  end
+
+  def test_remove_one_worktree_treats_already_removed_path_as_false
+    drop = Hive::Commands::Drop.new("missing-wt-260525-aaaa")
+    path = File.join(Dir.tmpdir, "hive-missing-worktree-#{Process.pid}")
+    FileUtils.rm_rf(path)
+    fake_wt = Object.new
+    fake_wt.define_singleton_method(:remove!) { |path:| raise Hive::WorktreeError, "git worktree remove failed: #{path}" }
+    fake_wt.define_singleton_method(:remove_force!) { |path:| raise Hive::WorktreeError, "force failed: #{path}" }
+
+    refute drop.send(:remove_one_worktree, fake_wt, path, registered_paths: [ path ])
+  end
+
+  def test_remove_one_worktree_reraises_force_error_when_path_still_exists
+    drop = Hive::Commands::Drop.new("dirty-wt-260525-aaaa")
+    Dir.mktmpdir("hive-force-wt-") do |path|
+      fake_wt = Object.new
+      fake_wt.define_singleton_method(:remove!) { |path:| raise Hive::WorktreeError, "git worktree remove failed: #{path}" }
+      fake_wt.define_singleton_method(:remove_force!) { |path:| raise Hive::WorktreeError, "force failed: #{path}" }
+
+      err = assert_raises(Hive::WorktreeError) do
+        drop.send(:remove_one_worktree, fake_wt, path, registered_paths: [ path ])
+      end
+      assert_match(/force failed/, err.message)
+    end
+  end
+
+  def test_drop_error_kind_maps_typed_operational_errors
+    drop = Hive::Commands::Drop.new("kind-260525-aaaa")
+
+    assert_equal Hive::Schemas::DropErrorKind::CONFIG,
+                 drop.send(:error_kind_for, Hive::ConfigError.new("bad config"))
+    assert_equal Hive::Schemas::DropErrorKind::GIT,
+                 drop.send(:error_kind_for, Hive::GitError.new("git failed"))
+    assert_equal Hive::Schemas::DropErrorKind::WORKTREE,
+                 drop.send(:error_kind_for, Hive::WorktreeError.new("worktree failed"))
+    assert_equal Hive::Schemas::DropErrorKind::INTERNAL,
+                 drop.send(:error_kind_for, Hive::InternalError.new("boom"))
+  end
 end

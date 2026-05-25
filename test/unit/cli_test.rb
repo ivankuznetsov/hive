@@ -133,6 +133,7 @@ class HiveCliTest < Minitest::Test
       "open-pr" => "open-pr",
       "pr" => "open-pr",
       "review" => "review",
+      "artifacts" => "artifacts",
       "finalize" => "finalize",
       "archive" => "archive"
     }
@@ -202,6 +203,16 @@ class HiveCliTest < Minitest::Test
       assert_equal [ "rollback-rate" ], calls.first.fetch(:args)
       assert_equal({ days: 30, project: "proj", json: true }, calls.first.fetch(:kwargs))
     end
+  end
+
+
+  def test_bot_rejects_foreground_and_detach_together
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "bot", "start", "--foreground", "--detach" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/do not combine it with --foreground/, err)
   end
 
   def test_daemon_argv_errors_emit_json_envelopes_before_raising

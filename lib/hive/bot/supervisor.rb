@@ -201,8 +201,9 @@ module Hive
 
       def dispatch_command_sequence(result, update)
         clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
-        reset_alert_for_result(result) unless @dry_run
         commands = Array(result.commands)
+        reset_pending = !@dry_run && needs_alert_reset?(result)
+        failed = false
         commands.each_with_index do |argv, idx|
           per_command = @router.class::Result.new(
             action: :dispatch_then_reply,
@@ -214,10 +215,33 @@ module Hive
           if idx < commands.length - 1 && last_pid
             unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
               safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
+              failed = true
               break
+            end
+            # First non-final command (typically `markers clear`) succeeded.
+            # Clear the alert NOW so the row no longer carries a recovery marker
+            # before the retry verb dispatches and before the next status tick.
+            # This closes the race window where reset-before-dispatch would let
+            # process_current re-alert the same fingerprint within seconds of
+            # the Autofix tap.
+            if reset_pending
+              reset_alert_for_result(result)
+              reset_pending = false
             end
           end
         end
+        # Single-command paths (e.g., AGENT_WORKING markers that skip
+        # markers-clear) reach here without ever hitting the between-command
+        # sync point above. Reset the alert post-dispatch — only if we did not
+        # bail out of the loop on a failed precursor.
+        reset_alert_for_result(result) if reset_pending && !failed
+      end
+
+      def needs_alert_reset?(result)
+        return false unless result.respond_to?(:alert_reset)
+
+        reset = result.alert_reset
+        reset && @notification_dispatcher.respond_to?(:reset_task)
       end
 
       def reset_alert_for_result(result)

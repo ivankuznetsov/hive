@@ -384,7 +384,7 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "Stopped because the previous command failed.", @telegram.messages.last.fetch(:text)
   end
 
-  def test_dispatch_command_sequence_resets_alert_before_dispatch
+  def test_dispatch_command_sequence_resets_alert_for_single_command
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [ [ "hive", "review", "task", "--json" ] ],
@@ -397,6 +397,61 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], @notification_dispatcher.reset_tasks
     assert_equal [ "hive", "review", "task", "--json" ], @child_supervisor.dispatched.first.fetch(:command_argv)
+  end
+
+  def test_dispatch_command_sequence_defers_alert_reset_until_markers_clear_succeeds
+    # markers-clear (pid 200) completes with exit 0; retry verb is fire-and-forget.
+    @child_supervisor.dispatch_pid = 200
+    @child_supervisor.completed[200] = child_exit(exit_code: 0, pid: 200)
+    reset_snapshot_at_dispatch = []
+    notification = @notification_dispatcher
+    dispatched_list = @child_supervisor.dispatched
+    dispatch_pid_value = @child_supervisor.dispatch_pid
+    @child_supervisor.define_singleton_method(:dispatch) do |**kwargs|
+      reset_snapshot_at_dispatch << notification.reset_tasks.dup
+      dispatched_list << kwargs
+      dispatch_pid_value
+    end
+
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task", "--name", "REVIEW_ERROR" ],
+        [ "hive", "review", "task", "--from", "6-review", "--json" ]
+      ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal 2, @child_supervisor.dispatched.length
+    assert_equal [], reset_snapshot_at_dispatch[0],
+                 "reset_task must NOT have been called when the first command (markers clear) dispatches"
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], reset_snapshot_at_dispatch[1],
+                 "reset_task must have been called exactly once before the retry verb dispatches"
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review" } ], @notification_dispatcher.reset_tasks
+  end
+
+  def test_dispatch_command_sequence_skips_alert_reset_when_markers_clear_fails
+    @child_supervisor.completed[123] = child_exit(exit_code: 1, pid: 123)
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task" ],
+        [ "hive", "review", "task" ]
+      ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal 1, @child_supervisor.dispatched.length, "retry verb must not run when markers-clear fails"
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "alert reset must NOT fire when the markers-clear precursor fails"
   end
 
   def test_dispatch_command_sequence_clears_inline_keyboard_when_requested

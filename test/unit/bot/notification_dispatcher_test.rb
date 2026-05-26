@@ -90,6 +90,37 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
+  def test_recovered_message_send_failure_retries_after_backoff_without_duplicate
+    # Telegram is down when the row first heals — Recovered cannot send.
+    # The entry must stay in the store, backoff must apply, and the next
+    # post-backoff tick must deliver exactly one Recovered message.
+    failing = FlakyTelegram.new
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path, telegram: failing)
+      d.process_rows([ recovery_row ])
+      # The first tick fails (initial alert), so the entry is persisted with
+      # delivered_to: [] and a 60s backoff. Advance past backoff and past the
+      # absence-grace window before the row disappears.
+      @clock += 61
+      d.process_rows([ recovery_row ])
+      assert_equal 1, failing.messages.size, "initial alert must deliver after backoff"
+
+      # Row heals — process_recoveries enters absence-grace.
+      d.process_rows([])
+      @clock += 61
+      # Now past grace; Telegram is up. Recovered must fire exactly once.
+      d.process_rows([])
+
+      recovered = failing.messages.select { |msg| msg[:text].include?("Recovered") }
+      assert_equal 1, recovered.size,
+                   "Recovered must deliver exactly once after Telegram outage clears"
+      assert_nil Hive::Bot::AlertStore.new(path: path).entry(
+        Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
+      ), "entry must be removed after successful Recovered delivery"
+    end
+  end
+
   def test_transient_row_absence_within_grace_does_not_fire_recovered
     d = dispatcher
     d.process_rows([ recovery_row ])

@@ -194,6 +194,39 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_match(/\A⚠ Still stuck \(8 h\) — "Stuck task…" — Review/, telegram.messages.last[:text])
   end
 
+  def test_reminder_send_failure_applies_backoff
+    # First tick: initial alert succeeds.
+    d = dispatcher
+    d.process_rows([ recovery_row ])
+    assert_equal 1, telegram.messages.size
+
+    # Advance to the 8h reminder boundary and swap in a Telegram that always fails.
+    @clock += 28_800
+    failing = AlwaysFailingTelegram.new
+    failing_dispatcher = Hive::Bot::NotificationDispatcher.new(
+      telegram: failing,
+      logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345 ], "recovery_reminder_window_sec" => 28_800 },
+      now: -> { @clock },
+      alert_store: d.instance_variable_get(:@alert_store)
+    )
+    failing_dispatcher.process_rows([ recovery_row ])
+    assert_equal 1, failing.calls, "reminder must attempt one send"
+    refute alert_store_via(failing_dispatcher).entry(
+      Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
+    ).next_attempt_after.nil?, "send failure must schedule a backoff window"
+
+    # Immediately retry: backoff window not yet expired → skip, no extra attempt.
+    failing_dispatcher.process_rows([ recovery_row ])
+    assert_equal 1, failing.calls, "reminder must NOT retry within the backoff window"
+    assert(logger.events.any? { |name, _| name == :notification_skipped_backoff },
+           "skipped reminder retry must emit :notification_skipped_backoff")
+  end
+
+  def alert_store_via(dispatcher)
+    dispatcher.instance_variable_get(:@alert_store)
+  end
+
   def test_ninety_minute_reminder_fires_with_minutes_label
     d = Hive::Bot::NotificationDispatcher.new(
       telegram: telegram,

@@ -1098,13 +1098,23 @@ module Hive
       end
     end
 
-    def warn_deprecated_bot_dedupe!(bot, source_path)
-      value = bot["notification_dedupe_window_sec"]
-      default = DEFAULTS.dig("bot", "notification_dedupe_window_sec")
-      return if value.nil? || value == default
+    # Single source of truth for deprecated bot keys. Each entry names the
+    # config key, its replacement, and the DEFAULTS path used to suppress
+    # warnings when the user has not actually set anything (or has set the
+    # historical default). Both the load-time `warn` path and the supervisor's
+    # structured :deprecated_config event iterate this list.
+    DEPRECATED_BOT_KEYS = [
+      {
+        key: "notification_dedupe_window_sec",
+        replacement: "bot.alert_state_file and bot.recovery_reminder_window_sec"
+      }
+    ].freeze
 
-      warn "hive: bot.notification_dedupe_window_sec in #{describe_source(source_path)} is deprecated; " \
-           "alert lifecycle now uses bot.alert_state_file and bot.recovery_reminder_window_sec"
+    def warn_deprecated_bot_dedupe!(bot, source_path)
+      deprecated_bot_keys(bot).each do |entry|
+        warn "hive: bot.#{entry[:key]} in #{describe_source(source_path)} is deprecated; " \
+             "alert lifecycle now uses #{entry[:replacement]}"
+      end
     end
 
     # Returns deprecated bot keys whose value differs from default so callers
@@ -1112,16 +1122,13 @@ module Hive
     def deprecated_bot_keys(bot)
       return [] unless bot.is_a?(Hash)
 
-      result = []
-      value = bot["notification_dedupe_window_sec"]
-      default = DEFAULTS.dig("bot", "notification_dedupe_window_sec")
-      unless value.nil? || value == default
-        result << {
-          key: "bot.notification_dedupe_window_sec",
-          replacement: "bot.alert_state_file and bot.recovery_reminder_window_sec"
-        }
+      DEPRECATED_BOT_KEYS.each_with_object([]) do |entry, out|
+        value = bot[entry[:key]]
+        default = DEFAULTS.dig("bot", entry[:key])
+        next if value.nil? || value == default
+
+        out << { key: "bot.#{entry[:key]}", replacement: entry[:replacement] }
       end
-      result
     end
 
     def validate_bot_paths!(bot, source_path)

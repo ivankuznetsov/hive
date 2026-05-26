@@ -1,5 +1,6 @@
 require "hive/workflows"
 require "hive/bot/notification_builders"
+require "hive/bot/handlers/recovery_sequence"
 
 module Hive
   module Bot
@@ -61,39 +62,23 @@ module Hive
 
         def clear_and_retry(data)
           _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
-          commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker,
-                                    match_attr: match_attr)
+          commands = RecoverySequence.retry_commands(project: project, slug: slug, stage: stage,
+                                                     marker: marker, match_attr: match_attr)
           if commands.empty?
             stage_label = stage.to_s.empty? ? "(empty)" : stage
             return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
           end
 
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
-                            alert_reset: alert_reset(project, slug, stage, marker, match_attr),
+                            alert_reset: RecoverySequence.alert_reset(project, slug, stage, marker, match_attr),
                             clear_keyboard: true)
         end
 
         def autofix(data)
           _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
-          if manual_only_marker?(marker)
-            return @result_class.new(action: :reply,
-                                     text: "Hive has no automatic recovery for this state - open it on a laptop.")
-          end
-
-          verb = retry_verb_for_stage(stage)
-          unless verb
-            stage_label = stage.to_s.empty? ? "(empty)" : stage
-            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
-          end
-
-          @result_class.new(
-            action: :dispatch_commands,
-            project: project,
-            slug: slug,
-            commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker,
-                                     match_attr: match_attr),
-            alert_reset: alert_reset(project, slug, stage, marker, match_attr),
-            clear_keyboard: true
+          RecoverySequence.build(
+            project: project, slug: slug, stage: stage, marker: marker,
+            match_attr: match_attr, result_class: @result_class, clear_keyboard: true
           )
         end
 
@@ -164,7 +149,7 @@ module Hive
         def findings_toggle(data, verb)
           _prefix, _kind, project, slug, stage = split_callback(data, 5)
           stage_argv = stage ? [ "--stage", stage ] : []
-          retry_verb = retry_verb_for_stage(stage)
+          retry_verb = RecoverySequence.retry_verb_for_stage(stage)
           retry_argv = retry_verb ? [ "hive", retry_verb, slug, "--from", stage, "--project", project, "--json" ] : nil
           commands = [
             [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ]
@@ -179,51 +164,9 @@ module Hive
             project: project,
             slug: slug,
             commands: commands,
-            alert_reset: alert_reset(project, slug, stage),
+            alert_reset: RecoverySequence.alert_reset(project, slug, stage),
             clear_keyboard: true
           )
-        end
-
-        def retry_verb_for_stage(stage)
-          return nil if stage.to_s == "9-done"
-
-          Hive::Workflows.verb_arriving_at(stage) || {
-            "4-execute" => "develop",
-            "5-review" => "review",
-            "6-pr" => "pr"
-          }[stage]
-        end
-
-        # 9-done returns an empty command list (no retry verb), and AGENT_WORKING
-        # markers skip `hive markers clear` because that name is outside the clear
-        # allowlist (markers.rb#ALLOWED_NAMES) and would exit 4. Both branches
-        # intentionally diverge from the pre-U7 `clear_and_retry` path.
-        def retry_commands(project:, slug:, stage:, marker:, match_attr: nil)
-          verb = retry_verb_for_stage(stage)
-          return [] unless verb
-
-          commands = []
-          marker_name = marker.to_s
-          unless marker_name.casecmp("none").zero? || marker_name.casecmp("agent_working").zero?
-            clear_argv = [ "hive", "markers", "clear", slug, "--name", marker_name.upcase,
-                           "--project", project ]
-            clear_argv += [ "--match-attr", match_attr ] if match_attr.to_s.include?("=")
-            clear_argv << "--json"
-            commands << clear_argv
-          end
-          commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ]
-          commands
-        end
-
-        def manual_only_marker?(marker)
-          Hive::Bot::NotificationBuilders.manual_only?(marker: marker)
-        end
-
-        def alert_reset(project, slug, stage, marker = nil, match_attr = nil)
-          payload = { project: project, slug: slug, stage: stage }
-          payload[:marker] = marker if marker && !marker.to_s.empty?
-          payload[:match_attr] = match_attr if match_attr && !match_attr.to_s.empty?
-          payload
         end
 
         def split_callback(data, expected)

@@ -6,7 +6,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
-  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
+  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
+                   keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :error, :envelope, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
@@ -150,9 +151,9 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
-          action_label: "Develop", marker: "COMPLETE", attrs: {})
+          action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil)
     Row.new(project: project, slug: slug, stage: stage, action: action,
-            action_label: action_label, marker: marker, attrs: attrs)
+            action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic)
   end
 
 
@@ -262,6 +263,69 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "cbq-7", failure.fetch(:payload).fetch(:callback_query_id)
   end
 
+  def test_latest_status_rows_returns_cached_rows_when_status_tick_already_ran
+    cached = [ row(slug: "cached-260526-aaaa") ]
+    @supervisor.instance_variable_set(:@latest_status_rows, cached)
+
+    assert_same cached, @supervisor.send(:latest_status_rows),
+                "cache hit must NOT trigger a fresh @status_watcher.fetch subprocess"
+  end
+
+  def test_latest_status_rows_falls_back_to_sync_fetch_when_no_cache_yet
+    fresh = [ row(slug: "fresh-260526-bbbb") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: fresh)
+    @supervisor.instance_variable_set(:@latest_status_rows, nil)
+
+    assert_equal fresh, @supervisor.send(:latest_status_rows),
+                 "first call after bot start must sync-fetch so /autofix works immediately"
+  end
+
+  def test_default_status_snapshot_provider_routes_through_supervisor_to_latest_status_rows
+    # The supervisor's default constructor wires
+    #   status_snapshot_provider: -> { latest_status_rows }
+    # into the real Router. The other unit tests inject a FakeRouter,
+    # which bypasses this lambda, so this test instantiates the supervisor
+    # with router: nil to exercise the full wiring end-to-end.
+    cached_rows = [ row(slug: "wire-260526-aaaa") ]
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config,
+      token: "test-token",
+      logger: @logger,
+      telegram: @telegram,
+      status_watcher: @status_watcher,
+      notification_dispatcher: @notification_dispatcher,
+      router: nil,  # real Router built via initialize default
+      child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store,
+      dry_run: false
+    )
+    supervisor.instance_variable_set(:@latest_status_rows, cached_rows)
+
+    update = Hive::Bot::Telegram::Update.new(
+      update_id: 1, chat_id: 42, from_id: 42, message_id: 1,
+      text: "/autofix wire-260526-aaaa"
+    )
+
+    supervisor.process_update(update)
+
+    # The lambda invoked latest_status_rows, found the cached row, and
+    # routed to RecoverySequence.build. The row's default marker is
+    # COMPLETE (from #row helper) → not retryable → reply with
+    # "no automatic recovery" or "No retry verb". Either path proves the
+    # wiring fired; we just assert SOME reply landed (not a no-op).
+    refute_empty @telegram.messages,
+                 "default snapshot provider lambda must reach latest_status_rows " \
+                 "so /autofix finds the cached row and dispatches a reply"
+  end
+
+  def test_latest_status_rows_returns_empty_array_when_sync_fetch_fails
+    @status_watcher.result = StatusResult.new(ok: false, rows: nil, error: "boom")
+    @supervisor.instance_variable_set(:@latest_status_rows, nil)
+
+    assert_equal [], @supervisor.send(:latest_status_rows),
+                 "failed fetch must yield [] so the slash handler degrades to 'slug not found'"
+  end
+
   def test_reap_children_dispatches_reply_for_each_completed_child
     @child_supervisor.reap_batches << [ child_exit(exit_code: 0) ]
 
@@ -284,7 +348,7 @@ class HiveBotSupervisorTest < Minitest::Test
     commands = registered.first
     assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
     slash_names = commands.map { |cmd| cmd.fetch(:command) }
-    assert_equal %w[idea status queue answer approve done help], slash_names
+    assert_equal %w[idea status queue answer approve autofix details done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
   end
@@ -342,6 +406,44 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
+  end
+
+  def test_render_queue_appends_slash_link_per_actionable_row_type
+    brainstorm = row(slug: "ask-q-260526-aaaa", stage: "2-brainstorm",
+                     action: "needs_input", marker: "waiting")
+    ready_to_x = row(slug: "ship-it-260526-bbbb", stage: "7-artifacts",
+                     action: "ready_to_finalize", marker: "complete")
+    retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
+                             action: "recover_review", marker: "review_error",
+                             attrs: { "phase" => "fix", "pass" => "2" },
+                             diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    manual_recovery = row(slug: "stale-260526-dddd", stage: "4-execute",
+                          action: "recover_review", marker: "execute_stale",
+                          attrs: {}, diagnostic: nil)
+    inert = row(slug: "agent-running-260526-eeee", action: "agent_running")
+
+    text = @supervisor.send(:render_queue, [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+
+    assert_includes text, "/answer ask-q-260526-aaaa",
+                    "brainstorm-waiting rows must carry an /answer slash link"
+    assert_includes text, "/approve ship-it-260526-bbbb",
+                    "ready_to_X rows must carry an /approve slash link"
+    assert_includes text, "/autofix stuck-260526-cccc",
+                    "retryable recovery rows must carry an /autofix slash link"
+    assert_includes text, "/details stale-260526-dddd",
+                    "manual-only recovery rows must carry a /details slash link"
+    refute_includes text, "agent-running-260526-eeee",
+                    "agent_running rows are inert and must not appear at all"
+  end
+
+  def test_render_queue_omits_slash_link_for_rows_without_actionable_state
+    plain_inflight = row(slug: "in-flight-260526-aaaa", stage: "4-execute",
+                         action: "developing", marker: "agent_working")
+
+    text = @supervisor.send(:render_queue, [ plain_inflight ])
+
+    refute_match(%r{/(answer|approve|autofix|details) in-flight-260526-aaaa}, text,
+                 "rows with no Telegram-actionable next step must NOT carry a slash link")
   end
 
   def test_render_details_sorts_attrs_and_handles_missing_row

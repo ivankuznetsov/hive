@@ -1,17 +1,21 @@
 require "securerandom"
 require "time"
+require "hive/bot/notification_builders"
+require "hive/bot/handlers/recovery_sequence"
 
 module Hive
   module Bot
     module Handlers
       class SlashHandlers
         def initialize(projects_provider:, pending_ideas:, last_project:, result_class:,
-                       now: -> { Time.now })
+                       now: -> { Time.now },
+                       status_snapshot_provider: -> { [] })
           @projects_provider = projects_provider
           @pending_ideas = pending_ideas
           @last_project = last_project
           @result_class = result_class
           @now = now
+          @status_snapshot_provider = status_snapshot_provider
         end
 
         def status(update)
@@ -85,11 +89,53 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea <text>, /answer <slug>, /approve <slug>, /done, /help"
+            text: "Commands: /status [project], /queue, /idea <text>, /answer <slug>, " \
+                  "/approve <slug>, /autofix <slug>, /details <slug>, /done, /help"
+          )
+        end
+
+        def autofix(update)
+          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /autofix <slug>.") if slug.empty?
+
+          row = find_status_row(slug)
+          return @result_class.new(action: :reply, text: "Slug not found, was it archived?") unless row
+
+          match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(row)
+          # clear_keyboard is false for the slash path — no inline button was
+          # tapped, so there's no keyboard to clear on the originating
+          # message. The inline-button path (CallbackHandlers#autofix) sets
+          # it to true. This is the only legitimate divergence between the
+          # two surfaces.
+          RecoverySequence.build(
+            project: row.project, slug: row.slug, stage: row.stage,
+            marker: row.marker, match_attr: match_attr,
+            result_class: @result_class, clear_keyboard: false
+          )
+        end
+
+        def details(update)
+          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /details <slug>.") if slug.empty?
+
+          row = find_status_row(slug)
+          return @result_class.new(action: :reply, text: "Slug not found, was it archived?") unless row
+
+          stage_argv = row.stage ? [ "--stage", row.stage ] : []
+          @result_class.new(
+            action: :dispatch_then_reply,
+            project: row.project,
+            slug: row.slug,
+            command_argv: [ "hive", "status", "--diagnose", row.slug,
+                            "--project", row.project, *stage_argv, "--json" ]
           )
         end
 
         private
+
+        def find_status_row(slug)
+          Array(@status_snapshot_provider.call).find { |row| row.respond_to?(:slug) && row.slug == slug }
+        end
 
         def project_keyboard(projects, token)
           sorted = projects.sort_by { |project| project["name"] == @last_project.call ? 0 : 1 }

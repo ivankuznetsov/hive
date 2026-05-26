@@ -40,21 +40,38 @@ hive bot tail
 | `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
+| `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
+| `/details <slug>` | Dispatches `hive status --diagnose <slug> --project <project> --stage <stage> --json` — same payload as the inline "Show details" button. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. |
 | `/help` | Lists the supported command set. |
 
 Free text outside an active answer conversation is rejected with a
 `/help` hint. Unauthorized chats receive no reply.
 
+The `/status` reply formats each actionable row with an inline
+slash-command suffix (e.g. `Title — Brainstorm — /answer <slug>`).
+Telegram clients auto-render `/<command>` strings inside bot messages
+as one-tap blue links — tapping `/answer <slug>` auto-sends that
+slash command back to the bot. Every actionable task in the status
+list gets a one-tap recovery path without an inline keyboard. Row
+classification (which slash link each row gets) reuses
+`NotificationBuilders.retryable_recovery?` and
+`manual_only_recovery?` so the `/status` surface stays consistent
+with the push-notification button surface: a row that emits a
+🔧 Autofix button on its alert always carries an `/autofix` link in
+`/status`, and vice versa. Rows with no Telegram-actionable next
+step (e.g. `agent_running`) appear without a slash link.
+
 On bot start the supervisor calls Telegram's `setMyCommands` so the
 blue quick-actions menu (shown when the operator taps the `/` icon in
 the chat input) surfaces `/idea`, `/status`, `/queue`, `/answer`,
-`/approve`, `/done`, and `/help` with human-readable descriptions.
-This is a one-shot idempotent RPC at start — it is not re-issued on
-SIGHUP/config reload because the command list does not change with
-config. A network failure during registration is logged as
-`:send_failure` with `source: "set_my_commands"` and does not block
-`poll_loop` from starting. The command list and descriptions live in
+`/approve`, `/autofix`, `/details`, `/done`, and `/help` with
+human-readable descriptions. This is a one-shot idempotent RPC at
+start — it is not re-issued on SIGHUP/config reload because the
+command list does not change with config. A network failure during
+registration is logged as `:send_failure` with
+`source: "set_my_commands"` and does not block `poll_loop` from
+starting. The command list and descriptions live in
 `Hive::Bot::Supervisor::BOT_COMMANDS`.
 
 ## Inline actions

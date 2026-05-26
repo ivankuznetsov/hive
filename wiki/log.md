@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T15:30:00Z] bot — /status slash-link surface + /autofix + /details
+
+**Action:** The `/status` reply now formats every actionable row with an inline `/command <slug>` suffix. Telegram clients auto-render these as one-tap blue links inside bot messages, giving every Brainstorm-waiting, ready-to-X, retryable-recovery, and manual-only-recovery row a one-tap recovery path with NO inline keyboard. Row classification reuses `NotificationBuilders.retryable_recovery?` / `manual_only_recovery?` so the text-link surface stays consistent with the push-notification button surface. Two new slash commands (`/autofix <slug>`, `/details <slug>`) were added; both resolve the slug against the latest `StatusWatcher` snapshot. Recovery dispatch logic was extracted into `Hive::Bot::Handlers::RecoverySequence` so the inline 🔧 Autofix button (`CallbackHandlers#autofix`) and the `/autofix` slash command (`SlashHandlers#autofix`) produce byte-identical argvs for the same row. `Supervisor::BOT_COMMANDS` extended from 7 to 9 commands.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
 ## [2026-05-26T14:30:00Z] bot — register slash commands with Telegram on start
 
 **Action:** Added `Hive::Bot::Telegram#set_my_commands` (thin wrapper over the Bot API) and `Hive::Bot::Supervisor#register_bot_commands` called once in `run_forever` after `:bot_started`. The seven supported slash commands (`/idea`, `/status`, `/queue`, `/answer`, `/approve`, `/done`, `/help`) and their descriptions live in `Hive::Bot::Supervisor::BOT_COMMANDS`. Failures are swallowed and logged as `:send_failure source: "set_my_commands"` so a Telegram outage at bot start does not prevent `poll_loop` from running. Intentionally NOT re-issued on SIGHUP/config reload — the command list does not depend on config. Operators now see the slash commands stacked in Telegram's blue quick-actions menu when they tap the `/` icon.

@@ -24,6 +24,8 @@ module Hive
         { command: "queue",   description: "Show queued and waiting tasks" },
         { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },
         { command: "approve", description: "Approve a task at its current stage: /approve <slug>" },
+        { command: "autofix", description: "Retry a stuck task: /autofix <slug>" },
+        { command: "details", description: "Show diagnostic detail: /details <slug>" },
         { command: "done",    description: "Mark a brainstorm as done after answering" },
         { command: "help",    description: "Show available commands" }
       ].freeze
@@ -45,7 +47,8 @@ module Hive
         @router = router || Hive::Bot::Router.new(
           bot_config: config,
           logger: @logger,
-          conversation_store: @conversation_store
+          conversation_store: @conversation_store,
+          status_snapshot_provider: -> { latest_status_rows }
         )
         @child_supervisor = child_supervisor ||
           Hive::Bot::ChildSupervisor.new(logger: @logger, dry_run: dry_run)
@@ -129,8 +132,22 @@ module Hive
         result = @status_watcher.fetch
         return result unless result.ok
 
+        @latest_status_rows = result.rows
         @notification_dispatcher.process_rows(result.rows)
         result
+      end
+
+      # Read-only snapshot of the most recent successful StatusWatcher
+      # fetch. Used by /autofix and /details to resolve a slug to its
+      # current row without spawning a second `hive status --json`
+      # subprocess. May be stale by up to poll_interval_sec; if empty
+      # (bot just started, no successful fetch yet) a sync fetch is
+      # performed so the first /autofix after start still works.
+      def latest_status_rows
+        return @latest_status_rows if @latest_status_rows
+
+        result = @status_watcher.fetch
+        @latest_status_rows = result.ok ? result.rows : []
       end
 
       def reap_children
@@ -574,14 +591,48 @@ module Hive
         return "No active Hive tasks." if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
-            "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
+          title = Hive::Bot::TitleFormatter.title_from_slug(row.slug)
+          stage = Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)
+          link = slash_link_for(row)
+          link ? "#{title} — #{stage} — #{link}" : "#{title} — #{stage}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
         ([ header ] + lines).join("\n")
+      end
+
+      # Per-row /command <slug> suffix for the /status text body. Returns
+      # a tappable Telegram slash command string (auto-detected by all
+      # Telegram clients as a blue link when sent without parse_mode) or
+      # nil when the row has no Telegram-actionable next step. Decision
+      # rules:
+      #   needs_input + 2-brainstorm + waiting → /answer  <slug>
+      #   ready_to_*                            → /approve <slug>
+      #   recover_* AND retryable_recovery?     → /autofix <slug>
+      #   recover_* AND manual_only_recovery?   → /details <slug>
+      #   else                                  → nil
+      # Classification helpers come from NotificationBuilders so the
+      # /status surface stays consistent with the push-notification
+      # surface (a row that emits a 🔧 Autofix button on its alert will
+      # always carry the /autofix link in /status, and vice versa).
+      def slash_link_for(row)
+        action = row.action.to_s
+        marker = row.marker.to_s
+        stage = row.stage.to_s
+
+        if action == "needs_input" && stage == "2-brainstorm" && marker == "waiting"
+          "/answer #{row.slug}"
+        elsif action.start_with?("ready_to_")
+          "/approve #{row.slug}"
+        elsif action.start_with?("recover_")
+          if Hive::Bot::NotificationBuilders.manual_only_recovery?(row)
+            "/details #{row.slug}"
+          elsif Hive::Bot::NotificationBuilders.retryable_recovery?(row)
+            "/autofix #{row.slug}"
+          end
+        end
       end
 
       def render_details(rows, project, slug)

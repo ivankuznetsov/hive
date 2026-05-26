@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T00:00:00Z] release — finish Homebrew + AUR publishing (gem-based)
+
+**Action:** Documented the completed brew/AUR distribution work. Added ADR-033 recording that releases ship the `hive-cli` rubygem (tebako dropped) and that publishing fans out to a Homebrew tap (via `repository_dispatch` to `ivankuznetsov/homebrew-hive`, now created and serving v0.1.0) and to the AUR (`aur-publish` container job with pinned cosign-identity verification, `makepkg --printsrcinfo`-generated `.SRCINFO`, idempotent push). Marked the old tebako ADR-027 superseded. Rewrote `gaps.md` "Release install follow-ups" §1: automation is built; remaining work is the human AUR account/key/bootstrap + secrets + `v*` tag protection. A single `packaging/render.rb` now renders both the formula and PKGBUILD (no more hand-maintained `.SRCINFO.template`, which had drifted to stale tebako tarball refs). New maintainer runbook at `docs/RELEASING.md`.
+
+**Refreshed pages:**
+- [[decisions]]
+- [[gaps]]
+
 ## [2026-05-26T18:00:00Z] bot — /status reverts to inline buttons (text-links can't carry the slug)
 
 **Action:** Real-device testing confirmed that tapping a rendered `/answer <slug>` text-link in a `/status` reply sends only `/answer` (Telegram's `bot_command` entity covers the token, not the argument), so the slug was dropped and the tap hit the usage hint. Reverted the `/status`/`/queue` surface from slash-command text suffixes to an inline callback keyboard: `Supervisor#status_keyboard` / `status_action_button` build one button per actionable row (✏️ answer / ✅ approve / 🔧 autofix / 🔍 details), reusing `NotificationBuilders` callback constructors so the callbacks are byte-identical to the push-notification buttons. `slash_link_for` removed. The `/answer`/`/approve`/`/autofix`/`/details` slash commands remain typeable and in the quick-actions menu. Corrected the prior wiki claim that text links were one-tap.

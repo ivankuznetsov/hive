@@ -27,13 +27,13 @@ The result Hive built in that reel lives at [ivankuznetsov/shipped](https://gith
 
 ## Install
 
-Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. All three channels below download the same `.gem`, verify the signature, and run `gem install` against it. After install, `hive init .` in any project writes the systemd-user (Linux) or launchd (macOS) daemon unit so the daemon survives reboots.
+Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. Every channel below downloads the same `.gem`, verifies the signature, and runs `gem install` against it. After install, `hive init .` in any project writes the systemd-user (Linux) or launchd (macOS) daemon unit so the daemon survives reboots.
 
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | `brew install ivankuznetsov/hive/hive` |
-| Arch Linux x86_64/aarch64 | `yay -S hive-bin` |
 | Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.0/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Arch Linux x86_64/aarch64 | _Coming soon_ (`yay -S hive-bin`) — use the Linux installer above until the AUR package is published. |
 
 Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, authenticated `gh`, and `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `gem`, checksum tool) on first run.
 

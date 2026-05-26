@@ -2223,3 +2223,17 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[commands/tui]]
 - [[commands/markers]]
 - [[modules/markers]]
+
+## [2026-05-26T13:42:13Z] tui — guard ERROR recovery with marker_id
+
+**Action:** Added generated `marker_id` attrs to new `ERROR` markers and changed TUI error recovery / kill-class auto-heal to clear by `--match-attr marker_id=...` when available. This closes the same-exit-code aliasing window where a stale recovery worker could clear a fresh `ERROR reason=exit_code exit_code=1` marker that the operator never reviewed. Legacy rows without `marker_id` fall back to observed `reason` and `exit_code` attrs when present.
+
+**Refreshed pages:**
+- [[modules/markers]]
+- [[modules/agent]]
+- [[commands/tui]]
+- [[commands/markers]]
+- [[state-model]]
+- [[modules/task_action]]
+- [[modules/bot]]
+- [[commands/bot]]

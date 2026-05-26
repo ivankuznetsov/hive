@@ -433,7 +433,7 @@ module Hive
 
       {
         "summary" => summary,
-        "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, recover via `hive markers clear #{task.slug} --name ERROR` or the standard red-status flow. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
+        "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, re-read `hive status --json` or use the standard red-status flow, then run the reported suggested_next_action.command so the current ERROR marker guard is included. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
         "source" => "marker",
         "source_path" => nil,
         "artifact_paths" => [],
@@ -621,7 +621,8 @@ module Hive
       return "FINALIZE_MISSING_PR_URL" if finalize_missing_pr_url?
       return "FINALIZE_PR_URL_MISMATCH" if finalize_pr_url_mismatch?
 
-      attrs = marker.attrs.map { |key, value| "#{key}=#{value}" }.join(" ")
+      attrs = Hive::Markers.display_attrs(marker.attrs)
+                           .map { |key, value| "#{key}=#{value}" }.join(" ")
       marker_name = marker.name.to_s.upcase
       attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
     end
@@ -842,10 +843,10 @@ module Hive
       File.exist?(File.join(folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
     end
 
-    # `hive markers clear` accepts a single --match-attr KEY=VALUE; pick
-    # the most-identifying attr per marker shape. The recipe stays a
-    # copy-pasteable one-liner so external agents (and humans) can run
-    # it from a shell unchanged.
+    # `hive markers clear` accepts --match-attr KEY=VALUE or comma-separated
+    # KEY=VALUE pairs; pick the most-identifying guard per marker shape. The
+    # recipe stays a copy-pasteable one-liner so external agents and humans can
+    # run it from a shell unchanged.
     def retry_command_string
       attrs = marker.attrs || {}
       case marker.name
@@ -860,7 +861,8 @@ module Hive
                        "--name", "REVIEW_STALE", *attr_pair ]
         "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
       when :error
-        attr_pair = priority_match_attr(attrs, %w[exit_code])
+        match_attr = Hive::Markers.error_recovery_match_attr(attrs)
+        attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
         clear_argv = [ "hive", "markers", "clear", task.folder,
                        "--name", "ERROR", *attr_pair ]
         "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"

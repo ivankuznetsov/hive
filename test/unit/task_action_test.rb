@@ -393,6 +393,10 @@ class TaskActionTest < Minitest::Test
     refute_nil diag, "stale agent_working must emit a synthetic diagnostic so the red-status surface has something to render"
     assert_includes diag["summary"], "12345",
                     "diagnostic summary should surface the recorded pid for operator triage"
+    assert_includes diag["detail"], "suggested_next_action.command",
+                    "synthetic stale-agent guidance must send agents back through guarded status diagnostics"
+    refute_match(/hive markers clear .*--name ERROR/, diag["detail"],
+                 "synthetic stale-agent guidance must not teach a bare ERROR clear before marker_id exists")
   end
 
   def test_agent_working_with_no_pid_and_old_mtime_classifies_as_error
@@ -412,16 +416,8 @@ class TaskActionTest < Minitest::Test
     assert_match(/never attached/, action.diagnostic["summary"])
   end
 
-  def test_synthetic_stale_agent_diagnostic_suggests_a_command_in_markers_clear_allowlist
-    # The synthetic diagnostic's `detail` text instructs the operator
-    # to run `hive markers clear <slug> --name ERROR`. If a future
-    # rename in lib/hive/commands/markers.rb#ALLOWED_NAMES ships a
-    # different terminal-recovery marker, this test catches the drift
-    # at unit-test time rather than at customer-frustration time
-    # (exit 4 from a copy-paste).
-    require "hive/commands/markers"
+  def test_synthetic_stale_agent_diagnostic_points_to_guarded_status_recovery
     task = fake_task(stage_name: "execute", stage_index: 4)
-    pattern = /clear[^\n]*--name ([A-Z_]+)/
 
     # agent_died branch: marker has pid attr, claude_pid_alive=false.
     died_action = Hive::TaskAction.for(
@@ -429,10 +425,8 @@ class TaskActionTest < Minitest::Test
       pid_alive: false, agent_marker_grace_sec: 300
     )
     died_detail = died_action.diagnostic["detail"]
-    died_match = died_detail.match(pattern)
-    assert died_match, "agent_died synthetic detail must include a `markers clear --name X` command; got: #{died_detail.inspect}"
-    assert_includes Hive::Commands::Markers::ALLOWED_NAMES, died_match[1],
-                    "agent_died synthetic detail suggests `--name #{died_match[1]}` which is not in ALLOWED_NAMES"
+    assert_includes died_detail, "suggested_next_action.command"
+    refute_match(/hive markers clear .*--name ERROR/, died_detail)
 
     # agent_orphaned branch: marker has NO pid attr, mtime past grace.
     orphan_action = Hive::TaskAction.for(
@@ -440,10 +434,8 @@ class TaskActionTest < Minitest::Test
       pid_alive: nil, state_file_mtime: Time.now - 600, agent_marker_grace_sec: 300
     )
     orphan_detail = orphan_action.diagnostic["detail"]
-    orphan_match = orphan_detail.match(pattern)
-    assert orphan_match, "agent_orphaned synthetic detail must include a `markers clear --name X` command; got: #{orphan_detail.inspect}"
-    assert_includes Hive::Commands::Markers::ALLOWED_NAMES, orphan_match[1],
-                    "agent_orphaned synthetic detail suggests `--name #{orphan_match[1]}` which is not in ALLOWED_NAMES"
+    assert_includes orphan_detail, "suggested_next_action.command"
+    refute_match(/hive markers clear .*--name ERROR/, orphan_detail)
   end
 
   def test_agent_working_with_no_pid_within_grace_stays_agent_running
@@ -1298,17 +1290,33 @@ class TaskActionTest < Minitest::Test
     assert_includes review_parts, "pass=2"
 
     error_task = fake_task(stage_name: "execute", stage_index: 4)
-    error_suggested = Hive::TaskAction.for(
+    error_action = Hive::TaskAction.for(
+      error_task,
+      marker(:error, "exit_code" => "70", "reason" => "agent_failed", "marker_id" => "err-70")
+    )
+    error_diagnostic = error_action.diagnostic
+    error_suggested = error_diagnostic.fetch("suggested_next_action")
+
+    assert_equal "retry", error_suggested.fetch("kind")
+    assert_equal [
+      "hive", "markers", "clear", error_task.folder,
+      "--name", "ERROR", "--match-attr", "marker_id=err-70",
+      "&&", "hive", "run", error_task.folder
+    ], Shellwords.split(error_suggested.fetch("command"))
+    refute_includes error_diagnostic.fetch("summary"), "marker_id"
+    refute_includes error_diagnostic.fetch("detail"), "marker_id"
+    assert_includes Shellwords.split(error_suggested.fetch("command")), "marker_id=err-70"
+
+    legacy_error_suggested = Hive::TaskAction.for(
       error_task,
       marker(:error, "exit_code" => "70", "reason" => "agent_failed")
     ).diagnostic.fetch("suggested_next_action")
 
-    assert_equal "retry", error_suggested.fetch("kind")
-    error_parts = Shellwords.split(error_suggested.fetch("command"))
-    assert_includes error_parts, "--name"
-    assert_includes error_parts, "ERROR"
-    assert_includes error_parts, "--match-attr"
-    assert_includes error_parts, "exit_code=70"
+    assert_equal [
+      "hive", "markers", "clear", error_task.folder,
+      "--name", "ERROR", "--match-attr", "reason=agent_failed,exit_code=70",
+      "&&", "hive", "run", error_task.folder
+    ], Shellwords.split(legacy_error_suggested.fetch("command"))
   end
 
   def test_incomplete_plan_retry_command_includes_project_when_needed

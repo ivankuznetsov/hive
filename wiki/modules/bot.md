@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-05-26
+updated: 2026-05-27
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -53,8 +53,10 @@ plain-language cause sentence. `Autofix` is shown only for retryable
 diagnostics; manual-only states such as `EXECUTE_STALE` and
 fix-tampered review errors show `Open laptop` / `Show details` instead.
 Autofix callbacks carry a marker attribute such as `pass=2` when one is
-available, so stale Telegram buttons cannot clear a newer marker, and
-the dispatcher clears the persisted alert entry for that task before
+available, so stale Telegram buttons cannot clear a newer marker. For
+`ERROR` rows they prefer the generated `marker_id` and fall back to
+observed `reason`/`exit_code` attrs for legacy markers. The dispatcher
+clears the persisted alert entry for that task before
 spawning the retry sequence. `/status [project]` is an explicit pull
 surface and renders actionable rows as `Title… — Stage` without inline
 buttons.

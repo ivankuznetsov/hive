@@ -1,3 +1,5 @@
+require "securerandom"
+
 module Hive
   module Markers
     # Marker names live in two places: this list (validates writes via
@@ -43,6 +45,7 @@ module Hive
     # code here updates both consumers; previously each module had its
     # own private copy and would drift on edit.
     KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
+    INTERNAL_ATTR_KEYS = %w[marker_id].freeze
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
@@ -78,6 +81,7 @@ module Hive
       marker_name = name.to_s.upcase
       raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
 
+      attrs = attrs_with_error_marker_id(marker_name, attrs)
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do
@@ -132,6 +136,31 @@ module Hive
       File.rename(tmp, path)
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
+    end
+
+    def attrs_with_error_marker_id(marker_name, attrs)
+      attrs = attrs ? attrs.to_h : {}
+      return attrs unless marker_name == "ERROR"
+      return attrs unless attrs["marker_id"].to_s.empty? && attrs[:marker_id].to_s.empty?
+
+      attrs.merge("marker_id" => SecureRandom.hex(8))
+    end
+
+    def display_attrs(attrs)
+      attrs.to_h.reject { |key, _value| INTERNAL_ATTR_KEYS.include?(key.to_s) }
+    end
+
+    def error_recovery_match_attr(attrs)
+      attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
+      marker_id = attrs["marker_id"].to_s
+      return "marker_id=#{marker_id}" unless marker_id.empty?
+
+      parts = []
+      %w[reason exit_code].each do |key|
+        value = attrs[key].to_s
+        parts << "#{key}=#{value}" unless value.empty?
+      end
+      parts.empty? ? nil : parts.join(",")
     end
 
     def build_marker(name, attrs)

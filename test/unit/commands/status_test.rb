@@ -336,7 +336,11 @@ class CommandsStatusTest < Minitest::Test
     assert_equal [], cmd.send(:detect_legacy_stage_dirs, "/tmp/no-such-hive-state")
     assert_match(/h ago/, cmd.send(:humanise_age, Time.now - 7_200))
     assert_match(/d ago/, cmd.send(:humanise_age, Time.now - 172_800))
-    marker = Hive::Markers::State.new(name: :error, attrs: { "detail" => "line 1\nline 2" }, raw: nil)
+    marker = Hive::Markers::State.new(
+      name: :error,
+      attrs: { "detail" => "line 1\nline 2", "marker_id" => "err-123" },
+      raw: nil
+    )
     assert_equal "error detail=line 1 line 2", cmd.send(:label_for, marker)
     assert_equal Hive::Schemas::StatusErrorKind::ERROR,
                  cmd.send(:error_kind_for, Hive::Error.new("generic"))

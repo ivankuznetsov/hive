@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-05-27
+updated: 2026-06-03
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles, daemon enrollment, experimental babysitter enrollment). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers` and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -62,6 +62,15 @@ tags: [config, yaml, validation]
                         "prompt_template" => "browser_test_prompt.md.erb", "max_attempts" => 2 },
     "max_passes"        => 2,
     "max_wall_clock_sec" => 5400
+  },
+  "babysitter" => {
+    "enabled" => false,
+    "interval" => "10m",
+    "max_concurrent_prs" => 2,
+    "labels_ignore" => %w[wip do-not-merge draft],
+    "dry_run" => false,
+    "budget_minutes" => 30,
+    "budget_usd" => 50
   }
 }
 ```
@@ -104,12 +113,13 @@ Rules:
 
 Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
 
-1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
+1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `babysitter`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
 5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
 6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
+7. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 
@@ -130,6 +140,8 @@ cfg.dig("budget_usd", "brainstorm")
 cfg.dig("timeout_sec", "execute_implementation")
 cfg.dig("review", "ci", "agent")
 cfg.dig("review", "reviewers")
+cfg.dig("babysitter", "enabled")
+cfg.dig("babysitter", "max_concurrent_prs")
 cfg["worktree_root"]
 ```
 
@@ -139,9 +151,9 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 ## Tests
 
-- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, error on malformed YAML, reviewer/agent-name validation.
+- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, error on malformed YAML, reviewer/agent-name validation, babysitter default/validation coverage.
 
 ## Backlinks
 
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]]
 - [[modules/agent]] · [[state-model]]

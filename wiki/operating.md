@@ -7,8 +7,8 @@ updated: 2026-05-26
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
-**TLDR**: Day-2 guide for running the hive daemon and Telegram bot.
-Covers install-time daemon autostart, per-project daemon enrollment, bot token/allowlist setup,
+**TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
+Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, and how to disable automation mid-flight.
 
@@ -227,6 +227,50 @@ toggle only flips `enabled`.
 For new projects, `hive init` asks at the TTY prompt and defaults to Y
 — no separate project-enable step. This prompt is project enrollment only; the
 daemon service should already be installed and enabled globally.
+
+## Experimental PR babysitter
+
+The babysitter is a separate daemon from `hive daemon`. It does not
+advance task folders; it walks open GitHub PRs for projects with
+`babysitter.enabled: true` and asks the configured development agent to
+repair conflicts or red CI in `.hive-state/babysitter/worktrees/<pr>/`.
+
+Fresh `hive init` prompts for `babysitter.enabled` and defaults to Y.
+Existing projects can opt in by adding or editing this block in
+`<project>/.hive-state/config.yml`:
+
+```yaml
+babysitter:
+  enabled: true
+  interval: 10m
+  max_concurrent_prs: 2
+  labels_ignore: [wip, do-not-merge, draft]
+  dry_run: false
+  budget_minutes: 30
+  budget_usd: 50
+```
+
+Run a read-only shakedown before live use:
+
+```bash
+hive babysit --once PROJECT --dry-run
+hive babysit start --dry-run --detach
+hive babysit tail
+```
+
+Inspect `<project>/.hive-state/babysitter/events.jsonl`,
+`<project>/.hive-state/babysitter/status.md`, and any
+`.babysitter-dry-run-plan.md` files under the PR worktrees. When the
+results look right, stop the dry-run process and start live mode:
+
+```bash
+hive babysit stop
+hive babysit start --detach
+```
+
+Kill switch: set `babysitter.enabled: false`; the dispatcher reloads
+project config each tick. v1 has no launchd/systemd install command for
+the babysitter.
 
 ## First run: the mandatory `--dry-run` shakedown
 

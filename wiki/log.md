@@ -481,6 +481,19 @@ redispatch.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T13:43:04Z] babysitter - experimental open-PR daemon
+
+**Action:** Documented the new experimental `hive babysit` process. The command is separate from `hive daemon`, uses its own PID/log files, polls projects with `babysitter.enabled: true`, filters open PR labels, spawns the development agent in `.hive-state/babysitter/worktrees/<pr>/`, writes per-project babysitter events/status, and supports best-effort dry-run stubs for agent-side `git`/`gh` mutations.
+
+**Refreshed pages:**
+- New: [[commands/babysit]] - CLI lifecycle, one-shot mode, config contract, PR processing, dry-run behavior, and tests.
+- New: [[modules/babysitter]] - module map, wiring, event shape, and v1 boundaries.
+- [[cli]] - command table and JSON-support note.
+- [[commands/init]] - babysitter opt-in prompt and non-TTY summary.
+- [[modules/config]] - defaults and validation for `babysitter`.
+- [[operating]] - dry-run shakedown and kill-switch guidance.
+- [[index]] - added the new pages and bumped the catalog count.
+
 ## [2026-05-26T14:11:12Z] tui - token footer ordering
 
 **Action:** Documented that the grid-mode footer now renders action hints before the compact token usage block on wide terminals, preserving the ` · ` separator between blocks and leaving the below-80-column compact-only usage path unchanged.

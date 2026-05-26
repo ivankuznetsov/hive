@@ -14,9 +14,10 @@ require "hive/bot/brainstorm_parser"
 #      bare "Send Q1's answer" prompt
 #   4. Each answer write triggers an auto-advance message that names the
 #      next question and the "Reply with your answer" prompt
-#   5. The final answer produces "All questions answered — send /done."
-#      and DOES NOT clear conversation_store (so /done can read state.slug)
-#   6. /done dispatches the expected hive run argv
+#   5. The final answer produces "Got QN." (no "send /done" prompt) and
+#      auto-dispatches hive run because all questions are answered
+#   6. conversation_store is cleared by the auto-dispatch path; /done still
+#      works as a manual backstop but is no longer required
 #
 # Pure structural test — no Codex judge calls. Deterministic on every run.
 class HiveEvalS6BrainstormRoundTripTest < Minitest::Test
@@ -101,23 +102,21 @@ class HiveEvalS6BrainstormRoundTripTest < Minitest::Test
     # --- Tick 6: answer Q4 (last) ---
     when_user_sends(ANSWERS[3])
     final_reply = harness.last_sent.text
-    assert_match(/Got Q4\./, final_reply)
-    assert_match(/All questions answered/, final_reply)
-    assert_match(%r{send /done}, final_reply,
-                 "the all-answered reply must instruct the operator to send /done")
-    refute_match(/Q5:/, final_reply, "must not invent a question that doesn't exist")
+    assert_equal "Got Q4.", final_reply,
+                 "final answer must produce a clean Got QN. ack — no 'send /done' prompt, " \
+                 "no invented Q5"
+    refute_match(/Q5:/, final_reply)
+    refute_match(%r{send /done}, final_reply)
 
-    # The conversation state must STILL be present after the final answer so
-    # /done can read state.slug and dispatch hive run.
+    # Auto-dispatch happened on the last answer; the conversation store is
+    # cleared so /done is a no-op safety net but not required.
+    assert_equal [ "hive", "run", SLUG, "--json" ], harness.child_supervisor.commands.last,
+                 "all-answered must auto-dispatch hive run — operator does not need to send /done"
     state = harness.instance_variable_get(:@conversation_store)
                     .get(chat_id: Hive::Eval::FakeTelegram::DEFAULT_CHAT_ID)
-    refute_nil state, "conversation_store must NOT be cleared on all-answered — /done depends on it"
-    assert_equal SLUG, state.slug
-
-    # --- Tick 7: operator sends /done ---
-    when_user_sends("/done")
-    assert_equal [ "hive", "run", SLUG, "--json" ], harness.child_supervisor.commands.last,
-                 "/done must dispatch the hive run argv that hands control back to the daemon"
+    assert_nil state,
+               "conversation_store must be cleared after auto-dispatch so a stale state can't " \
+               "double-dispatch on a later message"
 
     # --- Disk-level assertion: every answer landed in brainstorm.md in order ---
     parsed_answers = Hive::Bot::BrainstormParser.parse(brainstorm_path).map(&:answer)

@@ -220,7 +220,8 @@ class HiveBotSupervisorTest < Minitest::Test
                  @supervisor.send(:child_completion_text, child_exit(exit_code: Hive::ExitCodes::WRONG_STAGE))
     assert_equal "Try again - another run holds the lock",
                  @supervisor.send(:child_completion_text, child_exit(exit_code: Hive::ExitCodes::TEMPFAIL))
-    assert_equal "Command completed", @supervisor.send(:child_completion_text, child_exit(exit_code: 0))
+    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0)),
+               "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
     assert_includes @supervisor.send(:child_completion_text, child_exit(exit_code: 17)), "Command failed with exit 17"
   end
 
@@ -722,7 +723,8 @@ class HiveBotSupervisorTest < Minitest::Test
     ok = @supervisor.send(:wait_for_child_success, 456, deadline: Time.now + 1)
 
     assert_equal true, ok
-    assert_equal "Command completed", @telegram.messages.last.fetch(:text)
+    assert_empty @telegram.messages,
+                 "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
   end
 
   def test_wait_for_child_success_times_out_without_completed_child
@@ -950,7 +952,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal true, ok
     assert_equal [ 0.1 ], sleeps
-    assert_equal "Command completed", @telegram.messages.last.fetch(:text)
+    assert_empty @telegram.messages,
+                 "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
   end
 
   def test_execute_answer_write_reports_lock_busy

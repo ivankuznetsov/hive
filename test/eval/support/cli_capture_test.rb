@@ -30,6 +30,8 @@ class HiveEvalCliCaptureTest < Minitest::Test
 
     assert_equal [ "hive", "plan", "slug-a", "--from", "2-brainstorm",
                    "--project", "hive", "--json" ], harness.child_supervisor.commands.last
-    assert_equal "Queued command pid=20001", harness.last_sent.text
+    # The bot no longer sends a "Queued command pid=..." ack on dispatch.
+    # The capture-side contract is verified by child_supervisor.commands.
+    assert_nil harness.last_sent, "no Telegram ack should fire on plain dispatch"
   end
 end

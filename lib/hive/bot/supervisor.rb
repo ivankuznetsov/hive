@@ -376,7 +376,10 @@ module Hive
           project: result.project,
           slug: result.slug
         )
-        safe_send_message(chat_id: update.chat_id, text: "Queued command pid=#{pid}")
+        # No "Queued command pid=..." ack — that's operational chatter the
+        # operator does not need. The reaper still surfaces failures (and
+        # diagnose replies still fire for Show details), so silence here
+        # is signal-preserving.
         pid
       end
 
@@ -431,17 +434,30 @@ module Hive
           safe_send_message(
             chat_id: update.chat_id,
             text: "Got Q#{answered_n}.\n\nQ#{next_question.n}: #{next_question.text.to_s.strip}\n\n" \
-                  "Reply with your answer (or send /done when finished)."
+                  "Reply with your answer."
           )
         else
-          # Conversation state is intentionally NOT cleared here — /done
-          # reads it to discover the slug and dispatch `hive run <slug>`,
-          # then clears it itself.
-          safe_send_message(
-            chat_id: update.chat_id,
-            text: "Got Q#{answered_n}. All questions answered — send /done to continue the brainstorm."
-          )
+          # All questions answered. Acknowledge the final answer and auto-
+          # dispatch `hive run <slug>` so the daemon picks up the completed
+          # brainstorm without the operator having to send /done. /done
+          # still works as a manual backstop (it reads conversation_store,
+          # which we clear here to avoid double-dispatch).
+          safe_send_message(chat_id: update.chat_id, text: "Got Q#{answered_n}.")
+          auto_run_after_answers(result, update)
         end
+      end
+
+      def auto_run_after_answers(result, update)
+        return if @dry_run
+
+        @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
+        per_command = @router.class::Result.new(
+          action: :dispatch_then_reply,
+          command_argv: [ "hive", "run", result.slug, "--json" ],
+          project: result.project,
+          slug: result.slug
+        )
+        execute_dispatch(per_command, update)
       end
 
       def start_answer(result, update)
@@ -486,6 +502,8 @@ module Hive
 
       def reply_for_child(child)
         text = diagnose_reply_for_child(child) || child_completion_text(child)
+        return if text.nil?
+
         @telegram.send_message(chat_id: child.chat_id, text: text)
       end
 
@@ -516,7 +534,10 @@ module Hive
         elsif child.exit_code == Hive::ExitCodes::TEMPFAIL
           "Try again - another run holds the lock"
         elsif child.exit_code == 0
-          "Command completed"
+          # Clean success — no message. Operators see this signal via the
+          # next status row (or its absence). The "Command completed" ack
+          # was operational chatter with no actionable content.
+          nil
         else
           "Command failed with exit #{child.exit_code || 'unknown'}; see #{child.log_path}"
         end

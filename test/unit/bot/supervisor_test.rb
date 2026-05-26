@@ -483,7 +483,11 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "running"
   end
 
-  def test_render_queue_appends_slash_link_per_actionable_row_type
+  def test_status_keyboard_has_callback_button_per_actionable_row_type
+    # /status uses inline callback buttons, not text "/command <slug>" links:
+    # Telegram's bot_command entity covers only the token, so a tapped text
+    # link drops the slug. Each actionable row gets one button whose
+    # callback_data matches the push-notification surface.
     brainstorm = row(slug: "ask-q-260526-aaaa", stage: "2-brainstorm",
                      action: "needs_input", marker: "waiting")
     ready_to_x = row(slug: "ship-it-260526-bbbb", stage: "7-artifacts",
@@ -497,28 +501,27 @@ class HiveBotSupervisorTest < Minitest::Test
                           attrs: {}, diagnostic: nil)
     inert = row(slug: "agent-running-260526-eeee", action: "agent_running")
 
-    text = @supervisor.send(:render_queue, [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+    keyboard = @supervisor.send(:status_keyboard,
+                                [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+    callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
 
-    assert_includes text, "/answer ask-q-260526-aaaa",
-                    "brainstorm-waiting rows must carry an /answer slash link"
-    assert_includes text, "/approve ship-it-260526-bbbb",
-                    "ready_to_X rows must carry an /approve slash link"
-    assert_includes text, "/autofix stuck-260526-cccc",
-                    "retryable recovery rows must carry an /autofix slash link"
-    assert_includes text, "/details stale-260526-dddd",
-                    "manual-only recovery rows must carry a /details slash link"
-    refute_includes text, "agent-running-260526-eeee",
-                    "agent_running rows are inert and must not appear at all"
+    assert_includes callbacks, "answer:hive:ask-q-260526-aaaa",
+                    "brainstorm-waiting rows get an answer button"
+    assert_includes callbacks, "approve:finalize:hive:ship-it-260526-bbbb:7-artifacts",
+                    "ready_to_X rows get an approve button with the workflow verb"
+    assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
+                    "retryable recovery rows get an autofix button"
+    assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
+                    "manual-only recovery rows get a details button"
+    assert_equal 4, callbacks.length, "inert agent_running rows produce no button"
   end
 
-  def test_render_queue_omits_slash_link_for_rows_without_actionable_state
+  def test_status_keyboard_is_nil_when_no_row_is_actionable
     plain_inflight = row(slug: "in-flight-260526-aaaa", stage: "4-execute",
                          action: "developing", marker: "agent_working")
 
-    text = @supervisor.send(:render_queue, [ plain_inflight ])
-
-    refute_match(%r{/(answer|approve|autofix|details) in-flight-260526-aaaa}, text,
-                 "rows with no Telegram-actionable next step must NOT carry a slash link")
+    assert_nil @supervisor.send(:status_keyboard, [ plain_inflight ]),
+               "a reply with no actionable rows must stay text-only (no empty keyboard)"
   end
 
   def test_render_details_sorts_attrs_and_handles_missing_row
@@ -543,7 +546,9 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil pid
     assert_empty @child_supervisor.dispatched
     assert_includes @telegram.messages.last.fetch(:text), "1 active task"
-    assert_nil @telegram.messages.last.fetch(:reply_markup)
+    # ready_to_develop row → an approve button on the /status reply.
+    callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
+    assert_includes callbacks, "approve:develop:hive:alpha:3-plan"
   end
 
   def test_execute_dispatch_filters_status_by_project
@@ -560,7 +565,9 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @telegram.messages.last.fetch(:text)
     assert_includes text, "Beta… — Plan"
     refute_includes text, "Alpha"
-    assert_nil @telegram.messages.last.fetch(:reply_markup)
+    # Only the project-filtered row contributes a button.
+    callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
+    assert_equal [ "approve:develop:other:beta-260525-abcd:3-plan" ], callbacks
   end
 
   def test_execute_dispatch_reports_unknown_project_with_known_list

@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T18:00:00Z] bot — /status reverts to inline buttons (text-links can't carry the slug)
+
+**Action:** Real-device testing confirmed that tapping a rendered `/answer <slug>` text-link in a `/status` reply sends only `/answer` (Telegram's `bot_command` entity covers the token, not the argument), so the slug was dropped and the tap hit the usage hint. Reverted the `/status`/`/queue` surface from slash-command text suffixes to an inline callback keyboard: `Supervisor#status_keyboard` / `status_action_button` build one button per actionable row (✏️ answer / ✅ approve / 🔧 autofix / 🔍 details), reusing `NotificationBuilders` callback constructors so the callbacks are byte-identical to the push-notification buttons. `slash_link_for` removed. The `/answer`/`/approve`/`/autofix`/`/details` slash commands remain typeable and in the quick-actions menu. Corrected the prior wiki claim that text links were one-tap.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
 ## [2026-05-26T15:30:00Z] bot — /status slash-link surface + /autofix + /details
 
 **Action:** The `/status` reply now formats every actionable row with an inline `/command <slug>` suffix. Telegram clients auto-render these as one-tap blue links inside bot messages, giving every Brainstorm-waiting, ready-to-X, retryable-recovery, and manual-only-recovery row a one-tap recovery path with NO inline keyboard. Row classification reuses `NotificationBuilders.retryable_recovery?` / `manual_only_recovery?` so the text-link surface stays consistent with the push-notification button surface. Two new slash commands (`/autofix <slug>`, `/details <slug>`) were added; both resolve the slug against the latest `StatusWatcher` snapshot. Recovery dispatch logic was extracted into `Hive::Bot::Handlers::RecoverySequence` so the inline 🔧 Autofix button (`CallbackHandlers#autofix`) and the `/autofix` slash command (`SlashHandlers#autofix`) produce byte-identical argvs for the same row. `Supervisor::BOT_COMMANDS` extended from 7 to 9 commands.

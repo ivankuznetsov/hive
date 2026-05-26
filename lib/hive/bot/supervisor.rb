@@ -408,7 +408,8 @@ module Hive
           if result.slug
             safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
           else
-            safe_send_message(chat_id: update.chat_id, text: render_queue(rows))
+            safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
+                              reply_markup: status_keyboard(rows))
           end
           return nil
         end
@@ -630,10 +631,8 @@ module Hive
         return "No active Hive tasks." if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          title = Hive::Bot::TitleFormatter.title_from_slug(row.slug)
-          stage = Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)
-          link = slash_link_for(row)
-          link ? "#{title} — #{stage} — #{link}" : "#{title} — #{stage}"
+          "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
+            "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
@@ -642,41 +641,48 @@ module Hive
         ([ header ] + lines).join("\n")
       end
 
-      # Per-row /command <slug> suffix for the /status text body. Returns
-      # a tappable Telegram slash command string (auto-detected by all
-      # Telegram clients as a blue link when sent without parse_mode) or
-      # nil when the row has no Telegram-actionable next step. Decision
-      # rules:
-      #   needs_input + 2-brainstorm + waiting → /answer  <slug>
-      #   ready_to_*                            → /approve <slug>
-      #   recover_* AND retryable_recovery?     → /autofix <slug>
-      #   recover_* AND manual_only_recovery?   → /details <slug>
-      #   else                                  → nil
-      # Classification helpers come from NotificationBuilders so the
-      # /status surface stays consistent with the push-notification
-      # surface (a row that emits a 🔧 Autofix button on its alert will
-      # always carry the /autofix link in /status, and vice versa).
-      def slash_link_for(row)
-        action = row.action.to_s
-        marker = row.marker.to_s
-        stage = row.stage.to_s
+      # Inline keyboard for the /status (and /queue) reply: one button per
+      # actionable row that has a Telegram-side next step, capped to match
+      # the text body. Returns nil when no row is actionable, so the reply
+      # stays text-only.
+      #
+      # Why buttons and not text "/command <slug>" links: Telegram's
+      # bot_command message entity covers only the "/command" token, NOT the
+      # argument after it. Tapping a rendered "/answer <slug>" sends just
+      # "/answer", which hits the usage hint — the slug never rides along.
+      # Inline callback buttons carry the full payload on tap, in-chat. The
+      # callbacks are built via NotificationBuilders so they are byte-
+      # identical to (and compaction/registry-consistent with) the push-
+      # notification buttons.
+      def status_keyboard(rows)
+        buttons = actionable_queue_rows(rows).first(QUEUE_DISPLAY_CAP)
+                                             .filter_map { |row| status_action_button(row) }
+        buttons.empty? ? nil : buttons.map { |btn| [ btn ] }
+      end
 
-        if action == "needs_input" && stage == "2-brainstorm" && marker == "waiting"
-          "/answer #{row.slug}"
+      # One primary action button for a row, or nil when the row has no
+      # Telegram-side next step. Mirrors the push-notification surface:
+      #   needs_input + 2-brainstorm + waiting → Answer  (answer: callback)
+      #   ready_to_*                            → Approve (approve: callback)
+      #   recover_* AND retryable_recovery?     → Autofix (autofix: callback)
+      #   recover_* AND manual_only_recovery?   → Details (details: callback)
+      #   else                                  → nil
+      # Labels carry the task title so the operator can tell rows apart.
+      def status_action_button(row)
+        nb = Hive::Bot::NotificationBuilders
+        title = Hive::Bot::TitleFormatter.title_from_slug(row.slug)
+        action = row.action.to_s
+
+        if action == "needs_input" && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
+          nb.button("✏️ #{title}", "answer:#{row.project}:#{row.slug}")
         elsif action.start_with?("ready_to_")
-          "/approve #{row.slug}"
-        elsif Hive::Bot::NotificationBuilders.recovery?(row)
-          # Mirror recovery_keyboard: retryable rows get the Autofix action,
-          # everything else (manual-only markers AND recovery rows with no
-          # retry suggestion) gets Show details. Gate on recovery? — not
-          # action.start_with?("recover_") — so action=="error" rows and
-          # marker-only recovery rows keep parity with the push surface
-          # (a row that shows a 🔧 Autofix / Show details button on its
-          # alert always carries the matching slash link in /status).
-          if Hive::Bot::NotificationBuilders.retryable_recovery?(row)
-            "/autofix #{row.slug}"
+          verb = nb.verb_for_action(row.action)
+          nb.button("✅ #{title}", "approve:#{verb}:#{row.project}:#{row.slug}:#{row.stage}") if verb
+        elsif nb.recovery?(row)
+          if nb.retryable_recovery?(row)
+            nb.button("🔧 #{title}", nb.autofix_callback(row))
           else
-            "/details #{row.slug}"
+            nb.button("🔍 #{title}", nb.details_callback(row))
           end
         end
       end

@@ -7,7 +7,7 @@ updated: 2026-05-27
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: Four runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, and `git`; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
+**TLDR**: Four runtime gems (`thor`, `telegram-bot-ruby`, `bubbletea`, `lipgloss`); seven development/test gems (`minitest`, `rake`, `json_schemer`, `rubocop` + `rubocop-rails-omakase`, `brakeman`, `bundler-audit`). Runtime CLIs are `claude`, `codex`, `gh`, `git`, and QMD for managed llm-wiki search/indexing; e2e TUI tests additionally use `tmux` and optionally `asciinema`.
 
 ## Runtime gems
 
@@ -65,6 +65,8 @@ These are not gems but the CLI tools the runtime invokes:
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for secret-scan / dedupe), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
+| `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
+| `npm` | any recent npm with Node.js | installer for the QMD npm package; Hive reports missing npm but does not install Node.js/npm itself |
 | `asciinema` | 2.4+ (3.x accepted with v2 output flag) | test-time optional; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.

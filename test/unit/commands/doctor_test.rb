@@ -344,6 +344,72 @@ class HiveCommandsDoctorTest < Minitest::Test
     old_claude.nil? ? ENV.delete("CLAUDE_API_KEY") : ENV["CLAUDE_API_KEY"] = old_claude
   end
 
+  def test_llm_wiki_qmd_uses_hive_managed_binary_when_not_on_path
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        with_tmp_dir do |data_home|
+          qmd = File.join(data_home, "hive", "qmd", "bin", "qmd")
+          write_file(qmd, <<~SH)
+            #!/bin/sh
+            echo "qmd 2.1.0"
+          SH
+          File.chmod(0o755, qmd)
+
+          out = StringIO.new
+          cfg = base_config(
+            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+            "plan" => { "agent" => "claude", "skill" => "/x" }
+          )
+
+          with_env("XDG_DATA_HOME" => data_home, "PATH" => "", "HIVE_QMD_BIN" => nil) do
+            doctor = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out)
+            exit_code = doctor.call
+
+            assert_equal 0, exit_code
+            assert_match(%r{wiki/qmd.*✓ present}, out.string)
+            qmd_row = doctor.rows.find { |row| row[:label] == "wiki/qmd" }
+            assert_match(/qmd 2\.1\.0/, qmd_row.fetch(:message))
+          end
+        end
+      end
+    end
+  end
+
+  def test_llm_wiki_qmd_warning_when_binary_fails_to_start
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        with_tmp_dir do |bin_dir|
+          qmd = File.join(bin_dir, "qmd")
+          write_file(qmd, <<~SH)
+            #!/usr/bin/env bash
+            echo "NODE_MODULE_VERSION mismatch" >&2
+            exit 1
+          SH
+          File.chmod(0o755, qmd)
+
+          out = StringIO.new
+          cfg = base_config(
+            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+            "plan" => { "agent" => "claude", "skill" => "/x" }
+          )
+
+          with_env("HIVE_QMD_BIN" => qmd) do
+            exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
+
+            assert_equal 0, exit_code
+            assert_match(%r{wiki/qmd.*! warning}, out.string)
+            assert_match(/NODE_MODULE_VERSION mismatch/, out.string)
+            assert_match(/npm rebuild better-sqlite3/, out.string)
+          end
+        end
+      end
+    end
+  end
+
   def test_legacy_brainstorm_runtime_row_warns_to_migrate
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")

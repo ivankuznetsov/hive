@@ -6,6 +6,8 @@ REPO_NAME="${HIVE_REPO_NAME:-hive}"
 DRY_RUN=0
 VERSION="${HIVE_VERSION:-}"
 PREFIX="${HIVE_PREFIX:-}"
+INSTALL_QMD="${HIVE_INSTALL_QMD:-1}"
+QMD_NPM_PACKAGE="${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
 
 usage() {
   cat <<USAGE
@@ -23,7 +25,10 @@ telegram-bot-ruby) live under \${HIVE_PREFIX:-~/.local/share}/hive/gems so an
 uninstall is a clean \`rm -rf\` plus symlink removal.
 
 Requires Ruby 3.4 already on PATH; the installer reports its own
-prereqs (\`curl\`, \`jq\`, checksum tool) on first run.
+prereqs (\`curl\`, \`jq\`, checksum tool) on first run. When npm is
+available, the installer also installs Hive's qmd wiki indexer into the
+Hive data directory and links it beside the \`hive\` executable. Set
+HIVE_INSTALL_QMD=0 to skip that step.
 USAGE
 }
 
@@ -284,6 +289,85 @@ daemon_autostart_setup() {
   fi
 }
 
+qmd_install_enabled() {
+  case "$INSTALL_QMD" in
+    0|false|False|FALSE|no|No|NO) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+qmd_repair_hint() {
+  local qmd_home_arg="$1"
+  printf 'rerun hive update, or run: npm install --global --prefix %q %q' "$qmd_home_arg" "$QMD_NPM_PACKAGE"
+}
+
+# Install the qmd CLI used by Hive-managed llm-wiki refresh scripts into
+# Hive's own data prefix. This keeps the native better-sqlite3 build out
+# of the user's global npm prefix while still making `qmd` available from
+# the same bin directory as `hive`.
+install_qmd() {
+  local qmd_home qmd_bin qmd_link existing_qmd_link managed_qmd_link active_qmd active_qmd_canon managed_qmd_canon qmd_version
+  qmd_home="${data_home}/qmd"
+  qmd_bin="${qmd_home}/bin/qmd"
+  qmd_link="${bin_home}/qmd"
+
+  if ! qmd_install_enabled; then
+    log "qmd: skipped (HIVE_INSTALL_QMD=${INSTALL_QMD})"
+    return 0
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "missing wiki dependency 'npm'; qmd was not installed — install Node.js/npm and rerun hive update"
+    return 0
+  fi
+
+  log "qmd: installing ${QMD_NPM_PACKAGE} into ${qmd_home}"
+  mkdir -p "$qmd_home"
+  if ! npm install --global --prefix "$qmd_home" --no-audit --no-fund "$QMD_NPM_PACKAGE"; then
+    warn "qmd install failed; $(qmd_repair_hint "$qmd_home")"
+    return 0
+  fi
+
+  # `npm install` may leave an existing native better-sqlite3 build in place
+  # after a Node upgrade. Rebuild explicitly so `hive update` repairs the
+  # NODE_MODULE_VERSION mismatch class of failures.
+  npm rebuild --global --prefix "$qmd_home" better-sqlite3 >/dev/null 2>&1 || true
+
+  if [[ ! -x "$qmd_bin" ]]; then
+    warn "qmd install completed but no executable was found at ${qmd_bin}; $(qmd_repair_hint "$qmd_home")"
+    return 0
+  fi
+
+  if ! "$qmd_bin" --version >/dev/null 2>&1; then
+    warn "qmd installed at ${qmd_bin} but failed to start; $(qmd_repair_hint "$qmd_home")"
+    return 0
+  fi
+
+  if [[ -e "$qmd_link" || -L "$qmd_link" ]]; then
+    existing_qmd_link="$(readlink -f "$qmd_link" 2>/dev/null || true)"
+    managed_qmd_link="$(readlink -f "$qmd_bin" 2>/dev/null || echo "$qmd_bin")"
+    if [[ "$existing_qmd_link" != "$managed_qmd_link" ]]; then
+      warn "existing qmd at ${qmd_link}; leaving it unchanged (Hive-managed qmd is ${qmd_bin})"
+    else
+      ln -sfn "$qmd_bin" "$qmd_link"
+    fi
+  else
+    ln -sfn "$qmd_bin" "$qmd_link"
+  fi
+
+  active_qmd="$(command -v qmd 2>/dev/null || true)"
+  if [[ -n "$active_qmd" ]]; then
+    active_qmd_canon="$(readlink -f "$active_qmd" 2>/dev/null || true)"
+    managed_qmd_canon="$(readlink -f "$qmd_bin" 2>/dev/null || echo "$qmd_bin")"
+    if [[ -n "$active_qmd_canon" && "$active_qmd_canon" != "$managed_qmd_canon" ]]; then
+      warn "PATH resolves qmd to ${active_qmd}, not Hive-managed ${qmd_bin}; wiki refreshes may use the earlier binary"
+    fi
+  fi
+
+  qmd_version="$("$qmd_bin" --version 2>/dev/null || true)"
+  log "qmd: installed ${qmd_version:-${QMD_NPM_PACKAGE}}"
+}
+
 platform="$(detect_platform)"
 # Hard-fail BEFORE any network call when the installer itself is
 # missing required tools.
@@ -316,6 +400,13 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
   log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
+  if qmd_install_enabled; then
+    log "dry run: would npm install --global --prefix ${data_home}/qmd ${QMD_NPM_PACKAGE}"
+    log "dry run: would npm rebuild --global --prefix ${data_home}/qmd better-sqlite3"
+    log "dry run: would link ${bin_home}/qmd"
+  else
+    log "dry run: would skip qmd install (HIVE_INSTALL_QMD=${INSTALL_QMD})"
+  fi
   runtime_preflight
   exit 0
 fi
@@ -411,6 +502,8 @@ export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/shims/hv" "\$@"
 WRAPPER
 chmod +x "${gem_home}/bin/hive" "${gem_home}/bin/hv"
+
+install_qmd
 
 existing_hive="$(command -v hive 2>/dev/null || true)"
 existing_canon=""

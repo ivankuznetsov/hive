@@ -53,6 +53,7 @@ Initial public release of Hive — the folder-as-agent pipeline. The entries bel
 - Hive now ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. The Homebrew tap formula, AUR `hive-bin` template, and `install.sh` all download the same signed `.gem` and `gem install` it. The earlier tebako/static-binary build path was dropped — Hive already requires Ruby 3.4 on the user's machine, so bundling a Ruby runtime into a single binary added build-pipeline complexity for no user gain.
 - Added XDG path resolution, install-channel markers, `hive update`, `hive uninstall`, and the `hv` fallback entrypoint for Apache Hive PATH collisions.
 - `hive init` now writes the per-user daemon service unit and asks whether to enable and start it immediately.
+- The bash installer now installs Hive's managed QMD wiki indexer from `@tobilu/qmd` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` when npm is available, links `qmd` beside the Hive binary, and `hive doctor` reports missing/broken QMD non-fatally with native ABI rebuild guidance.
 
 ### Added — `hive tui` manual steering
 

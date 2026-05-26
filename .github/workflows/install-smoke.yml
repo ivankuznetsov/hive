@@ -248,6 +248,25 @@ jobs:
           chmod +x "$fakebin/curl"
           printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/cosign"
           chmod +x "$fakebin/cosign"
+          cat > "$fakebin/npm" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          prefix=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --prefix) prefix="$2"; shift 2 ;;
+              *) shift ;;
+            esac
+          done
+          [[ -n "$prefix" ]] || { echo "missing --prefix" >&2; exit 1; }
+          mkdir -p "$prefix/bin"
+          cat > "$prefix/bin/qmd" <<'QMD'
+          #!/usr/bin/env bash
+          echo "qmd fixture"
+          QMD
+          chmod +x "$prefix/bin/qmd"
+          SH
+          chmod +x "$fakebin/npm"
           apache_bin="$fixtures/apache-bin"
           xdg_bin="$fixtures/xdg-bin"
           xdg_data="$fixtures/xdg-data"
@@ -259,6 +278,8 @@ jobs:
           grep -qx "$xdg_bin/hive" "$fixtures/invoked-bin"
           test -L "$xdg_bin/hv"
           "$xdg_bin/hv" --version | grep -q '^0\.1\.0$'
+          test -L "$xdg_bin/qmd"
+          "$xdg_bin/qmd" --version | grep -q '^qmd fixture$'
 
   unsupported-platforms:
     name: install.sh unsupported platform messages

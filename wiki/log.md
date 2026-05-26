@@ -158,6 +158,16 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[commands/bot]]
 
+## [2026-05-26T15:30:00Z] install - managed QMD for llm-wiki
+
+**Action:** Made QMD part of Hive's install and diagnostics path. `install.sh` now installs `@tobilu/qmd` with npm into Hive's data prefix (`${XDG_DATA_HOME:-~/.local/share}/hive/qmd`) and links `qmd` beside the Hive binary unless the operator opts out with `HIVE_INSTALL_QMD=0`. Generated `.llm-wiki` scripts now resolve QMD through `HIVE_QMD_BIN`, PATH, Hive's managed data-prefix install, or the `install-prefix` sidecar so systemd timers are not dependent on an interactive shell PATH. `hive doctor` adds a non-fatal `wiki/qmd` row for initialized projects and reports native Node ABI failures with a `npm rebuild better-sqlite3` repair hint.
+
+**Refreshed pages:**
+- [[operating]] - documented managed QMD install flags and agent-assisted install repair.
+- [[dependencies]] - added QMD/npm to external CLI dependencies.
+- [[commands/init]] - documented generated script QMD resolution.
+- [[commands/doctor]] - documented the `wiki/qmd` row and JSON history.
+
 ## [2026-05-26T14:30:00Z] claude-launcher - preserve project-owned .claude/settings.json
 
 **Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.

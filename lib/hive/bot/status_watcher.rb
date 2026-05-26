@@ -16,8 +16,67 @@ module Hive
           super
         end
       end
-      Result = Data.define(:ok, :rows, :error, :envelope) do
-        def initialize(ok:, rows: [], error: nil, envelope: nil)
+
+      LegacyStageDirs = Data.define(:project, :project_path, :hive_state_path,
+                                    :legacy_stage_dirs, :legacy_migrate_command) do
+        def initialize(project:, project_path: nil, hive_state_path: nil,
+                       legacy_stage_dirs: [], legacy_migrate_command: nil)
+          super(
+            project: project,
+            project_path: project_path,
+            hive_state_path: hive_state_path,
+            legacy_stage_dirs: normalize_stage_dirs(legacy_stage_dirs),
+            legacy_migrate_command: legacy_migrate_command
+          )
+        end
+
+        def slug
+          "__legacy_stage_dirs__"
+        end
+
+        def stage
+          "legacy_stage_dirs"
+        end
+
+        def marker
+          "legacy_stage_dirs"
+        end
+
+        def action
+          "legacy_stage_dirs"
+        end
+
+        def attrs
+          {
+            "stage_dirs" => stage_dir_names.join(","),
+            "task_count" => total_task_count.to_s
+          }
+        end
+
+        def stage_dir_names
+          legacy_stage_dirs.map { |entry| entry.fetch("stage_dir") }
+        end
+
+        def total_task_count
+          legacy_stage_dirs.sum { |entry| entry.fetch("task_count").to_i }
+        end
+
+        private
+
+        def normalize_stage_dirs(entries)
+          Array(entries).filter_map do |entry|
+            raw = entry.is_a?(Hash) ? entry : {}
+            stage_dir = raw["stage_dir"].to_s
+            task_count = raw["task_count"].to_i
+            next if stage_dir.empty? || task_count <= 0
+
+            { "stage_dir" => stage_dir, "task_count" => task_count }
+          end.freeze
+        end
+      end
+
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope) do
+        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil)
           super
         end
       end
@@ -42,7 +101,13 @@ module Hive
 
         doc = JSON.parse(out)
         validate_envelope!(doc)
-        Result.new(ok: true, rows: extract_rows(doc, now: now), error: nil, envelope: doc)
+        Result.new(
+          ok: true,
+          rows: extract_rows(doc, now: now),
+          legacy_stage_dirs: extract_legacy_stage_dirs(doc),
+          error: nil,
+          envelope: doc
+        )
       rescue JSON::ParserError => e
         failure("malformed JSON from hive status: #{e.message}")
       rescue StandardError => e
@@ -53,7 +118,7 @@ module Hive
 
       def failure(message)
         @logger&.event(:poll_failure, source: "status", message: message)
-        Result.new(ok: false, rows: [], error: message)
+        Result.new(ok: false, rows: [], legacy_stage_dirs: [], error: message)
       end
 
       def validate_envelope!(doc)
@@ -66,6 +131,23 @@ module Hive
         return if doc["schema_version"] == expected
 
         raise ArgumentError, "schema_version mismatch: got #{doc['schema_version']}, want #{expected}"
+      end
+
+      def extract_legacy_stage_dirs(doc)
+        Array(doc["projects"]).filter_map do |project_doc|
+          next if project_doc["error"]
+
+          entry = LegacyStageDirs.new(
+            project: project_doc["name"],
+            project_path: project_doc["path"],
+            hive_state_path: project_doc["hive_state_path"],
+            legacy_stage_dirs: project_doc["legacy_stage_dirs"],
+            legacy_migrate_command: project_doc["legacy_migrate_command"]
+          )
+          next if entry.legacy_stage_dirs.empty?
+
+          entry
+        end
       end
 
       def extract_rows(doc, now:)

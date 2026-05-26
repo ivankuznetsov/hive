@@ -8,7 +8,7 @@ class HiveBotSupervisorTest < Minitest::Test
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
                    keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, :error, :envelope, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
@@ -151,6 +151,16 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
+  def legacy_stage_dirs(project: "hive", project_path: "/tmp/hive")
+    Hive::Bot::StatusWatcher::LegacyStageDirs.new(
+      project: project,
+      project_path: project_path,
+      hive_state_path: File.join(project_path, ".hive-state"),
+      legacy_stage_dirs: [ { "stage_dir" => "6-pr", "task_count" => 1 } ],
+      legacy_migrate_command: "hive migrate"
+    )
+  end
+
   def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
           action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil)
     Row.new(project: project, slug: slug, stage: stage, action: action,
@@ -176,6 +186,15 @@ class HiveBotSupervisorTest < Minitest::Test
       calls << kwargs
       outcome
     end
+  end
+
+  def test_status_tick_includes_legacy_stage_dirs_in_notification_inputs
+    legacy = legacy_stage_dirs
+    @status_watcher.result = StatusResult.new(ok: true, rows: [], legacy_stage_dirs: [ legacy ])
+
+    @supervisor.status_tick
+
+    assert_equal [ [ legacy ] ], @notification_dispatcher.processed
   end
 
   def test_reply_for_child_renders_status_diagnose_success_envelope
@@ -549,6 +568,44 @@ class HiveBotSupervisorTest < Minitest::Test
     # ready_to_develop row → an approve button on the /status reply.
     callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
     assert_includes callbacks, "approve:develop:hive:alpha:3-plan"
+  end
+
+  def test_execute_dispatch_renders_legacy_stage_dirs_in_status_queue
+    @status_watcher.result = StatusResult.new(ok: true, rows: [], legacy_stage_dirs: [ legacy_stage_dirs ])
+    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: [ "hive", "status", "--json" ])
+
+    pid = @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    assert_nil pid
+    assert_empty @child_supervisor.dispatched
+    message = @telegram.messages.last
+    assert_includes message.fetch(:text),
+                    "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`"
+    assert_includes message.fetch(:text), "No active Hive tasks."
+    assert_nil message[:reply_markup]
+  end
+
+  def test_execute_dispatch_filters_legacy_stage_dirs_by_project
+    other_legacy = legacy_stage_dirs(project: "other", project_path: "/tmp/other")
+    @status_watcher.result = StatusResult.new(
+      ok: true,
+      rows: [ row(project: "hive", slug: "alpha-260525-abcd") ],
+      legacy_stage_dirs: [ other_legacy ]
+    )
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      project: "other"
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    message = @telegram.messages.last
+    assert_includes message.fetch(:text),
+                    "Project other has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/other`"
+    assert_includes message.fetch(:text), "No active Hive tasks."
+    refute_includes message.fetch(:text), "Alpha"
+    assert_nil message[:reply_markup]
   end
 
   def test_execute_dispatch_filters_status_by_project

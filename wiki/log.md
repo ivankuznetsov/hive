@@ -2,6 +2,23 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T04:25:37Z] bot - legacy warning status parity
+
+**Action:** Code-review follow-up for #174: Telegram legacy-stage warnings now render project-scoped `hive migrate <project_path>` commands and the pull `/status`/`/queue` surface includes the same project-level warning even when there are no canonical task rows. Bot docs now describe daemon-aware ready notifications and the text-only legacy warning.
+
+**Refreshed pages:**
+- [[modules/bot]] - corrected ready-alert semantics and recorded `/status` legacy warning parity.
+- [[commands/bot]] - documented the text-only legacy-stage warning.
+- [[commands/status]] - recorded the bot's project-path-scoped migrate command.
+
+## [2026-05-27T04:17:33Z] bot - legacy warning dedupe follow-up
+
+**Action:** Code-review follow-up for #174: legacy-stage Telegram warning fingerprints are project-level, so changes to hidden task counts or stage-dir detail do not re-alert until the project reports clean and later regresses again. Fresh alert-store seeding now leaves legacy-stage migration warnings eligible for immediate delivery. Added dispatcher/status-watcher/builder regression coverage.
+
+**Refreshed pages:**
+- [[modules/bot]] - clarified project-level dedupe while legacy-dirty.
+- [[commands/status]] - clarified bot dedupe semantics.
+
 ## [2026-05-27T02:41:29Z] dependencies - faraday audit floor
 
 **Action:** Updated the lockfile security floor for Telegram Bot API HTTP transport after `bundler-audit --update` began flagging `faraday` 2.14.1 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. `Gemfile.lock` now resolves `faraday` 2.14.2 and `faraday-net_http` 3.4.3.
@@ -68,6 +85,14 @@ Append-only log of all wiki operations.
 **Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
+
+## [2026-05-26T12:19:00Z] bot - legacy stage directory notifications
+
+**Action:** Documented the Telegram bot parity path for `legacy_stage_dirs`. `StatusWatcher` now surfaces project-level legacy-stage warnings, `Supervisor#status_tick` feeds them through the alert lifecycle with task rows, and the bot sends one deduped notification on the clean-to-legacy transition telling the operator to run `hive migrate`.
+
+**Refreshed pages:**
+- [[modules/bot]] - recorded the watcher/supervisor/dispatcher notification flow.
+- [[commands/status]] - noted bot parity for legacy-stage warnings.
 
 ## [2026-05-26T11:49:11Z] brainstorm - fail fast on tmux prompt submit loss
 

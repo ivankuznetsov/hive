@@ -12,7 +12,6 @@ require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
-require "hive/bot/codex_conversation"
 require "hive/bot/title_formatter"
 require "hive/task"
 
@@ -79,9 +78,31 @@ module Hive
       end
 
       def process_update(update)
+        # Telegram requires answerCallbackQuery on every callback_query
+        # update to dismiss the spinner on the tapped button. Ack first so
+        # the spinner clears even if subsequent dispatch is slow; the call
+        # is silent (no toast) by design.
+        ack_callback_query(update) if callback_update?(update)
         result = @router.handle(update)
         execute_result(result, update)
         write_last_seen_update_id(update.update_id)
+      end
+
+      def callback_update?(update)
+        return update.callback_query? if update.respond_to?(:callback_query?)
+
+        update.respond_to?(:callback_data) && !update.callback_data.nil?
+      end
+
+      def ack_callback_query(update)
+        id = update.respond_to?(:callback_query_id) ? update.callback_query_id : nil
+        return unless id
+
+        @telegram.answer_callback_query(callback_query_id: id)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "answer_callback_query",
+                                      callback_query_id: id, error_class: e.class.name,
+                                      message: e.message)
       end
 
       def status_tick
@@ -172,7 +193,7 @@ module Hive
 
       ALLOWED_RESULT_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
-        write_answer_then_reply start_codex confirm_codex_draft
+        write_answer_then_reply
       ].freeze
 
       def execute_result(result, update)
@@ -190,10 +211,6 @@ module Hive
           start_answer(result, update)
         when :write_answer_then_reply
           execute_answer_write(result, update)
-        when :start_codex
-          execute_start_codex(result, update)
-        when :confirm_codex_draft
-          execute_confirm_codex_draft(result, update)
         else
           raise "Supervisor cannot execute unknown action #{result.action.inspect}"
         end
@@ -381,24 +398,49 @@ module Hive
           question_n: question_n,
           answer_text: result.answer_text
         )
-        text =
-          case write_result
-          when :written
-            @logger.event(:answer_written, slug: result.slug, question_n: question_n,
-                                           project: result.project)
-            "Got Q#{question_n}."
-          when :already_answered
-            @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                           question_n: question_n,
-                                                           project: result.project)
-            "Question #{question_n} was already answered by another device"
-          when :lock_busy
-            "Try again - another run holds the lock"
-          else
-            "Question #{question_n} was not found."
-          end
-        advance_conversation_after_write(result, update, path) if write_result == :written
-        safe_send_message(chat_id: update.chat_id, text: text)
+        case write_result
+        when :written
+          @logger.event(:answer_written, slug: result.slug, question_n: question_n,
+                                         project: result.project)
+          advance_conversation_after_write(result, update, path)
+          prompt_next_question_or_complete(result, update, path, question_n)
+        when :already_answered
+          @logger.event(:answer_skipped_already_answered, slug: result.slug,
+                                                         question_n: question_n,
+                                                         project: result.project)
+          safe_send_message(chat_id: update.chat_id,
+                            text: "Question #{question_n} was already answered by another device")
+        when :lock_busy
+          safe_send_message(chat_id: update.chat_id, text: "Try again - another run holds the lock")
+        else
+          safe_send_message(chat_id: update.chat_id, text: "Question #{question_n} was not found.")
+        end
+      end
+
+      # After a successful answer write, fetch the NEXT unanswered question
+      # from disk and send it to the operator so the Q-by-Q flow continues
+      # without the operator having to know what to answer next. When no
+      # questions remain, clear the conversation state and confirm with one
+      # "Brainstorm complete" message.
+      def prompt_next_question_or_complete(result, update, brainstorm_path, answered_n)
+        next_question = Hive::Bot::BrainstormParser.next_unanswered_question(
+          Hive::Bot::BrainstormParser.parse(brainstorm_path)
+        )
+        if next_question
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Got Q#{answered_n}.\n\nQ#{next_question.n}: #{next_question.text.to_s.strip}\n\n" \
+                  "Reply with your answer (or send /done when finished)."
+          )
+        else
+          # Conversation state is intentionally NOT cleared here — /done
+          # reads it to discover the slug and dispatch `hive run <slug>`,
+          # then clears it itself.
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Got Q#{answered_n}. All questions answered — send /done to continue the brainstorm."
+          )
+        end
       end
 
       def start_answer(result, update)
@@ -409,123 +451,20 @@ module Hive
               Hive::Bot::BrainstormParser.parse(path)
             )
           end
-        question_n = question&.n || 1
-        @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                  question_n: question_n, mode: result.mode || :path_b,
-                                  project: result.project)
-        safe_send_message(chat_id: update.chat_id,
-                          text: "Answer mode started for #{result.slug}. Send Q#{question_n}'s answer as a message.")
-      end
 
-      def execute_start_codex(result, update)
-        path = brainstorm_path_for(result.slug, project: result.project)
-        unless path
-          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
-          return
-        end
-
-        parsed = Hive::Bot::BrainstormParser.parse(path)
-        question = Hive::Bot::BrainstormParser.next_unanswered_question(parsed)
         unless question
           safe_send_message(chat_id: update.chat_id,
-                            text: "No unanswered questions remain for #{result.slug}.")
+                            text: "No unanswered questions for #{result.slug}.")
           return
         end
 
-        state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
-        unless state
-          state = @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                            question_n: question.n, mode: :path_a,
-                                            project: result.project)
-        end
-
-        conversation = codex_conversation
-        task = codex_task_for(path, result.slug, result.project)
-        history = Array(state.history)
-        user_input = result.answer_text.to_s
-        outcome = conversation.next_turn(task: task, question: question, history: history,
-                                         draft: state.draft, user_input: user_input)
-
-        case outcome.kind
-        when :draft_ready
-          history << { role: "user", text: user_input } unless user_input.empty?
-          history << { role: "assistant", text: outcome.draft.to_s }
-          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     draft: outcome.draft.to_s, awaiting_confirm: true,
-                                     history: history, project: result.project)
-          safe_send_message(chat_id: update.chat_id,
-                            text: "Codex draft for Q#{question.n}:\n#{outcome.draft}",
-                            reply_markup: codex_draft_keyboard(result.project, result.slug, question.n))
-        when :reply
-          history << { role: "user", text: user_input } unless user_input.empty?
-          history << { role: "assistant", text: outcome.text.to_s }
-          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     history: history, awaiting_confirm: false,
-                                     project: result.project)
-          safe_send_message(chat_id: update.chat_id, text: outcome.text.to_s)
-        else
-          safe_send_message(chat_id: update.chat_id,
-                            text: "Codex failed: #{outcome.reason}. Send your answer directly.")
-        end
-      end
-
-      def execute_confirm_codex_draft(result, update)
-        state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
-        draft = state&.draft.to_s
-        if draft.strip.empty?
-          safe_send_message(chat_id: update.chat_id, text: "No draft to confirm for #{result.slug}.")
-          return
-        end
-
-        path = brainstorm_path_for(result.slug, project: result.project)
-        unless path
-          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
-          return
-        end
-
-        write_result = Hive::Bot::BrainstormAnswerWriter.append!(
-          brainstorm_path: path,
-          question_n: result.question_n,
-          answer_text: draft
+        @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
+                                  question_n: question.n, mode: result.mode || :path_b,
+                                  project: result.project)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Q#{question.n}: #{question.text.to_s.strip}\n\nReply with your answer."
         )
-        if write_result == :written
-          @logger.event(:answer_written, slug: result.slug, question_n: result.question_n,
-                                          project: result.project)
-          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     draft: nil, awaiting_confirm: false)
-          advance_conversation_after_write(result, update, path)
-        elsif write_result == :already_answered
-          @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                            question_n: result.question_n,
-                                                            project: result.project)
-        end
-        text =
-          case write_result
-          when :written then "Draft saved as Q#{result.question_n}."
-          when :already_answered then "Question #{result.question_n} was already answered by another device"
-          when :lock_busy then "Try again - another run holds the lock"
-          else "Question #{result.question_n} was not found."
-          end
-        safe_send_message(chat_id: update.chat_id, text: text)
-      end
-
-      def codex_conversation
-        @codex_conversation ||= Hive::Bot::CodexConversation.new(
-          config: { "bot" => @config },
-          logger: @logger
-        )
-      end
-
-      def codex_task_for(brainstorm_path, slug, project)
-        Hive::Task.new(File.dirname(brainstorm_path))
-      end
-
-      def codex_draft_keyboard(project, slug, question_n)
-        [
-          [ { text: "Write", callback_data: "codex_write:#{project}:#{slug}:#{question_n}" } ],
-          [ { text: "Edit", callback_data: "codex_edit:#{project}:#{slug}:#{question_n}" } ],
-          [ { text: "Cancel", callback_data: "codex_cancel:#{project}:#{slug}:#{question_n}" } ]
-        ]
       end
 
       def advance_conversation_after_write(result, update, brainstorm_path)
@@ -558,7 +497,7 @@ module Hive
           return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
           return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
-                 "Open this task on a laptop for full details."
+                 "Tap Show details to dump it here."
         end
 
         kind = envelope["error_kind"].to_s.strip

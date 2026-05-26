@@ -26,11 +26,17 @@ module Hive
           when :callback_refresh_diagnose then refresh_diagnose(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
-          when :callback_path_a_yes then path_a(data)
-          when :callback_path_a_just_type then path_b(data)
-          when :callback_codex_write_draft then codex_write(data)
-          when :callback_codex_edit then @result_class.new(action: :reply, text: "Send the edited answer as a message.")
-          when :callback_codex_cancel then @result_class.new(action: :reply, text: "Draft cancelled.")
+          # Codex-draft flow is retired (deterministic Q-by-Q answering only).
+          # Legacy callbacks still land here from messages sent before the
+          # removal; reply with the new path so the operator isn't stuck.
+          when :callback_path_a_yes,
+               :callback_path_a_just_type,
+               :callback_codex_write_draft,
+               :callback_codex_edit,
+               :callback_codex_cancel
+            @result_class.new(action: :reply,
+                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <slug>) " \
+                                    "and reply with your answer; the bot will send the next question automatically.")
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
           when :callback_idea_project_new then idea_project_new(data)

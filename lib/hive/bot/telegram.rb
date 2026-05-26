@@ -8,9 +8,10 @@ module Hive
       MAX_MESSAGE_CHARS = 4096
 
       Update = Data.define(:update_id, :chat_id, :from_id, :message_id, :text,
-                           :callback_data, :entities, :reply_to_text) do
+                           :callback_data, :callback_query_id, :entities, :reply_to_text) do
         def initialize(update_id:, chat_id:, from_id: nil, message_id: nil,
-                       text: nil, callback_data: nil, entities: nil, reply_to_text: nil)
+                       text: nil, callback_data: nil, callback_query_id: nil,
+                       entities: nil, reply_to_text: nil)
           super
         end
 
@@ -66,6 +67,18 @@ module Hive
         client.api.edit_message_reply_markup(params)
       end
 
+      # Dismisses the spinner on a tapped inline button. Required by the
+      # Telegram Bot API on every callback_query update — without it the
+      # button shows a perpetual loading state for the operator. Pass an
+      # optional `text` (≤200 chars) to show as a toast; leave nil for the
+      # silent ACK that just clears the spinner.
+      def answer_callback_query(callback_query_id:, text: nil, show_alert: false)
+        params = { callback_query_id: callback_query_id }
+        params[:text] = text.to_s[0, 200] if text
+        params[:show_alert] = true if show_alert
+        client.api.answer_callback_query(params)
+      end
+
       private
 
       def build_update(raw)
@@ -92,6 +105,7 @@ module Hive
           message_id: value(source_message, :message_id),
           text: callback ? nil : value(message, :text),
           callback_data: value(callback, :data),
+          callback_query_id: value(callback, :id),
           entities: Array(value(message, :entities)),
           reply_to_text: value(reply_to, :text)
         )

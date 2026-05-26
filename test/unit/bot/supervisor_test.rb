@@ -184,7 +184,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis is available for "Red task…". Open this task on a laptop for full details.', text
+    assert_equal 'Diagnosis is available for "Red task…". Tap Show details to dump it here.', text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"
@@ -618,16 +618,29 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_start_answer_records_conversation_with_default_question_when_slug_missing
+  def test_start_answer_replies_when_no_unanswered_question_exists
     result = FakeRouter::Result.new(action: :start_answer, slug: "missing", project: "hive", mode: :path_b)
 
     @supervisor.send(:start_answer, result, Update.new(chat_id: 42, update_id: 13))
 
-    assert_equal(
-      { chat_id: 42, slug: "missing", question_n: 1, mode: :path_b, project: "hive" },
-      @conversation_store.starts.last
-    )
-    assert_includes @telegram.messages.last.fetch(:text), "Send Q1's answer"
+    assert_empty @conversation_store.starts,
+                 "no conversation must be opened when there is nothing to answer"
+    assert_includes @telegram.messages.last.fetch(:text), "No unanswered questions"
+  end
+
+  def test_start_answer_includes_question_text_in_first_prompt
+    with_brainstorm_file(content: "## Round 1\n### Q1. Should we use SQLite or Postgres?\n### A1.\n") do |path, project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(action: :start_answer, slug: "bot-task-260522-aa",
+                                      project: File.basename(project), mode: :path_b)
+
+      @supervisor.send(:start_answer, result, Update.new(chat_id: 42, update_id: 13))
+
+      text = @telegram.messages.last.fetch(:text)
+      assert_includes text, "Q1: Should we use SQLite or Postgres?",
+                      "first prompt must include the actual question text so operators don't have to fetch it elsewhere"
+      assert_includes text, "Reply with your answer"
+    end
   end
 
   def test_execute_answer_write_handles_missing_slug_and_no_unanswered_question
@@ -796,7 +809,11 @@ class HiveBotSupervisorTest < Minitest::Test
       @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 20))
 
       assert_includes File.read(path), "Build the real thing"
-      assert_equal "Got Q1.", @telegram.messages.last.fetch(:text)
+      text = @telegram.messages.last.fetch(:text)
+      assert_match(/Got Q1\./, text)
+      assert_match(/Q2: Cadence\?/, text,
+                   "auto-advance must include the next unanswered question text in the same reply")
+      assert_match(/Reply with your answer/, text)
       assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
     end
   end
@@ -828,109 +845,10 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_execute_start_codex_creates_draft_and_keyboard
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      conversation = FakeCodexConversation.new(
-        outcome: Outcome.new(kind: :draft_ready, draft: "Use focused tests."),
-        calls: []
-      )
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      @supervisor.define_singleton_method(:codex_conversation) { conversation }
-      result = FakeRouter::Result.new(
-        action: :start_codex,
-        slug: "bot-task-260522-aa",
-        project: "hive",
-        answer_text: "draft it"
-      )
 
-      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 30))
 
-      assert_equal 1, conversation.calls.length
-      assert_kind_of Hive::Task, conversation.calls.first.fetch(:task)
-      assert_equal "draft it", conversation.calls.first.fetch(:user_input)
-      assert_equal "Codex draft for Q1:\nUse focused tests.", @telegram.messages.last.fetch(:text)
-      assert_equal "codex_write:hive:bot-task-260522-aa:1",
-                   @telegram.messages.last.fetch(:reply_markup).first.first.fetch(:callback_data)
-      state = @conversation_store.get(chat_id: 42, slug: "bot-task-260522-aa")
-      assert_equal true, state.awaiting_confirm
-      assert_equal "Use focused tests.", state.draft
-    end
-  end
 
-  def test_execute_start_codex_sends_reply_and_failure_without_draft
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      conversation = FakeCodexConversation.new(outcome: Outcome.new(kind: :reply, text: "Need more context."), calls: [])
-      @supervisor.define_singleton_method(:codex_conversation) { conversation }
-      result = FakeRouter::Result.new(action: :start_codex, slug: "bot-task-260522-aa", project: "hive")
 
-      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 31))
-      assert_equal "Need more context.", @telegram.messages.last.fetch(:text)
-      state = @conversation_store.get(chat_id: 42, slug: "bot-task-260522-aa")
-      assert_equal false, state.awaiting_confirm
-
-      conversation.outcome = Outcome.new(kind: :failed, reason: "budget_exhausted")
-      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 32))
-      assert_equal "Codex failed: budget_exhausted. Send your answer directly.", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_execute_start_codex_handles_missing_path_and_no_questions
-    missing = FakeRouter::Result.new(action: :start_codex, slug: "missing", project: "hive")
-    @supervisor.send(:execute_start_codex, missing, Update.new(chat_id: 42, update_id: 33))
-    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
-
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
-  Done.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      done = FakeRouter::Result.new(action: :start_codex, slug: "done", project: "hive")
-
-      @supervisor.send(:execute_start_codex, done, Update.new(chat_id: 42, update_id: 34))
-      assert_equal "No unanswered questions remain for done.", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_execute_confirm_codex_draft_writes_answer_and_advances
-    content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
-    with_brainstorm_file(content: content) do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "task", draft: "Real answer", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 1)
-
-      @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 40))
-
-      assert_includes File.read(path), "Real answer"
-      assert_equal "Draft saved as Q1.", @telegram.messages.last.fetch(:text)
-      state = @conversation_store.get(chat_id: 42, slug: "task")
-      assert_nil state.draft
-      assert_equal false, state.awaiting_confirm
-      assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
-    end
-  end
-
-  def test_execute_confirm_codex_draft_reports_empty_missing_and_already_answered
-    empty = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "empty", project: "hive", question_n: 1)
-    @supervisor.send(:execute_confirm_codex_draft, empty, Update.new(chat_id: 42, update_id: 41))
-    assert_equal "No draft to confirm for empty.", @telegram.messages.last.fetch(:text)
-
-    @conversation_store.start(chat_id: 42, slug: "missing", question_n: 1, mode: :path_a, project: "hive")
-    @conversation_store.update(chat_id: 42, slug: "missing", draft: "Draft", awaiting_confirm: true)
-    missing = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "missing", project: "hive", question_n: 1)
-    @supervisor.send(:execute_confirm_codex_draft, missing, Update.new(chat_id: 42, update_id: 42))
-    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
-
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
-  Done.\n") do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "answered", question_n: 1, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "answered", draft: "Draft", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      answered = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "answered", project: "hive", question_n: 1)
-
-      @supervisor.send(:execute_confirm_codex_draft, answered, Update.new(chat_id: 42, update_id: 43))
-      assert_equal "Question 1 was already answered by another device", @telegram.messages.last.fetch(:text)
-    end
-  end
 
   def test_poll_loop_logs_process_update_failure_and_advances_update_id
     update = Update.new(chat_id: 42, update_id: 77)
@@ -1007,16 +925,12 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.define_singleton_method(:dispatch_command_sequence) { |result, update| calls << [ :sequence, result, update ] }
     @supervisor.define_singleton_method(:start_answer) { |result, update| calls << [ :start_answer, result, update ] }
     @supervisor.define_singleton_method(:execute_answer_write) { |result, update| calls << [ :answer_write, result, update ] }
-    @supervisor.define_singleton_method(:execute_start_codex) { |result, update| calls << [ :start_codex, result, update ] }
-    @supervisor.define_singleton_method(:execute_confirm_codex_draft) { |result, update| calls << [ :confirm_codex, result, update ] }
     update = Update.new(chat_id: 42, update_id: 88)
 
     [
       [ :dispatch_commands, :sequence ],
       [ :start_answer, :start_answer ],
-      [ :write_answer_then_reply, :answer_write ],
-      [ :start_codex, :start_codex ],
-      [ :confirm_codex_draft, :confirm_codex ]
+      [ :write_answer_then_reply, :answer_write ]
     ].each do |action, expected_call|
       result = FakeRouter::Result.new(action: action)
       @supervisor.send(:execute_result, result, update)
@@ -1058,41 +972,8 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_execute_confirm_codex_draft_reports_lock_busy
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "task", draft: "Draft", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 1)
 
-      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!, ->(**_kwargs) { :lock_busy }) do
-        @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 44))
-      end
 
-      assert_equal "Try again - another run holds the lock", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_execute_confirm_codex_draft_reports_missing_question
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 99, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "task", draft: "Draft", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 99)
-
-      @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 45))
-
-      assert_equal "Question 99 was not found.", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_codex_conversation_memoizes_default_conversation
-    first = @supervisor.send(:codex_conversation)
-    second = @supervisor.send(:codex_conversation)
-
-    assert_kind_of Hive::Bot::CodexConversation, first
-    assert_same first, second
-  end
 
   def test_next_unanswered_question_n_parses_brainstorm_file
     with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|

@@ -96,18 +96,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_match(/Brainstorm questions/, notification.text)
     assert_match(/provide input/, notification.text)
     assert_match(%r{/answer slug-260514-abcd}, notification.text)
-    assert_equal "Answer in chat", notification.keyboard.first.first[:text]
-    assert_equal "Ask Codex", notification.keyboard[1].first[:text]
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Answer in chat" ], labels,
+                 "brainstorm-waiting keyboard is deterministic Q-by-Q only — no Codex draft, no laptop button"
   end
 
-  def test_generic_needs_input_marker_builds_details_and_laptop_keyboard
+  def test_generic_needs_input_marker_builds_show_details_only_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" })
     )
 
     assert_match(/Needs input: agent_waiting reason=operator/, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Show details", "Open laptop" ], labels
+    assert_equal [ "Show details" ], labels,
+                 "the only useful action for an unknown waiting marker is Show details"
   end
 
   def test_compacted_callback_round_trips
@@ -123,7 +125,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  Hive::Bot::NotificationBuilders.resolve_callback(token)
   end
 
-  def test_review_waiting_fix_guardrail_builds_operator_keyboard_without_invalid_clear
+  def test_review_waiting_fix_guardrail_builds_show_details_only_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "review_waiting", attrs: { "reason" => "fix_guardrail" })
     )
@@ -132,7 +134,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "Clear and retry",
                     "REVIEW_WAITING is not a clearable marker — must not surface a clear_retry button"
-    assert_includes labels, "Open laptop"
+    refute_includes labels, "Open laptop",
+                    "Open laptop was retired — operators are on Telegram and the button has no payload"
     assert_includes labels, "Show details"
   end
 
@@ -216,9 +219,10 @@ class HiveBotNotificationBuildersTest < Minitest::Test
           diagnostic: manual_diagnostic)
     )
 
-    assert_includes notification.text, "Open this task on a laptop before retrying."
+    assert_includes notification.text, "Tap Show details to see what needs manual intervention."
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Open laptop", "Show details" ], labels
+    assert_equal [ "Show details" ], labels,
+                 "manual recovery surfaces Show details only — no Autofix, no laptop button"
     refute_includes labels, "🔧 Autofix"
   end
 
@@ -231,7 +235,9 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "🔧 Autofix"
-    assert_includes labels, "Open laptop"
+    refute_includes labels, "Open laptop",
+                    "Open laptop button retired everywhere"
+    assert_includes labels, "Show details"
   end
 
   def test_cause_sentence_for_execute_stale

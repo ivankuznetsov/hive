@@ -579,6 +579,51 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_review_fix_agent_auto_commit_fail_sign_policy_pauses_signed_repo
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => {
+            "fix" => {
+              "auto_commit" => { "sign_policy" => "fail" }
+            }
+          }
+        })
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        run!("git", "-C", worktree, "config", "commit.gpgsign", "true")
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        dirty_file = File.join(worktree, "signed-policy.txt")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          printf 'needs signing\n' > "#{dirty_file}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "fix_auto_commit_failed", marker.attrs["reason"]
+        assert_match(/auto-commit signing policy failed/, marker.attrs["message"])
+        assert_match(/commit\.gpgsign is enabled/, marker.attrs["message"])
+
+        assert_equal "needs signing\n", File.read(dirty_file)
+        git_status = `git -C #{worktree} status --porcelain`
+        assert_includes git_status, "?? signed-policy.txt\n"
+      end
+    end
+  end
+
   def test_review_fix_agent_refuses_to_auto_commit_pre_existing_dirty_worktree
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

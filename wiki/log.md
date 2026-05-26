@@ -2128,3 +2128,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[commands/bot]]
+
+## [2026-05-26T10:36:10Z] review — inherit signing for fallback fix commits
+
+**Action:** Changed Phase 4 fallback auto-commits to inherit the worktree's normal `commit.gpgsign` policy by default instead of forcing `commit.gpgsign=false`. Added `review.fix.auto_commit.sign_policy` with `inherit`, `bypass`, and `fail` modes so signed repositories can sign Hive fallback commits and operators can still opt into unsigned automation or a clear pause.
+
+**Refreshed pages:**
+- [[stages/review]]

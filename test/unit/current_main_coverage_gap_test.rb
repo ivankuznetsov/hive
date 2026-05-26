@@ -638,6 +638,124 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
+  def test_review_auto_commit_inherits_gpgsign_by_default
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => {} }
+
+      ok_status = ReviewCommandStatus.new(true)
+      captured_argv = []
+      responses = [
+        [ "", "", ok_status ],
+        [ "test/fix_test.rb\0", "", ok_status ],
+        [ "", "", ok_status ],
+        [ "head-after-auto-commit\n", "", ok_status ]
+      ]
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+        captured_argv << argv
+        responses.shift
+      }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+        assert result[:success]
+        assert_equal "head-after-auto-commit", result[:head]
+      end
+
+      commit_argv = captured_argv[2]
+      assert_equal [ "git", "-C", worktree, "commit" ], commit_argv.first(4)
+      refute_includes commit_argv, "commit.gpgsign=false"
+    end
+  end
+
+  def test_review_auto_commit_bypass_sign_policy_forces_unsigned_commit
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => { "fix" => { "auto_commit" => { "sign_policy" => "bypass" } } } }
+
+      ok_status = ReviewCommandStatus.new(true)
+      captured_argv = []
+      responses = [
+        [ "", "", ok_status ],
+        [ "test/fix_test.rb\0", "", ok_status ],
+        [ "", "", ok_status ],
+        [ "head-after-auto-commit\n", "", ok_status ]
+      ]
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+        captured_argv << argv
+        responses.shift
+      }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+        assert result[:success]
+      end
+
+      commit_argv = captured_argv[2]
+      assert_equal [ "git", "-C", worktree, "-c", "commit.gpgsign=false", "commit" ], commit_argv.first(6)
+    end
+  end
+
+  def test_review_auto_commit_fail_sign_policy_rejects_signed_repos_before_staging
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => { "fix" => { "auto_commit" => { "sign_policy" => "fail" } } } }
+
+      ok_status = ReviewCommandStatus.new(true)
+      captured_argv = []
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+        captured_argv << argv
+        [ "true\n", "", ok_status ]
+      }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+        refute result[:success]
+        assert_includes result[:message], "auto-commit signing policy failed"
+        assert_includes result[:message], "commit.gpgsign is enabled"
+      end
+
+      assert_equal 1, captured_argv.length
+      assert_equal [ "git", "-C", worktree, "config", "--bool", "--get", "commit.gpgsign" ], captured_argv[0]
+    end
+  end
+
+  def test_review_auto_commit_fail_sign_policy_reports_config_errors
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => { "fix" => { "auto_commit" => { "sign_policy" => "fail" } } } }
+
+      fail_status = ReviewCommandStatus.new(false)
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "fatal: bad config", fail_status ] }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+        refute result[:success]
+        assert_equal "git config --bool --get commit.gpgsign failed: fatal: bad config", result[:message]
+      end
+    end
+  end
+
   def test_auto_commit_scope_violations_cover_invalid_denied_and_outside_paths
     cfg = {
       "review" => {
@@ -684,27 +802,27 @@ class CurrentMainCoverageGapTest < Minitest::Test
   end
 
   def test_staged_auto_commit_paths_include_both_sides_of_denied_rename
-  with_tmp_dir do |root|
-    worktree = File.join(root, "worktree")
-    FileUtils.mkdir_p(File.join(worktree, "config"))
-    run!("git", "-C", worktree, "init", "-b", "main", "--quiet")
-    run!("git", "-C", worktree, "config", "user.email", "test@example.com")
-    run!("git", "-C", worktree, "config", "user.name", "Test")
-    File.write(File.join(worktree, "config", "secret.yml"), "secret: nope\n")
-    run!("git", "-C", worktree, "add", ".")
-    run!("git", "-C", worktree, "commit", "-m", "init", "--quiet")
-    FileUtils.mkdir_p(File.join(worktree, "docs"))
-    FileUtils.mv(File.join(worktree, "config", "secret.yml"), File.join(worktree, "docs", "secret.yml"))
-    run!("git", "-C", worktree, "add", "-A")
+    with_tmp_dir do |root|
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(File.join(worktree, "config"))
+      run!("git", "-C", worktree, "init", "-b", "main", "--quiet")
+      run!("git", "-C", worktree, "config", "user.email", "test@example.com")
+      run!("git", "-C", worktree, "config", "user.name", "Test")
+      File.write(File.join(worktree, "config", "secret.yml"), "secret: nope\n")
+      run!("git", "-C", worktree, "add", ".")
+      run!("git", "-C", worktree, "commit", "-m", "init", "--quiet")
+      FileUtils.mkdir_p(File.join(worktree, "docs"))
+      FileUtils.mv(File.join(worktree, "config", "secret.yml"), File.join(worktree, "docs", "secret.yml"))
+      run!("git", "-C", worktree, "add", "-A")
 
-    result = Hive::Stages::Review.send(:staged_auto_commit_paths, worktree)
+      result = Hive::Stages::Review.send(:staged_auto_commit_paths, worktree)
 
-    assert result[:success]
-    assert_includes result[:paths], "config/secret.yml"
-    assert_includes result[:paths], "docs/secret.yml"
-    violations = Hive::Stages::Review.send(:auto_commit_scope_violations, { "review" => {} }, result[:paths])
-    assert_includes violations.map(&:path), "config/secret.yml"
-  end
+      assert result[:success]
+      assert_includes result[:paths], "config/secret.yml"
+      assert_includes result[:paths], "docs/secret.yml"
+      violations = Hive::Stages::Review.send(:auto_commit_scope_violations, { "review" => {} }, result[:paths])
+      assert_includes violations.map(&:path), "config/secret.yml"
+    end
   end
 
   def test_fix_auto_commit_message_sanitizes_trailer_newlines

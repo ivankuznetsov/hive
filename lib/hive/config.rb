@@ -126,6 +126,7 @@ module Hive
           "agent" => "claude",
           "prompt_template" => "fix_prompt.md.erb",
           "auto_commit" => {
+            "sign_policy" => "inherit",
             "scope_check" => {
               "enabled" => true,
               "allowed_paths" => [
@@ -323,6 +324,7 @@ module Hive
     # a non-legacy override.
     LEGACY_WIKI_PLAN_ALIAS = "/plan"
     CLAUDE_MODES = %w[headless tmux].freeze
+    AUTO_COMMIT_SIGN_POLICIES = %w[inherit bypass fail].freeze
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
 
@@ -769,6 +771,7 @@ module Hive
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_fix_auto_commit_scope!(cfg, source_path)
+      validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
@@ -1060,6 +1063,34 @@ module Hive
           "review.reviewers[#{idx}].agent",
           source_path
         )
+      end
+    end
+
+    def validate_review_fix_auto_commit!(cfg, source_path)
+      review = cfg["review"]
+      fix = review["fix"] if review.is_a?(Hash)
+      return if fix.nil?
+
+      unless fix.is_a?(Hash)
+        raise ConfigError,
+              "review.fix in #{describe_source(source_path)} must be a Hash; got #{fix.class}"
+      end
+
+      auto_commit = fix["auto_commit"]
+      return if auto_commit.nil?
+
+      unless auto_commit.is_a?(Hash)
+        raise ConfigError,
+              "review.fix.auto_commit in #{describe_source(source_path)} must be a Hash; got #{auto_commit.class}"
+      end
+
+      policy = auto_commit["sign_policy"]
+      return if policy.nil?
+
+      unless policy.is_a?(String) && AUTO_COMMIT_SIGN_POLICIES.include?(policy)
+        raise ConfigError,
+              "review.fix.auto_commit.sign_policy in #{describe_source(source_path)} " \
+              "must be one of #{AUTO_COMMIT_SIGN_POLICIES.inspect}; got #{policy.inspect} (#{policy.class})"
       end
     end
 

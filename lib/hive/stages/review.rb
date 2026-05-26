@@ -1644,6 +1644,10 @@ module Hive
       end
 
       def auto_commit_fix_worktree(task, cfg, ctx, accepted_findings)
+        sign_policy = auto_commit_sign_policy_for(cfg)
+        sign_policy_failure = auto_commit_sign_policy_failure(ctx.worktree_path, sign_policy)
+        return sign_policy_failure if sign_policy_failure
+
         # `git add -A` (not `-u`) is intentional: fix-agent fixes
         # routinely include new files (added test cases, extracted
         # helpers, new modules) that must land in the same commit as the
@@ -1675,9 +1679,7 @@ module Hive
 
         message = fix_auto_commit_message(task, cfg, ctx, accepted_findings)
         commit_out, commit_err, commit_status = Open3.capture3(
-          "git", "-C", ctx.worktree_path,
-          "-c", "commit.gpgsign=false",
-          "commit", "-m", message
+          *auto_commit_git_commit_argv(ctx.worktree_path, sign_policy, message)
         )
         unless commit_status.success?
           commit_message = git_command_message("git commit", commit_out, commit_err)
@@ -1685,6 +1687,49 @@ module Hive
         end
 
         { success: true, head: git_head(ctx.worktree_path) }
+      end
+
+      def auto_commit_sign_policy_for(cfg)
+        review = cfg["review"]
+        fix = review["fix"] if review.is_a?(Hash)
+        auto_commit = fix["auto_commit"] if fix.is_a?(Hash)
+        policy = auto_commit["sign_policy"] if auto_commit.is_a?(Hash)
+
+        policy || "inherit"
+      end
+
+      def auto_commit_sign_policy_failure(worktree_path, sign_policy)
+        return nil unless sign_policy == "fail"
+
+        signing = commit_gpgsign_enabled?(worktree_path)
+        return signing unless signing[:success]
+        return nil unless signing[:enabled]
+
+        {
+          success: false,
+          message: "auto-commit signing policy failed: commit.gpgsign is enabled; " \
+                   "set review.fix.auto_commit.sign_policy to inherit to let git sign fallback commits, " \
+                   "or bypass to force unsigned automation commits"
+        }
+      end
+
+      def commit_gpgsign_enabled?(worktree_path)
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "config", "--bool", "--get", "commit.gpgsign"
+        )
+        return { success: true, enabled: out.strip == "true" } if status.success?
+        return { success: true, enabled: false } if out.to_s.empty? && err.to_s.empty?
+
+        {
+          success: false,
+          message: git_command_message("git config --bool --get commit.gpgsign", out, err)
+        }
+      end
+
+      def auto_commit_git_commit_argv(worktree_path, sign_policy, message)
+        argv = [ "git", "-C", worktree_path ]
+        argv += [ "-c", "commit.gpgsign=false" ] if sign_policy == "bypass"
+        argv + [ "commit", "-m", message ]
       end
 
       def fix_auto_commit_message(task, cfg, ctx, accepted_findings)

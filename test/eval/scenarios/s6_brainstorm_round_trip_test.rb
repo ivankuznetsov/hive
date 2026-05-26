@@ -102,11 +102,13 @@ class HiveEvalS6BrainstormRoundTripTest < Minitest::Test
     # --- Tick 6: answer Q4 (last) ---
     when_user_sends(ANSWERS[3])
     final_reply = harness.last_sent.text
-    assert_equal "Got Q4.", final_reply,
-                 "final answer must produce a clean Got QN. ack — no 'send /done' prompt, " \
-                 "no invented Q5"
-    refute_match(/Q5:/, final_reply)
-    refute_match(%r{send /done}, final_reply)
+    assert_match(/\AGot Q4\./, final_reply,
+                 "final answer must still ack the question that was just written")
+    assert_match(/All questions answered/, final_reply,
+                 "final ack must tell the operator the Q&A session is complete — without it " \
+                 "the operator sees only 'Got QN.' and can't tell whether more questions will arrive")
+    refute_match(/Q5:/, final_reply, "no invented Q5")
+    refute_match(%r{send /done}, final_reply, "no stale 'send /done' prompt")
 
     # Auto-dispatch happened on the last answer; the conversation store is
     # cleared so /done is a no-op safety net but not required.

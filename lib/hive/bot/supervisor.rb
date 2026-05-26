@@ -462,7 +462,11 @@ module Hive
           # brainstorm without the operator having to send /done. /done
           # still works as a manual backstop (it reads conversation_store,
           # which we clear here to avoid double-dispatch).
-          safe_send_message(chat_id: update.chat_id, text: "Got Q#{answered_n}.")
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Got Q#{answered_n}.\n\n✅ All questions answered — brainstorm Q&A complete. " \
+                  "Running the next round automatically; I'll ping you when there's something to do."
+          )
           auto_run_after_answers(result, update)
         end
       end

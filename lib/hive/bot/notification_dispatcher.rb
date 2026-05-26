@@ -240,10 +240,15 @@ module Hive
       def reminder_window_label
         seconds = recovery_reminder_window.to_i
         hours = seconds / 3600
-        return "#{hours} h" if hours >= 1 && seconds % 3600 == 0
-
-        minutes = (seconds / 60.0).round
-        "#{minutes} min"
+        remainder_seconds = seconds - (hours * 3600)
+        minutes = (remainder_seconds / 60.0).round
+        if hours >= 1 && minutes.positive?
+          "#{hours} h #{minutes} min"
+        elsif hours >= 1
+          "#{hours} h"
+        else
+          "#{(seconds / 60.0).round} min"
+        end
       end
 
       # ready_to_X notifications are pull-only via /status; never proactive.

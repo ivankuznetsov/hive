@@ -20,6 +20,11 @@ module Hive
       ACRONYMS = %w[PR CI CD DB UI UX API URL HTTP].freeze
       ACRONYM_REGEXPS = ACRONYMS.map { |a| [ /\b#{Regexp.escape(a)}\b/i, a ] }.freeze
       UNKNOWN_STAGE_LABELS_LOCK = Monitor.new
+      # Eager-initialize the unknown-label cache so the lookup at log time
+      # is never racing with a lazy-init. Behaviour is unchanged from a
+      # successfully-initialised state; only the construction race goes
+      # away.
+      @unknown_stage_labels = {}
 
       module_function
 
@@ -54,6 +59,16 @@ module Hive
         end
       end
 
+      # Clear the once-per-process log cache so SIGHUP / config reload can
+      # surface new stage_dir values that previously logged. Without this
+      # the cache lives for the bot's lifetime and silently masks stage
+      # additions across `hive bot reload`. Callers MUST hold no other
+      # locks; the synchronize here is the same Monitor protecting the
+      # cache mutation in log_unknown_stage_once.
+      def reset_unknown_stage_log_cache!
+        UNKNOWN_STAGE_LABELS_LOCK.synchronize { unknown_stage_labels.clear }
+      end
+
       def preserve_acronyms(sentence)
         ACRONYM_REGEXPS.each do |pattern, replacement|
           sentence = sentence.gsub(pattern, replacement)
@@ -62,7 +77,7 @@ module Hive
       end
 
       def unknown_stage_labels
-        @unknown_stage_labels ||= {}
+        @unknown_stage_labels
       end
     end
   end

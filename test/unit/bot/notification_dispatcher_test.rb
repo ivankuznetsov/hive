@@ -293,8 +293,24 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     d.process_rows([ recovery_row ])
 
     assert_equal 2, telegram.messages.size, "reminder should fire after 90 min"
-    assert_match(/Still stuck \(90 min\)/, telegram.messages.last[:text],
-                 "reminder label must use minutes form for non-whole-hour windows")
+    assert_match(/Still stuck \(1 h 30 min\)/, telegram.messages.last[:text],
+                 "reminder label uses combined hours+minutes form for windows that are >= 1h but not whole-hour")
+  end
+
+  def test_reminder_label_renders_pure_hours_when_whole_hour_window
+    d = Hive::Bot::NotificationDispatcher.new(
+      telegram: telegram,
+      logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345 ], "recovery_reminder_window_sec" => 14_400 },
+      now: -> { @clock ||= Time.utc(2026, 5, 25, 10, 0, 0) }
+    )
+    @clock = Time.utc(2026, 5, 25, 10, 0, 0)
+    d.process_rows([ recovery_row ])
+    @clock += 14_400
+    d.process_rows([ recovery_row ])
+
+    assert_match(/Still stuck \(4 h\)/, telegram.messages.last[:text],
+                 "whole-hour window uses bare 'N h' form, no '0 min' suffix")
   end
 
   def test_restart_simulation_does_not_refire_same_active_row

@@ -26,11 +26,25 @@ class HiveBotTitleFormatterTest < Minitest::Test
 
   def test_stage_label_falls_back_and_logs_unknown_stage_once
     logger = StubLogger.new
+    Hive::Bot::TitleFormatter.reset_unknown_stage_log_cache!
 
     assert_equal "Future", Hive::Bot::TitleFormatter.stage_label("99-future", logger: logger)
     assert_equal "Future", Hive::Bot::TitleFormatter.stage_label("99-future", logger: logger)
 
     assert_equal [ [ :unknown_stage_label, { stage: "99-future" } ] ], logger.events
+  end
+
+  def test_reset_unknown_stage_log_cache_re_arms_logging
+    logger = StubLogger.new
+    Hive::Bot::TitleFormatter.reset_unknown_stage_log_cache!
+    Hive::Bot::TitleFormatter.stage_label("88-mystery", logger: logger)
+    Hive::Bot::TitleFormatter.stage_label("88-mystery", logger: logger)
+    assert_equal 1, logger.events.size, "second call must be deduped by the cache"
+
+    Hive::Bot::TitleFormatter.reset_unknown_stage_log_cache!
+    Hive::Bot::TitleFormatter.stage_label("88-mystery", logger: logger)
+    assert_equal 2, logger.events.size,
+                 "after reset, the same unknown stage_dir must log again so SIGHUP / reload surfaces it"
   end
 
   class StubLogger

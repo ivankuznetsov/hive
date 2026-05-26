@@ -689,6 +689,10 @@ module Hive
           bot_config: @config
         )
         @conversation_store.update_ttl(@config.fetch("conversation_ttl_sec")) if @conversation_store.respond_to?(:update_ttl)
+        # Drop the once-per-process unknown-stage-log cache so SIGHUP can
+        # re-surface stage_dir values that the previous instance had
+        # already logged about.
+        Hive::Bot::TitleFormatter.reset_unknown_stage_log_cache!
         @logger.event(:config_reloaded)
         emit_deprecated_config_events!
         @reload = false

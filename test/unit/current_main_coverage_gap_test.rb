@@ -382,6 +382,45 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
+  def test_review_run_marks_status_check_failure_after_fix
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task = Hive::Task.new(folder)
+      File.write(task.state_file, "---\nslug: #{File.basename(folder)}\n---\n")
+      File.write(task.worktree_yml_path, { "path" => worktree }.to_yaml)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      Hive::Markers.set(task.state_file, :review_waiting, pass: 1, escalations: 1)
+
+      status_checks = [ :clean, [ :status_failed, "fatal: bad git" ] ]
+      with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
+        with_replaced_singleton_method(Hive::Worktree, :read_pointer, ->(_folder) { { "path" => worktree } }) do
+          with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
+              with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
+                with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(_path) { status_checks.shift }) do
+                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:) { { status: :ok } }) do
+                    result = Hive::Stages::Review.run!(task, { "review" => {} })
+
+                    assert_equal :review_error, result[:status]
+                    assert_equal "fix_status_check_failed_pass_01", result[:commit]
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :review_error, marker.name
+      assert_equal "fix", marker.attrs["phase"]
+      assert_equal "fix_status_check_failed", marker.attrs["reason"]
+      assert_equal "fatal: bad git", marker.attrs["message"]
+    end
+  end
+
   def test_review_auto_commit_reports_git_add_and_commit_failures
     with_tmp_dir do |root|
       folder = task_folder(root)

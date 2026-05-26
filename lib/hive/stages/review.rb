@@ -74,6 +74,7 @@ module Hive
       # Phase 4 with the operator's existing `[x]` marks instead of
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
+      AcceptedFindings = Data.define(:text, :count)
 
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
@@ -378,7 +379,8 @@ module Hive
           # Branch on triage output. Read per-reviewer files for [x]
           # count (source of truth). escalations file existence + line
           # count tells us whether anything was escalated.
-          accepted = collect_accepted_findings(ctx_pass)
+          accepted_findings = collect_accepted_findings_with_count(ctx_pass)
+          accepted = accepted_findings.text
           escalations_count = count_escalations(ctx_pass)
 
           if accepted.strip.empty? && escalations_count.zero?
@@ -493,7 +495,7 @@ module Hive
           post_fix_status = worktree_status(worktree_path)
           case post_fix_status
           when :dirty
-            auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted)
+            auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted_findings)
             unless auto_commit[:success]
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :fix, reason: "fix_auto_commit_failed",
@@ -1180,17 +1182,27 @@ module Hive
       # All [x] lines across every per-reviewer file for the current
       # pass, concatenated. Used by Phase 4's fix-agent prompt.
       def collect_accepted_findings(ctx)
+        collect_accepted_findings_with_count(ctx).text
+      end
+
+      def collect_accepted_findings_with_count(ctx)
         out = +""
+        count = 0
         Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")].sort.each do |path|
           name = File.basename(path)
           next unless reviewer_file?(name)
 
           File.readlines(path).each do |line|
-            out << "[#{name}] #{line}" if auto_fix_finding_line?(line)
+            next unless auto_fix_finding_line?(line)
+
+            out << "[#{name}] #{line}"
+            count += 1
           end
         end
-        out << collect_answered_escalation_findings(ctx)
-        out
+
+        answered = collect_answered_escalation_findings_with_count(ctx)
+        out << answered.text
+        AcceptedFindings.new(text: out, count: count + answered.count)
       end
 
       def auto_fix_finding_line?(line)
@@ -1201,12 +1213,16 @@ module Hive
       end
 
       def collect_answered_escalation_findings(ctx)
+        collect_answered_escalation_findings_with_count(ctx).text
+      end
+
+      def collect_answered_escalation_findings_with_count(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
-        return collect_legacy_checked_escalations(path) if questions.empty?
+        return collect_legacy_checked_escalations_with_count(path) if questions.empty?
 
         answered = questions.select { |q| q[:answer].strip != "" }
-        return "" if answered.empty?
+        return AcceptedFindings.new(text: "", count: 0) if answered.empty?
 
         name = File.basename(path)
         out = +"\n# User answers from #{name}\n"
@@ -1218,21 +1234,25 @@ module Hive
           out << prefixed_block(name, q[:answer].strip)
           out << "\n"
         end
-        out
+        AcceptedFindings.new(text: out, count: answered.size)
       end
 
       def collect_legacy_checked_escalations(path)
-        return "" unless File.exist?(path)
+        collect_legacy_checked_escalations_with_count(path).text
+      end
+
+      def collect_legacy_checked_escalations_with_count(path)
+        return AcceptedFindings.new(text: "", count: 0) unless File.exist?(path)
 
         name = File.basename(path)
         lines = File.readlines(path).select { |line| auto_fix_finding_line?(line) }
-        return "" if lines.empty?
+        return AcceptedFindings.new(text: "", count: 0) if lines.empty?
 
         out = +"\n# Accepted legacy escalations from #{name}\n"
         lines.each { |line| out << "[#{name}] #{line}" }
-        out
+        AcceptedFindings.new(text: out, count: lines.size)
       rescue SystemCallError, IOError
-        ""
+        AcceptedFindings.new(text: "", count: 0)
       end
 
       def prefixed_block(name, text)
@@ -1512,7 +1532,7 @@ module Hive
         status.success? ? out.strip : nil
       end
 
-      def auto_commit_fix_worktree(task, cfg, ctx, accepted)
+      def auto_commit_fix_worktree(task, cfg, ctx, accepted_findings)
         # `git add -A` (not `-u`) is intentional: fix-agent fixes
         # routinely include new files (added test cases, extracted
         # helpers, new modules) that must land in the same commit as the
@@ -1529,7 +1549,7 @@ module Hive
           }
         end
 
-        message = fix_auto_commit_message(task, cfg, ctx, accepted)
+        message = fix_auto_commit_message(task, cfg, ctx, accepted_findings)
         commit_out, commit_err, commit_status = Open3.capture3(
           "git", "-C", ctx.worktree_path,
           "-c", "commit.gpgsign=false",
@@ -1549,27 +1569,18 @@ module Hive
         { success: true, head: git_head(ctx.worktree_path) }
       end
 
-      def fix_auto_commit_message(task, cfg, ctx, accepted)
+      def fix_auto_commit_message(task, cfg, ctx, accepted_findings)
         pass = format("%02d", ctx.pass)
         <<~MSG.chomp
           fix(review): apply pass #{pass} findings
 
           Hive-Task-Slug: #{task.slug}
           Hive-Fix-Pass: #{pass}
-          Hive-Fix-Findings: #{accepted_finding_count(accepted)}
+          Hive-Fix-Findings: #{[ accepted_findings.count.to_i, 1 ].max}
           Hive-Triage-Bias: #{sanitize_trailer_value(triage_bias_for(cfg))}
           Hive-Reviewer-Sources: #{sanitize_trailer_value(reviewer_sources_for(ctx))}
           Hive-Fix-Phase: fix
         MSG
-      end
-
-      def accepted_finding_count(accepted)
-        count = accepted.to_s.lines.count do |line|
-          line.match?(/^\[[^\]]+\]\s+-\s+\[x\]\s+/) ||
-            line.match?(/^\[[^\]]+\]\s+USER-ANSWERED ESCALATION\b/)
-        end
-
-        count.positive? ? count : 1
       end
 
       def git_command_message(command, out, err)

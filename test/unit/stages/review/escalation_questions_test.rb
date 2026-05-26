@@ -66,12 +66,18 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       MD
 
       ctx = make_ctx(dir, task_folder)
-      accepted = Hive::Stages::Review.collect_accepted_findings(ctx)
+      payload = Hive::Stages::Review.collect_accepted_findings_with_count(ctx)
+      accepted = payload.text
+      answered = Hive::Stages::Review.collect_answered_escalation_findings(ctx)
 
+      assert_equal 3, payload.count
+      assert_equal accepted, Hive::Stages::Review.collect_accepted_findings(ctx)
       assert_includes accepted, "AUTO-FIX: rename the confusing helper"
       assert_includes accepted, "legacy accepted finding without a label"
       assert_includes accepted, "USER-ANSWERED ESCALATION Q1"
       assert_includes accepted, "Use execute.agent"
+      assert_includes answered, "USER-ANSWERED ESCALATION Q1"
+      assert_includes answered, "Use execute.agent"
       refute_includes accepted, "RESOLVED/NO-FIX"
       refute_includes accepted, "Should we add a new abstraction?"
     end
@@ -96,8 +102,10 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       MD
 
       ctx = make_ctx(dir, task_folder)
-      accepted = Hive::Stages::Review.collect_accepted_findings(ctx)
+      payload = Hive::Stages::Review.collect_accepted_findings_with_count(ctx)
+      accepted = payload.text
 
+      assert_equal 1, payload.count
       assert_includes accepted, "Accepted legacy escalations from escalations-01.md"
       assert_includes accepted, "apply the requested legacy escalation fix"
       assert_equal 1, Hive::Stages::Review.count_escalations(ctx)

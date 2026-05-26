@@ -61,6 +61,14 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T10:30:00Z] review - accepted finding count source of truth
+
+**Action:** Fixed issue #156 by carrying accepted-findings text and count together through the 6-review Phase 4 path. The auto-commit fallback now writes `Hive-Fix-Findings` from the collector's count instead of reparsing rendered accepted-findings lines, removing the duplicate line-format regexes.
+
+**Refreshed pages:**
+- [[stages/review]] - documented that auto-commit fallback uses the collector count for `Hive-Fix-Findings`.
+- [[modules/metrics]] - clarified the trailer's count source.
+
 ## [2026-05-26T10:15:00Z] daemon - self-reexec on source-file drift
 
 **Action:** Surfaced the daemon's new auto-re-exec behavior triggered by `lib/hive.rb` SHA-256 drift. Adds `ADR-031` recording the diagnosis (8,946 `schema_version` mismatches between PR #78 and the next restart) and the chosen mitigation. Updates `wiki/modules/daemon.md` with operator-facing details: fingerprint scope, rate-limit (60s), kill switch (`HIVE_DAEMON_NO_AUTO_REEXEC=1`), and what kinds of edits do and don't trigger re-exec.

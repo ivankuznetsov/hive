@@ -45,7 +45,7 @@ class BabysitterProjectTickTest < Minitest::Test
           called << pr["number"]
           :success
         }) do
-          summary = Hive::Babysitter::ProjectTick.run(project, {}, dry_run: true, logger: logger, inflight: Set.new)
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
           assert_equal({ total: 2, fixed: 2, untouched: 0, needs_human: 0 }, summary)
         end
       end
@@ -68,7 +68,7 @@ class BabysitterProjectTickTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { raise Hive::GhError, "api down" }) do
         with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(*_args, **_kwargs) { spawned = true }) do
-          summary = Hive::Babysitter::ProjectTick.run(project, {}, dry_run: false, logger: logger, inflight: Set.new)
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: false, logger: logger, inflight: Set.new)
           assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, summary)
         end
       end
@@ -97,7 +97,7 @@ class BabysitterProjectTickTest < Minitest::Test
         with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, *_args, **_kwargs|
           called << pr["number"]
         }) do
-          Hive::Babysitter::ProjectTick.run(project, {}, dry_run: false, logger: logger, inflight: inflight)
+          Hive::Babysitter::ProjectTick.run(project, dry_run: false, logger: logger, inflight: inflight)
         end
       end
 

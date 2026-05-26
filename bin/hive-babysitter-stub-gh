@@ -9,11 +9,29 @@ rescue SystemCallError
 end
 
 argv = ARGV.dup
+
+# Strip leading gh global options so the real subcommand is classified
+# correctly. Without this, `gh -R owner/repo pr comment` has argv[0,2] ==
+# ["-R", "owner/repo"] and slips past the subcommand check, execing the
+# real gh and mutating GitHub despite dry_run. `-R`/`--repo` each consume
+# the following token; `--repo=owner/repo` is a single token.
+rest = argv.dup
+loop do
+  case rest.first
+  when "-R", "--repo"
+    rest.shift(2)
+  when /\A-/
+    rest.shift
+  else
+    break
+  end
+end
+
 mutating =
-  argv[0, 2] == %w[pr comment] ||
-  argv[0, 2] == %w[pr edit] ||
-  argv[0, 2] == %w[pr review] ||
-  argv[0, 2] == %w[run rerun]
+  rest[0, 2] == %w[pr comment] ||
+  rest[0, 2] == %w[pr edit] ||
+  rest[0, 2] == %w[pr review] ||
+  rest[0, 2] == %w[run rerun]
 
 if mutating
   log_skip(argv)

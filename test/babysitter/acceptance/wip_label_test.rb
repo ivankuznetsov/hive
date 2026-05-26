@@ -17,7 +17,6 @@ class BabysitterAcceptanceWipLabelTest < Minitest::Test
         with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(*_args, **_kwargs) { spawned = true }) do
           summary = Hive::Babysitter::ProjectTick.run(
             project,
-            {},
             dry_run: true,
             logger: acceptance_logger,
             inflight: Set.new

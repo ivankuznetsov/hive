@@ -1474,10 +1474,17 @@ module Hive
       end
 
       interval = babysitter["interval"]
-      unless interval.nil? || interval.is_a?(Integer) || (interval.is_a?(String) && interval.match?(Hive::Babysitter::Interval::REGEX))
-        raise ConfigError,
-              "babysitter.interval in #{describe_source(source_path)} must be an integer seconds value " \
-              "or a duration string like 10m / 30s / 1h; got #{interval.inspect} (#{interval.class})"
+      unless interval.nil?
+        # Validate via Interval.parse so a zero/negative interval (0, "0m")
+        # is rejected at load time. The bare format check accepted them and
+        # they only blew up later inside the dispatcher tick, turning a
+        # malformed config into a daemon-loop crash instead of a load-time
+        # ConfigError.
+        begin
+          Hive::Babysitter::Interval.parse(interval)
+        rescue ConfigError => e
+          raise ConfigError, "#{e.message} (in #{describe_source(source_path)})"
+        end
       end
 
       {

@@ -48,6 +48,8 @@ module Hive
         6. Triage bias (courageous / safetyist)                  — default courageous
         7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
         8. Daemon enrollment                                     — default enabled
+        9. Hive babysitter enrollment                            — default enabled
+       10. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -57,7 +59,10 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux, claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
+        hive: using defaults — planning=claude, claude_mode=tmux,
+        claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
+        triage=courageous, limits=defaults, daemon=enabled,
+        babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus

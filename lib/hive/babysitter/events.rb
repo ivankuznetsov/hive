@@ -25,6 +25,7 @@ module Hive
         gh-error
         already-green
         label_ignored
+        fork_pr
         dry_run
       ].freeze
 

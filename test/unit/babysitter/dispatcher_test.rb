@@ -33,13 +33,13 @@ class BabysitterDispatcherTest < Minitest::Test
           logger = Hive::Babysitter::Logger.new(path: File.join(home, "logs", "babysitter.log"))
           dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger, dry_run: true)
 
-          with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, cfg, **kwargs|
-            calls << [ project["name"], cfg.dig("babysitter", "interval"), kwargs[:dry_run] ]
+          with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, **kwargs|
+            calls << [ project["name"], kwargs[:dry_run] ]
           }) do
             assert_equal 1, dispatcher.tick
           end
 
-          assert_equal [ [ "enabled", "30s", true ] ], calls
+          assert_equal [ [ "enabled", true ] ], calls
           docs = File.readlines(File.join(home, "logs", "babysitter.log")).map { |line| JSON.parse(line) }
           assert docs.any? { |doc| doc["event"] == "project_skipped" && doc["project"] == "disabled" }
           assert docs.any? { |doc| doc["event"] == "tick_end" && doc["next_interval_sec"] == 30 }
@@ -67,7 +67,7 @@ class BabysitterDispatcherTest < Minitest::Test
           logger = Hive::Babysitter::Logger.new(path: File.join(home, "logs", "babysitter.log"))
           dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger, project_name: "two")
 
-          with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, _cfg, **_kwargs|
+          with_replaced_singleton_method(Hive::Babysitter::ProjectTick, :run, lambda { |project, **_kwargs|
             calls << project["name"]
           }) do
             dispatcher.tick

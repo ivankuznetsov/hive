@@ -33,6 +33,17 @@ module Hive
         key = inflight_key
         @inflight.add(key)
         started = Time.now
+
+        if fork_pr?
+          skip_fork_pr(started)
+          return :fork_pr
+        end
+
+        # The early-green precheck runs `pr_status_rollup` against the project
+        # root, not the worktree, because no PR worktree exists yet (materialize
+        # happens below). gh resolves the same repo from either cwd's git
+        # config, and the result is threaded into ContextBuilder so the second
+        # call reuses this rollup rather than re-fetching.
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
         if already_green?(status)
           Hive::Babysitter::Events.emit(
@@ -73,6 +84,32 @@ module Hive
         [ @project.fetch("name"), number.to_i ]
       end
 
+      # Fork (cross-repository) PRs cannot be repaired here: the agent's
+      # rebase/force-push targets `origin`, which cannot update a
+      # fork-owned head branch. Skip them gracefully — label
+      # needs-human and emit a skipped event — rather than pushing to the
+      # wrong target.
+      def fork_pr?
+        @pr["isCrossRepository"] == true
+      end
+
+      def skip_fork_pr(started)
+        Hive::Babysitter::GhOps.add_label(
+          @project.fetch("path"),
+          number,
+          Hive::Babysitter::GhOps::GIVE_UP_LABEL,
+          cfg: @cfg,
+          dry_run: @dry_run
+        )
+        Hive::Babysitter::Events.emit(
+          project: @project,
+          pr: number,
+          action: "skipped",
+          outcome: "fork_pr",
+          duration_ms: duration_ms(started)
+        )
+      end
+
       def already_green?(status)
         status["mergeable"].to_s == "MERGEABLE" && checks_green_or_queued?(status["statusCheckRollup"])
       end
@@ -84,6 +121,14 @@ module Hive
           conclusion = entry["conclusion"].to_s.upcase
           state = entry["state"].to_s.upcase
           status = entry["status"].to_s.upcase
+
+          # Fail a hard-failed check out first, even when a retry is queued
+          # (conclusion=FAILURE + status=QUEUED). Without this, the
+          # "still progressing" branch below would read a re-queued failing
+          # check as green and the repair agent would never run.
+          next false if %w[FAILURE TIMED_OUT CANCELLED ACTION_REQUIRED STARTUP_FAILURE].include?(conclusion)
+          next false if state == "FAILURE"
+
           %w[SUCCESS NEUTRAL SKIPPED].include?(conclusion) ||
             %w[SUCCESS].include?(state) ||
             %w[QUEUED PENDING IN_PROGRESS].include?(status) ||
@@ -138,7 +183,11 @@ module Hive
           user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
           budget_minutes: budget_minutes,
           budget_usd: budget_usd,
-          diff_stat: context.diff_stat
+          diff_stat: context.diff_stat,
+          base_sha: context.base_sha,
+          merge_base: context.merge_base,
+          ahead: context.ahead,
+          behind: context.behind
         )
         Hive::Stages::Base.render("babysitter_pr_fix_prompt.md.erb", bindings)
       end
@@ -210,11 +259,18 @@ module Hive
           outcome: @dry_run ? "dry_run" : (comment_result.success? ? "success" : "failure")
         )
 
-        give_up_outcome = case outcome
-        when :timeout then "timeout"
-        when :budget_exhausted then "budget_exhausted"
-        else "failure"
-        end
+        give_up_outcome =
+          if @dry_run
+            # No real-world give-up happens in dry-run; tag it dry_run so an
+            # audit grep of events.jsonl for genuine give-ups stays accurate.
+            "dry_run"
+          else
+            case outcome
+            when :timeout then "timeout"
+            when :budget_exhausted then "budget_exhausted"
+            else "failure"
+            end
+          end
         Hive::Babysitter::Events.emit(
           project: @project,
           pr: number,

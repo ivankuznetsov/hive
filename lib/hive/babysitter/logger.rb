@@ -26,6 +26,7 @@ module Hive
         @max_bytes = max_bytes
         @max_files = max_files
         @stderr_fallback = false
+        @rotation_warned = false
         FileUtils.mkdir_p(File.dirname(path))
         @file = File.open(path, "a")
       rescue Errno::EACCES, Errno::EROFS, Errno::ENOSPC, Errno::ENOENT => e
@@ -72,18 +73,30 @@ module Hive
         return if file_size_for_rotation < @max_bytes
 
         @file.close
-        (@max_files - 2).downto(0) do |i|
-          src = i.zero? ? @path : "#{@path}.#{i - 1}"
-          dst = "#{@path}.#{i}"
-          if i.zero?
-            File.rename(@path, "#{@path}.0") if File.exist?(@path)
-          elsif File.exist?(src)
-            File.rename(src, dst)
+        if @max_files <= 1
+          # Keep only the current log: there is no `.N` ring to maintain,
+          # so unlink the over-cap file and reopen fresh. The rename ring
+          # below is a no-op when max_files == 1 ((@max_files - 2).downto(0)
+          # iterates over nothing), which left the file at its current size
+          # and re-fired rotation on every subsequent event.
+          File.delete(@path) if File.exist?(@path)
+        else
+          (@max_files - 2).downto(0) do |i|
+            src = i.zero? ? @path : "#{@path}.#{i - 1}"
+            dst = "#{@path}.#{i}"
+            if i.zero?
+              File.rename(@path, "#{@path}.0") if File.exist?(@path)
+            elsif File.exist?(src)
+              File.rename(src, dst)
+            end
           end
         end
         @file = File.open(@path, "a")
       rescue SystemCallError => e
-        warn "hive babysitter: log rotation failed (#{e.class}: #{e.message}); continuing without rotation"
+        unless @rotation_warned
+          warn "hive babysitter: log rotation failed (#{e.class}: #{e.message}); continuing without rotation"
+          @rotation_warned = true
+        end
         begin
           @file = File.open(@path, "a")
         rescue SystemCallError => reopen_err

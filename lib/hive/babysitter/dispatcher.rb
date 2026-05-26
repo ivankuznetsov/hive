@@ -31,7 +31,6 @@ module Hive
         enabled.each do |entry|
           Hive::Babysitter::ProjectTick.run(
             entry[:project],
-            entry[:cfg],
             dry_run: @dry_run || entry[:cfg].dig("babysitter", "dry_run") == true,
             logger: @logger,
             inflight: @inflight
@@ -60,6 +59,7 @@ module Hive
         ticks = 0
         until @shutdown
           if @reload
+            reload_logger!
             @logger.event(:config_reloaded)
             @reload = false
           end
@@ -124,10 +124,35 @@ module Hive
         trap("HUP")  { request_reload! }
       end
 
+      # SIGHUP reload must re-read the daemon-shared log rotation knobs
+      # (plan IU-3). The Logger is constructed once at start and would
+      # otherwise never see a refreshed log_max_bytes / log_max_files, so
+      # rebuild it from a fresh load_global_daemon. The per-tick
+      # babysitter.enabled cache already reloads via enabled_projects.
+      def reload_logger!
+        daemon_cfg = Hive::Config.load_global_daemon
+        fresh = Hive::Babysitter::Logger.new(
+          path: @logger.path,
+          max_bytes: daemon_cfg.fetch("log_max_bytes"),
+          max_files: daemon_cfg.fetch("log_max_files")
+        )
+        @logger.close
+        @logger = fresh
+      rescue StandardError => e
+        @logger.event(:fatal, message: "logger reload failed: #{e.class}: #{e.message}")
+      end
+
+      # Use the monotonic clock so a backwards NTP step between the deadline
+      # check and the sleep cannot yield a negative argument (Kernel#sleep
+      # raises ArgumentError on negatives, which would unwind run_forever in
+      # a long-lived daemon that survives clock corrections).
       def interruptible_sleep(seconds)
-        deadline = Time.now + seconds
-        until @shutdown || Time.now >= deadline
-          sleep [ deadline - Time.now, 0.5 ].min
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+        until @shutdown
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          break if remaining <= 0
+
+          sleep [ remaining, 0.5 ].min
         end
       end
     end

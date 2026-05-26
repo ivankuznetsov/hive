@@ -32,10 +32,10 @@ module Hive
       end
 
       def post_pr_comment(worktree, pr_number, body, cfg:, dry_run:)
-        stamped = stamp_comment(body)
         return result(true, "[dry-run] gh pr comment skipped", "") if dry_run
         return result(true, "recent give-up comment already exists", "") if recent_give_up_comment?(worktree, pr_number, cfg: cfg)
 
+        stamped = stamp_comment(body)
         out, err, status = Hive::Gh.capture3(
           "gh", "pr", "comment", pr_number.to_s, "--body", stamped,
           chdir: worktree,

@@ -10,8 +10,11 @@ module Hive
     module ProjectTick
       module_function
 
-      def run(project_entry, _cfg, dry_run:, logger:, inflight:)
+      def run(project_entry, dry_run:, logger:, inflight:)
         started = Time.now
+        # Re-read config here (rather than accepting the dispatcher's cached
+        # cfg) so a per-tick edit to babysitter.* takes effect on the next
+        # tick without restarting the daemon.
         cfg = Hive::Config.load(project_entry.fetch("path"))
         unless cfg.dig("babysitter", "enabled") == true
           logger.event(:project_skipped, project: project_entry["name"], reason: "babysitter_disabled")
@@ -58,7 +61,7 @@ module Hive
           case outcome
           when :success then summary[:fixed] += 1
           when :already_green, :noop, :dry_run then summary[:untouched] += 1
-          when :give_up, :failure, :timeout, :budget_exhausted then summary[:needs_human] += 1
+          when :give_up, :failure, :timeout, :budget_exhausted, :fork_pr then summary[:needs_human] += 1
           end
         end
 

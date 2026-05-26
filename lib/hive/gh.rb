@@ -108,6 +108,7 @@ module Hive
         baseRefName
         labels
         isDraft
+        isCrossRepository
         author
         headRepository
         url
@@ -157,22 +158,60 @@ module Hive
       jobs = failing_jobs_from_rollup(rollup)
       return [] if jobs.empty?
 
-      per_job_cap = [ byte_cap / jobs.size, 1 ].max
-      jobs.map do |job|
+      # Two-pass budget allocation: jobs whose full log fits under an even
+      # share keep their full text, and the bytes they leave unused are
+      # redistributed across the over-cap jobs. A flat `byte_cap / jobs.size`
+      # cap makes short jobs underspend while truncating the large failing
+      # job more aggressively than the budget allows (plan IU-8).
+      raw = jobs.map do |job|
         job_id = job["databaseId"] || job["id"]
-        log =
-          if job_id
-            fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
-            if fetch_result[:success]
-              fetch_result[:log]
-            else
-              "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
-            end
-          else
-            "[hive-babysitter: no job id available, cannot fetch log]"
-          end
-        { "name" => job["name"].to_s, "job_id" => job_id, "log" => tail_clip(log, per_job_cap) }
+        { "name" => job["name"].to_s, "job_id" => job_id, "log" => fetch_job_log(worktree_path, job_id, cfg: cfg) }
       end
+
+      caps = allocate_log_budget(raw.map { |entry| entry["log"].bytesize }, byte_cap)
+      raw.each_with_index.map do |entry, index|
+        entry.merge("log" => tail_clip(entry["log"], caps[index]))
+      end
+    end
+
+    def fetch_job_log(worktree_path, job_id, cfg: nil)
+      return "[hive-babysitter: no job id available, cannot fetch log]" unless job_id
+
+      fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
+      return fetch_result[:log] if fetch_result[:success]
+
+      "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
+    end
+
+    # Max-min fair allocation: repeatedly hand out an even share of the
+    # remaining budget; any log that fits under the current share is settled
+    # at full size, freeing its leftover bytes for the rest. Whatever stays
+    # over-cap then splits the leftover budget evenly.
+    def allocate_log_budget(sizes, byte_cap)
+      caps = Array.new(sizes.size)
+      remaining = byte_cap
+      unsettled = (0...sizes.size).to_a
+
+      loop do
+        break if unsettled.empty?
+
+        share = [ remaining / unsettled.size, 1 ].max
+        fits = unsettled.select { |i| sizes[i] <= share }
+        break if fits.empty?
+
+        fits.each do |i|
+          caps[i] = sizes[i]
+          remaining -= sizes[i]
+        end
+        unsettled -= fits
+      end
+
+      unless unsettled.empty?
+        share = [ remaining / unsettled.size, 1 ].max
+        unsettled.each { |i| caps[i] = share }
+      end
+
+      caps
     end
 
     def pr_diff_stat(worktree_path, base_ref, head_ref, cfg: nil)
@@ -186,6 +225,29 @@ module Hive
       end
 
       out
+    end
+
+    # Base HEAD + merge divergence summary for the babysitter prompt
+    # (plan IU-5): the agent needs the current base tip and how far the PR
+    # branch has diverged to decide between rebase, merge, or leave-alone.
+    # Best-effort — supplementary context, so a git hiccup yields blank
+    # values rather than failing the whole context build.
+    def pr_base_divergence(worktree_path, base_ref, cfg: nil)
+      capture3("git", "fetch", "origin", base_ref.to_s, chdir: worktree_path, cfg: cfg)
+      counts = git_rev(worktree_path, "rev-list", "--left-right", "--count", "origin/#{base_ref}...HEAD", cfg: cfg)
+      behind, ahead = counts.split(/\s+/)
+      {
+        "base_ref" => base_ref.to_s,
+        "base_sha" => git_rev(worktree_path, "rev-parse", "origin/#{base_ref}", cfg: cfg),
+        "merge_base" => git_rev(worktree_path, "merge-base", "origin/#{base_ref}", "HEAD", cfg: cfg),
+        "ahead" => ahead.to_i,
+        "behind" => behind.to_i
+      }
+    end
+
+    def git_rev(worktree_path, *args, cfg: nil)
+      out, _err, status = capture3("git", *args, chdir: worktree_path, cfg: cfg)
+      status.success? ? out.to_s.strip : ""
     end
 
     def failing_jobs_from_rollup(rollup)

@@ -9,13 +9,30 @@ rescue SystemCallError
 end
 
 argv = ARGV.dup
-subcommand = argv.first.to_s
+
+# Strip leading git global options so the real subcommand is classified
+# correctly. Without this, `git -C <wt> push` has ARGV[0] == "-C" and
+# slips past a bare ARGV[0] check, execing the real git and mutating
+# origin despite dry_run. `-C` and `-c` each consume the following token.
+rest = argv.dup
+loop do
+  case rest.first
+  when "-C", "-c"
+    rest.shift(2)
+  when /\A-/
+    rest.shift
+  else
+    break
+  end
+end
+
+subcommand = rest.first.to_s
 mutating =
   subcommand == "push" ||
-  (subcommand == "commit" && argv.include?("--amend")) ||
-  (subcommand == "reset" && argv.include?("--hard")) ||
-  (subcommand == "rebase" && (argv & %w[--continue --abort --skip]).any?) ||
-  (subcommand == "merge" && (argv & %w[--continue --abort]).any?)
+  (subcommand == "commit" && rest.include?("--amend")) ||
+  (subcommand == "reset" && rest.include?("--hard")) ||
+  (subcommand == "rebase" && (rest & %w[--continue --abort --skip]).any?) ||
+  (subcommand == "merge" && (rest & %w[--continue --abort]).any?)
 
 if mutating
   log_skip(argv)

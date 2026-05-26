@@ -34,15 +34,16 @@ module Hive
 
       private
 
-      def head_ref
-        @pr.fetch("headRefName")
-      end
-
+      # Run `worktree remove` + `worktree prune` unconditionally rather than
+      # gating on File.directory?(path): a prior run that crashed after
+      # `worktree add` leaves orphan .git/worktrees/<pr>/ metadata even when
+      # the on-disk path is gone, and the next `worktree add` would then fail
+      # with "already exists in the worktree list" and wedge every subsequent
+      # tick for this PR until an operator runs `git worktree prune` by hand.
       def remove_existing!
-        if File.directory?(path)
-          Open3.capture3("git", "-C", @project.fetch("path"), "worktree", "remove", "--force", path)
-          FileUtils.rm_rf(path)
-        end
+        Open3.capture3("git", "-C", @project.fetch("path"), "worktree", "remove", "--force", path)
+        Open3.capture3("git", "-C", @project.fetch("path"), "worktree", "prune")
+        FileUtils.rm_rf(path)
       end
 
       def run_git!(*args)

@@ -4,6 +4,9 @@ Worktree: <%= worktree_path %>
 PR: <%= pr_url %>
 Head branch: <%= head_ref %>
 Base branch: <%= base_ref %>
+Base HEAD (origin/<%= base_ref %>): <%= base_sha %>
+Merge base with base: <%= merge_base %>
+Branch divergence: <%= ahead %> ahead, <%= behind %> behind origin/<%= base_ref %>
 Mergeable state: <%= mergeable_state %>
 Budget: <%= budget_minutes %> minutes, $<%= budget_usd %>
 

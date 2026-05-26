@@ -74,9 +74,9 @@ module Hive
         if @json
           emit_json_summary(entry: entry, ops: ops, answers: answers)
         else
-          print_summary(entry: entry, ops: ops)
+          print_summary(entry: entry, ops: ops, answers: answers)
         end
-        register_daemon_service!(autostart: true)
+        register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight!
       rescue Hive::Error
         raise
@@ -406,18 +406,21 @@ module Hive
           "budgets" => answers.fetch("budgets"),
           "timeouts" => answers.fetch("timeouts"),
           "daemon_enabled" => answers.fetch("daemon_enabled", true),
-          "daemon_autostart_requested" => true
+          "babysitter_enabled" => answers.fetch("babysitter_enabled", true),
+          "daemon_autostart_requested" => answers.fetch("daemon_autostart", false)
         }
       end
 
-      def print_summary(entry:, ops:)
+      def print_summary(entry:, ops:, answers:)
         c = Palette.for($stdout)
         name = entry["name"]
         rows = [
           [ "project",        @project_path ],
           [ "default branch", ops.default_branch ],
           [ "hive state",     ops.hive_state_path ],
-          [ "worktree root",  worktree_root ]
+          [ "worktree root",  worktree_root ],
+          [ "daemon",         answers.fetch("daemon_enabled", true) ? "enabled" : "disabled" ],
+          [ "babysitter",     answers.fetch("babysitter_enabled", true) ? "enabled" : "disabled" ]
         ]
         label_width = rows.map { |k, _| k.length }.max
 
@@ -549,12 +552,14 @@ module Hive
           @budgets = required_limit_answers(answers.fetch("budgets"), "budgets")
           @timeouts = required_limit_answers(answers.fetch("timeouts"), "timeouts")
           @daemon_enabled = answers.fetch("daemon_enabled")
+          @babysitter_enabled = answers.fetch("babysitter_enabled", true)
+          @daemon_autostart = answers.fetch("daemon_autostart", false)
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :planning_agent, :claude_mode, :claude_permission_mode, :development_agent,
                     :enabled_reviewers, :triage_bias, :budgets, :timeouts,
-                    :daemon_enabled
+                    :daemon_enabled, :babysitter_enabled, :daemon_autostart
 
         def binding_for_erb
           binding

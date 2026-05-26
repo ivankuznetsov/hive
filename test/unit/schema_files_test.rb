@@ -900,8 +900,8 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     expected = %w[
-      answers budgets claude_mode daemon_autostart_requested daemon_enabled default_branch
-      development_agent enabled_reviewers hive_state_path ok path planning_agent
+      answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
+      default_branch development_agent enabled_reviewers hive_state_path ok path planning_agent
       project schema schema_version timeouts triage_bias worktree_root
     ].sort
     assert_equal expected, schema_required,

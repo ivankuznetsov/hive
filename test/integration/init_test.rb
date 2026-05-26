@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "hive/commands/init"
 require "hive/llm_wiki_bootstrap"
+require "hive/reviewers/agent"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
@@ -203,6 +204,7 @@ class InitTest < Minitest::Test
         assert_kind_of Array, reviewers
         names = reviewers.map { |r| r["name"] }.sort
         assert_equal %w[claude-ce-code-review codex-ce-code-review pr-review-toolkit], names
+        assert_equal [ Hive::Reviewers::Agent::DEFAULT_TIMEOUT_SEC ], reviewers.map { |r| r["timeout_sec"] }.uniq
 
         # Each entry references a registered AgentProfile.
         reviewers.each do |entry|

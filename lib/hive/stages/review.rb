@@ -425,6 +425,26 @@ module Hive
           # --- Phase 4: fix ---
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
+          pre_fix_status = worktree_status(worktree_path)
+          case pre_fix_status
+          when :dirty
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :fix,
+                              reason: "fix_dirty_worktree",
+                              message: "worktree was dirty before fix agent; refusing to auto-commit pre-existing changes",
+                              pass: pass)
+            return { commit: "fix_dirty_worktree_pass_#{format('%02d', pass)}",
+                     status: :review_error }
+          when Array
+            Hive::Markers.set(task.state_file, :review_error,
+                              phase: :fix,
+                              reason: "fix_status_check_failed",
+                              message: truncate_marker_message(pre_fix_status[1]),
+                              pass: pass)
+            return { commit: "fix_status_check_failed_pass_#{format('%02d', pass)}",
+                     status: :review_error }
+          end
+
           # Protect orchestrator-owned files PLUS the current pass's
           # escalations doc — only Triage may write that file, so a fix
           # agent rewriting it (e.g. flipping `[ ]` → `[x]` to short-
@@ -470,10 +490,26 @@ module Hive
                      status: :review_error }
           end
 
-          if worktree_dirty?(worktree_path)
+          post_fix_status = worktree_status(worktree_path)
+          case post_fix_status
+          when :dirty
+            auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted)
+            unless auto_commit[:success]
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :fix, reason: "fix_auto_commit_failed",
+                                message: truncate_marker_message(auto_commit[:message]),
+                                pass: pass)
+              return { commit: "fix_auto_commit_failed_pass_#{format('%02d', pass)}",
+                       status: :review_error }
+            end
+
+            after_fix_head = auto_commit[:head]
+          when Array
             Hive::Markers.set(task.state_file, :review_error,
-                              phase: :fix, reason: "fix_dirty_worktree", pass: pass)
-            return { commit: "fix_dirty_worktree_pass_#{format('%02d', pass)}",
+                              phase: :fix, reason: "fix_status_check_failed",
+                              message: truncate_marker_message(post_fix_status[1]),
+                              pass: pass)
+            return { commit: "fix_status_check_failed_pass_#{format('%02d', pass)}",
                      status: :review_error }
           end
 
@@ -1460,9 +1496,88 @@ module Hive
         status.success? ? out.strip : nil
       end
 
+      def auto_commit_fix_worktree(task, cfg, ctx, accepted)
+        # `git add -A` (not `-u`) is intentional: fix-agent fixes
+        # routinely include new files (added test cases, extracted
+        # helpers, new modules) that must land in the same commit as the
+        # tracked-file edits they support. `Hive::ProtectedFiles` already
+        # guards task.md / plan.md / worktree.yml; the worktree's own
+        # .gitignore is the line of defense against debris. The
+        # integration test `test_review_fix_agent_dirty_worktree_is_auto_committed`
+        # locks in the untracked-file behaviour.
+        add_out, add_err, add_status = Open3.capture3("git", "-C", ctx.worktree_path, "add", "-A")
+        unless add_status.success?
+          return {
+            success: false,
+            message: git_command_message("git add -A", add_out, add_err)
+          }
+        end
+
+        message = fix_auto_commit_message(task, cfg, ctx, accepted)
+        commit_out, commit_err, commit_status = Open3.capture3(
+          "git", "-C", ctx.worktree_path,
+          "-c", "commit.gpgsign=false",
+          "commit", "-m", message
+        )
+        unless commit_status.success?
+          commit_message = git_command_message("git commit", commit_out, commit_err)
+          reset_out, reset_err, reset_status = Open3.capture3(
+            "git", "-C", ctx.worktree_path, "reset", "HEAD", "--"
+          )
+          unless reset_status.success?
+            commit_message = "#{commit_message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
+          end
+          return { success: false, message: commit_message }
+        end
+
+        { success: true, head: git_head(ctx.worktree_path) }
+      end
+
+      def fix_auto_commit_message(task, cfg, ctx, accepted)
+        pass = format("%02d", ctx.pass)
+        <<~MSG.chomp
+          fix(review): apply pass #{pass} findings
+
+          Hive-Task-Slug: #{task.slug}
+          Hive-Fix-Pass: #{pass}
+          Hive-Fix-Findings: #{accepted_finding_count(accepted)}
+          Hive-Triage-Bias: #{sanitize_trailer_value(triage_bias_for(cfg))}
+          Hive-Reviewer-Sources: #{sanitize_trailer_value(reviewer_sources_for(ctx))}
+          Hive-Fix-Phase: fix
+        MSG
+      end
+
+      def accepted_finding_count(accepted)
+        count = accepted.to_s.lines.count do |line|
+          line.match?(/^\[[^\]]+\]\s+-\s+\[x\]\s+/) ||
+            line.match?(/^\[[^\]]+\]\s+USER-ANSWERED ESCALATION\b/)
+        end
+
+        count.positive? ? count : 1
+      end
+
+      def git_command_message(command, out, err)
+        details = [ err, out ].map(&:to_s).reject(&:empty?).join("\n").strip
+        details.empty? ? "#{command} failed" : "#{command} failed: #{details}"
+      end
+
+      def sanitize_trailer_value(value)
+        value.to_s.gsub(/[\r\n]+/, " ").strip
+      end
+
       def worktree_dirty?(worktree_path)
-        out, _err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
-        !status.success? || !out.empty?
+        worktree_status(worktree_path) != :clean
+      end
+
+      # Returns :clean, :dirty, or [:status_failed, err_message].
+      # Distinguishes a transient `git status` failure from "has changes"
+      # so the operator gets a true error rather than a misleading
+      # fix_dirty_worktree marker.
+      def worktree_status(worktree_path)
+        out, err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
+        return [ :status_failed, err.to_s ] unless status.success?
+
+        out.empty? ? :clean : :dirty
       end
 
       def agent_failed?(result)

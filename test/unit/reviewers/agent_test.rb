@@ -408,6 +408,26 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+
+  def test_run_uses_default_timeout_when_spec_omits_timeout
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "timeout_sec" => nil)
+      captured_timeouts = []
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured_timeouts << kwargs[:timeout_sec]
+        { status: :ok }
+      end
+      begin
+        reviewer.run!
+        assert_equal [ Hive::Reviewers::Agent::DEFAULT_TIMEOUT_SEC ], captured_timeouts
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+    end
+  end
+
   def test_run_uses_full_configured_timeout_when_no_deadline_supplied
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir) # default spec timeout_sec=5

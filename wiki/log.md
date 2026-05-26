@@ -1989,3 +1989,26 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/markers]]
 - [[commands/status]]
 - [[stages/open-pr]]
+
+## [2026-05-25T18:40:00Z] review — auto-commit successful fix-agent edits
+
+**Action:** Changed Phase 4 review recovery so a successful fix agent that leaves dirty worktree files is auto-committed by Hive with the rollback-rate trailers before fix guardrails run, instead of landing repeated `fix_dirty_worktree` errors.
+
+**Refreshed pages:**
+- [[stages/review]]
+
+## [2026-05-25T18:55:00Z] review/daemon — longer review timeout, lower daemon concurrency
+
+**Action:** Changed the default per-reviewer timeout from 600 seconds to 3600 seconds in both the reviewer adapter fallback and fresh-project reviewer template, and lowered daemon default parallel task caps from 5 to 3 globally/per project.
+
+**Refreshed pages:**
+- [[modules/reviewers]]
+- [[commands/daemon]]
+- [[operating]]
+
+## [2026-05-25T19:30:41Z] review — reject pre-existing dirty fix worktrees
+
+**Action:** Tightened the Phase 4 auto-commit path so Hive refuses worktrees that are already dirty before the fix agent runs. Auto-commit now only captures edits introduced by a successful fix-agent spawn from a clean tree, preventing unrelated manual changes from being bundled into rollback-rate trailered fix commits.
+
+**Refreshed pages:**
+- [[stages/review]]

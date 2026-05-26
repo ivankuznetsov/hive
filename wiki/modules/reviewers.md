@@ -37,7 +37,7 @@ The v1 reviewer adapter. `run!`:
 1. Resolves the agent profile via `AgentProfiles.lookup(spec["agent"])`.
 2. Reads `spec["prompt_template"]`; resolves it via `Stages::Base.resolve_template_path` (path-escape guard).
 3. Renders the prompt with bindings: `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation` (formatted via `profile.format_skill_invocation`, which honors profile-specific syntax — pi receives `/skill:<name>`), `user_supplied_tag`.
-4. Spawns via `Stages::Base.spawn_agent(synthetic_task, prompt:, add_dirs: [task_folder], cwd: worktree_path, profile:, status_mode: :output_file_exists, expected_output: output_path, max_budget_usd: spec["budget_usd"] || 50, timeout_sec: spec["timeout_sec"] || 600, log_label: "review-#{name}-pass#{NN}")`.
+4. Spawns via `Stages::Base.spawn_agent(synthetic_task, prompt:, add_dirs: [task_folder], cwd: worktree_path, profile:, status_mode: :output_file_exists, expected_output: output_path, max_budget_usd: spec["budget_usd"] || 50, timeout_sec: spec["timeout_sec"] || 3600, log_label: "review-#{name}-pass#{NN}")`.
 5. Returns `Result.new(status: :ok | :error, ...)`.
 
 When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and still waits on that reviewer's own `output_path`. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
@@ -62,7 +62,7 @@ Reviewers live in `cfg.review.reviewers`. Each entry:
   prompt_template: reviewer_claude_ce_code_review.md.erb  # required
   output_basename: claude-ce-code-review                  # required (validated unique, non-empty)
   budget_usd: 50                     # optional; default 50
-  timeout_sec: 600                   # optional; default 600
+  timeout_sec: 3600                  # optional; default 3600
 ```
 
 `Hive::Config.validate_reviewers!` enforces uniqueness on `name` and `output_basename`, non-empty `output_basename`, registered `agent`, and presence of `name` / `skill` / `prompt_template`. The Array replaces wholesale on per-project override (no per-element merge — see [[modules/config]] deep-merge semantics).

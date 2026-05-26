@@ -11,6 +11,8 @@ module Hive
     # success is detected via the profile's :output_file_exists mode (file
     # exists + non-empty + exit 0).
     class Agent < Base
+      DEFAULT_TIMEOUT_SEC = 3600
+
       def initialize(spec, ctx, cfg: nil)
         super(spec, ctx)
         @cfg = cfg
@@ -61,7 +63,7 @@ module Hive
         skill = spec.fetch("skill")
         prompt = render_prompt(profile, skill)
         max_attempts = max_attempts_from_spec
-        configured_timeout = spec["timeout_sec"] || 600
+        configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
 
         # Adapter-local retry loop. A reviewer that times out or fails
         # transiently is retried up to max_attempts times before the
@@ -76,8 +78,8 @@ module Hive
         # effective timeout is capped at `deadline - now`; backoff
         # sleeps are also clamped to that remaining budget. Without
         # this, a single reviewer could consume max_attempts ×
-        # timeout_sec + backoff (defaults: 2 × 600 + 1 = 1201s; with
-        # max_attempts: 3 override: 3 × 600 + 3 = 1803s) and exhaust
+        # timeout_sec + backoff (defaults: 2 × 3600 + 1 = 7201s; with
+        # max_attempts: 3 override: 3 × 3600 + 3 = 10803s) and exhaust
         # the outer review wall_clock budget (5400s default) before
         # the between-reviewer check in run_reviewers fires.
         attempts = 0

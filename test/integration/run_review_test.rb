@@ -477,7 +477,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_review_fix_agent_dirty_worktree_yields_review_error
+  def test_review_fix_agent_dirty_worktree_is_auto_committed
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
@@ -499,13 +499,62 @@ class RunReviewTest < Minitest::Test
         SH
         File.chmod(0o755, @driver_bin)
 
-        # `hive run` raises TaskInErrorState (exit 3) for :review_error
-        # markers (Finding #5) so polling agents see the failure.
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal 0, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+
+        git_status = `git -C #{worktree} status --porcelain`
+        assert_equal "", git_status
+        assert_equal "uncommitted\n", File.read(dirty_file)
+
+        commit = `git -C #{worktree} log -1 --pretty=%B`
+        assert_includes commit, "fix(review): apply pass 01 findings"
+        assert_includes commit, "Hive-Task-Slug: feat-x-260424-aaaa"
+        assert_includes commit, "Hive-Fix-Pass: 01"
+        assert_includes commit, "Hive-Fix-Findings: 1"
+        assert_includes commit, "Hive-Triage-Bias: courageous"
+        assert_includes commit, "Hive-Reviewer-Sources: local-reviewer"
+        assert_includes commit, "Hive-Fix-Phase: fix"
+      end
+    end
+  end
+
+  def test_review_fix_agent_refuses_to_auto_commit_pre_existing_dirty_worktree
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        preexisting_file = File.join(worktree, "preexisting-manual.txt")
+        agent_ran_file = File.join(worktree, "fix-agent-ran.txt")
+        File.write(preexisting_file, "manual before fix agent\n")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          printf 'fix agent ran\n' > "#{agent_ran_file}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
         _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
         assert_equal "fix_dirty_worktree", marker.attrs["reason"]
+        assert_match(/pre-existing changes/, marker.attrs["message"])
+
+        refute File.exist?(agent_ran_file), "fix agent must not run when the worktree is already dirty"
+        git_status = `git -C #{worktree} status --porcelain`
+        assert_includes git_status, "?? preexisting-manual.txt\n"
       end
     end
   end

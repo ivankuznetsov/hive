@@ -1364,8 +1364,8 @@ class ConfigTest < Minitest::Test
       assert_equal 30,    cfg.dig("daemon", "poll_interval_sec")
       assert_equal 30,    cfg.dig("daemon", "edit_debounce_sec")
       assert_equal 300,   cfg.dig("daemon", "pr_merge_poll_interval_sec")
-      assert_equal 5,     cfg.dig("daemon", "max_concurrent_runs")
-      assert_equal 5,     cfg.dig("daemon", "max_concurrent_per_project")
+      assert_equal 3,     cfg.dig("daemon", "max_concurrent_runs")
+      assert_equal 3,     cfg.dig("daemon", "max_concurrent_per_project")
       assert_equal 50,    cfg.dig("daemon", "max_runs_per_day_per_project")
       assert_equal 60,    cfg.dig("daemon", "transient_retry_backoff_sec")
       assert_equal 600,   cfg.dig("daemon", "shutdown_grace_sec")
@@ -1513,7 +1513,7 @@ class ConfigTest < Minitest::Test
       File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
       cfg = Hive::Config.load_global_daemon
       assert_equal 30, cfg["poll_interval_sec"]
-      assert_equal 5, cfg["max_concurrent_runs"]
+      assert_equal 3, cfg["max_concurrent_runs"]
       assert_equal 50, cfg["max_runs_per_day_per_project"]
     end
   end
@@ -1533,7 +1533,7 @@ class ConfigTest < Minitest::Test
       assert_equal 524_288, cfg["log_max_bytes"]
       # Unspecified keys still pull from defaults
       assert_equal 50, cfg["max_runs_per_day_per_project"]
-      assert_equal 5,  cfg["max_concurrent_per_project"]
+      assert_equal 3,  cfg["max_concurrent_per_project"]
     end
   end
 

@@ -155,9 +155,10 @@ module Hive
 
       # Markers that are ALWAYS manual-only regardless of attrs. Adding a new
       # marker here automatically narrows both the in-row recovery check
-      # (manual_only_recovery?) and the callback-time defensive check
-      # (CallbackHandlers#manual_only_marker?) — they share this constant
-      # through manual_only? below.
+      # (manual_only_recovery?) and the recover-sequence dispatch guard
+      # (RecoverySequence.build, used by the inline Autofix button and the
+      # /autofix slash command) — they share this constant through
+      # manual_only? below.
       ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
 
       # Single source of truth for "this state has no auto-recovery".

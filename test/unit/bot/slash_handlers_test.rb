@@ -244,6 +244,22 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(/no automatic recovery/, result.text)
   end
 
+  def test_autofix_refuses_attrs_gated_manual_only_fix_tampered_row
+    # review_error + phase=fix + reason=fix_tampered is manual-only, but that
+    # is gated on attrs, not the marker name. The callback_data doesn't carry
+    # attrs; the slash path does, so a directly-typed /autofix on such a row
+    # must refuse (not dispatch a retry against a tampered fix).
+    tampered = Row.new(project: "hive", slug: "tampered-260525-abcd", stage: "6-review",
+                       marker: "review_error",
+                       attrs: { "phase" => "fix", "reason" => "fix_tampered" }, diagnostic: nil)
+    handlers = autofix_handlers([ tampered ])
+
+    result = handlers.autofix(Update.new(text: "/autofix tampered-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic recovery/, result.text)
+  end
+
   def test_autofix_no_retry_verb_for_stage_replies_cleanly
     handlers = autofix_handlers([ DONE_ROW ])
 

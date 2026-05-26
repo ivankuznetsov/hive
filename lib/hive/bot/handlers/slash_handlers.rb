@@ -106,10 +106,12 @@ module Hive
           # tapped, so there's no keyboard to clear on the originating
           # message. The inline-button path (CallbackHandlers#autofix) sets
           # it to true. This is the only legitimate divergence between the
-          # two surfaces.
+          # two surfaces. We forward row.attrs (which the slash path has but
+          # the callback_data does not carry) so attrs-gated manual-only
+          # states refuse here instead of dispatching a retry.
           RecoverySequence.build(
             project: row.project, slug: row.slug, stage: row.stage,
-            marker: row.marker, match_attr: match_attr,
+            marker: row.marker, match_attr: match_attr, attrs: row.attrs,
             result_class: @result_class, clear_keyboard: false
           )
         end

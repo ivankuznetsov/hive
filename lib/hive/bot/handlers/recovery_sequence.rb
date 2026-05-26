@@ -15,8 +15,19 @@ module Hive
         # Builds a full recovery Result for a row whose marker is known.
         # Short-circuits with an operator-facing reply when the marker is
         # manual-only or the stage has no retry verb.
-        def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:)
-          if manual_only?(marker)
+        #
+        # attrs is optional: the inline-button / clear-and-retry callback
+        # paths only carry the marker (the callback_data does not encode the
+        # full attrs hash), so they pass nil and fall back to the marker-only
+        # ALWAYS_MANUAL_MARKERS check. The /autofix slash command has the full
+        # row in hand and passes row.attrs, which additionally catches the
+        # attrs-gated manual-only states (e.g. review_error + phase=fix +
+        # reason=fix_tampered) so a directly-typed /autofix on such a row
+        # refuses with the "open it on a laptop" reply instead of dispatching
+        # a retry against a tampered fix.
+        def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:,
+                       attrs: nil)
+          if manual_only?(marker, attrs)
             return result_class.new(action: :reply,
                                     text: "Hive has no automatic recovery for this state - open it on a laptop.")
           end
@@ -38,8 +49,8 @@ module Hive
           )
         end
 
-        def self.manual_only?(marker)
-          Hive::Bot::NotificationBuilders.manual_only?(marker: marker)
+        def self.manual_only?(marker, attrs = nil)
+          Hive::Bot::NotificationBuilders.manual_only?(marker: marker, attrs: attrs)
         end
 
         def self.retry_verb_for_stage(stage)

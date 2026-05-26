@@ -1,6 +1,5 @@
 require "test_helper"
 require "hive/bot/handlers/recovery_sequence"
-require "hive/bot/handlers/callback_handlers"
 
 class HiveBotRecoverySequenceTest < Minitest::Test
   Result = Struct.new(:action, :text, :command_argv, :commands, :project, :slug,

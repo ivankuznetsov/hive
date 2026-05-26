@@ -32,6 +32,25 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     MARKDOWN
   end
 
+  def test_try_append_returns_nil_pair_when_write_hits_enoent
+    # If the brainstorm file vanishes between lock acquisition and the atomic
+    # write (Errno::ENOENT), try_append must degrade to [nil, nil] so
+    # append!'s retry loop treats it like a transient miss instead of
+    # crashing the poll/answer path.
+    with_brainstorm(sample) do |path|
+      folder = File.dirname(path)
+      original = Hive::Markers.method(:write_atomic)
+      Hive::Markers.define_singleton_method(:write_atomic) { |*, **| raise Errno::ENOENT }
+      begin
+        result = Hive::Bot::BrainstormAnswerWriter.send(:try_append, folder, path, 1, "First answer.")
+      ensure
+        Hive::Markers.define_singleton_method(:write_atomic, original)
+      end
+
+      assert_equal [ nil, nil ], result
+    end
+  end
+
   def test_append_writes_answer_into_empty_slot_and_keeps_marker
     with_brainstorm(sample) do |path|
       result = Hive::Bot::BrainstormAnswerWriter.append!(

@@ -110,6 +110,21 @@ class HiveCommandsInitTest < Minitest::Test
     assert_includes warnings, "hive: daemon service registration failed: bad service"
   end
 
+  def test_register_daemon_service_degrades_unexpected_error_to_warning_with_bug_hint
+    # An unexpected StandardError (not Errno/Hive::Error) must not abort an
+    # already-committed init; it degrades to a warning with a bug-report hint.
+    cmd = command
+    warnings = []
+    cmd.define_singleton_method(:record_daemon_autostart!) { |_autostart| nil }
+    cmd.define_singleton_method(:write_warn) { |line| warnings << line }
+    cmd.define_singleton_method(:current_binary_path) { raise "kaboom" }
+
+    cmd.send(:register_daemon_service!, autostart: true)
+
+    assert(warnings.any? { |line| line.include?("RuntimeError: kaboom") && line.include?("this may be a hive bug") },
+           "unexpected errors must be reported as a possible hive bug, not swallowed or re-raised")
+  end
+
   def test_current_binary_path_resolves_hive_from_path
     Dir.mktmpdir("hive-init-unit") do |dir|
       hive = File.join(dir, "hive")

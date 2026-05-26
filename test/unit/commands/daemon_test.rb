@@ -612,6 +612,22 @@ class HiveCommandsDaemonTest < Minitest::Test
                  "a written-but-not-enabled unit must still report where it lives"
   end
 
+  def test_emit_install_success_summary_reports_autostart_unavailable_non_json
+    command = daemon("install")
+    installer = FakeInstaller.new(
+      target_path: "/home/u/.config/systemd/user/hive-daemon.service",
+      last_backup_path: nil,
+      last_restart_invoked: false,
+      envelope_platform: "linux",
+      messages: []
+    )
+
+    out, _err = capture_io { command.send(:emit_install_success_summary, installer, :autostart_unavailable) }
+    assert_includes out,
+                    "hive daemon: unit written at /home/u/.config/systemd/user/hive-daemon.service; " \
+                    "autostart not enabled on this host"
+  end
+
   def test_emit_install_outcome_json_failed_raises_with_error_envelope
     command = daemon("install", json: true)
     installer = FakeInstaller.new(

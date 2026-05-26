@@ -462,6 +462,12 @@ module Hive
           puts msg
         when :unchanged
           puts "hive daemon: unit already up to date at #{installer.target_path}"
+        when :autostart_unavailable
+          # The unit was written; only autostart enablement was
+          # impossible (e.g. Linux without systemd-user). Not a
+          # failure — confirm the write and let installer.messages
+          # carry the "how to enable autostart" guidance.
+          puts "hive daemon: unit written at #{installer.target_path}; autostart not enabled on this host"
         when :unsupported, :drifted, :failed
           # :unsupported is messaged via installer.messages.
           # :drifted / :failed are handled by emit_install_outcome
@@ -475,6 +481,13 @@ module Hive
           when :written  then "written"
           when :upgraded then "upgraded"
           when :unchanged then "unchanged"
+          # The unit was written but autostart could not be enabled
+          # because the host has no supported service manager (Linux
+          # without systemd-user). This is a known-platform limitation,
+          # not a software failure, so it reports the `unsupported`
+          # success outcome (exit 0) — `target_path` still points at the
+          # written unit so an operator can enable autostart later.
+          when :autostart_unavailable then "unsupported"
           when :unsupported then "unsupported"
           when :drifted then "drifted"
           when :failed  then "failed"
@@ -507,7 +520,11 @@ module Hive
       def install_envelope(installer, outcome:)
         restarted = outcome == "upgraded" ? installer.last_restart_invoked : false
         backup_path = outcome == "upgraded" ? installer.last_backup_path : nil
-        target = outcome == "unsupported" ? nil : installer.target_path
+        # `target_path` is whatever the installer resolved: the written
+        # unit path on linux/macos (including the autostart-unavailable
+        # case, where the unit IS written), and nil only on a truly
+        # unsupported host where no unit exists.
+        target = installer.target_path
         {
           "schema" => "hive-daemon-install",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
@@ -563,10 +580,6 @@ module Hive
 
       def current_binary_path
         Hive::InvokedBinary.path
-      end
-
-      def which(name)
-        Hive::InvokedBinary.which(name)
       end
 
       def safe_install_platform(installer)

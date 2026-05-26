@@ -70,7 +70,7 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
-  def test_linux_without_systemd_writes_unit_and_warns
+  def test_linux_without_systemd_writes_unit_and_reports_autostart_unavailable
     with_tmp_dir do |dir|
       commands = []
       installer = Hive::Commands::Daemon::ServiceInstaller.new(
@@ -82,8 +82,10 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :failed, result
-      assert File.exist?(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+      assert_equal :autostart_unavailable, result,
+                   "no systemd-user is a known-platform limitation, not a failure"
+      assert File.exist?(File.join(dir, ".config/systemd/user/hive-daemon.service")),
+             "unit must still be written so the operator can enable autostart later"
       assert_empty commands
       assert installer.messages.any? { |msg| msg.include?("autostart was not enabled") }
     end

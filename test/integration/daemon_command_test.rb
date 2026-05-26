@@ -1324,7 +1324,7 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
-  def test_install_without_systemd_exits_70_with_failed_envelope
+  def test_install_without_systemd_exits_0_with_unsupported_envelope
     require "json_schemer"
     schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-install"))))
     with_isolated_install_target do |home, env|
@@ -1335,10 +1335,15 @@ class HiveDaemonCommandTest < Minitest::Test
       doc = JSON.parse(out)
       errors = schema.validate(doc).map { |e| e["error"] }
       assert_empty errors,
-                   "install failure envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
-      assert_equal 70, status.exitstatus
-      assert_equal false, doc.fetch("ok")
-      assert_equal "failed", doc.fetch("outcome")
+                   "install envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
+      # A host with no systemd-user can write the unit but cannot enable
+      # autostart. That is a known-platform limitation, not a software
+      # failure: exit 0 with the `unsupported` success outcome.
+      assert_equal 0, status.exitstatus
+      assert_equal true, doc.fetch("ok")
+      assert_equal "unsupported", doc.fetch("outcome")
+      assert_equal unit_path, doc.fetch("target_path"),
+                   "target_path must point at the written unit so the operator can enable autostart later"
       assert_includes doc.fetch("messages").join("\n"), "autostart was not enabled"
       assert_includes File.read(unit_path), "ExecStart=",
                       "unit should still be written so the operator can repair systemd-user and retry"

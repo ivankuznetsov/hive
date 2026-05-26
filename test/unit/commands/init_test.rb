@@ -3,6 +3,8 @@ require "hive/commands/init"
 require "fileutils"
 
 class HiveCommandsInitTest < Minitest::Test
+  include HiveTestHelper
+
   def command(project_path = "/tmp/project")
     Hive::Commands::Init.new(project_path)
   end
@@ -43,7 +45,10 @@ class HiveCommandsInitTest < Minitest::Test
     cmd = command
     warnings = []
     fake_installer = Object.new
-    fake_installer.define_singleton_method(:install!) { |autostart:| autostart ? :failed : :ok }
+    # Tolerate the installer contract (install!(autostart:, force:)), not
+    # just init's current call site, so a future force: arg can't make
+    # this read as an unrelated ArgumentError.
+    fake_installer.define_singleton_method(:install!) { |autostart:, **| autostart ? :failed : :ok }
     fake_installer.define_singleton_method(:messages) { [ "created service" ] }
     original_new = Hive::Commands::Daemon::ServiceInstaller.singleton_class.instance_method(:new)
     Hive::Commands::Daemon::ServiceInstaller.define_singleton_method(:new) do |binary_path:|
@@ -61,6 +66,32 @@ class HiveCommandsInitTest < Minitest::Test
     assert_includes warnings, "hive: daemon service registration reported a failure; run `hive doctor` and check daemon logs"
   ensure
     Hive::Commands::Daemon::ServiceInstaller.singleton_class.define_method(:new, original_new) if original_new
+  end
+
+  def test_register_daemon_service_records_autostart_even_when_unavailable
+    # The PR's load-bearing semantic: autostart intent is persisted even
+    # when the host cannot actually enable the service. record_daemon_autostart!
+    # is NOT stubbed here, so the real global config is written.
+    with_tmp_global_config do |home|
+      cmd = command
+      fake_installer = Object.new
+      fake_installer.define_singleton_method(:install!) { |autostart:, **| :autostart_unavailable }
+      fake_installer.define_singleton_method(:messages) do
+        [ "systemd not detected; daemon unit was written but autostart was not enabled." ]
+      end
+      original_new = Hive::Commands::Daemon::ServiceInstaller.singleton_class.instance_method(:new)
+      Hive::Commands::Daemon::ServiceInstaller.define_singleton_method(:new) { |binary_path:| fake_installer }
+      cmd.define_singleton_method(:current_binary_path) { "/tmp/hive" }
+      cmd.define_singleton_method(:write_warn) { |_line| nil }
+
+      cmd.send(:register_daemon_service!, autostart: true)
+
+      global = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      assert_equal true, global.dig("daemon", "autostart"),
+                   "autostart intent is recorded even when the host cannot enable the service"
+    ensure
+      Hive::Commands::Daemon::ServiceInstaller.singleton_class.define_method(:new, original_new) if original_new
+    end
   end
 
   def test_register_daemon_service_warns_on_permission_failures_and_hive_errors
@@ -91,7 +122,7 @@ class HiveCommandsInitTest < Minitest::Test
       ENV["PATH"] = dir
 
       assert_equal hive, command.send(:current_binary_path)
-      assert_nil command.send(:which, "missing-hive")
+      assert_nil Hive::InvokedBinary.which("missing-hive")
     ensure
       $PROGRAM_NAME = previous_program
       ENV["PATH"] = previous_path

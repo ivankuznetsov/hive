@@ -122,6 +122,19 @@ module Hive
         write_warn("hive: daemon service registration failed (#{e.class}: #{e.message}); fix permissions and re-run `hive init`")
       rescue Hive::Error => e
         write_warn("hive: daemon service registration failed: #{e.message}")
+      rescue StandardError => e
+        # Daemon registration is best-effort and runs AFTER init has
+        # already committed the hive/state branch, registered the
+        # project, and printed the success summary. An unexpected error
+        # here (a SystemCallError we did not list above, or a bug in
+        # ServiceInstaller) must not abort a completed init with a stack
+        # trace — degrade to a warning with a bug-report hint, mirroring
+        # run_init_preflight!.
+        write_warn(
+          "hive: daemon service registration failed: #{e.class}: #{e.message} " \
+          "(this may be a hive bug, please report at " \
+          "https://github.com/ivankuznetsov/hive/issues)"
+        )
       end
 
       def record_daemon_autostart!(autostart)
@@ -134,10 +147,6 @@ module Hive
 
       def current_binary_path
         Hive::InvokedBinary.path
-      end
-
-      def which(name)
-        Hive::InvokedBinary.which(name)
       end
 
       def print_summary(entry:, ops:)

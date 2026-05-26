@@ -47,4 +47,49 @@ class InvokedBinaryTest < Minitest::Test
 
     assert_nil Hive::InvokedBinary.path(program_name: "ruby", env: env)
   end
+
+  def test_non_executable_wrapper_is_rejected_and_falls_back_to_path
+    with_tmp_dir do |dir|
+      # Wrapper exists but is not chmod +x — must not be trusted, since
+      # a non-runnable path baked into a daemon unit would fail at boot.
+      wrapper = File.join(dir, "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(wrapper))
+      File.write(wrapper, "#!/bin/sh\n")
+      FileUtils.chmod(0o644, wrapper)
+      on_path = write_executable(File.join(dir, "path", "hive"))
+      env = { "HIVE_INVOKED_BIN" => wrapper, "PATH" => File.dirname(on_path) }
+
+      assert_equal on_path, Hive::InvokedBinary.path(program_name: "hive", env: env)
+    end
+  end
+
+  def test_wrapper_with_disallowed_basename_is_rejected
+    with_tmp_dir do |dir|
+      # A valid path to an executable, but named neither hive nor hv —
+      # the VALID_NAMES gate must refuse it.
+      ruby_like = write_executable(File.join(dir, "bin", "ruby"))
+      env = { "HIVE_INVOKED_BIN" => ruby_like, "PATH" => "" }
+
+      assert_nil Hive::InvokedBinary.path(program_name: "ruby", env: env)
+    end
+  end
+
+  def test_valid_name_with_empty_path_resolves_to_nil
+    env = { "HIVE_INVOKED_BIN" => "", "PATH" => "" }
+
+    assert_nil Hive::InvokedBinary.path(program_name: "hive", env: env)
+  end
+
+  def test_relative_program_name_expands_against_cwd
+    # A relative $PROGRAM_NAME like ./bin/hive is expanded against the
+    # current working directory. Pinned deliberately so the behavior is
+    # an explicit choice, not an accident.
+    with_tmp_dir do |dir|
+      Dir.chdir(dir) do
+        env = { "HIVE_INVOKED_BIN" => "", "PATH" => "" }
+        assert_equal File.join(dir, "bin", "hive"),
+                     Hive::InvokedBinary.path(program_name: "./bin/hive", env: env)
+      end
+    end
+  end
 end

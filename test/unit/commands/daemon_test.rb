@@ -563,7 +563,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     broken.define_singleton_method(:target_path) { raise "target unavailable" }
     broken.define_singleton_method(:messages) { raise "messages unavailable" }
 
-    assert_nil command.send(:which, "missing-hive")
     assert_equal "unsupported", command.send(:safe_install_platform, broken)
     assert_nil command.send(:safe_install_target_path, broken)
     assert_equal [], command.send(:safe_install_messages, broken)
@@ -584,13 +583,33 @@ class HiveCommandsDaemonTest < Minitest::Test
       upgraded: "upgraded",
       unchanged: "unchanged",
       unsupported: "unsupported",
+      autostart_unavailable: "unsupported",
       ok: "written"
     }
     expectations.each do |result, outcome|
       out, _err = capture_io { command.send(:emit_install_outcome, installer, result) }
       doc = JSON.parse(out)
       assert_equal outcome, doc.fetch("outcome")
+      assert_equal true, doc.fetch("ok"), "#{result} must be a success envelope"
     end
+  end
+
+  def test_emit_install_outcome_autostart_unavailable_preserves_target_path
+    command = daemon("install", json: true)
+    installer = FakeInstaller.new(
+      target_path: "/home/u/.config/systemd/user/hive-daemon.service",
+      last_backup_path: nil,
+      last_restart_invoked: false,
+      envelope_platform: "linux",
+      messages: [ "systemd not detected; daemon unit was written but autostart was not enabled." ]
+    )
+
+    out, _err = capture_io { command.send(:emit_install_outcome, installer, :autostart_unavailable) }
+    doc = JSON.parse(out)
+    assert_equal "unsupported", doc.fetch("outcome")
+    assert_equal true, doc.fetch("ok")
+    assert_equal "/home/u/.config/systemd/user/hive-daemon.service", doc.fetch("target_path"),
+                 "a written-but-not-enabled unit must still report where it lives"
   end
 
   def test_emit_install_outcome_json_failed_raises_with_error_envelope

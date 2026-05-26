@@ -234,35 +234,53 @@ runtime_preflight() {
 # controls whether a project is enrolled for dispatch; the service itself
 # should already be installed, enabled, and started after Hive is installed.
 daemon_autostart_setup() {
-  local out err rc
+  local out err rc outcome
   out="${tmpdir}/daemon-install.out"
   err="${tmpdir}/daemon-install.err"
 
   if "$link_path" daemon install --json >"$out" 2>"$err"; then
-    local outcome
-    outcome="$(jq -r '.outcome // empty' "$out" 2>/dev/null || true)"
-    case "$outcome" in
-      written|upgraded|unchanged)
-        log "daemon autostart enabled via hive daemon install (${outcome})"
-        ;;
-      *)
-        warn "daemon autostart setup reported outcome '${outcome:-unknown}'; Hive is installed, but the daemon may not start after reboot"
-        ;;
-    esac
+    # `jq -e` fails when the envelope is unparseable or `.outcome` is
+    # absent/null, so a garbled-but-exit-0 install is reported instead
+    # of being silently trusted as success.
+    if outcome="$(jq -er '.outcome' "$out" 2>/dev/null)"; then
+      case "$outcome" in
+        written|upgraded|unchanged)
+          log "daemon autostart enabled via hive daemon install (${outcome})"
+          ;;
+        unsupported)
+          # Known-platform limitation (e.g. Linux without systemd-user):
+          # the unit was written but autostart could not be enabled. The
+          # CLI exits 0 for this, so it is not a failure to warn about.
+          log "daemon unit written; autostart unavailable on this host (hive daemon install: unsupported)"
+          ;;
+        *)
+          warn "daemon autostart setup reported outcome '${outcome}'; Hive is installed, but the daemon may not start after reboot"
+          ;;
+      esac
+    else
+      warn "daemon autostart setup succeeded but its JSON output was unreadable; Hive is installed, but the daemon may not start after reboot"
+      if [[ -s "$out" ]]; then
+        sed 's/^/hive install: daemon output: /' "$out" >&2
+      fi
+    fi
     if jq -e '.messages? | length > 0' "$out" >/dev/null 2>&1; then
       jq -r '.messages[]?' "$out" | sed 's/^/hive install: daemon message: /' >&2
     fi
     return 0
-  fi
-
-  rc=$?
-  warn "daemon autostart setup did not complete (exit ${rc}); Hive is installed, but the daemon may not start after reboot"
-  warn "run '${link_path} daemon install' after fixing launchd/systemd-user, or '${link_path} daemon install --force' if an existing unit is customized"
-  if [[ -s "$err" ]]; then
-    sed 's/^/hive install: daemon stderr: /' "$err" >&2
-  fi
-  if [[ -s "$out" ]]; then
-    sed 's/^/hive install: daemon output: /' "$out" >&2
+  else
+    # `rc=$?` is the first statement in the else branch, so it captures
+    # the exit code of the failed `hive daemon install` (NOT 0 — `$?`
+    # after a false `if` condition with no else would be 0).
+    rc=$?
+    warn "daemon autostart setup did not complete (exit ${rc}); Hive is installed, but the daemon may not start after reboot"
+    warn "run '${link_path} daemon install' after fixing launchd/systemd-user, or '${link_path} daemon install --force' if an existing unit is customized"
+    if [[ -s "$err" ]]; then
+      sed 's/^/hive install: daemon stderr: /' "$err" >&2
+    fi
+    if [[ -s "$out" ]]; then
+      sed 's/^/hive install: daemon output: /' "$out" >&2
+    fi
+    return 0
   fi
 }
 

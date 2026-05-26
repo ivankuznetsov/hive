@@ -1,4 +1,16 @@
 module Hive
+  # Resolves the user-facing CLI path to bake into the systemd-user /
+  # launchd daemon unit. Precedence:
+  #   1. HIVE_INVOKED_BIN — exported by the bash/Homebrew bin wrappers so
+  #      the unit points at the stable GEM_HOME wrapper rather than the
+  #      inner versioned gem shim (which `brew upgrade` / re-install would
+  #      move out from under the unit).
+  #   2. $PROGRAM_NAME — when hive was invoked via an absolute/relative
+  #      path, trust that path.
+  #   3. PATH lookup — resolve the bare `hive`/`hv` name.
+  # Every candidate's basename must be in VALID_NAMES, so a wrong or
+  # hostile value (a renamed program, or an env var pointing at some
+  # other executable) can never be persisted into an autostart unit.
   module InvokedBinary
     ENV_KEY = "HIVE_INVOKED_BIN".freeze
     VALID_NAMES = %w[hive hv].freeze

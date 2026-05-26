@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T23:30:00Z] daemon - reclassify no-systemd autostart as unsupported (review follow-up)
+
+**Action:** Code-review follow-up on the autostart-install branch. A Linux host with no systemd-user no longer reports a `failed` / exit-70 envelope (this supersedes the 22:55Z entry below): the unit is still written, but autostart-unavailable is now a `:autostart_unavailable` installer result that maps to the `unsupported` success outcome (exit 0) with `target_path` set to the written unit. A genuine service-manager rejection (systemctl enable/reload, or macOS launchctl load) still exits 70. Also hardened: `install.sh daemon_autostart_setup` captures the real exit code in an `else` branch (was always reporting `exit 0`) and treats `unsupported`/unreadable-JSON distinctly; `hive init`'s `register_daemon_service!` now degrades any unexpected `StandardError` to a warning so it can't abort an already-committed init; dead `which` delegators removed in favor of `Hive::InvokedBinary`; README scoped so only `install.sh` is described as auto-running `hive daemon install`.
+
+**Impact:** WSL/containers without systemd-user get a clean exit 0 and a quiet `hive init` instead of a spurious failure; the `hive-daemon-install.v1` `unsupported` outcome can now carry a `target_path`. Schema description updated accordingly.
+
+**Refs:** [[commands/daemon]], [[commands/init]], [[operating]]
+
 ## [2026-05-26T22:55:00Z] daemon - autostart install repair
 
 **Action:** Tightened install-time daemon autostart so service units preserve the invoked user-facing wrapper (`hive` or `hv`) instead of baking the inner gem shim, and so Linux hosts without usable systemd-user get a failed `hive-daemon-install` envelope rather than a false enabled-autostart success. Agent install instructions now carry the verified `hive_cmd` through daemon install and project init.

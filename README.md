@@ -27,7 +27,7 @@ The result Hive built in that reel lives at [ivankuznetsov/shipped](https://gith
 
 ## Install
 
-Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. All three channels below download the same `.gem`, verify the signature, and run `gem install` against it. Install-time setup runs `hive daemon install` so the per-user systemd-user (Linux) or launchd (macOS) daemon service is enabled by default; `hive init .` only decides whether that project is enrolled for daemon dispatch.
+Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. All three channels below download the same `.gem`, verify the signature, and run `gem install` against it. The `install.sh` channel then runs `hive daemon install` automatically; the Homebrew and AUR packages print a one-line reminder to run it once, and `hive init .` also ensures it. Either way the per-user systemd-user (Linux) or launchd (macOS) daemon service ends up enabled by default, and `hive init .` only decides whether that project is enrolled for daemon dispatch.
 
 | Platform | Channel |
 |----------|---------|

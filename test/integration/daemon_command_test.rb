@@ -1296,6 +1296,9 @@ class HiveDaemonCommandTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(unit_path))
       File.write(unit_path, "stale-pre-existing-content\n")
 
+      File.write(File.join(home, "bin", "systemctl"), "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0755, File.join(home, "bin", "systemctl"))
+
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
                                          "daemon", "install", "--force", "--json")
       doc = JSON.parse(out)
@@ -1314,10 +1317,31 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_equal 1, backups.size, "force must write exactly one timestamped backup"
       assert_equal "stale-pre-existing-content\n", File.read(backups.first)
 
-      assert_equal 0, status.exitstatus, "fake non-systemd systemctl keeps install hermetic"
+      assert_equal 0, status.exitstatus, "fake systemctl keeps install hermetic"
       assert_equal true, doc["ok"]
       assert_equal "upgraded", doc["outcome"]
       assert_equal backups.first, doc["backup_path"]
+    end
+  end
+
+  def test_install_without_systemd_exits_70_with_failed_envelope
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-install"))))
+    with_isolated_install_target do |home, env|
+      unit_path = File.join(home, ".config", "systemd", "user", "hive-daemon.service")
+
+      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+                                         "daemon", "install", "--json")
+      doc = JSON.parse(out)
+      errors = schema.validate(doc).map { |e| e["error"] }
+      assert_empty errors,
+                   "install failure envelope must validate against hive-daemon-install.v1; got: #{errors.inspect}"
+      assert_equal 70, status.exitstatus
+      assert_equal false, doc.fetch("ok")
+      assert_equal "failed", doc.fetch("outcome")
+      assert_includes doc.fetch("messages").join("\n"), "autostart was not enabled"
+      assert_includes File.read(unit_path), "ExecStart=",
+                      "unit should still be written so the operator can repair systemd-user and retry"
     end
   end
 

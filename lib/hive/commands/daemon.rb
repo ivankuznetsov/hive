@@ -11,6 +11,7 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/logger"
+require "hive/invoked_binary"
 
 module Hive
   module Commands
@@ -429,7 +430,15 @@ module Hive
       def install_daemon
         require "hive/commands/daemon/service_installer"
         installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: current_binary_path)
-        result = installer.install!(autostart: true, force: @force)
+        begin
+          result = installer.install!(autostart: true, force: @force)
+        rescue Hive::Error
+          raise
+        rescue StandardError => e
+          install_emit_exception_envelope(installer, e) if @json
+          raise Hive::DaemonInstallFailed,
+                "daemon service install failed: #{e.class}: #{e.message}"
+        end
         unless @json
           installer.messages.each { |line| warn "hive: #{line}" }
           emit_install_success_summary(installer, result)
@@ -536,23 +545,46 @@ module Hive
         )
       end
 
-      def current_binary_path
-        raw = $PROGRAM_NAME.to_s
-        return nil unless File.basename(raw) == "hive"
+      def install_emit_exception_envelope(installer, error)
+        puts JSON.generate(
+          "schema" => "hive-daemon-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
+          "ok" => false,
+          "error_class" => "DaemonInstallFailed",
+          "error_kind" => "failed",
+          "exit_code" => Hive::ExitCodes::SOFTWARE,
+          "message" => "daemon service install failed: #{error.class}: #{error.message}",
+          "outcome" => "failed",
+          "platform" => safe_install_platform(installer),
+          "target_path" => safe_install_target_path(installer),
+          "messages" => safe_install_messages(installer)
+        )
+      end
 
-        if raw.include?(File::SEPARATOR)
-          File.expand_path(raw)
-        else
-          which("hive")
-        end
+      def current_binary_path
+        Hive::InvokedBinary.path
       end
 
       def which(name)
-        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-          path = File.join(dir, name)
-          return path if File.file?(path) && File.executable?(path)
-        end
+        Hive::InvokedBinary.which(name)
+      end
+
+      def safe_install_platform(installer)
+        installer.envelope_platform
+      rescue StandardError
+        "unsupported"
+      end
+
+      def safe_install_target_path(installer)
+        installer.target_path
+      rescue StandardError
         nil
+      end
+
+      def safe_install_messages(installer)
+        installer.messages.dup
+      rescue StandardError
+        []
       end
 
       def envelope_schema

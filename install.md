@@ -79,13 +79,14 @@ Run:
 
 ```bash
 if hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  hive --version
+  hive_cmd=hive
 elif hv --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  hv --version
+  hive_cmd=hv
 else
   echo "verify failed: expected Hive CLI version X.Y.Z from hive or hv" >&2
   exit 1
 fi
+"$hive_cmd" --version
 ```
 
 If `hive` is shadowed by Apache Hive, try `hv --version` and tell the user to use `hv` or adjust PATH.
@@ -95,18 +96,18 @@ If `hive` is shadowed by Apache Hive, try `hv --version` and tell the user to us
 Do not ask the user whether to initialize the daemon. Hive install includes the per-user daemon service by default. After version verification, run this once for every channel and report the outcome:
 
 ```bash
-hive daemon install --json
+"$hive_cmd" daemon install --json
 ```
 
-The bash installer already runs the same command after installing the gem; rerunning it is idempotent when the unit matches. If the command reports a drifted/customized unit, leave it untouched and report the `hive daemon install --force` recovery command instead of forcing an overwrite. If systemd-user or launchd is unavailable, keep Hive installed and report that daemon autostart could not be enabled on this host.
+The bash installer already runs the same command after installing the gem; rerunning it is idempotent when the unit matches. If the command reports a drifted/customized unit, leave it untouched and report the `"$hive_cmd" daemon install --force` recovery command instead of forcing an overwrite. If systemd-user or launchd is unavailable, keep Hive installed and report that daemon autostart could not be enabled on this host.
 
 ## Initialize Project
 
 If the current directory is a git project and the user wants Hive enabled here, ask before running:
 
 ```bash
-hive init .
-hive doctor || true
+"$hive_cmd" init .
+"$hive_cmd" doctor || true
 ```
 
 During `hive init`, keep the user's prompt choices. The daemon prompt is per-project enrollment (`daemon.enabled`) only; the service autostart has already been installed globally. If init is non-interactive, Hive uses recommended defaults and enrolls the project. `hive doctor` runs AFTER `hive init` because it requires an initialized project root.
@@ -129,8 +130,8 @@ Report:
 
 - channel used
 - command run
-- `hive --version` output
-- daemon autostart setup result from `hive daemon install --json`
+- Hive CLI version output (`"$hive_cmd" --version`)
+- daemon autostart setup result from `"$hive_cmd" daemon install --json`
 - whether `hive init` was run
 - missing runtime dependencies from `hive doctor`
 - whether the optional skills package was installed or skipped

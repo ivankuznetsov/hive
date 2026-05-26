@@ -239,7 +239,19 @@ daemon_autostart_setup() {
   err="${tmpdir}/daemon-install.err"
 
   if "$link_path" daemon install --json >"$out" 2>"$err"; then
-    log "daemon autostart enabled via hive daemon install"
+    local outcome
+    outcome="$(jq -r '.outcome // empty' "$out" 2>/dev/null || true)"
+    case "$outcome" in
+      written|upgraded|unchanged)
+        log "daemon autostart enabled via hive daemon install (${outcome})"
+        ;;
+      *)
+        warn "daemon autostart setup reported outcome '${outcome:-unknown}'; Hive is installed, but the daemon may not start after reboot"
+        ;;
+    esac
+    if jq -e '.messages? | length > 0' "$out" >/dev/null 2>&1; then
+      jq -r '.messages[]?' "$out" | sed 's/^/hive install: daemon message: /' >&2
+    fi
     return 0
   fi
 
@@ -370,12 +382,14 @@ cat > "${gem_home}/bin/hive" <<WRAPPER
 #!/usr/bin/env bash
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/shims/hive" "\$@"
 WRAPPER
 cat > "${gem_home}/bin/hv" <<WRAPPER
 #!/usr/bin/env bash
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
+export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/shims/hv" "\$@"
 WRAPPER
 chmod +x "${gem_home}/bin/hive" "${gem_home}/bin/hv"

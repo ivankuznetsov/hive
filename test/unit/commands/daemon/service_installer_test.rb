@@ -81,10 +81,11 @@ class DaemonServiceInstallerTest < Minitest::Test
         runner: ->(argv) { commands << argv }
       )
 
-      installer.install!(autostart: true)
+      result = installer.install!(autostart: true)
+      assert_equal :failed, result
       assert File.exist?(File.join(dir, ".config/systemd/user/hive-daemon.service"))
       assert_empty commands
-      assert installer.messages.any? { |msg| msg.include?("enable systemd in WSL") }
+      assert installer.messages.any? { |msg| msg.include?("autostart was not enabled") }
     end
   end
 

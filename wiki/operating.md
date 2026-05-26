@@ -99,9 +99,12 @@ blocks the parallel install before fallback aliasing is possible.
 Daemon autostart is part of install, not project enrollment. The bash installer
 runs `hive daemon install --json` after installing the gem. Agent-assisted
 Homebrew/AUR/manual installs run the same command after `hive --version`
-verification. Manual package users should run `hive daemon install` once after
-install if they did not use the agent prompt; package hooks cannot reliably
-start a per-user systemd/launchd service for every host setup.
+verification. If systemd-user or launchd cannot actually enable/start the unit,
+`hive daemon install --json` returns a failed envelope while leaving the written
+unit on disk for manual repair. Manual package users should run
+`hive daemon install` once after install if they did not use the agent prompt;
+package hooks cannot reliably start a per-user systemd/launchd service for every
+host setup.
 
 Updates and uninstall:
 

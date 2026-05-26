@@ -138,7 +138,8 @@ module Hive
                 return :failed
               end
             else
-              @messages << "systemd not detected; enable systemd in WSL or run `hive daemon start` manually."
+              @messages << "systemd not detected; daemon unit was written but autostart was not enabled. Enable systemd in WSL or run `hive daemon start` manually."
+              return :failed
             end
           end
           # Preserve the write_result distinction for the operator-facing

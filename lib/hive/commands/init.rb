@@ -7,6 +7,7 @@ require "hive/llm_wiki_bootstrap"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
 require "hive/commands/daemon/service_installer"
+require "hive/invoked_binary"
 
 module Hive
   module Commands
@@ -132,22 +133,11 @@ module Hive
       end
 
       def current_binary_path
-        raw = $PROGRAM_NAME.to_s
-        return nil unless File.basename(raw) == "hive"
-
-        if raw.include?(File::SEPARATOR)
-          File.expand_path(raw)
-        else
-          which("hive")
-        end
+        Hive::InvokedBinary.path
       end
 
       def which(name)
-        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-          path = File.join(dir, name)
-          return path if File.file?(path) && File.executable?(path)
-        end
-        nil
+        Hive::InvokedBinary.which(name)
       end
 
       def print_summary(entry:, ops:)

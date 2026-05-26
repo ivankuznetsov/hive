@@ -98,6 +98,29 @@ class HiveCommandsInitTest < Minitest::Test
     end
   end
 
+  def test_current_binary_path_resolves_hv_from_path
+    Dir.mktmpdir("hive-init-unit") do |dir|
+      apache = File.join(dir, "apache", "hive")
+      hv_dir = File.join(dir, "hive-bin")
+      hv = File.join(hv_dir, "hv")
+      FileUtils.mkdir_p(File.dirname(apache))
+      FileUtils.mkdir_p(hv_dir)
+      File.write(apache, "#!/bin/sh\n")
+      File.write(hv, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, apache)
+      FileUtils.chmod(0o755, hv)
+      previous_program = $PROGRAM_NAME
+      previous_path = ENV["PATH"]
+      $PROGRAM_NAME = "hv"
+      ENV["PATH"] = [ File.dirname(apache), hv_dir ].join(File::PATH_SEPARATOR)
+
+      assert_equal hv, command.send(:current_binary_path)
+    ensure
+      $PROGRAM_NAME = previous_program
+      ENV["PATH"] = previous_path
+    end
+  end
+
   def test_validate_git_repo_rejects_linked_worktree_checkout
     Dir.mktmpdir("hive-init-unit") do |dir|
       project = File.join(dir, "project")

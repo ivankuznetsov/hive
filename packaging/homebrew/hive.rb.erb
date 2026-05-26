@@ -28,6 +28,7 @@ class Hive < Formula
         #!/bin/bash
         export GEM_HOME="#{libexec}"
         export GEM_PATH="${GEM_HOME}${GEM_PATH:+:$GEM_PATH}"
+        export HIVE_INVOKED_BIN="${HIVE_INVOKED_BIN:-$0}"
         exec "#{libexec}/bin/#{name}" "$@"
       SH
       (bin/name).chmod 0755

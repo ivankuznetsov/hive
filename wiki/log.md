@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T22:55:00Z] daemon - autostart install repair
+
+**Action:** Tightened install-time daemon autostart so service units preserve the invoked user-facing wrapper (`hive` or `hv`) instead of baking the inner gem shim, and so Linux hosts without usable systemd-user get a failed `hive-daemon-install` envelope rather than a false enabled-autostart success. Agent install instructions now carry the verified `hive_cmd` through daemon install and project init.
+
+**Impact:** Bash/Homebrew installs keep wrapper-provided GEM_HOME/GEM_PATH across reboot, Apache Hive collision hosts can use `hv` safely for daemon setup, and installer automation can distinguish "unit written" from "autostart enabled".
+
+**Refs:** [[commands/daemon]], [[operating]]
+
 ## [2026-05-26T21:22:40Z] daemon - install-time autostart by default
 
 **Action:** Moved daemon autostart to install-time/global setup. The bash installer now runs `hive daemon install` after installing the gem; the agent installer prompt tells agents to run `hive daemon install --json` for Homebrew/AUR/existing installs. `hive init` no longer asks a second autostart question; it only asks whether the current project should render `daemon.enabled: true`. The init path still idempotently ensures the service for dev-clone/manual users.

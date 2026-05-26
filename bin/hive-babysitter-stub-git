@@ -24,5 +24,8 @@ if mutating
 end
 
 real = ENV["HIVE_BABYSITTER_REAL_GIT"].to_s
-real = "/usr/bin/git" if real.empty?
+if real.empty?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GIT is unset; refusing to guess a path for the real git binary"
+  exit 127
+end
 exec(real, *argv)

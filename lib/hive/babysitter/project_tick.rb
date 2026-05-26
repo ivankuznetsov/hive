@@ -30,14 +30,31 @@ module Hive
         selected = select_prs(prs, project_entry, cfg, inflight)
         summary = { total: selected.size, fixed: 0, untouched: 0, needs_human: 0 }
         selected.each do |pr|
-          outcome = Hive::Babysitter::PrFixer.run(
-            pr,
-            project_entry,
-            cfg,
-            dry_run: dry_run,
-            logger: logger,
-            inflight: inflight
-          )
+          outcome =
+            begin
+              Hive::Babysitter::PrFixer.run(
+                pr,
+                project_entry,
+                cfg,
+                dry_run: dry_run,
+                logger: logger,
+                inflight: inflight
+              )
+            rescue StandardError => e
+              Hive::Babysitter::Events.emit(
+                project: project_entry,
+                pr: pr["number"],
+                action: "agent-fix",
+                outcome: "failure",
+                message: "#{e.class}: #{e.message}"
+              )
+              logger.event(:fatal,
+                           project: project_entry["name"],
+                           pr: pr["number"],
+                           message: "PrFixer raised: #{e.class}: #{e.message}")
+              :failure
+            end
+
           case outcome
           when :success then summary[:fixed] += 1
           when :already_green, :noop, :dry_run then summary[:untouched] += 1

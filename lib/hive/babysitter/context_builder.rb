@@ -13,11 +13,11 @@ module Hive
         keyword_init: true
       )
 
-      def self.build(worktree_path:, pr:, cfg:, byte_cap: 50 * 1024)
-        status = Hive::Gh.pr_status_rollup(worktree_path, pr.fetch("number"), cfg: cfg)
-        failing_jobs = Hive::Gh.pr_failing_job_logs(
+      def self.build(worktree_path:, pr:, cfg:, byte_cap: 50 * 1024, status_rollup: nil)
+        status = status_rollup || Hive::Gh.pr_status_rollup(worktree_path, pr.fetch("number"), cfg: cfg)
+        failing_jobs = Hive::Gh.failing_jobs_with_logs(
           worktree_path,
-          pr.fetch("number"),
+          status,
           cfg: cfg,
           byte_cap: byte_cap
         )

@@ -2,6 +2,7 @@ require "yaml"
 require "fileutils"
 require "securerandom"
 require "hive/agent_profiles"
+require "hive/babysitter/interval"
 require "hive/paths"
 
 module Hive
@@ -1473,7 +1474,7 @@ module Hive
       end
 
       interval = babysitter["interval"]
-      unless interval.nil? || interval.is_a?(Integer) || (interval.is_a?(String) && interval.match?(/\A\d+[smh]\z/))
+      unless interval.nil? || interval.is_a?(Integer) || (interval.is_a?(String) && interval.match?(Hive::Babysitter::Interval::REGEX))
         raise ConfigError,
               "babysitter.interval in #{describe_source(source_path)} must be an integer seconds value " \
               "or a duration string like 10m / 30s / 1h; got #{interval.inspect} (#{interval.class})"

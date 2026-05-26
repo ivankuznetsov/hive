@@ -18,8 +18,9 @@ module Hive
       def materialize
         FileUtils.mkdir_p(File.dirname(path))
         remove_existing!
-        run_git!("fetch", "origin", head_ref)
-        run_git!("worktree", "add", "-B", branch, path, "origin/#{head_ref}")
+        local_ref = "refs/hive-babysitter/pr-#{@pr.fetch('number')}"
+        run_git!("fetch", "origin", "pull/#{@pr.fetch('number')}/head:#{local_ref}")
+        run_git!("worktree", "add", "-B", branch, path, local_ref)
         Result.new(path: path, branch: branch)
       end
 

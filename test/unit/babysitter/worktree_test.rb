@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/gh"
 require "hive/babysitter/worktree"
 
 class BabysitterWorktreeTest < Minitest::Test
@@ -20,7 +21,8 @@ class BabysitterWorktreeTest < Minitest::Test
         assert_equal "hive-babysitter/pr-42", result.branch
       end
 
-      assert calls.any? { |cmd| cmd.include?("fetch") && cmd.include?("feature") }
+      assert calls.any? { |cmd| cmd.include?("fetch") && cmd.any? { |arg| arg.include?("pull/42/head") } },
+             "expected `git fetch origin pull/42/head:...` so fork PRs and same-repo PRs share the same path"
       assert calls.any? { |cmd| cmd.include?("worktree") && cmd.include?("-B") && cmd.include?("hive-babysitter/pr-42") }
     end
   end

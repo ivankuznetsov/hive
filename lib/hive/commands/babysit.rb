@@ -93,6 +93,11 @@ module Hive
 
       def run_once
         project_name = resolve_once_project_name
+        if @all && Hive::Config.registered_projects.empty?
+          puts "babysitter: 0 enabled projects, nothing to do"
+          return
+        end
+
         dispatcher = build_dispatcher(project_name: project_name, max_ticks: 1)
         dispatcher.run_forever
       end

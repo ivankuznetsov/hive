@@ -1,6 +1,8 @@
 module Hive
   module Babysitter
     module Interval
+      REGEX = /\A(?<amount>\d+)(?<unit>[smh])\z/.freeze
+
       module_function
 
       def parse(value)
@@ -8,7 +10,7 @@ module Hive
 
         case value
         when String
-          match = value.match(/\A(?<amount>\d+)(?<unit>[smh])\z/)
+          match = value.match(REGEX)
           raise Hive::ConfigError, "babysitter.interval must look like 30s, 10m, or 1h; got #{value.inspect}" unless match
 
           amount = match[:amount].to_i

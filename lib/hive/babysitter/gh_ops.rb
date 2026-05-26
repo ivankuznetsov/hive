@@ -69,7 +69,12 @@ module Hive
         false
       end
 
-      def recent_give_up_comment?(worktree, pr_number, cfg:)
+      GIVE_UP_WINDOW_SEC = 3600
+      GIVE_UP_MARKER_PREFIX = "<!-- hive-babysitter:give-up:".freeze
+      GIVE_UP_MARKER_SUFFIX = " -->".freeze
+      GIVE_UP_MARKER_REGEX = /<!-- hive-babysitter:give-up:(?<ts>[^ ]+) -->/
+
+      def recent_give_up_comment?(worktree, pr_number, cfg:, now: Time.now.utc)
         out, _err, status = Hive::Gh.capture3(
           "gh", "pr", "view", pr_number.to_s, "--json", "comments",
           chdir: worktree,
@@ -77,19 +82,33 @@ module Hive
         )
         return false unless status.success?
 
-        marker = give_up_marker
         doc = JSON.parse(out)
-        Array(doc["comments"]).any? { |entry| entry.is_a?(Hash) && entry["body"].to_s.include?(marker) }
+        cutoff = now - GIVE_UP_WINDOW_SEC
+        Array(doc["comments"]).any? do |entry|
+          next false unless entry.is_a?(Hash)
+
+          marker_ts = extract_give_up_marker_timestamp(entry["body"].to_s)
+          marker_ts && marker_ts >= cutoff
+        end
       rescue JSON::ParserError
         false
       end
 
-      def stamp_comment(body)
-        "#{body}\n\n#{give_up_marker}"
+      def stamp_comment(body, now: Time.now.utc)
+        "#{body}\n\n#{give_up_marker(now: now)}"
       end
 
       def give_up_marker(now: Time.now.utc)
-        "<!-- hive-babysitter:give-up:#{now.strftime('%Y%m%d%H')} -->"
+        "#{GIVE_UP_MARKER_PREFIX}#{now.iso8601}#{GIVE_UP_MARKER_SUFFIX}"
+      end
+
+      def extract_give_up_marker_timestamp(body)
+        match = body.match(GIVE_UP_MARKER_REGEX)
+        return nil unless match
+
+        Time.iso8601(match[:ts])
+      rescue ArgumentError
+        nil
       end
 
       def result(success, stdout, stderr)

@@ -83,12 +83,13 @@ module Hive
         end
         @file = File.open(@path, "a")
       rescue SystemCallError => e
+        warn "hive babysitter: log rotation failed (#{e.class}: #{e.message}); continuing without rotation"
         begin
           @file = File.open(@path, "a")
         rescue SystemCallError => reopen_err
           @file = nil
           @stderr_fallback = true
-          warn "hive babysitter: log rotation failed (#{e.message}) and reopen failed (#{reopen_err.message}); falling back to stderr"
+          warn "hive babysitter: log rotation reopen failed (#{reopen_err.message}); falling back to stderr"
         end
       end
 

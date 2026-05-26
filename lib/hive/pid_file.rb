@@ -32,7 +32,7 @@ module Hive
       return :legacy     if payload["_legacy"]
 
       recorded = payload["process_start_time"]
-      live = Hive::Lock.send(:process_start_time, pid)
+      live = Hive::Lock.process_start_time(pid)
       return :unverified if recorded.nil? || live.nil?
 
       recorded == live ? :verified : :reused
@@ -58,7 +58,7 @@ module Hive
     end
 
     def pid_file_payload(pid, start_time = nil)
-      start_time ||= Hive::Lock.send(:process_start_time, pid)
+      start_time ||= Hive::Lock.process_start_time(pid)
       {
         "pid" => pid,
         "process_start_time" => start_time,

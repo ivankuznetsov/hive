@@ -22,5 +22,8 @@ if mutating
 end
 
 real = ENV["HIVE_BABYSITTER_REAL_GH"].to_s
-real = "/usr/bin/gh" if real.empty?
+if real.empty?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
+  exit 127
+end
 exec(real, *argv)

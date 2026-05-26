@@ -115,6 +115,7 @@ module Hive
       ].join(",")
       out, err, status = capture3("gh", "pr", "list",
                                   "--state", "open",
+                                  "--limit", "1000",
                                   "--json", fields,
                                   chdir: worktree_path,
                                   cfg: cfg)
@@ -149,17 +150,27 @@ module Hive
 
     def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)
       rollup = pr_status_rollup(worktree_path, number, cfg: cfg)
+      failing_jobs_with_logs(worktree_path, rollup, cfg: cfg, byte_cap: byte_cap)
+    end
+
+    def failing_jobs_with_logs(worktree_path, rollup, cfg: nil, byte_cap: 50 * 1024)
       jobs = failing_jobs_from_rollup(rollup)
       return [] if jobs.empty?
 
       per_job_cap = [ byte_cap / jobs.size, 1 ].max
       jobs.map do |job|
         job_id = job["databaseId"] || job["id"]
-        log = if job_id
-                fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
-        else
-                ""
-        end
+        log =
+          if job_id
+            fetch_result = fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
+            if fetch_result[:success]
+              fetch_result[:log]
+            else
+              "[hive-babysitter: failed to fetch log for job #{job_id} via gh run view: #{fetch_result[:error]}]"
+            end
+          else
+            "[hive-babysitter: no job id available, cannot fetch log]"
+          end
         { "name" => job["name"].to_s, "job_id" => job_id, "log" => tail_clip(log, per_job_cap) }
       end
     end
@@ -193,7 +204,13 @@ module Hive
                                   "--job", job_id.to_s,
                                   chdir: worktree_path,
                                   cfg: cfg)
-      status.success? ? out : err.to_s
+      if status.success?
+        { success: true, log: out, error: nil }
+      else
+        { success: false, log: "", error: err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip }
+      end
+    rescue Hive::GhError => e
+      { success: false, log: "", error: e.message }
     end
 
     def tail_clip(text, byte_cap)

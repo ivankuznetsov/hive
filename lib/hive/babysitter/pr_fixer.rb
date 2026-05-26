@@ -27,9 +27,10 @@ module Hive
       end
 
       def run
-        key = inflight_key
-        return :noop if @inflight.include?(key)
+        key = nil
+        return :noop if @inflight.include?(inflight_key)
 
+        key = inflight_key
         @inflight.add(key)
         started = Time.now
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
@@ -48,10 +49,11 @@ module Hive
         context = Hive::Babysitter::ContextBuilder.build(
           worktree_path: worktree.path,
           pr: @pr,
-          cfg: @cfg
+          cfg: @cfg,
+          status_rollup: status
         )
         result = spawn_agent(worktree.path, context)
-        outcome = outcome_for(result)
+        outcome = outcome_for(result, worktree.path)
         emit_agent_event(outcome, started)
         return outcome if %i[success dry_run].include?(outcome)
 
@@ -141,12 +143,25 @@ module Hive
         Hive::Stages::Base.render("babysitter_pr_fix_prompt.md.erb", bindings)
       end
 
-      def outcome_for(result)
+      def outcome_for(result, worktree_path = nil)
         return :timeout if result[:status] == :timeout || result[:timed_out]
-        return :dry_run if @dry_run && result[:status] == :ok
+        return :budget_exhausted if budget_exhausted?(result)
+        if @dry_run && result[:status] == :ok
+          return :dry_run if worktree_path && File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
+
+          return :failure
+        end
         return :success if result[:status] == :ok
 
         :failure
+      end
+
+      def budget_exhausted?(result)
+        status = result[:status]
+        reason = result[:reason].to_s
+        %i[budget_exceeded budget_exhausted].include?(status) ||
+          reason == "budget_exceeded" ||
+          reason == "budget_exhausted"
       end
 
       def emit_agent_event(outcome, started)
@@ -154,6 +169,7 @@ module Hive
         when :success then "success"
         when :dry_run then "dry_run"
         when :timeout then "timeout"
+        when :budget_exhausted then "budget_exhausted"
         else "failure"
         end
         Hive::Babysitter::Events.emit(
@@ -194,11 +210,16 @@ module Hive
           outcome: @dry_run ? "dry_run" : (comment_result.success? ? "success" : "failure")
         )
 
+        give_up_outcome = case outcome
+        when :timeout then "timeout"
+        when :budget_exhausted then "budget_exhausted"
+        else "failure"
+        end
         Hive::Babysitter::Events.emit(
           project: @project,
           pr: number,
           action: "give-up",
-          outcome: outcome.to_s == "timeout" ? "timeout" : "failure",
+          outcome: give_up_outcome,
           duration_ms: duration_ms(started)
         )
       end

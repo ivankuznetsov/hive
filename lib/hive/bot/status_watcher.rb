@@ -16,8 +16,8 @@ module Hive
           super
         end
       end
-      Result = Data.define(:ok, :rows, :error) do
-        def initialize(ok:, rows: [], error: nil)
+      Result = Data.define(:ok, :rows, :error, :envelope) do
+        def initialize(ok:, rows: [], error: nil, envelope: nil)
           super
         end
       end
@@ -42,7 +42,7 @@ module Hive
 
         doc = JSON.parse(out)
         validate_envelope!(doc)
-        Result.new(ok: true, rows: extract_rows(doc, now: now), error: nil)
+        Result.new(ok: true, rows: extract_rows(doc, now: now), error: nil, envelope: doc)
       rescue JSON::ParserError => e
         failure("malformed JSON from hive status: #{e.message}")
       rescue StandardError => e

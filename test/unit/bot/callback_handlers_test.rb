@@ -9,7 +9,7 @@ require "hive/bot/handlers/callback_handlers"
 class HiveBotCallbackHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
-                      :intent, :alert_reset, :clear_keyboard, keyword_init: true)
+                      :intent, :alert_reset, :clear_keyboard, :format, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)
       events << { name: name, payload: payload }

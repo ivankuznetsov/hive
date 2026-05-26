@@ -255,6 +255,19 @@ module Hive
                                             match_attr: reset[:match_attr])
       end
 
+      def render_status_json(envelope, project_filter)
+        return "{}" if envelope.nil?
+
+        if project_filter && !project_filter.to_s.empty?
+          filtered = envelope.merge(
+            "projects" => Array(envelope["projects"]).select { |p| p["name"] == project_filter }
+          )
+          ::JSON.pretty_generate(filtered)
+        else
+          ::JSON.pretty_generate(envelope)
+        end
+      end
+
       def project_filter_miss_text(project, rows)
         registered = registered_project_names
         active = rows.map { |row| row.project.to_s }.uniq
@@ -310,6 +323,12 @@ module Hive
             error = fetch_result.error.to_s.strip
             error = "unknown error" if error.empty?
             safe_send_message(chat_id: update.chat_id, text: "hive status unavailable: #{error}")
+            return nil
+          end
+
+          if result.respond_to?(:format) && result.format == :json
+            safe_send_message(chat_id: update.chat_id,
+                              text: render_status_json(fetch_result.envelope, result.project))
             return nil
           end
 

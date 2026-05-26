@@ -7,7 +7,7 @@ class HiveBotSupervisorTest < Minitest::Test
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, :error, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :error, :envelope, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
@@ -48,7 +48,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, keyword_init: true)
+                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        keyword_init: true)
   end
 
   FakeChildSupervisor = Struct.new(:dispatch_pid, :dispatched, :completed, :reap_batches, keyword_init: true) do
@@ -326,6 +327,55 @@ class HiveBotSupervisorTest < Minitest::Test
 
       assert_equal "No tasks for project other.", @telegram.messages.last.fetch(:text)
     end
+  end
+
+  def test_execute_dispatch_renders_status_envelope_when_format_json
+    envelope = {
+      "schema" => "hive-status",
+      "schema_version" => 1,
+      "ok" => true,
+      "projects" => [
+        { "name" => "hive", "tasks" => [ { "slug" => "alpha" } ] },
+        { "name" => "other", "tasks" => [ { "slug" => "beta" } ] }
+      ]
+    }
+    @status_watcher.result = StatusResult.new(ok: true, rows: [], envelope: envelope)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      format: :json
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    parsed = JSON.parse(text)
+    assert_equal "hive-status", parsed["schema"], "JSON reply must surface the raw envelope"
+    project_names = parsed["projects"].map { |p| p["name"] }
+    assert_equal %w[hive other], project_names
+  end
+
+  def test_execute_dispatch_renders_status_envelope_filtered_by_project_when_format_json
+    envelope = {
+      "schema" => "hive-status",
+      "projects" => [
+        { "name" => "hive", "tasks" => [ { "slug" => "alpha" } ] },
+        { "name" => "other", "tasks" => [ { "slug" => "beta" } ] }
+      ]
+    }
+    @status_watcher.result = StatusResult.new(ok: true, rows: [], envelope: envelope)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json", "--project", "hive" ],
+      project: "hive",
+      format: :json
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    parsed = JSON.parse(@telegram.messages.last.fetch(:text))
+    assert_equal [ "hive" ], parsed["projects"].map { |p| p["name"] },
+                 "project filter must drop other projects from the JSON envelope"
   end
 
   def test_execute_dispatch_surfaces_status_fetch_failure

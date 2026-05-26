@@ -4,7 +4,7 @@ require "hive/bot/handlers/slash_handlers"
 class HiveBotSlashHandlersTest < Minitest::Test
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :question_n, :answer_text, :mode,
-                      :intent, keyword_init: true)
+                      :intent, :format, keyword_init: true)
   Update = Struct.new(:text, :chat_id, keyword_init: true)
 
   def setup
@@ -44,5 +44,21 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = @handlers.help(Update.new(text: "/help"))
 
     assert_includes result.text, "/status [project]"
+  end
+
+  def test_status_with_json_flag_sets_format_json
+    result = @handlers.status(Update.new(text: "/status --json"))
+
+    assert_equal :json, result.format
+    assert_nil result.project, "/status --json without a project must produce a no-project filter"
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
+  end
+
+  def test_status_with_json_flag_and_project_filters_and_sets_format_json
+    result = @handlers.status(Update.new(text: "/status --json hive"))
+
+    assert_equal :json, result.format
+    assert_equal "hive", result.project
+    assert_equal [ "hive", "status", "--json", "--project", "hive" ], result.command_argv
   end
 end

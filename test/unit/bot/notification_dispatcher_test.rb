@@ -127,6 +127,70 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
+  def test_recovered_message_send_failure_records_backoff
+    # Stand up an entry via a working Telegram, then swap the dispatcher
+    # for an always-failing Telegram so process_recoveries lands in the
+    # record_send_failure branch.
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      store = Hive::Bot::AlertStore.new(path: path)
+      store.mark_seeded!
+      working = StubTelegram.new
+      d_in = Hive::Bot::NotificationDispatcher.new(
+        telegram: working,
+        logger: logger,
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "recovery_reminder_window_sec" => 28_800 },
+        now: -> { @clock ||= Time.utc(2026, 5, 25, 10, 0, 0) },
+        alert_store: store
+      )
+      @clock = Time.utc(2026, 5, 25, 10, 0, 0)
+      d_in.process_rows([ recovery_row ])
+
+      failing = AlwaysFailingTelegram.new
+      d_out = Hive::Bot::NotificationDispatcher.new(
+        telegram: failing,
+        logger: logger,
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "recovery_reminder_window_sec" => 28_800 },
+        now: -> { @clock },
+        alert_store: store
+      )
+      # Tick 1 absent: mark_absent only, no Recovered attempt yet.
+      d_out.process_rows([])
+      assert_equal 0, failing.calls
+      # Tick 2 absent (past grace): Recovered attempted, send fails.
+      @clock += 61
+      d_out.process_rows([])
+      assert_equal 1, failing.calls
+
+      fingerprint = Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
+      entry = store.entry(fingerprint)
+      refute_nil entry, "failed Recovered must leave the entry intact"
+      refute_nil entry.next_attempt_after,
+                 "Recovered send failure must call record_send_failure to schedule backoff"
+    end
+  end
+
+  def test_reminder_notification_raises_on_unexpected_recovery_headline_shape
+    d = dispatcher
+    # Stub NotificationBuilders.recovery to return text that does not
+    # start with the expected "⚠ " sentinel; reminder_notification must
+    # raise rather than silently mutate the wrong line.
+    original = Hive::Bot::NotificationBuilders.method(:recovery)
+    Hive::Bot::NotificationBuilders.define_singleton_method(:recovery) do |row, **_kwargs|
+      Hive::Bot::NotificationBuilders::Notification.new(
+        text: "different headline\nbody",
+        keyboard: nil
+      )
+    end
+
+    err = assert_raises(RuntimeError) do
+      d.send(:reminder_notification, recovery_row)
+    end
+    assert_match(/reminder_notification expected NotificationBuilders\.recovery/, err.message)
+  ensure
+    Hive::Bot::NotificationBuilders.define_singleton_method(:recovery, original) if original
+  end
+
   def test_fresh_install_silently_seeds_first_tick_and_alerts_only_on_deltas
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")
@@ -295,6 +359,40 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 2, telegram.messages.size, "reminder should fire after 90 min"
     assert_match(/Still stuck \(1 h 30 min\)/, telegram.messages.last[:text],
                  "reminder label uses combined hours+minutes form for windows that are >= 1h but not whole-hour")
+  end
+
+  def test_dispatcher_uses_default_now_lambda_when_not_provided
+    # Production callers (Supervisor) construct without `now:` and rely
+    # on the default lambda returning Time.now. Exercise the default
+    # so the constructor signature line is covered.
+    d = Hive::Bot::NotificationDispatcher.new(
+      telegram: StubTelegram.new,
+      logger: StubLogger.new,
+      bot_config: { "chat_id_allowlist" => [ 12345 ], "recovery_reminder_window_sec" => 28_800 }
+    )
+    now_lambda = d.instance_variable_get(:@now)
+    refute_nil now_lambda
+    assert_in_delta Time.now.to_f, now_lambda.call.to_f, 1.0,
+                    "default now: lambda must return current time"
+  end
+
+  def test_reminder_label_renders_minutes_form_for_sub_hour_windows
+    # Sub-hour windows aren't normally reachable via config bounds (3600 floor),
+    # but the dispatcher accepts raw bot_config so the minutes form must still
+    # apply if a caller bypasses validation.
+    d = Hive::Bot::NotificationDispatcher.new(
+      telegram: telegram,
+      logger: logger,
+      bot_config: { "chat_id_allowlist" => [ 12345 ], "recovery_reminder_window_sec" => 1800 },
+      now: -> { @clock ||= Time.utc(2026, 5, 25, 10, 0, 0) }
+    )
+    @clock = Time.utc(2026, 5, 25, 10, 0, 0)
+    d.process_rows([ recovery_row ])
+    @clock += 1800
+    d.process_rows([ recovery_row ])
+
+    assert_match(/Still stuck \(30 min\)/, telegram.messages.last[:text],
+                 "sub-1h window uses the bare 'N min' form")
   end
 
   def test_reminder_label_renders_pure_hours_when_whole_hour_window

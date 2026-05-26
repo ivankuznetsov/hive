@@ -193,15 +193,15 @@ module Hive
       def recovery_match_attr(row)
         attrs = row.attrs.to_h.transform_keys(&:to_s)
         keys = case row.marker.to_s.downcase
-               when "review_error", "review_ci_stale"
+        when "review_error", "review_ci_stale"
                  %w[pass phase reason]
-               when "review_stale"
+        when "review_stale"
                  %w[pass reason]
-               when "error"
+        when "error"
                  %w[exit_code]
-               else
+        else
                  []
-               end
+        end
         key = keys.find { |candidate| !attrs[candidate].to_s.empty? }
         key ? "#{key}=#{attrs[key]}" : nil
       end

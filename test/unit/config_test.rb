@@ -1867,4 +1867,17 @@ class ConfigTest < Minitest::Test
     assert_equal "bot.notification_dedupe_window_sec", result.first[:key]
     assert_includes result.first[:replacement], "alert_state_file"
   end
+
+  def test_warn_deprecated_bot_dedupe_writes_one_stderr_line_per_deprecated_entry
+    captured = +""
+    Hive::Config.singleton_class.send(:public, :warn_deprecated_bot_dedupe!)
+    $stderr = StringIO.new(captured)
+    Hive::Config.warn_deprecated_bot_dedupe!({ "notification_dedupe_window_sec" => 600 }, "/tmp/hive-config.yml")
+    assert_match(/hive: bot\.notification_dedupe_window_sec.*deprecated.*alert_state_file/,
+                 captured,
+                 "warn_deprecated_bot_dedupe! must emit one stderr line per deprecated key")
+  ensure
+    $stderr = STDERR
+    Hive::Config.singleton_class.send(:private, :warn_deprecated_bot_dedupe!)
+  end
 end

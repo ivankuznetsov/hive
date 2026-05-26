@@ -523,6 +523,39 @@ class HiveBotSupervisorTest < Minitest::Test
                  "dry_run must not call reset_task even when alert_reset is present"
   end
 
+  def test_clear_inline_keyboard_swallows_telegram_errors
+    @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
+      raise IOError, "telegram offline"
+    end
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "develop", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      clear_keyboard: true
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12, message_id: 777))
+
+    failure = @logger.events.find { |evt| evt[:name] == :send_failure }
+    refute_nil failure, ":send_failure must be logged when edit_message_reply_markup raises"
+    assert_equal "edit_message_reply_markup", failure[:payload][:source]
+    assert_equal 1, @child_supervisor.dispatched.length,
+                 "the command must still dispatch even when keyboard clear fails"
+  end
+
+  def test_registered_project_names_returns_empty_when_config_raises
+    original = Hive::Config.method(:registered_projects)
+    Hive::Config.define_singleton_method(:registered_projects) do
+      raise Hive::ConfigError, "synthetic"
+    end
+
+    assert_equal [], @supervisor.send(:registered_project_names),
+                 "config load errors during registered_project_names must yield []"
+  ensure
+    Hive::Config.define_singleton_method(:registered_projects, original) if original
+  end
+
   def test_dispatch_command_sequence_clears_inline_keyboard_when_requested
     result = FakeRouter::Result.new(
       action: :dispatch_commands,

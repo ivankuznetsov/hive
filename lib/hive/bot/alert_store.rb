@@ -151,7 +151,11 @@ module Hive
       private
 
       def with_rollback
-        snapshot = Marshal.load(Marshal.dump(@data))
+        # JSON round-trip rather than Marshal: the data is already JSON-
+        # serializable (it's about to be persisted via JSON.pretty_generate),
+        # and JSON has no code-execution attack surface, which keeps brakeman
+        # happy and the deep-clone semantics aligned with the on-disk format.
+        snapshot = ::JSON.parse(::JSON.generate(@data))
         yield
       rescue StandardError
         @data = snapshot

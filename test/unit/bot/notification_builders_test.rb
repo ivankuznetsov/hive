@@ -136,6 +136,41 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes labels, "Show details"
   end
 
+  def test_review_waiting_non_guardrail_builds_findings_triage_keyboard
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "needs_input", marker: "review_waiting", attrs: { "reason" => "needs_findings" })
+    )
+
+    assert_match(/Review triage is waiting/, notification.text)
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_includes labels, "Accept all"
+    assert_includes labels, "Reject all"
+    assert_includes labels, "Show details"
+  end
+
+  def test_recovery_match_attr_review_stale_uses_pass_reason
+    attrs = { "pass" => "3", "reason" => "timeout" }
+    r = row(action: "recover_review", marker: "review_stale", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:pass=3\z/, autofix,
+                 "review_stale must drive recovery_match_attr toward the pass=<n> key")
+  end
+
+  def test_recovery_match_attr_error_uses_exit_code
+    attrs = { "exit_code" => "137" }
+    r = row(action: "error", marker: "error", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:exit_code=137\z/, autofix,
+                 "generic `error` marker must drive recovery_match_attr toward exit_code")
+  end
+
+  def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix
+    r = row(action: "recover_execute", marker: "execute_stale", attrs: { "pass" => "1" })
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    refute_match(/=/, autofix.split(":").last.to_s,
+                 "unknown-to-recovery_match_attr markers must produce a no-match_attr callback")
+  end
+
   def test_recovery_marker_builds_plain_language_autofix_notification
     notification = Hive::Bot::NotificationBuilders.build(
       row(

@@ -17,18 +17,10 @@
       "note": "False positive. Open3.capture3 array form in Stages::Finalize#final_commits. base is produced by `git merge-base HEAD origin/<default>` and interpolated into one revspec argv element (`base..HEAD`); no shell ever sees it."
     },
     {
-      "fingerprint": "c95e1a89a496342c7c7f06de67790df2bc46bc538b9ced61c16a703fb42facb5",
-      "note": "False positive. Open3.capture3 array form in BrainstormTmux#sweep_orphan_processes. task.folder is Regexp.escape'd into one pgrep pattern argv element; no shell ever sees it."
-    },
-    {
-      "fingerprint": "5bca07d54019b8f635328009cbc5517d6d7e8f74d12afcb448517a482176d392",
-      "note": "False positive. Open3.capture3 array form in BrainstormTmux#sweep_orphan_processes. task.folder is Regexp.escape'd into one pkill pattern argv element; no shell ever sees it."
-    },
-    {
       "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",
       "note": "False positive. Open3.capture3 array form in GitOps#commits_behind. `ref` is `origin/<default_branch>` constructed inside Hive::Rebase from `cfg.default_branch || git.default_branch` (the latter from `git symbolic-ref refs/remotes/origin/HEAD`). Not attacker-controlled; passed as a single argv element to execve(2)."
     }
   ],
-  "updated": "2026-05-15",
+  "updated": "2026-05-26",
   "brakeman_version": "8.0.4"
 }

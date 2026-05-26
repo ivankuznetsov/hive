@@ -233,6 +233,19 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
+  def test_clear_and_retry_replies_when_stage_has_no_retry_verb
+    result = @handlers.handle(
+      :callback_clear_and_retry,
+      update("clear_retry:alpha:done-task-260519-abcd:9-done:REVIEW_ERROR")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/No retry verb for stage 9-done/, result.text,
+                 "clear_and_retry must short-circuit instead of dispatching zero commands plus an alert_reset")
+    assert_nil result.alert_reset,
+               "with no commands to run, alert_reset must NOT fire (otherwise the alert clears without any retry)"
+  end
+
   def test_autofix_marker_dispatches_clear_then_retry
     result = @handlers.handle(
       :callback_autofix,

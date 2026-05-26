@@ -187,6 +187,44 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_clean_orphaned_tmp_files_swallows_glob_errors
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      original_glob = Dir.method(:glob)
+      Dir.define_singleton_method(:glob) do |*args, **opts|
+        raise IOError, "synthetic glob failure" if args.first.to_s.include?(File.dirname(path))
+
+        original_glob.call(*args, **opts)
+      end
+      Hive::Bot::AlertStore.new(path: path) # must NOT raise — cleanup is best-effort
+    ensure
+      Dir.define_singleton_method(:glob, original_glob) if original_glob
+    end
+  end
+
+  def test_parse_time_returns_nil_for_malformed_persisted_value
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      File.write(path, JSON.generate({
+                                       "schema_version" => 1,
+                                       "entries" => {
+                                         "fp1" => {
+                                           "first_seen_at" => "not-a-real-time",
+                                           "reminded_at" => nil,
+                                           "row" => {
+                                             "project" => "hive", "slug" => "a-260525-aaaa", "stage" => "6-review",
+                                             "marker" => "review_error", "attrs" => {}, "action" => "recover_review"
+                                           }
+                                         }
+                                       }
+                                     }))
+      store = Hive::Bot::AlertStore.new(path: path)
+
+      assert_nil store.entry("fp1").first_seen_at,
+                 "malformed first_seen_at must parse to nil rather than raising"
+    end
+  end
+
   def test_constructor_cleans_orphan_tmp_files
     with_tmp_dir do |dir|
       path = File.join(dir, "alerts.json")

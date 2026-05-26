@@ -1111,8 +1111,10 @@ module Hive
     ].freeze
 
     def warn_deprecated_bot_dedupe!(bot, source_path)
+      # deprecated_bot_keys already returns the fully-qualified key
+      # ("bot.<name>"), so the warn line does not add its own prefix.
       deprecated_bot_keys(bot).each do |entry|
-        warn "hive: bot.#{entry[:key]} in #{describe_source(source_path)} is deprecated; " \
+        warn "hive: #{entry[:key]} in #{describe_source(source_path)} is deprecated; " \
              "alert lifecycle now uses #{entry[:replacement]}"
       end
     end

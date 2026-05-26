@@ -9,7 +9,8 @@ class HiveBotSupervisorTest < Minitest::Test
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :error, :envelope, keyword_init: true)
 
-  FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears, keyword_init: true) do
+  FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
+                            :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
       raise raise_on_send if raise_on_send
 
@@ -18,6 +19,12 @@ class HiveBotSupervisorTest < Minitest::Test
 
     def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
       (self.keyboard_clears ||= []) << { chat_id: chat_id, message_id: message_id, reply_markup: reply_markup }
+    end
+
+    def set_my_commands(commands:)
+      raise raise_on_set_my_commands if raise_on_set_my_commands
+
+      (self.commands_registered ||= []) << commands
     end
   end
 
@@ -213,6 +220,85 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     assert_equal "No diagnostic available for stuck-task.", @telegram.messages.first.fetch(:text)
+  end
+
+  CallbackUpdate = Struct.new(:callback_query_id, :update_id, keyword_init: true) do
+    def callback_query?; !callback_query_id.nil?; end
+    def callback_data; "approve:plan:hive:slug:2-brainstorm"; end
+  end
+
+  def test_ack_callback_query_calls_telegram_with_callback_query_id
+    captured = []
+    @telegram.define_singleton_method(:answer_callback_query) do |callback_query_id:|
+      captured << callback_query_id
+    end
+
+    @supervisor.send(:ack_callback_query, CallbackUpdate.new(callback_query_id: "cbq-99"))
+
+    assert_equal [ "cbq-99" ], captured
+  end
+
+  def test_ack_callback_query_skips_when_callback_query_id_missing
+    called = false
+    @telegram.define_singleton_method(:answer_callback_query) do |callback_query_id:|
+      called = true
+    end
+
+    @supervisor.send(:ack_callback_query, CallbackUpdate.new(callback_query_id: nil))
+
+    refute called, "ack_callback_query must short-circuit when callback_query_id is nil"
+  end
+
+  def test_ack_callback_query_logs_send_failure_on_telegram_exception
+    @telegram.define_singleton_method(:answer_callback_query) do |callback_query_id:|
+      raise StandardError, "telegram down"
+    end
+
+    @supervisor.send(:ack_callback_query, CallbackUpdate.new(callback_query_id: "cbq-7"))
+
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure
+    assert_equal "answer_callback_query", failure.fetch(:payload).fetch(:source)
+    assert_equal "cbq-7", failure.fetch(:payload).fetch(:callback_query_id)
+  end
+
+  def test_reap_children_dispatches_reply_for_each_completed_child
+    @child_supervisor.reap_batches << [ child_exit(exit_code: 0) ]
+
+    @supervisor.reap_children
+
+    # exit_code 0 yields nil from child_completion_text → no Telegram ack.
+    # The contract under test is that reap_children iterates the batch and
+    # calls reply_for_child without raising; @telegram.messages stays empty
+    # because the clean-exit path is silent by design.
+    assert_empty @telegram.messages,
+                 "exit_code 0 must not produce a Telegram ack (child_completion_text returns nil)"
+  end
+
+  def test_register_bot_commands_sends_full_command_list_to_telegram
+    @supervisor.send(:register_bot_commands)
+
+    registered = Array(@telegram.commands_registered)
+    assert_equal 1, registered.length, "register_bot_commands must call set_my_commands exactly once"
+
+    commands = registered.first
+    assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
+    slash_names = commands.map { |cmd| cmd.fetch(:command) }
+    assert_equal %w[idea status queue answer approve done help], slash_names
+    assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
+           "every command description must be non-empty and within Telegram's 256-char cap")
+  end
+
+  def test_register_bot_commands_swallows_telegram_failure_and_logs_send_failure
+    @telegram.raise_on_set_my_commands = StandardError.new("boom")
+
+    @supervisor.send(:register_bot_commands)  # must not raise
+
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure, "a set_my_commands failure must be logged as :send_failure"
+    assert_equal "set_my_commands", failure.fetch(:payload).fetch(:source)
+    assert_equal "StandardError", failure.fetch(:payload).fetch(:error_class)
+    assert_equal "boom", failure.fetch(:payload).fetch(:message)
   end
 
   def test_child_completion_text_covers_exit_statuses

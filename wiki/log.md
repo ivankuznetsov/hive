@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T14:30:00Z] bot — register slash commands with Telegram on start
+
+**Action:** Added `Hive::Bot::Telegram#set_my_commands` (thin wrapper over the Bot API) and `Hive::Bot::Supervisor#register_bot_commands` called once in `run_forever` after `:bot_started`. The seven supported slash commands (`/idea`, `/status`, `/queue`, `/answer`, `/approve`, `/done`, `/help`) and their descriptions live in `Hive::Bot::Supervisor::BOT_COMMANDS`. Failures are swallowed and logged as `:send_failure source: "set_my_commands"` so a Telegram outage at bot start does not prevent `poll_loop` from running. Intentionally NOT re-issued on SIGHUP/config reload — the command list does not depend on config. Operators now see the slash commands stacked in Telegram's blue quick-actions menu when they tap the `/` icon.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
 **Action:** Dogfooded the merged project-global `claude.mode: tmux` path against real Claude in a disposable project. The run used a temporary `HIVE_HOME` plus private `HIVE_TMUX_SOCKET`, verified `hive doctor --json`, ran brainstorm to `marker_after=waiting`, filled the answer, reran to `marker_after=complete`, confirmed `round_waiting`/`round_complete` events, `hive status --json` `ready_to_plan`, and tmux cleanup.

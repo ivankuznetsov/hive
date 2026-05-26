@@ -46,6 +46,17 @@ hive bot tail
 Free text outside an active answer conversation is rejected with a
 `/help` hint. Unauthorized chats receive no reply.
 
+On bot start the supervisor calls Telegram's `setMyCommands` so the
+blue quick-actions menu (shown when the operator taps the `/` icon in
+the chat input) surfaces `/idea`, `/status`, `/queue`, `/answer`,
+`/approve`, `/done`, and `/help` with human-readable descriptions.
+This is a one-shot idempotent RPC at start — it is not re-issued on
+SIGHUP/config reload because the command list does not change with
+config. A network failure during registration is logged as
+`:send_failure` with `source: "set_my_commands"` and does not block
+`poll_loop` from starting. The command list and descriptions live in
+`Hive::Bot::Supervisor::BOT_COMMANDS`.
+
 ## Inline actions
 
 Push notifications use callback data that routes to:

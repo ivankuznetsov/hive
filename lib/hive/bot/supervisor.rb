@@ -18,6 +18,16 @@ require "hive/task"
 module Hive
   module Bot
     class Supervisor
+      BOT_COMMANDS = [
+        { command: "idea",    description: "Capture a new idea" },
+        { command: "status",  description: "Show active tasks" },
+        { command: "queue",   description: "Show queued and waiting tasks" },
+        { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },
+        { command: "approve", description: "Approve a task at its current stage: /approve <slug>" },
+        { command: "done",    description: "Mark a brainstorm as done after answering" },
+        { command: "help",    description: "Show available commands" }
+      ].freeze
+
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false)
@@ -56,6 +66,7 @@ module Hive
       def run_forever
         install_signal_handlers!
         @logger.event(:bot_started, pid: Process.pid, dry_run: @dry_run, version: Hive::VERSION)
+        register_bot_commands
         threads = [
           Thread.new { poll_loop },
           Thread.new { status_loop },
@@ -103,6 +114,15 @@ module Hive
         @logger.event(:send_failure, source: "answer_callback_query",
                                       callback_query_id: id, error_class: e.class.name,
                                       message: e.message)
+      end
+
+      # One-shot RPC at bot start. Intentionally not re-called on SIGHUP/
+      # config reload — commands don't change with config.
+      def register_bot_commands
+        @telegram.set_my_commands(commands: BOT_COMMANDS)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "set_my_commands",
+                                      error_class: e.class.name, message: e.message)
       end
 
       def status_tick

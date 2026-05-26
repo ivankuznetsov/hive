@@ -161,30 +161,6 @@ module Hive
           )
         end
 
-        def path_a(data)
-          _prefix, project, slug = split_callback(data, 3)
-          @result_class.new(action: :start_codex, project: project, slug: slug, mode: :path_a)
-        end
-
-        def path_b(data)
-          _prefix, project, slug = split_callback(data, 3)
-          @result_class.new(action: :reply, project: project, slug: slug,
-                            text: "Send the answer as a message.")
-        end
-
-        def codex_write(data)
-          _prefix, project, slug, question_n = split_callback(data, 4)
-          begin
-            n = Integer(question_n)
-          rescue ArgumentError, TypeError => e
-            @logger&.event(:callback_malformed, data: data, reason: "non_integer_question_n",
-                                                  error_class: e.class.name)
-            return @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
-          end
-          @result_class.new(action: :confirm_codex_draft, project: project, slug: slug,
-                            question_n: n)
-        end
-
         def findings_toggle(data, verb)
           _prefix, _kind, project, slug, stage = split_callback(data, 5)
           stage_argv = stage ? [ "--stage", stage ] : []

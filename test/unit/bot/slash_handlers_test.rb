@@ -62,4 +62,50 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "hive", result.project
     assert_equal [ "hive", "status", "--json" ], result.command_argv
   end
+
+  FakeConversationState = Struct.new(:slug, keyword_init: true)
+
+  class FakeConversationStore
+    attr_reader :cleared
+
+    def initialize(pending: 0, state: nil)
+      @pending = pending
+      @state = state
+      @cleared = []
+    end
+
+    def pending_confirm_count(chat_id:) = @pending
+    def get(chat_id:) = @state
+    def clear(chat_id:, slug:) = (@cleared << [ chat_id, slug ])
+  end
+
+  def test_done_dispatches_hive_run_and_clears_conversation_state
+    store = FakeConversationStore.new(state: FakeConversationState.new(slug: "ship-it-260526-abcd"))
+
+    result = @handlers.done(Update.new(text: "/done", chat_id: 12345), store)
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "run", "ship-it-260526-abcd", "--json" ], result.command_argv
+    assert_equal "ship-it-260526-abcd", result.slug
+    assert_equal [ [ 12345, "ship-it-260526-abcd" ] ], store.cleared,
+                 "/done must clear the active conversation so the auto-dispatch path doesn't double-fire"
+  end
+
+  def test_done_with_pending_confirm_drafts_warns_without_dispatch
+    store = FakeConversationStore.new(pending: 2)
+
+    result = @handlers.done(Update.new(text: "/done", chat_id: 12345), store)
+
+    assert_equal :reply, result.action
+    assert_match(/2 draft answers/, result.text)
+  end
+
+  def test_done_without_active_conversation_replies_with_friendly_hint
+    store = FakeConversationStore.new(state: nil)
+
+    result = @handlers.done(Update.new(text: "/done", chat_id: 12345), store)
+
+    assert_equal :reply, result.action
+    assert_match(/No active brainstorm conversation/, result.text)
+  end
 end

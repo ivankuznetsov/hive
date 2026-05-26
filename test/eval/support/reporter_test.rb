@@ -21,19 +21,41 @@ class HiveEvalReporterTest < Minitest::Test
   end
 
   def test_cli_reports_failing_scenario_and_exits_nonzero
+    # s3_noise used to be the always-failing scenario the reporter exercised.
+    # Now that daemon-gated ready_to_X suppression has landed (commit
+    # 0aa16678), s3_noise passes — which is the correct production
+    # behavior. Write a tmpdir-scoped fixture that asserts a deliberate
+    # failure so we still exercise the reporter's failure path (exit
+    # nonzero + report shape + per-scenario "fail" status) without
+    # coupling to any specific production bug.
     Dir.mktmpdir("hive-eval-report") do |dir|
-      report = File.join(dir, "s3.json")
+      fixture = File.join(dir, "intentional_failure_test.rb")
+      File.write(fixture, <<~RUBY)
+        require "eval/eval_helper"
+
+        class HiveEvalIntentionalFailureFixture < Minitest::Test
+          include Hive::Eval::ScenarioSupport
+
+          def test_intentional_failure_for_reporter_contract
+            given_project(name: "hive")
+            assert false, "intentional failure for HiveEvalReporterTest fixture"
+          end
+        end
+      RUBY
+      report = File.join(dir, "failure.json")
 
       _out, _err, status = Open3.capture3(
-        "bin/hive-eval", "--scenario", "s3_noise", "--no-judge", "--report", report
+        { "HIVE_EVAL_NO_JUDGE" => "1" },
+        "bin/hive-eval", "--scenario", fixture, "--no-judge", "--report", report
       )
 
-      refute status.success?, "scenario 3 is expected to fail against the current bot"
+      refute status.success?, "fixture asserts false; reporter CLI must exit nonzero on failure"
       doc = JSON.parse(File.read(report))
+      assert_equal "hive-eval-report", doc.fetch("schema")
       entry = doc.fetch("scenarios").fetch(0)
       assert_equal "fail", entry.fetch("status")
-      assert_match(/proactive messages violated allow-list/, entry.fetch("failures").join("\n"))
-      assert entry.fetch("captured_messages").any? { |message| message.fetch("reason") == "task_finished" }
+      assert_match(/intentional failure for HiveEvalReporterTest fixture/,
+                   entry.fetch("failures").join("\n"))
     end
   end
 end

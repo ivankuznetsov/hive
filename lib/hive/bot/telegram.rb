@@ -79,6 +79,14 @@ module Hive
         client.api.answer_callback_query(params)
       end
 
+      # Registers the bot's slash-command list with Telegram so the blue
+      # quick-actions menu (shown when the operator taps the `/` icon)
+      # surfaces our commands with human-readable descriptions. Idempotent
+      # on Telegram's side; one call at bot start is enough.
+      def set_my_commands(commands:)
+        client.api.set_my_commands(commands: commands)
+      end
+
       private
 
       def build_update(raw)

@@ -31,16 +31,18 @@ module Hive
 
       def add(fingerprint, row, now, delivered_to: [])
         synchronize do
-          entries[fingerprint] = {
-            "first_seen_at" => timestamp(now),
-            "reminded_at" => nil,
-            "delivered_to" => normalize_chat_ids(delivered_to),
-            "consecutive_failures" => 0,
-            "next_attempt_after" => nil,
-            "absent_since" => nil,
-            "row" => serialize_row(row)
-          }
-          persist_locked!
+          with_rollback do
+            entries[fingerprint] = {
+              "first_seen_at" => timestamp(now),
+              "reminded_at" => nil,
+              "delivered_to" => normalize_chat_ids(delivered_to),
+              "consecutive_failures" => 0,
+              "next_attempt_after" => nil,
+              "absent_since" => nil,
+              "row" => serialize_row(row)
+            }
+            persist_locked!
+          end
         end
       end
 
@@ -50,8 +52,10 @@ module Hive
           return false unless entry
           return false if entry["absent_since"]
 
-          entry["absent_since"] = timestamp(now)
-          persist_locked!
+          with_rollback do
+            entry["absent_since"] = timestamp(now)
+            persist_locked!
+          end
           true
         end
       end
@@ -62,8 +66,10 @@ module Hive
           return false unless entry
           return false if entry["absent_since"].nil?
 
-          entry["absent_since"] = nil
-          persist_locked!
+          with_rollback do
+            entry["absent_since"] = nil
+            persist_locked!
+          end
           true
         end
       end
@@ -77,10 +83,12 @@ module Hive
           additions = normalize_chat_ids(chat_ids) - existing
           return false if additions.empty?
 
-          entry["delivered_to"] = existing + additions
-          entry["consecutive_failures"] = 0
-          entry["next_attempt_after"] = nil
-          persist_locked!
+          with_rollback do
+            entry["delivered_to"] = existing + additions
+            entry["consecutive_failures"] = 0
+            entry["next_attempt_after"] = nil
+            persist_locked!
+          end
           true
         end
       end
@@ -92,9 +100,11 @@ module Hive
 
           failures = entry["consecutive_failures"].to_i + 1
           delay = backoff_for || backoff_seconds(failures)
-          entry["consecutive_failures"] = failures
-          entry["next_attempt_after"] = timestamp(now + delay)
-          persist_locked!
+          with_rollback do
+            entry["consecutive_failures"] = failures
+            entry["next_attempt_after"] = timestamp(now + delay)
+            persist_locked!
+          end
           true
         end
       end
@@ -105,36 +115,56 @@ module Hive
           return false unless entry
           return false if entry["consecutive_failures"].to_i.zero? && entry["next_attempt_after"].nil?
 
-          entry["consecutive_failures"] = 0
-          entry["next_attempt_after"] = nil
-          persist_locked!
+          with_rollback do
+            entry["consecutive_failures"] = 0
+            entry["next_attempt_after"] = nil
+            persist_locked!
+          end
           true
         end
       end
+
+      private
+
+      def with_rollback
+        snapshot = Marshal.load(Marshal.dump(@data))
+        yield
+      rescue StandardError
+        @data = snapshot
+        raise
+      end
+
+      public
 
       def mark_reminded(fingerprint, now)
         synchronize do
           entry = entries[fingerprint]
           next unless entry
 
-          entry["reminded_at"] = timestamp(now)
-          persist_locked!
+          with_rollback do
+            entry["reminded_at"] = timestamp(now)
+            persist_locked!
+          end
         end
       end
 
       def remove(fingerprint)
         synchronize do
-          entry = entries.delete(fingerprint)
-          persist_locked! if entry
-          entry ? row_from_raw(entry["row"]) : nil
+          entry = entries[fingerprint]
+          next nil unless entry
+
+          with_rollback do
+            entries.delete(fingerprint)
+            persist_locked!
+          end
+          row_from_raw(entry["row"])
         end
       end
 
       def remove_matching(project:, slug:, stage: nil, marker: nil, match_attr: nil)
         attr_key, attr_value = parse_match_attr(match_attr)
         synchronize do
-          before = entries.size
-          entries.delete_if do |_fingerprint, raw|
+          targets = entries.select do |_fingerprint, raw|
             row = row_from_raw(raw.is_a?(Hash) ? raw["row"] : nil)
             next false unless row.project.to_s == project.to_s
             next false unless row.slug.to_s == slug.to_s
@@ -144,9 +174,13 @@ module Hive
 
             true
           end
-          removed = before - entries.size
-          persist_locked! if removed.positive?
-          removed
+          next 0 if targets.empty?
+
+          with_rollback do
+            targets.each_key { |fingerprint| entries.delete(fingerprint) }
+            persist_locked!
+          end
+          targets.size
         end
       end
 

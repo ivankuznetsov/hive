@@ -187,6 +187,43 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_persist_failure_rolls_back_in_memory_state_on_add
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      # Add one entry successfully so we have a baseline.
+      store.add("fp1", row, Time.utc(2026, 5, 25, 10, 0, 0))
+      assert_equal [ "fp1" ], store.each_fingerprint.to_a
+
+      # Force the next persist to fail.
+      store.define_singleton_method(:persist_locked!) { raise IOError, "disk full" }
+      assert_raises(IOError) do
+        store.add("fp2", row, Time.utc(2026, 5, 25, 10, 0, 5))
+      end
+
+      # In-memory state must NOT contain fp2 — otherwise a restart would
+      # re-alert anything persisted only in memory.
+      assert_equal [ "fp1" ], store.each_fingerprint.to_a,
+                   "failed persist must roll back the in-memory mutation"
+    end
+  end
+
+  def test_persist_failure_rolls_back_remove_matching
+    with_tmp_dir do |dir|
+      store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))
+      store.add("fp1", row, Time.utc(2026, 5, 25, 10, 0, 0))
+      store.add("fp2", row(slug: "other-task-260525-abcd"), Time.utc(2026, 5, 25, 10, 0, 5))
+
+      store.define_singleton_method(:persist_locked!) { raise IOError, "disk full" }
+      assert_raises(IOError) do
+        store.remove_matching(project: "hive", slug: "stuck-task-260525-abcd", stage: "6-review")
+      end
+
+      assert_includes store.each_fingerprint.to_a, "fp1",
+                      "remove_matching must roll back deletions on persist failure"
+      assert_includes store.each_fingerprint.to_a, "fp2"
+    end
+  end
+
   def test_remove_matching_with_marker_only_removes_matching_marker
     with_tmp_dir do |dir|
       store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))

@@ -15,6 +15,16 @@ capture       refine           design      build          draft PR       harden 
 
 Read the model in depth in [docs/concepts.md](docs/concepts.md) — folder-as-agent, the marker protocol that lets stages negotiate handoff, the nine stages in detail, and the trade-offs that come with making everything a file.
 
+## Demo
+
+A sub-two-minute reel of the whole loop — install, `hive init`, capture an idea in the TUI, answer brainstorm questions in vim, and archive the finished task once Hive has shipped it:
+
+![Hive demo](docs/assets/hive-demo.webp)
+
+Full-quality MP4 (~4&nbsp;MB): [docs/assets/hive-demo.mp4](docs/assets/hive-demo.mp4).
+
+The result Hive built in that reel lives at [ivankuznetsov/shipped](https://github.com/ivankuznetsov/shipped) — a real public repo seeded with a one-sentence idea ("a Telegram bot that sends a daily digest of what was shipped"), driven through brainstorm → plan → execute → multi-agent review → finalize, and landed as [PR #1](https://github.com/ivankuznetsov/shipped/pull/1).
+
 ## Install
 
 Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. All three channels below download the same `.gem`, verify the signature, and run `gem install` against it. After install, `hive init .` in any project writes the systemd-user (Linux) or launchd (macOS) daemon unit so the daemon survives reboots.

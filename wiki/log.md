@@ -23,6 +23,20 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[commands/bot]]
 
+## [2026-05-26T14:30:00Z] claude-launcher - preserve project-owned .claude/settings.json
+
+**Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.
+
+**Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
+
+## [2026-05-26T10:15:00Z] daemon - self-reexec on source-file drift
+
+**Action:** Surfaced the daemon's new auto-re-exec behavior triggered by `lib/hive.rb` SHA-256 drift. Adds `ADR-031` recording the diagnosis (8,946 `schema_version` mismatches between PR #78 and the next restart) and the chosen mitigation. Updates `wiki/modules/daemon.md` with operator-facing details: fingerprint scope, rate-limit (60s), kill switch (`HIVE_DAEMON_NO_AUTO_REEXEC=1`), and what kinds of edits do and don't trigger re-exec.
+
+**Refreshed pages:**
+- [[decisions]] - new ADR-031 inserted ahead of ADR-030.
+- [[modules/daemon]] - added "Self-reexec on source drift" section before Backlinks.
+
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
 **Action:** Dogfooded the merged project-global `claude.mode: tmux` path against real Claude in a disposable project. The run used a temporary `HIVE_HOME` plus private `HIVE_TMUX_SOCKET`, verified `hive doctor --json`, ran brainstorm to `marker_after=waiting`, filled the answer, reran to `marker_after=complete`, confirmed `round_waiting`/`round_complete` events, `hive status --json` `ready_to_plan`, and tmux cleanup.

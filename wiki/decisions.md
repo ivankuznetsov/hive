@@ -9,6 +9,13 @@ tags: [decisions, adr]
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode.
 
+## ADR-031: Daemon self-reexec on source-file drift
+
+**Status:** Active
+**Context:** The daemon is a long-running Ruby process whose in-memory constants freeze at load time, while shelled-out `hive` subprocesses load fresh code on every invocation. PR #78 (2026-05-15) bumped `SCHEMA_VERSIONS["hive-status"]` from 1 to 2 in `lib/hive.rb`. Because the daemon process loaded before that bump and was not restarted, `StatusConsumer#validate_envelope!` (in-memory `expected=1`) kept rejecting every status envelope the subprocess emitted (`got 2, want 1`) — 8,946 events over ~3 days until the operator manually restarted on 2026-05-20. Every future schema bump silently reproduces the same incident without a restart-in-lockstep discipline.
+**Decision:** The dispatcher captures a SHA-256 fingerprint of `lib/hive.rb` at startup and rehashes the file on every tick. On mismatch it logs a `version_drift` event with both digests, sets `reexec_requested?`, and breaks the run loop. `Hive::Commands::Daemon#start_daemon` then calls `Kernel#exec` to replace the process with a fresh `hive daemon start` invocation — same PID (so the PID file stays valid), fresh code on both sides. `--detach` is omitted from the re-exec argv because we are already the daemonized child. Rate-limited to one re-exec per 60s. Operators can disable via `HIVE_DAEMON_NO_AUTO_REEXEC=1`.
+**Consequences:** Schema bumps no longer require a coordinated daemon restart — the next tick after `git pull` self-heals. The blast radius is bounded by `@shutdown_grace_sec` (existing terminate_all path runs before re-exec, so in-flight children are properly drained). The `dispatcher_started` event now carries `code_fingerprint` and `dispatcher_stopping` carries `reexec_requested`, both for observability. Detection is file-mtime/hash based on `lib/hive.rb`; edits that don't touch that file (e.g. dispatcher-only changes) DO NOT trigger re-exec, so reload semantics for non-schema code changes still require a manual restart — fine because the schema-version mismatch was the only failure mode that hard-blocked operation.
+
 ## ADR-030: Global Claude launch mode
 
 **Status:** Active

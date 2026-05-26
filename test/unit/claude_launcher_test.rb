@@ -484,6 +484,41 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_cleanup_scratch_restores_project_owned_settings_from_backup
+    with_tmp_task do |task|
+      settings = File.join(task.folder, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(settings))
+      backup = "#{settings}#{Hive::StopHookInstaller::BACKUP_SUFFIX}"
+      # Simulate state mid-spawn: backup holds the project's original
+      # content, settings.json holds the hive-installed Stop-hook stub.
+      File.write(backup, %({"enabledPlugins":{"frontend-design@official":true}}))
+      File.write(settings, %({"hooks":{"Stop":[]}}))
+      File.chmod(0o444, settings) # installer marks it read-only
+
+      Hive::ClaudeLauncher.cleanup_scratch(settings)
+
+      refute File.exist?(backup), "backup must be removed after restoring"
+      assert File.exist?(settings),
+             "settings.json must remain — restored from backup, not deleted"
+      assert_equal %({"enabledPlugins":{"frontend-design@official":true}}),
+                   File.read(settings),
+                   "restored content must match the project's original byte-for-byte"
+    end
+  end
+
+  def test_cleanup_scratch_deletes_when_no_backup_exists
+    with_tmp_task do |task|
+      settings = File.join(task.folder, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(settings))
+      File.write(settings, "{}")
+
+      Hive::ClaudeLauncher.cleanup_scratch(settings)
+
+      refute File.exist?(settings),
+             "no-backup case (project did not own the file) must keep the delete-on-cleanup semantics"
+    end
+  end
+
   def test_safe_with_log_mentions_task_folder_when_available
     task = Struct.new(:folder).new("/tmp/example-task")
 

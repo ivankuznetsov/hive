@@ -653,7 +653,7 @@ module Hive
       def diagnose_subprocess_exit(msg)
         return nil if msg.exit_code.nil? || msg.exit_code.zero?
 
-        diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb)
+        diagnostic = Hive::Tui::Subprocess.diagnose_recent_failure(msg.verb, spawn_id: msg.spawn_id)
         return nil if diagnostic.nil?
 
         [ @hive_model.with(flash: diagnostic, flash_set_at: Time.now), nil ]

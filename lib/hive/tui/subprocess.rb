@@ -1,5 +1,6 @@
 require "open3"
 require "securerandom"
+require "shellwords"
 require "tmpdir"
 require "fileutils"
 require "bubbletea"
@@ -20,7 +21,7 @@ module Hive
       #     waits for the child, deletes the per-spawn capture on
       #     exit_code == 0 (success has nothing to diagnose) and keeps
       #     it on non-zero exits, then dispatches
-      #     `Messages::SubprocessExited(verb:, exit_code:)`. Multiple
+      #     `Messages::SubprocessExited(verb:, exit_code:, spawn_id:)`. Multiple
       #     concurrent agents (across projects) work — the TUI keeps
       #     polling and rendering while children run, and a noisy child
       #     can no longer grow the shared log past its rotation cap
@@ -56,6 +57,9 @@ module Hive
       COMMAND_NOT_FOUND_EXIT = 127
       COMMAND_TIMEOUT_EXIT = 124
       RUN_QUIET_TIMEOUT_SECONDS = 30
+      DIAGNOSIS_LOG_INITIAL_LOOKBACK_BYTES = 64 * 1024
+      DIAGNOSIS_LOG_MAX_LOOKBACK_BYTES = 1024 * 1024
+      DIAGNOSIS_CAPTURE_TAIL_BYTES = 64 * 1024
 
       # Background spawn for workflow verbs (hive brainstorm/plan/
       # develop/review/pr/archive). Returns nil when the child starts
@@ -63,7 +67,7 @@ module Hive
       # exists. The TUI keeps running its render loop while the child
       # runs in parallel; multiple agents can run concurrently
       # across projects. A reaper Thread waits for the child and
-      # dispatches `Messages::SubprocessExited(verb:, exit_code:)` so
+      # dispatches `Messages::SubprocessExited(verb:, exit_code:, spawn_id:)` so
       # the TUI flashes the result.
       #
       # Why no foreground takeover: the workflow verbs invoke
@@ -72,10 +76,10 @@ module Hive
       # never needs the user's tty — taking over would only block the
       # TUI for no benefit, and force serial agent runs.
       #
-      # Stdout + stderr both redirect to `SUBPROCESS_LOG_PATH` (append)
-      # so a per-verb tail is available without corrupting the TUI's
-      # alt-screen. The agent's own structured log lands separately
-      # in `task.log_dir/*.log` (visible via Enter on agent_running rows).
+      # Stdout + stderr both redirect to a per-spawn capture file;
+      # `SUBPROCESS_LOG_PATH` stores only BEGIN/END/ERRNO marker lines.
+      # The agent's own structured log lands separately in
+      # `task.log_dir/*.log` (visible via Enter on agent_running rows).
       #
       # Pgroup leadership preserved: signal forwarding from the TUI
       # parent isn't installed (the child detaches into its own
@@ -94,7 +98,7 @@ module Hive
 
         pid = spawn_background_child(argv, spawn_id)
         if pid.nil?
-          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: COMMAND_NOT_FOUND_EXIT))
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: COMMAND_NOT_FOUND_EXIT, spawn_id: spawn_id))
           return false
         end
 
@@ -262,14 +266,14 @@ module Hive
           elsif spawn_id
             bound_spawn_capture(spawn_id)
           end
-          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code))
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: exit_code, spawn_id: spawn_id))
         rescue StandardError => e
           # `wait2` raised (ECHILD / pid tracking bug) — synthesize
           # an exit so the user's "running …" flash resolves to
           # "exited -1" rather than appearing wedged.
           Hive::Tui::Debug.log("dispatch_background", "reaper: #{e.class.name}: #{e.message}")
           begin
-            dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: -1))
+            dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: -1, spawn_id: spawn_id))
           rescue StandardError => inner
             # Runner torn down before we got here (post-quit reaper)
             # — logged and silenced. See lifecycle note above.
@@ -377,7 +381,7 @@ module Hive
         path = log_path
         FileUtils.mkdir_p(File.dirname(path))
         File.open(path, "a") do |f|
-          f.puts "----- #{Time.now.utc.iso8601} #{annotated}: #{argv.join(' ')} -----"
+          f.puts "----- #{Time.now.utc.iso8601} #{annotated}: #{Shellwords.join(argv)} -----"
         end
       rescue StandardError
         nil
@@ -462,17 +466,15 @@ module Hive
       # diagnostic is available, the TUI flashes that instead of the
       # generic "exited N — tail …" hint.
       #
-      # The lookup is best-effort: it reads the tail of the log,
-      # finds the most recent BEGIN that mentions the verb, and treats
-      # everything between that BEGIN and the next END as the verb's
-      # captured stderr. Concurrent verbs may interleave at line
-      # boundaries; if a pattern still matches we still show the
-      # diagnostic — false-positive risk is low because the patterns
-      # are specific.
-      def diagnose_recent_failure(verb)
+      # The lookup is best-effort and bounded: when the exit message
+      # carries a spawn id, it finds that exact BEGIN[id]; otherwise it
+      # falls back to the most recent BEGIN for the verb for legacy
+      # messages. The selected section is then matched against known
+      # stderr patterns.
+      def diagnose_recent_failure(verb, spawn_id: nil)
         return nil unless File.exist?(log_path)
 
-        section = recent_log_section_for(verb)
+        section = recent_log_section_for(verb, spawn_id: spawn_id)
         return nil if section.nil? || section.strip.empty?
 
         argv = parse_argv_from_section(section) || []
@@ -486,27 +488,30 @@ module Hive
       end
 
       # @api private
-      # Find the most recent BEGIN[id] for `verb` in the marker log;
-      # return the matching per-spawn capture file's contents (the
-      # actual child stderr, capped at 64KB tail). Returns nil if no
-      # BEGIN-for-verb is present, or if its capture file is gone (the
-      # success-path delete fired, or the sweep reaped an orphan).
+      # Find the BEGIN[id] for the exiting spawn when `spawn_id` is
+      # known; otherwise find the most recent BEGIN for `verb` as a
+      # legacy fallback. Return the matching per-spawn capture file's
+      # contents (the actual child stderr, capped at 64KB tail). Starts
+      # with the last 64KB of marker lines, then walks backward in 64KB
+      # increments up to 1MiB so a burst of concurrent marker traffic
+      # does not hide the BEGIN line for the subprocess that just
+      # exited. Returns nil if no matching BEGIN is present, or if its
+      # capture file is gone (the success-path delete fired, or the
+      # sweep reaped an orphan).
       #
       # Falls back to reading the section from the marker log itself
       # for entries that lack a correlation ID (legacy logs from
       # before per-spawn capture landed). The fallback returns the
       # text BEGIN..matching-END just like the pre-rewrite behavior.
-      def recent_log_section_for(verb)
-        cap = 64 * 1024
+      def recent_log_section_for(verb, spawn_id: nil)
         path = log_path
-        size = File.size(path)
-        offset = [ size - cap, 0 ].max
-        text = File.open(path, "r") do |f|
-          f.seek(offset)
-          f.read
+        id_pattern = if spawn_id
+          "\\[(?<id>#{Regexp.escape(spawn_id)})\\]"
+        else
+          "(?:\\[(?<id>[0-9a-f]{8})\\])?"
         end
-        begin_re = /^----- [^\n]* BEGIN(?:\([^)]+\))?(?:\[(?<id>[0-9a-f]{8})\])?: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
-        begin_match = text.enum_for(:scan, begin_re).map { Regexp.last_match }.last
+        begin_re = /^----- [^\n]* BEGIN(?:\([^)]+\))?#{id_pattern}: hive #{Regexp.escape(verb.to_s)}\b[^\n]* -----$/
+        text, begin_match = recent_marker_log_window(path, begin_re)
         return nil if begin_match.nil?
 
         spawn_id = begin_match[:id]
@@ -516,7 +521,7 @@ module Hive
           # `extract_project` runs against stderr and loses the
           # `--project` flag — multi-project users would see an
           # unscoped diagnostic flash.
-          capture = read_spawn_capture(spawn_id, cap)
+          capture = read_spawn_capture(spawn_id, DIAGNOSIS_CAPTURE_TAIL_BYTES)
           return capture.nil? ? nil : "#{begin_match[0]}\n#{capture}"
         end
 
@@ -531,14 +536,38 @@ module Hive
       end
 
       # @api private
-      def read_spawn_capture(spawn_id, cap)
-        path = spawn_capture_path(spawn_id)
+      def recent_marker_log_window(path, begin_re)
         size = File.size(path)
-        offset = [ size - cap, 0 ].max
+        max_window = [ size, DIAGNOSIS_LOG_MAX_LOOKBACK_BYTES ].min
+        window = [ DIAGNOSIS_LOG_INITIAL_LOOKBACK_BYTES, max_window ].min
+
+        loop do
+          text = read_log_tail(path, window)
+          begin_match = recent_begin_match(text, begin_re)
+          return [ text, begin_match ] if begin_match || window >= max_window
+
+          window = [ window + DIAGNOSIS_LOG_INITIAL_LOOKBACK_BYTES, max_window ].min
+        end
+      end
+
+      # @api private
+      def recent_begin_match(text, begin_re)
+        text.enum_for(:scan, begin_re).map { Regexp.last_match }.last
+      end
+
+      # @api private
+      def read_log_tail(path, bytes)
+        size = File.size(path)
+        offset = [ size - bytes, 0 ].max
         File.open(path, "r") do |f|
           f.seek(offset)
           f.read
         end
+      end
+
+      # @api private
+      def read_spawn_capture(spawn_id, cap)
+        read_log_tail(spawn_capture_path(spawn_id), cap)
       rescue Errno::ENOENT
         nil
       end
@@ -571,7 +600,14 @@ module Hive
         # Match `BEGIN:`, `BEGIN(interactive):`, and the F7 variants
         # carrying a correlation ID (`BEGIN[ID]:` / `BEGIN(interactive)[ID]:`).
         m = first.match(/BEGIN(?:\([^)]+\))?(?:\[[0-9a-f]{8}\])?: (.+) -----$/)
-        m ? m[1].split(/\s+/) : nil
+        return nil unless m
+
+        argv_text = m[1]
+        begin
+          Shellwords.split(argv_text)
+        rescue ArgumentError
+          argv_text.split(/\s+/)
+        end
       end
 
       # @api private

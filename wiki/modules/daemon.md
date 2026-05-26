@@ -84,6 +84,32 @@ immediately. Brainstorm, execute, and review `needs_input` rows still
 use mtime-baseline + debounce because those states represent actual
 user-authored answers or review decisions.
 
+## Self-reexec on source drift (ADR-031)
+
+The daemon is a long-running Ruby process whose in-memory constants
+(notably `Hive::Schemas::SCHEMA_VERSIONS`) freeze at load time, while
+shelled-out `hive` subprocesses load fresh code on every invocation.
+A `git pull` or gem upgrade that bumps a schema version between daemon
+restarts produces a producer/consumer mismatch where `StatusConsumer`
+rejects every envelope (historically: 8,946 `got 2, want 1` events
+were logged between PR #78 on 2026-05-15 and the next restart on
+2026-05-20).
+
+At startup the dispatcher captures a SHA-256 fingerprint of `lib/hive.rb`
+(the file holding `SCHEMA_VERSIONS`). On every tick it rehashes the
+file and compares. On mismatch it logs `version_drift` with the old
+and new digests, sets `reexec_requested?`, and breaks the run loop.
+`Hive::Commands::Daemon#start_daemon` then `Kernel#exec`-replaces the
+process with a fresh `hive daemon start` invocation — same PID, fresh
+code on both producer and consumer sides. `--detach` is omitted from
+the re-exec argv because we are already the daemonized child; calling
+`Process.daemon` a second time would fork off and orphan us.
+
+Rate-limited to one re-exec per 60s as a defense against pathological
+fingerprint flapping. Operators can disable the behavior entirely via
+`HIVE_DAEMON_NO_AUTO_REEXEC=1` (useful for tests and short-lived
+dev runs).
+
 ## Backlinks
 
 - [[commands/daemon]]

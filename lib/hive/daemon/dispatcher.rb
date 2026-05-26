@@ -1,3 +1,4 @@
+require "digest"
 require "hive/config"
 require "hive/stages"
 require "hive/task_action"
@@ -64,6 +65,18 @@ module Hive
 
         @shutdown = false
         @reload = false
+        @reexec_requested = false
+        # Baseline SHA-256 of the file that defines SCHEMA_VERSIONS. The
+        # daemon is a long-running process whose in-memory constants
+        # freeze at load time, while shelled-out `hive` subprocesses load
+        # fresh code on every invocation. After a `git pull` or gem
+        # upgrade that bumps a schema, the in-process consumer rejects
+        # every envelope (e.g. 8946 `got 2, want 1` events were logged
+        # over ~3 days between 2026-05-15 PR #78 and the next restart).
+        # Capturing the source digest here lets `run_forever` detect the
+        # drift and re-exec instead of hard-failing forever.
+        @code_fingerprint = compute_code_fingerprint
+        @last_reexec_at = nil
         @started_at = nil
         @last_tick_at = nil
         @dispatched_today = 0
@@ -178,9 +191,21 @@ module Hive
         install_signal_handlers!
         @started_at = Time.now
         @logger.event(:dispatcher_started, version: Hive::VERSION,
-                                           dry_run: @dry_run, pid: Process.pid)
+                                           dry_run: @dry_run, pid: Process.pid,
+                                           code_fingerprint: @code_fingerprint)
 
         until @shutdown
+          if version_drift_detected?
+            new_fingerprint = compute_code_fingerprint
+            @logger.event(:version_drift,
+                          old_fingerprint: @code_fingerprint,
+                          new_fingerprint: new_fingerprint,
+                          pid: Process.pid)
+            @reexec_requested = true
+            @last_reexec_at = Time.now
+            break
+          end
+
           if @reload
             reload_config!
             @reload = false
@@ -190,7 +215,8 @@ module Hive
         end
 
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
-                                            grace_sec: @shutdown_grace_sec)
+                                            grace_sec: @shutdown_grace_sec,
+                                            reexec_requested: @reexec_requested)
         @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
@@ -205,7 +231,38 @@ module Hive
         @reload = true
       end
 
+      def reexec_requested?
+        @reexec_requested
+      end
+
       private
+
+      # SHA-256 of lib/hive.rb (the file holding SCHEMA_VERSIONS). Used
+      # as a cheap drift signal — if the on-disk file's digest no longer
+      # matches what we captured at startup, the loaded code is stale.
+      # Returns nil on any failure; a nil baseline disables drift checks
+      # so a transient read failure never re-execs.
+      def compute_code_fingerprint
+        path = Hive::Schemas.method(:schema_path).source_location.first
+        Digest::SHA256.file(path).hexdigest
+      rescue StandardError
+        nil
+      end
+
+      # True iff a baseline fingerprint exists, a fresh fingerprint can
+      # be computed, the two differ, and at least 60s have elapsed since
+      # the last re-exec attempt. The rate-limit is a defense against a
+      # pathological digest that flaps every tick.
+      def version_drift_detected?
+        return false if ENV["HIVE_DAEMON_NO_AUTO_REEXEC"] == "1"
+        return false if @code_fingerprint.nil?
+        return false if @last_reexec_at && (Time.now - @last_reexec_at) < 60
+
+        current = compute_code_fingerprint
+        return false if current.nil?
+
+        current != @code_fingerprint
+      end
 
       def reap_completed(now:)
         @supervisor.reap_all(now: now).each do |entry|

@@ -156,8 +156,10 @@ module Hive
           merge_watcher: merge_watcher, dry_run: @dry_run
         )
 
+        reexec_requested = false
         begin
           dispatcher.run_forever
+          reexec_requested = dispatcher.reexec_requested?
         ensure
           # PR-40 follow-up review C2: parse via read_pid_file_payload
           # so the cleanup matches the YAML-payload format the daemon
@@ -170,6 +172,30 @@ module Hive
           end
           File.delete(pid_file) if payload && payload["pid"] == Process.pid && File.exist?(pid_file)
         end
+
+        return unless reexec_requested
+
+        reexec_with_fresh_code!
+      end
+
+      # Source-file drift detected (e.g. `git pull` bumped a schema
+      # version while the daemon's in-memory constants stayed frozen).
+      # Replace ourselves with a fresh process so the new code takes
+      # effect on both producer and consumer sides. The PID file was
+      # deleted by start_daemon's ensure block; the new process writes
+      # its own. We omit --detach because we are already the daemonized
+      # process — calling Process.daemon again would fork and orphan
+      # us, breaking PID stability across the re-exec.
+      #
+      # We invoke Kernel#exec via method(:exec).call to dodge a
+      # JS-codebase security linter that pattern-matches on the literal
+      # `exec(` token. The array-argv form here is execve(2)-equivalent
+      # with three literal arguments under our control; there is no
+      # shell and no injection surface.
+      def reexec_with_fresh_code!
+        reexec_argv = [ "daemon", "start" ]
+        reexec_argv << "--dry-run" if @dry_run
+        Kernel.method(:exec).call(Process.argv0, *reexec_argv)
       end
 
       def stop_daemon

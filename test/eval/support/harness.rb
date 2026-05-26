@@ -35,7 +35,9 @@ module Hive
             telegram: @telegram,
             logger: @logger,
             bot_config: @bot_config,
-            daemon_enabled: ->(_project) { false },
+            # Let the dispatcher fall back to Hive::Config.find_project / load
+            # so given_project(daemon_enabled: ...) is honoured per-scenario
+            # rather than locked to a single hardcoded default.
             now: -> { current_time }
           )
         @supervisor = Hive::Bot::Supervisor.new(

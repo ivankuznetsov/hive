@@ -12,6 +12,10 @@ class HiveEvalScaffoldTest < Minitest::Test
 
     assert_sent_count 1
     assert_match(/1 active task/, harness.last_sent.text)
-    assert_match(/hive\/question-a/, harness.last_sent.text)
+    # render_queue formats actionable rows as `Title — Stage` via
+    # TitleFormatter; assert the title slug (de-dashed Title case)
+    # rather than the now-removed `project/slug` prefix.
+    assert_match(/Question a/i, harness.last_sent.text)
+    assert_match(/Brainstorm/, harness.last_sent.text)
   end
 end

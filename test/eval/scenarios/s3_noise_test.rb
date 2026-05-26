@@ -4,7 +4,12 @@ class HiveEvalS3NoiseTest < Minitest::Test
   include Hive::Eval::ScenarioSupport
 
   def test_simulated_night_obeys_signal_not_noise_contract
-    given_project(name: "hive")
+    # Daemon enabled: ready_to_X transitions are dispatched automatically by
+    # the daemon, so the bot must NOT also push them as Telegram alerts. With
+    # daemon disabled this scenario would (correctly) fire one Approve/Reject
+    # alert per task — see test_inline_approve_button_dispatches_expected_command
+    # for that path.
+    given_project(name: "hive", daemon_enabled: true)
 
     50.times do |tick|
       rows = noisy_rows(tick)

@@ -436,18 +436,26 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
-  def test_ready_actions_are_always_suppressed
-    # ready_to_X notifications are pull-only via /status. The proactive
-    # allow-list (eval contract) is agent_blocked_question / fatal_error
-    # only, so neither a daemon-on project nor a daemon-off project should
-    # ever see a proactive ready_to_X.
-    d = dispatcher
-    Hive::Bot::NotificationBuilders::READY_ACTIONS.each do |action|
-      d.process_rows([ row(action: action, marker: "complete") ])
-    end
+  def test_ready_action_suppressed_when_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+    d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
 
     assert_empty telegram.messages,
-                 "ready_to_X must never produce a proactive Telegram message"
+                 "ready_to_X with daemon enabled must not produce a proactive Telegram message"
+  end
+
+  def test_ready_action_fires_alert_when_daemon_disabled
+    # With daemon disabled the operator needs the Approve/Reject keyboard to
+    # advance the workflow — fire one proactive alert per fingerprint.
+    d = dispatcher(daemon_enabled: ->(_project) { false })
+    d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+
+    assert_equal 1, telegram.messages.size,
+                 "ready_to_X with daemon disabled must fire one proactive alert"
+    assert_match(/Ready for/, telegram.messages.last[:text])
+    labels = telegram.messages.last[:reply_markup].flatten.map { |b| b[:text] }
+    assert_includes labels, "Approve"
+    assert_includes labels, "Reject"
   end
 
   def test_multi_chat_fanout_delivers_to_all_allowed_chats
@@ -528,24 +536,56 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 2, flaky_telegram.calls
   end
 
-  def test_ready_actions_suppressed_regardless_of_config_or_daemon_state
-    # The daemon-probe gate was removed because ready_to_X is pull-only —
-    # no proactive emission regardless of project config state. These
-    # tests previously pinned the buggy "leak when daemon disabled" path.
+  def test_ready_action_uses_config_fallback_when_no_daemon_probe
+    projects = []
+    loads = []
+    with_config_stubs(
+      find_project: ->(project) { projects << project; { "path" => "/tmp/hive" } },
+      load: ->(path) { loads << path; { "daemon" => { "enabled" => true } } }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_empty telegram.messages,
+                 "ready_to_X with daemon enabled in project config must be suppressed"
+    assert_equal [ "hive" ], projects
+    assert_equal [ "/tmp/hive" ], loads
+  end
+
+  def test_ready_action_not_suppressed_when_project_missing_from_config
     projects = []
     loads = []
     with_config_stubs(
       find_project: ->(project) { projects << project; nil },
       load: ->(_path) { loads << "loaded"; raise "Config.load should not be called" }
     ) do
-      d = dispatcher
+      d = dispatcher(daemon_enabled: nil)
       d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
     end
 
-    assert_empty telegram.messages,
-                 "ready_to_X must be suppressed even when project is missing from config"
-    assert_empty projects, "daemon-probe Config.find_project must no longer be called"
-    assert_empty loads, "daemon-probe Config.load must no longer be called"
+    assert_equal 1, telegram.messages.size,
+                 "unknown project (no config entry) defaults to daemon disabled → alert fires"
+    assert_equal [ "hive" ], projects
+    assert_empty loads, "Config.load is skipped when find_project returns nil"
+  end
+
+  def test_daemon_config_errors_are_logged_and_do_not_suppress_ready_actions
+    with_config_stubs(
+      find_project: ->(_project) { { "path" => "/tmp/hive" } },
+      load: ->(_path) { raise Hive::ConfigError, "bad config" }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_equal 1, telegram.messages.size,
+                 "config load failure must not silently suppress — fail open to alerting"
+    event = logger.events.find { |name, _attrs| name == :poll_failure }
+    refute_nil event
+    assert_equal "daemon_check", event.last[:source]
+    assert_equal "hive", event.last[:project]
+    assert_equal "Hive::ConfigError", event.last[:error_class]
   end
 
   def with_config_stubs(find_project:, load:)

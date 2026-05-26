@@ -37,8 +37,28 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :slash_idea, @router.classify(update(text: "/idea fix cron"))
     assert_equal :slash_answer, @router.classify(update(text: "/answer slug"))
     assert_equal :slash_approve, @router.classify(update(text: "/approve slug"))
+    assert_equal :slash_autofix, @router.classify(update(text: "/autofix slug"))
+    assert_equal :slash_details, @router.classify(update(text: "/details slug"))
     assert_equal :slash_done, @router.classify(update(text: "/done"))
     assert_equal :slash_help, @router.classify(update(text: "/help"))
+  end
+
+  def test_autofix_slash_resolves_against_default_empty_snapshot_provider
+    # The router's default status_snapshot_provider returns [] so unknown
+    # slugs (which is every slug, in this test setup) reply with the
+    # archive hint. This covers both the default lambda body and the
+    # /autofix dispatch path without needing a Supervisor instance.
+    result = @router.handle(update(text: "/autofix unknown-260526-zzzz"))
+
+    assert_equal :reply, result.action
+    assert_match(/Slug not found/, result.text)
+  end
+
+  def test_details_slash_resolves_against_default_empty_snapshot_provider
+    result = @router.handle(update(text: "/details unknown-260526-zzzz"))
+
+    assert_equal :reply, result.action
+    assert_match(/Slug not found/, result.text)
   end
 
   def test_unauthorized_update_returns_noop_and_logs_once

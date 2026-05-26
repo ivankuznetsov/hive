@@ -2,6 +2,27 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T18:00:00Z] bot — /status reverts to inline buttons (text-links can't carry the slug)
+
+**Action:** Real-device testing confirmed that tapping a rendered `/answer <slug>` text-link in a `/status` reply sends only `/answer` (Telegram's `bot_command` entity covers the token, not the argument), so the slug was dropped and the tap hit the usage hint. Reverted the `/status`/`/queue` surface from slash-command text suffixes to an inline callback keyboard: `Supervisor#status_keyboard` / `status_action_button` build one button per actionable row (✏️ answer / ✅ approve / 🔧 autofix / 🔍 details), reusing `NotificationBuilders` callback constructors so the callbacks are byte-identical to the push-notification buttons. `slash_link_for` removed. The `/answer`/`/approve`/`/autofix`/`/details` slash commands remain typeable and in the quick-actions menu. Corrected the prior wiki claim that text links were one-tap.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
+## [2026-05-26T15:30:00Z] bot — /status slash-link surface + /autofix + /details
+
+**Action:** The `/status` reply now formats every actionable row with an inline `/command <slug>` suffix. Telegram clients auto-render these as one-tap blue links inside bot messages, giving every Brainstorm-waiting, ready-to-X, retryable-recovery, and manual-only-recovery row a one-tap recovery path with NO inline keyboard. Row classification reuses `NotificationBuilders.retryable_recovery?` / `manual_only_recovery?` so the text-link surface stays consistent with the push-notification button surface. Two new slash commands (`/autofix <slug>`, `/details <slug>`) were added; both resolve the slug against the latest `StatusWatcher` snapshot. Recovery dispatch logic was extracted into `Hive::Bot::Handlers::RecoverySequence` so the inline 🔧 Autofix button (`CallbackHandlers#autofix`) and the `/autofix` slash command (`SlashHandlers#autofix`) produce byte-identical argvs for the same row. `Supervisor::BOT_COMMANDS` extended from 7 to 9 commands.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
+## [2026-05-26T14:30:00Z] bot — register slash commands with Telegram on start
+
+**Action:** Added `Hive::Bot::Telegram#set_my_commands` (thin wrapper over the Bot API) and `Hive::Bot::Supervisor#register_bot_commands` called once in `run_forever` after `:bot_started`. The seven supported slash commands (`/idea`, `/status`, `/queue`, `/answer`, `/approve`, `/done`, `/help`) and their descriptions live in `Hive::Bot::Supervisor::BOT_COMMANDS`. Failures are swallowed and logged as `:send_failure source: "set_my_commands"` so a Telegram outage at bot start does not prevent `poll_loop` from running. Intentionally NOT re-issued on SIGHUP/config reload — the command list does not depend on config. Operators now see the slash commands stacked in Telegram's blue quick-actions menu when they tap the `/` icon.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
 ## [2026-05-26T14:30:00Z] claude-launcher - preserve project-owned .claude/settings.json
 
 **Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.
@@ -2043,3 +2064,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[stages/review]]
+
+## [2026-05-26T10:05:02Z] bot — load ~/.config/hive/.env on bot start
+
+**Action:** Added `Hive::EnvFile.load!` and wired it into `hive bot start` so operators can drop `HIVE_TELEGRAM_BOT_TOKEN=...` into `~/.config/hive/.env` instead of shell rc files. Existing env vars take precedence; `#` comments and outer single/double quotes are honored; missing/unreadable files are silently skipped. `hive bot reload` does NOT re-read the file — operators must restart after rotating secrets.
+
+**Refreshed pages:**
+- [[commands/bot]]

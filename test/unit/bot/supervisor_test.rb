@@ -6,10 +6,12 @@ class HiveBotSupervisorTest < Minitest::Test
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
-  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
+  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
+                   keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :error, :envelope, keyword_init: true)
 
-  FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears, keyword_init: true) do
+  FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
+                            :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
       raise raise_on_send if raise_on_send
 
@@ -18,6 +20,12 @@ class HiveBotSupervisorTest < Minitest::Test
 
     def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
       (self.keyboard_clears ||= []) << { chat_id: chat_id, message_id: message_id, reply_markup: reply_markup }
+    end
+
+    def set_my_commands(commands:)
+      raise raise_on_set_my_commands if raise_on_set_my_commands
+
+      (self.commands_registered ||= []) << commands
     end
   end
 
@@ -29,8 +37,9 @@ class HiveBotSupervisorTest < Minitest::Test
     def close; end
   end
 
-  FakeStatusWatcher = Struct.new(:result, keyword_init: true) do
+  FakeStatusWatcher = Struct.new(:result, :fetch_count, keyword_init: true) do
     def fetch
+      self.fetch_count = (fetch_count || 0) + 1
       result
     end
   end
@@ -143,9 +152,9 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
   def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
-          action_label: "Develop", marker: "COMPLETE", attrs: {})
+          action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil)
     Row.new(project: project, slug: slug, stage: stage, action: action,
-            action_label: action_label, marker: marker, attrs: attrs)
+            action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic)
   end
 
 
@@ -184,7 +193,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis is available for "Red task…". Open this task on a laptop for full details.', text
+    assert_equal 'Diagnosis is available for "Red task…". Tap Show details to dump it here.', text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"
@@ -215,12 +224,229 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "No diagnostic available for stuck-task.", @telegram.messages.first.fetch(:text)
   end
 
+  CallbackUpdate = Struct.new(:callback_query_id, :update_id, keyword_init: true) do
+    def callback_query?; !callback_query_id.nil?; end
+    def callback_data; "approve:plan:hive:slug:2-brainstorm"; end
+  end
+
+  def test_ack_callback_query_calls_telegram_with_callback_query_id
+    captured = []
+    @telegram.define_singleton_method(:answer_callback_query) do |callback_query_id:|
+      captured << callback_query_id
+    end
+
+    @supervisor.send(:ack_callback_query, CallbackUpdate.new(callback_query_id: "cbq-99"))
+
+    assert_equal [ "cbq-99" ], captured
+  end
+
+  def test_ack_callback_query_skips_when_callback_query_id_missing
+    called = false
+    @telegram.define_singleton_method(:answer_callback_query) do |callback_query_id:|
+      called = true
+    end
+
+    @supervisor.send(:ack_callback_query, CallbackUpdate.new(callback_query_id: nil))
+
+    refute called, "ack_callback_query must short-circuit when callback_query_id is nil"
+  end
+
+  def test_ack_callback_query_logs_send_failure_on_telegram_exception
+    @telegram.define_singleton_method(:answer_callback_query) do |callback_query_id:|
+      raise StandardError, "telegram down"
+    end
+
+    @supervisor.send(:ack_callback_query, CallbackUpdate.new(callback_query_id: "cbq-7"))
+
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure
+    assert_equal "answer_callback_query", failure.fetch(:payload).fetch(:source)
+    assert_equal "cbq-7", failure.fetch(:payload).fetch(:callback_query_id)
+  end
+
+  def test_latest_status_rows_returns_cached_rows_when_status_tick_already_ran
+    cached = [ row(slug: "cached-260526-aaaa") ]
+    @supervisor.instance_variable_set(:@latest_status_rows, cached)
+
+    assert_same cached, @supervisor.send(:latest_status_rows),
+                "cache hit must NOT trigger a fresh @status_watcher.fetch subprocess"
+  end
+
+  def test_latest_status_rows_returns_nil_when_cold_without_blocking_on_a_fetch
+    # Regression guard for the double-dispatch risk: latest_status_rows must
+    # NOT shell out to @status_watcher.fetch on the (poll) thread that calls
+    # it. A hung `hive status` there would stall the long-poll loop, after
+    # which Telegram redelivers the un-acked update and /autofix double-fires.
+    @status_watcher.result = StatusResult.new(ok: true, rows: [ row(slug: "fresh-260526-bbbb") ])
+    @status_watcher.fetch_count = 0
+    @supervisor.instance_variable_set(:@latest_status_rows, nil)
+
+    assert_nil @supervisor.send(:latest_status_rows),
+               "cold cache must return nil (status_loop populates it), not sync-fetch"
+    assert_equal 0, @status_watcher.fetch_count,
+                 "latest_status_rows must never call @status_watcher.fetch on the caller thread"
+  end
+
+  def test_status_tick_does_not_poison_cache_on_failed_fetch
+    # status_tick only assigns @latest_status_rows on a successful fetch, so a
+    # transient failure cannot leave a stale/empty snapshot poisoning the
+    # cache (the slash handlers would otherwise reply "slug not found" for
+    # every slug until the next successful tick).
+    good = [ row(slug: "good-260526-aaaa") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: good)
+    @supervisor.status_tick
+    assert_equal good, @supervisor.send(:latest_status_rows)
+
+    @status_watcher.result = StatusResult.new(ok: false, rows: nil, error: "boom")
+    @supervisor.status_tick
+
+    assert_equal good, @supervisor.send(:latest_status_rows),
+                 "a failed tick must leave the last good snapshot intact, not overwrite it"
+  end
+
+  def test_reload_rewires_status_snapshot_provider_into_the_rebuilt_router
+    # Regression guard: reload_config_if_requested rebuilds @router, and that
+    # rebuild must keep the status_snapshot_provider wiring. The original bug
+    # rebuilt the Router without it, so after any `hive bot reload` /autofix
+    # and /details replied "Slug not found" for every slug until restart.
+    retryable = row(slug: "stuck-260526-cccc", stage: "6-review", action: "recover_review",
+                    marker: "review_error", attrs: { "pass" => "2" },
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config, token: "test-token", logger: @logger, telegram: @telegram,
+      status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
+      router: nil, child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store, dry_run: false
+    )
+    supervisor.instance_variable_set(:@latest_status_rows, [ retryable ])
+    supervisor.instance_variable_set(:@reload, true)
+    cfg = @config
+    original = Hive::Config.method(:load_global_bot)
+    Hive::Config.define_singleton_method(:load_global_bot) { |**| cfg }
+    begin
+      supervisor.send(:reload_config_if_requested)
+    ensure
+      Hive::Config.define_singleton_method(:load_global_bot, original)
+    end
+
+    update = Hive::Bot::Telegram::Update.new(
+      update_id: 1, chat_id: 42, from_id: 42, message_id: 1,
+      text: "/autofix stuck-260526-cccc"
+    )
+    supervisor.process_update(update)
+
+    dispatched = @child_supervisor.dispatched.map { |d| d[:command_argv] }
+    assert(dispatched.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
+           "after SIGHUP reload, /autofix must still resolve the slug and dispatch the " \
+           "recover sequence — proving the rebuilt Router kept status_snapshot_provider")
+  end
+
+  def test_default_status_snapshot_provider_dispatches_recover_sequence_for_cached_row
+    # Exercises the full default wiring (real Router built by the constructor)
+    # end-to-end: the status_snapshot_provider lambda must reach
+    # latest_status_rows, resolve the cached row, and dispatch the recover
+    # sequence. Asserts the dispatched argv, not merely "some message sent",
+    # so the lambda returning [] or the row failing to resolve would fail.
+    retryable = row(slug: "wire-260526-aaaa", stage: "6-review", action: "recover_review",
+                    marker: "review_error", attrs: { "pass" => "2" },
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config, token: "test-token", logger: @logger, telegram: @telegram,
+      status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
+      router: nil, child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store, dry_run: false
+    )
+    supervisor.instance_variable_set(:@latest_status_rows, [ retryable ])
+
+    update = Hive::Bot::Telegram::Update.new(
+      update_id: 1, chat_id: 42, from_id: 42, message_id: 1,
+      text: "/autofix wire-260526-aaaa"
+    )
+    supervisor.process_update(update)
+
+    dispatched = @child_supervisor.dispatched.map { |d| d[:command_argv] }
+    assert(dispatched.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
+           "default snapshot provider must route /autofix through latest_status_rows " \
+           "to a real recover-sequence dispatch")
+  end
+
+  def test_reap_children_dispatches_reply_for_each_completed_child
+    @child_supervisor.reap_batches << [ child_exit(exit_code: 0) ]
+
+    @supervisor.reap_children
+
+    # exit_code 0 yields nil from child_completion_text → no Telegram ack.
+    # The contract under test is that reap_children iterates the batch and
+    # calls reply_for_child without raising; @telegram.messages stays empty
+    # because the clean-exit path is silent by design.
+    assert_empty @telegram.messages,
+                 "exit_code 0 must not produce a Telegram ack (child_completion_text returns nil)"
+  end
+
+  def test_finalize_completed_brainstorm_in_dry_run_announces_without_dispatching
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config, token: "test-token", logger: @logger, telegram: @telegram,
+      status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
+      router: FakeRouter.new, child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store, dry_run: true
+    )
+    result = FakeRouter::Result.new(slug: "done-260526-aaaa", project: "hive")
+    update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
+
+    supervisor.send(:finalize_completed_brainstorm, result, update, 4)
+
+    assert_match(/All questions answered/, @telegram.messages.last.fetch(:text))
+    assert_match(/Dry-run: not dispatching/, @telegram.messages.last.fetch(:text))
+    assert_empty @child_supervisor.dispatched, "dry-run must not dispatch hive run"
+  end
+
+  def test_auto_run_after_answers_recovers_and_logs_when_dispatch_raises
+    @child_supervisor.define_singleton_method(:dispatch) { |**| raise "spawn failed" }
+    result = FakeRouter::Result.new(slug: "x-260526-aaaa", project: "hive")
+    update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
+
+    @supervisor.send(:auto_run_after_answers, result, update)
+
+    assert_match(/couldn't start the next round/, @telegram.messages.last.fetch(:text),
+                 "a dispatch failure after the completion ack must surface a corrective message")
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure
+    assert_equal "auto_run_after_answers", failure.fetch(:payload).fetch(:source)
+  end
+
+  def test_register_bot_commands_sends_full_command_list_to_telegram
+    @supervisor.send(:register_bot_commands)
+
+    registered = Array(@telegram.commands_registered)
+    assert_equal 1, registered.length, "register_bot_commands must call set_my_commands exactly once"
+
+    commands = registered.first
+    assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
+    slash_names = commands.map { |cmd| cmd.fetch(:command) }
+    assert_equal %w[idea status queue answer approve autofix details done help], slash_names
+    assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
+           "every command description must be non-empty and within Telegram's 256-char cap")
+  end
+
+  def test_register_bot_commands_swallows_telegram_failure_and_logs_send_failure
+    @telegram.raise_on_set_my_commands = StandardError.new("boom")
+
+    @supervisor.send(:register_bot_commands)  # must not raise
+
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure, "a set_my_commands failure must be logged as :send_failure"
+    assert_equal "set_my_commands", failure.fetch(:payload).fetch(:source)
+    assert_equal "StandardError", failure.fetch(:payload).fetch(:error_class)
+    assert_equal "boom", failure.fetch(:payload).fetch(:message)
+  end
+
   def test_child_completion_text_covers_exit_statuses
     assert_equal "Already advanced by another device",
                  @supervisor.send(:child_completion_text, child_exit(exit_code: Hive::ExitCodes::WRONG_STAGE))
     assert_equal "Try again - another run holds the lock",
                  @supervisor.send(:child_completion_text, child_exit(exit_code: Hive::ExitCodes::TEMPFAIL))
-    assert_equal "Command completed", @supervisor.send(:child_completion_text, child_exit(exit_code: 0))
+    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0)),
+               "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
     assert_includes @supervisor.send(:child_completion_text, child_exit(exit_code: 17)), "Command failed with exit 17"
   end
 
@@ -257,6 +483,47 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "running"
   end
 
+  def test_status_keyboard_has_callback_button_per_actionable_row_type
+    # /status uses inline callback buttons, not text "/command <slug>" links:
+    # Telegram's bot_command entity covers only the token, so a tapped text
+    # link drops the slug. Each actionable row gets one button whose
+    # callback_data matches the push-notification surface.
+    brainstorm = row(slug: "ask-q-260526-aaaa", stage: "2-brainstorm",
+                     action: "needs_input", marker: "waiting")
+    ready_to_x = row(slug: "ship-it-260526-bbbb", stage: "7-artifacts",
+                     action: "ready_to_finalize", marker: "complete")
+    retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
+                             action: "recover_review", marker: "review_error",
+                             attrs: { "phase" => "fix", "pass" => "2" },
+                             diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    manual_recovery = row(slug: "stale-260526-dddd", stage: "4-execute",
+                          action: "recover_review", marker: "execute_stale",
+                          attrs: {}, diagnostic: nil)
+    inert = row(slug: "agent-running-260526-eeee", action: "agent_running")
+
+    keyboard = @supervisor.send(:status_keyboard,
+                                [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+    callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
+
+    assert_includes callbacks, "answer:hive:ask-q-260526-aaaa",
+                    "brainstorm-waiting rows get an answer button"
+    assert_includes callbacks, "approve:finalize:hive:ship-it-260526-bbbb:7-artifacts",
+                    "ready_to_X rows get an approve button with the workflow verb"
+    assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
+                    "retryable recovery rows get an autofix button"
+    assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
+                    "manual-only recovery rows get a details button"
+    assert_equal 4, callbacks.length, "inert agent_running rows produce no button"
+  end
+
+  def test_status_keyboard_is_nil_when_no_row_is_actionable
+    plain_inflight = row(slug: "in-flight-260526-aaaa", stage: "4-execute",
+                         action: "developing", marker: "agent_working")
+
+    assert_nil @supervisor.send(:status_keyboard, [ plain_inflight ]),
+               "a reply with no actionable rows must stay text-only (no empty keyboard)"
+  end
+
   def test_render_details_sorts_attrs_and_handles_missing_row
     rows = [ row(attrs: { "z" => 9, "a" => 1 }, marker: nil, action_label: nil) ]
 
@@ -279,7 +546,9 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil pid
     assert_empty @child_supervisor.dispatched
     assert_includes @telegram.messages.last.fetch(:text), "1 active task"
-    assert_nil @telegram.messages.last.fetch(:reply_markup)
+    # ready_to_develop row → an approve button on the /status reply.
+    callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
+    assert_includes callbacks, "approve:develop:hive:alpha:3-plan"
   end
 
   def test_execute_dispatch_filters_status_by_project
@@ -296,7 +565,9 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @telegram.messages.last.fetch(:text)
     assert_includes text, "Beta… — Plan"
     refute_includes text, "Alpha"
-    assert_nil @telegram.messages.last.fetch(:reply_markup)
+    # Only the project-filtered row contributes a button.
+    callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
+    assert_equal [ "approve:develop:other:beta-260525-abcd:3-plan" ], callbacks
   end
 
   def test_execute_dispatch_reports_unknown_project_with_known_list
@@ -618,16 +889,29 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_start_answer_records_conversation_with_default_question_when_slug_missing
+  def test_start_answer_replies_when_no_unanswered_question_exists
     result = FakeRouter::Result.new(action: :start_answer, slug: "missing", project: "hive", mode: :path_b)
 
     @supervisor.send(:start_answer, result, Update.new(chat_id: 42, update_id: 13))
 
-    assert_equal(
-      { chat_id: 42, slug: "missing", question_n: 1, mode: :path_b, project: "hive" },
-      @conversation_store.starts.last
-    )
-    assert_includes @telegram.messages.last.fetch(:text), "Send Q1's answer"
+    assert_empty @conversation_store.starts,
+                 "no conversation must be opened when there is nothing to answer"
+    assert_includes @telegram.messages.last.fetch(:text), "No unanswered questions"
+  end
+
+  def test_start_answer_includes_question_text_in_first_prompt
+    with_brainstorm_file(content: "## Round 1\n### Q1. Should we use SQLite or Postgres?\n### A1.\n") do |path, project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(action: :start_answer, slug: "bot-task-260522-aa",
+                                      project: File.basename(project), mode: :path_b)
+
+      @supervisor.send(:start_answer, result, Update.new(chat_id: 42, update_id: 13))
+
+      text = @telegram.messages.last.fetch(:text)
+      assert_includes text, "Q1: Should we use SQLite or Postgres?",
+                      "first prompt must include the actual question text so operators don't have to fetch it elsewhere"
+      assert_includes text, "Reply with your answer"
+    end
   end
 
   def test_execute_answer_write_handles_missing_slug_and_no_unanswered_question
@@ -709,7 +993,8 @@ class HiveBotSupervisorTest < Minitest::Test
     ok = @supervisor.send(:wait_for_child_success, 456, deadline: Time.now + 1)
 
     assert_equal true, ok
-    assert_equal "Command completed", @telegram.messages.last.fetch(:text)
+    assert_empty @telegram.messages,
+                 "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
   end
 
   def test_wait_for_child_success_times_out_without_completed_child
@@ -796,7 +1081,11 @@ class HiveBotSupervisorTest < Minitest::Test
       @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 20))
 
       assert_includes File.read(path), "Build the real thing"
-      assert_equal "Got Q1.", @telegram.messages.last.fetch(:text)
+      text = @telegram.messages.last.fetch(:text)
+      assert_match(/Got Q1\./, text)
+      assert_match(/Q2: Cadence\?/, text,
+                   "auto-advance must include the next unanswered question text in the same reply")
+      assert_match(/Reply with your answer/, text)
       assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
     end
   end
@@ -828,109 +1117,10 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_execute_start_codex_creates_draft_and_keyboard
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      conversation = FakeCodexConversation.new(
-        outcome: Outcome.new(kind: :draft_ready, draft: "Use focused tests."),
-        calls: []
-      )
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      @supervisor.define_singleton_method(:codex_conversation) { conversation }
-      result = FakeRouter::Result.new(
-        action: :start_codex,
-        slug: "bot-task-260522-aa",
-        project: "hive",
-        answer_text: "draft it"
-      )
 
-      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 30))
 
-      assert_equal 1, conversation.calls.length
-      assert_kind_of Hive::Task, conversation.calls.first.fetch(:task)
-      assert_equal "draft it", conversation.calls.first.fetch(:user_input)
-      assert_equal "Codex draft for Q1:\nUse focused tests.", @telegram.messages.last.fetch(:text)
-      assert_equal "codex_write:hive:bot-task-260522-aa:1",
-                   @telegram.messages.last.fetch(:reply_markup).first.first.fetch(:callback_data)
-      state = @conversation_store.get(chat_id: 42, slug: "bot-task-260522-aa")
-      assert_equal true, state.awaiting_confirm
-      assert_equal "Use focused tests.", state.draft
-    end
-  end
 
-  def test_execute_start_codex_sends_reply_and_failure_without_draft
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      conversation = FakeCodexConversation.new(outcome: Outcome.new(kind: :reply, text: "Need more context."), calls: [])
-      @supervisor.define_singleton_method(:codex_conversation) { conversation }
-      result = FakeRouter::Result.new(action: :start_codex, slug: "bot-task-260522-aa", project: "hive")
 
-      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 31))
-      assert_equal "Need more context.", @telegram.messages.last.fetch(:text)
-      state = @conversation_store.get(chat_id: 42, slug: "bot-task-260522-aa")
-      assert_equal false, state.awaiting_confirm
-
-      conversation.outcome = Outcome.new(kind: :failed, reason: "budget_exhausted")
-      @supervisor.send(:execute_start_codex, result, Update.new(chat_id: 42, update_id: 32))
-      assert_equal "Codex failed: budget_exhausted. Send your answer directly.", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_execute_start_codex_handles_missing_path_and_no_questions
-    missing = FakeRouter::Result.new(action: :start_codex, slug: "missing", project: "hive")
-    @supervisor.send(:execute_start_codex, missing, Update.new(chat_id: 42, update_id: 33))
-    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
-
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
-  Done.\n") do |path, _project|
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      done = FakeRouter::Result.new(action: :start_codex, slug: "done", project: "hive")
-
-      @supervisor.send(:execute_start_codex, done, Update.new(chat_id: 42, update_id: 34))
-      assert_equal "No unanswered questions remain for done.", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_execute_confirm_codex_draft_writes_answer_and_advances
-    content = "## Round 1\n### Q1. Scope?\n### A1.\n\n### Q2. Cadence?\n### A2.\n"
-    with_brainstorm_file(content: content) do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "task", draft: "Real answer", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 1)
-
-      @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 40))
-
-      assert_includes File.read(path), "Real answer"
-      assert_equal "Draft saved as Q1.", @telegram.messages.last.fetch(:text)
-      state = @conversation_store.get(chat_id: 42, slug: "task")
-      assert_nil state.draft
-      assert_equal false, state.awaiting_confirm
-      assert_equal 2, @conversation_store.updates.last.fetch(:values).fetch(:question_n)
-    end
-  end
-
-  def test_execute_confirm_codex_draft_reports_empty_missing_and_already_answered
-    empty = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "empty", project: "hive", question_n: 1)
-    @supervisor.send(:execute_confirm_codex_draft, empty, Update.new(chat_id: 42, update_id: 41))
-    assert_equal "No draft to confirm for empty.", @telegram.messages.last.fetch(:text)
-
-    @conversation_store.start(chat_id: 42, slug: "missing", question_n: 1, mode: :path_a, project: "hive")
-    @conversation_store.update(chat_id: 42, slug: "missing", draft: "Draft", awaiting_confirm: true)
-    missing = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "missing", project: "hive", question_n: 1)
-    @supervisor.send(:execute_confirm_codex_draft, missing, Update.new(chat_id: 42, update_id: 42))
-    assert_equal "Slug not found, was it archived?", @telegram.messages.last.fetch(:text)
-
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.
-  Done.\n") do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "answered", question_n: 1, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "answered", draft: "Draft", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      answered = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "answered", project: "hive", question_n: 1)
-
-      @supervisor.send(:execute_confirm_codex_draft, answered, Update.new(chat_id: 42, update_id: 43))
-      assert_equal "Question 1 was already answered by another device", @telegram.messages.last.fetch(:text)
-    end
-  end
 
   def test_poll_loop_logs_process_update_failure_and_advances_update_id
     update = Update.new(chat_id: 42, update_id: 77)
@@ -1007,16 +1197,12 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.define_singleton_method(:dispatch_command_sequence) { |result, update| calls << [ :sequence, result, update ] }
     @supervisor.define_singleton_method(:start_answer) { |result, update| calls << [ :start_answer, result, update ] }
     @supervisor.define_singleton_method(:execute_answer_write) { |result, update| calls << [ :answer_write, result, update ] }
-    @supervisor.define_singleton_method(:execute_start_codex) { |result, update| calls << [ :start_codex, result, update ] }
-    @supervisor.define_singleton_method(:execute_confirm_codex_draft) { |result, update| calls << [ :confirm_codex, result, update ] }
     update = Update.new(chat_id: 42, update_id: 88)
 
     [
       [ :dispatch_commands, :sequence ],
       [ :start_answer, :start_answer ],
-      [ :write_answer_then_reply, :answer_write ],
-      [ :start_codex, :start_codex ],
-      [ :confirm_codex_draft, :confirm_codex ]
+      [ :write_answer_then_reply, :answer_write ]
     ].each do |action, expected_call|
       result = FakeRouter::Result.new(action: action)
       @supervisor.send(:execute_result, result, update)
@@ -1036,7 +1222,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal true, ok
     assert_equal [ 0.1 ], sleeps
-    assert_equal "Command completed", @telegram.messages.last.fetch(:text)
+    assert_empty @telegram.messages,
+                 "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
   end
 
   def test_execute_answer_write_reports_lock_busy
@@ -1058,41 +1245,8 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_execute_confirm_codex_draft_reports_lock_busy
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 1, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "task", draft: "Draft", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 1)
 
-      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!, ->(**_kwargs) { :lock_busy }) do
-        @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 44))
-      end
 
-      assert_equal "Try again - another run holds the lock", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_execute_confirm_codex_draft_reports_missing_question
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      @conversation_store.start(chat_id: 42, slug: "task", question_n: 99, mode: :path_a, project: "hive")
-      @conversation_store.update(chat_id: 42, slug: "task", draft: "Draft", awaiting_confirm: true)
-      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
-      result = FakeRouter::Result.new(action: :confirm_codex_draft, slug: "task", project: "hive", question_n: 99)
-
-      @supervisor.send(:execute_confirm_codex_draft, result, Update.new(chat_id: 42, update_id: 45))
-
-      assert_equal "Question 99 was not found.", @telegram.messages.last.fetch(:text)
-    end
-  end
-
-  def test_codex_conversation_memoizes_default_conversation
-    first = @supervisor.send(:codex_conversation)
-    second = @supervisor.send(:codex_conversation)
-
-    assert_kind_of Hive::Bot::CodexConversation, first
-    assert_same first, second
-  end
 
   def test_next_unanswered_question_n_parses_brainstorm_file
     with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|

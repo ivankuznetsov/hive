@@ -16,6 +16,8 @@ module Hive
         slash_idea
         slash_answer
         slash_approve
+        slash_autofix
+        slash_details
         slash_done
         slash_help
         callback_approve
@@ -54,7 +56,8 @@ module Hive
 
       def initialize(bot_config:, logger:, conversation_store:,
                      projects_provider: -> { Hive::Config.registered_projects },
-                     now: -> { Time.now })
+                     now: -> { Time.now },
+                     status_snapshot_provider: -> { [] })
         @bot_config = bot_config
         @logger = logger
         @conversation_store = conversation_store
@@ -68,7 +71,8 @@ module Hive
           projects_provider: @projects_provider,
           pending_ideas: @pending_ideas,
           last_project: -> { @last_project },
-          result_class: Result
+          result_class: Result,
+          status_snapshot_provider: status_snapshot_provider
         )
         @callback_handlers = Handlers::CallbackHandlers.new(
           pending_ideas: @pending_ideas,
@@ -101,6 +105,8 @@ module Hive
         when %r{\A/idea\b} then :slash_idea
         when %r{\A/answer\b} then :slash_answer
         when %r{\A/approve\b} then :slash_approve
+        when %r{\A/autofix\b} then :slash_autofix
+        when %r{\A/details\b} then :slash_details
         when %r{\A/done\b} then :slash_done
         when %r{\A/help\b} then :slash_help
         else
@@ -196,6 +202,8 @@ module Hive
         when :slash_idea then @slash_handlers.idea(update)
         when :slash_answer then @slash_handlers.answer(update, @conversation_store)
         when :slash_approve then @slash_handlers.approve(update)
+        when :slash_autofix then @slash_handlers.autofix(update)
+        when :slash_details then @slash_handlers.details(update)
         when :slash_done then @slash_handlers.done(update, @conversation_store)
         when :slash_help then @slash_handlers.help(update)
         when :free_text_answer then @free_text_handler.handle(update)

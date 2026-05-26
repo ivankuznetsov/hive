@@ -62,6 +62,13 @@ Append-only log of all wiki operations.
 - [[decisions]] - new ADR-031 inserted ahead of ADR-030.
 - [[modules/daemon]] - added "Self-reexec on source drift" section before Backlinks.
 
+## [2026-05-26T10:00:00Z] review - fair per-reviewer wall-clock deadlines
+
+**Action:** Fixed issue #155 by changing `Stages::Review.run_reviewers` to give each reviewer a rolling fair share of the remaining `review.max_wall_clock_sec` budget instead of handing every reviewer the full remaining deadline. This preserves sequential reviewer execution while preventing one hung reviewer from starving later reviewers in the same pass.
+
+**Refreshed pages:**
+- [[stages/review]] - documented the rolling fair-share deadline behavior for Phase 2 reviewers.
+
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
 **Action:** Dogfooded the merged project-global `claude.mode: tmux` path against real Claude in a disposable project. The run used a temporary `HIVE_HOME` plus private `HIVE_TMUX_SOCKET`, verified `hive doctor --json`, ran brainstorm to `marker_after=waiting`, filled the answer, reran to `marker_after=complete`, confirmed `round_waiting`/`round_complete` events, `hive status --json` `ready_to_plan`, and tmux cleanup.

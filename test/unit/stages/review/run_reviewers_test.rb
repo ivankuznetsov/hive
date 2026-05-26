@@ -182,6 +182,22 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class DeadlineCaptureReviewer < Hive::Reviewers::Base
+    attr_reader :deadline_seconds
+
+    def run!(deadline: nil)
+      @deadline_seconds = deadline && (deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      ensure_reviews_dir!
+      File.write(output_path, "## Low\n\n- [ ] captured deadline\n")
+      Hive::Reviewers::Result.new(
+        name: name,
+        output_path: output_path,
+        status: :ok,
+        error_message: nil
+      )
+    end
+  end
+
   class SharedSessionReviewer < Hive::Reviewers::Base
     attr_reader :headless_runs, :session_runs
 
@@ -211,6 +227,15 @@ class RunReviewersTest < Minitest::Test
         status: :ok,
         error_message: nil
       )
+    end
+  end
+
+  class DeadlineCaptureSharedReviewer < SharedSessionReviewer
+    attr_reader :session_deadline_seconds
+
+    def run_in_session!(handle:, deadline: nil)
+      @session_deadline_seconds = deadline && (deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      super
     end
   end
 
@@ -287,6 +312,41 @@ class RunReviewersTest < Minitest::Test
           assert_equal [ 1, 1 ], adapters.map(&:session_runs)
         end
       end
+    end
+  end
+
+  def test_shared_session_reviewers_receive_fair_deadlines
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" },
+            { "name" => "claude-b", "output_basename" => "claude-b", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| DeadlineCaptureSharedReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do
+          result = Hive::Stages::Review.run_reviewers(
+            cfg,
+            ctx,
+            Task.new(dir, File.join(dir, "task.md")),
+            started_at: Time.now,
+            max_wall_clock_sec: 60
+          )
+          assert_equal :ok, result
+        end
+      end
+
+      assert_operator adapters[0].session_deadline_seconds, :>, 0
+      assert_operator adapters[0].session_deadline_seconds, :<=, 31,
+                      "first shared-session reviewer should receive roughly half of the remaining 60s budget"
+      assert_operator adapters[1].session_deadline_seconds, :<=, 61,
+                      "last shared-session reviewer may use the remaining budget"
     end
   end
 
@@ -536,6 +596,41 @@ class RunReviewersTest < Minitest::Test
       end
 
       assert File.exist?(File.join(dir, "reviews", "legacy-01.md"))
+    end
+  end
+
+  def test_run_reviewers_caps_first_reviewer_to_fair_wall_clock_share
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" },
+            { "name" => "rev-b", "output_basename" => "rev-b" },
+            { "name" => "rev-c", "output_basename" => "rev-c" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| DeadlineCaptureReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(
+          cfg,
+          ctx,
+          Task.new(dir, File.join(dir, "task.md")),
+          started_at: Time.now,
+          max_wall_clock_sec: 90
+        )
+        assert_equal :ok, result
+      end
+
+      assert_operator adapters[0].deadline_seconds, :>, 0
+      assert_operator adapters[0].deadline_seconds, :<=, 31,
+                      "first of three reviewers should receive roughly one third of the remaining 90s budget"
+      assert_operator adapters[1].deadline_seconds, :<=, 46,
+                      "second reviewer should receive at most half of the still-remaining budget"
+      assert_operator adapters[2].deadline_seconds, :<=, 91,
+                      "last reviewer may use the remaining budget"
     end
   end
 

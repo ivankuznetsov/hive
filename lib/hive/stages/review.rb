@@ -915,23 +915,10 @@ module Hive
           return :wall_clock_exceeded
         end
 
-        # Derive a monotonic deadline from the caller's wall-clock
-        # budget so each reviewer's adapter
-        # caps its own spawn/backoff at the remaining time. Without
-        # this, max_attempts × timeout_sec on a single reviewer can
-        # exhaust the outer review.max_wall_clock_sec before the
-        # between-reviewer check fires. We base the deadline on a
-        # monotonic clock relative to the wall-clock budget so a
-        # paused process clock doesn't move the deadline; subtract the
-        # consumed wall-clock to align.
-        deadline = nil
-        if started_at && max_wall_clock_sec
-          consumed = Time.now - started_at
-          remaining = max_wall_clock_sec - consumed
-          if remaining.positive?
-            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + remaining
-          end
-        end
+        # Keep a rolling fair share of the remaining wall-clock budget
+        # for each reviewer. A hung early reviewer can spend its share,
+        # but not the time reserved for siblings later in the pass.
+        remaining_specs = specs.length
 
         statuses = []
         # Partition into claude-tmux specs vs everything else so the
@@ -944,14 +931,21 @@ module Hive
           claude_specs, other_specs = specs.partition { |spec| claude_tmux_reviewer?(cfg, spec) }
 
           other_specs.each do |spec|
-            result = run_reviewer_spec(cfg, ctx, spec, deadline,
-                                       started_at: started_at,
-                                       max_wall_clock_sec: max_wall_clock_sec)
+            result = run_reviewer_spec(
+              cfg, ctx, spec,
+              reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+              started_at: started_at,
+              max_wall_clock_sec: max_wall_clock_sec
+            )
             return :wall_clock_exceeded if result == :wall_clock_exceeded
 
             statuses << result.status
             handle_reviewer_result(task, cfg, ctx, spec, result)
+            remaining_specs -= 1
           end
+
+          return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
+                                         wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
           Hive::ClaudeLauncher.with_shared_session(
             task: task,
@@ -962,29 +956,48 @@ module Hive
             allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           ) do |handle|
             claude_specs.each do |spec|
-              result = run_reviewer_spec(cfg, ctx, spec, deadline,
-                                         started_at: started_at,
-                                         max_wall_clock_sec: max_wall_clock_sec,
-                                         handle: handle)
+              result = run_reviewer_spec(
+                cfg, ctx, spec,
+                reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+                started_at: started_at,
+                max_wall_clock_sec: max_wall_clock_sec,
+                handle: handle
+              )
               return :wall_clock_exceeded if result == :wall_clock_exceeded
 
               statuses << result.status
               handle_reviewer_result(task, cfg, ctx, spec, result)
+              remaining_specs -= 1
             end
           end
         else
           specs.each do |spec|
-            result = run_reviewer_spec(cfg, ctx, spec, deadline,
-                                       started_at: started_at,
-                                       max_wall_clock_sec: max_wall_clock_sec)
+            result = run_reviewer_spec(
+              cfg, ctx, spec,
+              reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+              started_at: started_at,
+              max_wall_clock_sec: max_wall_clock_sec
+            )
             return :wall_clock_exceeded if result == :wall_clock_exceeded
 
             statuses << result.status
             handle_reviewer_result(task, cfg, ctx, spec, result)
+            remaining_specs -= 1
           end
         end
 
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining:)
+        return nil unless started_at && max_wall_clock_sec
+        return nil if specs_remaining.to_i <= 0
+
+        remaining = max_wall_clock_sec - (Time.now - started_at)
+        return Process.clock_gettime(Process::CLOCK_MONOTONIC) if remaining <= 0
+
+        fair_share = remaining / specs_remaining
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ fair_share, 1 ].max
       end
 
       def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)

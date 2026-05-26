@@ -1,0 +1,143 @@
+require "test_helper"
+require "hive/commands/babysit"
+
+class HiveCommandsBabysitTest < Minitest::Test
+  include HiveTestHelper
+
+  FakeDispatcher = Struct.new(:calls) do
+    def run_forever
+      calls << :run_forever
+    end
+  end
+
+  def babysit(subcommand = nil, **kwargs)
+    Hive::Commands::Babysit.new(subcommand, **{ hive_home: @home }.merge(kwargs))
+  end
+
+  def setup
+    @home = Dir.mktmpdir("hive-babysit-command")
+  end
+
+  def teardown
+    FileUtils.rm_rf(@home) if @home
+  end
+
+  def daemon_config
+    {
+      "log_max_bytes" => 1024,
+      "log_max_files" => 2
+    }
+  end
+
+  def write_pid_payload(pid: 4242, process_start_time: "start-time")
+    FileUtils.mkdir_p(@home)
+    File.write(
+      File.join(@home, ".babysitter.pid"),
+      {
+        "pid" => pid,
+        "process_start_time" => process_start_time,
+        "started_at" => Time.now.utc.iso8601
+      }.to_yaml
+    )
+  end
+
+  def test_start_writes_pid_runs_dispatcher_and_cleans_pid
+    command = babysit("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    captured = nil
+    config = daemon_config
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+        with_replaced_singleton_method(Hive::Babysitter::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal [ :run_forever ], dispatcher.calls
+    assert_equal true, captured.fetch(:dry_run)
+    refute File.exist?(command.pid_file)
+  end
+
+  def test_start_refuses_when_pid_file_points_to_live_babysitter
+    command = babysit("start")
+    command.define_singleton_method(:read_live_pid) { 2222 }
+
+    err = assert_raises(Hive::ConcurrentRunError) { command.call }
+    assert_match(/already running/, err.message)
+    assert_equal 2222, err.holder.fetch(:pid)
+  end
+
+  def test_status_not_running_exits_error_after_message
+    command = babysit("status")
+
+    out, _err = capture_io do
+      assert_raises(Hive::Error) { command.call }
+    end
+
+    assert_includes out, "not running"
+  end
+
+  def test_status_reports_verified_running_babysitter
+    command = babysit("status")
+    write_pid_payload(pid: 1234)
+    File.utime(Time.now - 5, Time.now - 5, command.pid_file)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+
+    out, _err = capture_io { command.call }
+    assert_match(/running \(pid 1234, uptime \d+s\)/, out)
+  end
+
+  def test_once_unknown_project_is_usage_error
+    with_tmp_global_config do
+      err = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Babysit.new(nil, "missing", once: true, hive_home: @home).call
+      end
+      assert_match(/unknown project/, err.message)
+    end
+  end
+
+  def test_once_registered_project_runs_one_dispatcher_pass
+    with_tmp_global_config do |home|
+      with_tmp_dir do |project|
+        data = YAML.safe_load(File.read(File.join(home, "config.yml")))
+        data["registered_projects"] = [ { "name" => "proj", "path" => project } ]
+        File.write(File.join(home, "config.yml"), data.to_yaml)
+
+        dispatcher = FakeDispatcher.new([])
+        captured = nil
+        config = daemon_config
+        with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+          with_replaced_singleton_method(Hive::Babysitter::Dispatcher, :new, lambda { |**kwargs|
+            captured = kwargs
+            dispatcher
+          }) do
+            Hive::Commands::Babysit.new(nil, "proj", once: true, hive_home: @home).call
+          end
+        end
+
+        assert_equal [ :run_forever ], dispatcher.calls
+        assert_equal "proj", captured.fetch(:project_name)
+        assert_equal 1, captured.fetch(:max_ticks)
+      end
+    end
+  end
+
+  def test_reload_success_sends_hup
+    command = babysit("reload")
+    write_pid_payload(pid: 1234)
+    signals = []
+    command.define_singleton_method(:pid_alive?) { |_pid| true }
+    command.define_singleton_method(:pid_ownership) { |_payload, _pid| :verified }
+    command.define_singleton_method(:send_signal_safely) { |pid, signal| signals << [ pid, signal ] }
+
+    out, _err = capture_io { command.call }
+    assert_equal [ [ 1234, :HUP ] ], signals
+    assert_includes out, "reload requested"
+  end
+end

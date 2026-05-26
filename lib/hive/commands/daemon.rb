@@ -5,6 +5,7 @@ require "yaml"
 require "hive/config"
 require "hive/paths"
 require "hive/lock"
+require "hive/pid_file"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
@@ -31,6 +32,7 @@ module Hive
     #   disable [PROJECT|--all]        Set daemon.enabled: false in per-project YAML.
     class Daemon
       include Hive::Schemas::EnvelopeEmitter
+      include Hive::PidFile
 
       VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install queue].freeze
 
@@ -1316,107 +1318,6 @@ module Hive
         end
 
         lines.join("\n")
-      end
-
-      def read_live_pid
-        return nil unless File.exist?(pid_file)
-
-        payload = read_pid_file_payload
-        pid = payload && payload["pid"]
-        return nil unless pid && pid > 0
-        return nil unless pid_alive?(pid)
-        # PR-40 review P2 #3: a `pid_alive?` PID owned by an unrelated
-        # process (after PID reuse) must NOT be treated as our daemon.
-        return nil unless pid_owned_by_us?(payload, pid)
-
-        pid
-      end
-
-      def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
-      end
-
-      # Verify the live process at `pid` is the daemon we wrote to the
-      # PID file. Returns one of three symbols:
-      #
-      #   :verified   — recorded and live start_time both present AND match.
-      #                 Safe to send signals.
-      #   :reused     — both present but DIFFER. The OS handed `pid` to
-      #                 a different process; refuse signals.
-      #   :unverified — at least one side is nil. Cannot prove it's the
-      #                 daemon. Refuse signals to avoid hitting bystanders.
-      #
-      # PR-40 follow-up review C5 — split from the prior "true on either
-      # nil" boolean which silently degraded to TRUST in stripped
-      # containers. The bare-integer back-compat path (legacy PID files)
-      # produces a :legacy outcome callers may treat as :verified at
-      # their discretion.
-      def pid_ownership(payload, pid)
-        return :unverified if payload.nil?
-        return :legacy     if payload["_legacy"]
-
-        recorded = payload["process_start_time"]
-        live = Hive::Lock.send(:process_start_time, pid)
-        return :unverified if recorded.nil? || live.nil?
-
-        recorded == live ? :verified : :reused
-      end
-
-      # Back-compat predicate; true only when the daemon is genuinely
-      # confirmed to own the PID. Legacy files get :verified-class
-      # treatment to match the prior behavior for hand-written PID
-      # files used in tests.
-      def pid_owned_by_us?(payload, pid)
-        ownership = pid_ownership(payload, pid)
-        ownership == :verified || ownership == :legacy
-      end
-
-      def read_pid_file_payload
-        return nil unless File.exist?(pid_file)
-
-        raw = File.read(pid_file)
-        # New YAML format
-        parsed = YAML.safe_load(raw, permitted_classes: [ Time ]) rescue nil
-        return parsed if parsed.is_a?(Hash) && parsed["pid"]
-
-        # Back-compat: a bare-integer PID file (older daemon versions OR
-        # a hand-written PID for testing). Mark it with `_legacy` so the
-        # ownership check can distinguish "intentional bare-int" from
-        # "process_start_time silently nil at write time on a stripped
-        # container" — the latter is the C5 attack surface we just
-        # closed at write-time but the read-time check still needs to
-        # tell the two cases apart.
-        if raw.strip =~ /\A\d+\z/
-          return { "pid" => raw.strip.to_i, "process_start_time" => nil, "_legacy" => true }
-        end
-
-        nil
-      end
-
-      def pid_file_payload(pid, start_time = nil)
-        # PR-40 follow-up review C5: callers in start_daemon now read
-        # the start_time once and pass it explicitly so the failure
-        # mode is observable at start (refuse to start) rather than
-        # silently dropping a `nil` into the PID file.
-        start_time ||= Hive::Lock.send(:process_start_time, pid)
-        {
-          "pid" => pid,
-          "process_start_time" => start_time,
-          "started_at" => Time.now.utc.iso8601
-        }
-      end
-
-      def send_signal_safely(pid, signal)
-        Process.kill(signal, pid)
-      rescue Errno::ESRCH
-        # Already gone
-      rescue Errno::EPERM
-        warn "hive: insufficient permissions to signal pid #{pid}"
       end
 
       # `start` and `tail` don't emit a JSON envelope (start blocks

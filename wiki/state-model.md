@@ -284,6 +284,21 @@ Fix-agent commits (Phase 4 review-fix and Phase 1 ci-fix) MUST end with these gi
 
 Trailers are not validated server-side — commits without trailers are silently excluded from the rollback metric, so missing trailers degrade signal but never block work. `Hive::Metrics.parse_trailers` (`lib/hive/metrics.rb:104`) lower-cases keys and accepts any `[A-Za-z][A-Za-z0-9-]*: value` line in the body. See [[modules/metrics]] · [[commands/metrics]].
 
+## Babysitter state (out-of-band)
+
+Per-project opt-in PR-repair daemon (see [[modules/babysitter]]). Lives outside the 1→9 stages tree.
+
+```
+<project>/.hive-state/babysitter/
+├── events.jsonl                 # append-only JSONL action log
+├── status.md                    # human-readable loop summary
+└── worktrees/<pr>/              # ephemeral worktree per PR head branch
+$HIVE_HOME/.babysitter.pid        # single-instance PID lock
+$HIVE_HOME/logs/babysitter.log    # rotated JSON-line process log
+```
+
+No marker grammar, no stage `mv`, no `worktree.yml` — `Hive::Babysitter::Worktree.materialize` recreates the per-PR worktree from the PR head each tick. Events use the closed action/outcome enums documented in [[modules/babysitter]].
+
 ## State machine diagram
 
 ```mermaid

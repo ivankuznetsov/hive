@@ -63,6 +63,11 @@ class ReviewEscalationQuestionsTest < Minitest::Test
         ### Q2. Should we add a new abstraction?
         Source: codex-ce-code-review-01.md
         ### A2.
+        No, keep the fix local to the current helper.
+
+        ### Q3. Should this remain manual?
+        Source: codex-ce-code-review-01.md
+        ### A3.
       MD
 
       ctx = make_ctx(dir, task_folder)
@@ -70,16 +75,21 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       accepted = payload.text
       answered = Hive::Stages::Review.collect_answered_escalation_findings(ctx)
 
-      assert_equal 3, payload.count
+      assert_equal 4, payload.count
       assert_equal accepted, Hive::Stages::Review.collect_accepted_findings(ctx)
       assert_includes accepted, "AUTO-FIX: rename the confusing helper"
       assert_includes accepted, "legacy accepted finding without a label"
       assert_includes accepted, "USER-ANSWERED ESCALATION Q1"
       assert_includes accepted, "Use execute.agent"
+      assert_includes accepted, "USER-ANSWERED ESCALATION Q2"
+      assert_includes accepted, "Should we add a new abstraction?"
+      assert_includes accepted, "keep the fix local"
       assert_includes answered, "USER-ANSWERED ESCALATION Q1"
+      assert_includes answered, "USER-ANSWERED ESCALATION Q2"
       assert_includes answered, "Use execute.agent"
+      assert_includes answered, "keep the fix local"
       refute_includes accepted, "RESOLVED/NO-FIX"
-      refute_includes accepted, "Should we add a new abstraction?"
+      refute_includes accepted, "Should this remain manual?"
     end
   end
 
@@ -108,6 +118,9 @@ class ReviewEscalationQuestionsTest < Minitest::Test
       assert_equal 1, payload.count
       assert_includes accepted, "Accepted legacy escalations from escalations-01.md"
       assert_includes accepted, "apply the requested legacy escalation fix"
+      assert_equal accepted, Hive::Stages::Review.collect_legacy_checked_escalations(
+        Hive::Stages::Review::Triage.escalations_path(ctx)
+      )
       assert_equal 1, Hive::Stages::Review.count_escalations(ctx)
     end
   end

@@ -483,8 +483,21 @@ class RunReviewTest < Minitest::Test
         folder = setup_review_task(dir)
         worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
         FileUtils.mkdir_p(File.join(folder, "reviews"))
-        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
-                   "## High\n- [x] apply a fix\n")
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"), <<~MD)
+          ## High
+          - [x] apply a fix
+          - [x] apply another fix
+        MD
+        File.write(File.join(folder, "reviews", "escalations-01.md"), <<~MD)
+          # Escalations for pass 01
+
+          ## Round 1
+
+          ### Q1. Which config key should the fix use?
+          Source: local-reviewer-01.md
+          ### A1.
+          Use execute.agent.
+        MD
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         dirty_file = File.join(worktree, "dirty-fix.txt")
@@ -512,7 +525,7 @@ class RunReviewTest < Minitest::Test
         assert_includes commit, "fix(review): apply pass 01 findings"
         assert_includes commit, "Hive-Task-Slug: feat-x-260424-aaaa"
         assert_includes commit, "Hive-Fix-Pass: 01"
-        assert_includes commit, "Hive-Fix-Findings: 1"
+        assert_includes commit, "Hive-Fix-Findings: 3"
         assert_includes commit, "Hive-Triage-Bias: courageous"
         assert_includes commit, "Hive-Reviewer-Sources: local-reviewer"
         assert_includes commit, "Hive-Fix-Phase: fix"

@@ -19,6 +19,13 @@ Append-only log of all wiki operations.
 
 **Pages:** updated [[modules/bot]] (answer-writer slot creation), [[commands/status]] (`unanswered_questions`), [[modules/daemon]] (gate now observable + answerable).
 
+## [2026-05-26T22:15:00Z] markers - record tmux-capture embedded-marker mis-read footgun
+
+**Action:** Documented a marker-parsing footgun found while forcing a manual re-review on two writero tasks. `Hive::Markers.current` scans the whole state file and returns the *last* `MARKER_RE` match (and `set` rewrites the last match). In tmux-mode stages `task.md` is a pane capture that includes the stage prompt, which contains literal example markers (e.g. an embedded `<!-- REVIEW_COMPLETE pass=1 browser=skipped -->` in the prompt instructions). When the real trailing marker is removed via the documented hand-edit recovery, `current` falls back to the embedded example and mis-classifies the task, so the daemon advances it instead of re-reviewing and `hive run` short-circuits "already complete". Worked around by appending an authoritative `<!-- EXECUTE_COMPLETE -->` at EOF.
+
+**Refreshed pages:**
+- [[gaps]] - added open-question #14 under "Open questions about the codebase".
+
 ## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
 
 **Action:** Addressed the actionable `/ce-code-review` findings on PR #268:

@@ -490,6 +490,39 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_augment_result_sets_nil_final_message_when_pane_tail_is_unavailable
+    runner = Struct.new(:name) do
+      def capture_pane_tail(bytes:)
+        raise Hive::TmuxError, "pane gone"
+      end
+    end.new("gone-pane")
+    result = {}
+
+    Hive::ClaudeLauncher.augment_result_with_final_message!(result, runner)
+
+    assert_nil result.fetch(:final_message)
+    assert_nil result.fetch(:final_message_source)
+  end
+
+  def test_capture_pane_log_warns_when_log_path_is_not_writable
+    with_tmp_dir do |dir|
+      log_dir = File.join(dir, "not-a-directory")
+      File.write(log_dir, "already a file")
+      task = Struct.new(:log_dir).new(log_dir)
+      runner = Struct.new(:pane) do
+        def capture_pane_tail(bytes:)
+          pane
+        end
+      end.new("pane tail")
+
+      _out, err = capture_io do
+        Hive::ClaudeLauncher.capture_pane_log(task, runner, "brainstorm")
+      end
+
+      assert_includes err, "could not write tmux pane log for brainstorm"
+    end
+  end
+
   private
 
   def with_tmp_task(stage: "2-brainstorm")

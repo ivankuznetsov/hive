@@ -69,6 +69,13 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T11:49:11Z] brainstorm - fail fast on tmux prompt submit loss
+
+**Action:** Documented the tmux prompt submit failure path. `TmuxRunner#send_prompt` now lets `NoServerRunning`, hung tmux commands, and other `send-keys Enter` failures propagate while retaining buffer cleanup, so an unsubmitted prompt fails immediately instead of waiting for the stage timeout. `HIVE_TMUX_COMMAND_TIMEOUT_SEC` bounds each tmux client call.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] - recorded the fail-fast tmux submit semantics.
+
 ## [2026-05-26T11:37:50Z] brainstorm - pin Claude TUI ready predicates
 
 **Action:** Documented the Claude TUI predicate contract for tmux mode. Trust and ready markers are pinned in `Hive::ClaudeLauncher` to the observed Claude Code 2.1.133 TUI; readiness is based on the current prompt block, requires the prompt marker on the last non-blank pane line, ignores stale trust/permission scrollback, and rejects numbered menu options as non-ready.

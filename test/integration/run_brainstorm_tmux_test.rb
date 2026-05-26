@@ -15,9 +15,11 @@ class RunBrainstormTmuxTest < Minitest::Test
     @old_poll = ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"]
     @old_sentinel = ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"]
     @old_tmux_bin = ENV["HIVE_TMUX_BIN"]
+    @old_prompt_submit_delay = ENV["HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC"]
     ENV["HIVE_TMUX_SOCKET"] = @socket
     ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"] = "0.1"
     ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"] = "0.1"
+    ENV["HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC"] = "0.05"
   end
 
   def teardown
@@ -27,6 +29,7 @@ class RunBrainstormTmuxTest < Minitest::Test
     ENV["HIVE_BRAINSTORM_TMUX_POLL_INTERVAL_SEC"] = @old_poll
     ENV["HIVE_BRAINSTORM_TMUX_SENTINEL_INTERVAL_SEC"] = @old_sentinel
     ENV["HIVE_TMUX_BIN"] = @old_tmux_bin
+    ENV["HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC"] = @old_prompt_submit_delay
     ENV.delete("HIVE_FAKE_INTERACTIVE_SCENARIO")
   end
 
@@ -181,6 +184,28 @@ class RunBrainstormTmuxTest < Minitest::Test
     end
   end
 
+  def test_submit_loss_writes_error_marker_and_tears_down
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        fake = write_fake_interactive_claude(dir)
+        ENV["HIVE_CLAUDE_BIN"] = fake
+        ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "exit_before_submit"
+        folder = make_task_at_brainstorm(dir, timeout: 3)
+
+        _out, _err, status = with_env("HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC" => "0.5") do
+          with_captured_exit { Hive::Commands::Run.new(folder).call }
+        end
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "brainstorm.md"))
+        assert_equal :error, marker.name
+        assert_equal "claude_launch_failed", marker.attrs["reason"]
+        assert_equal "Hive::TmuxRunner::NoServerRunning", marker.attrs["exception_class"]
+        assert_empty tmux_sessions
+      end
+    end
+  end
+
   def test_midrun_exception_still_tears_down_session
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -247,10 +272,23 @@ class RunBrainstormTmuxTest < Minitest::Test
       puts "Claude Code v2.1.118"
       puts "❯"
       STDOUT.flush
+      scenario = ENV.fetch("HIVE_FAKE_INTERACTIVE_SCENARIO")
+      if scenario == "exit_before_submit"
+        system("stty raw -echo")
+        deadline = Time.now + 2
+        loop do
+          if IO.select([STDIN], nil, nil, 0.05)
+            STDIN.read_nonblock(1)
+            exit 0
+          end
+          exit 2 if Time.now >= deadline
+        rescue IO::WaitReadable
+          retry
+        end
+      end
       STDIN.gets
       stage_dir = ENV.fetch("HIVE_TASK_STAGE_DIR")
       state_file = File.join(stage_dir, "brainstorm.md")
-      scenario = ENV.fetch("HIVE_FAKE_INTERACTIVE_SCENARIO")
 
       def fire_hook(turn)
         settings = JSON.parse(File.read(File.join(Dir.pwd, ".claude", "settings.json")))
@@ -272,21 +310,28 @@ class RunBrainstormTmuxTest < Minitest::Test
         end
       end
 
+      def keep_session_alive_for_submit
+        sleep 1
+      end
+
       case scenario
       when "waiting"
         File.write(state_file, "## Round 1\\n### Q1. Scope?\\n### A1.\\n\\n<!-- WAITING -->\\n")
         puts "<!-- WAITING -->"
         fire_hook("waiting")
+        keep_session_alive_for_submit
       when "complete"
         File.write(state_file, "## Requirements\\n- Done\\n<!-- COMPLETE -->\\n")
         puts "<!-- COMPLETE -->"
         fire_hook("complete")
+        keep_session_alive_for_submit
       when "manual_then_complete"
         fire_hook("first")
         wait_for_done_cleared
         File.write(state_file, "## Requirements\\n- Done after manual turn\\n<!-- COMPLETE -->\\n")
         puts "<!-- COMPLETE -->"
         fire_hook("second")
+        keep_session_alive_for_submit
       when "hang"
         sleep 10
       when "crash"

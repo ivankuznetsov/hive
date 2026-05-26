@@ -160,6 +160,14 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T14:11:12Z] tui - token footer ordering
+
+**Action:** Documented that the grid-mode footer now renders action hints before the compact token usage block on wide terminals, preserving the ` · ` separator between blocks and leaving the below-80-column compact-only usage path unchanged.
+
+**Refreshed pages:**
+- [[token-usage]] - updated the TUI surface description and example footer order.
+- [[commands/tui]] - refreshed the dashboard footer diagram to show hints before usage.
+
 ## [2026-05-26T12:19:00Z] bot - legacy stage directory notifications
 
 **Action:** Documented the Telegram bot parity path for `legacy_stage_dirs`. `StatusWatcher` now surfaces project-level legacy-stage warnings, `Supervisor#status_tick` feeds them through the alert lifecycle with task rows, and the bot sends one deduped notification on the clean-to-legacy transition telling the operator to run `hive migrate`.

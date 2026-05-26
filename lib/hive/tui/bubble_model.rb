@@ -3201,7 +3201,7 @@ module Hive
             return Views::UsageFooter.render(aggregate: aggregate, width: usable_width)
           end
 
-          line = "#{Views::UsageFooter.text(aggregate)} · #{footer_hint}"
+          line = "#{footer_hint} · #{Views::UsageFooter.text(aggregate)}"
           line = Views::Format.truncate(line, usable_width) if usable_width
           Hive::Tui::Styles::HINT.render(line)
         end

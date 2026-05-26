@@ -28,7 +28,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │  myapp          │  ⚠  oauth-…       6-review      Needs recovery      1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
-│ Footer: [Tab]  [Enter]  [n] new  [/] filter  [?] help  [i] info  [q] quit│
+│ Footer: [Tab] ... [q] quit · today ... • 7d ... • all ... • tokens        │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 

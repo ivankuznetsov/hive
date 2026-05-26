@@ -101,6 +101,111 @@ module Hive
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
     end
 
+    def list_open_prs(worktree_path, cfg: nil)
+      fields = %w[
+        number
+        headRefName
+        baseRefName
+        labels
+        isDraft
+        author
+        headRepository
+        url
+        updatedAt
+      ].join(",")
+      out, err, status = capture3("gh", "pr", "list",
+                                  "--state", "open",
+                                  "--json", fields,
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr list` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      list = JSON.parse(out)
+      raise Hive::GhError, "`gh pr list` returned #{list.class}; expected Array" unless list.is_a?(Array)
+
+      list
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr list` returned unparseable JSON: #{e.message}"
+    end
+
+    def pr_status_rollup(worktree_path, number, cfg: nil)
+      out, err, status = capture3("gh", "pr", "view", number.to_s,
+                                  "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid,url",
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{number}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      doc
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
+    end
+
+    def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)
+      rollup = pr_status_rollup(worktree_path, number, cfg: cfg)
+      jobs = failing_jobs_from_rollup(rollup)
+      return [] if jobs.empty?
+
+      per_job_cap = [ byte_cap / jobs.size, 1 ].max
+      jobs.map do |job|
+        job_id = job["databaseId"] || job["id"]
+        log = if job_id
+                fetch_failed_job_log(worktree_path, job_id, cfg: cfg)
+        else
+                ""
+        end
+        { "name" => job["name"].to_s, "job_id" => job_id, "log" => tail_clip(log, per_job_cap) }
+      end
+    end
+
+    def pr_diff_stat(worktree_path, base_ref, head_ref, cfg: nil)
+      capture3("git", "fetch", "origin", base_ref.to_s, chdir: worktree_path, cfg: cfg)
+      out, err, status = capture3("git", "diff", "--stat",
+                                  "origin/#{base_ref}...#{head_ref}",
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`git diff --stat origin/#{base_ref}...#{head_ref}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      out
+    end
+
+    def failing_jobs_from_rollup(rollup)
+      Array(rollup["statusCheckRollup"]).select do |entry|
+        next false unless entry.is_a?(Hash)
+
+        conclusion = entry["conclusion"].to_s.upcase
+        status = entry["status"].to_s.upcase
+        conclusion == "FAILURE" || conclusion == "TIMED_OUT" || conclusion == "CANCELLED" || status == "FAILURE"
+      end
+    end
+
+    def fetch_failed_job_log(worktree_path, job_id, cfg: nil)
+      out, err, status = capture3("gh", "run", "view",
+                                  "--log-failed",
+                                  "--job", job_id.to_s,
+                                  chdir: worktree_path,
+                                  cfg: cfg)
+      status.success? ? out : err.to_s
+    end
+
+    def tail_clip(text, byte_cap)
+      text = text.to_s
+      return text if text.bytesize <= byte_cap
+
+      elided = text.bytesize - byte_cap
+      tail = text.byteslice(-byte_cap, byte_cap).to_s
+      tail.scrub!("")
+      "\n...[truncated, #{elided} bytes elided]\n#{tail}"
+    end
+
     def lookup_merged_pr(worktree_path, branch, cfg: nil, head_oid: nil)
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find do |p|
         p["state"] == "MERGED" && (head_oid.nil? || p["headRefOid"].to_s == head_oid.to_s)

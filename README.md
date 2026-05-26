@@ -19,7 +19,7 @@ Read the model in depth in [docs/concepts.md](docs/concepts.md) — folder-as-ag
 
 A sub-two-minute reel of the whole loop — install, `hive init`, capture an idea in the TUI, answer brainstorm questions in vim, and archive the finished task once Hive has shipped it:
 
-![Hive demo](docs/assets/hive-demo.gif)
+![Hive demo](docs/assets/hive-demo.webp)
 
 Full-quality MP4 (~4&nbsp;MB): [docs/assets/hive-demo.mp4](docs/assets/hive-demo.mp4).
 

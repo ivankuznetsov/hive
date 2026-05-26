@@ -726,6 +726,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "tokens"
     assert_includes out, "[i] info"
     assert_includes out, "[q] quit"
+    assert_operator out.index("[Tab] switch"), :<, out.index("tokens"),
+                    "hint block must precede token block at wide width"
   end
 
   def test_default_footer_fits_full_hint_at_exact_boundary_width
@@ -748,7 +750,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert usage.end_with?("tokens"),
            "test premise: usage text must end with `tokens` label, got #{usage.inspect}"
     full_width = "#{hint} · #{usage}".length
-    out = with_zero_usage { @model.send(:default_footer, full_width - usage.length) }
+    out = with_zero_usage { @model.send(:default_footer, full_width - 5) }
 
     assert_includes out, "[Tab] switch",
                     "hint block must survive when overflow clips from the right"
@@ -756,7 +758,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
                     "token block must be the first content clipped on overflow"
   end
 
-  def test_default_footer_truncates_from_right_at_narrow_width
+  def test_default_footer_narrow_branch_drops_hints_and_keeps_usage
     out = with_zero_usage { @model.send(:default_footer, 76) }
 
     assert_includes out, "tokens"

@@ -2274,3 +2274,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[state-model]]
 - [[dependencies]]
 
+## [2026-05-26T15:08:00Z] forget — add retry-safe --if-exists
+
+**Action:** `hive forget NAME --if-exists` now exits 0 when the registry row is already absent, while the default `hive forget NAME` path still returns `unknown_project` / exit 64 for typo detection. The `hive-forget` success envelope now carries `removed: true` for actual removals and `removed: false` for `--if-exists` no-ops.
+
+**Refreshed pages:**
+- [[commands/forget]]
+- [[cli]]

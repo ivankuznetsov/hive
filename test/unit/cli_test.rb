@@ -59,8 +59,13 @@ class HiveCliTest < Minitest::Test
 
     with_command_new_stub(Hive::Commands::Forget) do |calls|
       Hive::CLI.start([ "forget", "demo", "--json" ])
-      assert_equal [ "demo" ], calls.first.fetch(:args)
-      assert_equal({ json: true }, calls.first.fetch(:kwargs))
+      Hive::CLI.start([ "forget", "demo", "--json", "--if-exists" ])
+
+      constructor_calls = calls.grep(Hash)
+      assert_equal [ "demo" ], constructor_calls.first.fetch(:args)
+      assert_equal({ json: true, if_exists: false }, constructor_calls.first.fetch(:kwargs))
+      assert_equal [ "demo" ], constructor_calls.last.fetch(:args)
+      assert_equal({ json: true, if_exists: true }, constructor_calls.last.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Prune) do |calls|

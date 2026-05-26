@@ -268,7 +268,7 @@ module Hive
       # the per-project scaffolding values (project name, default branch,
       # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / development_agent /
-      # claude_mode / enabled_reviewers / triage_bias / budgets /
+      # claude_mode / claude_permission_mode / enabled_reviewers / triage_bias / budgets /
       # timeouts). The single source of truth for the answers hash is
       # `Prompts#collect`; this binding
       # never invents defaults of its own — callers always supply
@@ -280,6 +280,10 @@ module Hive
           @worktree_root = worktree_root
           @planning_agent = answers.fetch("planning_agent")
           @claude_mode = answers.fetch("claude_mode", Hive::Commands::Init::Prompts::DEFAULT_CLAUDE_MODE)
+          @claude_permission_mode = answers.fetch(
+            "claude_permission_mode",
+            Hive::Commands::Init::Prompts::DEFAULT_CLAUDE_PERMISSION_MODE
+          )
           @development_agent = answers.fetch("development_agent")
           @enabled_reviewers = answers.fetch("enabled_reviewers")
           @triage_bias = answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS)
@@ -293,7 +297,7 @@ module Hive
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
-                    :planning_agent, :claude_mode, :development_agent,
+                    :planning_agent, :claude_mode, :claude_permission_mode, :development_agent,
                     :enabled_reviewers, :triage_bias, :budgets, :timeouts,
                     :daemon_enabled, :daemon_autostart
 

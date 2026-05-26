@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb
 created: 2026-04-25
-updated: 2026-05-13
+updated: 2026-05-25
 tags: [agent, claude, subprocess]
 ---
 
@@ -22,7 +22,8 @@ Hive::Agent.new(
   log_label: nil,       # defaults to task.stage_name
   profile: nil,         # AgentProfile; defaults to claude profile
   expected_output: nil, # used by :output_file_exists profiles
-  status_mode: nil      # per-spawn override
+  status_mode: nil,     # per-spawn override
+  permission_mode: nil  # Claude-only override; nil uses profile default/config caller
 )
 ```
 
@@ -42,6 +43,20 @@ There is **no inode-tracking concurrent-edit detection.** It was tried in early 
 
 ## `build_cmd`
 
+`build_cmd` composes argv from the selected `AgentProfile`, not from a
+hardcoded Claude template:
+
+```
+<profile.bin> <profile.headless_flag>
+  <permission flags>
+  [<profile.add_dir_flag> <dir> ...]
+  [<profile.budget_flag> <amount>]
+  <profile.output_format_flags...>
+  <prompt>
+```
+
+For the built-in Claude profile this is still:
+
 ```
 claude -p
   --dangerously-skip-permissions
@@ -54,7 +69,20 @@ claude -p
   <prompt>
 ```
 
-`--verbose` is required by `claude` whenever `-p` is paired with `--output-format stream-json`; without it claude rejects the invocation with `"Error: When using --print, --output-format=stream-json requires --verbose"`. `--no-session-persistence` ensures every invocation starts fresh — no surprises from a previous session's state.
+`--verbose` is required by `claude` whenever `-p` is paired with
+`--output-format stream-json`; without it claude rejects the invocation
+with `"Error: When using --print, --output-format=stream-json requires
+--verbose"`. `--no-session-persistence` ensures every invocation starts
+fresh.
+
+Claude permission flags are configurable per spawn. If no
+`permission_mode:` is supplied, the profile's `permission_skip_flag`
+is used (`--dangerously-skip-permissions` for Claude). If
+`permission_mode: "bypassPermissions"` is supplied, Hive keeps using the
+skip flag for backward-compatible headless behavior. Any other Claude
+permission mode is emitted as `--permission-mode <mode>`; current config
+validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
+`dontAsk`, and `plan`.
 
 ## `spawn_and_wait` (the long part)
 
@@ -86,7 +114,7 @@ claude -p
 
 ## Why these three boundaries matter
 
-The agent runs with `--dangerously-skip-permissions`. Three controls keep this safe under the single-developer trust model:
+The default Claude permission path still uses `--dangerously-skip-permissions` (`bypassPermissions`). Three controls keep this safe under the single-developer trust model:
 
 1. **`--add-dir` discipline**: the agent only sees `cwd` and explicit `--add-dir` paths. Other projects on disk are unreachable.
 2. **Status-mode ownership**: marker-owning stages use `:state_file_marker`; reviewer-style spawns can use `:output_file_exists` so the orchestrator, not the reviewer, owns terminal markers.
@@ -94,10 +122,12 @@ The agent runs with `--dangerously-skip-permissions`. Three controls keep this s
 
 ## Tests
 
-- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary.
+- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv.
+- `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns.
 
 ## Backlinks
 
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]]
-- [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/finalize]]
+- [[modules/agent_profile]] · [[modules/config]]
+- [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/artifacts]] · [[stages/finalize]]
 - [[architecture]]

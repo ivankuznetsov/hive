@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-25
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) to use, and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, and registers the project globally.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) and tmux permission mode (`claude.permission_mode`) to use, and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, and registers the project globally.
 
 ## Usage
 
@@ -56,13 +56,14 @@ On TTY input streams the prompt walks the operator through the following section
 
 1. **Planning agent** (`brainstorm.agent` + `plan.agent`): one combined choice; the answer maps to both keys. Recommended default `claude`.
 2. **Claude launch mode** (`claude.mode`): `tmux` (default) runs every Claude-backed stage in an attachable tmux pane using the logged-in Claude session; `headless` keeps the non-interactive `claude -p` path. The setting is global for Claude only — Codex/Pi stages remain on their normal headless profile path.
-3. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
-4. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
-5. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the triage agent in the 6-review autonomous loop.
-6. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
-7. **Daemon enrollment + autostart** (`daemon.enabled`, `daemon.autostart`): whether to opt this project into the auto-advance daemon (default yes), and whether to enable+start the per-user service unit now (default no — the unit is always written, but autostart is opt-in).
+3. **Claude permission mode** (`claude.permission_mode`): applies to interactive tmux Claude sessions. Recommended default `bypassPermissions` skips Claude Code permission prompts for dogfood runs; `auto` uses Claude Code auto-mode rules. The same prompt also accepts `default`, `acceptEdits`, `dontAsk`, and `plan`.
+4. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
+5. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
+6. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the triage agent in the 6-review autonomous loop.
+7. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
+8. **Daemon enrollment + autostart** (`daemon.enabled`, `daemon.autostart`): whether to opt this project into the auto-advance daemon (default yes), and whether to enable+start the per-user service unit now (default no — the unit is always written, but autostart is opt-in).
 
-Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). The Claude mode prompt follows the same rule (`tmux` / `headless` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
+Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). The Claude mode and permission-mode prompts follow the same rule (`tmux` / `headless` or `1` / `2`; `bypassPermissions` / `auto` / etc. or `1` / `2` / ...). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
 
 ### Stable-iteration-order contract
 
@@ -77,7 +78,7 @@ Reordering either is a **breaking change for scripted automation** that uses ind
 When `$stdin.tty?` is false the prompt module skips every question and emits exactly one line to `$stdout`:
 
 ```
-hive: using defaults — planning=claude, claude_mode=tmux, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled, daemon_autostart=disabled
+hive: using defaults — planning=claude, claude_mode=tmux, claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled, daemon_autostart=disabled
 ```
 
 Piped input is **not** consumed — `printf 'codex\n...' | hive init` ignores the piped data and uses defaults. Document this contract for any automation that wants to set non-default values: use `--force` plus an explicitly-edited YAML rather than expecting heredoc piping to populate answers.
@@ -105,7 +106,7 @@ This branch is what the orphan worktree is initially based on, and what feature 
 ## Tests
 
 - `test/integration/init_test.rb` covers all five preconditions, the `--force` path, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, and the U5 piped-input + abort + already-initialized-guard scenarios.
-- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, edge re-prompts, the Claude mode prompt, the non-TTY summary contract, and the testability invariant.
+- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, edge re-prompts, the Claude mode and permission-mode prompts, the non-TTY summary contract, and the testability invariant.
 
 ## Backlinks
 

@@ -18,7 +18,7 @@ class ClaudeLauncherTest < Minitest::Test
 
         result = Hive::ClaudeLauncher.launch!(
           task: task,
-          cfg: { "claude" => { "mode" => "headless" } },
+          cfg: { "claude" => { "mode" => "headless", "permission_mode" => "auto" } },
           prompt: "prompt",
           add_dirs: [ task.folder ],
           cwd: task.folder,
@@ -33,6 +33,42 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal task, captured.fetch(0)
         assert_equal "prompt", captured.fetch(1).fetch(:prompt)
         assert_equal :claude, captured.fetch(1).fetch(:profile).name
+        assert_equal "auto", captured.fetch(1).fetch(:permission_mode)
+      end
+    end
+  end
+
+  def test_tmux_mode_delegates_configured_permission_mode_to_shared_session
+    with_tmp_task do |task|
+      captured = nil
+      handle = Struct.new(:result) do
+        def send_and_wait!(**_kwargs)
+          result
+        end
+      end.new({ status: :complete })
+      original = Hive::ClaudeLauncher.method(:with_shared_session)
+
+      capture_unbound_method(:with_shared_session, original) do
+        Hive::ClaudeLauncher.define_singleton_method(:with_shared_session) do |**kwargs, &block|
+          captured = kwargs
+          block.call(handle)
+        end
+
+        result = Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: { "claude" => { "mode" => "tmux", "permission_mode" => "auto" } },
+          prompt: "prompt",
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 1,
+          log_label: "test",
+          session_name: "hive-test-session",
+          status_mode: :state_file_marker
+        )
+
+        assert_equal({ status: :complete }, result)
+        assert_equal "auto", captured.fetch(:permission_mode)
       end
     end
   end

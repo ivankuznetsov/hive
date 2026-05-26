@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-25
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/Dev/hive/config.yml` (registered projects) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -17,7 +17,7 @@ tags: [config, yaml, validation]
   "worktree_root"     => nil,
   "default_branch"    => nil,
   "project_name"      => nil,
-  "claude"            => { "mode" => "tmux" },
+  "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions" },
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
   # caps for runaway agents, not cost targets. The deprecated
   # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
@@ -84,6 +84,8 @@ tags: [config, yaml, validation]
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
 | `write_global_config!(data)` | Single ingress for global-config writes; rewraps `Errno::EACCES`/`EROFS`/`ENOSPC` as `ConfigError`. Mirrors `Markers.write_atomic` shape so a future flock upgrade (Issue #31) can swap in without touching call sites. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |
+| `claude_mode(cfg)` | Returns `:tmux` or `:headless` after validating `claude.mode`. |
+| `claude_permission_mode(cfg)` | Returns the configured Claude Code permission mode, defaulting to `bypassPermissions`. Valid values mirror Claude Code: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. |
 | `deep_merge(base, override)` | Recursive merge: Hash-vs-Hash recurses; everything else (scalar, Array, mismatched types) replaces. |
 | `deep_dup(obj)` | Recursive Hash/Array deep-copy. |
 
@@ -105,6 +107,7 @@ Runs after merge so a default value can never trigger a failure — only user in
 2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
 3. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
 4. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
+5. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. The tmux launcher passes this value to Claude Code as `--permission-mode`; fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

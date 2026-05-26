@@ -16,6 +16,15 @@ Append-only log of all wiki operations.
 - [[decisions]] - new ADR-031 inserted ahead of ADR-030.
 - [[modules/daemon]] - added "Self-reexec on source drift" section before Backlinks.
 
+## [2026-05-25T18:28:15Z] claude.mode - init permission-mode selection
+
+**Action:** Added project config and `hive init` support for `claude.permission_mode`. Fresh projects now render `bypassPermissions` by default for interactive tmux Claude sessions, while the init prompt lets operators choose `auto` for Claude Code auto-mode rules or another supported Claude Code permission mode. `Hive::ClaudeLauncher` now reads the configured value before building the tmux wrapper command.
+
+**Refreshed pages:**
+- [[commands/init]] - documented the new prompt, defaults summary, and scripted-answer contract.
+- [[modules/config]] - documented defaults, validation, and `Config.claude_permission_mode`.
+- [[stages/brainstorm]] and [[state-model]] - recorded the launcher/config surface.
+
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
 **Action:** Dogfooded the merged project-global `claude.mode: tmux` path against real Claude in a disposable project. The run used a temporary `HIVE_HOME` plus private `HIVE_TMUX_SOCKET`, verified `hive doctor --json`, ran brainstorm to `marker_after=waiting`, filled the answer, reran to `marker_after=complete`, confirmed `round_waiting`/`round_complete` events, `hive status --json` `ready_to_plan`, and tmux cleanup.
@@ -2036,6 +2045,21 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/reviewers]]
 - [[commands/daemon]]
 - [[operating]]
+
+## [2026-05-25T19:06:41Z] refresh - architecture, daemon liveness, gaps
+
+**Action:** Refreshed the project wiki after reading `.llm-wiki/config.json`, agent instructions, the current wiki index/gaps/log, the configured cross-project wiki at `/home/asterio/wikis/master/wiki`, recent git history, and the dirty working-tree source changes. Documented PR #151's `live_task_lock` daemon path, updated stale architecture/active-area stage and AgentProfile descriptions, recorded the uncommitted `claude.permission_mode` surface in adjacent module/ADR pages, and made the gaps page explicit that source coverage is a representative domain map rather than an automated one-file audit.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[active-areas]]
+- [[modules/daemon]]
+- [[commands/daemon]]
+- [[modules/agent]]
+- [[modules/agent_profile]]
+- [[decisions]]
+- [[gaps]]
+- [[index]]
 
 ## [2026-05-25T19:30:41Z] review — reject pre-existing dirty fix worktrees
 

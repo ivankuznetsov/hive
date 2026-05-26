@@ -3,11 +3,11 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-25
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up.
 
 ## ADR-031: Daemon self-reexec on source-file drift
 
@@ -20,8 +20,8 @@ tags: [decisions, adr]
 
 **Status:** Active
 **Context:** Hive's first interactive Claude runtime was scoped to `2-brainstorm` via `brainstorm.runtime: tmux_interactive`. That solved OAuth/subscription billing for brainstorm, but left plan, execute, open-pr, review sub-spawns, artifacts, and finalize on the headless `claude -p` path. A per-stage runtime matrix would make operator intent harder to reason about and would not help the common case: "use my logged-in Claude session for every Claude-backed stage on this project."
-**Decision:** Add top-level `claude.mode` with values `tmux` and `headless`, defaulting to `tmux`. Every stage whose resolved `AgentProfile` is Claude calls `Hive::Stages::Base.spawn_claude!`, which routes through `Hive::ClaudeLauncher` and honors the global setting; non-Claude profiles remain on the normal `spawn_agent` path. `brainstorm.runtime` is deprecated and read only as a brainstorm fallback when `claude.mode` is absent. In 6-review, Claude reviewers run sequentially inside one shared tmux session per pass; Codex/Pi reviewers remain headless.
-**Consequences:** `tmux >= 3.0` is a runtime dependency when `claude.mode: tmux`, and missing tmux is a hard error (`ERROR reason=tmux_unavailable` or `REVIEW_ERROR reason=tmux_unavailable`) rather than a silent fallback. Mode switching is an edit to `.hive-state/config.yml` plus a stage restart. Daemon/service-only hosts that cannot run tmux should set `claude.mode: headless`. A longer standalone note lives at `docs/adrs/030-global-claude-launch-mode.md`.
+**Decision:** Add top-level `claude.mode` with values `tmux` and `headless`, defaulting to `tmux`. Every stage whose resolved `AgentProfile` is Claude calls `Hive::Stages::Base.spawn_claude!`, which routes through `Hive::ClaudeLauncher` and honors the global setting; non-Claude profiles remain on the normal `spawn_agent` path. `brainstorm.runtime` is deprecated and read only as a brainstorm fallback when `claude.mode` is absent. In 6-review, Claude reviewers run sequentially inside one shared tmux session per pass; Codex/Pi reviewers remain headless. The follow-up `claude.permission_mode` key controls Claude Code's interactive permission mode for tmux sessions, defaults fresh projects to `bypassPermissions`, and lets operators choose `auto`, `default`, `acceptEdits`, `dontAsk`, or `plan` at `hive init`.
+**Consequences:** `tmux >= 3.0` is a runtime dependency when `claude.mode: tmux`, and missing tmux is a hard error (`ERROR reason=tmux_unavailable` or `REVIEW_ERROR reason=tmux_unavailable`) rather than a silent fallback. Mode or permission-mode switching is an edit to `.hive-state/config.yml` plus a stage restart. Daemon/service-only hosts that cannot run tmux should set `claude.mode: headless`. A longer standalone note lives at `docs/adrs/030-global-claude-launch-mode.md`, with the permission-mode behavior also reflected in `docs/notes/claude-tmux-launch-mode.md`.
 
 ## ADR-027: Release artifacts are Tebako-packed binaries
 
@@ -91,11 +91,11 @@ tags: [decisions, adr]
 - PID-reuse defence: the lock payload includes `process_start_time` from `/proc/<pid>/stat` field 22; stale-check compares.
 **Consequences:** Multiple long-running stage agents on the same project can run concurrently; only the brief commit window is serialised.
 
-## ADR-008: `--dangerously-skip-permissions` everywhere, secured by other means
+## ADR-008: Default Claude bypassPermissions secured by other means
 
 **Status:** Active (single-developer trust model)
 **Context:** `claude -p` permission flags (`--allowed-tools "Bash(bin/* …)"`) showed unverified parse behaviour for multi-glob patterns in v2.1.118; even if they worked, `.env` is already on disk and reachable via `Read`. Permission scoping doesn't actually close the leak path.
-**Decision:** Use `--dangerously-skip-permissions` on every active stage. Substitute three other boundaries:
+**Decision:** Use Claude's bypass-permissions path by default for active stages that run through the Claude profile. Later AgentProfile work generalized non-Claude profiles, and ADR-030's `claude.permission_mode` follow-up lets operators choose other Claude Code permission modes, but the default local dogfood posture remains `bypassPermissions`. Substitute three other boundaries:
 1. **Prompt-injection wrapping with a per-run random nonce** — every user-supplied content blob is wrapped in `<user_supplied_<hex16>>…</user_supplied_<hex16>>`. The nonce is generated once per process by `Stages::Base.user_supplied_tag`, so attacker-supplied closing tags inside content (`</user_supplied>`) cannot terminate the wrapper.
 2. **Physical isolation** — every stage's `add-dir` is narrowed to `task.folder` only. Brainstorm and plan stages deliberately do NOT add the project root, so prompt-injected idea/brainstorm content cannot reach project source. Only the execute stage's worktree spawn gives the agent code-edit access, and that's confined to a feature branch in a sibling directory.
 3. **Post-run integrity checks** — SHA-256 pre/post on `plan.md` and `worktree.yml` around **both** the implementation and reviewer passes; either-agent tampering yields `<!-- ERROR reason=implementer_tampered|reviewer_tampered -->`. The PR stage runs an additional regex secret-scan on the published body and refuses to commit on api-key/AWS/GH-token hits. Inode-based concurrent-edit detection was tried and dropped because claude's atomic `Edit`/`Write` rotates inodes on every legitimate write.

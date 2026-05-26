@@ -82,6 +82,8 @@ class ConfigTest < Minitest::Test
       assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
       assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
       assert_equal :tmux, Hive::Config.claude_mode(cfg), "claude.mode must default to tmux"
+      assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg),
+                   "claude.permission_mode must default to bypassPermissions"
       assert_equal "headless", cfg.dig("brainstorm", "runtime"), "brainstorm runtime must default to headless"
     end
   end
@@ -96,6 +98,46 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal :headless, Hive::Config.claude_mode(cfg)
       assert_equal true, Hive::Config.explicit_claude_mode?(cfg)
+    end
+  end
+
+  def test_load_honors_claude_permission_mode_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        claude:
+          permission_mode: auto
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "auto", Hive::Config.claude_permission_mode(cfg)
+      assert_equal "auto", cfg.dig("claude", "permission_mode")
+    end
+  end
+
+  def test_load_raises_when_claude_permission_mode_is_unknown
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        claude:
+          permission_mode: reckless
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/claude\.permission_mode/, err.message)
+      assert_match(/bypassPermissions/, err.message)
+      assert_match(/auto/, err.message)
+    end
+  end
+
+  def test_load_raises_when_claude_permission_mode_is_not_a_string
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        claude:
+          permission_mode: 42
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/claude\.permission_mode/, err.message)
+      assert_match(/Integer/, err.message)
     end
   end
 
@@ -1837,6 +1879,16 @@ class ConfigTest < Minitest::Test
       assert_match(/rebase.*must be a Hash/, err.message)
     end
   end
+
+  def test_claude_permission_mode_rejects_unknown_value
+    err = assert_raises(Hive::ConfigError) do
+      Hive::Config.claude_permission_mode("claude" => { "permission_mode" => "reckless" })
+    end
+
+    assert_match(/claude\.permission_mode must be one of/, err.message)
+    assert_match(/reckless/, err.message)
+  end
+
   def test_claude_mode_rejects_unknown_value
     err = assert_raises(Hive::ConfigError) do
       Hive::Config.claude_mode("claude" => { "mode" => "warm_pool" })

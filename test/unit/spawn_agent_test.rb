@@ -97,6 +97,28 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_claude_permission_mode_from_cfg_reaches_headless_spawn
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        cfg: { "claude" => { "permission_mode" => "auto" } }
+      )
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "arg=--permission-mode"
+      assert_includes argv, "arg=auto"
+      refute_includes argv, "arg=--dangerously-skip-permissions"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # --- preflight ordering --------------------------------------------------
 
   def test_preflight_runs_before_agent_spawn_returns_error_envelope

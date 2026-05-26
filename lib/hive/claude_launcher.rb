@@ -84,9 +84,10 @@ module Hive
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
                 allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                permission_mode: DEFAULT_PERMISSION_MODE)
+                permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
+      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       if Hive::Config.claude_mode(cfg) == :headless
         require "hive/stages/base"
@@ -100,7 +101,8 @@ module Hive
           log_label: log_label,
           profile: profile,
           expected_output: expected_output,
-          status_mode: status_mode
+          status_mode: status_mode,
+          permission_mode: permission_mode
         )
       end
 
@@ -128,9 +130,10 @@ module Hive
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                            permission_mode: DEFAULT_PERMISSION_MODE)
+                            permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
+      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       runner = build_runner(task: task, session_name: session_name, cwd: cwd)
       # Pre-clean signal files BEFORE the preflight check so a stale

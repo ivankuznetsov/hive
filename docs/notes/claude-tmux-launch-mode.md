@@ -1,7 +1,7 @@
 # Claude Tmux Launch Mode
 
 **Status:** project-global Claude launch mode
-**Config:** `claude.mode: tmux`
+**Config:** `claude.mode: tmux`, `claude.permission_mode: bypassPermissions` by default
 
 ## Why this exists
 
@@ -54,11 +54,13 @@ and the watchdog keeps waiting. This preserves the manual-intervention
 model: a human may type in the attached pane, but completion still requires
 Claude to write the expected terminal marker.
 
-The wrapper starts Claude with `--permission-mode bypassPermissions` and an
-explicit `--allowedTools Read,Write,Edit,LS` list so ordinary task-folder
-reads and `brainstorm.md` writes do not stop on permission prompts. This
-does not turn brainstorm into a shell-execution stage; Bash is not in the
-allowed tool list, and the prompt still instructs Claude to modify only
+The wrapper starts Claude with `--permission-mode <claude.permission_mode>`
+(default `bypassPermissions`) and an explicit `--allowedTools
+Read,Write,Edit,LS` list so ordinary task-folder reads and stage-file writes
+do not stop on permission prompts. Projects can set
+`claude.permission_mode: auto` to use Claude Code auto-mode rules instead.
+This does not turn brainstorm into a shell-execution stage; Bash is not in
+the allowed tool list, and the prompt still instructs Claude to modify only
 `brainstorm.md` and not to invoke shell/network tools.
 
 ## Failure Modes

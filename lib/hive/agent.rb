@@ -12,11 +12,12 @@ module Hive
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
-                :profile, :expected_output, :status_mode
+                :profile, :expected_output, :status_mode, :permission_mode
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
-                   profile: nil, expected_output: nil, status_mode: nil)
+                   profile: nil, expected_output: nil, status_mode: nil,
+                   permission_mode: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -37,6 +38,7 @@ module Hive
               "unknown status_mode: #{status_mode.inspect}; valid: #{Hive::AgentProfile::STATUS_DETECTION_MODES.inspect}"
       end
       @status_mode = status_mode
+      @permission_mode = permission_mode
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -227,7 +229,7 @@ module Hive
     # Build the argv for the configured profile.
     #
     # Order is fixed:
-    #   bin, headless_flag, permission_skip_flag (if any),
+    #   bin, headless_flag, permission flags (if any),
     #   --add-dir <dir> repeated for each add_dir (if profile supports),
     #   budget_flag <amount> (if profile supports),
     #   output_format_flags...,
@@ -241,7 +243,7 @@ module Hive
     def build_cmd
       cmd = [ @profile.bin ]
       cmd << @profile.headless_flag if @profile.headless_flag
-      cmd << @profile.permission_skip_flag if @profile.permission_skip_flag
+      cmd.concat(permission_flags)
       if @profile.add_dir_flag
         @add_dirs.each do |d|
           cmd << @profile.add_dir_flag << d
@@ -253,6 +255,17 @@ module Hive
       cmd.concat(@profile.output_format_flags)
       cmd << (prompt_via_stdin? ? "-" : @prompt)
       cmd
+    end
+
+    def permission_flags
+      return [] unless @profile.permission_skip_flag
+      return [ @profile.permission_skip_flag ] unless @profile.name == :claude && @permission_mode
+
+      if @permission_mode == "bypassPermissions"
+        [ @profile.permission_skip_flag ]
+      else
+        [ "--permission-mode", @permission_mode ]
+      end
     end
 
     def prompt_via_stdin?

@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-25
 tags: [architecture, overview]
 ---
 
@@ -12,12 +12,13 @@ tags: [architecture, overview]
 ## Layer cake
 
 ```
-bin/hive                          Thor entry; rescues Hive::Error → exit
-  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot)
-       └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot
-            └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Finalize · Done
-                 ├─ Stages::Base  template render + agent spawn helpers
-                 └─ Hive::Agent   `claude -p` subprocess wrapper
+bin/hive                          Thor entry; rescues Hive::Error -> exit
+  └─ lib/hive/cli.rb              command class (init / new / run / status / daemon / bot / tui)
+       └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot · TUI helpers
+            └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Artifacts · Finalize · Done
+                 ├─ Stages::Base      template render + AgentProfile spawn helpers
+                 ├─ ClaudeLauncher    project-global tmux/headless Claude routing
+                 └─ Hive::Agent       headless subprocess wrapper
                       └─ Hive::Markers / Lock / Worktree / GitOps / Config / Task
 ```
 
@@ -58,6 +59,7 @@ Concurrency: any number of `hive run` processes on **different** tasks can proce
 | `execute` | `Stages::Execute` | yes (impl-only since ADR-014) | yes (in feature worktree) |
 | `open-pr` | `Stages::OpenPr` | yes | no code edits (`git push`, `gh pr create --draft`) |
 | `review` | `Stages::Review` (orchestrator) → `Review::{CiFix,Triage,BrowserTest,FixGuardrail}` + `Reviewers::Agent` | yes (CI-fix + reviewers + triage + fix + browser; sub-spawns use `status_mode: :exit_code_only` per ADR-021) | yes (fix agent commits in feature worktree) |
+| `artifacts` | `Stages::Artifacts` | yes | no code edits (`artifact.md` collection handoff) |
 | `finalize` | `Stages::Finalize` | yes | no code edits (`gh pr edit`, `gh pr ready`, `summary.md`) |
 | `done` | `Stages::Done` | no | no |
 
@@ -65,7 +67,14 @@ Inbox/Done are the two non-working stages: capture-only and archive-only.
 
 ## Agent invocation contract
 
-`Hive::Agent#build_cmd` (`lib/hive/agent.rb:121`) always assembles:
+Headless agent spawns are profile-driven. `Hive::Agent#build_cmd`
+starts with the selected `AgentProfile` binary/headless flag, then adds
+profile-specific permission, add-dir, budget, and output-format flags.
+Claude, Codex, and Pi therefore share one subprocess wrapper while
+keeping their CLI-specific argv and status-detection contracts in
+`lib/hive/agent_profiles/`.
+
+For the built-in Claude profile, the default headless argv is:
 
 ```
 claude -p
@@ -79,9 +88,19 @@ claude -p
   <prompt>
 ```
 
-`HIVE_CLAUDE_BIN` env var overrides the binary (used by tests with `test/fixtures/fake-claude`). `--verbose` is mandatory whenever `-p` is paired with `--output-format stream-json` (claude rejects the invocation otherwise).
+`HIVE_CLAUDE_BIN` env var overrides the binary (used by tests with
+`test/fixtures/fake-claude`). `--verbose` is mandatory whenever `-p` is
+paired with `--output-format stream-json` (claude rejects the invocation
+otherwise). When a Claude spawn receives `permission_mode` other than
+`bypassPermissions`, the skip flag is replaced with
+`--permission-mode <mode>`.
 
-`--dangerously-skip-permissions` is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 6-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), and (d) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. PR publishing paths (`OpenPr`, `Review::GithubPublisher`, `Finalize`) also secret-scan before sending content to GitHub.
+Claude-backed stages normally route through `Hive::ClaudeLauncher`,
+which honors project config `claude.mode`. `tmux` runs an attachable
+interactive Claude session using the configured
+`claude.permission_mode`; `headless` delegates back to `Hive::Agent`.
+
+The default Claude permission path (`bypassPermissions`) is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 6-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), and (d) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. PR publishing paths (`OpenPr`, `Review::GithubPublisher`, `Finalize`) also secret-scan before sending content to GitHub.
 
 ## State machine (cross-stage)
 
@@ -97,9 +116,10 @@ stateDiagram-v2
     S4_execute --> S5_open_pr: user mv (EXECUTE_COMPLETE)
     S5_open_pr --> S6_review: user mv (draft PR open)
     S6_review --> S6_review: hive run (autonomous loop: CI → reviewers → triage → fix → guardrail → browser)
-    S6_review --> S7_finalize: user mv (REVIEW_COMPLETE)
-    S7_finalize --> S8_done: user mv (after merge)
-    S8_done --> [*]
+    S6_review --> S7_artifacts: user mv (REVIEW_COMPLETE)
+    S7_artifacts --> S8_finalize: user mv (artifact collected)
+    S8_finalize --> S9_done: user mv or daemon archive after merge
+    S9_done --> [*]
 ```
 
 `mv` between directories is the only approval gesture. The user can always interrupt by editing files in place.
@@ -194,4 +214,4 @@ confirmed draft; Codex never edits `brainstorm.md` directly.
 - [[cli]] — command surface.
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
-- [[modules/agent]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/bot]]
+- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/bot]]

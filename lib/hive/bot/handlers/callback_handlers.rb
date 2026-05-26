@@ -183,11 +183,17 @@ module Hive
             [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ]
           ]
           commands << retry_argv if retry_argv
+          # The callback only carries (project, slug, stage), not marker — accept/reject
+          # explicitly resolves every finding for the row, so the broad-delete behaviour
+          # (no marker filter) matches operator intent: clear ALL alerts at this (project,
+          # slug, stage) so a recurring same-fingerprint failure re-alerts cleanly.
           @result_class.new(
             action: :dispatch_commands,
             project: project,
             slug: slug,
-            commands: commands
+            commands: commands,
+            alert_reset: alert_reset(project, slug, stage),
+            clear_keyboard: true
           )
         end
 

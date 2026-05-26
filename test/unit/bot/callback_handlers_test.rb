@@ -111,6 +111,10 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       [ "hive", "accept-finding", "slug", "--all", "--stage", "6-review", "--project", "hive", "--json" ],
       [ "hive", "review", "slug", "--from", "6-review", "--project", "hive", "--json" ]
     ], result.commands
+    assert_equal({ project: "hive", slug: "slug", stage: "6-review" }, result.alert_reset,
+                 "accept-finding must clear the alert so recurring same-fingerprint failures re-alert cleanly")
+    assert_equal true, result.clear_keyboard,
+                 "findings buttons must clear the inline keyboard to prevent double-tap"
   end
 
   def test_findings_reject_all_without_retry_stage_only_toggles_findings
@@ -120,6 +124,9 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal [
       [ "hive", "reject-finding", "slug", "--all", "--stage", "unknown-stage", "--project", "hive", "--json" ]
     ], result.commands
+    assert_equal({ project: "hive", slug: "slug", stage: "unknown-stage" }, result.alert_reset,
+                 "reject-finding must clear the alert so a future same-fingerprint failure re-alerts")
+    assert_equal true, result.clear_keyboard
   end
 
   def test_show_details_dispatches_status_diagnose_for_targeted_envelope

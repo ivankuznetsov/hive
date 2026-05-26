@@ -1,0 +1,26 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+def log_skip(argv)
+  path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
+  File.open(path, "a") { |file| file.puts("[dry-run] gh #{argv.join(' ')} skipped") }
+rescue SystemCallError
+  nil
+end
+
+argv = ARGV.dup
+mutating =
+  argv[0, 2] == %w[pr comment] ||
+  argv[0, 2] == %w[pr edit] ||
+  argv[0, 2] == %w[pr review] ||
+  argv[0, 2] == %w[run rerun]
+
+if mutating
+  log_skip(argv)
+  warn "[dry-run] gh #{argv.join(' ')} skipped"
+  exit 0
+end
+
+real = ENV["HIVE_BABYSITTER_REAL_GH"].to_s
+real = "/usr/bin/gh" if real.empty?
+exec(real, *argv)

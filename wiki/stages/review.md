@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail}.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-05-25T19:30:41Z
+updated: 2026-05-26T10:00:00Z
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -40,7 +40,7 @@ branch on triage:
   all clean              → Phase 5 (browser test) → REVIEW_COMPLETE
 ```
 
-Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary AND between reviewers inside `run_reviewers` (so the adapter-local retry budget cannot drain the whole 5400s window inside one Phase 2 invocation); exceeding it sets `REVIEW_STALE reason=wall_clock`.
+Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceeding it sets `REVIEW_STALE pass=NN`. Wall-clock cap (`review.max_wall_clock_sec`, default 5400) is checked at every phase boundary and between reviewers inside `run_reviewers`; each reviewer that accepts a `deadline:` kwarg receives a rolling fair share of the remaining pass budget (`remaining_wall_clock / remaining_reviewers`, with unused time redistributed to later reviewers), so one hung early reviewer cannot consume the entire pass window. Shared Claude tmux readiness waits count against the current reviewer deadline. Exceeding the outer wall-clock cap sets `REVIEW_STALE reason=wall_clock`.
 
 `mark_working(phase:, pass:)` doubles as the event-bracket emitter: each call closes the previously-open phase event (if any) and opens a new `agent_start` with agent label `phase=<name> pass=<NN>`. An `ensure` block at the bottom of `run!` calls `close_phase_event!` so the trailing `agent_end` always lands — return, raise, and `SystemExit` paths all keep the `events.jsonl` brackets balanced. Per-reviewer spawns nest underneath these phase pairs via their own `Hive::Agent#run!` agent_start/agent_end records (agent label `claude review-stub-reviewer-passNN`). See [[modules/events]].
 

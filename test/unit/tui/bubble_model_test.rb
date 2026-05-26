@@ -2794,8 +2794,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal [
       "hive", "markers", "clear", folder,
       "--name", "ERROR",
-      "--match-attr", "exit_code=1"
-    ], clear_argv, "argv must clear ERROR with --match-attr exit_code=N to avoid erasing fresher real failures"
+      "--match-attr", "reason=exit_code,exit_code=1"
+    ], clear_argv, "argv must clear ERROR with observed attrs to avoid erasing fresher failures"
     assert_equal [ "hive", "run", folder ], run_argv
 
     sync_flash = @model.hive_model.flash.to_s
@@ -3151,7 +3151,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
     end
 
-    assert_equal [ "hive", "markers", "clear", folder, "--name", "ERROR", "--match-attr", "exit_code=1" ],
+    assert_equal [ "hive", "markers", "clear", folder, "--name", "ERROR", "--match-attr", "reason=exit_code,exit_code=1" ],
                  clear_argv
     assert_equal [ :clear, :subprocess_exited, :flash ], events
     assert_kind_of Hive::Tui::Messages::SubprocessExited, @messages[-2]
@@ -3214,6 +3214,33 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_match(/kill-class.*auto-heals/, @model.hive_model.flash.to_s,
                    "flash must explain why exit_code=#{code} was refused")
     end
+  end
+
+  def test_recover_error_clears_kill_class_code_when_reason_is_not_exit_code
+    folder = "/tmp/hive/shutdown-kill"
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "shutdown-kill", stage: "3-plan", folder: folder,
+      marker: "error", attrs: { "reason" => "shutdown", "exit_code" => "143" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+    run_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(argv, **_kwargs) { run_argv = argv; nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", folder,
+      "--name", "ERROR",
+      "--match-attr", "reason=shutdown,exit_code=143"
+    ], clear_argv
+    assert_equal [ "hive", "run", folder ], run_argv
+    assert_match(/running.*hive run/, last_async_flash_text)
   end
 
   def test_recover_error_catches_io_failure_from_run_quiet
@@ -5835,6 +5862,18 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_empty captured
   end
 
+  def test_snapshot_with_kill_class_code_but_non_exit_code_reason_does_not_heal
+    captured = stub_heal_capture(@model)
+    row = make_error_row(
+      slug: "shutdown", folder: "/x/.hive-state/stages/6-review/shutdown",
+      exit_code: 143, reason: "shutdown"
+    )
+    snap = snapshot_with([ row ])
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+    assert_empty captured,
+                 "auto-heal is reserved for reason=exit_code signal kills; other reasons need RecoverError"
+  end
+
   def test_snapshot_with_multiple_kill_class_rows_triggers_heal_for_each
     captured = stub_heal_capture(@model)
     snap = snapshot_with([
@@ -5925,10 +5964,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "auto-heal must not block the regular Update.apply path — the model still updates"
   end
 
-  # F4: heal_marker passes --match-attr exit_code=<observed> so the
-  # cross-process race window (auto-heal observes 143, concurrent
-  # `hive run` writes 1, heal arrives) can't erase a real-failure
-  # marker. Captures the actual argv handed to run_quiet!.
+  # F4: heal_marker passes the observed reason and exit_code so the
+  # cross-process race window (auto-heal observes reason=exit_code/143,
+  # concurrent `hive run` writes reason=shutdown/143, heal arrives)
+  # can't erase a distinct structured marker. Captures the actual argv
+  # handed to run_quiet!.
   def test_heal_marker_argv_includes_match_attr_for_observed_exit_code
     captured_argv = nil
     Hive::Tui::Subprocess.singleton_class.send(:alias_method, :__orig_run_quiet, :run_quiet!)
@@ -5944,9 +5984,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "hive", "markers", "clear",
       "/x/.hive-state/stages/4-execute/killed",
       "--name", "ERROR",
-      "--match-attr", "exit_code=143"
+      "--match-attr", "reason=exit_code,exit_code=143"
     ], captured_argv,
-      "heal_marker must scope the clear to the kill-class exit_code we observed"
+      "heal_marker must scope the clear to the kill-class marker attrs we observed"
   ensure
     Hive::Tui::Subprocess.singleton_class.send(:alias_method, :run_quiet!, :__orig_run_quiet)
     Hive::Tui::Subprocess.singleton_class.send(:remove_method, :__orig_run_quiet)

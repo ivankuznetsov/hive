@@ -125,32 +125,42 @@ module Hive
       end
 
       # Cross-process race guard. The TUI's auto-healer observes a
-      # kill-class `:error exit_code=143` at time T and dispatches
-      # `hive markers clear` at T+1s. If a concurrent `hive run` writes
-      # a NEW `:error exit_code=1` (real failure) in that window, the
-      # name-based check still passes ("ERROR" == "ERROR") and we'd
-      # erase a real-failure marker. `--match-attr exit_code=143` ties
-      # the clear to the SPECIFIC marker the caller observed; a
-      # mismatch refuses with WrongStage, the auto-healer's eviction
-      # path retries with the current marker, and the data-loss window
+      # kill-class `:error reason=exit_code exit_code=143` at time T
+      # and dispatches `hive markers clear` at T+1s. If a concurrent
+      # `hive run` writes a NEW `:error reason=shutdown exit_code=143`
+      # in that window, the name-based check still passes ("ERROR" ==
+      # "ERROR") and we'd erase a distinct structured marker. A
+      # comma-separated `--match-attr reason=exit_code,exit_code=143`
+      # ties the clear to the SPECIFIC marker the caller observed; any
+      # mismatch refuses with WrongStage, the caller's eviction path
+      # retries with the current marker, and the data-loss window
       # closes.
       def match_attr_or_raise!(task, marker)
         return if @match_attr.nil? || @match_attr.to_s.strip.empty?
 
-        key, value = @match_attr.to_s.split("=", 2)
-        if key.nil? || key.empty? || value.nil?
-          raise Hive::InvalidTaskPath,
-                "hive markers clear: --match-attr expects KEY=VALUE (got #{@match_attr.inspect})"
+        parse_match_attrs.each do |key, value|
+          actual_value = marker.attrs[key]
+          next if actual_value.to_s == value.to_s
+
+          raise Hive::WrongStage,
+                "hive markers clear: task #{task.slug} has marker " \
+                "#{marker.name.to_s.upcase} but attr #{key.inspect}=" \
+                "#{actual_value.inspect}, not #{value.inspect}; refusing " \
+                "to clear (a concurrent writer likely updated the marker)."
         end
+      end
 
-        actual_value = marker.attrs[key]
-        return if actual_value.to_s == value.to_s
+      def parse_match_attrs
+        @match_attr.to_s.split(",").map(&:strip).map do |pair|
+          key, value = pair.split("=", 2)
+          if key.nil? || key.empty? || value.nil?
+            raise Hive::InvalidTaskPath,
+                  "hive markers clear: --match-attr expects KEY=VALUE" \
+                  " or comma-separated KEY=VALUE pairs (got #{@match_attr.inspect})"
+          end
 
-        raise Hive::WrongStage,
-              "hive markers clear: task #{task.slug} has marker " \
-              "#{marker.name.to_s.upcase} but attr #{key.inspect}=" \
-              "#{actual_value.inspect}, not #{value.inspect}; refusing " \
-              "to clear (a concurrent writer likely updated the marker)."
+          [ key, value ]
+        end
       end
 
       # Atomic removal: read body, drop the matched marker substring

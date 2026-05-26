@@ -31,11 +31,12 @@ module Hive
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
 
     # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
-    # SIGKILL, 143 = SIGTERM). When an ERROR marker carries one of these
-    # exit_code attrs, the task was interrupted, not "broken" — the
-    # file-system state is intact and the marker is stale. Two consumers
-    # share this list: `Hive::Tui::BubbleModel#auto_heal_kill_class_errors`
-    # (background heal that clears these markers automatically) and
+    # SIGKILL, 143 = SIGTERM). Only ERROR markers shaped as
+    # `reason=exit_code exit_code=<kill-class>` are treated as
+    # interrupted, not "broken" — the file-system state is intact and
+    # the marker is stale. The numeric list is shared by
+    # `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (background
+    # heal that clears those explicit signal-kill markers) and
     # `Hive::Tui::KeyMap.error_message` (routes Enter on those rows to
     # OpenLogTail rather than RecoverError so Enter doesn't race the
     # auto-healer for the same markers-lock). Adding a new kill-class

@@ -809,16 +809,16 @@ module Hive
       # transient failure would leave the row stuck in Error
       # indefinitely while `@healed_folders` blocked re-heals.
       #
-      # `--match-attr exit_code=<observed>` ties the clear to the
-      # specific kill-class marker we observed. If a concurrent
-      # `hive run` writes a NEW `:error exit_code=1` (real failure)
-      # between snapshot and heal, the match refuses, eviction fires,
-      # and the next snapshot's auto-heal pass sees the real failure
-      # instead of erasing it.
+      # `--match-attr reason=<observed>,exit_code=<observed>` ties
+      # the clear to the specific kill-class marker we observed. If a
+      # concurrent `hive run` writes a NEW `:error reason=shutdown
+      # exit_code=143` between snapshot and heal, any attr mismatch
+      # refuses, eviction fires, and the next snapshot's auto-heal pass
+      # sees the current marker instead of erasing it.
       def heal_marker(row)
-        observed_exit = row.attrs && row.attrs["exit_code"]
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        argv += [ "--match-attr", "exit_code=#{observed_exit}" ] if observed_exit
+        match_attr = error_marker_match_attr(row)
+        argv += [ "--match-attr", match_attr ] if match_attr
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
         return if exit_code.zero?
 
@@ -1156,11 +1156,12 @@ module Hive
 
       # Enter-driven ERROR-marker recovery. Mirrors `recover_review` but
       # targets the generic ERROR marker any stage emits when the agent
-      # exited with a non-kill-class code — the case auto-heal
-      # deliberately skips because exit codes outside 130/137/143
-      # generally mean "the agent ran and decided to fail" rather than
-      # "we killed it". Before this gesture existed those rows sat in
-      # "Error" forever and the only recovery path was a shell-level
+      # is not in the explicit signal-kill shape
+      # (`reason=exit_code exit_code=130|137|143`). Auto-heal owns that
+      # interrupted-task shape; other structured reasons remain
+      # recoverable even when they carry the same numeric code. Before
+      # this gesture existed those rows sat in "Error" forever and the
+      # only recovery path was a shell-level
       # `hive markers clear --name ERROR`.
       #
       # Same threading model as `recover_review`: the bubbletea update
@@ -1177,7 +1178,7 @@ module Hive
         end
 
         attrs = row.attrs || {}
-        if KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+        if kill_class_error?(row)
           return [ flashed("error recovery: kill-class exit_code=#{attrs['exit_code']} auto-heals"), nil ]
         end
 
@@ -1261,20 +1262,28 @@ module Hive
         )
       end
 
-      # `hive markers clear --match-attr exit_code=N` ties the clear to
-      # the SPECIFIC marker we observed at snapshot time. If a concurrent
-      # `hive run` writes a fresher ERROR with a different exit_code in
-      # the dispatch window, the match refuses (`WrongStage`), the
-      # eviction in spawn_error_recovery_thread's ensure releases the
-      # dedup slot, and the next Enter retries against the current
-      # marker. Without the match-attr, recovery would silently erase
-      # newer real failures.
+      # `hive markers clear --match-attr <observed attrs>` ties the
+      # clear to the SPECIFIC marker we observed at snapshot time. If a
+      # concurrent `hive run` writes a fresher ERROR with the same
+      # numeric code but a different reason in the dispatch window, the
+      # match refuses (`WrongStage`), the eviction in
+      # spawn_error_recovery_thread's ensure releases the dedup slot,
+      # and the next Enter retries against the current marker. Without
+      # the match-attr, recovery would silently erase newer failures.
       def error_recovery_clear_argv(row)
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
+        match_attr = error_marker_match_attr(row)
+        match_attr ? argv + [ "--match-attr", match_attr ] : argv
+      end
+
+      def error_marker_match_attr(row)
         attrs = row.attrs || {}
-        exit_code = attrs["exit_code"].to_s
-        argv += [ "--match-attr", "exit_code=#{exit_code}" ] unless exit_code.empty?
-        argv
+        parts = []
+        %w[reason exit_code].each do |key|
+          value = attrs[key].to_s
+          parts << "#{key}=#{value}" unless value.empty?
+        end
+        parts.empty? ? nil : parts.join(",")
       end
 
       def error_recovery_detail(row)

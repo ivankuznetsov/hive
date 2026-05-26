@@ -2,6 +2,31 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T23:30:00Z] daemon - reclassify no-systemd autostart as unsupported (review follow-up)
+
+**Action:** Code-review follow-up on the autostart-install branch. A Linux host with no systemd-user no longer reports a `failed` / exit-70 envelope (this supersedes the 22:55Z entry below): the unit is still written, but autostart-unavailable is now a `:autostart_unavailable` installer result that maps to the `unsupported` success outcome (exit 0) with `target_path` set to the written unit. A genuine service-manager rejection (systemctl enable/reload, or macOS launchctl load) still exits 70. Also hardened: `install.sh daemon_autostart_setup` captures the real exit code in an `else` branch (was always reporting `exit 0`) and treats `unsupported`/unreadable-JSON distinctly; `hive init`'s `register_daemon_service!` now degrades any unexpected `StandardError` to a warning so it can't abort an already-committed init; dead `which` delegators removed in favor of `Hive::InvokedBinary`; README scoped so only `install.sh` is described as auto-running `hive daemon install`.
+
+**Impact:** WSL/containers without systemd-user get a clean exit 0 and a quiet `hive init` instead of a spurious failure; the `hive-daemon-install.v1` `unsupported` outcome can now carry a `target_path`. Schema description updated accordingly.
+
+**Refs:** [[commands/daemon]], [[commands/init]], [[operating]]
+
+## [2026-05-26T22:55:00Z] daemon - autostart install repair
+
+**Action:** Tightened install-time daemon autostart so service units preserve the invoked user-facing wrapper (`hive` or `hv`) instead of baking the inner gem shim, and so Linux hosts without usable systemd-user get a failed `hive-daemon-install` envelope rather than a false enabled-autostart success. Agent install instructions now carry the verified `hive_cmd` through daemon install and project init.
+
+**Impact:** Bash/Homebrew installs keep wrapper-provided GEM_HOME/GEM_PATH across reboot, Apache Hive collision hosts can use `hv` safely for daemon setup, and installer automation can distinguish "unit written" from "autostart enabled".
+
+**Refs:** [[commands/daemon]], [[operating]]
+
+## [2026-05-26T21:22:40Z] daemon - install-time autostart by default
+
+**Action:** Moved daemon autostart to install-time/global setup. The bash installer now runs `hive daemon install` after installing the gem; the agent installer prompt tells agents to run `hive daemon install --json` for Homebrew/AUR/existing installs. `hive init` no longer asks a second autostart question; it only asks whether the current project should render `daemon.enabled: true`. The init path still idempotently ensures the service for dev-clone/manual users.
+
+**Refreshed pages:**
+- [[commands/init]] - prompt flow and non-TTY summary now describe project enrollment only.
+- [[commands/daemon]] and [[operating]] - service autostart is global install-time infrastructure; project enable/disable is dispatch enrollment.
+- [[cli]] and [[decisions]] - updated command and ADR wording for the new install/init split.
+
 ## [2026-05-26T18:00:00Z] bot — /status reverts to inline buttons (text-links can't carry the slug)
 
 **Action:** Real-device testing confirmed that tapping a rendered `/answer <slug>` text-link in a `/status` reply sends only `/answer` (Telegram's `bot_command` entity covers the token, not the argument), so the slug was dropped and the tap hit the usage hint. Reverted the `/status`/`/queue` surface from slash-command text suffixes to an inline callback keyboard: `Supervisor#status_keyboard` / `status_action_button` build one button per actionable row (✏️ answer / ✅ approve / 🔧 autofix / 🔍 details), reusing `NotificationBuilders` callback constructors so the callbacks are byte-identical to the push-notification buttons. `slash_link_for` removed. The `/answer`/`/approve`/`/autofix`/`/details` slash commands remain typeable and in the quick-actions menu. Corrected the prior wiki claim that text links were one-tap.

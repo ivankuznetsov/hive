@@ -43,7 +43,7 @@ module Hive
         4. Review agents (multi-select over 3 default reviewers) — default all
         5. Triage bias (courageous / safetyist)                  — default courageous
         6. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        7. Daemon enrollment + autostart                         — default enabled / off
+        7. Daemon enrollment                                     — default enabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at

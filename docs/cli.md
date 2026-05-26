@@ -50,9 +50,10 @@ Use these when building scripts, recovering a task, or checking idempotency.
 
 ## Daemon
 
-The daemon is optional and per-project. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
+The daemon process is global user infrastructure; dispatch is per-project. Install-time setup runs `hive daemon install` so the service survives login/reboot, while `hive init` or `hive daemon enable` decides which projects it may touch. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
 
 ```bash
+hive daemon install
 hive daemon enable <project>
 hive daemon enable --all
 hive daemon start --dry-run --detach

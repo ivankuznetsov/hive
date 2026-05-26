@@ -59,8 +59,8 @@ class InitTest < Minitest::Test
         assert File.exist?(File.join(home, ".config/systemd/user/hive-daemon.service")),
                "init should register the per-user daemon service unit"
         global = YAML.safe_load(File.read(File.join(home, "config.yml")))
-        assert_equal false, global.dig("daemon", "autostart"),
-                     "non-TTY init writes the service unit but does not start it by default"
+        assert_equal true, global.dig("daemon", "autostart"),
+                     "init registers the daemon service for autostart; project config controls enrollment only"
       end
     end
   end
@@ -371,7 +371,7 @@ class InitTest < Minitest::Test
     inputs = [
       "codex", "", "2", "1,3", "safetyist",
       "", "30,900", "", "", "", "", "", "", "", "",
-      "", "", ""
+      "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -403,10 +403,10 @@ class InitTest < Minitest::Test
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), dev=blank,
     # reviewers=blank, triage=blank, limit blanks, daemon-enable=blank,
-    # daemon-autostart=blank, confirm=blank.
+    # confirm=blank.
     inputs = ([ "", "2", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
-              [ "", "", "" ]).join("\n") + "\n"
+              [ "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -426,10 +426,9 @@ class InitTest < Minitest::Test
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
     # Blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, limits. Then "n" for daemon-enable, blank for
-    # daemon-autostart, blank for confirm.
+    # triage bias, limits. Then "n" for daemon-enable and blank for confirm.
     inputs = (([ "" ] * (5 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
-              [ "n", "", "" ]).join("\n") + "\n"
+              [ "n", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -445,8 +444,8 @@ class InitTest < Minitest::Test
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
     # Blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, limits, daemon-enable, daemon-autostart.
-    inputs = (([ "" ] * (7 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    # triage bias, limits, daemon-enable.
+    inputs = (([ "" ] * (6 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

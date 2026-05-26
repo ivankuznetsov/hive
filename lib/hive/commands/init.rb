@@ -7,6 +7,7 @@ require "hive/llm_wiki_bootstrap"
 require "hive/commands/init/prompts"
 require "hive/commands/doctor"
 require "hive/commands/daemon/service_installer"
+require "hive/invoked_binary"
 
 module Hive
   module Commands
@@ -50,7 +51,7 @@ module Hive
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
 
         print_summary(entry: entry, ops: ops)
-        register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
+        register_daemon_service!(autostart: true)
         run_init_preflight!
       end
 
@@ -121,6 +122,19 @@ module Hive
         write_warn("hive: daemon service registration failed (#{e.class}: #{e.message}); fix permissions and re-run `hive init`")
       rescue Hive::Error => e
         write_warn("hive: daemon service registration failed: #{e.message}")
+      rescue StandardError => e
+        # Daemon registration is best-effort and runs AFTER init has
+        # already committed the hive/state branch, registered the
+        # project, and printed the success summary. An unexpected error
+        # here (a SystemCallError we did not list above, or a bug in
+        # ServiceInstaller) must not abort a completed init with a stack
+        # trace — degrade to a warning with a bug-report hint, mirroring
+        # run_init_preflight!.
+        write_warn(
+          "hive: daemon service registration failed: #{e.class}: #{e.message} " \
+          "(this may be a hive bug, please report at " \
+          "https://github.com/ivankuznetsov/hive/issues)"
+        )
       end
 
       def record_daemon_autostart!(autostart)
@@ -132,22 +146,7 @@ module Hive
       end
 
       def current_binary_path
-        raw = $PROGRAM_NAME.to_s
-        return nil unless File.basename(raw) == "hive"
-
-        if raw.include?(File::SEPARATOR)
-          File.expand_path(raw)
-        else
-          which("hive")
-        end
-      end
-
-      def which(name)
-        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-          path = File.join(dir, name)
-          return path if File.file?(path) && File.executable?(path)
-        end
-        nil
+        Hive::InvokedBinary.path
       end
 
       def print_summary(entry:, ops:)
@@ -289,13 +288,12 @@ module Hive
           # daemon key (e.g. integration fixtures predating ADR-024).
           # Production answers always set this explicitly via Prompts.
           @daemon_enabled = answers.fetch("daemon_enabled", true)
-          @daemon_autostart = answers.fetch("daemon_autostart", false)
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :planning_agent, :claude_mode, :development_agent,
                     :enabled_reviewers, :triage_bias, :budgets, :timeouts,
-                    :daemon_enabled, :daemon_autostart
+                    :daemon_enabled
 
         def binding_for_erb
           binding

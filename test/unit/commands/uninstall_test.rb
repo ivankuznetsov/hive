@@ -169,6 +169,87 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_linux_bot_unit_disable_removes_unit
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-bot.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      assert_includes calls, %w[systemctl --user disable --now hive-bot]
+      refute File.exist?(unit), "bot unit must be removed after a successful disable"
+    end
+  end
+
+  def test_linux_bot_disable_failure_leaves_unit_in_place
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-bot.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      out = StringIO.new
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: out,
+        runner: ->(argv) { argv.include?("hive-bot") ? false : true }, host_os: "linux"
+      ).call
+
+      assert File.exist?(unit)
+      assert_match(/systemctl --user disable failed for hive-bot/, out.string)
+    end
+  end
+
+  def test_macos_bot_plist_unload_removes_plist
+    with_xdg_home do
+      plist = File.expand_path("~/Library/LaunchAgents/local.hive-bot.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "plist\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "darwin"
+      ).call
+
+      assert_includes calls, [ "launchctl", "unload", plist ]
+      refute File.exist?(plist)
+    end
+  end
+
+  def test_bot_teardown_noops_when_unit_absent
+    with_xdg_home do
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      refute(calls.any? { |argv| argv.include?("hive-bot") },
+             "no bot unit present → no bot service-manager calls")
+    end
+  end
+
+  def test_stop_foreground_bot_terms_pid_from_yaml_payload
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      # The bot pid file is YAML, not a bare integer.
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
+                 { "pid" => 456, "started_at" => "2026-05-27T00:00:00Z" }.to_yaml)
+      signals = []
+
+      with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_bot)
+      end
+
+      assert_equal [ [ "TERM", 456 ] ], signals
+    end
+  end
+
   def test_macos_launch_agent_noops_when_plist_missing
     with_xdg_home do
       calls = []

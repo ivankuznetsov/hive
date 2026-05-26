@@ -1,5 +1,6 @@
 require "fileutils"
 require "rbconfig"
+require "yaml"
 require "hive/config"
 require "hive/paths"
 
@@ -19,6 +20,7 @@ module Hive
       def call
         projects = registered_projects
         deregister_daemon
+        deregister_bot
         remove_user_config_and_cache
         remove_data_versions
         remove_user_symlinks
@@ -64,6 +66,53 @@ module Hive
             @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{unit}; run it manually" unless ok_reload
           end
         end
+      end
+
+      # Mirror of deregister_daemon for the opt-in bot autostart service
+      # (installed by `hive bot install`). Warn-and-continue on failure so a
+      # stuck service manager never aborts the rest of the uninstall.
+      def deregister_bot
+        stop_foreground_bot
+        case @host_os
+        when /darwin/i
+          plist = File.expand_path("~/Library/LaunchAgents/local.hive-bot.plist")
+          if File.exist?(plist)
+            ok = @runner.call([ "launchctl", "unload", plist ])
+            unless ok
+              @output.puts "hive: warning: launchctl unload failed for #{plist}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
+              return
+            end
+            safe_unlink(plist)
+          end
+        when /linux/i
+          unit = File.expand_path("~/.config/systemd/user/hive-bot.service")
+          if File.exist?(unit)
+            ok = @runner.call(%w[systemctl --user disable --now hive-bot])
+            unless ok
+              @output.puts "hive: warning: systemctl --user disable failed for hive-bot; leaving #{unit} in place. Fix systemd state and re-run `hive uninstall`."
+              return
+            end
+            safe_unlink(unit)
+            ok_reload = @runner.call(%w[systemctl --user daemon-reload])
+            @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{unit}; run it manually" unless ok_reload
+          end
+        end
+      end
+
+      def stop_foreground_bot
+        pid_file = File.join(Hive::Paths.state_home, ".bot.pid")
+        return unless File.exist?(pid_file)
+
+        # The bot's pid file is a YAML payload ({pid:, started_at:}), unlike
+        # the daemon's bare-integer .daemon.pid — parse it, don't to_i the
+        # raw text (which would read "---" and silently no-op).
+        payload = YAML.safe_load(File.read(pid_file)) || {}
+        pid = payload["pid"].to_i
+        return if pid.zero?
+
+        Process.kill("TERM", pid)
+      rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT, Psych::SyntaxError
+        nil
       end
 
       # Refuse to delete via a symlink: an attacker who pre-plants

@@ -303,6 +303,34 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     assert_equal [ "Enter" ], runner.sent_keys
   end
 
+  def test_prepare_claude_session_ignores_stale_trust_prompt_when_current_ready
+    runner = FakeInteractiveRunner.new(
+      "hive-2-brainstorm-test",
+      [
+        "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm\n" \
+        "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\""
+      ],
+      []
+    )
+
+    assert Hive::ClaudeLauncher.prepare_claude_session!(runner)
+    assert_empty runner.sent_keys
+  end
+
+  def test_prepare_claude_session_ignores_stale_permission_prompt_when_current_ready
+    runner = FakeInteractiveRunner.new(
+      "hive-2-brainstorm-test",
+      [
+        "Claude Code v2.1.133\nDo you want to make this edit?\n❯ 1. Yes\n" \
+        "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\""
+      ],
+      []
+    )
+
+    assert Hive::ClaudeLauncher.prepare_claude_session!(runner)
+    assert_empty runner.sent_keys
+  end
+
   def test_prepare_claude_session_trust_prompt_branch_respects_deadline
     runner = FakeInteractiveRunner.new(
       "hive-2-brainstorm-test",

@@ -29,6 +29,17 @@ module Hive
     CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
     MIN_TMUX_VERSION = "3.0"
     TERMINAL_MARKERS = %i[waiting complete error execute_complete review_complete review_waiting review_error].freeze
+    # Observed against Claude Code 2.1.133 during the 2026-05-25 tmux dogfood.
+    # Update these constants and their tests if Claude Code interactive TUI copy changes.
+    CLAUDE_TRUST_PROMPT_MARKERS = [
+      "Quick safety check",
+      "Yes, I trust this folder"
+    ].freeze
+    CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
+    CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
+    CLAUDE_READY_PROMPT_LINE = /\A\s*❯(?:\s|$)/.freeze
+    CLAUDE_MENU_OPTION_LINE = /\A\s*❯\s*\d+\./.freeze
+    CLAUDE_PROMPT_CONTEXT_LINES = 4
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
     # them as constants means a policy change lands in one place; previous
     # PRs inlined the string literal across 11 sites and silently drifted
@@ -474,14 +485,37 @@ module Hive
     end
 
     def claude_trust_prompt?(pane)
-      pane.include?("Quick safety check") && pane.include?("Yes, I trust this folder")
+      current_prompt_text(pane).then do |text|
+        CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| text.include?(marker) }
+      end
     end
 
     def claude_ready_prompt?(pane)
-      return false if claude_trust_prompt?(pane)
-      return false if pane.include?("Do you want to")
+      lines = nonblank_pane_lines(pane)
+      current_text = current_prompt_text(pane)
+      last_line = lines.last.to_s
 
-      pane.include?("Claude Code") && pane.include?("❯")
+      return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
+      return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
+      return false if last_line.match?(CLAUDE_MENU_OPTION_LINE)
+      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
+
+      last_line.match?(CLAUDE_READY_PROMPT_LINE)
+    end
+
+    def current_prompt_text(pane)
+      raw_lines = pane.each_line.map(&:strip)
+      last_blank_index = raw_lines.rindex("")
+      last_banner_index = raw_lines.rindex { |line| line.include?(CLAUDE_READY_BANNER_MARKER) }
+      last_blank_start = last_blank_index ? last_blank_index + 1 : nil
+      start_index = [ last_banner_index, last_blank_start, 0 ].compact.max
+      current_lines = raw_lines[start_index..] || []
+
+      current_lines.reject(&:empty?).last(CLAUDE_PROMPT_CONTEXT_LINES).join("\n")
+    end
+
+    def nonblank_pane_lines(pane)
+      pane.each_line.map(&:strip).reject(&:empty?)
     end
 
     def wait_for_terminal_marker(task, runner, timeout)

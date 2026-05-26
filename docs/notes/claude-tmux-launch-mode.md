@@ -17,6 +17,12 @@ until Claude's TUI is ready before pasting the stage prompt; if Claude
 shows its first-run folder-trust prompt, Hive confirms it for the task
 folder and then waits for the normal prompt.
 
+The trust and ready predicates are pinned in `Hive::ClaudeLauncher` against the
+Claude Code 2.1.133 TUI observed during the 2026-05-25 dogfood, and
+ready detection requires the prompt marker on the last non-blank pane line,
+classifies trust and permission prompts from the current prompt block instead of
+stale scrollback, and rejects numbered menu options as non-ready.
+
 ## Scope
 
 The project-global setting applies only when the resolved agent profile is

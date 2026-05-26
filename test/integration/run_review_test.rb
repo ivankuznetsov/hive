@@ -500,14 +500,15 @@ class RunReviewTest < Minitest::Test
         MD
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
-        dirty_file = File.join(worktree, "dirty-fix.txt")
+        dirty_file = File.join(worktree, "test", "dirty-fix.txt")
         File.write(@driver_bin, <<~SH)
           #!/usr/bin/env bash
           if [[ "${1:-}" == "--version" ]]; then
             echo "2.1.118 (Claude Code)"
             exit 0
           fi
-          printf 'uncommitted\\n' > "#{dirty_file}"
+          mkdir -p "$(dirname '#{dirty_file}')"
+          printf 'uncommitted\n' > "#{dirty_file}"
           exit 0
         SH
         File.chmod(0o755, @driver_bin)
@@ -529,6 +530,42 @@ class RunReviewTest < Minitest::Test
         assert_includes commit, "Hive-Triage-Bias: courageous"
         assert_includes commit, "Hive-Reviewer-Sources: local-reviewer"
         assert_includes commit, "Hive-Fix-Phase: fix"
+      end
+    end
+  end
+
+  def test_review_fix_agent_auto_commit_rejects_out_of_scope_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        blocked_file = File.join(worktree, "bin", "pwn")
+        File.write(@driver_bin, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          mkdir -p "$(dirname '#{blocked_file}')"
+          printf 'unexpected\n' > "#{blocked_file}"
+          exit 0
+        SH
+        File.chmod(0o755, @driver_bin)
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "fix_auto_commit_failed", marker.attrs["reason"]
+        assert_includes marker.attrs["message"], "auto-commit scope check failed"
+        assert_includes marker.attrs["message"], "bin/pwn"
+        assert File.exist?(blocked_file), "blocked fix-agent file remains for operator inspection"
       end
     end
   end

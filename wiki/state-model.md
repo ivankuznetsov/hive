@@ -226,7 +226,14 @@ agents:                 # per-CLI profile overrides (claude, codex, pi)
 review:                 # 6-review stage config (U2)
   ci:           { command: null, max_attempts: 3, agent: claude, prompt_template: ci_fix_prompt.md.erb }
   triage:       { enabled: true, agent: claude, bias: courageous, prompt_template: null, custom_prompt: null }
-  fix:          { agent: claude, prompt_template: fix_prompt.md.erb }
+  fix:
+    agent: claude
+    prompt_template: fix_prompt.md.erb
+    auto_commit:
+      scope_check:
+        enabled: true
+        allowed_paths: [...] # default source/test/docs/wiki/manifests allowlist
+        denied_paths: [...]  # default bin/config/CI/env/lockfile denylist
   browser_test: { enabled: false, agent: claude, prompt_template: browser_test_prompt.md.erb, max_attempts: 2 }
   max_passes: 2
   max_wall_clock_sec: 5400

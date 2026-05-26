@@ -75,6 +75,8 @@ module Hive
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
       AcceptedFindings = Data.define(:text, :count)
+      AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
+      AutoCommitScopeViolation = Data.define(:path, :reason)
 
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
@@ -1532,21 +1534,111 @@ module Hive
         status.success? ? out.strip : nil
       end
 
+      def auto_commit_scope_config(cfg)
+        defaults = Hive::Config::DEFAULTS.dig("review", "fix", "auto_commit", "scope_check") || {}
+        override = cfg.dig("review", "fix", "auto_commit", "scope_check")
+        override.is_a?(Hash) ? defaults.merge(override) : defaults
+      end
+
+      def auto_commit_scope_check_enabled?(cfg)
+        auto_commit_scope_config(cfg)["enabled"] != false
+      end
+
+      def staged_auto_commit_paths(worktree_path)
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "-z"
+        )
+        unless status.success?
+          return {
+            success: false,
+            message: git_command_message("git diff --cached --name-only", out, err)
+          }
+        end
+
+        { success: true, paths: out.split("\0").reject(&:empty?) }
+      end
+
+      def normalize_staged_path(path)
+        normalized = path.to_s.tr("\\", "/")
+        parts = normalized.split("/")
+        return nil if normalized.empty? || normalized.start_with?("/")
+        return nil if normalized.include?("\0") || parts.include?("..")
+
+        normalized
+      end
+
+      def staged_path_matches_glob?(pattern, path)
+        normalized_pattern = pattern.to_s.tr("\\", "/")
+        return true if File.fnmatch?(normalized_pattern, path, AUTO_COMMIT_SCOPE_GLOB_FLAGS)
+        return false unless normalized_pattern.end_with?("/**")
+
+        prefix = normalized_pattern.delete_suffix("/**")
+        path == prefix || path.start_with?("#{prefix}/")
+      end
+
+      def auto_commit_scope_violations(cfg, paths)
+        scope = auto_commit_scope_config(cfg)
+        allowed = Array(scope["allowed_paths"])
+        denied = Array(scope["denied_paths"])
+
+        paths.filter_map do |raw_path|
+          path = normalize_staged_path(raw_path)
+          if path.nil?
+            AutoCommitScopeViolation.new(path: raw_path.to_s, reason: "invalid staged path")
+          elsif (pattern = denied.find { |glob| staged_path_matches_glob?(glob, path) })
+            AutoCommitScopeViolation.new(path: path, reason: "matches denied path pattern #{pattern.inspect}")
+          elsif allowed.none? { |glob| staged_path_matches_glob?(glob, path) }
+            AutoCommitScopeViolation.new(
+              path: path,
+              reason: "outside review.fix.auto_commit.scope_check.allowed_paths"
+            )
+          end
+        end
+      end
+
+      def auto_commit_scope_failure_message(violations)
+        details = violations.first(5).map { |v| "#{v.path}: #{v.reason}" }.join("; ")
+        suffix = violations.size > 5 ? "; and #{violations.size - 5} more" : ""
+        "auto-commit scope check failed: #{details}#{suffix}"
+      end
+
+      def auto_commit_failure_with_unstage(worktree_path, message)
+        reset_out, reset_err, reset_status = Open3.capture3(
+          "git", "-C", worktree_path, "reset", "HEAD", "--"
+        )
+        unless reset_status.success?
+          message = "#{message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
+        end
+
+        { success: false, message: message }
+      end
+
       def auto_commit_fix_worktree(task, cfg, ctx, accepted_findings)
         # `git add -A` (not `-u`) is intentional: fix-agent fixes
         # routinely include new files (added test cases, extracted
         # helpers, new modules) that must land in the same commit as the
-        # tracked-file edits they support. `Hive::ProtectedFiles` already
-        # guards task.md / plan.md / worktree.yml; the worktree's own
-        # .gitignore is the line of defense against debris. The
-        # integration test `test_review_fix_agent_dirty_worktree_is_auto_committed`
-        # locks in the untracked-file behaviour.
+        # tracked-file edits they support. Immediately after staging,
+        # the auto-commit scope check inspects the exact staged path set
+        # before Hive writes its rollback-rate trailers.
         add_out, add_err, add_status = Open3.capture3("git", "-C", ctx.worktree_path, "add", "-A")
         unless add_status.success?
           return {
             success: false,
             message: git_command_message("git add -A", add_out, add_err)
           }
+        end
+
+        if auto_commit_scope_check_enabled?(cfg)
+          staged = staged_auto_commit_paths(ctx.worktree_path)
+          return auto_commit_failure_with_unstage(ctx.worktree_path, staged[:message]) unless staged[:success]
+
+          violations = auto_commit_scope_violations(cfg, staged[:paths])
+          unless violations.empty?
+            return auto_commit_failure_with_unstage(
+              ctx.worktree_path,
+              auto_commit_scope_failure_message(violations)
+            )
+          end
         end
 
         message = fix_auto_commit_message(task, cfg, ctx, accepted_findings)
@@ -1557,13 +1649,7 @@ module Hive
         )
         unless commit_status.success?
           commit_message = git_command_message("git commit", commit_out, commit_err)
-          reset_out, reset_err, reset_status = Open3.capture3(
-            "git", "-C", ctx.worktree_path, "reset", "HEAD", "--"
-          )
-          unless reset_status.success?
-            commit_message = "#{commit_message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
-          end
-          return { success: false, message: commit_message }
+          return auto_commit_failure_with_unstage(ctx.worktree_path, commit_message)
         end
 
         { success: true, head: git_head(ctx.worktree_path) }

@@ -447,6 +447,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
 
       responses = [
         [ "", "", ok_status ],
+        [ "test/fix_test.rb\0", "", ok_status ],
         [ "stdout detail", "stderr detail", fail_status ],
         [ "", "", ok_status ]
       ]
@@ -474,10 +475,10 @@ class CurrentMainCoverageGapTest < Minitest::Test
       captured_argv = []
       responses = [
         [ "", "", ok_status ],
+        [ "test/fix_test.rb\0", "", ok_status ],
         [ "", "commit boom", fail_status ],
         [ "", "", ok_status ]
       ]
-
       with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
         captured_argv << argv
         responses.shift
@@ -488,8 +489,8 @@ class CurrentMainCoverageGapTest < Minitest::Test
         assert_includes result[:message], "git commit failed"
       end
 
-      assert_equal 3, captured_argv.length
-      assert_equal [ "git", "-C", worktree, "reset" ], captured_argv[2].first(4)
+      assert_equal 4, captured_argv.length
+      assert_equal [ "git", "-C", worktree, "reset" ], captured_argv[3].first(4)
     end
   end
 
@@ -507,6 +508,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
       ok_status = ReviewCommandStatus.new(true)
       responses = [
         [ "", "", ok_status ],
+        [ "test/fix_test.rb\0", "", ok_status ],
         [ "", "commit boom", fail_status ],
         [ "", "reset boom", fail_status ]
       ]
@@ -533,6 +535,134 @@ class CurrentMainCoverageGapTest < Minitest::Test
       assert_includes message, "Hive-Fix-Findings: 2"
     end
   end
+
+  def test_review_auto_commit_rejects_staged_paths_outside_scope
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => {} }
+
+      ok_status = ReviewCommandStatus.new(true)
+      captured_argv = []
+      responses = [
+        [ "", "", ok_status ],
+        [ "bin/pwn\0test/fix_test.rb\0", "", ok_status ],
+        [ "", "", ok_status ]
+      ]
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+        captured_argv << argv
+        responses.shift
+      }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+        refute result[:success]
+        assert_includes result[:message], "auto-commit scope check failed"
+        assert_includes result[:message], "bin/pwn"
+        assert captured_argv.none? { |argv| argv.include?("commit") }
+        assert_equal [ "git", "-C", worktree, "reset" ], captured_argv.last.first(4)
+      end
+    end
+  end
+
+  def test_review_auto_commit_reports_staged_path_scan_failures
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = { "review" => {} }
+
+      fail_status = ReviewCommandStatus.new(false)
+      ok_status = ReviewCommandStatus.new(true)
+      responses = [
+        [ "", "", ok_status ],
+        [ "", "diff boom", fail_status ],
+        [ "", "", ok_status ]
+      ]
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { responses.shift }) do
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+        refute result[:success]
+        assert_equal "git diff --cached --name-only failed: diff boom", result[:message]
+      end
+    end
+  end
+
+  def test_review_auto_commit_can_disable_scope_check
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+      task = fake_task(root, folder, worktree: worktree)
+      ctx = review_ctx(worktree, folder)
+      cfg = {
+        "review" => {
+          "fix" => {
+            "auto_commit" => { "scope_check" => { "enabled" => false } }
+          }
+        }
+      }
+
+      ok_status = ReviewCommandStatus.new(true)
+      captured_argv = []
+      responses = [
+        [ "", "", ok_status ],
+        [ "", "", ok_status ]
+      ]
+
+      with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-after" }) do
+        with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+          captured_argv << argv
+          responses.shift
+        }) do
+          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+
+          assert result[:success]
+          assert_equal "head-after", result[:head]
+          refute captured_argv.any? { |argv| argv.include?("diff") }
+        end
+      end
+    end
+  end
+
+  def test_auto_commit_scope_violations_cover_invalid_denied_and_outside_paths
+    cfg = {
+      "review" => {
+        "fix" => {
+          "auto_commit" => {
+            "scope_check" => {
+              "allowed_paths" => [ "test/**" ],
+              "denied_paths" => [ "bin/**" ]
+            }
+          }
+        }
+      }
+    }
+
+    violations = Hive::Stages::Review.send(
+      :auto_commit_scope_violations,
+      cfg,
+      [ "/abs", "bin/pwn", "README.md", "test/nested/fix_test.rb" ]
+    )
+
+    assert_equal [ "/abs", "bin/pwn", "README.md" ], violations.map(&:path)
+    assert_includes violations[0].reason, "invalid staged path"
+    assert_includes violations[1].reason, "denied path pattern"
+    assert_includes violations[2].reason, "outside review.fix.auto_commit.scope_check.allowed_paths"
+
+    message = Hive::Stages::Review.send(:auto_commit_scope_failure_message, violations * 2)
+    assert_includes message, "and 1 more"
+  end
+
 
   def test_fix_auto_commit_message_sanitizes_trailer_newlines
     with_tmp_dir do |root|

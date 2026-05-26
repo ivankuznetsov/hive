@@ -77,12 +77,22 @@ Append-only log of all wiki operations.
 - [[decisions]] - new ADR-031 inserted ahead of ADR-030.
 - [[modules/daemon]] - added "Self-reexec on source drift" section before Backlinks.
 
+## [2026-05-26T10:07:52Z] review - auto-commit staged path scope gate
+
+**Action:** Fixed issue #157 by adding a default-on staged-path scope check before Hive Phase 4 auto-commit fallback writes a trailered fix commit. The runner still stages with `git add -A`, but then reads `git diff --cached --name-only -z`, rejects denied/out-of-allowlist paths from `review.fix.auto_commit.scope_check`, unstages on failure, and surfaces the block as `REVIEW_ERROR phase=fix reason=fix_auto_commit_failed`.
+
+**Refreshed pages:**
+- [[stages/review]] - documented the staged-path gate in Phase 4.
+- [[architecture]] - added the scope gate to the review-stage safety boundary list.
+- [[state-model]] - documented the new review.fix.auto_commit.scope_check config shape.
+
 ## [2026-05-26T10:00:00Z] review - fair per-reviewer wall-clock deadlines
 
 **Action:** Fixed issue #155 by changing `Stages::Review.run_reviewers` to give each reviewer a rolling fair share of the remaining `review.max_wall_clock_sec` budget instead of handing every reviewer the full remaining deadline. This preserves sequential reviewer execution while preventing one hung reviewer from starving later reviewers in the same pass.
 
 **Refreshed pages:**
 - [[stages/review]] - documented the rolling fair-share deadline behavior for Phase 2 reviewers.
+
 
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 

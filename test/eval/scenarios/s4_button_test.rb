@@ -21,7 +21,10 @@ class HiveEvalS4ButtonTest < Minitest::Test
 
     assert_equal [ "hive", "finalize", "ship-a", "--from", "7-artifacts",
                    "--project", "hive", "--json" ], harness.child_supervisor.commands.last
-    assert_match(/Queued command pid=/, harness.last_sent.text)
+    # The bot no longer sends a "Queued command pid=..." ack on dispatch —
+    # operators get signal via the next status row or via the failure path
+    # in the reaper. The Approve callback contract is fully verified by the
+    # child_supervisor.commands.last assertion above.
     assert_all_messages_typed
     assert_no_duplicates(window_sec: 300)
   end

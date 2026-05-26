@@ -33,6 +33,16 @@ class HiveBotTelegramTest < Minitest::Test
       @calls << [ :edit_message_reply_markup, params ]
       true
     end
+
+    def answer_callback_query(params)
+      @calls << [ :answer_callback_query, params ]
+      true
+    end
+
+    def set_my_commands(params)
+      @calls << [ :set_my_commands, params ]
+      true
+    end
   end
 
   def logger
@@ -212,6 +222,45 @@ class HiveBotTelegramTest < Minitest::Test
     _, params = api.calls.last
     assert_equal :edit_message_reply_markup, api.calls.last.first
     assert_equal({ chat_id: 12345, message_id: 50 }, params)
+  end
+
+  def test_set_my_commands_forwards_commands_list_to_api
+    api = FakeApi.new
+    commands = [
+      { command: "idea", description: "Capture a new idea" },
+      { command: "status", description: "Show active tasks" }
+    ]
+
+    telegram(api).set_my_commands(commands: commands)
+
+    assert_equal :set_my_commands, api.calls.last.first
+    assert_equal commands, api.calls.last.last[:commands]
+  end
+
+  def test_answer_callback_query_silent_ack
+    api = FakeApi.new
+
+    telegram(api).answer_callback_query(callback_query_id: "cbq-1")
+
+    assert_equal :answer_callback_query, api.calls.last.first
+    params = api.calls.last.last
+    assert_equal "cbq-1", params[:callback_query_id]
+    refute params.key?(:text),
+           "silent ack must omit :text so Telegram clears the spinner with no toast"
+    refute params.key?(:show_alert)
+  end
+
+  def test_answer_callback_query_with_toast_truncates_to_200_chars_and_marks_show_alert
+    api = FakeApi.new
+    long_text = "x" * 250
+
+    telegram(api).answer_callback_query(callback_query_id: "cbq-2",
+                                        text: long_text, show_alert: true)
+
+    params = api.calls.last.last
+    assert_equal 200, params[:text].length,
+                 "toast text must be truncated to Telegram's 200-char limit"
+    assert_equal true, params[:show_alert]
   end
 
   def test_value_returns_nil_for_unsupported_objects

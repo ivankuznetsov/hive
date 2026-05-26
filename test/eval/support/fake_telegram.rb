@@ -89,13 +89,19 @@ module Hive
       end
 
       def tap_button(callback_data:, update_id:, chat_id: DEFAULT_CHAT_ID,
-                     from_id: DEFAULT_USER_ID, message_id: nil)
+                     from_id: DEFAULT_USER_ID, message_id: nil, callback_query_id: nil)
         update = Hive::Bot::Telegram::Update.new(
           update_id: update_id,
           chat_id: chat_id,
           from_id: from_id,
           message_id: message_id || @sent.length,
-          callback_data: callback_data
+          callback_data: callback_data,
+          # Real Telegram updates carry a callback_query.id distinct from
+          # update_id. Tests need it so the supervisor's answerCallbackQuery
+          # ack path actually fires (Supervisor#ack_callback_query short-
+          # circuits when callback_query_id is nil). Synthesize one from
+          # update_id when the caller didn't pass one explicitly.
+          callback_query_id: callback_query_id || "cbq-#{update_id}"
         )
         @updates << update
         update

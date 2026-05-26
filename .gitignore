@@ -2,6 +2,10 @@
 /vendor/bundle/
 /tmp/
 *.gem
+# Operator-local secrets (HIVE_TELEGRAM_BOT_TOKEN, etc). The bot loads
+# ~/.config/hive/.env at startup; a repo-root .env is a common operator
+# habit that must not leak into source.
+/.env
 !/test/e2e/sample-project/vendor/cache/*.gem
 .byebug_history
 /coverage/

@@ -76,8 +76,7 @@ module Hive
           Notification.new(
             text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
             keyboard: [
-              [ button("Show details", details_callback(row)) ],
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
+              [ button("Show details", details_callback(row)) ]
             ]
           )
         end
@@ -89,9 +88,7 @@ module Hive
                 "Brainstorm questions are waiting. " \
                 "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
           keyboard: [
-            [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ],
-            [ button("Ask Codex", "path_a_yes:#{row.project}:#{row.slug}") ],
-            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
+            [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ]
           ]
         )
       end
@@ -102,7 +99,6 @@ module Hive
           return Notification.new(
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
             keyboard: [
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
               [ button("Show details", details_callback(row)) ]
             ]
           )
@@ -127,7 +123,7 @@ module Hive
             "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
             cause_sentence_for(row),
             retryable ? "Tap Autofix to retry the stage cleanly." :
-              "Open this task on a laptop before retrying."
+              "Tap Show details to see what needs manual intervention."
           ].join("\n"),
           keyboard: recovery_keyboard(row, retryable: retryable)
         )
@@ -138,7 +134,6 @@ module Hive
           [ [ button("🔧 Autofix", autofix_callback(row)) ] ]
         else
           [
-            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
             [ button("Show details", details_callback(row)) ]
           ]
         end
@@ -160,9 +155,10 @@ module Hive
 
       # Markers that are ALWAYS manual-only regardless of attrs. Adding a new
       # marker here automatically narrows both the in-row recovery check
-      # (manual_only_recovery?) and the callback-time defensive check
-      # (CallbackHandlers#manual_only_marker?) — they share this constant
-      # through manual_only? below.
+      # (manual_only_recovery?) and the recover-sequence dispatch guard
+      # (RecoverySequence.build, used by the inline Autofix button and the
+      # /autofix slash command) — they share this constant through
+      # manual_only? below.
       ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
 
       # Single source of truth for "this state has no auto-recovery".

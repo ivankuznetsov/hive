@@ -12,13 +12,24 @@ require "hive/bot/router"
 require "hive/bot/child_supervisor"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
-require "hive/bot/codex_conversation"
 require "hive/bot/title_formatter"
 require "hive/task"
 
 module Hive
   module Bot
     class Supervisor
+      BOT_COMMANDS = [
+        { command: "idea",    description: "Capture a new idea" },
+        { command: "status",  description: "Show active tasks" },
+        { command: "queue",   description: "Show queued and waiting tasks" },
+        { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },
+        { command: "approve", description: "Approve a task at its current stage: /approve <slug>" },
+        { command: "autofix", description: "Retry a stuck task: /autofix <slug>" },
+        { command: "details", description: "Show diagnostic detail: /details <slug>" },
+        { command: "done",    description: "Mark a brainstorm as done after answering" },
+        { command: "help",    description: "Show available commands" }
+      ].freeze
+
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false)
@@ -33,11 +44,7 @@ module Hive
         @status_watcher = status_watcher || Hive::Bot::StatusWatcher.new(logger: @logger)
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
-        @router = router || Hive::Bot::Router.new(
-          bot_config: config,
-          logger: @logger,
-          conversation_store: @conversation_store
-        )
+        @router = router || build_router(config)
         @child_supervisor = child_supervisor ||
           Hive::Bot::ChildSupervisor.new(logger: @logger, dry_run: dry_run)
         @notification_dispatcher = notification_dispatcher ||
@@ -57,6 +64,7 @@ module Hive
       def run_forever
         install_signal_handlers!
         @logger.event(:bot_started, pid: Process.pid, dry_run: @dry_run, version: Hive::VERSION)
+        register_bot_commands
         threads = [
           Thread.new { poll_loop },
           Thread.new { status_loop },
@@ -79,17 +87,66 @@ module Hive
       end
 
       def process_update(update)
+        # Telegram requires answerCallbackQuery on every callback_query
+        # update to dismiss the spinner on the tapped button. Ack first so
+        # the spinner clears even if subsequent dispatch is slow; the call
+        # is silent (no toast) by design.
+        ack_callback_query(update) if callback_update?(update)
         result = @router.handle(update)
         execute_result(result, update)
         write_last_seen_update_id(update.update_id)
+      end
+
+      def callback_update?(update)
+        return update.callback_query? if update.respond_to?(:callback_query?)
+
+        update.respond_to?(:callback_data) && !update.callback_data.nil?
+      end
+
+      def ack_callback_query(update)
+        id = update.respond_to?(:callback_query_id) ? update.callback_query_id : nil
+        return unless id
+
+        @telegram.answer_callback_query(callback_query_id: id)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "answer_callback_query",
+                                      callback_query_id: id, error_class: e.class.name,
+                                      message: e.message)
+      end
+
+      # One-shot RPC at bot start. Intentionally not re-called on SIGHUP/
+      # config reload — commands don't change with config.
+      def register_bot_commands
+        @telegram.set_my_commands(commands: BOT_COMMANDS)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "set_my_commands",
+                                      error_class: e.class.name, message: e.message)
       end
 
       def status_tick
         result = @status_watcher.fetch
         return result unless result.ok
 
+        @latest_status_rows = result.rows
         @notification_dispatcher.process_rows(result.rows)
         result
+      end
+
+      # Read-only snapshot of the most recent successful StatusWatcher
+      # fetch, populated by status_tick on the status_loop thread. Used by
+      # /autofix and /details to resolve a slug to its current row.
+      #
+      # Returns nil until the first successful tick — callers treat nil as
+      # "status not loaded yet" (the status_loop ticks immediately on bot
+      # start, so this window is brief). We deliberately do NOT fall back to
+      # a synchronous @status_watcher.fetch here: that fetch shells out via
+      # Open3.capture3 with no timeout, and running it on the poll thread
+      # would let a hung `hive status` stall the long-poll loop, after which
+      # Telegram redelivers the un-acked update and the same /autofix
+      # double-fires the recovery sequence. status_tick only assigns on a
+      # successful fetch, so a transient failure never poisons this cache.
+      def latest_status_rows
+        @latest_status_rows
       end
 
       def reap_children
@@ -106,6 +163,21 @@ module Hive
       end
 
       private
+
+      # Single construction point for the Router so the boot path and the
+      # SIGHUP reload path cannot drift. The status_snapshot_provider wiring
+      # used to live only in the constructor; reload_config_if_requested
+      # rebuilt the Router without it, silently breaking /autofix and
+      # /details (every slug replied "Slug not found") after any
+      # `hive bot reload` until a full restart.
+      def build_router(config)
+        Hive::Bot::Router.new(
+          bot_config: config,
+          logger: @logger,
+          conversation_store: @conversation_store,
+          status_snapshot_provider: -> { latest_status_rows }
+        )
+      end
 
       def poll_loop
         first_poll = true
@@ -172,7 +244,7 @@ module Hive
 
       ALLOWED_RESULT_ACTIONS = %i[
         noop reply dispatch_then_reply dispatch_commands start_answer
-        write_answer_then_reply start_codex confirm_codex_draft
+        write_answer_then_reply
       ].freeze
 
       def execute_result(result, update)
@@ -190,10 +262,6 @@ module Hive
           start_answer(result, update)
         when :write_answer_then_reply
           execute_answer_write(result, update)
-        when :start_codex
-          execute_start_codex(result, update)
-        when :confirm_codex_draft
-          execute_confirm_codex_draft(result, update)
         else
           raise "Supervisor cannot execute unknown action #{result.action.inspect}"
         end
@@ -340,7 +408,8 @@ module Hive
           if result.slug
             safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
           else
-            safe_send_message(chat_id: update.chat_id, text: render_queue(rows))
+            safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
+                              reply_markup: status_keyboard(rows))
           end
           return nil
         end
@@ -359,7 +428,10 @@ module Hive
           project: result.project,
           slug: result.slug
         )
-        safe_send_message(chat_id: update.chat_id, text: "Queued command pid=#{pid}")
+        # No "Queued command pid=..." ack — that's operational chatter the
+        # operator does not need. The reaper still surfaces failures (and
+        # diagnose replies still fire for Show details), so silence here
+        # is signal-preserving.
         pid
       end
 
@@ -379,26 +451,94 @@ module Hive
         write_result = Hive::Bot::BrainstormAnswerWriter.append!(
           brainstorm_path: path,
           question_n: question_n,
-          answer_text: result.answer_text
+          answer_text: result.answer_text,
+          logger: @logger
         )
-        text =
-          case write_result
-          when :written
-            @logger.event(:answer_written, slug: result.slug, question_n: question_n,
-                                           project: result.project)
-            "Got Q#{question_n}."
-          when :already_answered
-            @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                           question_n: question_n,
-                                                           project: result.project)
-            "Question #{question_n} was already answered by another device"
-          when :lock_busy
-            "Try again - another run holds the lock"
-          else
-            "Question #{question_n} was not found."
-          end
-        advance_conversation_after_write(result, update, path) if write_result == :written
-        safe_send_message(chat_id: update.chat_id, text: text)
+        case write_result
+        when :written
+          @logger.event(:answer_written, slug: result.slug, question_n: question_n,
+                                         project: result.project)
+          advance_conversation_after_write(result, update, path)
+          prompt_next_question_or_complete(result, update, path, question_n)
+        when :already_answered
+          @logger.event(:answer_skipped_already_answered, slug: result.slug,
+                                                         question_n: question_n,
+                                                         project: result.project)
+          safe_send_message(chat_id: update.chat_id,
+                            text: "Question #{question_n} was already answered by another device")
+        when :lock_busy
+          safe_send_message(chat_id: update.chat_id, text: "Try again - another run holds the lock")
+        else
+          safe_send_message(chat_id: update.chat_id, text: "Question #{question_n} was not found.")
+        end
+      end
+
+      # After a successful answer write, fetch the NEXT unanswered question
+      # from disk and send it to the operator so the Q-by-Q flow continues
+      # without the operator having to know what to answer next. When no
+      # questions remain, clear the conversation state and confirm with one
+      # "Brainstorm complete" message.
+      def prompt_next_question_or_complete(result, update, brainstorm_path, answered_n)
+        next_question = Hive::Bot::BrainstormParser.next_unanswered_question(
+          Hive::Bot::BrainstormParser.parse(brainstorm_path)
+        )
+        if next_question
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Got Q#{answered_n}.\n\nQ#{next_question.n}: #{next_question.text.to_s.strip}\n\n" \
+                  "Reply with your answer."
+          )
+        else
+          finalize_completed_brainstorm(result, update, answered_n)
+        end
+      end
+
+      # All questions answered. Acknowledge the final answer and auto-dispatch
+      # `hive run <slug>` so the daemon picks up the completed brainstorm
+      # without the operator having to send /done.
+      def finalize_completed_brainstorm(result, update, answered_n)
+        if @dry_run
+          # Dry-run never dispatches; say so instead of promising a run that
+          # won't happen. Leave the conversation intact so /done still works.
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Got Q#{answered_n}.\n\n✅ All questions answered. " \
+                  "Dry-run: not dispatching `hive run` — send /done to dispatch for real."
+          )
+          return
+        end
+
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Got Q#{answered_n}.\n\n✅ All questions answered — brainstorm Q&A complete. " \
+                "Running the next round automatically; I'll ping you when there's something to do."
+        )
+        auto_run_after_answers(result, update)
+      end
+
+      def auto_run_after_answers(result, update)
+        per_command = @router.class::Result.new(
+          action: :dispatch_then_reply,
+          command_argv: [ "hive", "run", result.slug, "--json" ],
+          project: result.project,
+          slug: result.slug
+        )
+        execute_dispatch(per_command, update)
+        # Clear only AFTER a successful dispatch so a dispatch failure leaves
+        # the conversation intact and the /done backstop can retry. (The
+        # earlier order cleared first, which stranded the operator if the
+        # spawn raised — they'd seen "running automatically" but /done found
+        # no conversation to dispatch.)
+        @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "auto_run_after_answers",
+                                      slug: result.slug, error_class: e.class.name,
+                                      message: e.message)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "I couldn't start the next round automatically (#{e.class}). " \
+                "Send /done to retry."
+        )
       end
 
       def start_answer(result, update)
@@ -409,123 +549,20 @@ module Hive
               Hive::Bot::BrainstormParser.parse(path)
             )
           end
-        question_n = question&.n || 1
-        @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                  question_n: question_n, mode: result.mode || :path_b,
-                                  project: result.project)
-        safe_send_message(chat_id: update.chat_id,
-                          text: "Answer mode started for #{result.slug}. Send Q#{question_n}'s answer as a message.")
-      end
 
-      def execute_start_codex(result, update)
-        path = brainstorm_path_for(result.slug, project: result.project)
-        unless path
-          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
-          return
-        end
-
-        parsed = Hive::Bot::BrainstormParser.parse(path)
-        question = Hive::Bot::BrainstormParser.next_unanswered_question(parsed)
         unless question
           safe_send_message(chat_id: update.chat_id,
-                            text: "No unanswered questions remain for #{result.slug}.")
+                            text: "No unanswered questions for #{result.slug}.")
           return
         end
 
-        state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
-        unless state
-          state = @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
-                                            question_n: question.n, mode: :path_a,
-                                            project: result.project)
-        end
-
-        conversation = codex_conversation
-        task = codex_task_for(path, result.slug, result.project)
-        history = Array(state.history)
-        user_input = result.answer_text.to_s
-        outcome = conversation.next_turn(task: task, question: question, history: history,
-                                         draft: state.draft, user_input: user_input)
-
-        case outcome.kind
-        when :draft_ready
-          history << { role: "user", text: user_input } unless user_input.empty?
-          history << { role: "assistant", text: outcome.draft.to_s }
-          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     draft: outcome.draft.to_s, awaiting_confirm: true,
-                                     history: history, project: result.project)
-          safe_send_message(chat_id: update.chat_id,
-                            text: "Codex draft for Q#{question.n}:\n#{outcome.draft}",
-                            reply_markup: codex_draft_keyboard(result.project, result.slug, question.n))
-        when :reply
-          history << { role: "user", text: user_input } unless user_input.empty?
-          history << { role: "assistant", text: outcome.text.to_s }
-          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     history: history, awaiting_confirm: false,
-                                     project: result.project)
-          safe_send_message(chat_id: update.chat_id, text: outcome.text.to_s)
-        else
-          safe_send_message(chat_id: update.chat_id,
-                            text: "Codex failed: #{outcome.reason}. Send your answer directly.")
-        end
-      end
-
-      def execute_confirm_codex_draft(result, update)
-        state = @conversation_store.get(chat_id: update.chat_id, slug: result.slug)
-        draft = state&.draft.to_s
-        if draft.strip.empty?
-          safe_send_message(chat_id: update.chat_id, text: "No draft to confirm for #{result.slug}.")
-          return
-        end
-
-        path = brainstorm_path_for(result.slug, project: result.project)
-        unless path
-          safe_send_message(chat_id: update.chat_id, text: "Slug not found, was it archived?")
-          return
-        end
-
-        write_result = Hive::Bot::BrainstormAnswerWriter.append!(
-          brainstorm_path: path,
-          question_n: result.question_n,
-          answer_text: draft
+        @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
+                                  question_n: question.n, mode: result.mode || :path_b,
+                                  project: result.project)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Q#{question.n}: #{question.text.to_s.strip}\n\nReply with your answer."
         )
-        if write_result == :written
-          @logger.event(:answer_written, slug: result.slug, question_n: result.question_n,
-                                          project: result.project)
-          @conversation_store.update(chat_id: update.chat_id, slug: result.slug,
-                                     draft: nil, awaiting_confirm: false)
-          advance_conversation_after_write(result, update, path)
-        elsif write_result == :already_answered
-          @logger.event(:answer_skipped_already_answered, slug: result.slug,
-                                                            question_n: result.question_n,
-                                                            project: result.project)
-        end
-        text =
-          case write_result
-          when :written then "Draft saved as Q#{result.question_n}."
-          when :already_answered then "Question #{result.question_n} was already answered by another device"
-          when :lock_busy then "Try again - another run holds the lock"
-          else "Question #{result.question_n} was not found."
-          end
-        safe_send_message(chat_id: update.chat_id, text: text)
-      end
-
-      def codex_conversation
-        @codex_conversation ||= Hive::Bot::CodexConversation.new(
-          config: { "bot" => @config },
-          logger: @logger
-        )
-      end
-
-      def codex_task_for(brainstorm_path, slug, project)
-        Hive::Task.new(File.dirname(brainstorm_path))
-      end
-
-      def codex_draft_keyboard(project, slug, question_n)
-        [
-          [ { text: "Write", callback_data: "codex_write:#{project}:#{slug}:#{question_n}" } ],
-          [ { text: "Edit", callback_data: "codex_edit:#{project}:#{slug}:#{question_n}" } ],
-          [ { text: "Cancel", callback_data: "codex_cancel:#{project}:#{slug}:#{question_n}" } ]
-        ]
       end
 
       def advance_conversation_after_write(result, update, brainstorm_path)
@@ -546,6 +583,8 @@ module Hive
 
       def reply_for_child(child)
         text = diagnose_reply_for_child(child) || child_completion_text(child)
+        return if text.nil?
+
         @telegram.send_message(chat_id: child.chat_id, text: text)
       end
 
@@ -558,7 +597,7 @@ module Hive
           return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
           return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
-                 "Open this task on a laptop for full details."
+                 "Tap Show details to dump it here."
         end
 
         kind = envelope["error_kind"].to_s.strip
@@ -576,7 +615,10 @@ module Hive
         elsif child.exit_code == Hive::ExitCodes::TEMPFAIL
           "Try again - another run holds the lock"
         elsif child.exit_code == 0
-          "Command completed"
+          # Clean success — no message. Operators see this signal via the
+          # next status row (or its absence). The "Command completed" ack
+          # was operational chatter with no actionable content.
+          nil
         else
           "Command failed with exit #{child.exit_code || 'unknown'}; see #{child.log_path}"
         end
@@ -597,6 +639,52 @@ module Hive
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
         ([ header ] + lines).join("\n")
+      end
+
+      # Inline keyboard for the /status (and /queue) reply: one button per
+      # actionable row that has a Telegram-side next step, capped to match
+      # the text body. Returns nil when no row is actionable, so the reply
+      # stays text-only.
+      #
+      # Why buttons and not text "/command <slug>" links: Telegram's
+      # bot_command message entity covers only the "/command" token, NOT the
+      # argument after it. Tapping a rendered "/answer <slug>" sends just
+      # "/answer", which hits the usage hint — the slug never rides along.
+      # Inline callback buttons carry the full payload on tap, in-chat. The
+      # callbacks are built via NotificationBuilders so they are byte-
+      # identical to (and compaction/registry-consistent with) the push-
+      # notification buttons.
+      def status_keyboard(rows)
+        buttons = actionable_queue_rows(rows).first(QUEUE_DISPLAY_CAP)
+                                             .filter_map { |row| status_action_button(row) }
+        buttons.empty? ? nil : buttons.map { |btn| [ btn ] }
+      end
+
+      # One primary action button for a row, or nil when the row has no
+      # Telegram-side next step. Mirrors the push-notification surface:
+      #   needs_input + 2-brainstorm + waiting → Answer  (answer: callback)
+      #   ready_to_*                            → Approve (approve: callback)
+      #   recover_* AND retryable_recovery?     → Autofix (autofix: callback)
+      #   recover_* AND manual_only_recovery?   → Details (details: callback)
+      #   else                                  → nil
+      # Labels carry the task title so the operator can tell rows apart.
+      def status_action_button(row)
+        nb = Hive::Bot::NotificationBuilders
+        title = Hive::Bot::TitleFormatter.title_from_slug(row.slug)
+        action = row.action.to_s
+
+        if action == "needs_input" && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
+          nb.button("✏️ #{title}", "answer:#{row.project}:#{row.slug}")
+        elsif action.start_with?("ready_to_")
+          verb = nb.verb_for_action(row.action)
+          nb.button("✅ #{title}", "approve:#{verb}:#{row.project}:#{row.slug}:#{row.stage}") if verb
+        elsif nb.recovery?(row)
+          if nb.retryable_recovery?(row)
+            nb.button("🔧 #{title}", nb.autofix_callback(row))
+          else
+            nb.button("🔍 #{title}", nb.details_callback(row))
+          end
+        end
       end
 
       def render_details(rows, project, slug)
@@ -678,11 +766,7 @@ module Hive
         return unless @reload
 
         @config = Hive::Config.load_global_bot(require_runtime: true)
-        @router = Hive::Bot::Router.new(
-          bot_config: @config,
-          logger: @logger,
-          conversation_store: @conversation_store
-        )
+        @router = build_router(@config)
         @notification_dispatcher = Hive::Bot::NotificationDispatcher.new(
           telegram: @telegram,
           logger: @logger,

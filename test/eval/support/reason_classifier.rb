@@ -127,7 +127,10 @@ module Hive
       def classify_answer_text(text)
         body = text.to_s
         return "fatal_error" if body.match?(/failed|not found|already answered|lock|confused/i)
-        return "agent_blocked_question" if body.match?(/Answer mode started|Send the answer|Codex draft/i)
+        # "Reply with your answer" is the new Q-by-Q prompt format introduced by
+        # the answer-flow cleanup; legacy prompts ("Answer mode started", etc)
+        # are kept for any older code paths that may still route here.
+        return "agent_blocked_question" if body.match?(/Reply with your answer|Answer mode started|Send the answer|Codex draft/i)
 
         "status_response"
       end

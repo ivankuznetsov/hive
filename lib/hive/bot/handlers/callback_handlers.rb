@@ -1,5 +1,4 @@
-require "hive/workflows"
-require "hive/bot/notification_builders"
+require "hive/bot/handlers/recovery_sequence"
 
 module Hive
   module Bot
@@ -26,11 +25,17 @@ module Hive
           when :callback_refresh_diagnose then refresh_diagnose(data)
           when :callback_answer then answer(data)
           when :callback_idea_project_pick then idea_project(data)
-          when :callback_path_a_yes then path_a(data)
-          when :callback_path_a_just_type then path_b(data)
-          when :callback_codex_write_draft then codex_write(data)
-          when :callback_codex_edit then @result_class.new(action: :reply, text: "Send the edited answer as a message.")
-          when :callback_codex_cancel then @result_class.new(action: :reply, text: "Draft cancelled.")
+          # Codex-draft flow is retired (deterministic Q-by-Q answering only).
+          # Legacy callbacks still land here from messages sent before the
+          # removal; reply with the new path so the operator isn't stuck.
+          when :callback_path_a_yes,
+               :callback_path_a_just_type,
+               :callback_codex_write_draft,
+               :callback_codex_edit,
+               :callback_codex_cancel
+            @result_class.new(action: :reply,
+                              text: "The Codex draft flow was removed. Tap Answer in chat (or send /answer <slug>) " \
+                                    "and reply with your answer; the bot will send the next question automatically.")
           when :callback_findings_accept_all then findings_toggle(data, "accept-finding")
           when :callback_findings_reject_all then findings_toggle(data, "reject-finding")
           when :callback_idea_project_new then idea_project_new(data)
@@ -55,39 +60,26 @@ module Hive
 
         def clear_and_retry(data)
           _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
-          commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker,
-                                    match_attr: match_attr)
-          if commands.empty?
-            stage_label = stage.to_s.empty? ? "(empty)" : stage
-            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
-          end
-
-          @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
-                            alert_reset: alert_reset(project, slug, stage, marker, match_attr),
-                            clear_keyboard: true)
+          # Legacy clear_retry: buttons (from messages predating the Autofix
+          # rename) route here. Go through RecoverySequence.build, not
+          # retry_commands directly, so a stale clear_retry on a manual-only
+          # marker (e.g. EXECUTE_STALE) gets the same "open it on a laptop"
+          # refusal the current Autofix paths enforce — rather than blindly
+          # dispatching markers-clear + a retry verb against a state that has
+          # no safe auto-recovery. callback_data carries no attrs, so this
+          # uses the marker-only manual-only check (ALWAYS_MANUAL_MARKERS).
+          RecoverySequence.build(
+            project: project, slug: slug, stage: stage,
+            marker: marker, match_attr: match_attr,
+            result_class: @result_class, clear_keyboard: true
+          )
         end
 
         def autofix(data)
           _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
-          if manual_only_marker?(marker)
-            return @result_class.new(action: :reply,
-                                     text: "Hive has no automatic recovery for this state - open it on a laptop.")
-          end
-
-          verb = retry_verb_for_stage(stage)
-          unless verb
-            stage_label = stage.to_s.empty? ? "(empty)" : stage
-            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
-          end
-
-          @result_class.new(
-            action: :dispatch_commands,
-            project: project,
-            slug: slug,
-            commands: retry_commands(project: project, slug: slug, stage: stage, marker: marker,
-                                     match_attr: match_attr),
-            alert_reset: alert_reset(project, slug, stage, marker, match_attr),
-            clear_keyboard: true
+          RecoverySequence.build(
+            project: project, slug: slug, stage: stage, marker: marker,
+            match_attr: match_attr, result_class: @result_class, clear_keyboard: true
           )
         end
 
@@ -155,34 +147,10 @@ module Hive
           )
         end
 
-        def path_a(data)
-          _prefix, project, slug = split_callback(data, 3)
-          @result_class.new(action: :start_codex, project: project, slug: slug, mode: :path_a)
-        end
-
-        def path_b(data)
-          _prefix, project, slug = split_callback(data, 3)
-          @result_class.new(action: :reply, project: project, slug: slug,
-                            text: "Send the answer as a message.")
-        end
-
-        def codex_write(data)
-          _prefix, project, slug, question_n = split_callback(data, 4)
-          begin
-            n = Integer(question_n)
-          rescue ArgumentError, TypeError => e
-            @logger&.event(:callback_malformed, data: data, reason: "non_integer_question_n",
-                                                  error_class: e.class.name)
-            return @result_class.new(action: :reply, text: "Bot got confused - please retry from /queue.")
-          end
-          @result_class.new(action: :confirm_codex_draft, project: project, slug: slug,
-                            question_n: n)
-        end
-
         def findings_toggle(data, verb)
           _prefix, _kind, project, slug, stage = split_callback(data, 5)
           stage_argv = stage ? [ "--stage", stage ] : []
-          retry_verb = retry_verb_for_stage(stage)
+          retry_verb = RecoverySequence.retry_verb_for_stage(stage)
           retry_argv = retry_verb ? [ "hive", retry_verb, slug, "--from", stage, "--project", project, "--json" ] : nil
           commands = [
             [ "hive", verb, slug, "--all", *stage_argv, "--project", project, "--json" ]
@@ -197,51 +165,9 @@ module Hive
             project: project,
             slug: slug,
             commands: commands,
-            alert_reset: alert_reset(project, slug, stage),
+            alert_reset: RecoverySequence.alert_reset(project, slug, stage),
             clear_keyboard: true
           )
-        end
-
-        def retry_verb_for_stage(stage)
-          return nil if stage.to_s == "9-done"
-
-          Hive::Workflows.verb_arriving_at(stage) || {
-            "4-execute" => "develop",
-            "5-review" => "review",
-            "6-pr" => "pr"
-          }[stage]
-        end
-
-        # 9-done returns an empty command list (no retry verb), and AGENT_WORKING
-        # markers skip `hive markers clear` because that name is outside the clear
-        # allowlist (markers.rb#ALLOWED_NAMES) and would exit 4. Both branches
-        # intentionally diverge from the pre-U7 `clear_and_retry` path.
-        def retry_commands(project:, slug:, stage:, marker:, match_attr: nil)
-          verb = retry_verb_for_stage(stage)
-          return [] unless verb
-
-          commands = []
-          marker_name = marker.to_s
-          unless marker_name.casecmp("none").zero? || marker_name.casecmp("agent_working").zero?
-            clear_argv = [ "hive", "markers", "clear", slug, "--name", marker_name.upcase,
-                           "--project", project ]
-            clear_argv += [ "--match-attr", match_attr ] if match_attr.to_s.include?("=")
-            clear_argv << "--json"
-            commands << clear_argv
-          end
-          commands << [ "hive", verb, slug, "--from", stage, "--project", project, "--json" ]
-          commands
-        end
-
-        def manual_only_marker?(marker)
-          Hive::Bot::NotificationBuilders.manual_only?(marker: marker)
-        end
-
-        def alert_reset(project, slug, stage, marker = nil, match_attr = nil)
-          payload = { project: project, slug: slug, stage: stage }
-          payload[:marker] = marker if marker && !marker.to_s.empty?
-          payload[:match_attr] = match_attr if match_attr && !match_attr.to_s.empty?
-          payload
         end
 
         def split_callback(data, expected)

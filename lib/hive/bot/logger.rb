@@ -18,6 +18,7 @@ module Hive
         notification_skipped_dedupe
         notification_skipped_backoff
         fresh_install_seeded
+        answer_lock_contention
         dispatched_command
         command_completed
         codex_spawned

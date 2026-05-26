@@ -187,6 +187,67 @@ class HiveBotAlertStoreTest < Minitest::Test
     end
   end
 
+  def test_constructor_cleans_orphan_tmp_files
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      orphan = File.join(dir, ".alerts.json.99999.deadbeef.tmp")
+      File.write(orphan, "garbage")
+      File.write(path, JSON.generate({ "schema_version" => 1, "entries" => {} }))
+
+      Hive::Bot::AlertStore.new(path: path)
+
+      refute File.exist?(orphan), "orphan tmp file must be cleaned up at construction"
+      assert File.exist?(path), "live alert state file must NOT be touched"
+    end
+  end
+
+  def test_corrupt_rename_failure_starts_empty_without_raising
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      # Write a corrupt file then make the parent dir read-only so File.rename
+      # inside handle_corrupt! raises a SystemCallError.
+      File.write(path, "not json")
+      File.chmod(0o500, dir)
+      logger = StubLogger.new
+
+      store = Hive::Bot::AlertStore.new(path: path, logger: logger)
+
+      assert_equal [], store.each_fingerprint.to_a, "store must start empty when rename fails"
+      event = logger.events.find { |e| e.first == :alert_store_corrupt }
+      refute_nil event
+      assert_nil event.last[:corrupt_path],
+                 "corrupt_path must be nil when File.rename could not move the bad file aside"
+    ensure
+      File.chmod(0o700, dir) if dir && File.directory?(dir)
+    end
+  end
+
+  def test_concurrent_contention_on_same_fingerprint_preserves_valid_json
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      store = Hive::Bot::AlertStore.new(path: path)
+      now = Time.utc(2026, 5, 25, 10, 0, 0)
+      fingerprint = "shared-fp"
+
+      threads = 20.times.map do |i|
+        Thread.new do
+          if i.even?
+            store.add(fingerprint, row(attrs: { "pass" => i.to_s }), now + i)
+          else
+            store.remove(fingerprint)
+          end
+        end
+      end
+      threads.each(&:join)
+
+      # Final state is unspecified (race), but the on-disk JSON must always
+      # be parseable — every persist_locked! is atomic.
+      content = File.read(path)
+      assert_kind_of Hash, JSON.parse(content),
+                     "on-disk file must remain parseable JSON under contention"
+    end
+  end
+
   def test_persist_failure_rolls_back_in_memory_state_on_add
     with_tmp_dir do |dir|
       store = Hive::Bot::AlertStore.new(path: File.join(dir, "alerts.json"))

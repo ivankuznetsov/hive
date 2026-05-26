@@ -57,6 +57,11 @@ module Hive
           _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
           commands = retry_commands(project: project, slug: slug, stage: stage, marker: marker,
                                     match_attr: match_attr)
+          if commands.empty?
+            stage_label = stage.to_s.empty? ? "(empty)" : stage
+            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
+          end
+
           @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
                             alert_reset: alert_reset(project, slug, stage, marker, match_attr),
                             clear_keyboard: true)

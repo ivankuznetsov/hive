@@ -19,10 +19,12 @@ module Hive
           tokens = rest.split(/\s+/)
           json = !tokens.delete("--json").nil?
           project = tokens.join(" ").strip
-          argv = [ "hive", "status", "--json" ]
-          argv += [ "--project", project ] unless project.empty?
+          # The supervisor's in-process status intercept filters via
+          # Result.project; `hive status --json` itself does not honour a
+          # snapshot-level --project, so the argv stays flag-free to avoid
+          # claiming a filter the subprocess fallback would not enforce.
           @result_class.new(action: :dispatch_then_reply,
-                            command_argv: argv,
+                            command_argv: [ "hive", "status", "--json" ],
                             project: project.empty? ? nil : project,
                             format: json ? :json : nil)
         end

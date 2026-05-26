@@ -287,7 +287,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @status_watcher.result = StatusResult.new(ok: true, rows: rows)
     result = FakeRouter::Result.new(
       action: :dispatch_then_reply,
-      command_argv: [ "hive", "status", "--json", "--project", "other" ],
+      command_argv: [ "hive", "status", "--json" ],
       project: "other"
     )
 
@@ -303,7 +303,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
     result = FakeRouter::Result.new(
       action: :dispatch_then_reply,
-      command_argv: [ "hive", "status", "--json", "--project", "missing" ],
+      command_argv: [ "hive", "status", "--json" ],
       project: "missing"
     )
 
@@ -319,7 +319,7 @@ class HiveBotSupervisorTest < Minitest::Test
       @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
       result = FakeRouter::Result.new(
         action: :dispatch_then_reply,
-        command_argv: [ "hive", "status", "--json", "--project", "other" ],
+        command_argv: [ "hive", "status", "--json" ],
         project: "other"
       )
 
@@ -366,7 +366,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @status_watcher.result = StatusResult.new(ok: true, rows: [], envelope: envelope)
     result = FakeRouter::Result.new(
       action: :dispatch_then_reply,
-      command_argv: [ "hive", "status", "--json", "--project", "hive" ],
+      command_argv: [ "hive", "status", "--json" ],
       project: "hive",
       format: :json
     )
@@ -505,6 +505,22 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal 1, @child_supervisor.dispatched.length, "retry verb must not run when markers-clear fails"
     assert_empty @notification_dispatcher.reset_tasks,
                  "alert reset must NOT fire when the markers-clear precursor fails"
+  end
+
+  def test_dispatch_command_sequence_skips_alert_reset_in_dry_run
+    @supervisor.instance_variable_set(:@dry_run, true)
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "develop", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "4-execute" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "dry_run must not call reset_task even when alert_reset is present"
   end
 
   def test_dispatch_command_sequence_clears_inline_keyboard_when_requested

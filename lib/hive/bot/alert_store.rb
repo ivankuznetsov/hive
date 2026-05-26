@@ -20,6 +20,7 @@ module Hive
         @logger = logger
         @mutex = Mutex.new
         @data = empty_data
+        clean_orphaned_tmp_files!
         load!
       end
 
@@ -204,6 +205,25 @@ module Hive
         return [ nil, nil ] if key.to_s.empty? || value.nil?
 
         [ key.to_s, value.to_s ]
+      end
+
+      # SIGKILL or power loss between File.write(tmp) and File.rename(tmp, @path)
+      # leaves a hidden tmp file in the parent directory. Without periodic
+      # cleanup these accumulate. Sweep on construction: any file matching
+      # the tmp naming convention but not the active path is an orphan.
+      def clean_orphaned_tmp_files!
+        return unless @path
+
+        dir = File.dirname(@path)
+        return unless File.directory?(dir)
+
+        prefix = ".#{File.basename(@path)}."
+        Dir.glob(File.join(dir, "#{prefix}*.tmp")).each do |orphan|
+          FileUtils.rm_f(orphan)
+        end
+      rescue StandardError
+        # Cleanup is best-effort; never let a sweep error block startup.
+        nil
       end
 
       def load!

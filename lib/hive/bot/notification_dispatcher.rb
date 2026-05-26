@@ -35,7 +35,7 @@ module Hive
         Array(rows).each_with_object({}) do |row, out|
           next if suppress_ready_action?(row)
 
-          notification = NotificationBuilders.build(row)
+          notification = NotificationBuilders.build(row, logger: @logger)
           next unless notification
 
           fingerprint = NotificationBuilders.fingerprint(row)

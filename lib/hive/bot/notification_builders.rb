@@ -31,13 +31,13 @@ module Hive
         archived
       ].freeze
 
-      def build(row)
+      def build(row, logger: nil)
         if READY_ACTIONS.include?(row.action)
           stage_approval(row)
         elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
           needs_input(row)
         elsif recovery?(row)
-          recovery(row)
+          recovery(row, logger: logger)
         else
           nil
         end
@@ -120,11 +120,11 @@ module Hive
         )
       end
 
-      def recovery(row)
+      def recovery(row, logger: nil)
         retryable = retryable_recovery?(row)
         Notification.new(
           text: [
-            "⚠ #{TitleFormatter.stage_label(row.stage)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
+            "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
             cause_sentence_for(row),
             retryable ? "Tap Autofix to retry the stage cleanly." :
               "Open this task on a laptop before retrying."

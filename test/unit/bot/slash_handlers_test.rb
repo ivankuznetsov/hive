@@ -28,7 +28,8 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = @handlers.status(Update.new(text: "/status hive"))
 
     assert_equal :dispatch_then_reply, result.action
-    assert_equal [ "hive", "status", "--json", "--project", "hive" ], result.command_argv
+    # argv stays flag-free; project filter rides on Result.project
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
     assert_equal "hive", result.project
   end
 
@@ -36,7 +37,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = @handlers.status(Update.new(text: "/status my project"))
 
     assert_equal :dispatch_then_reply, result.action
-    assert_equal [ "hive", "status", "--json", "--project", "my project" ], result.command_argv
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
     assert_equal "my project", result.project
   end
 
@@ -59,6 +60,6 @@ class HiveBotSlashHandlersTest < Minitest::Test
 
     assert_equal :json, result.format
     assert_equal "hive", result.project
-    assert_equal [ "hive", "status", "--json", "--project", "hive" ], result.command_argv
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
   end
 end

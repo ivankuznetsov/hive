@@ -238,17 +238,13 @@ module Hive
       end
 
       def needs_alert_reset?(result)
-        return false unless result.respond_to?(:alert_reset)
-
         reset = result.alert_reset
-        reset && @notification_dispatcher.respond_to?(:reset_task)
+        reset ? true : false
       end
 
       def reset_alert_for_result(result)
-        return unless result.respond_to?(:alert_reset)
-
         reset = result.alert_reset
-        return unless reset && @notification_dispatcher.respond_to?(:reset_task)
+        return unless reset
 
         @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug],
                                             stage: reset[:stage], marker: reset[:marker],
@@ -622,10 +618,7 @@ module Hive
       end
 
       def status_command?(argv)
-        argv = Array(argv)
-        return true if argv == [ "hive", "status", "--json" ]
-
-        argv.length == 5 && argv[0, 3] == [ "hive", "status", "--json" ] && argv[3] == "--project"
+        Array(argv) == [ "hive", "status", "--json" ]
       end
 
       def next_unanswered_question_n(brainstorm_path)

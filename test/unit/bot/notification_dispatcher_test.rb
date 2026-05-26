@@ -26,9 +26,9 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
   end
 
   def dispatcher(path: nil, now: Time.utc(2026, 5, 25, 10, 0, 0), daemon_enabled: ->(_project) { false },
-                 telegram: self.telegram)
+                 telegram: self.telegram, fresh_install: false)
     @clock = now
-    Hive::Bot::NotificationDispatcher.new(
+    d = Hive::Bot::NotificationDispatcher.new(
       telegram: telegram,
       logger: logger,
       bot_config: {
@@ -39,6 +39,12 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       daemon_enabled: daemon_enabled,
       now: -> { @clock }
     )
+    # Most tests assert the FIRST tick alerts. The fresh_install
+    # seeding behaviour gets its own focused tests; mark the
+    # AlertStore as already-seeded by default so existing tests
+    # don't need clock-advance wrappers.
+    d.instance_variable_get(:@alert_store).mark_seeded! unless fresh_install
+    d
   end
 
   def telegram
@@ -118,6 +124,50 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       assert_nil Hive::Bot::AlertStore.new(path: path).entry(
         Hive::Bot::NotificationBuilders.fingerprint(recovery_row)
       ), "entry must be removed after successful Recovered delivery"
+    end
+  end
+
+  def test_fresh_install_silently_seeds_first_tick_and_alerts_only_on_deltas
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      refute File.exist?(path), "precondition: alert_state_file must not yet exist"
+
+      d = dispatcher(path: path, fresh_install: true)
+      pre_existing = recovery_row
+      brand_new = recovery_row(slug: "new-stuck-260525-9999")
+
+      # Day 1: existing failure already in the snapshot. Must NOT alert.
+      d.process_rows([ pre_existing ])
+      assert_empty telegram.messages,
+                   "fresh install must not alert on backlog failures from the very first tick"
+      assert(logger.events.any? { |name, _| name == :fresh_install_seeded },
+             ":fresh_install_seeded event must be logged for observability")
+
+      # Day 2: the same pre-existing failure is still around — dedupe applies.
+      @clock += 30
+      d.process_rows([ pre_existing ])
+      assert_empty telegram.messages, "subsequent tick must dedupe seeded entries"
+
+      # Day 3: a NEW failure appears. This one alerts normally.
+      @clock += 30
+      d.process_rows([ pre_existing, brand_new ])
+      assert_equal 1, telegram.messages.size, "only the delta (new failure) must alert"
+      assert_match(/New stuck/, telegram.messages.last[:text])
+    end
+  end
+
+  def test_existing_state_file_does_not_count_as_fresh_install
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      # Pre-create an empty but valid state file. This simulates a bot that
+      # has run before but has no entries.
+      File.write(path, JSON.generate({ "schema_version" => 1, "entries" => {} }))
+
+      d = dispatcher(path: path, fresh_install: true)
+      d.process_rows([ recovery_row ])
+
+      assert_equal 1, telegram.messages.size,
+                   "an existing state file (even empty) must NOT trigger silent seeding"
     end
   end
 

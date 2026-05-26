@@ -78,6 +78,14 @@ bot:
 alert lifecycle dedupe is status-driven and persisted in
 `alert_state_file`.
 
+On a fresh install (or after the operator deletes `alert_state_file`)
+the first status tick **silently seeds** every currently-failing row
+into the store and emits a single `:fresh_install_seeded` log event
+instead of firing an alert per backlog row. Subsequent ticks alert on
+deltas only. To suppress this and force an alert for every active row
+on first start, do not configure `alert_state_file` (running without
+persistence means every restart is a burst — accept the trade-off).
+
 `HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
 token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
 (exit 78). Unknown chat IDs are logged once per bot lifetime and ignored

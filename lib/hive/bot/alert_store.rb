@@ -20,8 +20,31 @@ module Hive
         @logger = logger
         @mutex = Mutex.new
         @data = empty_data
+        # Snapshot whether the persistent file already existed BEFORE load!
+        # so the dispatcher can suppress alerts on the first process_rows
+        # after a fresh install or wiped state file. A previously-running
+        # backlog should not all alert simultaneously on day 1.
+        #
+        # Only "fresh" when there IS a configured path that does not yet
+        # exist on disk. A nil path means the operator is intentionally
+        # running without persistence — every restart is a burst, suppressing
+        # the first tick would just mask real alerts indefinitely.
+        @fresh_install = !@path.nil? && !File.exist?(@path)
         clean_orphaned_tmp_files!
         load!
+      end
+
+      def fresh_install?
+        synchronize { @fresh_install }
+      end
+
+      def mark_seeded!
+        synchronize do
+          next false unless @fresh_install
+
+          @fresh_install = false
+          true
+        end
       end
 
       def each_fingerprint

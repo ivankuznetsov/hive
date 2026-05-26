@@ -20,6 +20,11 @@ module Hive
 
       def process_rows(rows)
         current = current_notifications(rows)
+        if @alert_store.fresh_install?
+          seed_silently(current)
+          @alert_store.mark_seeded!
+          return
+        end
         process_recoveries(current)
         process_current(current)
       end
@@ -41,6 +46,21 @@ module Hive
           fingerprint = NotificationBuilders.fingerprint(row)
           out[fingerprint] ||= { row: row, notification: notification }
         end
+      end
+
+      # On a fresh AlertStore (no prior persistent state), pretend every
+      # current notification has already been delivered to every chat in the
+      # allowlist. This populates the store with a baseline so subsequent
+      # ticks only alert on deltas — operators don't see a thunderstorm of
+      # ⚠ alerts on day 1 for failures that pre-date the bot's deployment.
+      def seed_silently(current)
+        return if current.empty?
+
+        chats = chat_ids
+        current.each do |fingerprint, payload|
+          @alert_store.add(fingerprint, payload.fetch(:row), @now.call, delivered_to: chats)
+        end
+        @logger.event(:fresh_install_seeded, fingerprint_count: current.size)
       end
 
       def process_recoveries(current)

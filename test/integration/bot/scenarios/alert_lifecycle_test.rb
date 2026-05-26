@@ -55,6 +55,9 @@ class HiveBotAlertLifecycleIntegrationTest < Minitest::Test
       )
       # Manually wire AlertStore so we can drive reset_task without standing up Supervisor.
       alert_store = Hive::Bot::AlertStore.new(path: path, logger: logger)
+      # Skip the fresh-install silent-seed branch; this scenario asserts
+      # the alerting flow for a bot that has run before.
+      alert_store.mark_seeded!
       dispatcher.instance_variable_set(:@alert_store, alert_store)
 
       row1 = stuck_row(pass: 2)

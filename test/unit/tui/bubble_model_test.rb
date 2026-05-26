@@ -736,6 +736,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_includes out, "tokens"
     assert_includes out, "[i] info"
     assert_includes out, "[q] quit"
+    assert_includes out, " · ",
+                    "hint and usage blocks must remain joined by the ` · ` separator"
     refute out.end_with?("…"),
            "footer at exact hint width should not truncate, got #{out.inspect}"
   end
@@ -743,8 +745,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_default_footer_truncates_tokens_first_on_overflow_above_threshold
     hint = @model.send(:footer_hint)
     usage = Hive::Tui::Views::UsageFooter.text(Hive::UsageDb.zero_aggregate)
+    assert usage.end_with?("tokens"),
+           "test premise: usage text must end with `tokens` label, got #{usage.inspect}"
     full_width = "#{hint} · #{usage}".length
-    out = with_zero_usage { @model.send(:default_footer, full_width - 5) }
+    out = with_zero_usage { @model.send(:default_footer, full_width - usage.length) }
 
     assert_includes out, "[Tab] switch",
                     "hint block must survive when overflow clips from the right"

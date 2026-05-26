@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-05-14
+updated: 2026-05-25
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -35,8 +35,8 @@ hive bot tail
 
 | Slash command | Behavior |
 |--------------|----------|
-| `/status` | Renders the active cross-project queue from `hive status --json`. |
-| `/queue` | Same queue view, focused on actionable waiting/recovery rows. |
+| `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
+| `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
@@ -48,12 +48,12 @@ Free text outside an active answer conversation is rejected with a
 
 ## Inline actions
 
-Notifications and `/queue` rows use callback data that routes to:
+Push notifications use callback data that routes to:
 
 - Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
 - Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
-- Recovery markers: `Clear and retry` dispatches `hive markers clear ... --name <MARKER> --json`, then dispatches the stage's workflow verb when one exists.
+- Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. Manual-only recovery states show `Open laptop` / `Show details`; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -67,10 +67,24 @@ bot:
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
+  alert_state_file: ~/.local/state/hive/.bot.alert_state.json
+  recovery_reminder_window_sec: 28800
   pid_file: ~/.local/state/hive/.bot.pid
   log_file: ~/.local/state/hive/logs/bot.log
   last_seen_state_file: ~/.local/state/hive/.bot.last_seen_update_id
 ```
+
+`notification_dedupe_window_sec` is legacy compatibility surface; current
+alert lifecycle dedupe is status-driven and persisted in
+`alert_state_file`.
+
+On a fresh install (or after the operator deletes `alert_state_file`)
+the first status tick **silently seeds** every currently-failing row
+into the store and emits a single `:fresh_install_seeded` log event
+instead of firing an alert per backlog row. Subsequent ticks alert on
+deltas only. To suppress this and force an alert for every active row
+on first start, do not configure `alert_state_file` (running without
+persistence means every restart is a burst — accept the trade-off).
 
 `HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
 token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
@@ -82,6 +96,14 @@ silently.
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
 `hive-bot-log.v1`. The event enum is closed in
 `Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
+
+The schema evolves additively: new event values may be appended to
+`v1` without changing `schema_version`. Breaking changes (removing an
+event, renaming it, or changing the payload shape of an existing
+event) require a `v2` schema file alongside `v1`, bumped `$id`, and
+synchronized `schema_version` constant. Downstream consumers that pin
+on the `$id` URL must therefore tolerate unknown event values when
+parsing v1; that's the read-side compat invariant.
 Events include `bot_started`, `poll_failure`, `update_received`,
 `notification_sent`, `dispatched_command`, `command_completed`,
 `codex_spawned`, `answer_written`, `reconnect_summary`, and `fatal`.

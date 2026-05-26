@@ -5,15 +5,19 @@ class HiveBotSupervisorTest < Minitest::Test
   include HiveTestHelper
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
-  Update = Struct.new(:chat_id, :update_id, keyword_init: true)
+  Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :error, :envelope, keyword_init: true)
 
-  FakeTelegram = Struct.new(:messages, :raise_on_send, keyword_init: true) do
+  FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
       raise raise_on_send if raise_on_send
 
       messages << { chat_id: chat_id, text: text, reply_markup: reply_markup }
+    end
+
+    def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
+      (self.keyboard_clears ||= []) << { chat_id: chat_id, message_id: message_id, reply_markup: reply_markup }
     end
   end
 
@@ -32,15 +36,20 @@ class HiveBotSupervisorTest < Minitest::Test
   end
 
 
-  FakeNotificationDispatcher = Struct.new(:processed, keyword_init: true) do
+  FakeNotificationDispatcher = Struct.new(:processed, :reset_tasks, keyword_init: true) do
     def process_rows(rows)
       processed << rows
+    end
+
+    def reset_task(**kwargs)
+      reset_tasks << kwargs
     end
   end
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, keyword_init: true)
+                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        keyword_init: true)
   end
 
   FakeChildSupervisor = Struct.new(:dispatch_pid, :dispatched, :completed, :reap_batches, keyword_init: true) do
@@ -92,7 +101,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @status_watcher = FakeStatusWatcher.new(result: StatusResult.new(ok: true, rows: []))
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
-    @notification_dispatcher = FakeNotificationDispatcher.new(processed: [])
+    @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
     # Drive the real constructor so any future invariant added to
     # Supervisor#initialize is exercised by every test in this file. We
     # inject all collaborators so the constructor's `||=` defaults never
@@ -175,9 +184,10 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_includes text, "REVIEW_ERROR phase=fix pass=1"
-    assert_includes text, "fix attempt timed out"
-    assert_includes text, "Path: /tmp/red-status.md"
+    assert_equal 'Diagnosis is available for "Red task…". Open this task on a laptop for full details.', text
+    refute_includes text, "REVIEW_ERROR"
+    refute_includes text, "fix attempt timed out"
+    refute_includes text, "/tmp/red-status.md"
     refute_includes text, "Command completed"
   end
 
@@ -239,8 +249,10 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @supervisor.send(:render_queue, rows)
 
     assert_includes text, "12 active tasks"
-    assert_includes text, "hive/task-0 3-plan Develop COMPLETE"
+    assert_includes text, "Task 0… — Plan"
     assert_includes text, "+ 2 more tasks"
+    refute_includes text, "hive/task-0"
+    refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
   end
@@ -267,7 +279,116 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil pid
     assert_empty @child_supervisor.dispatched
     assert_includes @telegram.messages.last.fetch(:text), "1 active task"
-    refute_nil @telegram.messages.last.fetch(:reply_markup)
+    assert_nil @telegram.messages.last.fetch(:reply_markup)
+  end
+
+  def test_execute_dispatch_filters_status_by_project
+    rows = [ row(project: "hive", slug: "alpha-260525-abcd"), row(project: "other", slug: "beta-260525-abcd") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      project: "other"
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    assert_includes text, "Beta… — Plan"
+    refute_includes text, "Alpha"
+    assert_nil @telegram.messages.last.fetch(:reply_markup)
+  end
+
+  def test_execute_dispatch_reports_unknown_project_with_known_list
+    @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      project: "missing"
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    assert_match(/Unknown project missing/, text)
+    assert_match(/hive/, text)
+  end
+
+  def test_execute_dispatch_reports_no_tasks_for_known_but_empty_project
+    with_registered_projects([ { "name" => "hive" }, { "name" => "other" } ]) do
+      @status_watcher.result = StatusResult.new(ok: true, rows: [ row(project: "hive", slug: "alpha") ])
+      result = FakeRouter::Result.new(
+        action: :dispatch_then_reply,
+        command_argv: [ "hive", "status", "--json" ],
+        project: "other"
+      )
+
+      @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+      assert_equal "No tasks for project other.", @telegram.messages.last.fetch(:text)
+    end
+  end
+
+  def test_execute_dispatch_renders_status_envelope_when_format_json
+    envelope = {
+      "schema" => "hive-status",
+      "schema_version" => 1,
+      "ok" => true,
+      "projects" => [
+        { "name" => "hive", "tasks" => [ { "slug" => "alpha" } ] },
+        { "name" => "other", "tasks" => [ { "slug" => "beta" } ] }
+      ]
+    }
+    @status_watcher.result = StatusResult.new(ok: true, rows: [], envelope: envelope)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      format: :json
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    parsed = JSON.parse(text)
+    assert_equal "hive-status", parsed["schema"], "JSON reply must surface the raw envelope"
+    project_names = parsed["projects"].map { |p| p["name"] }
+    assert_equal %w[hive other], project_names
+  end
+
+  def test_execute_dispatch_renders_status_envelope_filtered_by_project_when_format_json
+    envelope = {
+      "schema" => "hive-status",
+      "projects" => [
+        { "name" => "hive", "tasks" => [ { "slug" => "alpha" } ] },
+        { "name" => "other", "tasks" => [ { "slug" => "beta" } ] }
+      ]
+    }
+    @status_watcher.result = StatusResult.new(ok: true, rows: [], envelope: envelope)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      project: "hive",
+      format: :json
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    parsed = JSON.parse(@telegram.messages.last.fetch(:text))
+    assert_equal [ "hive" ], parsed["projects"].map { |p| p["name"] },
+                 "project filter must drop other projects from the JSON envelope"
+  end
+
+  def test_execute_dispatch_surfaces_status_fetch_failure
+    @status_watcher.result = StatusResult.new(ok: false, rows: [], error: "envelope ok=false: pipeline timeout")
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ]
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    assert_equal "hive status unavailable: envelope ok=false: pipeline timeout",
+                 @telegram.messages.last.fetch(:text)
   end
 
   def test_execute_dispatch_renders_status_details_when_slug_is_present
@@ -311,6 +432,159 @@ class HiveBotSupervisorTest < Minitest::Test
 
     assert_equal 1, @child_supervisor.dispatched.length
     assert_equal "Stopped because the previous command failed.", @telegram.messages.last.fetch(:text)
+  end
+
+  def test_dispatch_command_sequence_resets_alert_for_single_command
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "review", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 @notification_dispatcher.reset_tasks
+    assert_equal [ "hive", "review", "task", "--json" ], @child_supervisor.dispatched.first.fetch(:command_argv)
+  end
+
+  def test_dispatch_command_sequence_defers_alert_reset_until_markers_clear_succeeds
+    # markers-clear (pid 200) completes with exit 0; retry verb is fire-and-forget.
+    @child_supervisor.dispatch_pid = 200
+    @child_supervisor.completed[200] = child_exit(exit_code: 0, pid: 200)
+    reset_snapshot_at_dispatch = []
+    notification = @notification_dispatcher
+    dispatched_list = @child_supervisor.dispatched
+    dispatch_pid_value = @child_supervisor.dispatch_pid
+    @child_supervisor.define_singleton_method(:dispatch) do |**kwargs|
+      reset_snapshot_at_dispatch << notification.reset_tasks.dup
+      dispatched_list << kwargs
+      dispatch_pid_value
+    end
+
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task", "--name", "REVIEW_ERROR" ],
+        [ "hive", "review", "task", "--from", "6-review", "--json" ]
+      ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal 2, @child_supervisor.dispatched.length
+    assert_equal [], reset_snapshot_at_dispatch[0],
+                 "reset_task must NOT have been called when the first command (markers clear) dispatches"
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 reset_snapshot_at_dispatch[1],
+                 "reset_task must have been called exactly once before the retry verb dispatches"
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 @notification_dispatcher.reset_tasks
+  end
+
+  def test_dispatch_command_sequence_skips_alert_reset_when_markers_clear_fails
+    @child_supervisor.completed[123] = child_exit(exit_code: 1, pid: 123)
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "markers", "clear", "task" ],
+        [ "hive", "review", "task" ]
+      ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal 1, @child_supervisor.dispatched.length, "retry verb must not run when markers-clear fails"
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "alert reset must NOT fire when the markers-clear precursor fails"
+  end
+
+  def test_dispatch_command_sequence_skips_alert_reset_in_dry_run
+    @supervisor.instance_variable_set(:@dry_run, true)
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "develop", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "4-execute" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "dry_run must not call reset_task even when alert_reset is present"
+  end
+
+  def test_clear_inline_keyboard_swallows_telegram_errors
+    @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
+      raise IOError, "telegram offline"
+    end
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "develop", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      clear_keyboard: true
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12, message_id: 777))
+
+    failure = @logger.events.find { |evt| evt[:name] == :send_failure }
+    refute_nil failure, ":send_failure must be logged when edit_message_reply_markup raises"
+    assert_equal "edit_message_reply_markup", failure[:payload][:source]
+    assert_equal 1, @child_supervisor.dispatched.length,
+                 "the command must still dispatch even when keyboard clear fails"
+  end
+
+  def test_registered_project_names_returns_empty_when_config_raises
+    original = Hive::Config.method(:registered_projects)
+    Hive::Config.define_singleton_method(:registered_projects) do
+      raise Hive::ConfigError, "synthetic"
+    end
+
+    assert_equal [], @supervisor.send(:registered_project_names),
+                 "config load errors during registered_project_names must yield []"
+  ensure
+    Hive::Config.define_singleton_method(:registered_projects, original) if original
+  end
+
+  def test_dispatch_command_sequence_clears_inline_keyboard_when_requested
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "review", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      clear_keyboard: true
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12, message_id: 777))
+
+    assert_equal 1, @telegram.keyboard_clears.size, "edit_message_reply_markup must be called once"
+    clear = @telegram.keyboard_clears.first
+    assert_equal 42, clear.fetch(:chat_id)
+    assert_equal 777, clear.fetch(:message_id)
+    assert_nil clear.fetch(:reply_markup), "reply_markup must be nil to remove the inline keyboard"
+  end
+
+  def test_dispatch_command_sequence_does_not_clear_keyboard_without_flag
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "develop", "task", "--json" ] ],
+      project: "hive",
+      slug: "task"
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12, message_id: 777))
+
+    assert_nil @telegram.keyboard_clears, "edit_message_reply_markup must not be called when clear_keyboard is false/nil"
   end
 
   def test_queued_updates_filters_by_last_seen_and_allowlist
@@ -442,14 +716,6 @@ class HiveBotSupervisorTest < Minitest::Test
     ok = @supervisor.send(:wait_for_child_success, 999, deadline: Time.now - 1)
 
     assert_equal false, ok
-  end
-
-  def test_queue_inline_keyboard_falls_back_to_details_callback_with_stage
-    keyboard = @supervisor.send(:queue_inline_keyboard, [ row(action: "unknown", action_label: nil) ])
-
-    button = keyboard.first.first
-    assert_equal "Details: hive/task", button.fetch(:text)
-    assert_equal "details:hive:task:3-plan", button.fetch(:callback_data)
   end
 
   def test_project_and_brainstorm_paths_resolve_registered_project
@@ -832,6 +1098,14 @@ class HiveBotSupervisorTest < Minitest::Test
     with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
       assert_equal 1, @supervisor.send(:next_unanswered_question_n, path)
     end
+  end
+
+  def with_registered_projects(projects)
+    original = Hive::Config.method(:registered_projects)
+    Hive::Config.define_singleton_method(:registered_projects) { projects }
+    yield
+  ensure
+    Hive::Config.define_singleton_method(:registered_projects, original)
   end
 
   def test_interruptible_sleep_sleeps_until_flag_changes

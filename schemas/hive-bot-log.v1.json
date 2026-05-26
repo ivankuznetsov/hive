@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-log.v1.json",
   "title": "hive bot structured log line (v1)",
-  "description": "One JSON-line event emitted by Hive::Bot::Logger.",
+  "description": "One JSON-line event emitted by Hive::Bot::Logger. v1 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event) require a v2 schema file with $id and `schema_version` bumped.",
   "type": "object",
   "additionalProperties": true,
   "required": ["ts", "schema", "schema_version", "event"],
@@ -26,6 +26,8 @@
         "update_rejected_unauthorized",
         "notification_sent",
         "notification_skipped_dedupe",
+        "notification_skipped_backoff",
+        "fresh_install_seeded",
         "dispatched_command",
         "command_completed",
         "codex_spawned",
@@ -39,6 +41,9 @@
         "send_failure",
         "callback_malformed",
         "pid_file_corrupted",
+        "unknown_stage_label",
+        "alert_store_corrupt",
+        "deprecated_config",
         "fatal"
       ]
     }

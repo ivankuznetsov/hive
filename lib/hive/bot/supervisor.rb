@@ -13,6 +13,7 @@ require "hive/bot/child_supervisor"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/codex_conversation"
+require "hive/bot/title_formatter"
 require "hive/task"
 
 module Hive
@@ -50,6 +51,7 @@ module Hive
         last_seen = read_last_seen_update_id
         @next_update_id = last_seen ? last_seen + 1 : nil
         @started_at = Time.now
+        emit_deprecated_config_events!
       end
 
       def run_forever
@@ -198,7 +200,10 @@ module Hive
       end
 
       def dispatch_command_sequence(result, update)
+        clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
         commands = Array(result.commands)
+        reset_pending = !@dry_run && needs_alert_reset?(result)
+        failed = false
         commands.each_with_index do |argv, idx|
           per_command = @router.class::Result.new(
             action: :dispatch_then_reply,
@@ -210,10 +215,82 @@ module Hive
           if idx < commands.length - 1 && last_pid
             unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
               safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
+              failed = true
               break
+            end
+            # First non-final command (typically `markers clear`) succeeded.
+            # Clear the alert NOW so the row no longer carries a recovery marker
+            # before the retry verb dispatches and before the next status tick.
+            # This closes the race window where reset-before-dispatch would let
+            # process_current re-alert the same fingerprint within seconds of
+            # the Autofix tap.
+            if reset_pending
+              reset_alert_for_result(result)
+              reset_pending = false
             end
           end
         end
+        # Single-command paths (e.g., AGENT_WORKING markers that skip
+        # markers-clear) reach here without ever hitting the between-command
+        # sync point above. Reset the alert post-dispatch — only if we did not
+        # bail out of the loop on a failed precursor.
+        reset_alert_for_result(result) if reset_pending && !failed
+      end
+
+      def needs_alert_reset?(result)
+        reset = result.alert_reset
+        reset ? true : false
+      end
+
+      def reset_alert_for_result(result)
+        reset = result.alert_reset
+        return unless reset
+
+        @notification_dispatcher.reset_task(project: reset[:project], slug: reset[:slug],
+                                            stage: reset[:stage], marker: reset[:marker],
+                                            match_attr: reset[:match_attr])
+      end
+
+      def render_status_json(envelope, project_filter)
+        return "{}" if envelope.nil?
+
+        if project_filter && !project_filter.to_s.empty?
+          filtered = envelope.merge(
+            "projects" => Array(envelope["projects"]).select { |p| p["name"] == project_filter }
+          )
+          ::JSON.pretty_generate(filtered)
+        else
+          ::JSON.pretty_generate(envelope)
+        end
+      end
+
+      def project_filter_miss_text(project, rows)
+        registered = registered_project_names
+        active = rows.map { |row| row.project.to_s }.uniq
+        if registered.include?(project.to_s) || active.include?(project.to_s)
+          "No tasks for project #{project}."
+        else
+          known = (registered + active).uniq.sort
+          known_list = known.empty? ? "(none registered)" : known.join(", ")
+          "Unknown project #{project}. Known: #{known_list}."
+        end
+      end
+
+      def registered_project_names
+        Array(Hive::Config.registered_projects).map { |entry| entry.is_a?(Hash) ? entry["name"].to_s : entry.to_s }
+      rescue StandardError
+        []
+      end
+
+      def clear_inline_keyboard(update)
+        return unless update.respond_to?(:message_id) && update.message_id && update.chat_id
+
+        @telegram.edit_message_reply_markup(chat_id: update.chat_id, message_id: update.message_id,
+                                            reply_markup: nil)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "edit_message_reply_markup",
+                                      chat_id: update.chat_id, message_id: update.message_id,
+                                      error_class: e.class.name, message: e.message)
       end
 
       def wait_for_child_success(pid, deadline:)
@@ -236,13 +313,34 @@ module Hive
       end
 
       def execute_dispatch(result, update)
-        if result.command_argv == [ "hive", "status", "--json" ]
-          rows = @status_watcher.fetch.rows
+        if status_command?(result.command_argv)
+          fetch_result = @status_watcher.fetch
+          unless fetch_result.ok
+            error = fetch_result.error.to_s.strip
+            error = "unknown error" if error.empty?
+            safe_send_message(chat_id: update.chat_id, text: "hive status unavailable: #{error}")
+            return nil
+          end
+
+          if result.respond_to?(:format) && result.format == :json
+            safe_send_message(chat_id: update.chat_id,
+                              text: render_status_json(fetch_result.envelope, result.project))
+            return nil
+          end
+
+          rows = fetch_result.rows
+          if result.project && !result.project.to_s.empty?
+            filtered = rows.select { |row| row.project == result.project }
+            if filtered.empty?
+              safe_send_message(chat_id: update.chat_id, text: project_filter_miss_text(result.project, rows))
+              return nil
+            end
+            rows = filtered
+          end
           if result.slug
             safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
           else
-            safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
-                              reply_markup: queue_inline_keyboard(rows))
+            safe_send_message(chat_id: update.chat_id, text: render_queue(rows))
           end
           return nil
         end
@@ -454,19 +552,13 @@ module Hive
       def diagnose_reply_for_child(child)
         envelope = child.json_envelope
         return nil unless envelope.is_a?(Hash) && envelope["schema"] == "hive-status-diagnose"
-
         if envelope["ok"] == true
           diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
-          lines = []
-          summary = diagnostic["summary"].to_s.strip
-          detail = diagnostic["detail"].to_s.strip
-          path = envelope["path"].to_s.strip
-          lines << summary unless summary.empty?
-          lines << detail unless detail.empty? || detail == summary
-          lines << "Path: #{path}" unless path.empty?
-          return lines.join("\n\n") unless lines.empty?
+          slug = envelope["slug"] || child.slug
+          return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
 
-          return "No diagnostic available for #{envelope['slug'] || child.slug}."
+          return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
+                 "Open this task on a laptop for full details."
         end
 
         kind = envelope["error_kind"].to_s.strip
@@ -497,35 +589,14 @@ module Hive
         return "No active Hive tasks." if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{row.project}/#{row.slug} #{row.stage} #{row.action_label || row.action} #{row.marker}"
+          "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
+            "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
-          lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks (use /status for full list)"
+          lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
         ([ header ] + lines).join("\n")
-      end
-
-      def queue_inline_keyboard(rows)
-        actionable = actionable_queue_rows(rows).first(QUEUE_DISPLAY_CAP)
-        return nil if actionable.empty?
-
-        actionable.flat_map do |row|
-          notification = Hive::Bot::NotificationBuilders.build(row)
-          buttons = Array(notification&.keyboard).flatten
-          primary = buttons.find { |button| button[:callback_data].to_s !~ /\Aopen_laptop:|details:/ } ||
-            buttons.first ||
-            { text: "Details", callback_data: details_callback_for(row) }
-          [ [ { text: "#{primary[:text]}: #{row.project}/#{row.slug}",
-                callback_data: primary[:callback_data] } ] ]
-        end
-      end
-
-      def details_callback_for(row)
-        parts = [ "details", row.project, row.slug ]
-        stage = row.respond_to?(:stage) ? row.stage.to_s : ""
-        parts << stage unless stage.empty?
-        parts.join(":")
       end
 
       def render_details(rows, project, slug)
@@ -544,6 +615,10 @@ module Hive
 
       def actionable_queue_rows(rows)
         Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
+      end
+
+      def status_command?(argv)
+        Array(argv) == [ "hive", "status", "--json" ]
       end
 
       def next_unanswered_question_n(brainstorm_path)
@@ -614,12 +689,23 @@ module Hive
           bot_config: @config
         )
         @conversation_store.update_ttl(@config.fetch("conversation_ttl_sec")) if @conversation_store.respond_to?(:update_ttl)
+        # Drop the once-per-process unknown-stage-log cache so SIGHUP can
+        # re-surface stage_dir values that the previous instance had
+        # already logged about.
+        Hive::Bot::TitleFormatter.reset_unknown_stage_log_cache!
         @logger.event(:config_reloaded)
+        emit_deprecated_config_events!
         @reload = false
       rescue Hive::ConfigError => e
         @logger.event(:fatal, message: "config reload failed: #{e.message}",
                               keeping_previous: true)
         @reload = false
+      end
+
+      def emit_deprecated_config_events!
+        Hive::Config.deprecated_bot_keys(@config).each do |entry|
+          @logger.event(:deprecated_config, key: entry[:key], replacement: entry[:replacement])
+        end
       end
 
       def install_signal_handlers!

@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-05-14
+updated: 2026-05-25
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -22,8 +22,9 @@ and subprocess I/O.
 | `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. |
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. |
 | `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed rows. |
-| `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Dedupe and send newly-entered waiting/recovery/ready rows. Suppresses ready notifications when the daemon is enabled for that project. |
-| `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Marker/action-specific text and inline keyboards. Fingerprints rows by project/slug/marker/attrs. |
+| `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery/ready rows through a persistent alert lifecycle store. Suppresses ready notifications when the daemon is enabled for that project, sends one recovery confirmation when a recovery row leaves the active set, treats same-task recovery fingerprint changes as superseded rather than recovered, and sends one reminder for unchanged recovery rows. |
+| `AlertStore` | `lib/hive/bot/alert_store.rb` | JSON sidecar for alert fingerprints, first-seen timestamps, reminder timestamps, and row snapshots. Corrupt files are renamed aside so the bot keeps running. |
+| `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Marker/action-specific text and inline keyboards. Recovery alerts are human-readable; Autofix is exposed only when the diagnostic `suggested_next_action.kind` is `retry`, while manual-only states show laptop/details actions. Fingerprints include project, slug, stage, marker, and marker attrs. |
 | `BrainstormParser` | `lib/hive/bot/brainstorm_parser.rb` | Pure parser for `## Round`, `### Q<N>.`, and `### A<N>.` blocks. |
 | `BrainstormAnswerWriter` | `lib/hive/bot/brainstorm_answer_writer.rb` | Locked, first-write-wins insertion into the next answer block, with atomic rewrite. |
 | `ConversationStore` | `lib/hive/bot/conversation_store.rb` | In-memory per-chat active answer/Codex state with TTL. No sidecar file; `brainstorm.md` stays canonical. |
@@ -44,6 +45,19 @@ hive bot start
             ├─ status loop: hive status --json → NotificationDispatcher
             └─ reaper loop: ChildSupervisor.reap_all → Telegram reply
 ```
+
+Recovery push notifications intentionally hide marker attrs, exception
+classes, phase names, diagnostic summaries, and diagnostic artifact
+paths. The operator-facing message is `Stage stuck` plus one
+plain-language cause sentence. `Autofix` is shown only for retryable
+diagnostics; manual-only states such as `EXECUTE_STALE` and
+fix-tampered review errors show `Open laptop` / `Show details` instead.
+Autofix callbacks carry a marker attribute such as `pass=2` when one is
+available, so stale Telegram buttons cannot clear a newer marker, and
+the dispatcher clears the persisted alert entry for that task before
+spawning the retry sequence. `/status [project]` is an explicit pull
+surface and renders actionable rows as `Title… — Stage` without inline
+buttons.
 
 ## Trust boundary
 

@@ -174,7 +174,13 @@ module Hive
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
-        "notification_dedupe_window_sec" => 300,
+        # alert_state_file is intentionally omitted from DEFAULTS — the
+        # path is state_home-derived and resolved at runtime by
+        # `global_bot_defaults` / `Config.load` so a HIVE_HOME / XDG
+        # override propagates correctly. A hardcoded developer-specific
+        # path here would be misleading for direct DEFAULTS readers.
+        "recovery_reminder_window_sec" => 28_800,
+        "recovery_grace_sec" => 60,
         "conversation_ttl_sec" => 3600,
         "codex_budget_usd" => 1,
         "codex_timeout_sec" => 120,
@@ -253,8 +259,23 @@ module Hive
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
+      inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
+    end
+
+    # DEFAULTS["bot"] intentionally omits state_home-derived path keys
+    # so direct readers cannot get a stale developer-specific path. We
+    # fill those in here after merge so the consumer-facing cfg always
+    # carries the same path that `global_bot_defaults` would resolve.
+    def inject_bot_runtime_path_defaults!(cfg)
+      # Skip when "bot" is not a Hash — `validate!` runs next and turns
+      # the malformed scalar into a proper ConfigError. Injecting first
+      # would crash with IndexError on String#[]= and lose that signal.
+      bot = cfg["bot"]
+      return unless bot.is_a?(Hash)
+
+      bot["alert_state_file"] ||= File.join(Hive::Paths.state_home, ".bot.alert_state.json")
     end
 
     def claude_mode(cfg)
@@ -486,6 +507,7 @@ module Hive
       defaults = deep_dup(DEFAULTS["bot"])
       defaults["pid_file"] = File.join(Hive::Paths.state_home, ".bot.pid")
       defaults["log_file"] = File.join(Hive::Paths.state_home, "logs", "bot.log")
+      defaults["alert_state_file"] = File.join(Hive::Paths.state_home, ".bot.alert_state.json")
       defaults["last_seen_state_file"] = File.join(Hive::Paths.state_home, ".bot.last_seen_update_id")
       defaults
     end
@@ -1001,7 +1023,8 @@ module Hive
     BOT_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
-      [ "notification_dedupe_window_sec", 0, nil ],
+      [ "recovery_reminder_window_sec", 3600, 604_800 ],
+      [ "recovery_grace_sec", 0, 3600 ],
       [ "conversation_ttl_sec", 60, nil ],
       [ "codex_budget_usd", 0, nil ],
       [ "codex_timeout_sec", 10, nil ],
@@ -1013,6 +1036,7 @@ module Hive
     BOT_PATH_KEYS = %w[
       pid_file
       log_file
+      alert_state_file
       last_seen_state_file
     ].freeze
 
@@ -1028,6 +1052,7 @@ module Hive
       end
 
       validate_bot_allowlist!(bot, source_path)
+      warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
     end
@@ -1070,6 +1095,41 @@ module Hive
                 "bot.#{key} in #{describe_source(source_path)} must be an integer #{bound}; " \
                 "got #{value.inspect} (#{value.class})"
         end
+      end
+    end
+
+    # Single source of truth for deprecated bot keys. Each entry names the
+    # config key, its replacement, and the DEFAULTS path used to suppress
+    # warnings when the user has not actually set anything (or has set the
+    # historical default). Both the load-time `warn` path and the supervisor's
+    # structured :deprecated_config event iterate this list.
+    DEPRECATED_BOT_KEYS = [
+      {
+        key: "notification_dedupe_window_sec",
+        replacement: "bot.alert_state_file and bot.recovery_reminder_window_sec"
+      }
+    ].freeze
+
+    def warn_deprecated_bot_dedupe!(bot, source_path)
+      # deprecated_bot_keys already returns the fully-qualified key
+      # ("bot.<name>"), so the warn line does not add its own prefix.
+      deprecated_bot_keys(bot).each do |entry|
+        warn "hive: #{entry[:key]} in #{describe_source(source_path)} is deprecated; " \
+             "alert lifecycle now uses #{entry[:replacement]}"
+      end
+    end
+
+    # Returns deprecated bot keys whose value differs from default so callers
+    # (e.g. the bot supervisor) can emit structured :deprecated_config events.
+    def deprecated_bot_keys(bot)
+      return [] unless bot.is_a?(Hash)
+
+      DEPRECATED_BOT_KEYS.each_with_object([]) do |entry, out|
+        value = bot[entry[:key]]
+        default = DEFAULTS.dig("bot", entry[:key])
+        next if value.nil? || value == default
+
+        out << { key: "bot.#{entry[:key]}", replacement: entry[:replacement] }
       end
     end
 

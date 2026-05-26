@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "hive"
+require "hive/bot/title_formatter"
 
 module Hive
   module Bot
@@ -30,13 +31,13 @@ module Hive
         archived
       ].freeze
 
-      def build(row)
+      def build(row, logger: nil)
         if READY_ACTIONS.include?(row.action)
           stage_approval(row)
         elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
           needs_input(row)
         elsif recovery?(row)
-          recovery(row)
+          recovery(row, logger: logger)
         else
           nil
         end
@@ -44,7 +45,7 @@ module Hive
 
       def fingerprint(row)
         normalized_attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.marker, normalized_attrs ]))
+        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, normalized_attrs ]))
       end
 
       def recovery?(row)
@@ -119,82 +120,103 @@ module Hive
         )
       end
 
-      def recovery(row)
-        # The "Refresh diagnosis" button is the bot-side parity of the
-        # TUI's R keystroke: dispatches `hive status --diagnose <slug>
-        # --write --force --json` so the configured execute AgentProfile
-        # produces a fresh diagnostic verdict. Pairs with Show details
-        # (which just reads the current verdict). Resolves issue #91.
-        details_row = [
-          button("Show details", details_callback(row)),
-          button("Refresh diagnosis", refresh_diagnose_callback(row))
-        ]
-        keyboard =
-          if open_laptop_only_recovery?(row)
-            [
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              details_row
-            ]
-          elsif markerless_retry_recovery?(row)
-            [
-              [ button("Retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:NONE") ],
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              details_row
-            ]
-          else
-            [
-              [ button("Clear and retry", "clear_retry:#{row.project}:#{row.slug}:#{row.stage}:#{row.marker}") ],
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
-              details_row
-            ]
-          end
-        # Append the bounded diagnostic summary so the operator sees the
-        # one-line "why is this red" without an extra round-trip through
-        # the Show-details callback. StatusWatcher::Row carries the
-        # diagnostic hash from `hive status --json`; nil when the row is
-        # green or the snapshot pre-dates the schema. See PR #84 review
-        # row 23.
-        text = header(row) + "\nNeeds recovery: #{marker_with_attrs(row)}"
-        if row.diagnostic.is_a?(Hash) && !row.diagnostic["summary"].to_s.empty?
-          text += "\n\n#{row.diagnostic['summary']}"
+      def recovery(row, logger: nil)
+        retryable = retryable_recovery?(row)
+        Notification.new(
+          text: [
+            "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
+            cause_sentence_for(row),
+            retryable ? "Tap Autofix to retry the stage cleanly." :
+              "Open this task on a laptop before retrying."
+          ].join("\n"),
+          keyboard: recovery_keyboard(row, retryable: retryable)
+        )
+      end
+
+      def recovery_keyboard(row, retryable:)
+        if retryable
+          [ [ button("🔧 Autofix", autofix_callback(row)) ] ]
+        else
+          [
+            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
+            [ button("Show details", details_callback(row)) ]
+          ]
         end
-        Notification.new(text: text, keyboard: keyboard)
       end
 
-      def open_laptop_only_recovery?(row)
-        attrs = row.attrs.to_h.transform_keys(&:to_s)
-        diagnostic_manual_fix?(row) ||
-          stale_agent_working_pending_heal?(row) ||
-          row.marker.to_s == "review_error" &&
-            attrs["phase"] == "fix" &&
-            attrs["reason"] == "fix_tampered"
+      def autofix_callback(row)
+        parts = [ "autofix", row.project, row.slug, row.stage, row.marker ]
+        match_attr = recovery_match_attr(row)
+        parts << match_attr if match_attr
+        parts.join(":")
       end
 
-      # Stale AGENT_WORKING that TaskAction has reclassified as :error
-      # but the daemon hasn't yet rewritten on disk. Rendering "Clear
-      # and retry" here would dispatch `hive markers clear --name
-      # AGENT_WORKING`, which is not in the markers-clear allowlist
-      # (lib/hive/commands/markers.rb#ALLOWED_NAMES) and exits 4. Hide
-      # the button; the daemon heals within one tick anyway, after
-      # which the normal ERROR-recovery affordance fires.
-      def stale_agent_working_pending_heal?(row)
-        row.marker.to_s == "agent_working" && row.action.to_s == "error"
+      def retryable_recovery?(row)
+        return false if manual_only_recovery?(row)
+
+        suggested = suggested_next_action(row)
+        suggested && suggested["kind"].to_s == "retry"
       end
 
-      def markerless_retry_recovery?(row)
-        row.marker.to_s == "none" && diagnostic_suggested_action(row)["kind"].to_s == "retry"
+      # Markers that are ALWAYS manual-only regardless of attrs. Adding a new
+      # marker here automatically narrows both the in-row recovery check
+      # (manual_only_recovery?) and the callback-time defensive check
+      # (CallbackHandlers#manual_only_marker?) — they share this constant
+      # through manual_only? below.
+      ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
+
+      # Single source of truth for "this state has no auto-recovery".
+      # Pass attrs: nil from callers that only have the marker name
+      # (e.g. callback handlers); pass row.attrs from in-process checks
+      # where the full attrs hash is available.
+      def manual_only?(marker:, attrs: nil)
+        marker = marker.to_s.downcase
+        return true if ALWAYS_MANUAL_MARKERS.include?(marker)
+        return false if attrs.nil?
+
+        attrs = attrs.to_h.transform_keys(&:to_s)
+        marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
       end
 
-      def diagnostic_manual_fix?(row)
-        diagnostic_suggested_action(row)["kind"].to_s == "manual_fix"
+      def manual_only_recovery?(row)
+        manual_only?(marker: row.marker, attrs: row.attrs)
       end
 
-      def diagnostic_suggested_action(row)
-        diagnostic = row.diagnostic
-        return {} unless diagnostic.is_a?(Hash)
+      def suggested_next_action(row)
+        diagnostic = row.respond_to?(:diagnostic) ? row.diagnostic : nil
+        return nil unless diagnostic.is_a?(Hash)
 
         suggested = diagnostic["suggested_next_action"]
-        suggested.is_a?(Hash) ? suggested : {}
+        suggested.is_a?(Hash) ? suggested : nil
+      end
+
+      def recovery_match_attr(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        keys = case row.marker.to_s.downcase
+        when "review_error", "review_ci_stale"
+                 %w[pass phase reason]
+        when "review_stale"
+                 %w[pass reason]
+        when "error"
+                 %w[exit_code]
+        else
+                 []
+        end
+        key = keys.find { |candidate| !attrs[candidate].to_s.empty? }
+        key ? "#{key}=#{attrs[key]}" : nil
+      end
+
+      def cause_sentence_for(row)
+        case row.marker.to_s.downcase
+        when "review_error"
+          "The review agent crashed before it could finish."
+        when "execute_stale"
+          "The execute agent stalled before it could finish."
+        when "review_stale", "review_ci_stale"
+          "The review run stalled before it could finish."
+        else
+          "The agent crashed before it could finish."
+        end
       end
 
       def header(row)
@@ -209,10 +231,6 @@ module Hive
 
       def details_callback(row)
         callback_with_stage("details", row)
-      end
-
-      def refresh_diagnose_callback(row)
-        callback_with_stage("refresh_diagnose", row)
       end
 
       def callback_with_stage(prefix, row)

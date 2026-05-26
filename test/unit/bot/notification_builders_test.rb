@@ -21,6 +21,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
   end
 
+  def retry_diagnostic(command: "hive review slug --json")
+    { "suggested_next_action" => { "kind" => "retry", "command" => command } }
+  end
+
+  def manual_diagnostic
+    { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
+  end
+
   def test_ready_to_plan_builds_approval_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "ready_to_plan", marker: "complete")
@@ -128,159 +136,139 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes labels, "Show details"
   end
 
-  def test_recovery_marker_builds_full_recovery_keyboard
+  def test_review_waiting_non_guardrail_builds_findings_triage_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error", attrs: { "phase" => "fix", "reason" => "timeout" })
+      row(action: "needs_input", marker: "review_waiting", attrs: { "reason" => "needs_findings" })
     )
 
+    assert_match(/Review triage is waiting/, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    # "Refresh diagnosis" is the bot-side parity of the TUI's R
-    # keystroke — issue #91. Order is locked so a future keyboard
-    # tweak cannot accidentally drop or duplicate the button.
-    assert_equal [ "Clear and retry", "Open laptop", "Show details", "Refresh diagnosis" ], labels
+    assert_includes labels, "Accept all"
+    assert_includes labels, "Reject all"
+    assert_includes labels, "Show details"
   end
 
-  def test_markerless_retry_recovery_uses_retry_button_without_clear_copy
-    diagnostic = {
-      "summary" => "PLAN_MISSING_OUTPUT",
-      "suggested_next_action" => {
-        "kind" => "retry",
-        "command" => "hive plan slug-260514-abcd --from 3-plan"
-      }
-    }
+  def test_recovery_match_attr_review_stale_uses_pass_reason
+    attrs = { "pass" => "3", "reason" => "timeout" }
+    r = row(action: "recover_review", marker: "review_stale", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:pass=3\z/, autofix,
+                 "review_stale must drive recovery_match_attr toward the pass=<n> key")
+  end
+
+  def test_recovery_match_attr_error_uses_exit_code
+    attrs = { "exit_code" => "137" }
+    r = row(action: "error", marker: "error", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:exit_code=137\z/, autofix,
+                 "generic `error` marker must drive recovery_match_attr toward exit_code")
+  end
+
+  def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix
+    r = row(action: "recover_execute", marker: "execute_stale", attrs: { "pass" => "1" })
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    refute_match(/=/, autofix.split(":").last.to_s,
+                 "unknown-to-recovery_match_attr markers must produce a no-match_attr callback")
+  end
+
+  def test_recovery_marker_builds_plain_language_autofix_notification
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "error", marker: "none", stage: "3-plan", diagnostic: diagnostic)
+      row(
+        action: "recover_review",
+        marker: "review_error",
+        attrs: { "phase" => "fix", "reason" => "timeout", "exception_class" => "Encoding::CompatibilityError" },
+        slug: "we-need-to-improve-this-260522-db23",
+        stage: "6-review",
+        diagnostic: retry_diagnostic(command: "hive review we-need-to-improve-this-260522-db23 --json")
+      )
     )
 
-    labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Retry", "Open laptop", "Show details", "Refresh diagnosis" ], labels
-    assert_equal "clear_retry:hive:slug-260514-abcd:3-plan:NONE",
-                 notification.keyboard.first.first[:callback_data]
+    assert_includes notification.text, "⚠ Review stuck — \"We need to improve this…\""
+    assert_includes notification.text, "The review agent crashed before it could finish."
+    assert_includes notification.text, "Tap Autofix to retry the stage cleanly."
+    refute_includes notification.text, "phase="
+    refute_includes notification.text, "reason="
+    refute_includes notification.text, "marker"
+    refute_includes notification.text, "exception_class"
+    refute_includes notification.text, "-260522-db23"
+    refute_includes notification.text, "(6-review)"
+    refute_includes notification.text, "Encoding::CompatibilityError"
   end
 
-  def test_manual_fix_recovery_omits_clear_and_retry_button
-    diagnostic = {
-      "summary" => "FINALIZE_MISSING_PR_MD",
-      "suggested_next_action" => {
-        "kind" => "manual_fix",
-        "command" => nil
-      }
-    }
+  def test_recovery_keyboard_is_single_autofix_button
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "error", marker: "error", stage: "8-finalize", diagnostic: diagnostic)
+      row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" },
+          slug: "we-need-to-improve-this-260522-db23", stage: "6-review",
+          diagnostic: retry_diagnostic)
     )
 
-    labels = notification.keyboard.flatten.map { |button| button[:text] }
-    refute_includes labels, "Clear and retry"
-    assert_equal [ "Open laptop", "Show details", "Refresh diagnosis" ], labels
+    assert_equal 1, notification.keyboard.length
+    assert_equal 1, notification.keyboard.first.length
+    button = notification.keyboard.first.first
+    assert_equal "🔧 Autofix", button[:text]
+    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error:pass=2",
+                 Hive::Bot::NotificationBuilders.resolve_callback(button[:callback_data])
   end
 
-  def test_fix_tampered_recovery_falls_back_to_laptop
+  def test_manual_recovery_diagnostic_does_not_offer_autofix
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error", attrs: { "phase" => "fix", "reason" => "fix_tampered" })
+      row(action: "recover_execute", marker: "execute_stale", stage: "4-execute",
+          diagnostic: manual_diagnostic)
     )
 
+    assert_includes notification.text, "Open this task on a laptop before retrying."
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    refute_includes labels, "Clear and retry"
-    assert_equal [ "Open laptop", "Show details", "Refresh diagnosis" ], labels
+    assert_equal [ "Open laptop", "Show details" ], labels
+    refute_includes labels, "🔧 Autofix"
   end
 
-  def test_stale_agent_working_pending_heal_suppresses_clear_and_retry_button
-    # When TaskAction has reclassified a stale agent_working row to
-    # :error but the daemon hasn't yet rewritten the marker to ERROR
-    # on disk, rendering the default "Clear and retry" button would
-    # dispatch `hive markers clear --name AGENT_WORKING` — which is
-    # not in lib/hive/commands/markers.rb#ALLOWED_NAMES and exits 4.
-    # The bot must instead offer Open laptop only; the daemon's
-    # StaleAgentHealer rewrites the marker within ~30s after which
-    # the normal ERROR recovery affordance fires.
-    notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "error", marker: "agent_working", stage: "4-execute")
-    )
-
-    labels = notification.keyboard.flatten.map { |button| button[:text] }
-    refute_includes labels, "Clear and retry",
-                    "Clear and retry on AGENT_WORKING would dispatch a markers-clear name not in the allowlist"
-    assert_includes labels, "Open laptop",
-                    "Open laptop must remain as a fallback while the daemon heals the marker"
-  end
-
-  def test_refresh_diagnosis_button_carries_callback_with_project_slug_and_stage
-    # The button data must round-trip through the router's callback_intent
-    # regex (\Arefresh_diagnose:/) and split cleanly into
-    # prefix:project:slug:stage for CallbackHandlers#refresh_diagnose.
-    # Pin the exact callback shape.
+  def test_fix_tampered_review_error_does_not_offer_autofix
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "recover_review", marker: "review_error",
-          attrs: { "phase" => "fix", "reason" => "timeout" })
+          attrs: { "phase" => "fix", "reason" => "fix_tampered" },
+          stage: "6-review", diagnostic: retry_diagnostic)
     )
-    refresh_btn = notification.keyboard.flatten.find { |b| b[:text] == "Refresh diagnosis" }
-    refute_nil refresh_btn, "Refresh diagnosis button must be present on the recovery keyboard"
 
-    raw = Hive::Bot::NotificationBuilders.resolve_callback(refresh_btn[:callback_data])
-    assert raw.start_with?("refresh_diagnose:"),
-           "Refresh diagnosis callback must use the refresh_diagnose: prefix; got #{raw.inspect}"
-    parts = raw.split(":")
-    assert_equal(
-      [ "refresh_diagnose", "hive", "slug-260514-abcd", "2-brainstorm" ],
-      parts,
-      "callback data must be refresh_diagnose:<project>:<slug>:<stage>"
-    )
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    refute_includes labels, "🔧 Autofix"
+    assert_includes labels, "Open laptop"
   end
 
-  def test_show_details_button_carries_stage_for_disambiguation
-    notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error",
-          attrs: { "phase" => "fix", "reason" => "timeout" }, stage: "6-review")
-    )
-    details_btn = notification.keyboard.flatten.find { |b| b[:text] == "Show details" }
-
-    assert_equal "details:hive:slug-260514-abcd:6-review",
-                 Hive::Bot::NotificationBuilders.resolve_callback(details_btn[:callback_data])
+  def test_cause_sentence_for_execute_stale
+    r = row(action: "recover_review", marker: "execute_stale")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The execute agent stalled before it could finish."
   end
 
-  def test_recovery_notification_appends_diagnostic_summary_when_present
-    # Operators reading the bot notification get the "why is this red"
-    # one-liner inline instead of needing to round-trip through Show
-    # details. Mirrors what the TUI red_status_detail view shows at the
-    # top of the screen. See PR #84 review row 23.
-    diag = {
-      "summary" => "REVIEW_ERROR phase=fix pass=2 reason=timeout",
-      "detail" => "agent timed out",
-      "generated_by" => "local"
-    }
-    row_with_diag = row(action: "recover_review", marker: "review_error",
-                        attrs: { "phase" => "fix", "reason" => "timeout" })
-    # Re-construct with diagnostic since the test helper does not pass it.
-    enriched = Row.new(
-      project: row_with_diag.project, slug: row_with_diag.slug,
-      stage: row_with_diag.stage, marker: row_with_diag.marker,
-      attrs: row_with_diag.attrs, folder: row_with_diag.folder,
-      action: row_with_diag.action, action_label: row_with_diag.action_label,
-      suggested_command: row_with_diag.suggested_command,
-      diagnostic: diag
-    )
-
-    notification = Hive::Bot::NotificationBuilders.build(enriched)
-    assert_includes notification.text, diag["summary"],
-                    "recovery notification must surface diagnostic.summary inline"
+  def test_cause_sentence_for_review_stale
+    r = row(action: "recover_review", marker: "review_stale")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The review run stalled before it could finish."
   end
 
-  def test_recovery_notification_omits_diagnostic_when_nil
-    # Pre-schema snapshots / non-red rows return nil diagnostic. The
-    # notification must work without the inline summary — the existing
-    # "Needs recovery: marker attrs" line carries enough operator signal.
-    notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error",
-          attrs: { "phase" => "fix", "reason" => "timeout" })
-    )
-    refute_nil notification
-    assert_match(/Needs recovery/, notification.text)
+  def test_cause_sentence_for_review_ci_stale
+    r = row(action: "recover_review", marker: "review_ci_stale")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The review run stalled before it could finish."
+  end
+
+  def test_cause_sentence_for_unknown_marker_uses_generic_fallback
+    r = row(action: "recover_review", marker: "totally_unknown_marker")
+    notification = Hive::Bot::NotificationBuilders.build(r)
+    assert_includes notification.text, "The agent crashed before it could finish."
   end
 
   def test_fingerprint_changes_when_marker_attrs_change
     first = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" })
     second = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "3" })
+
+    refute_equal Hive::Bot::NotificationBuilders.fingerprint(first),
+                 Hive::Bot::NotificationBuilders.fingerprint(second)
+  end
+
+  def test_fingerprint_changes_when_stage_changes
+    first = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" }, stage: "5-open-pr")
+    second = row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" }, stage: "6-review")
 
     refute_equal Hive::Bot::NotificationBuilders.fingerprint(first),
                  Hive::Bot::NotificationBuilders.fingerprint(second)

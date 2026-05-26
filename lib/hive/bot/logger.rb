@@ -16,6 +16,8 @@ module Hive
         update_rejected_unauthorized
         notification_sent
         notification_skipped_dedupe
+        notification_skipped_backoff
+        fresh_install_seeded
         dispatched_command
         command_completed
         codex_spawned
@@ -29,6 +31,9 @@ module Hive
         send_failure
         callback_malformed
         pid_file_corrupted
+        unknown_stage_label
+        alert_store_corrupt
+        deprecated_config
         fatal
       ].freeze
 

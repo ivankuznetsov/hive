@@ -22,14 +22,13 @@ class HiveBotScenarioQueueTest < Minitest::Test
 
     text = telegram.messages.last[:text]
     assert_match(/4 active tasks/, text)
-    assert_match(/hive\/brainstorm-a/, text)
+    assert_match(/Brainstorm a… — Brainstorm/, text)
+    assert_match(/Review a… — Brainstorm/, text)
+    assert_match(/PR a… — Brainstorm/, text)
+    refute_match(/hive\/brainstorm-a/, text)
     refute_match(/archived-a/, text)
 
-    keyboard = telegram.messages.last[:reply_markup]
-    labels = keyboard.flatten.map { |button| button[:text] }
-    assert labels.any? { |label| label.start_with?("Answer in chat: hive/brainstorm-a") }
-    assert labels.any? { |label| label.start_with?("Accept all: hive/review-a") }
-    assert labels.any? { |label| label.start_with?("Approve: hive/pr-a") }
+    assert_nil telegram.messages.last[:reply_markup]
   end
 
   def test_s3_queue_caps_at_10_rows_and_shows_more_affordance
@@ -121,6 +120,8 @@ class HiveBotScenarioQueueTest < Minitest::Test
     def send_message(chat_id:, text:, reply_markup: nil, parse_mode: :markdown)
       @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
     end
+
+    def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil); end
   end
 
   class FakeStatusWatcher

@@ -1990,6 +1990,23 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[commands/status]]
 - [[stages/open-pr]]
 
+## [2026-05-25T15:45:00Z] bot — human-readable recovery alerts
+
+**Action:** Replaced bot recovery push alerts with a short human-readable template and a single Autofix button, moved alert dedupe to a persistent status-driven store, added one 8 h reminder per unchanged recovery fingerprint, and made `/status [project]` render clean `Title… — Stage` lines without inline buttons.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[commands/bot]]
+
+## [2026-05-25T16:40:00Z] bot — guarded Autofix alert lifecycle
+
+**Action:** Guarded recovery Autofix behind retry diagnostics, carried marker match attributes into Telegram retry callbacks, reset persisted alert state before retry dispatch, treated same-task recovery fingerprint changes as superseded instead of recovered, and hardened alert-store/fanout failure handling.
+
+**Refreshed pages:**
+- [[modules/bot]]
+- [[commands/bot]]
+- [[state-model]]
+
 ## [2026-05-25T18:40:00Z] review — auto-commit successful fix-agent edits
 
 **Action:** Changed Phase 4 review recovery so a successful fix agent that leaves dirty worktree files is auto-committed by Hive with the rollback-rate trailers before fix guardrails run, instead of landing repeated `fix_dirty_worktree` errors.

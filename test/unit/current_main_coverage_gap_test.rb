@@ -85,6 +85,10 @@ class CurrentMainCoverageGapTest < Minitest::Test
     )
   end
 
+  def accepted_findings(text = "## High\n- [x] apply a fix\n", count: 1)
+    Hive::Stages::Review::AcceptedFindings.new(text: text, count: count)
+  end
+
   def with_fake_profile(profile = FakeProfile.new(:codex))
     with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(*_args, **_kwargs) { profile }) do
       yield profile
@@ -435,7 +439,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
       ok_status = ReviewCommandStatus.new(true)
 
       with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "", fail_status ] }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
         assert_equal "git add -A failed", result[:message]
@@ -447,7 +451,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
         [ "", "", ok_status ]
       ]
       with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { responses.shift }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
         assert_equal "git commit failed: stderr detail\nstdout detail", result[:message]
@@ -478,7 +482,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
         captured_argv << argv
         responses.shift
       }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
         assert_includes result[:message], "git commit failed"
@@ -507,12 +511,26 @@ class CurrentMainCoverageGapTest < Minitest::Test
         [ "", "reset boom", fail_status ]
       ]
       with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { responses.shift }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
         assert_includes result[:message], "git commit failed"
         assert_includes result[:message], "git reset HEAD -- failed"
       end
+    end
+  end
+
+  def test_fix_auto_commit_message_uses_collected_finding_count
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      ctx = review_ctx(root, folder)
+      task = fake_task(root, folder)
+      cfg = { "review" => {} }
+      accepted = accepted_findings("source one\nsource two\n", count: 2)
+
+      message = Hive::Stages::Review.send(:fix_auto_commit_message, task, cfg, ctx, accepted)
+
+      assert_includes message, "Hive-Fix-Findings: 2"
     end
   end
 
@@ -525,7 +543,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::Stages::Review, :triage_bias_for, ->(_cfg) { "courageous\nHive-Forged: yes" }) do
         with_replaced_singleton_method(Hive::Stages::Review, :reviewer_sources_for, ->(_ctx) { "alpha\nHive-Forged: beta" }) do
-          message = Hive::Stages::Review.send(:fix_auto_commit_message, task, cfg, ctx, "## High\n- [x] apply a fix\n")
+          message = Hive::Stages::Review.send(:fix_auto_commit_message, task, cfg, ctx, accepted_findings)
 
           assert_equal 1, message.scan(/^Hive-Triage-Bias:/).length
           assert_equal 1, message.scan(/^Hive-Reviewer-Sources:/).length

@@ -25,13 +25,52 @@ module Hive
 
           configure_qmd_environment
 
+          find_qmd() {
+            if [ -n "${HIVE_QMD_BIN:-}" ] && [ -x "$HIVE_QMD_BIN" ]; then
+              printf '%s\n' "$HIVE_QMD_BIN"
+              return 0
+            fi
+
+            if command -v qmd >/dev/null 2>&1; then
+              command -v qmd
+              return 0
+            fi
+
+            local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+            local candidate
+            for candidate in "$data_home/hive/qmd/bin/qmd" "$HOME/.local/share/hive/qmd/bin/qmd"; do
+              if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+              fi
+            done
+
+            local prefix_file="$data_home/hive/install-prefix"
+            if [ -r "$prefix_file" ]; then
+              local prefix
+              prefix="$(sed -n '1p' "$prefix_file")"
+              candidate="${prefix%/}/hive/qmd/bin/qmd"
+              if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          qmd_available() {
+            find_qmd >/dev/null 2>&1
+          }
+
           run_qmd() {
-            command -v qmd >/dev/null 2>&1 || return 0
+            local qmd_bin
+            qmd_bin="$(find_qmd)" || return 0
 
             if command -v timeout >/dev/null 2>&1; then
-              timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" qmd "$@"
+              timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@"
             else
-              qmd "$@"
+              "$qmd_bin" "$@"
             fi
           }
 
@@ -43,7 +82,7 @@ module Hive
             fi
           }
 
-          if command -v qmd >/dev/null 2>&1; then
+          if qmd_available; then
             run_qmd update >/dev/null 2>&1 || true
           fi
 
@@ -97,13 +136,52 @@ module Hive
 
           configure_qmd_environment
 
+          find_qmd() {
+            if [ -n "${HIVE_QMD_BIN:-}" ] && [ -x "$HIVE_QMD_BIN" ]; then
+              printf '%s\n' "$HIVE_QMD_BIN"
+              return 0
+            fi
+
+            if command -v qmd >/dev/null 2>&1; then
+              command -v qmd
+              return 0
+            fi
+
+            local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+            local candidate
+            for candidate in "$data_home/hive/qmd/bin/qmd" "$HOME/.local/share/hive/qmd/bin/qmd"; do
+              if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+              fi
+            done
+
+            local prefix_file="$data_home/hive/install-prefix"
+            if [ -r "$prefix_file" ]; then
+              local prefix
+              prefix="$(sed -n '1p' "$prefix_file")"
+              candidate="${prefix%/}/hive/qmd/bin/qmd"
+              if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          qmd_available() {
+            find_qmd >/dev/null 2>&1
+          }
+
           run_qmd() {
-            command -v qmd >/dev/null 2>&1 || return 0
+            local qmd_bin
+            qmd_bin="$(find_qmd)" || return 0
 
             if command -v timeout >/dev/null 2>&1; then
-              timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" qmd "$@"
+              timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@"
             else
-              qmd "$@"
+              "$qmd_bin" "$@"
             fi
           }
 
@@ -189,7 +267,7 @@ module Hive
           fi
 
           if [ "$ran_refresh" -eq 1 ]; then
-            if command -v qmd >/dev/null 2>&1; then
+            if qmd_available; then
               run_qmd update >>"$log_file" 2>&1 || true
               run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 >>"$log_file" 2>&1 || true
             fi

@@ -10,6 +10,9 @@ class HiveCommandsBotTest < Minitest::Test
     end
   end
 
+  FakeInstaller = Struct.new(:target_path, :last_backup_path, :last_restart_invoked,
+                             :envelope_platform, :messages, keyword_init: true)
+
   FakeLockFile = Struct.new(:calls) do
     def flock(_mode)
       true
@@ -216,6 +219,227 @@ class HiveCommandsBotTest < Minitest::Test
     }) do
       refute command.send(:pid_alive?, 1)
       assert command.send(:pid_alive?, 2)
+    end
+  end
+
+  # ── install: routing, success summary, envelopes, exit codes ───────────
+
+  def stub_installer(messages: [], last_backup_path: nil, last_restart_invoked: false,
+                     target_path: "/tmp/hive-bot.service", envelope_platform: "linux", &install)
+    installer = FakeInstaller.new(
+      target_path: target_path,
+      last_backup_path: last_backup_path,
+      last_restart_invoked: last_restart_invoked,
+      envelope_platform: envelope_platform,
+      messages: messages
+    )
+    installer.define_singleton_method(:install!, &install)
+    installer
+  end
+
+  def run_install(command, installer)
+    require "hive/commands/bot/service_installer"
+    with_replaced_singleton_method(Hive::Commands::Bot::ServiceInstaller, :new, ->(**_kwargs) { installer }) do
+      yield
+    end
+  end
+
+  def test_install_written_text_prints_summary_and_warns_messages
+    command = bot("install")
+    installer = stub_installer(messages: [ "installed by fake" ]) { |autostart:, force:| :written }
+
+    out, err = run_install(command, installer) { capture_io { command.call } }
+
+    assert_includes err, "hive: installed by fake"
+    assert_includes out, "hive bot: installed unit at /tmp/hive-bot.service"
+  end
+
+  def test_install_written_json_emits_success_envelope
+    command = bot("install", json: true)
+    installer = stub_installer { |autostart:, force:| :written }
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal "hive-bot-install", doc.fetch("schema")
+    assert_equal true, doc.fetch("ok")
+    assert_equal "written", doc.fetch("outcome")
+    assert_equal "linux", doc.fetch("platform")
+    assert_equal "/tmp/hive-bot.service", doc.fetch("target_path")
+    assert_equal false, doc.fetch("restarted")
+  end
+
+  def test_install_unchanged_is_idempotent_success
+    command = bot("install", json: true)
+    installer = stub_installer { |autostart:, force:| :unchanged }
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal true, doc.fetch("ok")
+    assert_equal "unchanged", doc.fetch("outcome")
+  end
+
+  def test_install_upgraded_json_reports_backup_and_restart
+    command = bot("install", json: true, force: true)
+    installer = stub_installer(last_backup_path: "/tmp/hive-bot.service.bak", last_restart_invoked: true) do |autostart:, force:|
+      :upgraded
+    end
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal "upgraded", doc.fetch("outcome")
+    assert_equal "/tmp/hive-bot.service.bak", doc.fetch("backup_path")
+    assert_equal true, doc.fetch("restarted")
+  end
+
+  def test_install_drifted_without_force_exits_64_and_names_force_and_bak
+    command = bot("install", json: true)
+    installer = stub_installer(messages: [ "changed locally" ]) { |autostart:, force:| :drifted }
+
+    out, _err = run_install(command, installer) do
+      capture_io do
+        error = assert_raises(Hive::BotInstallDriftError) { command.call }
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      end
+    end
+
+    doc = JSON.parse(out)
+    assert_equal false, doc.fetch("ok")
+    assert_equal "drifted", doc.fetch("outcome")
+    assert_equal "drifted", doc.fetch("error_kind")
+    assert_equal Hive::ExitCodes::USAGE, doc.fetch("exit_code")
+  end
+
+  def test_install_drifted_text_message_names_force_and_bak
+    command = bot("install")
+    installer = stub_installer { |autostart:, force:| :drifted }
+
+    run_install(command, installer) do
+      capture_io do
+        error = assert_raises(Hive::BotInstallDriftError) { command.call }
+        assert_match(/hive bot install --force/, error.message)
+        assert_match(/\.bak/, error.message)
+      end
+    end
+  end
+
+  def test_install_failed_exits_70_with_error_envelope
+    command = bot("install", json: true)
+    installer = stub_installer { |autostart:, force:| :failed }
+
+    out, _err = run_install(command, installer) do
+      capture_io do
+        error = assert_raises(Hive::BotInstallFailed) { command.call }
+        assert_equal Hive::ExitCodes::SOFTWARE, error.exit_code
+      end
+    end
+
+    doc = JSON.parse(out)
+    assert_equal false, doc.fetch("ok")
+    assert_equal "failed", doc.fetch("outcome")
+    assert_equal "BotInstallFailed", doc.fetch("error_class")
+    assert_equal Hive::ExitCodes::SOFTWARE, doc.fetch("exit_code")
+  end
+
+  def test_install_unsupported_exits_0_with_warning
+    command = bot("install")
+    installer = stub_installer(messages: [ "bot autostart not supported on this platform" ]) do |autostart:, force:|
+      :unsupported
+    end
+
+    _out, err = run_install(command, installer) { capture_io { command.call } }
+
+    assert_includes err, "hive: bot autostart not supported on this platform"
+  end
+
+  def test_install_autostart_unavailable_exits_0_and_preserves_target_path
+    command = bot("install", json: true)
+    installer = stub_installer(
+      target_path: "/home/u/.config/systemd/user/hive-bot.service",
+      messages: [ "systemd not detected; bot unit was written but autostart was not enabled." ]
+    ) { |autostart:, force:| :autostart_unavailable }
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal true, doc.fetch("ok")
+    assert_equal "unsupported", doc.fetch("outcome")
+    assert_equal "/home/u/.config/systemd/user/hive-bot.service", doc.fetch("target_path"),
+                 "a written-but-not-enabled unit must still report where it lives"
+  end
+
+  def test_install_json_wraps_unexpected_exceptions
+    command = bot("install", json: true)
+    installer = stub_installer(messages: [ "before write" ]) do |autostart:, force:|
+      raise Errno::EACCES, "denied"
+    end
+
+    out, _err = run_install(command, installer) do
+      capture_io { assert_raises(Hive::BotInstallFailed) { command.call } }
+    end
+
+    doc = JSON.parse(out)
+    assert_equal false, doc.fetch("ok")
+    assert_equal "failed", doc.fetch("outcome")
+    assert_equal "BotInstallFailed", doc.fetch("error_class")
+    assert_match(/Errno::EACCES/, doc.fetch("message"))
+    assert_equal [ "before write" ], doc.fetch("messages")
+  end
+
+  def test_install_reraises_hive_errors_without_exception_envelope
+    command = bot("install", json: true)
+    installer = stub_installer do |autostart:, force:|
+      raise Hive::BotInstallFailed, "already wrapped"
+    end
+
+    out, _err = run_install(command, installer) do
+      capture_io { assert_raises(Hive::BotInstallFailed) { command.call } }
+    end
+
+    assert_equal "", out
+  end
+
+  # Integration-style: drive the real command (only the installer stubbed)
+  # and validate every emitted envelope against the published schema.
+  def test_install_envelopes_validate_against_schema
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-install"))))
+
+    success_cases = {
+      written: "written",
+      upgraded: "upgraded",
+      unchanged: "unchanged",
+      unsupported: "unsupported",
+      autostart_unavailable: "unsupported"
+    }
+    success_cases.each do |result, outcome|
+      command = bot("install", json: true, force: result == :upgraded)
+      installer = stub_installer(
+        last_backup_path: result == :upgraded ? "/tmp/hive-bot.service.bak" : nil,
+        last_restart_invoked: result == :upgraded
+      ) { |autostart:, force:| result }
+
+      out, _err = run_install(command, installer) { capture_io { command.call } }
+      doc = JSON.parse(out)
+      errors = schema.validate(doc).map { |e| e["error"] }
+      assert_empty errors, "#{result} envelope must validate against hive-bot-install.v1; got: #{errors.inspect}"
+      assert_equal outcome, doc.fetch("outcome")
+    end
+
+    error_cases = { drifted: Hive::BotInstallDriftError, failed: Hive::BotInstallFailed }
+    error_cases.each do |result, error_class|
+      command = bot("install", json: true)
+      installer = stub_installer { |autostart:, force:| result }
+
+      out, _err = run_install(command, installer) do
+        capture_io { assert_raises(error_class) { command.call } }
+      end
+      doc = JSON.parse(out)
+      errors = schema.validate(doc).map { |e| e["error"] }
+      assert_empty errors, "#{result} envelope must validate against hive-bot-install.v1; got: #{errors.inspect}"
+      assert_equal result.to_s, doc.fetch("outcome")
     end
   end
 end

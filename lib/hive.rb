@@ -26,7 +26,8 @@ module Hive
       "hive-daemon-install" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
-      "hive-bot-reload" => 1
+      "hive-bot-reload" => 1,
+      "hive-bot-install" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the
@@ -435,6 +436,23 @@ module Hive
   end
 
   class DaemonInstallFailed < Error
+    def exit_code
+      ExitCodes::SOFTWARE
+    end
+  end
+
+  # `hive bot install` mirrors the daemon's install outcome split: drift is
+  # a recoverable USAGE error (re-run with --force) while a service-manager
+  # failure (systemctl / launchctl) is SOFTWARE. Separate classes from the
+  # daemon's so the top-level rescue maps each surface independently while
+  # still producing the stable 64 / 70 exit codes automation branches on.
+  class BotInstallDriftError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class BotInstallFailed < Error
     def exit_code
       ExitCodes::SOFTWARE
     end

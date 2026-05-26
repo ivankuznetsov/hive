@@ -694,7 +694,7 @@ module Hive
       end
     end
 
-    desc "bot SUBCOMMAND", "Manage the Telegram bot (start / stop / status / reload / tail)"
+    desc "bot SUBCOMMAND", "Manage the Telegram bot (start / stop / status / reload / tail / install)"
     long_desc <<~DESC
       Subcommands:
         start [--foreground] [--dry-run]  Run the Telegram long-poll bot in the background.
@@ -706,14 +706,27 @@ module Hive
         reload [--json]                   Send SIGHUP to reload bot config.
                                           --json emits hive-bot-reload.v1.
         tail                              Stream bot.log.
+        install [--force] [--json]        (Re)write the platform-native unit
+                                          file and enable autostart. Without
+                                          --force, refuses to overwrite a
+                                          pre-existing unit and exits 64
+                                          (USAGE). With --force, saves the
+                                          previous file to a timestamped
+                                          <path>.bak-<UTC-stamp> (never
+                                          overwritten) and restarts the
+                                          running bot. Autostart is opt-in:
+                                          `hive install` never touches it.
+                                          --json emits hive-bot-install.v1.
 
       The bot reads the global `bot:` block from ~/.config/hive/config.yml.
       Its Telegram token comes only from HIVE_TELEGRAM_BOT_TOKEN. Incoming
       updates from chat IDs outside bot.chat_id_allowlist are ignored.
 
-      Exit codes: 0 success; 1 bot-not-running for status/reload; 64 usage;
-      70 internal error; 75 TEMPFAIL when start finds a live bot; 78 CONFIG
-      when runtime config or HIVE_TELEGRAM_BOT_TOKEN is missing.
+      Exit codes: 0 success; 1 bot-not-running for status/reload; 64 usage
+      (also `install` drift without --force — retry with --force); 70
+      internal error (also `install` service-manager failure); 75 TEMPFAIL
+      when start finds a live bot; 78 CONFIG when runtime config or
+      HIVE_TELEGRAM_BOT_TOKEN is missing.
     DESC
     option :foreground, type: :boolean, default: false,
                         desc: "run in the foreground instead of backgrounding"
@@ -721,18 +734,26 @@ module Hive
                     desc: "deprecated; start already backgrounds by default"
     option :dry_run, type: :boolean, default: false,
                      desc: "log/send would-be actions without spawning child commands"
+    option :force, type: :boolean, default: false,
+                   desc: "for install: overwrite an existing unit (saves <path>.bak)"
     def bot(subcommand = nil)
       require "hive/commands/bot"
       if options[:foreground] && options[:detach]
         raise Hive::InvalidTaskPath,
               "hive bot start: --detach is the default; do not combine it with --foreground"
       end
+      if options[:force] && subcommand != "install"
+        raise Hive::InvalidTaskPath,
+              "hive bot #{subcommand}: --force only applies to `install`; " \
+              "drop it or use `hive bot install --force`"
+      end
 
       Hive::Commands::Bot.new(
         subcommand,
         foreground: options[:foreground],
         dry_run: options[:dry_run],
-        json: options[:json]
+        json: options[:json],
+        force: options[:force]
       ).call
     end
 

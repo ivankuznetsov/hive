@@ -97,16 +97,18 @@ the runtime can override them in the calling shell:
   Hive captures the pane tail as a fallback when the Stop hook does not
   fire.
 - `HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC` (default `5`) — shared
-  default for the two ready-waits below. Override one of them directly
-  to tune that wait without affecting the other.
+  override for the readiness waits below when their specific env vars
+  are unset. Override one of them directly to tune that wait without
+  affecting the others.
 - `HIVE_CLAUDE_TMUX_SESSION_READY_WAIT_TIMEOUT_SEC` (defaults to the
   shared `READY_WAIT_TIMEOUT_SEC`) — budget for tmux session creation
   after `new-session -d`.
 - `HIVE_CLAUDE_TMUX_PID_READY_WAIT_TIMEOUT_SEC` (defaults to the
   shared `READY_WAIT_TIMEOUT_SEC`) — budget for the claude PID to appear
   in the pane after the wrapper execs.
-- `HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC` (default `30`) —
-  budget for Claude's interactive prompt to become ready after the tmux
+- `HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC` (defaults to the
+  shared `READY_WAIT_TIMEOUT_SEC` when set, otherwise `120`) — budget
+  for the Claude interactive prompt to become ready after the tmux
   session starts.
 - `HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC` (default `0.2`) — delay between
   pasting the prompt into tmux and pressing Enter. Claude Code processes

@@ -141,4 +141,69 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       assert_match(/Answer from thread/, saved)
     end
   end
+
+  class StubLogger
+    attr_reader :events
+
+    def initialize
+      @events = []
+    end
+
+    def event(name, **attrs)
+      @events << [ name, attrs ]
+    end
+  end
+
+  def test_lock_busy_emits_answer_lock_contention_with_holder_metadata
+    # When a competing run holds the per-task lock for longer than the
+    # retry deadline, the writer must emit :answer_lock_contention with
+    # the holder's metadata so operators can grep the bot log and identify
+    # the culprit (daemon dispatch, hive run, hive approve, etc).
+    with_brainstorm(sample) do |path|
+      task_folder = File.dirname(path)
+      # Plant a held lock with this test process's PID so the stale-lock
+      # check sees the holder as live (Process.kill(0, pid) succeeds) and
+      # leaves the lock file in place. Without a live PID the writer would
+      # treat the lock as stale, delete it, and succeed — masking the
+      # contention path we're trying to exercise.
+      held_holder = { "pid" => Process.pid, "op" => "approve", "slug" => "slug-260514-abcd",
+                       "host" => "test-host", "started_at" => Time.utc(2026, 5, 26).iso8601 }
+      File.write(File.join(task_folder, ".lock"), held_holder.to_yaml)
+
+      logger = StubLogger.new
+      # Stub the deadline to fail-fast (no need to sleep the real 5s).
+      with_short_deadline do
+        result = Hive::Bot::BrainstormAnswerWriter.append!(
+          brainstorm_path: path,
+          question_n: 1,
+          answer_text: "Reply blocked by the live lock holder",
+          logger: logger
+        )
+        assert_equal :lock_busy, result
+      end
+
+      event = logger.events.find { |name, _| name == :answer_lock_contention }
+      refute_nil event, "writer must emit :answer_lock_contention when giving up on the lock"
+
+      payload = event.last
+      assert_equal task_folder, payload[:task_folder]
+      assert_equal 1, payload[:question_n]
+      refute_nil payload[:holder], "holder metadata from the rescued ConcurrentRunError must propagate to the event"
+      assert_equal Process.pid, payload[:holder]["pid"]
+      assert_equal "approve", payload[:holder]["op"]
+      assert_equal "slug-260514-abcd", payload[:holder]["slug"]
+    ensure
+      File.delete(File.join(task_folder, ".lock")) if task_folder && File.exist?(File.join(task_folder, ".lock"))
+    end
+  end
+
+  def with_short_deadline
+    original = Hive::Bot::BrainstormAnswerWriter::LOCK_RETRY_DEADLINE_SEC
+    Hive::Bot::BrainstormAnswerWriter.send(:remove_const, :LOCK_RETRY_DEADLINE_SEC)
+    Hive::Bot::BrainstormAnswerWriter.const_set(:LOCK_RETRY_DEADLINE_SEC, 0.1)
+    yield
+  ensure
+    Hive::Bot::BrainstormAnswerWriter.send(:remove_const, :LOCK_RETRY_DEADLINE_SEC)
+    Hive::Bot::BrainstormAnswerWriter.const_set(:LOCK_RETRY_DEADLINE_SEC, original)
+  end
 end

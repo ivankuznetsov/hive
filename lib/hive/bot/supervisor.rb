@@ -396,7 +396,8 @@ module Hive
         write_result = Hive::Bot::BrainstormAnswerWriter.append!(
           brainstorm_path: path,
           question_n: question_n,
-          answer_text: result.answer_text
+          answer_text: result.answer_text,
+          logger: @logger
         )
         case write_result
         when :written

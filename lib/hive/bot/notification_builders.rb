@@ -158,11 +158,28 @@ module Hive
         suggested && suggested["kind"].to_s == "retry"
       end
 
+      # Markers that are ALWAYS manual-only regardless of attrs. Adding a new
+      # marker here automatically narrows both the in-row recovery check
+      # (manual_only_recovery?) and the callback-time defensive check
+      # (CallbackHandlers#manual_only_marker?) — they share this constant
+      # through manual_only? below.
+      ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
+
+      # Single source of truth for "this state has no auto-recovery".
+      # Pass attrs: nil from callers that only have the marker name
+      # (e.g. callback handlers); pass row.attrs from in-process checks
+      # where the full attrs hash is available.
+      def manual_only?(marker:, attrs: nil)
+        marker = marker.to_s.downcase
+        return true if ALWAYS_MANUAL_MARKERS.include?(marker)
+        return false if attrs.nil?
+
+        attrs = attrs.to_h.transform_keys(&:to_s)
+        marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
+      end
+
       def manual_only_recovery?(row)
-        attrs = row.attrs.to_h.transform_keys(&:to_s)
-        marker = row.marker.to_s.downcase
-        marker == "execute_stale" ||
-          marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
+        manual_only?(marker: row.marker, attrs: row.attrs)
       end
 
       def suggested_next_action(row)

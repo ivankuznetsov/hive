@@ -1,4 +1,5 @@
 require "hive/workflows"
+require "hive/bot/notification_builders"
 
 module Hive
   module Bot
@@ -222,7 +223,7 @@ module Hive
         end
 
         def manual_only_marker?(marker)
-          marker.to_s.casecmp("execute_stale").zero?
+          Hive::Bot::NotificationBuilders.manual_only?(marker: marker)
         end
 
         def alert_reset(project, slug, stage, marker = nil, match_attr = nil)

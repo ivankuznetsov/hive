@@ -91,6 +91,23 @@ token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
 (exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
 silently.
 
+`hive bot start` also loads `~/.config/hive/.env` (next to `config.yml`)
+into `ENV` at startup so operators don't have to wire the token into a
+shell rc file. Format is the conventional `KEY=value` per line; outer
+single or double quotes are stripped; `#` starts a comment; existing env
+vars take precedence (a manual `export HIVE_TELEGRAM_BOT_TOKEN=...`
+always wins).
+
+Example `~/.config/hive/.env`:
+
+```
+HIVE_TELEGRAM_BOT_TOKEN=123456789:AAAAa-BBBb-CCCC
+```
+
+The file is read once at `hive bot start` time; `hive bot reload`
+re-reads `config.yml` but NOT `.env` (tokens are not reload-safe; restart
+the bot after rotating).
+
 ## Structured log
 
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema

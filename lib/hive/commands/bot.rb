@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "yaml"
 require "hive/config"
+require "hive/env_file"
 require "hive/lock"
 require "hive/bot/supervisor"
 require "hive/bot/logger"
@@ -53,6 +54,10 @@ module Hive
       private
 
       def start_bot
+        # Load ~/.config/hive/.env (if present) so operators don't have to
+        # paste HIVE_TELEGRAM_BOT_TOKEN into shell startup. Existing env vars
+        # take precedence — a manual `export` still overrides the file.
+        Hive::EnvFile.load!
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(pid_file))
         FileUtils.mkdir_p(File.dirname(log_file))

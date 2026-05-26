@@ -7,13 +7,20 @@ require "hive/bot/title_formatter"
 module Hive
   module Bot
     class NotificationDispatcher
+      # daemon_enabled is retained as a no-op keyword so existing callers
+      # don't break. The old gate ("suppress ready_to_X only when the
+      # daemon is enabled for the project") leaked ready_to_X notifications
+      # whenever the daemon was off, which the eval contract classifies as
+      # noise (allow-list is agent_blocked_question / fatal_error only).
+      # ready_to_X is now always pull-only via /status; the operator decides
+      # when to advance.
       def initialize(telegram:, logger:, bot_config:,
                      daemon_enabled: nil, now: -> { Time.now },
                      alert_store: nil)
         @telegram = telegram
         @logger = logger
         @bot_config = bot_config
-        @daemon_enabled = daemon_enabled
+        _ = daemon_enabled # accepted for backward compatibility, unused
         @now = now
         @alert_store = alert_store || AlertStore.new(path: bot_config["alert_state_file"], logger: logger)
       end
@@ -239,22 +246,19 @@ module Hive
         "#{minutes} min"
       end
 
+      # ready_to_X notifications are pull-only via /status; never proactive.
+      # The eval contract limits proactive messages to agent_blocked_question
+      # (needs_input) and fatal_error (recovery/error). Stage approvals don't
+      # block the operator — they wait for an approve callback, which the
+      # operator initiates by pulling /status when ready to advance.
       def suppress_ready_action?(row)
-        return false unless NotificationBuilders::READY_ACTIONS.include?(row.action)
-
-        daemon_enabled_for?(row.project)
+        NotificationBuilders::READY_ACTIONS.include?(row.action)
       end
 
-      def daemon_enabled_for?(project)
-        return @daemon_enabled.call(project) if @daemon_enabled
-
-        entry = Hive::Config.find_project(project)
-        return false unless entry
-
-        Hive::Config.load(entry["path"]).dig("daemon", "enabled") == true
-      rescue Hive::ConfigError => e
-        @logger.event(:poll_failure, source: "daemon_check", project: project,
-                                      error_class: e.class.name, message: e.message)
+      def daemon_enabled_for?(_project)
+        # Retained as no-op for callers that may still subclass or stub it
+        # during the daemon-probe transition. To be removed once the
+        # bot/daemon split lands fully.
         false
       end
 

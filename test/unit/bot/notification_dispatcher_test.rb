@@ -322,11 +322,18 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
-  def test_ready_action_suppressed_when_daemon_enabled
-    d = dispatcher(daemon_enabled: ->(_project) { true })
-    d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+  def test_ready_actions_are_always_suppressed
+    # ready_to_X notifications are pull-only via /status. The proactive
+    # allow-list (eval contract) is agent_blocked_question / fatal_error
+    # only, so neither a daemon-on project nor a daemon-off project should
+    # ever see a proactive ready_to_X.
+    d = dispatcher
+    Hive::Bot::NotificationBuilders::READY_ACTIONS.each do |action|
+      d.process_rows([ row(action: action, marker: "complete") ])
+    end
 
-    assert_equal [], telegram.messages
+    assert_empty telegram.messages,
+                 "ready_to_X must never produce a proactive Telegram message"
   end
 
   def test_multi_chat_fanout_delivers_to_all_allowed_chats
@@ -407,52 +414,24 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 2, flaky_telegram.calls
   end
 
-  def test_ready_action_uses_config_fallback_when_no_daemon_probe
-    projects = []
-    loads = []
-    with_config_stubs(
-      find_project: ->(project) { projects << project; { "path" => "/tmp/hive" } },
-      load: ->(path) { loads << path; { "daemon" => { "enabled" => true } } }
-    ) do
-      d = dispatcher(daemon_enabled: nil)
-      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
-    end
-
-    assert_empty telegram.messages
-    assert_equal [ "hive" ], projects
-    assert_equal [ "/tmp/hive" ], loads
-  end
-
-  def test_ready_action_not_suppressed_when_project_missing_from_config
+  def test_ready_actions_suppressed_regardless_of_config_or_daemon_state
+    # The daemon-probe gate was removed because ready_to_X is pull-only —
+    # no proactive emission regardless of project config state. These
+    # tests previously pinned the buggy "leak when daemon disabled" path.
     projects = []
     loads = []
     with_config_stubs(
       find_project: ->(project) { projects << project; nil },
-      load: ->(_path) { loads << path; raise "Config.load should not be called" }
+      load: ->(_path) { loads << "loaded"; raise "Config.load should not be called" }
     ) do
-      d = dispatcher(daemon_enabled: nil)
+      d = dispatcher
       d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
     end
 
-    assert_equal 1, telegram.messages.size
-    assert_equal [ "hive" ], projects
-    assert_empty loads
-  end
-
-  def test_daemon_config_errors_are_logged_and_do_not_suppress_ready_actions
-    with_config_stubs(
-      find_project: ->(_project) { { "path" => "/tmp/hive" } },
-      load: ->(_path) { raise Hive::ConfigError, "bad config" }
-    ) do
-      d = dispatcher(daemon_enabled: nil)
-      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
-    end
-
-    assert_equal 1, telegram.messages.size
-    event = logger.events.find { |name, _attrs| name == :poll_failure }
-    assert_equal "daemon_check", event.last[:source]
-    assert_equal "hive", event.last[:project]
-    assert_equal "Hive::ConfigError", event.last[:error_class]
+    assert_empty telegram.messages,
+                 "ready_to_X must be suppressed even when project is missing from config"
+    assert_empty projects, "daemon-probe Config.find_project must no longer be called"
+    assert_empty loads, "daemon-probe Config.load must no longer be called"
   end
 
   def with_config_stubs(find_project:, load:)

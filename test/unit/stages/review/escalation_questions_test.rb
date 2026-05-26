@@ -93,6 +93,37 @@ class ReviewEscalationQuestionsTest < Minitest::Test
     end
   end
 
+  def test_answered_escalation_body_checkboxes_do_not_inflate_finding_count
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, ".hive-state", "stages", "5-review", "demo")
+      reviews_dir = File.join(task_folder, "reviews")
+      FileUtils.mkdir_p(reviews_dir)
+      File.write(File.join(reviews_dir, "escalations-01.md"), <<~MD)
+        # Escalations for pass 01
+
+        ## Round 1
+
+        ### Q1. Which steps should the user-approved fix follow?
+        Source: codex-ce-code-review-01.md
+        Body text that includes a checked markdown item:
+        - [x] this is context, not a separate accepted finding
+        ### A1.
+        Apply the user answer, but preserve this checklist as prose:
+        - [x] answer body checkbox is context too
+      MD
+
+      ctx = make_ctx(dir, task_folder)
+      payload = Hive::Stages::Review.collect_accepted_findings_with_count(ctx)
+      accepted = payload.text
+
+      assert_equal 1, payload.count
+      assert_includes accepted, "USER-ANSWERED ESCALATION Q1"
+      assert_includes accepted, "[escalations-01.md] >>> - [x] this is context"
+      assert_includes accepted, "[escalations-01.md] >>> - [x] answer body checkbox"
+      refute_match(/^\[escalations-01\.md\] - \[x\]/, accepted)
+    end
+  end
+
   def test_collect_accepted_findings_preserves_legacy_checked_escalations
     with_tmp_dir do |dir|
       task_folder = File.join(dir, ".hive-state", "stages", "5-review", "demo")

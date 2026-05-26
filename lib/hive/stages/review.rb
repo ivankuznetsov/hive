@@ -1247,9 +1247,9 @@ module Hive
         answered.each do |q|
           out << "[#{name}] USER-ANSWERED ESCALATION Q#{q[:number]}: #{q[:question]}\n"
           body = q[:body].strip
-          out << prefixed_block(name, body) unless body.empty?
+          out << answered_escalation_context_block(name, body) unless body.empty?
           out << "[#{name}] Answer:\n"
-          out << prefixed_block(name, q[:answer].strip)
+          out << answered_escalation_context_block(name, q[:answer].strip)
           out << "\n"
         end
         AcceptedFindings.new(text: out, count: answered.size)
@@ -1273,8 +1273,8 @@ module Hive
         AcceptedFindings.new(text: "", count: 0)
       end
 
-      def prefixed_block(name, text)
-        text.lines(chomp: true).map { |line| "[#{name}] #{line}\n" }.join
+      def answered_escalation_context_block(name, text)
+        text.lines(chomp: true).map { |line| "[#{name}] >>> #{line}\n" }.join
       end
 
       def count_escalations(ctx)

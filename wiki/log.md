@@ -2137,3 +2137,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[stages/review]]
 - [[modules/config]]
 - [[state-model]]
+
+## [2026-05-26T10:52:00Z] review — keep user-answer checkboxes out of finding counts
+
+**Action:** Changed answered escalation body and answer prose in Phase 4 accepted findings to use `[source] >>> ...` context lines. User-provided markdown checkboxes still reach the fix agent as context, but no longer match the accepted-finding counter that fills `Hive-Fix-Findings`.
+
+**Refreshed pages:**
+- [[stages/review]]
+- [[state-model]]
+- [[modules/metrics]]

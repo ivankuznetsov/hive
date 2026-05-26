@@ -269,7 +269,7 @@ Fix-agent commits (Phase 4 review-fix and Phase 1 ci-fix) MUST end with these gi
 | `Hive-Task-Slug: <slug>` | ci, fix | template var `task_slug` |
 | `Hive-Fix-Pass: <NN>` | ci, fix | `attempt` (ci) / `pass` (fix) |
 | `Hive-Fix-Phase: <ci\|fix>` | ci, fix | template literal |
-| `Hive-Fix-Findings: <int>` | fix only | filled by LLM (count of `[x]` items applied in this commit) |
+| `Hive-Fix-Findings: <int>` | fix only | filled by LLM for self-authored fix commits; auto-commit fallback fills it from the accepted-findings collector. Counts accepted reviewer findings plus answered escalations applied in this commit, not raw markdown checkboxes inside answered-escalation context. |
 | `Hive-Triage-Bias: <courageous\|safetyist\|custom>` | fix only | `cfg.review.triage.bias` via `Stages::Review#triage_bias_for` |
 | `Hive-Reviewer-Sources: <names>` | fix only | sorted, comma-joined reviewer-file basenames for the pass via `Stages::Review#reviewer_sources_for`; orchestrator-owned files (escalations-/ci-blocked/browser-/fix-guardrail-) excluded; `none` when empty |
 

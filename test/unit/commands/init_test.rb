@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "fileutils"
+require "stringio"
 
 class HiveCommandsInitTest < Minitest::Test
   include HiveTestHelper
@@ -13,6 +14,88 @@ class HiveCommandsInitTest < Minitest::Test
     result = Object.new
     result.define_singleton_method(:success?) { success }
     result
+  end
+
+  def default_init_limits(config_key)
+    Hive::Commands::Init::Prompts::LIMIT_KEYS.each_with_object({}) do |key, limits|
+      limits[key] = Hive::Config::DEFAULTS.fetch(config_key).fetch(key)
+    end
+  end
+
+  def project_config_answers
+    input = StringIO.new
+    input.define_singleton_method(:tty?) { false }
+    Hive::Commands::Init::Prompts.new(input: input, output: StringIO.new, summary_io: StringIO.new).collect
+  end
+
+  def project_config_binding(answers = project_config_answers)
+    Hive::Commands::Init::ProjectConfigBinding.new(
+      project_name: "example",
+      default_branch: "main",
+      worktree_root: "/tmp/example.worktrees",
+      answers: answers
+    )
+  end
+
+  def test_project_config_binding_accepts_complete_prompt_answers
+    answers = project_config_answers.merge(
+      "claude_mode" => "headless",
+      "triage_bias" => "safetyist",
+      "daemon_enabled" => false
+    )
+
+    config_binding = project_config_binding(answers)
+
+    assert_equal "example", config_binding.project_name
+    assert_equal "main", config_binding.default_branch
+    assert_equal "/tmp/example.worktrees", config_binding.worktree_root
+    assert_equal "claude", config_binding.planning_agent
+    assert_equal "headless", config_binding.claude_mode
+    assert_equal "codex", config_binding.development_agent
+    assert_equal Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES, config_binding.enabled_reviewers
+    assert_equal "safetyist", config_binding.triage_bias
+    assert_equal default_init_limits("budget_usd"), config_binding.budgets
+    assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
+    refute config_binding.daemon_enabled
+  end
+
+  def test_project_config_binding_requires_every_prompt_answer_key
+    project_config_answers.keys.each do |key|
+      answers = project_config_answers
+      answers.delete(key)
+
+      error = assert_raises(KeyError) do
+        project_config_binding(answers)
+      end
+      assert_includes error.message, key
+    end
+  end
+
+  def test_project_config_binding_requires_every_limit_answer_key
+    %w[budgets timeouts].each do |section|
+      Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key|
+        answers = project_config_answers
+        answers[section] = answers.fetch(section).dup
+        answers.fetch(section).delete(key)
+
+        error = assert_raises(KeyError) do
+          project_config_binding(answers)
+        end
+        assert_includes error.message, key
+      end
+    end
+  end
+
+  def test_project_config_binding_requires_limit_sections_to_be_fetchable
+    %w[budgets timeouts].each do |section|
+      answers = project_config_answers
+      answers[section] = nil
+
+      error = assert_raises(KeyError) do
+        project_config_binding(answers)
+      end
+      assert_includes error.message, section
+    end
   end
 
   def test_run_init_preflight_warns_when_doctor_reports_config_error

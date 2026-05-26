@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "stringio"
 require "hive/commands/init"
 require "hive/llm_wiki_bootstrap"
 require "hive/reviewers/agent"
@@ -354,7 +355,6 @@ class InitTest < Minitest::Test
   # test/unit/commands/init/prompts_test.rb but inlined here so init_test
   # stays self-contained.
   def make_tty_prompts(input_text)
-    require "stringio"
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true }
     Hive::Commands::Init::Prompts.new(
@@ -362,6 +362,22 @@ class InitTest < Minitest::Test
       output: StringIO.new,
       summary_io: StringIO.new
     )
+  end
+
+  def make_incomplete_prompts(missing_key)
+    prompts = Object.new
+    prompts.define_singleton_method(:collect) do
+      input = StringIO.new
+      input.define_singleton_method(:tty?) { false }
+      answers = Hive::Commands::Init::Prompts.new(
+        input: input,
+        output: StringIO.new,
+        summary_io: StringIO.new
+      ).collect
+      answers.delete(missing_key)
+      answers
+    end
+    prompts
   end
 
   def test_init_with_piped_user_choices_writes_matching_config
@@ -469,6 +485,30 @@ class InitTest < Minitest::Test
                         "orphan hive/state branch must not exist after abort"
         refute Hive::Config.find_project(File.basename(dir)),
                "global registry must not list the aborted project"
+      end
+    end
+  end
+
+  def test_init_incomplete_prompt_answers_fail_before_disk_side_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        error = assert_raises(KeyError) do
+          capture_io do
+            Hive::Commands::Init.new(dir, prompts: make_incomplete_prompts("claude_mode")).call
+          end
+        end
+        assert_includes error.message, "claude_mode"
+
+        refute File.directory?(File.join(dir, ".hive-state")),
+               ".hive-state must not exist after an incomplete prompt answer hash"
+        log = `git -C #{dir} log --format=%s 2>&1`.strip
+        refute_includes log, "chore: ignore .hive-state worktree",
+                        "master must not have the gitignore commit"
+        branches = `git -C #{dir} branch --list`
+        refute_includes branches, "hive/state",
+                        "orphan hive/state branch must not exist after incomplete prompt answers"
+        refute Hive::Config.find_project(File.basename(dir)),
+               "global registry must not list the failed project"
       end
     end
   end

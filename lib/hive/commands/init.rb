@@ -40,9 +40,10 @@ module Hive
         # no orphan branch, no worktree, no master .gitignore update —
         # so a re-run of `hive init` proceeds normally.
         answers = collect_prompt_answers
+        project_config_content = render_project_config(ops, answers: answers)
 
         ops.hive_state_init
-        write_per_project_config(ops, answers: answers)
+        write_per_project_config(ops, content: project_config_content)
         ops.add_hive_state_to_master_gitignore!
         Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
         ops.commit_llm_wiki_bootstrap!
@@ -208,11 +209,10 @@ module Hive
         exit 1
       end
 
-      def write_per_project_config(ops, answers:)
+      def write_per_project_config(ops, content:)
         cfg_path = File.join(ops.hive_state_path, "config.yml")
         return if File.exist?(cfg_path)
 
-        content = render_project_config(ops, answers: answers)
         File.write(cfg_path, content)
       end
 
@@ -266,28 +266,27 @@ module Hive
       # ERB binding object for templates/project_config.yml.erb. Carries
       # the per-project scaffolding values (project name, default branch,
       # worktree root) plus the prompted answers hash from
-      # Hive::Commands::Init::Prompts (planning_agent / development_agent /
-      # claude_mode / enabled_reviewers / triage_bias / budgets /
-      # timeouts). The single source of truth for the answers hash is
-      # `Prompts#collect`; this binding
+      # Hive::Commands::Init::Prompts (planning_agent / claude_mode /
+      # development_agent / enabled_reviewers / triage_bias / budgets /
+      # timeouts / daemon_enabled). The single source
+      # of truth for the answers hash is `Prompts#collect`; this binding
       # never invents defaults of its own — callers always supply
       # `answers:` (production: from Prompts; tests: explicit hashes).
+      # Budget and timeout sections are also validated against the full
+      # prompt LIMIT_KEYS set so nested prompt/template drift fails fast.
       class ProjectConfigBinding
         def initialize(project_name:, default_branch:, worktree_root:, answers:)
           @project_name = project_name
           @default_branch = default_branch
           @worktree_root = worktree_root
           @planning_agent = answers.fetch("planning_agent")
-          @claude_mode = answers.fetch("claude_mode", Hive::Commands::Init::Prompts::DEFAULT_CLAUDE_MODE)
+          @claude_mode = answers.fetch("claude_mode")
           @development_agent = answers.fetch("development_agent")
           @enabled_reviewers = answers.fetch("enabled_reviewers")
-          @triage_bias = answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS)
-          @budgets = answers.fetch("budgets")
-          @timeouts = answers.fetch("timeouts")
-          # Default to true for legacy answer hashes that don't carry the
-          # daemon key (e.g. integration fixtures predating ADR-024).
-          # Production answers always set this explicitly via Prompts.
-          @daemon_enabled = answers.fetch("daemon_enabled", true)
+          @triage_bias = answers.fetch("triage_bias")
+          @budgets = required_limit_answers(answers.fetch("budgets"), "budgets")
+          @timeouts = required_limit_answers(answers.fetch("timeouts"), "timeouts")
+          @daemon_enabled = answers.fetch("daemon_enabled")
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
@@ -297,6 +296,16 @@ module Hive
 
         def binding_for_erb
           binding
+        end
+
+        def required_limit_answers(values, section)
+          unless values.respond_to?(:fetch)
+            raise KeyError, "key not found: #{section}"
+          end
+
+          Hive::Commands::Init::Prompts::LIMIT_KEYS.each_with_object({}) do |key, required|
+            required[key] = values.fetch(key)
+          end
         end
       end
     end

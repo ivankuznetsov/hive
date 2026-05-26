@@ -54,7 +54,7 @@ Each action appends one JSON object:
 
 Closed action enum: `list-prs`, `noop`, `skipped`, `agent-fix`, `force-push`, `pr-comment`, `label-apply`, `give-up`, `dry_run`.
 
-Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-error`, `already-green`, `label_ignored`, `dry_run`.
+Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-error`, `already-green`, `label_ignored`, `fork_pr`, `dry_run`.
 
 ## Boundaries
 

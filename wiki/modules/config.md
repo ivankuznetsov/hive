@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-26
 tags: [config, yaml, validation]
 ---
 
@@ -78,9 +78,9 @@ tags: [config, yaml, validation]
 | `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, recursively deep-merges onto DEFAULTS, validates, returns Hash with `"project_root"` injected. Returns DEFAULTS-only hash if config absent. |
 | `registered_projects` | Reads global config; returns `[{name, path, hive_state_path}, …]` (paths `expand_path`-ed). |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
-| `register_project(name:, path:)` | Adds or replaces an entry in the global config; ensures `hive_home` exists; writes via `write_global_config!`. |
+| `register_project(name:, path:)` | Adds or replaces an entry in the global config; stores private absolute-string `real_path` when the path can be resolved so prune can detect relinked symlinks; ensures `hive_home` exists; writes via `write_global_config!`. |
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; writes via `write_global_config!`. |
-| `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory OR whose shape is invalid (non-Hash, missing `path`); writes via `write_global_config!` unless `dry_run`. |
+| `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); writes via `write_global_config!` unless `dry_run`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
 | `write_global_config!(data)` | Single ingress for global-config writes; rewraps `Errno::EACCES`/`EROFS`/`ENOSPC` as `ConfigError`. Mirrors `Markers.write_atomic` shape so a future flock upgrade (Issue #31) can swap in without touching call sites. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |

@@ -621,6 +621,8 @@ module Hive
       abs_path = File.expand_path(path)
       hive_state_path = File.join(abs_path, ".hive-state")
       entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
+      real_path = realpath_or_nil(abs_path)
+      entry["real_path"] = real_path if real_path
       existing = data["registered_projects"].find { |p| p["name"] == name }
       if existing
         existing.replace(entry)
@@ -674,12 +676,13 @@ module Hive
     end
 
     # Drop every registry entry whose `path` no longer points at a
-    # directory on disk OR whose row shape is invalid (non-Hash / missing
-    # / non-String name or path). Used by `hive prune` and the TUI's
-    # stale-project drop key. The filesystem check is `File.directory?`
-    # (not `exist?`) so a stray leftover file at the registered path
-    # doesn't masquerade as live. Pass `dry_run: true` to compute the
-    # would-be-removed list without rewriting global_config_path.
+    # directory on disk, whose stored realpath no longer matches the
+    # current target, OR whose row shape is invalid (non-Hash / missing
+    # / non-String name or path). Used by `hive prune` and the TUI stale-
+    # project drop key. The filesystem check is `File.directory?` (not
+    # `exist?`) so a stray leftover file at the registered path does not
+    # masquerade as live. Pass `dry_run: true` to compute the would-be-
+    # removed list without rewriting global_config_path.
     #
     # Returns a Hash:
     #   {
@@ -711,11 +714,12 @@ module Hive
       result
     end
 
-    # Predicate for prune: drops invalid rows AND rows whose path is
-    # gone. The shape branch and the directory-existence branch are
-    # both true for "this row should not be in the registry", so
-    # corrupted rows surface in the prune output (and `removed_count`)
-    # exactly like missing-path rows.
+    # Predicate for prune: drops invalid rows, rows whose path is
+    # gone, AND rows whose stored realpath no longer matches the current
+    # path target. The shape branch and the filesystem branches are all
+    # true for "this row should not be in the registry", so corrupted
+    # rows surface in the prune output and removed_count exactly like
+    # missing-path rows.
     #
     # `File.expand_path` mirrors `registered_projects` (which expands
     # before exposing the row to the rest of the surface). Without it,
@@ -724,7 +728,30 @@ module Hive
     def droppable_registry_entry?(entry)
       return true unless valid_registry_entry?(entry)
 
-      !File.directory?(File.expand_path(entry["path"]))
+      path = File.expand_path(entry["path"])
+      return true unless File.directory?(path)
+
+      registered_real_path = registry_real_path(entry)
+      return false unless registered_real_path
+
+      current_real_path = realpath_or_nil(path)
+      current_real_path.nil? || current_real_path != registered_real_path
+    end
+
+    def registry_real_path(entry)
+      value = entry["real_path"]
+      return nil unless value.is_a?(String) && !value.empty?
+
+      expanded = File.expand_path(value)
+      expanded == value ? expanded : nil
+    rescue ArgumentError
+      nil
+    end
+
+    def realpath_or_nil(path)
+      File.realpath(path)
+    rescue SystemCallError, ArgumentError
+      nil
     end
 
     # Recursive deep-merge: descends into nested Hashes so a partial

@@ -442,4 +442,80 @@ class HiveCommandsBotTest < Minitest::Test
       assert_equal result.to_s, doc.fetch("outcome")
     end
   end
+
+  # ── install: non-JSON text summary per outcome ─────────────────────────
+
+  def test_install_upgraded_text_summary_names_backup
+    command = bot("install", force: true)
+    installer = stub_installer(last_backup_path: "/tmp/hive-bot.service.bak-20260527") do |autostart:, force:|
+      :upgraded
+    end
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    assert_includes out, "hive bot: upgraded unit at /tmp/hive-bot.service"
+    assert_includes out, "(backup: /tmp/hive-bot.service.bak-20260527)"
+  end
+
+  def test_install_unchanged_text_summary
+    command = bot("install")
+    installer = stub_installer { |autostart:, force:| :unchanged }
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    assert_includes out, "hive bot: unit already up to date at /tmp/hive-bot.service"
+  end
+
+  def test_install_autostart_unavailable_text_summary
+    command = bot("install")
+    installer = stub_installer(
+      target_path: "/home/u/.config/systemd/user/hive-bot.service"
+    ) { |autostart:, force:| :autostart_unavailable }
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    assert_includes out,
+                    "hive bot: unit written at /home/u/.config/systemd/user/hive-bot.service; " \
+                    "autostart not enabled on this host"
+  end
+
+  # The installer's legacy :ok result still maps to the "written" summary
+  # line (and the "written" envelope outcome) so an older installer return
+  # value keeps reporting success rather than falling silent.
+  def test_install_legacy_ok_text_summary_reports_written
+    command = bot("install")
+    installer = stub_installer { |autostart:, force:| :ok }
+
+    out, _err = run_install(command, installer) { capture_io { command.call } }
+
+    assert_includes out, "hive bot: installed unit at /tmp/hive-bot.service"
+  end
+
+  # ── install: safe_install_* rescue fallbacks on a hostile installer ────
+
+  # An installer that raises a non-Hive error from install! AND whose
+  # envelope_platform/target_path/messages accessors also raise. The
+  # exception-envelope path must still emit valid JSON by falling back to
+  # "unsupported" / nil / [] rather than crashing while reporting a crash.
+  def test_install_exception_envelope_survives_hostile_installer_accessors
+    command = bot("install", json: true)
+    installer = stub_installer { |autostart:, force:| raise Errno::EACCES, "denied" }
+    installer.define_singleton_method(:envelope_platform) { raise "boom platform" }
+    installer.define_singleton_method(:target_path) { raise "boom target" }
+    installer.define_singleton_method(:messages) { raise "boom messages" }
+
+    out, _err = run_install(command, installer) do
+      capture_io { assert_raises(Hive::BotInstallFailed) { command.call } }
+    end
+
+    doc = JSON.parse(out)
+    assert_equal false, doc.fetch("ok")
+    assert_equal "failed", doc.fetch("outcome")
+    assert_equal "unsupported", doc.fetch("platform"),
+                 "a raising envelope_platform must fall back to \"unsupported\""
+    assert_nil doc.fetch("target_path"),
+               "a raising target_path must fall back to nil"
+    assert_equal [], doc.fetch("messages"),
+                 "raising messages must fall back to an empty list"
+  end
 end

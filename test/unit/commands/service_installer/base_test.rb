@@ -209,4 +209,29 @@ class ServiceInstallerBaseTest < Minitest::Test
       assert_nil installer.ruby_shim_dir
     end
   end
+
+  # ── abstract subclass hooks ────────────────────────────────────────
+  # A bare subclass that overrides NOTHING must raise NotImplementedError
+  # for every identity/render hook, so a half-built subclass fails loudly
+  # rather than rendering a malformed unit. `upgrade_restart_warning`
+  # defaults to nil (the bot has no long stop drain to warn about).
+  class BareInstaller < Hive::Commands::ServiceInstaller::Base
+  end
+
+  def test_abstract_hooks_raise_not_implemented
+    installer = BareInstaller.new(host_os: "linux")
+
+    %i[service_name cli_label service_noun unit_noun target_path
+       render_systemd render_launchd].each do |hook|
+      error = assert_raises(NotImplementedError, "#{hook} must raise on the bare base") do
+        installer.public_send(hook)
+      end
+      assert_match(/must define ##{hook}/, error.message)
+    end
+  end
+
+  def test_upgrade_restart_warning_defaults_to_nil
+    installer = BareInstaller.new(host_os: "linux")
+    assert_nil installer.upgrade_restart_warning
+  end
 end

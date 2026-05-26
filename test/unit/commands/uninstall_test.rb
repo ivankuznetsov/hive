@@ -220,6 +220,23 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_macos_bot_plist_unload_failure_leaves_plist_in_place
+    with_xdg_home do
+      plist = File.expand_path("~/Library/LaunchAgents/local.hive-bot.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "plist\n")
+      out = StringIO.new
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: out,
+        runner: ->(_argv) { false }, host_os: "darwin"
+      ).call
+
+      assert File.exist?(plist), "a failed launchctl unload must leave the bot plist in place"
+      assert_match(/launchctl unload failed for #{Regexp.escape(plist)}/, out.string)
+    end
+  end
+
   def test_bot_teardown_noops_when_unit_absent
     with_xdg_home do
       calls = []
@@ -247,6 +264,20 @@ class UninstallCommandTest < Minitest::Test
       end
 
       assert_equal [ [ "TERM", 456 ] ], signals
+    end
+  end
+
+  def test_stop_foreground_bot_ignores_stale_pid
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
+                 { "pid" => 789, "started_at" => "2026-05-27T00:00:00Z" }.to_yaml)
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+        # A dead/stale bot pid must be swallowed, not re-raised, so a
+        # vanished bot never aborts the rest of the uninstall.
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_bot)
+      end
     end
   end
 

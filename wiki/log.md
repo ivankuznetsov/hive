@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T01:30:00Z] bot — autostart service (`hive bot install`)
+
+**Action:** Added `hive bot install [--force] [--json]`, a per-user autostart service for the Telegram bot (systemd-user unit on Linux, launchd plist on macOS) that survives reboot/login and starts the bot immediately — one command, no separate `hive bot start`. Implemented by extracting `Hive::Commands::ServiceInstaller::Base` from the daemon installer (daemon behavior byte-identical) and a `Bot::ServiceInstaller` subclass; the unit runs `hive bot start --foreground` with no inline token (the bot loads `~/.config/hive/.env`) and no `TimeoutStopSec=900`. Opt-in only — not wired into `install.sh`/`hive init`. `hive uninstall` tears the unit down. New `hive-bot-install.v1` schema; exit codes mirror the daemon (0 / 64 drift / 70 service-manager failure). Documented the new subcommand, an Autostart section, and exit codes in [[commands/bot]]; updated `docs/cli.md`.
+
+**Refreshed pages:**
+- [[commands/bot]]
+
 ## [2026-05-26T23:30:00Z] daemon - reclassify no-systemd autostart as unsupported (review follow-up)
 
 **Action:** Code-review follow-up on the autostart-install branch. A Linux host with no systemd-user no longer reports a `failed` / exit-70 envelope (this supersedes the 22:55Z entry below): the unit is still written, but autostart-unavailable is now a `:autostart_unavailable` installer result that maps to the `unsupported` success outcome (exit 0) with `target_path` set to the written unit. A genuine service-manager rejection (systemctl enable/reload, or macOS launchctl load) still exits 70. Also hardened: `install.sh daemon_autostart_setup` captures the real exit code in an `else` branch (was always reporting `exit 0`) and treats `unsupported`/unreadable-JSON distinctly; `hive init`'s `register_daemon_service!` now degrades any unexpected `StandardError` to a warning so it can't abort an already-committed init; dead `which` delegators removed in favor of `Hive::InvokedBinary`; README scoped so only `install.sh` is described as auto-running `hive daemon install`.
@@ -2096,3 +2103,6 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[commands/bot]]
+
+## 2026-05-27
+- `wiki/commands/bot.md`: documented the new `hive bot install [--force] [--json]` subcommand (platform-native unit write + autostart via the shared `ServiceInstaller::Base`, `--force` backup/reload, `unsupported`/`70` outcomes, `hive-bot-install.v1` envelope, torn down by `hive uninstall`). Mirrors `hive daemon install`.

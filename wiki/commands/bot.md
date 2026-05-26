@@ -21,6 +21,7 @@ hive bot stop [--json]
 hive bot status [--json]
 hive bot reload [--json]
 hive bot tail
+hive bot install [--force] [--json]
 ```
 
 | Subcommand | Behavior |
@@ -30,6 +31,7 @@ hive bot tail
 | `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, and `log_file`. |
 | `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
 | `tail` | Streams `~/.local/state/hive/logs/bot.log`; exits 1 if the log does not exist. |
+| `install` | (Re)writes the platform-native unit (`~/.config/systemd/user/hive-bot.service` on Linux, `~/Library/LaunchAgents/local.hive-bot.plist` on macOS) and enables autostart. Mirrors `hive daemon install` via the shared `ServiceInstaller::Base`: always installs with `autostart: true`. Without `--force`, refuses to overwrite a pre-existing unit that differs from the template (exit `64` USAGE, message pointing at `--force`). With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` via atomic write, then restarts/reloads the service so new `Environment=` lines take effect. A service-manager failure exits `70` (SOFTWARE); a host with no systemd-user manager still gets the unit written but exits `0` with the `unsupported` outcome. Units point at the user-facing wrapper path when installers provide it, so `hv` invocations survive Apache Hive shadowing `hive`. `hive uninstall` tears this unit back down. With `--json`, every outcome (success and error) emits a `hive-bot-install.v1` envelope. |
 
 ## Commands in Telegram
 
@@ -163,6 +165,33 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 `notification_sent`, `dispatched_command`, `command_completed`,
 `codex_spawned`, `answer_written`, `reconnect_summary`, and `fatal`.
 
+## Autostart
+
+`hive bot install` gives the bot the same reboot-survivable per-user
+service the daemon has (`hive daemon install`), built on the shared
+`Hive::Commands::ServiceInstaller::Base`. Key differences from the daemon:
+
+- **Opt-in.** Unlike the daemon — which the Hive installer enables at
+  install time as core infrastructure — the bot service is installed only
+  by the explicit `hive bot install`. It is never auto-run by `install.sh`
+  or `hive init`, because the bot needs a token and an allowlist the
+  operator must set up first.
+- **One command.** `install` both enables autostart (survives
+  reboot/login) and starts the bot now (`systemctl --user enable --now` /
+  `launchctl load`). There is no separate `hive bot start` step for the
+  managed bot.
+- **No inline secret.** The unit runs `hive bot start --foreground` and the
+  bot loads `~/.config/hive/.env` itself (`Hive::EnvFile.load!`), so
+  `HIVE_TELEGRAM_BOT_TOKEN` never appears in the unit file. The unit only
+  carries the Ruby-shim `PATH` (mise/rbenv/asdf detection) so the `hive`
+  binary resolves under the service manager's minimal environment.
+- **Single instance.** The service and a manual `hive bot start` cannot run
+  two bots at once — the `.bot.pid` lock makes the second exit
+  `75 (TEMPFAIL)`. `hive bot start` remains the manual/debug path and the
+  fallback on hosts without systemd-user / launchd.
+- **Teardown.** `hive uninstall` stops, disables, and removes the bot unit
+  alongside the daemon unit. There is no standalone `hive bot uninstall`.
+
 ## Exit codes
 
 | Subcommand | Code | Condition |
@@ -177,6 +206,9 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 | `reload` | 1 | Bot is not running |
 | `tail` | 0 | Stream ended via Ctrl-C |
 | `tail` | 1 | Log file missing |
+| `install` | 0 | Unit written/upgraded/unchanged and autostart enabled, or written on a host with no service manager (`unsupported` outcome) |
+| `install` | 64 | Existing unit differs from the template; re-run with `--force` (USAGE) |
+| `install` | 70 | Service manager rejected enable/load (SOFTWARE) |
 
 ## Backlinks
 

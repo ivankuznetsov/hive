@@ -2622,6 +2622,14 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Refreshed pages:**
 - [[stages/review]]
 
+## [2026-05-26T22:10:00Z] babysitter — document out-of-band state layout
+
+**Action:** Recorded the experimental PR-repair daemon's on-disk state in the state model: `<project>/.hive-state/babysitter/` (`events.jsonl`, `status.md`, ephemeral `worktrees/<pr>/`), plus `$HIVE_HOME/.babysitter.pid` and `$HIVE_HOME/logs/babysitter.log`. Confirmed paths against `status_writer.rb`, `events.rb`, `worktree.rb`. Noted the daemon has no marker grammar, stage `mv`, or `worktree.yml` — worktrees are recreated from the PR head each tick. Added a reciprocal `[[state-model]]` backlink to the babysitter module page.
+
+**Refreshed pages:**
+- [[state-model]]
+- [[modules/babysitter]]
+
 ## [2026-05-26T10:05:02Z] bot — load ~/.config/hive/.env on bot start
 
 **Action:** Added `Hive::EnvFile.load!` and wired it into `hive bot start` so operators can drop `HIVE_TELEGRAM_BOT_TOKEN=...` into `~/.config/hive/.env` instead of shell rc files. Existing env vars take precedence; `#` comments and outer single/double quotes are honored; missing/unreadable files are silently skipped. `hive bot reload` does NOT re-read the file — operators must restart after rotating secrets.

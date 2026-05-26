@@ -68,5 +68,6 @@ Closed outcome enum: `success`, `failure`, `timeout`, `budget_exhausted`, `gh-er
 ## Backlinks
 
 - [[commands/babysit]]
+- [[state-model]]
 - [[modules/config]] · [[modules/agent_profile]] · [[modules/daemon]] · [[modules/events]] · [[modules/worktree]]
 - [[operating]]

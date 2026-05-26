@@ -295,7 +295,11 @@ if command -v cosign >/dev/null 2>&1; then
     "${tmpdir}/SHA256SUMS" \
     || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow)"
 else
-  warn "cosign not installed; skipping signature verification (still validating SHA256)"
+  # Phrased as a positive info line, not a scare-warning: the SHA256 check still
+  # runs (see below). cosign is an optional second factor for keyless signature
+  # verification — installing it upgrades the check; not having it doesn't break
+  # the install.
+  log "verifying release with SHA256 (install cosign for additional keyless signature verification)"
 fi
 
 # Strict line match: optional `./` prefix, sha digest, two-space sep,

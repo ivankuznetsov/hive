@@ -45,6 +45,31 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_linux_default_runner_suppresses_systemctl_stdout
+    with_tmp_dir do |dir|
+      fake_bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(fake_bin)
+      systemctl = File.join(fake_bin, "systemctl")
+      File.write(systemctl, "#!/bin/sh\necho systemctl-noise\nexit 0\n")
+      FileUtils.chmod(0755, systemctl)
+
+      with_env("PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        installer = Hive::Commands::Daemon::ServiceInstaller.new(
+          host_os: "linux",
+          home: dir,
+          binary_path: "/tmp/hive",
+          systemctl_available: true
+        )
+
+        out, _err = capture_io do
+          assert_equal :written, installer.install!(autostart: true)
+        end
+
+        assert_equal "", out
+      end
+    end
+  end
+
   def test_linux_without_systemd_writes_unit_and_warns
     with_tmp_dir do |dir|
       commands = []

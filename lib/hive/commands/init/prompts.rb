@@ -102,7 +102,6 @@ module Hive
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
-        #     "daemon_autostart"  => Boolean           # start user service now
         #   }
         # Raises Aborted when the user declines confirmation.
         def collect
@@ -116,7 +115,6 @@ module Hive
           triage_bias = prompt_triage_bias
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
-          daemon_autostart = prompt_daemon_autostart
 
           answers = {
             "planning_agent" => planning,
@@ -126,8 +124,7 @@ module Hive
             "triage_bias" => triage_bias,
             "budgets" => budgets,
             "timeouts" => timeouts,
-            "daemon_enabled" => daemon_enabled,
-            "daemon_autostart" => daemon_autostart
+            "daemon_enabled" => daemon_enabled
           }
 
           summarize(answers)
@@ -154,8 +151,7 @@ module Hive
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
-            "daemon_enabled" => true,
-            "daemon_autostart" => false
+            "daemon_enabled" => true
           }
           # Goes to @summary_io (stdout by default) so a non-TTY caller's
           # `summary=$(hive init)` capture has a parseable single line.
@@ -164,7 +160,7 @@ module Hive
             "claude_mode=#{DEFAULT_CLAUDE_MODE}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
-            "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled, daemon_autostart=disabled"
+            "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled"
           )
           answers
         end
@@ -394,22 +390,6 @@ module Hive
           end
         end
 
-        def prompt_daemon_autostart
-          @output.puts ""
-          @output.puts "Hive daemon service — install the per-user service unit now."
-          @output.puts "  The unit is written either way. Starting it now also enables"
-          @output.puts "  launchd/systemd-user autostart for future logins."
-          loop do
-            @output.print "Enable and start the hive daemon now? [y/N]: "
-            @output.flush
-            answer = read_line.downcase
-            return false if answer.empty? || answer == "n" || answer == "no"
-            return true  if answer == "y" || answer == "yes"
-
-            @output.puts "  please answer y or n"
-          end
-        end
-
         def summarize(answers)
           @output.puts ""
           @output.puts "Summary:"
@@ -420,7 +400,6 @@ module Hive
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"
-          @output.puts "  daemon_autostart  = #{answers['daemon_autostart'] ? 'enabled' : 'disabled'}"
         end
 
         def summarize_limits(answers)

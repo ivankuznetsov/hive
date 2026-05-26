@@ -3,12 +3,12 @@ title: Operating Hive
 type: operating
 source: lib/hive/commands/daemon.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/
 created: 2026-05-07
-updated: 2026-05-20
+updated: 2026-05-26
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon and Telegram bot.
-Covers per-project daemon enrollment, bot token/allowlist setup,
+Covers install-time daemon autostart, per-project daemon enrollment, bot token/allowlist setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, and how to disable automation mid-flight.
 
@@ -73,8 +73,9 @@ bash "$tmpdir/hive-install.sh"
 
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
-verifies `hive --version`, offers `hive init`, and treats the skills package as
-optional marketplace content.
+verifies `hive --version`, runs `hive daemon install --json` so the per-user
+daemon service is installed/enabled by default, offers `hive init`, and treats
+the skills package as optional marketplace content.
 
 Fresh installs use XDG locations:
 
@@ -94,6 +95,13 @@ Apache Hive collision: the Homebrew formula installs an `hv` symlink and the
 bash installer creates `hv` when another `hive` is already earlier on PATH. The
 AUR package does not ship `hv`; its `conflicts=('hive' 'apache-hive')` metadata
 blocks the parallel install before fallback aliasing is possible.
+
+Daemon autostart is part of install, not project enrollment. The bash installer
+runs `hive daemon install --json` after installing the gem. Agent-assisted
+Homebrew/AUR/manual installs run the same command after `hive --version`
+verification. Manual package users should run `hive daemon install` once after
+install if they did not use the agent prompt; package hooks cannot reliably
+start a per-user systemd/launchd service for every host setup.
 
 Updates and uninstall:
 
@@ -202,7 +210,8 @@ tunables (`poll_interval_sec`, `max_concurrent_runs`, …) survive — the
 toggle only flips `enabled`.
 
 For new projects, `hive init` asks at the TTY prompt and defaults to Y
-— no separate enable step.
+— no separate project-enable step. This prompt is project enrollment only; the
+daemon service should already be installed and enabled globally.
 
 ## First run: the mandatory `--dry-run` shakedown
 
@@ -243,17 +252,20 @@ hive daemon start --detach
 
 ## Autostart
 
-`hive init` writes the platform daemon unit for you (see ADR-024).
-On Linux it lands at `~/.config/systemd/user/hive-daemon.service`; on
-macOS at `~/Library/LaunchAgents/local.hive-daemon.plist`. The recipes
-below are the manual fallback for environments where `hive init` could
-not write the unit (read-only home, restricted user, custom layout) or
-for migrating an existing install onto a newer template.
+`hive daemon install` writes and enables the platform daemon unit (see
+ADR-024). On Linux it lands at `~/.config/systemd/user/hive-daemon.service`;
+on macOS at `~/Library/LaunchAgents/local.hive-daemon.plist`. Installers and
+agent-assisted setup run this by default. `hive init` also idempotently ensures
+the service after project setup, but the init prompt only controls whether that
+project is enrolled for dispatch. The recipes below are the manual fallback for
+environments where the installer could not write or enable the unit (read-only
+home, restricted user, custom layout) or for migrating an existing install onto
+a newer template.
 
 ### Linux (systemd-user)
 
 A sample unit ships at `examples/systemd/hive-daemon.service`. Install
-manually only if `hive init` could not write it for you:
+manually only if `hive daemon install` could not write it for you:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -287,7 +299,7 @@ doesn't load your shell's rc files.
 
 ### macOS (launchd)
 
-`hive init` writes the resolved plist at
+`hive daemon install` writes the resolved plist at
 `~/Library/LaunchAgents/local.hive-daemon.plist` with your real `hive`
 binary path already substituted. Homebrew installs use the stable
 `${HOMEBREW_PREFIX}/bin/hive` symlink so `brew upgrade hive` keeps the daemon

@@ -50,7 +50,7 @@ module Hive
         entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
 
         print_summary(entry: entry, ops: ops)
-        register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
+        register_daemon_service!(autostart: true)
         run_init_preflight!
       end
 
@@ -289,13 +289,12 @@ module Hive
           # daemon key (e.g. integration fixtures predating ADR-024).
           # Production answers always set this explicitly via Prompts.
           @daemon_enabled = answers.fetch("daemon_enabled", true)
-          @daemon_autostart = answers.fetch("daemon_autostart", false)
         end
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :planning_agent, :claude_mode, :development_agent,
                     :enabled_reviewers, :triage_bias, :budgets, :timeouts,
-                    :daemon_enabled, :daemon_autostart
+                    :daemon_enabled
 
         def binding_for_erb
           binding

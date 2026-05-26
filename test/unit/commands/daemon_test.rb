@@ -455,7 +455,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     )
     installer.define_singleton_method(:install!) { |autostart:, force:| :written }
 
-    with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, -> { installer }) do
+    with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { installer }) do
       out, err = capture_io { command.call }
       assert_includes err, "hive: installed by fake"
       assert_includes out, "installed unit at /tmp/hive-daemon.service"

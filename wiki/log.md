@@ -2,6 +2,15 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T21:22:40Z] daemon - install-time autostart by default
+
+**Action:** Moved daemon autostart to install-time/global setup. The bash installer now runs `hive daemon install` after installing the gem; the agent installer prompt tells agents to run `hive daemon install --json` for Homebrew/AUR/existing installs. `hive init` no longer asks a second autostart question; it only asks whether the current project should render `daemon.enabled: true`. The init path still idempotently ensures the service for dev-clone/manual users.
+
+**Refreshed pages:**
+- [[commands/init]] - prompt flow and non-TTY summary now describe project enrollment only.
+- [[commands/daemon]] and [[operating]] - service autostart is global install-time infrastructure; project enable/disable is dispatch enrollment.
+- [[cli]] and [[decisions]] - updated command and ADR wording for the new install/init split.
+
 ## [2026-05-26T14:30:00Z] claude-launcher - preserve project-owned .claude/settings.json
 
 **Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.

@@ -428,7 +428,7 @@ module Hive
       # exit 0.
       def install_daemon
         require "hive/commands/daemon/service_installer"
-        installer = Hive::Commands::Daemon::ServiceInstaller.new
+        installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: current_binary_path)
         result = installer.install!(autostart: true, force: @force)
         unless @json
           installer.messages.each { |line| warn "hive: #{line}" }
@@ -534,6 +534,25 @@ module Hive
           "target_path" => installer.target_path,
           "messages" => installer.messages.dup
         )
+      end
+
+      def current_binary_path
+        raw = $PROGRAM_NAME.to_s
+        return nil unless File.basename(raw) == "hive"
+
+        if raw.include?(File::SEPARATOR)
+          File.expand_path(raw)
+        else
+          which("hive")
+        end
+      end
+
+      def which(name)
+        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
+          path = File.join(dir, name)
+          return path if File.file?(path) && File.executable?(path)
+        end
+        nil
       end
 
       def envelope_schema

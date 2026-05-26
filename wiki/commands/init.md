@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-26
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) to use, and what budget+timeout sanity caps to set, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, and registers the project globally.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) to use, what budget+timeout sanity caps to set, and whether this project should be enrolled for daemon dispatch, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service is installed for autostart.
 
 ## Usage
 
@@ -48,7 +48,8 @@ hive init [PROJECT_PATH] [--force]
 9. **Install runtime wiki hooks** via `Hive::LlmWikiBootstrap.install_runtime_hooks!`: adds/replaces only the managed block in `.git/hooks/post-commit`, writes Linux user systemd service/timer files for daily refresh, and enables the timer through `timers.target.wants`.
 10. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into `~/Dev/hive/config.yml`.
 11. Print summary: project name, default branch, hive-state path, worktree root, and a `next:` line with the `hive new ...` invocation.
-12. Run the non-fatal `hive doctor` skill preflight; missing skills warn on stderr without failing init.
+12. Ensure global daemon autostart via `Hive::Commands::Daemon::ServiceInstaller`, recording `daemon.autostart: true` in the global config and enabling/starting the platform service when systemd-user or launchd is available. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
+13. Run the non-fatal `hive doctor` skill preflight; missing skills warn on stderr without failing init.
 
 ## Prompt flow (ADR-023)
 
@@ -60,7 +61,7 @@ On TTY input streams the prompt walks the operator through the following section
 4. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
 5. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the triage agent in the 6-review autonomous loop.
 6. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
-7. **Daemon enrollment + autostart** (`daemon.enabled`, `daemon.autostart`): whether to opt this project into the auto-advance daemon (default yes), and whether to enable+start the per-user service unit now (default no — the unit is always written, but autostart is opt-in).
+7. **Daemon enrollment** (`daemon.enabled`): whether to opt this project into the auto-advance daemon (default yes). The per-user daemon service is global install-time infrastructure; project init no longer asks whether to start or autostart it.
 
 Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). The Claude mode prompt follows the same rule (`tmux` / `headless` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
 
@@ -77,7 +78,7 @@ Reordering either is a **breaking change for scripted automation** that uses ind
 When `$stdin.tty?` is false the prompt module skips every question and emits exactly one line to `$stdout`:
 
 ```
-hive: using defaults — planning=claude, claude_mode=tmux, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled, daemon_autostart=disabled
+hive: using defaults — planning=claude, claude_mode=tmux, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 ```
 
 Piped input is **not** consumed — `printf 'codex\n...' | hive init` ignores the piped data and uses defaults. Document this contract for any automation that wants to set non-default values: use `--force` plus an explicitly-edited YAML rather than expecting heredoc piping to populate answers.

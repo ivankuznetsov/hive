@@ -20,7 +20,7 @@ module Hive
           # HOME stay hermetic.
           @home = File.expand_path(home || ENV["HOME"] || Dir.home)
           @binary_path = binary_path
-          @runner = runner || ->(argv) { system(*argv) }
+          @runner = runner || ->(argv) { system(*argv, out: File::NULL) }
           @systemctl_available = systemctl_available
           @messages = []
           @last_backup_path = nil

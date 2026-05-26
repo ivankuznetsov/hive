@@ -31,3 +31,7 @@ Query protocol:
    - `<parent-of-project>/wikis/master/wiki/`
    - `<parent-of-project>/wikis/main/wiki/`
 <!-- END LLM WIKI -->
+
+## Documented Solutions
+
+`docs/solutions/` contains documented solutions to past problems (bugs, architecture patterns, workflow issues, and conventions), organized by category with YAML frontmatter such as `module`, `tags`, and `problem_type`. Relevant when implementing or debugging in documented areas.

@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-05-25
+updated: 2026-05-26
 tags: [decisions, adr]
 ---
 
@@ -70,6 +70,8 @@ The allowlist is closed: `run develop brainstorm plan review open-pr artifacts f
 **Context:** Opening the GitHub PR only after autonomous review made human intervention awkward: a person had to find the task under `.hive-state/stages/6-review/` and edit local files instead of using `gh pr checkout`. At the same time, the daemon needed a deterministic install surface — manual launchd/systemd cp+edit recipes drift across platforms and become stale doc the moment Hive can install a unit on its own.
 **Decision:** Insert `5-open-pr` between execute and review. It pushes the branch and opens a draft PR. Rename the old PR stage to `7-finalize`; it now verifies the reviewed branch is pushed, refreshes the PR description, writes `summary.md`, and flips the PR from draft to ready-for-review. The stage order from that decision was `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-finalize → 8-done`; ADR-029 supersedes the tail with `7-artifacts → 8-finalize → 9-done`. In parallel, `hive daemon install` installs the platform daemon unit via `Hive::Commands::Daemon::ServiceInstaller`: the unit (launchd plist on macOS, systemd-user service on Linux) is written and `launchctl load` / `systemctl --user enable --now` is invoked by default at install time. `hive init` no longer asks a second autostart question; it only asks whether the current project should render `daemon.enabled: true`. Drifted/customised units are detected by content hash and left untouched unless the operator uses `--force`.
 **Consequences:** Review runs against an already-open draft PR. Reviewer files remain authoritative locally, but the review orchestrator mirrors each reviewer/escalation file to the PR as a comment for human visibility. Existing in-flight tasks on old stage names require explicit `hive migrate`; hive does not silently rename task folders. For daemon registration: users who previously hand-installed a service unit see the "already exists; leaving user-customized file untouched" warning instead of a silent overwrite. Homebrew-installed macOS units point at the stable `${HOMEBREW_PREFIX}/bin/hive` symlink rather than a versioned Cellar realpath, so `brew upgrade hive` keeps the daemon binary path current; customized drifted plists still require explicit removal and `hive daemon install --force` re-registration.
+
+Stage-layout rename regressions from this ADR's follow-on work are captured in `docs/solutions/architecture-patterns/silent-stage-rename-state-drift.md`. The pattern treats `Hive::Stages::DIRS`, `Hive::Commands::Migrate::STAGE_RENAMES`, and status legacy-dir warnings as one migration contract so durable on-disk task state cannot become invisible after code constants move.
 
 ## ADR-001: Folder-as-task, not single markdown file
 

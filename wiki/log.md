@@ -26,6 +26,13 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[gaps]] - added open-question #14 under "Open questions about the codebase".
 
+## [2026-05-26T12:08:56Z] architecture - silent stage rename state drift pattern
+
+**Action:** Added a documented solution for the repeated stage-rename drift class where `Hive::Stages::DIRS` changes but old on-disk task folders remain under legacy stage directories. The note captures the migration-map contract, producer-side `legacy_stage_dirs` warning, and the paired unit/integration test pattern from PR #93.
+
+**Refreshed pages:**
+- [[decisions]] - linked ADR-024 to the durable stage-rename drift pattern.
+
 ## [2026-06-02T01:00:00Z] fix — PR #268 ce-code-review: harden the brainstorm answers-pending gate
 
 **Action:** Addressed the actionable `/ce-code-review` findings on PR #268:

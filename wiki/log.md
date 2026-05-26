@@ -2207,3 +2207,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[stages/review]]
 - [[state-model]]
 - [[modules/metrics]]
+
+## [2026-05-26T12:46:42Z] tui — spawn-failure recovery flash
+
+**Action:** Refined `Hive::Tui::Subprocess.dispatch_background` so immediate spawn failures return a `false` sentinel after dispatching `SubprocessExited(exit_code: 127)`, and recovery workers now treat that sentinel like a failed rerun start instead of flashing that `hive run` is running after the marker was cleared.
+
+**Refreshed pages:**
+- [[commands/tui]]

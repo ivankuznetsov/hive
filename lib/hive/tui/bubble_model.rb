@@ -1041,19 +1041,7 @@ module Hive
           return
         end
 
-        begin
-          Hive::Tui::Subprocess.dispatch_background([ "hive", "run", row.folder ], dispatch: @dispatch)
-        rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-          Hive::Tui::Debug.log(
-            "review_recovery",
-            "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
-          )
-          flash_async(
-            "review recovery: marker cleared, but `hive run` failed to start: " \
-            "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
-          )
-          return
-        end
+        return unless dispatch_recovery_rerun(row, label: "review recovery", debug_scope: "review_recovery")
 
         detail = review_recovery_detail(row, marker_name)
         flash_async("review recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
@@ -1062,6 +1050,31 @@ module Hive
         flash_async(
           "review recovery failed: #{e.class.name}: #{Hive::Tui::Text.sanitize(e.message)[0, 80]}"
         )
+      end
+
+      def dispatch_recovery_rerun(row, label:, debug_scope:)
+        started = Hive::Tui::Subprocess.dispatch_background(
+          [ "hive", "run", row.folder ],
+          dispatch: @dispatch
+        )
+        return true unless started == false
+
+        Hive::Tui::Debug.log(debug_scope, "dispatch returned false for #{row.slug} (marker cleared)")
+        flash_async(
+          "#{label}: marker cleared, but `hive run` failed to start; " \
+          "run `hive run #{row.folder}` manually"
+        )
+        false
+      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
+        Hive::Tui::Debug.log(
+          debug_scope,
+          "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
+        )
+        flash_async(
+          "#{label}: marker cleared, but `hive run` failed to start: " \
+          "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
+        )
+        false
       end
 
       def flash_async(text)
@@ -1237,19 +1250,7 @@ module Hive
           return
         end
 
-        begin
-          Hive::Tui::Subprocess.dispatch_background([ "hive", "run", row.folder ], dispatch: @dispatch)
-        rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-          Hive::Tui::Debug.log(
-            "error_recovery",
-            "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
-          )
-          flash_async(
-            "error recovery: marker cleared, but `hive run` failed to start: " \
-            "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
-          )
-          return
-        end
+        return unless dispatch_recovery_rerun(row, label: "error recovery", debug_scope: "error_recovery")
 
         detail = error_recovery_detail(row)
         flash_async("error recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")

@@ -243,6 +243,21 @@ class HiveBotCallbackHandlersTest < Minitest::Test
                "with no commands to run, alert_reset must NOT fire (otherwise the alert clears without any retry)"
   end
 
+  def test_clear_and_retry_refuses_manual_only_marker
+    # P2b: a stale clear_retry: button on a manual-only marker (EXECUTE_STALE)
+    # must refuse, not dispatch markers-clear + a retry verb. Routing through
+    # RecoverySequence.build gives it the same manual-only guard the current
+    # Autofix paths enforce.
+    result = @handlers.handle(
+      :callback_clear_and_retry,
+      update("clear_retry:alpha:stale-task-260519-abcd:4-execute:EXECUTE_STALE")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic recovery/, result.text)
+    assert_nil result.commands, "manual-only refusal must not dispatch any commands"
+  end
+
   def test_autofix_marker_dispatches_clear_then_retry
     result = @handlers.handle(
       :callback_autofix,

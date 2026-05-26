@@ -60,16 +60,19 @@ module Hive
 
         def clear_and_retry(data)
           _prefix, project, slug, stage, marker, match_attr = split_callback(data, [ 5, 6 ])
-          commands = RecoverySequence.retry_commands(project: project, slug: slug, stage: stage,
-                                                     marker: marker, match_attr: match_attr)
-          if commands.empty?
-            stage_label = stage.to_s.empty? ? "(empty)" : stage
-            return @result_class.new(action: :reply, text: "No retry verb for stage #{stage_label}.")
-          end
-
-          @result_class.new(action: :dispatch_commands, project: project, slug: slug, commands: commands,
-                            alert_reset: RecoverySequence.alert_reset(project, slug, stage, marker, match_attr),
-                            clear_keyboard: true)
+          # Legacy clear_retry: buttons (from messages predating the Autofix
+          # rename) route here. Go through RecoverySequence.build, not
+          # retry_commands directly, so a stale clear_retry on a manual-only
+          # marker (e.g. EXECUTE_STALE) gets the same "open it on a laptop"
+          # refusal the current Autofix paths enforce — rather than blindly
+          # dispatching markers-clear + a retry verb against a state that has
+          # no safe auto-recovery. callback_data carries no attrs, so this
+          # uses the marker-only manual-only check (ALWAYS_MANUAL_MARKERS).
+          RecoverySequence.build(
+            project: project, slug: slug, stage: stage,
+            marker: marker, match_attr: match_attr,
+            result_class: @result_class, clear_keyboard: true
+          )
         end
 
         def autofix(data)

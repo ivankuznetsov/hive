@@ -101,6 +101,18 @@ module Hive
           row, error = resolve_status_row(slug)
           return @result_class.new(action: :reply, text: error) if error
 
+          # Gate on retryable_recovery? exactly as the inline 🔧 Autofix button
+          # and the /status /autofix link do. The slash path has the full row
+          # (including the diagnostic), so a directly-typed /autofix on a row
+          # that isn't auto-retryable — a manual-only state, or a recovery row
+          # whose diagnostic carries no suggested_next_action.retry — must
+          # refuse here rather than dispatch markers-clear + a retry verb.
+          # Without this, manually typing /autofix bypassed the retryability
+          # gate that both other surfaces enforce.
+          unless Hive::Bot::NotificationBuilders.retryable_recovery?(row)
+            return @result_class.new(action: :reply, text: not_retryable_hint(row))
+          end
+
           match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(row)
           # clear_keyboard is false for the slash path — no inline button was
           # tapped, so there's no keyboard to clear on the originating
@@ -134,6 +146,18 @@ module Hive
         end
 
         private
+
+        # Operator-facing refusal for a /autofix on a non-retryable row.
+        # Manual-only states (execute_stale, fix_tampered) point at a laptop;
+        # other non-retryable recovery rows (and any non-recovery row) point
+        # at /details so the operator can see what the task actually needs.
+        def not_retryable_hint(row)
+          if Hive::Bot::NotificationBuilders.manual_only_recovery?(row)
+            "Hive has no automatic recovery for this state - open it on a laptop."
+          else
+            "#{row.slug} has no automatic retry available. Use /details #{row.slug} to see what it needs."
+          end
+        end
 
         # Resolves a slug against the latest status snapshot. Returns
         # [row, nil] on a unique match, or [nil, error_text] otherwise:

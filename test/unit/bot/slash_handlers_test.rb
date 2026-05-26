@@ -111,15 +111,6 @@ class HiveBotSlashHandlersTest < Minitest::Test
     diagnostic: nil
   ).freeze
 
-  DONE_ROW = Row.new(
-    project: "hive",
-    slug: "done-260525-abcd",
-    stage: "9-done",
-    marker: "review_error",
-    attrs: {},
-    diagnostic: nil
-  ).freeze
-
   def test_autofix_with_default_snapshot_provider_replies_slug_not_found
     # SlashHandlers default-constructs status_snapshot_provider to -> { [] }
     # so it works in isolation when nobody injects one (e.g., scripts that
@@ -261,12 +252,33 @@ class HiveBotSlashHandlersTest < Minitest::Test
   end
 
   def test_autofix_no_retry_verb_for_stage_replies_cleanly
-    handlers = autofix_handlers([ DONE_ROW ])
+    # A retryable 9-done row passes the retryable gate but has no retry verb,
+    # so RecoverySequence.build's stage check produces the clean refusal.
+    done_retryable = Row.new(project: "hive", slug: "done-260525-abcd", stage: "9-done",
+                             marker: "review_error", attrs: {},
+                             diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    handlers = autofix_handlers([ done_retryable ])
 
     result = handlers.autofix(Update.new(text: "/autofix done-260525-abcd", chat_id: 1))
 
     assert_equal :reply, result.action
     assert_match(/No retry verb for stage 9-done/, result.text)
+  end
+
+  def test_autofix_non_retryable_recovery_row_points_to_details
+    # P2a: a recovery row with no suggested_next_action.retry is not auto-
+    # retryable. Manually typed /autofix must refuse and point to /details
+    # rather than dispatch markers-clear + a retry verb (the gate the inline
+    # button and the /status link already enforce).
+    non_retryable = Row.new(project: "hive", slug: "norefry-260525-abcd", stage: "6-review",
+                            marker: "review_error", attrs: { "pass" => "2" }, diagnostic: nil)
+    handlers = autofix_handlers([ non_retryable ])
+
+    result = handlers.autofix(Update.new(text: "/autofix norefry-260525-abcd", chat_id: 1))
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic retry available/, result.text)
+    assert_match(%r{/details norefry-260525-abcd}, result.text)
   end
 
   def test_details_dispatches_status_diagnose_argv

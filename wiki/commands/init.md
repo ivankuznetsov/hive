@@ -7,15 +7,15 @@ updated: 2026-05-26
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) to use, what budget+timeout sanity caps to set, and whether this project should be enrolled for daemon dispatch, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service is installed for autostart.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive and `--json` emits the resolved bootstrap contract: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) to use, what budget+timeout sanity caps to set, and whether this project should be enrolled for daemon dispatch, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service is installed for autostart.
 
 ## Usage
 
 ```
-hive init [PROJECT_PATH] [--force]
+hive init [PROJECT_PATH] [--force] [--json]
 ```
 
-`PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check.
+`PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits a single `hive-init.v1` success document on stdout with project metadata and the resolved prompt answers.
 
 ## Preconditions
 
@@ -47,10 +47,12 @@ hive init [PROJECT_PATH] [--force]
    - Managed LLM WIKI blocks in `AGENTS.md` and `CLAUDE.md`, plus `.claude/settings.json` with a managed `SessionStart` hook that prints `wiki/index.md` and recent `wiki/log.md`.
 9. **Commit llm-wiki bootstrap files** via `GitOps#commit_llm_wiki_bootstrap!`, committing tracked project context as `chore: initialize llm-wiki` so future Hive worktrees inherit wiki context.
 10. **Install runtime wiki hooks** via `Hive::LlmWikiBootstrap.install_runtime_hooks!`: adds/replaces only the managed block in `.git/hooks/post-commit`, writes Linux user systemd service/timer files for daily refresh, and enables the timer through `timers.target.wants`.
-11. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into `~/Dev/hive/config.yml`.
-12. Print summary: project name, default branch, hive-state path, worktree root, and a `next:` line with the `hive new ...` invocation.
+11. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into the XDG global config path (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml`).
+12. Print a human summary, or with `--json` emit `hive-init.v1`: `schema`, `schema_version`, `ok`, `project`, `path`, `default_branch`, `hive_state_path`, `worktree_root`, `answers`, plus top-level `planning_agent`, `claude_mode`, `development_agent`, `enabled_reviewers`, `triage_bias`, `budgets`, `timeouts`, `daemon_enabled`, and `daemon_autostart_requested`. In JSON mode the non-TTY defaults line is suppressed so stdout remains one JSON document.
 13. Ensure global daemon autostart via `Hive::Commands::Daemon::ServiceInstaller`, recording `daemon.autostart: true` in the global config and enabling/starting the platform service when systemd-user or launchd is available. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
 14. Run the non-fatal `hive doctor` skill preflight; missing skills warn on stderr without failing init.
+
+If any step from orphan-state creation through global registration raises, init attempts partial rollback before surfacing the failure: delete `.hive-state/config.yml` if present, `git worktree remove --force <project>/.hive-state`, `git branch -D hive/state`, reset init-created main-checkout commits to the pre-init head, and restore/remove init-owned files such as `.gitignore`, `.llm-wiki/`, wiki scaffolding, runtime hooks, scheduler units, and the global registry file. Non-Hive exceptions are wrapped as `Hive::InternalError` (exit 70) so `bin/hive` does not leak a Ruby stack trace. If rollback itself cannot converge, stderr includes the rollback error plus a one-line recovery command so re-running init is not trapped behind an orphan `hive/state` branch.
 
 ## Prompt flow (ADR-023)
 
@@ -64,7 +66,7 @@ On TTY input streams the prompt walks the operator through the following section
 6. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
 7. **Daemon enrollment** (`daemon.enabled`): whether to opt this project into the auto-advance daemon (default yes). The per-user daemon service is global install-time infrastructure; project init no longer asks whether to start or autostart it.
 
-Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). The Claude mode prompt follows the same rule (`tmux` / `headless` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
+Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). Agent names are resolved before numeric indexes, so a future digit-only profile name such as `42` remains addressable by name. The Claude mode prompt follows the same rule (`tmux` / `headless` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
 
 ### Stable-iteration-order contract
 
@@ -83,6 +85,8 @@ hive: using defaults — planning=claude, claude_mode=tmux, dev=codex, reviewers
 ```
 
 Piped input is **not** consumed — `printf 'codex\n...' | hive init` ignores the piped data and uses defaults. Document this contract for any automation that wants to set non-default values: use `--force` plus an explicitly-edited YAML rather than expecting heredoc piping to populate answers.
+
+Limit prompts accept `<budget>,<timeout>` pairs. Blank input keeps both defaults. A leading empty budget such as `,900` keeps the default budget and overrides only timeout. A trailing empty timeout such as `10,` is rejected and re-prompts; budget-only overrides must be explicit as `<budget>,<timeout>` so typoed commas do not silently keep a default timeout.
 
 ## Default-branch detection
 
@@ -103,12 +107,13 @@ This branch is what the orphan worktree is initially based on, and what feature 
 | `target appears to be inside a worktree` | running from a feature worktree | run on main checkout |
 | `uncommitted changes` | dirty working tree | commit/stash, or pass `--force` |
 | `already initialized` (exit 2) | `hive/state` already exists | nothing to do |
+| `partial init failed` warning | disk-side-effect step raised after orphan-state creation | rerun after automatic rollback; if rollback was incomplete, inspect stderr and run the printed `git worktree remove ... && git branch -D hive/state` recovery command |
 
 ## Tests
 
-- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, and the U5 piped-input + abort + already-initialized-guard scenarios.
-- `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path plus top-level and nested missing-key fail-fast contracts.
-- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, edge re-prompts, the Claude mode prompt, the non-TTY summary contract, and the testability invariant.
+- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including non-default answer mirroring and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, and the U5 piped-input + abort + already-initialized-guard scenarios.
+- `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
+- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, limit-pair edge re-prompts, the Claude mode prompt, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins `schemas/hive-init.v1.json` to the producer's success payload.
 
 ## Backlinks
 

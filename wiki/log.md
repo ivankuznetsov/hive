@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T07:57:49Z] init - JSON success envelope and partial rollback
+
+**Action:** Rebased and documented issue #24's `hive init` hardening on top of the current daemon-autostart behavior: `--json` now emits a single `hive-init.v1` success payload with resolved prompt answers and project metadata, the non-TTY defaults prose is suppressed in JSON mode, and the disk-writing init window snapshots and rolls back `.hive-state/config.yml`, the `.hive-state` worktree, `hive/state`, init-created main-checkout commits/files, runtime hook/scheduler files, and the global registry path before surfacing failures as typed Hive errors. Prompt edge cases were also pinned: digit-only agent profile names resolve as names before indexes, leading-comma timeout-only limits remain valid, and trailing-comma budget-only limits re-prompt.
+
+**Refreshed pages:**
+- [[commands/init]] - usage, JSON shape, rollback/recovery semantics, daemon autostart semantics, prompt edge-case contract, tests.
+- [[cli]] - command table and `--json` support matrix updated for `hive init --json`.
+
 ## [2026-05-27T07:08:56Z] config - atomic registry review hardening
 
 **Action:** Code-review follow-up for #184: global config atomic rewrites now restore the existing file mode after tempfile creation so a restrictive process umask cannot silently narrow `config.yml`; lock/write path-shape failures such as directory lockfiles, `EISDIR`, `ENOTDIR`, and symlink loops are rewrapped as `Hive::ConfigError`; and mixed register/forget/prune fork tests cover the locked read-modify-write paths. Refreshed config/state docs to name the XDG global config path while preserving the migrated legacy `~/Dev/hive/config.yml` note.

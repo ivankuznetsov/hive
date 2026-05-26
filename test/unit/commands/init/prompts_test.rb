@@ -142,6 +142,15 @@ class InitPromptsTest < Minitest::Test
     assert_equal "codex", answers["planning_agent"]
   end
 
+  def test_interactive_planning_agent_digit_name_prefers_name_over_index
+    prompts, _output = make_prompts(
+      interactive_input(planning: "42"),
+      registered_agents: %w[claude codex 42]
+    )
+    answers = prompts.collect
+    assert_equal "42", answers["planning_agent"]
+  end
+
   def test_interactive_planning_agent_unknown_reprompts_then_accepts
     # First answer is invalid → re-prompt; second answer is valid.
     # Reads total: planning (invalid + retry) + claude mode
@@ -337,6 +346,16 @@ class InitPromptsTest < Minitest::Test
     answers = prompts.collect
     assert_equal Hive::Config::DEFAULTS["budget_usd"]["brainstorm"], answers["budgets"]["brainstorm"]
     assert_equal 900, answers["timeouts"]["brainstorm"]
+  end
+
+  def test_interactive_limits_trailing_comma_reprompts
+    input = ([ "", "", "", "", "", "10,", "10,600" ] +
+             ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 2))).join("\n") + "\n"
+    prompts, output = make_prompts(input)
+    answers = prompts.collect
+    assert_equal 10, answers["budgets"]["brainstorm"]
+    assert_equal 600, answers["timeouts"]["brainstorm"]
+    assert_match(/timeout is required when budget is provided/, output.string)
   end
 
   def test_interactive_limits_zero_budget_reprompts

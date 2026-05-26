@@ -1,5 +1,7 @@
 require "open3"
 require "fileutils"
+require "json"
+require "shellwords"
 require "stringio"
 require "hive/config"
 require "hive/git_ops"
@@ -12,9 +14,35 @@ require "hive/invoked_binary"
 module Hive
   module Commands
     class Init
-      def initialize(project_path, force: false, prompts: nil)
+      INIT_MAIN_CHECKOUT_PATHS = %w[
+        .gitignore
+        .llm-wiki/config.json
+        .llm-wiki/refresh-wiki.sh
+        .llm-wiki/post-commit-refresh.sh
+        .claude/settings.json
+        AGENTS.md
+        CLAUDE.md
+        wiki/index.md
+        wiki/log.md
+        wiki/gaps.md
+        wiki/architecture.md
+        wiki/decisions.md
+        wiki/dependencies.md
+        raw/notes/.gitkeep
+      ].freeze
+
+      INIT_MAIN_CHECKOUT_DIRS = %w[
+        .llm-wiki
+        .claude
+        wiki
+        raw
+        raw/notes
+      ].freeze
+
+      def initialize(project_path, force: false, json: false, prompts: nil)
         @project_path = File.expand_path(project_path)
         @force = force
+        @json = json
         # Optional Prompts instance for testability. Tests inject a
         # pre-fed StringIO-backed instance to drive the interactive flow
         # without touching $stdin. Production keeps this nil so the
@@ -41,19 +69,223 @@ module Hive
         # so a re-run of `hive init` proceeds normally.
         answers = collect_prompt_answers
         project_config_content = render_project_config(ops, answers: answers)
+        entry = initialize_project_state(ops, content: project_config_content)
 
-        ops.hive_state_init
-        write_per_project_config(ops, content: project_config_content)
-        ops.add_hive_state_to_master_gitignore!
-        Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
-        ops.commit_llm_wiki_bootstrap!
-        Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
-
-        entry = Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
-
-        print_summary(entry: entry, ops: ops)
+        if @json
+          emit_json_summary(entry: entry, ops: ops, answers: answers)
+        else
+          print_summary(entry: entry, ops: ops)
+        end
         register_daemon_service!(autostart: true)
         run_init_preflight!
+      rescue Hive::Error
+        raise
+      rescue StandardError => e
+        raise Hive::InternalError, "init failed: #{e.class}: #{e.message}"
+      end
+
+      def initialize_project_state(ops, content:)
+        rollback_on_failure = false
+        side_effect_snapshot = capture_init_side_effect_snapshot
+        begin
+          rollback_on_failure = true
+          init_result = ops.hive_state_init
+          rollback_on_failure = init_result == :created
+          write_per_project_config(ops, content: content)
+          ops.add_hive_state_to_master_gitignore!
+          Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
+          ops.commit_llm_wiki_bootstrap!
+          Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path)
+
+          Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
+        rescue StandardError
+          rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
+          raise
+        end
+      end
+
+      def rollback_partial_init(ops, side_effect_snapshot: nil)
+        results = []
+        errors = []
+        rollback_config_file(ops, results, errors)
+        rollback_hive_state_worktree(ops, results, errors)
+        rollback_hive_state_branch(ops, results, errors)
+        rollback_init_side_effects(side_effect_snapshot, results, errors)
+        report_partial_init_rollback(ops, results, errors)
+      rescue StandardError => e
+        write_warn("hive: partial init failed; rollback failed: #{e.class}: #{e.message}")
+        write_warn("hive: recover with: #{partial_init_recovery_command(ops)}")
+      end
+
+      def rollback_config_file(ops, results, errors)
+        path = File.join(ops.hive_state_path, "config.yml")
+        return unless File.exist?(path)
+
+        FileUtils.rm_f(path)
+        results << "config.yml"
+      rescue StandardError => e
+        errors << "config.yml cleanup failed: #{e.class}: #{e.message}"
+      end
+
+      def rollback_hive_state_worktree(ops, results, errors)
+        return unless File.exist?(ops.hive_state_path)
+
+        out, err, status = Open3.capture3(
+          "git", "-C", @project_path, "worktree", "remove", "--force", ops.hive_state_path
+        )
+        if status.success?
+          results << ".hive-state worktree"
+        else
+          errors << rollback_error("git worktree remove", out, err)
+        end
+      end
+
+      def rollback_hive_state_branch(ops, results, errors)
+        return unless ops.hive_state_branch_exists?
+
+        out, err, status = Open3.capture3("git", "-C", @project_path, "branch", "-D", Hive::GitOps::HIVE_BRANCH)
+        if status.success?
+          results << "hive/state branch"
+        else
+          errors << rollback_error("git branch -D", out, err)
+        end
+      end
+
+      def capture_init_side_effect_snapshot
+        {
+          head: current_project_head,
+          paths: init_side_effect_paths.to_h { |path| [ path, snapshot_path(path) ] }
+        }
+      end
+
+      def init_side_effect_paths
+        project_paths = (INIT_MAIN_CHECKOUT_PATHS + INIT_MAIN_CHECKOUT_DIRS).map do |path|
+          File.join(@project_path, path)
+        end
+        project_paths + [
+          File.join(@project_path, ".git", "hooks", "post-commit"),
+          *llm_wiki_scheduler_paths,
+          Hive::Config.global_config_path
+        ]
+      end
+
+      def llm_wiki_scheduler_paths
+        user_dir = File.expand_path("~/.config/systemd/user")
+        slug = Hive::LlmWikiBootstrap.project_slug(@project_path)
+        service = "llm-wiki-#{slug}.service"
+        timer = "llm-wiki-#{slug}.timer"
+        [
+          File.join(user_dir, service),
+          File.join(user_dir, timer),
+          File.join(user_dir, "timers.target.wants", timer)
+        ]
+      end
+
+      def snapshot_path(path)
+        if File.symlink?(path)
+          { type: :symlink, target: File.readlink(path), mode: File.lstat(path).mode & 0o7777 }
+        elsif File.file?(path)
+          { type: :file, content: File.binread(path), mode: File.stat(path).mode & 0o7777 }
+        elsif File.directory?(path)
+          { type: :directory, mode: File.stat(path).mode & 0o7777 }
+        else
+          { type: :absent }
+        end
+      end
+
+      def current_project_head
+        out, _err, status = Open3.capture3("git", "-C", @project_path, "rev-parse", "HEAD")
+        status.success? ? out.strip : nil
+      end
+
+      def rollback_init_side_effects(snapshot, results, errors)
+        return unless snapshot
+
+        rollback_main_checkout_commits(snapshot, results, errors)
+        rollback_main_checkout_index(errors)
+        restore_init_side_effect_paths(snapshot.fetch(:paths), results, errors)
+      end
+
+      def rollback_main_checkout_commits(snapshot, results, errors)
+        head = snapshot[:head]
+        return if head.to_s.empty?
+
+        current = current_project_head
+        return if current == head
+
+        out, err, status = Open3.capture3("git", "-C", @project_path, "reset", "--soft", head)
+        if status.success?
+          results << "main checkout commits"
+        else
+          errors << rollback_error("git reset --soft", out, err)
+        end
+      end
+
+      def rollback_main_checkout_index(errors)
+        out, err, status = Open3.capture3(
+          "git", "-C", @project_path, "reset", "-q", "--", *INIT_MAIN_CHECKOUT_PATHS
+        )
+        errors << rollback_error("git reset init paths", out, err) unless status.success?
+      end
+
+      def restore_init_side_effect_paths(paths, results, errors)
+        changed = false
+        paths.each do |path, snapshot|
+          changed = true if restore_init_side_effect_path(path, snapshot)
+        rescue StandardError => e
+          errors << "#{path} restore failed: #{e.class}: #{e.message}"
+        end
+        results << "main checkout side effects" if changed
+      end
+
+      def restore_init_side_effect_path(path, snapshot)
+        case snapshot.fetch(:type)
+        when :absent
+          return false unless File.exist?(path) || File.symlink?(path)
+
+          FileUtils.rm_rf(path)
+          true
+        when :file
+          FileUtils.rm_rf(path) if File.directory?(path) && !File.symlink?(path)
+          FileUtils.mkdir_p(File.dirname(path))
+          File.binwrite(path, snapshot.fetch(:content))
+          File.chmod(snapshot.fetch(:mode), path)
+          true
+        when :symlink
+          FileUtils.rm_rf(path)
+          FileUtils.mkdir_p(File.dirname(path))
+          File.symlink(snapshot.fetch(:target), path)
+          true
+        when :directory
+          FileUtils.rm_rf(path) if File.exist?(path) && !File.directory?(path)
+          FileUtils.mkdir_p(path)
+          File.chmod(snapshot.fetch(:mode), path)
+          true
+        else
+          false
+        end
+      end
+
+      def report_partial_init_rollback(ops, results, errors)
+        return if results.empty? && errors.empty?
+
+        if errors.empty?
+          write_warn("hive: partial init failed; rolled back #{results.join(', ')}")
+        else
+          write_warn("hive: partial init failed; rollback incomplete: #{errors.join('; ')}")
+          write_warn("hive: recover with: #{partial_init_recovery_command(ops)}")
+        end
+      end
+
+      def rollback_error(command, out, err)
+        detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+        detail.empty? ? "#{command} failed" : "#{command} failed: #{detail.lines.first.chomp}"
+      end
+
+      def partial_init_recovery_command(ops)
+        worktree = Shellwords.join([ "git", "-C", @project_path, "worktree", "remove", ops.hive_state_path, "--force" ])
+        branch = Shellwords.join([ "git", "-C", @project_path, "branch", "-D", Hive::GitOps::HIVE_BRANCH ])
+        "#{worktree} && #{branch}"
       end
 
       # Non-fatal skill preflight: after init succeeds, run the doctor
@@ -149,6 +381,35 @@ module Hive
         Hive::InvokedBinary.path
       end
 
+      def emit_json_summary(entry:, ops:, answers:)
+        puts JSON.generate(success_payload(entry: entry, ops: ops, answers: answers))
+      rescue Errno::EPIPE
+        nil
+      end
+
+      def success_payload(entry:, ops:, answers:)
+        {
+          "schema" => "hive-init",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init"),
+          "ok" => true,
+          "project" => entry.fetch("name"),
+          "path" => entry.fetch("path"),
+          "default_branch" => ops.default_branch,
+          "hive_state_path" => entry.fetch("hive_state_path"),
+          "worktree_root" => worktree_root,
+          "answers" => answers,
+          "planning_agent" => answers.fetch("planning_agent"),
+          "claude_mode" => answers.fetch("claude_mode", Hive::Commands::Init::Prompts::DEFAULT_CLAUDE_MODE),
+          "development_agent" => answers.fetch("development_agent"),
+          "enabled_reviewers" => answers.fetch("enabled_reviewers"),
+          "triage_bias" => answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS),
+          "budgets" => answers.fetch("budgets"),
+          "timeouts" => answers.fetch("timeouts"),
+          "daemon_enabled" => answers.fetch("daemon_enabled", true),
+          "daemon_autostart_requested" => true
+        }
+      end
+
       def print_summary(entry:, ops:)
         c = Palette.for($stdout)
         name = entry["name"]
@@ -169,7 +430,8 @@ module Hive
       end
 
       def collect_prompt_answers
-        prompts = @prompts || Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: $stdout)
+        summary_io = @json ? StringIO.new : $stdout
+        prompts = @prompts || Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: summary_io)
         prompts.collect
       rescue Hive::Commands::Init::Prompts::Aborted => e
         # Distinct exit code (USAGE / 64) from generic crashes (GENERIC / 1)

@@ -51,9 +51,9 @@ class HiveCliTest < Minitest::Test
 
   def test_init_forget_prune_update_uninstall_and_migrate_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
-      Hive::CLI.start([ "init", "/tmp/project", "--force" ])
+      Hive::CLI.start([ "init", "/tmp/project", "--force", "--json" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-      assert_equal({ force: true }, calls.first.fetch(:kwargs))
+      assert_equal({ force: true, json: true }, calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
 

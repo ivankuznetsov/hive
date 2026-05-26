@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-26T10:15:00Z] daemon - self-reexec on source-file drift
+
+**Action:** Surfaced the daemon's new auto-re-exec behavior triggered by `lib/hive.rb` SHA-256 drift. Adds `ADR-031` recording the diagnosis (8,946 `schema_version` mismatches between PR #78 and the next restart) and the chosen mitigation. Updates `wiki/modules/daemon.md` with operator-facing details: fingerprint scope, rate-limit (60s), kill switch (`HIVE_DAEMON_NO_AUTO_REEXEC=1`), and what kinds of edits do and don't trigger re-exec.
+
+**Refreshed pages:**
+- [[decisions]] - new ADR-031 inserted ahead of ADR-030.
+- [[modules/daemon]] - added "Self-reexec on source drift" section before Backlinks.
+
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
 **Action:** Dogfooded the merged project-global `claude.mode: tmux` path against real Claude in a disposable project. The run used a temporary `HIVE_HOME` plus private `HIVE_TMUX_SOCKET`, verified `hive doctor --json`, ran brainstorm to `marker_after=waiting`, filled the answer, reran to `marker_after=complete`, confirmed `round_waiting`/`round_complete` events, `hive status --json` `ready_to_plan`, and tmux cleanup.

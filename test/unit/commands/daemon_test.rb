@@ -8,6 +8,10 @@ class HiveCommandsDaemonTest < Minitest::Test
     def run_forever
       calls << :run_forever
     end
+
+    def reexec_requested?
+      false
+    end
   end
 
   FakeInstaller = Struct.new(:target_path, :last_backup_path, :last_restart_invoked,

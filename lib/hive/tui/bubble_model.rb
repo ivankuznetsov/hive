@@ -115,10 +115,10 @@ module Hive
         @clipboard_probe = clipboard_probe
         # `@healed_folders` is touched from the main runner thread
         # (`auto_heal_kill_class_errors` registers folders before
-        # spawning heals) AND from heal Threads (which evict on
-        # failure so the next poll retries). The mutex serializes
-        # both — Hash#[]=/`#delete` are not GVL-atomic across multiple
-        # writers under MRI.
+        # spawning heals) AND from heal Threads (which refresh the
+        # failure-backoff timestamp). The mutex serializes both —
+        # Hash reads/writes are not GVL-atomic across multiple writers
+        # under MRI.
         @healed_folders = {} # folder path → Time.now
         @healed_folders_mutex = Mutex.new
         # F8: track in-flight heal Threads so App.run_charm's ensure
@@ -661,10 +661,10 @@ module Hive
 
       # Scan a fresh snapshot for tasks whose `:error` marker came from
       # a signal kill (130 / 137 / 143) and clear the marker in the
-      # background. Each folder is healed at most once per session
-      # (`@healed_folders` dedup) so the loop never thrashes if the
-      # background heal is slow or the marker re-appears for an
-      # unrelated reason.
+      # background. Each folder can claim one heal attempt per
+      # HEAL_REPEAT_INTERVAL_SECONDS (`@healed_folders` repeat window),
+      # so the loop never thrashes if the background heal is slow or a
+      # persistent marker-clear failure survives across snapshots.
       #
       # The heal runs in a Ruby thread — `hive markers clear` is an
       # in-process subprocess via `run_quiet!` which captures
@@ -693,7 +693,7 @@ module Hive
         KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
       end
 
-      # Time-bounded eviction window: a previous successful heal blocks
+      # Time-bounded repeat window: a previous heal attempt blocks
       # re-heals of the same folder for `HEAL_REPEAT_INTERVAL_SECONDS`,
       # then the slot becomes available again. Without the bound, a
       # later kill-class error on the same folder (theoretically: the
@@ -716,12 +716,12 @@ module Hive
         end
       end
 
-      # On heal failure, evict the folder so the next snapshot's
-      # `register_heal_attempt` succeeds and retries. Without this,
-      # a transient `hive markers clear` failure would strand the
-      # row in "Error" forever (the cache would block re-attempts).
-      def evict_heal_attempt(folder)
-        @healed_folders_mutex.synchronize { @healed_folders.delete(folder) }
+      # On heal failure, refresh the folder timestamp so retries are
+      # throttled by HEAL_REPEAT_INTERVAL_SECONDS instead of spawning
+      # one new heal thread per snapshot. Transient failures still retry
+      # after the same bounded window used for successful heals.
+      def record_heal_failure(folder)
+        @healed_folders_mutex.synchronize { @healed_folders[folder] = Time.now }
       end
 
       # Override-able for tests so they can capture the heal
@@ -804,15 +804,17 @@ module Hive
       end
 
       # Calls `hive markers clear` and converts any failure (non-zero
-      # exit, exception) into a debug-log entry + cache eviction so
-      # the next snapshot retries. Without the eviction, a single
-      # transient failure would leave the row stuck in Error
-      # indefinitely while `@healed_folders` blocked re-heals.
+      # exit, exception) into a debug-log entry + backoff timestamp so
+      # persistent failures cannot spawn one heal thread per snapshot.
+      # Transient failures retry after HEAL_REPEAT_INTERVAL_SECONDS.
       #
       # `--match-attr marker_id=<observed>` ties the clear to the
       # specific kill-class marker we observed. Legacy rows without a
       # marker_id fall back to the observed reason/exit_code attrs so a
-      # same-code marker with a different reason is not erased.
+      # same-code marker with a different reason is not erased. If a
+      # concurrent run writes a different ERROR marker between snapshot
+      # and heal, the match refuses, backoff is refreshed, and the next
+      # eligible snapshot sees the real failure instead of erasing it.
       def heal_marker(row)
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
         match_attr = error_recovery_match_attr(row)
@@ -824,10 +826,10 @@ module Hive
           "auto_heal",
           "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.lines.first&.chomp.to_s[0, 120]}"
         )
-        evict_heal_attempt(row.folder)
+        record_heal_failure(row.folder)
       rescue StandardError => e
         Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
-        evict_heal_attempt(row.folder)
+        record_heal_failure(row.folder)
       end
 
       def red_status_autofix(row)

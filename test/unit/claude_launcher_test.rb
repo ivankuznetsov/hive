@@ -65,6 +65,115 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_session_handle_passes_deadline_to_send_prompt_and_wait
+    with_tmp_task do |task|
+      captured = nil
+      original = Hive::ClaudeLauncher.method(:send_prompt_and_wait!)
+      Hive::ClaudeLauncher.define_singleton_method(:send_prompt_and_wait!) do |**kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+      handle = Hive::ClaudeLauncher::SessionHandle.new(task: task, runner: Object.new)
+      handle.send_and_wait!(prompt: "prompt", timeout_sec: 5, deadline: deadline)
+
+      assert_equal deadline, captured.fetch(:deadline)
+    ensure
+      Hive::ClaudeLauncher.singleton_class.send(:remove_method, :send_prompt_and_wait!)
+      Hive::ClaudeLauncher.define_singleton_method(:send_prompt_and_wait!, original) if original
+    end
+  end
+
+  def test_prepare_claude_session_uses_caller_deadline_before_ready_timeout
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-test-session" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) { |bytes:| "Claude Code v2.1.128\nstill working" }
+
+    monotonic_now = 1_000.0
+    sleeps = []
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, lambda { |seconds|
+        sleeps << seconds
+        monotonic_now += seconds
+      }) do
+        err = assert_raises(Hive::AgentError) do
+          Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now + 0.5)
+        end
+        assert_match(/before caller deadline/, err.message)
+      end
+    end
+
+    assert_in_delta 0.5, sleeps.sum, 0.001
+  end
+
+  def test_send_prompt_and_wait_clamps_wait_timeout_to_remaining_deadline
+    with_tmp_task do |task|
+      runner = Object.new
+      sent_prompts = []
+      runner.define_singleton_method(:send_prompt) { |prompt| sent_prompts << prompt }
+
+      monotonic_now = 1_000.0
+      captured_timeout = nil
+      captured_deadline = nil
+      with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, lambda { |_runner, deadline:|
+          captured_deadline = deadline
+          monotonic_now += 1
+          true
+        }) do
+          with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_for_status, lambda { |_task, _runner, timeout, *_args|
+            captured_timeout = timeout
+            { status: :ok, final_message: nil, final_message_source: nil }
+          }) do
+            with_replaced_singleton_method(Hive::ClaudeLauncher, :capture_pane_log, ->(*_args) { }) do
+              result = Hive::ClaudeLauncher.send_prompt_and_wait!(
+                task: task,
+                runner: runner,
+                prompt: "prompt",
+                timeout_sec: 10,
+                deadline: 1_005.0,
+                status_mode: :output_file_exists
+              )
+              assert_equal :ok, result.fetch(:status)
+            end
+          end
+        end
+      end
+
+      assert_equal [ "prompt" ], sent_prompts
+      assert_in_delta 1_005.0, captured_deadline, 0.001
+      assert_in_delta 4.0, captured_timeout, 0.001
+    end
+  end
+
+  def test_send_prompt_and_wait_returns_timeout_when_readiness_consumes_deadline
+    with_tmp_task do |task|
+      runner = Object.new
+      runner.define_singleton_method(:send_prompt) { |_prompt| flunk "prompt must not be sent after deadline" }
+
+      monotonic_now = 1_000.0
+      with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, lambda { |_runner, deadline:|
+          monotonic_now = deadline
+          true
+        }) do
+          result = Hive::ClaudeLauncher.send_prompt_and_wait!(
+            task: task,
+            runner: runner,
+            prompt: "prompt",
+            timeout_sec: 10,
+            deadline: 1_001.0,
+            status_mode: :output_file_exists
+          )
+          assert_equal :timeout, result.fetch(:status)
+          assert_match(/deadline reached before prompt/, result.fetch(:error_message))
+        end
+      end
+    end
+  end
+
   def test_legacy_brainstorm_env_timeout_is_honored
     old_new = ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"]
     old_legacy = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]

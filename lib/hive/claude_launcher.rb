@@ -65,7 +65,7 @@ module Hive
 
     SessionHandle = Struct.new(:task, :runner, keyword_init: true) do
       def send_and_wait!(prompt:, expected_output: nil, timeout_sec:,
-                         status_mode: nil, log_label: nil)
+                         status_mode: nil, log_label: nil, deadline: nil)
         Hive::ClaudeLauncher.send_prompt_and_wait!(
           task: task,
           runner: runner,
@@ -73,7 +73,8 @@ module Hive
           expected_output: expected_output,
           timeout_sec: timeout_sec,
           status_mode: status_mode,
-          log_label: log_label
+          log_label: log_label,
+          deadline: deadline
         )
       end
     end
@@ -186,10 +187,17 @@ module Hive
 
     def send_prompt_and_wait!(task:, runner:, prompt:, timeout_sec:,
                               expected_output: nil, status_mode: nil,
-                              log_label: nil)
+                              log_label: nil, deadline: nil)
       reset_signal_files(task)
       cleanup_expected_output(expected_output)
-      prepare_claude_session!(runner)
+      prepare_claude_session!(runner, deadline: deadline)
+      effective_timeout_sec = timeout_sec
+      if deadline
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return { status: :timeout, error_message: "deadline reached before prompt was sent" } if remaining <= 0
+
+        effective_timeout_sec = [ timeout_sec, remaining ].compact.min
+      end
       effective_mode = status_mode || :state_file_marker
       # Parity with `Hive::Agent#run!`: only the :state_file_marker mode
       # stamps the AGENT_WORKING transient marker (the orchestrator
@@ -202,7 +210,7 @@ module Hive
                           started: Time.now.utc.iso8601)
       end
       runner.send_prompt(prompt)
-      result = wait_for_status(task, runner, timeout_sec, status_mode, expected_output, log_label)
+      result = wait_for_status(task, runner, effective_timeout_sec, status_mode, expected_output, log_label)
       # Headless launches drop a `<log_label>-<ts>.log` under
       # `task.log_dir`; tmux launches need the same shared log path so
       # downstream Claude-driven stages can find per-invocation output.
@@ -415,7 +423,9 @@ module Hive
       nil
     end
 
-    def prepare_claude_session!(runner)
+    # `deadline:` is an optional CLOCK_MONOTONIC timestamp supplied by
+    # callers that need readiness waits to count against an outer budget.
+    def prepare_claude_session!(runner, deadline: nil)
       # Distinguish "session was alive, claude inside it died" from
       # "trust prompt never appeared" — both look like "last_tail
       # didn't show the ready prompt" by the deadline, but a dead
@@ -431,27 +441,33 @@ module Hive
         end
       end
 
-      deadline = Time.now + claude_ready_wait_timeout
+      ready_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + claude_ready_wait_timeout
+      caller_deadline = deadline
+      deadline = [ ready_deadline, caller_deadline ].compact.min
       last_tail = ""
       loop do
         last_tail = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
 
         if claude_trust_prompt?(last_tail)
           runner.send_keys("Enter")
-          sleep CLAUDE_READY_POLL_INTERVAL_SEC
-          break if Time.now >= deadline
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          break if remaining <= 0
+
+          sleep [ CLAUDE_READY_POLL_INTERVAL_SEC, remaining ].min
           next
         end
 
         return true if claude_ready_prompt?(last_tail)
 
-        break if Time.now >= deadline
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        break if remaining <= 0
 
-        sleep CLAUDE_READY_POLL_INTERVAL_SEC
+        sleep [ CLAUDE_READY_POLL_INTERVAL_SEC, remaining ].min
       end
 
+      reason = caller_deadline && deadline == caller_deadline ? "before caller deadline" : "in tmux session #{runner.name}"
       raise Hive::AgentError,
-            "claude interactive prompt did not become ready in tmux session #{runner.name}; " \
+            "claude interactive prompt did not become ready #{reason}; " \
             "last pane tail: #{last_tail.byteslice(-500, 500).to_s.scrub.inspect}"
     rescue Hive::TmuxError => e
       raise Hive::AgentError, "could not inspect claude tmux session #{runner.name}: #{e.message}"

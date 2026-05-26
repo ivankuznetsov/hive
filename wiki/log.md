@@ -10,6 +10,13 @@ Append-only log of all wiki operations.
 
 **Refs:** [[commands/daemon]], [[commands/init]], [[operating]]
 
+## [2026-05-26T23:18:07Z] review - enforce wall-clock attribution for fair-share deadlines
+
+**Action:** Review-code follow-up for #155: when all reviewers return errors after consuming rolling shares, `run_reviewers` re-checks the outer wall clock before falling back to `:all_failed`, preserving `REVIEW_STALE reason=wall_clock`. Shared Claude review sends now thread the reviewer deadline into tmux readiness, so a busy shared session cannot spend time outside that reviewer's fair share.
+
+**Refreshed pages:**
+- [[stages/review]] - noted that shared Claude tmux readiness waits count against the current reviewer deadline.
+
 ## [2026-05-26T22:55:00Z] daemon - autostart install repair
 
 **Action:** Tightened install-time daemon autostart so service units preserve the invoked user-facing wrapper (`hive` or `hv`) instead of baking the inner gem shim, and so Linux hosts without usable systemd-user get a failed `hive-daemon-install` envelope rather than a false enabled-autostart success. Agent install instructions now carry the verified `hive_cmd` through daemon install and project init.

@@ -49,7 +49,8 @@ module Hive
             expected_output: output_path,
             timeout_sec: spawn_timeout || configured_timeout,
             status_mode: :output_file_exists,
-            log_label: build_log_label(attempts)
+            log_label: build_log_label(attempts),
+            deadline: deadline
           )
         end
       end

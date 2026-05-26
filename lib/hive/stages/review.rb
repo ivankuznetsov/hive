@@ -986,6 +986,9 @@ module Hive
           end
         end
 
+        return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
+                                       wall_clock_exceeded?(started_at, max_wall_clock_sec)
+
         statuses.all?(:error) ? :all_failed : :ok
       end
 

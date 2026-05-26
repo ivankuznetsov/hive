@@ -744,6 +744,20 @@ module Hive
     def cleanup_scratch(settings_path)
       return unless settings_path
 
+      # If StopHookInstaller backed up a project-owned settings.json
+      # before overwriting (because the file was already present at
+      # install time), restore it from the backup. Otherwise this
+      # cleanup unconditionally deletes the file — destructive when
+      # the project committed `.claude/settings.json` (e.g. via
+      # `hive init`'s llm-wiki bootstrap), and the source of recurring
+      # `dirty_worktree` markers in 4-execute / 6-review / 8-finalize.
+      backup_path = "#{settings_path}#{Hive::StopHookInstaller::BACKUP_SUFFIX}"
+      if File.exist?(backup_path)
+        File.chmod(0o644, settings_path) if File.exist?(settings_path)
+        FileUtils.mv(backup_path, settings_path)
+        return
+      end
+
       File.delete(settings_path) if File.exist?(settings_path)
       dir = File.dirname(settings_path)
       Dir.rmdir(dir) if Dir.exist?(dir) && Dir.empty?(dir)

@@ -77,6 +77,55 @@ class StopHookInstallerTest < Minitest::Test
     end
   end
 
+  def test_install_backs_up_existing_project_owned_settings
+    with_tmp_dir do |dir|
+      claude_dir = File.join(dir, ".claude")
+      FileUtils.mkdir_p(claude_dir)
+      project_settings = File.join(claude_dir, "settings.json")
+      project_body = %({"enabledPlugins":{"frontend-design@official":true}})
+      File.write(project_settings, project_body)
+
+      Hive::StopHookInstaller.install(stage_dir: dir)
+
+      backup_path = "#{project_settings}#{Hive::StopHookInstaller::BACKUP_SUFFIX}"
+      assert File.exist?(backup_path),
+             "a pre-existing project-owned .claude/settings.json must be backed up before overwrite"
+      assert_equal project_body, File.read(backup_path),
+                   "the backup must hold the project's original content verbatim"
+    end
+  end
+
+  def test_install_skips_backup_when_no_existing_settings_present
+    with_tmp_dir do |dir|
+      Hive::StopHookInstaller.install(stage_dir: dir)
+
+      backup_path = File.join(dir, ".claude", "settings.json#{Hive::StopHookInstaller::BACKUP_SUFFIX}")
+      refute File.exist?(backup_path),
+             "no backup must be written when nothing existed to overwrite (the scratch case)"
+    end
+  end
+
+  def test_install_does_not_overwrite_existing_backup
+    with_tmp_dir do |dir|
+      claude_dir = File.join(dir, ".claude")
+      FileUtils.mkdir_p(claude_dir)
+      project_settings = File.join(claude_dir, "settings.json")
+      project_body = %({"original":"project-owned"})
+      File.write(project_settings, project_body)
+
+      # First install backs up the project file. Second install runs
+      # against the hive-installed stub; if it re-backed up, the stub
+      # would clobber the original. The invariant: backup is captured
+      # once per install/cleanup pair and never re-captured mid-pair.
+      Hive::StopHookInstaller.install(stage_dir: dir)
+      Hive::StopHookInstaller.install(stage_dir: dir)
+
+      backup_path = "#{project_settings}#{Hive::StopHookInstaller::BACKUP_SUFFIX}"
+      assert_equal project_body, File.read(backup_path),
+                   "second install must NOT overwrite the existing backup with the hive stub"
+    end
+  end
+
   def test_stop_hook_writes_result_json_and_done
     with_tmp_dir do |dir|
       payload = %({"session_id":"abc","transcript_path":"/tmp/transcript.jsonl"})

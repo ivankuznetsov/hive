@@ -5,6 +5,7 @@ require "shellwords"
 module Hive
   module StopHookInstaller
     HOOK_PATH = File.expand_path("scripts/stop_hook.sh", __dir__)
+    BACKUP_SUFFIX = ".hive-pre-install"
 
     module_function
 
@@ -31,6 +32,21 @@ module Hive
       claude_dir = File.join(target_dir, ".claude")
       FileUtils.mkdir_p(claude_dir)
       settings_path = File.join(claude_dir, "settings.json")
+      # If a project-owned `.claude/settings.json` is already present
+      # (e.g. committed by `hive init`'s llm-wiki bootstrap or by the
+      # operator), back it up so cleanup_scratch can restore it. Without
+      # this, the unconditional delete below would destroy the project's
+      # plugin/hook configuration and the post-stage dirty-worktree check
+      # would fire `EXECUTE_WAITING reason=dirty_worktree` (and the
+      # equivalent in 6-review / 8-finalize). Only back up on the FIRST
+      # install in a spawn pair: if a backup already exists, the current
+      # settings.json is the hive-installed stub from a prior install
+      # call, not the project's original — re-backing up would overwrite
+      # the original with the stub and lose it forever.
+      backup_path = "#{settings_path}#{BACKUP_SUFFIX}"
+      if File.exist?(settings_path) && !File.exist?(backup_path)
+        FileUtils.cp(settings_path, backup_path)
+      end
       # Brainstorm Claude runs with --permission-mode bypassPermissions
       # plus Write/Edit in --allowedTools, both scoped to this stage_dir.
       # A prompt-injected idea.md could otherwise direct the agent to

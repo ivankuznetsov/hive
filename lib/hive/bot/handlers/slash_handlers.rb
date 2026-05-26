@@ -98,8 +98,8 @@ module Hive
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
           return @result_class.new(action: :reply, text: "Use /autofix <slug>.") if slug.empty?
 
-          row = find_status_row(slug)
-          return @result_class.new(action: :reply, text: "Slug not found, was it archived?") unless row
+          row, error = resolve_status_row(slug)
+          return @result_class.new(action: :reply, text: error) if error
 
           match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(row)
           # clear_keyboard is false for the slash path — no inline button was
@@ -118,8 +118,8 @@ module Hive
           slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
           return @result_class.new(action: :reply, text: "Use /details <slug>.") if slug.empty?
 
-          row = find_status_row(slug)
-          return @result_class.new(action: :reply, text: "Slug not found, was it archived?") unless row
+          row, error = resolve_status_row(slug)
+          return @result_class.new(action: :reply, text: error) if error
 
           stage_argv = row.stage ? [ "--stage", row.stage ] : []
           @result_class.new(
@@ -133,8 +133,34 @@ module Hive
 
         private
 
-        def find_status_row(slug)
-          Array(@status_snapshot_provider.call).find { |row| row.respond_to?(:slug) && row.slug == slug }
+        # Resolves a slug against the latest status snapshot. Returns
+        # [row, nil] on a unique match, or [nil, error_text] otherwise:
+        #   - snapshot nil        → status not loaded yet (bot just started);
+        #                           we never sync-fetch here (see
+        #                           Supervisor#latest_status_rows for why)
+        #   - zero matches        → slug not found / archived
+        #   - more than one match → ambiguous across projects. A slash
+        #                           command carries no project, so we refuse
+        #                           rather than dispatch against a guessed
+        #                           project (slugs are date+hex so this is
+        #                           rare, but a silent wrong-project dispatch
+        #                           would be worse than asking the operator).
+        def resolve_status_row(slug)
+          snapshot = @status_snapshot_provider.call
+          return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
+
+          matches = Array(snapshot).select { |row| row.respond_to?(:slug) && row.slug == slug }
+          case matches.length
+          when 0 then [ nil, "Slug not found, was it archived?" ]
+          when 1 then [ matches.first, nil ]
+          else [ nil, "Multiple active tasks match #{slug}; open on a laptop to pick the right project." ]
+          end
+        rescue StandardError
+          # The production provider just reads a cached ivar and cannot raise,
+          # but a future provider that does I/O must never crash the poll loop
+          # (an escape here would skip write_last_seen and let Telegram
+          # redeliver the update). Degrade to a soft retry hint instead.
+          [ nil, "Status lookup failed — try again in a moment." ]
         end
 
         def project_keyboard(projects, token)

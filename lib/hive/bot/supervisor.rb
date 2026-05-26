@@ -44,12 +44,7 @@ module Hive
         @status_watcher = status_watcher || Hive::Bot::StatusWatcher.new(logger: @logger)
         @conversation_store = conversation_store ||
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
-        @router = router || Hive::Bot::Router.new(
-          bot_config: config,
-          logger: @logger,
-          conversation_store: @conversation_store,
-          status_snapshot_provider: -> { latest_status_rows }
-        )
+        @router = router || build_router(config)
         @child_supervisor = child_supervisor ||
           Hive::Bot::ChildSupervisor.new(logger: @logger, dry_run: dry_run)
         @notification_dispatcher = notification_dispatcher ||
@@ -138,16 +133,20 @@ module Hive
       end
 
       # Read-only snapshot of the most recent successful StatusWatcher
-      # fetch. Used by /autofix and /details to resolve a slug to its
-      # current row without spawning a second `hive status --json`
-      # subprocess. May be stale by up to poll_interval_sec; if empty
-      # (bot just started, no successful fetch yet) a sync fetch is
-      # performed so the first /autofix after start still works.
+      # fetch, populated by status_tick on the status_loop thread. Used by
+      # /autofix and /details to resolve a slug to its current row.
+      #
+      # Returns nil until the first successful tick — callers treat nil as
+      # "status not loaded yet" (the status_loop ticks immediately on bot
+      # start, so this window is brief). We deliberately do NOT fall back to
+      # a synchronous @status_watcher.fetch here: that fetch shells out via
+      # Open3.capture3 with no timeout, and running it on the poll thread
+      # would let a hung `hive status` stall the long-poll loop, after which
+      # Telegram redelivers the un-acked update and the same /autofix
+      # double-fires the recovery sequence. status_tick only assigns on a
+      # successful fetch, so a transient failure never poisons this cache.
       def latest_status_rows
-        return @latest_status_rows if @latest_status_rows
-
-        result = @status_watcher.fetch
-        @latest_status_rows = result.ok ? result.rows : []
+        @latest_status_rows
       end
 
       def reap_children
@@ -164,6 +163,21 @@ module Hive
       end
 
       private
+
+      # Single construction point for the Router so the boot path and the
+      # SIGHUP reload path cannot drift. The status_snapshot_provider wiring
+      # used to live only in the constructor; reload_config_if_requested
+      # rebuilt the Router without it, silently breaking /autofix and
+      # /details (every slug replied "Slug not found") after any
+      # `hive bot reload` until a full restart.
+      def build_router(config)
+        Hive::Bot::Router.new(
+          bot_config: config,
+          logger: @logger,
+          conversation_store: @conversation_store,
+          status_snapshot_provider: -> { latest_status_rows }
+        )
+      end
 
       def poll_loop
         first_poll = true
@@ -474,24 +488,34 @@ module Hive
                   "Reply with your answer."
           )
         else
-          # All questions answered. Acknowledge the final answer and auto-
-          # dispatch `hive run <slug>` so the daemon picks up the completed
-          # brainstorm without the operator having to send /done. /done
-          # still works as a manual backstop (it reads conversation_store,
-          # which we clear here to avoid double-dispatch).
-          safe_send_message(
-            chat_id: update.chat_id,
-            text: "Got Q#{answered_n}.\n\n✅ All questions answered — brainstorm Q&A complete. " \
-                  "Running the next round automatically; I'll ping you when there's something to do."
-          )
-          auto_run_after_answers(result, update)
+          finalize_completed_brainstorm(result, update, answered_n)
         end
       end
 
-      def auto_run_after_answers(result, update)
-        return if @dry_run
+      # All questions answered. Acknowledge the final answer and auto-dispatch
+      # `hive run <slug>` so the daemon picks up the completed brainstorm
+      # without the operator having to send /done.
+      def finalize_completed_brainstorm(result, update, answered_n)
+        if @dry_run
+          # Dry-run never dispatches; say so instead of promising a run that
+          # won't happen. Leave the conversation intact so /done still works.
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Got Q#{answered_n}.\n\n✅ All questions answered. " \
+                  "Dry-run: not dispatching `hive run` — send /done to dispatch for real."
+          )
+          return
+        end
 
-        @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Got Q#{answered_n}.\n\n✅ All questions answered — brainstorm Q&A complete. " \
+                "Running the next round automatically; I'll ping you when there's something to do."
+        )
+        auto_run_after_answers(result, update)
+      end
+
+      def auto_run_after_answers(result, update)
         per_command = @router.class::Result.new(
           action: :dispatch_then_reply,
           command_argv: [ "hive", "run", result.slug, "--json" ],
@@ -499,6 +523,21 @@ module Hive
           slug: result.slug
         )
         execute_dispatch(per_command, update)
+        # Clear only AFTER a successful dispatch so a dispatch failure leaves
+        # the conversation intact and the /done backstop can retry. (The
+        # earlier order cleared first, which stranded the operator if the
+        # spawn raised — they'd seen "running automatically" but /done found
+        # no conversation to dispatch.)
+        @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
+      rescue StandardError => e
+        @logger.event(:send_failure, source: "auto_run_after_answers",
+                                      slug: result.slug, error_class: e.class.name,
+                                      message: e.message)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "I couldn't start the next round automatically (#{e.class}). " \
+                "Send /done to retry."
+        )
       end
 
       def start_answer(result, update)
@@ -626,11 +665,18 @@ module Hive
           "/answer #{row.slug}"
         elsif action.start_with?("ready_to_")
           "/approve #{row.slug}"
-        elsif action.start_with?("recover_")
-          if Hive::Bot::NotificationBuilders.manual_only_recovery?(row)
-            "/details #{row.slug}"
-          elsif Hive::Bot::NotificationBuilders.retryable_recovery?(row)
+        elsif Hive::Bot::NotificationBuilders.recovery?(row)
+          # Mirror recovery_keyboard: retryable rows get the Autofix action,
+          # everything else (manual-only markers AND recovery rows with no
+          # retry suggestion) gets Show details. Gate on recovery? — not
+          # action.start_with?("recover_") — so action=="error" rows and
+          # marker-only recovery rows keep parity with the push surface
+          # (a row that shows a 🔧 Autofix / Show details button on its
+          # alert always carries the matching slash link in /status).
+          if Hive::Bot::NotificationBuilders.retryable_recovery?(row)
             "/autofix #{row.slug}"
+          else
+            "/details #{row.slug}"
           end
         end
       end
@@ -714,11 +760,7 @@ module Hive
         return unless @reload
 
         @config = Hive::Config.load_global_bot(require_runtime: true)
-        @router = Hive::Bot::Router.new(
-          bot_config: @config,
-          logger: @logger,
-          conversation_store: @conversation_store
-        )
+        @router = build_router(@config)
         @notification_dispatcher = Hive::Bot::NotificationDispatcher.new(
           telegram: @telegram,
           logger: @logger,

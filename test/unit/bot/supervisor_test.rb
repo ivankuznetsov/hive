@@ -37,8 +37,9 @@ class HiveBotSupervisorTest < Minitest::Test
     def close; end
   end
 
-  FakeStatusWatcher = Struct.new(:result, keyword_init: true) do
+  FakeStatusWatcher = Struct.new(:result, :fetch_count, keyword_init: true) do
     def fetch
+      self.fetch_count = (fetch_count || 0) + 1
       result
     end
   end
@@ -271,59 +272,102 @@ class HiveBotSupervisorTest < Minitest::Test
                 "cache hit must NOT trigger a fresh @status_watcher.fetch subprocess"
   end
 
-  def test_latest_status_rows_falls_back_to_sync_fetch_when_no_cache_yet
-    fresh = [ row(slug: "fresh-260526-bbbb") ]
-    @status_watcher.result = StatusResult.new(ok: true, rows: fresh)
+  def test_latest_status_rows_returns_nil_when_cold_without_blocking_on_a_fetch
+    # Regression guard for the double-dispatch risk: latest_status_rows must
+    # NOT shell out to @status_watcher.fetch on the (poll) thread that calls
+    # it. A hung `hive status` there would stall the long-poll loop, after
+    # which Telegram redelivers the un-acked update and /autofix double-fires.
+    @status_watcher.result = StatusResult.new(ok: true, rows: [ row(slug: "fresh-260526-bbbb") ])
+    @status_watcher.fetch_count = 0
     @supervisor.instance_variable_set(:@latest_status_rows, nil)
 
-    assert_equal fresh, @supervisor.send(:latest_status_rows),
-                 "first call after bot start must sync-fetch so /autofix works immediately"
+    assert_nil @supervisor.send(:latest_status_rows),
+               "cold cache must return nil (status_loop populates it), not sync-fetch"
+    assert_equal 0, @status_watcher.fetch_count,
+                 "latest_status_rows must never call @status_watcher.fetch on the caller thread"
   end
 
-  def test_default_status_snapshot_provider_routes_through_supervisor_to_latest_status_rows
-    # The supervisor's default constructor wires
-    #   status_snapshot_provider: -> { latest_status_rows }
-    # into the real Router. The other unit tests inject a FakeRouter,
-    # which bypasses this lambda, so this test instantiates the supervisor
-    # with router: nil to exercise the full wiring end-to-end.
-    cached_rows = [ row(slug: "wire-260526-aaaa") ]
+  def test_status_tick_does_not_poison_cache_on_failed_fetch
+    # status_tick only assigns @latest_status_rows on a successful fetch, so a
+    # transient failure cannot leave a stale/empty snapshot poisoning the
+    # cache (the slash handlers would otherwise reply "slug not found" for
+    # every slug until the next successful tick).
+    good = [ row(slug: "good-260526-aaaa") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: good)
+    @supervisor.status_tick
+    assert_equal good, @supervisor.send(:latest_status_rows)
+
+    @status_watcher.result = StatusResult.new(ok: false, rows: nil, error: "boom")
+    @supervisor.status_tick
+
+    assert_equal good, @supervisor.send(:latest_status_rows),
+                 "a failed tick must leave the last good snapshot intact, not overwrite it"
+  end
+
+  def test_reload_rewires_status_snapshot_provider_into_the_rebuilt_router
+    # Regression guard: reload_config_if_requested rebuilds @router, and that
+    # rebuild must keep the status_snapshot_provider wiring. The original bug
+    # rebuilt the Router without it, so after any `hive bot reload` /autofix
+    # and /details replied "Slug not found" for every slug until restart.
+    retryable = row(slug: "stuck-260526-cccc", stage: "6-review", action: "recover_review",
+                    marker: "review_error", attrs: { "pass" => "2" },
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
     supervisor = Hive::Bot::Supervisor.new(
-      config: @config,
-      token: "test-token",
-      logger: @logger,
-      telegram: @telegram,
-      status_watcher: @status_watcher,
-      notification_dispatcher: @notification_dispatcher,
-      router: nil,  # real Router built via initialize default
-      child_supervisor: @child_supervisor,
-      conversation_store: @conversation_store,
-      dry_run: false
+      config: @config, token: "test-token", logger: @logger, telegram: @telegram,
+      status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
+      router: nil, child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store, dry_run: false
     )
-    supervisor.instance_variable_set(:@latest_status_rows, cached_rows)
+    supervisor.instance_variable_set(:@latest_status_rows, [ retryable ])
+    supervisor.instance_variable_set(:@reload, true)
+    cfg = @config
+    original = Hive::Config.method(:load_global_bot)
+    Hive::Config.define_singleton_method(:load_global_bot) { |**| cfg }
+    begin
+      supervisor.send(:reload_config_if_requested)
+    ensure
+      Hive::Config.define_singleton_method(:load_global_bot, original)
+    end
+
+    update = Hive::Bot::Telegram::Update.new(
+      update_id: 1, chat_id: 42, from_id: 42, message_id: 1,
+      text: "/autofix stuck-260526-cccc"
+    )
+    supervisor.process_update(update)
+
+    dispatched = @child_supervisor.dispatched.map { |d| d[:command_argv] }
+    assert(dispatched.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
+           "after SIGHUP reload, /autofix must still resolve the slug and dispatch the " \
+           "recover sequence — proving the rebuilt Router kept status_snapshot_provider")
+  end
+
+  def test_default_status_snapshot_provider_dispatches_recover_sequence_for_cached_row
+    # Exercises the full default wiring (real Router built by the constructor)
+    # end-to-end: the status_snapshot_provider lambda must reach
+    # latest_status_rows, resolve the cached row, and dispatch the recover
+    # sequence. Asserts the dispatched argv, not merely "some message sent",
+    # so the lambda returning [] or the row failing to resolve would fail.
+    retryable = row(slug: "wire-260526-aaaa", stage: "6-review", action: "recover_review",
+                    marker: "review_error", attrs: { "pass" => "2" },
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config, token: "test-token", logger: @logger, telegram: @telegram,
+      status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
+      router: nil, child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store, dry_run: false
+    )
+    supervisor.instance_variable_set(:@latest_status_rows, [ retryable ])
 
     update = Hive::Bot::Telegram::Update.new(
       update_id: 1, chat_id: 42, from_id: 42, message_id: 1,
       text: "/autofix wire-260526-aaaa"
     )
-
     supervisor.process_update(update)
 
-    # The lambda invoked latest_status_rows, found the cached row, and
-    # routed to RecoverySequence.build. The row's default marker is
-    # COMPLETE (from #row helper) → not retryable → reply with
-    # "no automatic recovery" or "No retry verb". Either path proves the
-    # wiring fired; we just assert SOME reply landed (not a no-op).
-    refute_empty @telegram.messages,
-                 "default snapshot provider lambda must reach latest_status_rows " \
-                 "so /autofix finds the cached row and dispatches a reply"
-  end
-
-  def test_latest_status_rows_returns_empty_array_when_sync_fetch_fails
-    @status_watcher.result = StatusResult.new(ok: false, rows: nil, error: "boom")
-    @supervisor.instance_variable_set(:@latest_status_rows, nil)
-
-    assert_equal [], @supervisor.send(:latest_status_rows),
-                 "failed fetch must yield [] so the slash handler degrades to 'slug not found'"
+    dispatched = @child_supervisor.dispatched.map { |d| d[:command_argv] }
+    assert(dispatched.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
+           "default snapshot provider must route /autofix through latest_status_rows " \
+           "to a real recover-sequence dispatch")
   end
 
   def test_reap_children_dispatches_reply_for_each_completed_child
@@ -337,6 +381,37 @@ class HiveBotSupervisorTest < Minitest::Test
     # because the clean-exit path is silent by design.
     assert_empty @telegram.messages,
                  "exit_code 0 must not produce a Telegram ack (child_completion_text returns nil)"
+  end
+
+  def test_finalize_completed_brainstorm_in_dry_run_announces_without_dispatching
+    supervisor = Hive::Bot::Supervisor.new(
+      config: @config, token: "test-token", logger: @logger, telegram: @telegram,
+      status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
+      router: FakeRouter.new, child_supervisor: @child_supervisor,
+      conversation_store: @conversation_store, dry_run: true
+    )
+    result = FakeRouter::Result.new(slug: "done-260526-aaaa", project: "hive")
+    update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
+
+    supervisor.send(:finalize_completed_brainstorm, result, update, 4)
+
+    assert_match(/All questions answered/, @telegram.messages.last.fetch(:text))
+    assert_match(/Dry-run: not dispatching/, @telegram.messages.last.fetch(:text))
+    assert_empty @child_supervisor.dispatched, "dry-run must not dispatch hive run"
+  end
+
+  def test_auto_run_after_answers_recovers_and_logs_when_dispatch_raises
+    @child_supervisor.define_singleton_method(:dispatch) { |**| raise "spawn failed" }
+    result = FakeRouter::Result.new(slug: "x-260526-aaaa", project: "hive")
+    update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
+
+    @supervisor.send(:auto_run_after_answers, result, update)
+
+    assert_match(/couldn't start the next round/, @telegram.messages.last.fetch(:text),
+                 "a dispatch failure after the completion ack must surface a corrective message")
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure
+    assert_equal "auto_run_after_answers", failure.fetch(:payload).fetch(:source)
   end
 
   def test_register_bot_commands_sends_full_command_list_to_telegram

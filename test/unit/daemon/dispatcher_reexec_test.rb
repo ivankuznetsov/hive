@@ -86,6 +86,29 @@ class HiveDaemonDispatcherReexecTest < Minitest::Test
            "no baseline → never re-exec (fail-soft on read failure)"
   end
 
+  def test_compute_code_fingerprint_returns_nil_on_read_failure
+    dispatcher = build_dispatcher
+    # Force the digest path to raise so the rescue clause runs. A real
+    # cause in production would be a missing or unreadable lib/hive.rb
+    # (e.g. mid-gem-install, broken filesystem, permissions). The
+    # contract is: any failure → nil baseline → drift detection disabled.
+    with_replaced_singleton_method(Digest::SHA256, :file, ->(_path) { raise StandardError, "boom" }) do
+      assert_nil dispatcher.send(:compute_code_fingerprint),
+                 "any Digest failure must produce a nil fingerprint (fail-soft)"
+    end
+  end
+
+  def test_version_drift_returns_false_when_current_fingerprint_is_nil
+    dispatcher = build_dispatcher
+    # Baseline exists, but the live re-stat fails. The rate-limit timer
+    # is reset so the only thing gating drift here is the nil current
+    # fingerprint — same fail-soft contract as a nil baseline.
+    with_replaced_singleton_method(Digest::SHA256, :file, ->(_path) { raise StandardError, "boom" }) do
+      refute dispatcher.send(:version_drift_detected?),
+             "current fingerprint failure must not trigger re-exec"
+    end
+  end
+
   def test_version_drift_rate_limited_within_60_seconds_of_previous_reexec
     dispatcher = build_dispatcher
     dispatcher.instance_variable_set(:@code_fingerprint, "0" * 64)

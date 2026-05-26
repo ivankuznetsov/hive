@@ -4,13 +4,17 @@ require "hive/commands/daemon"
 class HiveCommandsDaemonTest < Minitest::Test
   include HiveTestHelper
 
-  FakeDispatcher = Struct.new(:calls) do
+  FakeDispatcher = Struct.new(:calls, :reexec_requested) do
+    def initialize(calls, reexec_requested = false)
+      super
+    end
+
     def run_forever
       calls << :run_forever
     end
 
     def reexec_requested?
-      false
+      reexec_requested
     end
   end
 
@@ -74,6 +78,61 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal({ "daemon" => config }, captured.fetch(:config))
     assert_equal true, captured.fetch(:dry_run)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
+  end
+
+  def test_start_daemon_invokes_reexec_when_dispatcher_signals_drift
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([], true) # signals drift
+    config = daemon_config
+    reexec_invoked = false
+    command.define_singleton_method(:reexec_with_fresh_code!) { reexec_invoked = true }
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, ->(**_) { dispatcher }) do
+          command.call
+        end
+      end
+    end
+
+    assert reexec_invoked,
+           "dispatcher.reexec_requested? true must route through reexec_with_fresh_code!"
+    refute File.exist?(command.pid_file),
+           "the ensure block must still delete the PID file before the re-exec call"
+  end
+
+  def test_reexec_with_fresh_code_calls_kernel_exec_with_daemon_start_argv
+    command = daemon("start", dry_run: true)
+    captured_argv = nil
+    fake_method = ->(*args) { captured_argv = args; raise "exec replaced" }
+
+    # Replace Kernel.method(:exec).call with a recorder that raises so
+    # we don't actually exec the test runner away. The raise keeps us
+    # in the rescue path of the caller (the test) rather than letting
+    # control return into ruby and continue.
+    with_replaced_singleton_method(Kernel, :exec, fake_method) do
+      assert_raises(RuntimeError) { command.send(:reexec_with_fresh_code!) }
+    end
+
+    refute_nil captured_argv, "Kernel.exec stub must have been called"
+    assert_equal Process.argv0, captured_argv.first
+    assert_includes captured_argv, "daemon"
+    assert_includes captured_argv, "start"
+    assert_includes captured_argv, "--dry-run",
+                    "--dry-run must be forwarded so the re-exec'd process mirrors the current run mode"
+  end
+
+  def test_reexec_with_fresh_code_omits_dry_run_when_not_a_dry_run
+    command = daemon("start", dry_run: false)
+    captured_argv = nil
+    fake_method = ->(*args) { captured_argv = args; raise "exec replaced" }
+
+    with_replaced_singleton_method(Kernel, :exec, fake_method) do
+      assert_raises(RuntimeError) { command.send(:reexec_with_fresh_code!) }
+    end
+
+    refute_includes captured_argv, "--dry-run",
+                    "non-dry-run daemons must re-exec without --dry-run"
   end
 
 

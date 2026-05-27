@@ -2,6 +2,11 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.1.6
+
+- `install.sh` now manages the qmd wiki indexer; `hive doctor` gained a managed-qmd probe and clearer failure reporting.
+- Fixed `hive tui` footer ordering (hints render before token counters).
+
 ## 0.1.5
 
 - Fixed `yay -S hive-bin`: the AUR `package()` aborted on an invalid `gem install --ignore-dependencies=false` flag — the published package never actually installed. Caught by the new real-install CI matrix.

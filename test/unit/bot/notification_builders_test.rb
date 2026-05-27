@@ -196,12 +196,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "review_stale must drive recovery_match_attr toward the pass=<n> key")
   end
 
-  def test_recovery_match_attr_error_uses_exit_code
-    attrs = { "exit_code" => "137" }
+  def test_recovery_match_attr_error_prefers_marker_id
+    attrs = { "reason" => "exit_code", "exit_code" => "137", "marker_id" => "err-137" }
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:exit_code=137\z/, autofix,
-                 "generic `error` marker must drive recovery_match_attr toward exit_code")
+    assert_match(/:marker_id=err-137\z/, autofix,
+                 "generic `error` marker must prefer the high-cardinality marker_id guard")
+  end
+
+  def test_recovery_match_attr_error_legacy_falls_back_to_observed_attrs
+    attrs = { "reason" => "exit_code", "exit_code" => "137" }
+    r = row(action: "error", marker: "error", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:reason=exit_code,exit_code=137\z/, autofix,
+                 "legacy `error` marker must use observed reason and exit_code together")
   end
 
   def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix

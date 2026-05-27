@@ -124,17 +124,14 @@ module Hive
         emit_success(task, normalized)
       end
 
-      # Cross-process race guard. The TUI's auto-healer observes a
-      # kill-class `:error reason=exit_code exit_code=143` at time T
-      # and dispatches `hive markers clear` at T+1s. If a concurrent
-      # `hive run` writes a NEW `:error reason=shutdown exit_code=143`
-      # in that window, the name-based check still passes ("ERROR" ==
-      # "ERROR") and we'd erase a distinct structured marker. A
-      # comma-separated `--match-attr reason=exit_code,exit_code=143`
-      # ties the clear to the SPECIFIC marker the caller observed; any
-      # mismatch refuses with WrongStage, the caller's eviction path
-      # retries with the current marker, and the data-loss window
-      # closes.
+      # Cross-process race guard. The TUI observes an ERROR marker at
+      # time T and dispatches `hive markers clear` at T+1s. If a
+      # concurrent `hive run` writes a fresh ERROR marker in that
+      # window, the name-based check still passes. `--match-attr
+      # marker_id=<observed>` ties the clear to the specific generated
+      # marker when present; legacy callers can pass comma-separated
+      # observed attrs such as `reason=exit_code,exit_code=143` so
+      # different structured ERROR rotations still refuse.
       def match_attr_or_raise!(task, marker)
         return if @match_attr.nil? || @match_attr.to_s.strip.empty?
 

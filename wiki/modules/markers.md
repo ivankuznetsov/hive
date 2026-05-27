@@ -15,7 +15,7 @@ tags: [marker, protocol, flock]
 <!-- WAITING -->
 <!-- COMPLETE -->
 <!-- AGENT_WORKING pid=12345 started=2026-04-25T10:23:45Z -->
-<!-- ERROR reason=timeout timeout_sec=300 -->
+<!-- ERROR reason=timeout timeout_sec=300 marker_id=<hex16> -->
 <!-- EXECUTE_WAITING reason=no_worktree_changes -->
 <!-- EXECUTE_WAITING reason=dirty_worktree -->
 <!-- EXECUTE_WAITING reason=branch_mismatch -->
@@ -32,6 +32,8 @@ tags: [marker, protocol, flock]
 ```
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
+
+`ERROR` markers written through `Markers.set` receive a generated `marker_id` attr unless the caller supplies one. This is the high-cardinality recovery discriminator for `hive markers clear --match-attr marker_id=...`; legacy rows without it fall back to observed attrs such as `reason=exit_code,exit_code=143`.
 
 `KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). Only an `ERROR` marker shaped as `reason=exit_code exit_code=130|137|143` means the task was interrupted rather than broken. Same numeric codes with another reason remain structured recoverable failures. The numeric list is shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears explicit signal-kill markers) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
 

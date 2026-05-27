@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "hive"
 require "hive/bot/title_formatter"
+require "hive/markers"
 
 module Hive
   module Bot
@@ -229,7 +230,7 @@ module Hive
         when "review_stale"
                  %w[pass reason]
         when "error"
-                 %w[exit_code]
+                 return Hive::Markers.error_recovery_match_attr(attrs)
         else
                  []
         end

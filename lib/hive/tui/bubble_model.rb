@@ -809,15 +809,13 @@ module Hive
       # transient failure would leave the row stuck in Error
       # indefinitely while `@healed_folders` blocked re-heals.
       #
-      # `--match-attr reason=<observed>,exit_code=<observed>` ties
-      # the clear to the specific kill-class marker we observed. If a
-      # concurrent `hive run` writes a NEW `:error reason=shutdown
-      # exit_code=143` between snapshot and heal, any attr mismatch
-      # refuses, eviction fires, and the next snapshot's auto-heal pass
-      # sees the current marker instead of erasing it.
+      # `--match-attr marker_id=<observed>` ties the clear to the
+      # specific kill-class marker we observed. Legacy rows without a
+      # marker_id fall back to the observed reason/exit_code attrs so a
+      # same-code marker with a different reason is not erased.
       def heal_marker(row)
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        match_attr = error_marker_match_attr(row)
+        match_attr = error_recovery_match_attr(row)
         argv += [ "--match-attr", match_attr ] if match_attr
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
         return if exit_code.zero?
@@ -1262,32 +1260,22 @@ module Hive
         )
       end
 
-      # `hive markers clear --match-attr <observed attrs>` ties the
-      # clear to the SPECIFIC marker we observed at snapshot time. If a
-      # concurrent `hive run` writes a fresher ERROR with the same
-      # numeric code but a different reason in the dispatch window, the
-      # match refuses (`WrongStage`), the eviction in
-      # spawn_error_recovery_thread's ensure releases the dedup slot,
-      # and the next Enter retries against the current marker. Without
-      # the match-attr, recovery would silently erase newer failures.
+      # `hive markers clear --match-attr marker_id=N` ties the clear
+      # to the specific ERROR marker observed at snapshot time. Legacy
+      # rows without marker_id fall back to the observed reason/exit_code
+      # attrs, preserving same-code/different-reason race protection.
       def error_recovery_clear_argv(row)
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        match_attr = error_marker_match_attr(row)
+        match_attr = error_recovery_match_attr(row)
         match_attr ? argv + [ "--match-attr", match_attr ] : argv
       end
 
-      def error_marker_match_attr(row)
-        attrs = row.attrs || {}
-        parts = []
-        %w[reason exit_code].each do |key|
-          value = attrs[key].to_s
-          parts << "#{key}=#{value}" unless value.empty?
-        end
-        parts.empty? ? nil : parts.join(",")
+      def error_recovery_match_attr(row)
+        Hive::Markers.error_recovery_match_attr(row.attrs)
       end
 
       def error_recovery_detail(row)
-        attrs = row.attrs || {}
+        attrs = Hive::Markers.display_attrs(row.attrs)
         keys = ERROR_RECOVERY_DETAIL_ATTRS.select { |key| attrs.key?(key) }
         keys += (attrs.keys.map(&:to_s) - keys).sort
         attr_text = keys.map { |key| "#{key}=#{attrs[key]}" }.join(" ")

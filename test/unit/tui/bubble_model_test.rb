@@ -2778,7 +2778,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "3-plan",
       folder: folder,
       marker: "error",
-      attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      attrs: { "reason" => "exit_code", "exit_code" => "1", "marker_id" => "err-123" },
       suggested_command: nil
     )
     clear_argv = nil
@@ -2794,8 +2794,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal [
       "hive", "markers", "clear", folder,
       "--name", "ERROR",
-      "--match-attr", "reason=exit_code,exit_code=1"
-    ], clear_argv, "argv must clear ERROR with observed attrs to avoid erasing fresher failures"
+      "--match-attr", "marker_id=err-123"
+    ], clear_argv, "argv must clear ERROR with --match-attr marker_id=N to avoid erasing fresher failures"
     assert_equal [ "hive", "run", folder ], run_argv
 
     sync_flash = @model.hive_model.flash.to_s
@@ -2803,10 +2803,39 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/ERROR/, sync_flash)
     assert_match(/reason=exit_code/, sync_flash)
     assert_match(/exit_code=1/, sync_flash)
+    refute_match(/marker_id/, sync_flash)
 
     final_flash = last_async_flash_text
     assert_match(/ERROR/, final_flash, "async flash must echo the cleared marker")
     assert_match(/running.*hive run/, final_flash, "async flash must announce the rerun")
+  end
+
+  def test_recover_error_falls_back_to_observed_attrs_for_legacy_rows
+    folder = "/tmp/hive/error-me"
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      slug: "error-me",
+      stage: "3-plan",
+      folder: folder,
+      marker: "error",
+      attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, **_kwargs) { nil }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [
+      "hive", "markers", "clear", folder,
+      "--name", "ERROR",
+      "--match-attr", "reason=exit_code,exit_code=1"
+    ], clear_argv, "legacy ERROR recovery must scope the clear to observed attrs"
   end
 
   def test_red_status_autofix_dispatches_markerless_diagnostic_retry_without_marker_clear
@@ -5796,10 +5825,11 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # interrupted tasks in a stuck "Error" classification the user has
   # to manually escape from.
 
-  def make_error_row(slug:, folder:, exit_code:, reason: "exit_code")
+  def make_error_row(slug:, folder:, exit_code:, reason: "exit_code", marker_id: nil)
     Hive::Tui::Snapshot::Row.new(
       project_name: "demo", stage: "6-review", slug: slug, folder: folder,
-      state_file: nil, marker: "error", attrs: { "reason" => reason, "exit_code" => exit_code.to_s },
+      state_file: nil, marker: "error",
+      attrs: { "reason" => reason, "exit_code" => exit_code.to_s }.tap { |attrs| attrs["marker_id"] = marker_id if marker_id },
       mtime: nil, age_seconds: 0, claude_pid: nil, claude_pid_alive: nil,
       action_key: "error", action_label: "Error", suggested_command: nil, next_action: nil,
       diagnostic: nil
@@ -5964,21 +5994,39 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "auto-heal must not block the regular Update.apply path — the model still updates"
   end
 
-  # F4: heal_marker passes the observed reason and exit_code so the
-  # cross-process race window (auto-heal observes reason=exit_code/143,
-  # concurrent `hive run` writes reason=shutdown/143, heal arrives)
-  # can't erase a distinct structured marker. Captures the actual argv
-  # handed to run_quiet!.
-  def test_heal_marker_argv_includes_match_attr_for_observed_exit_code
+  # F4: heal_marker passes --match-attr marker_id=<observed> so the
+  # cross-process race window cannot erase a fresh marker with the same
+  # exit_code. Captures the actual argv handed to run_quiet!.
+  def test_heal_marker_argv_includes_match_attr_for_observed_marker_id
     captured_argv = nil
-    Hive::Tui::Subprocess.singleton_class.send(:alias_method, :__orig_run_quiet, :run_quiet!)
-    Hive::Tui::Subprocess.define_singleton_method(:run_quiet!) do |argv|
-      captured_argv = argv
-      [ 0, "", "" ]
+    row = make_error_row(
+      slug: "killed", folder: "/x/.hive-state/stages/4-execute/killed",
+      exit_code: 143, marker_id: "kill-123"
+    )
+
+    with_run_quiet_stub(->(argv) { captured_argv = argv; [ 0, "", "" ] }) do
+      @model.send(:heal_marker, row)
     end
 
-    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/4-execute/killed", exit_code: 143)
-    @model.send(:heal_marker, row)
+    assert_equal [
+      "hive", "markers", "clear",
+      "/x/.hive-state/stages/4-execute/killed",
+      "--name", "ERROR",
+      "--match-attr", "marker_id=kill-123"
+    ], captured_argv,
+      "heal_marker must scope the clear to the kill-class marker_id we observed"
+  end
+
+  def test_heal_marker_falls_back_to_observed_attrs_for_legacy_rows
+    captured_argv = nil
+    row = make_error_row(
+      slug: "killed", folder: "/x/.hive-state/stages/4-execute/killed",
+      exit_code: 143
+    )
+
+    with_run_quiet_stub(->(argv) { captured_argv = argv; [ 0, "", "" ] }) do
+      @model.send(:heal_marker, row)
+    end
 
     assert_equal [
       "hive", "markers", "clear",
@@ -5986,12 +6034,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "--name", "ERROR",
       "--match-attr", "reason=exit_code,exit_code=143"
     ], captured_argv,
-      "heal_marker must scope the clear to the kill-class marker attrs we observed"
-  ensure
-    Hive::Tui::Subprocess.singleton_class.send(:alias_method, :run_quiet!, :__orig_run_quiet)
-    Hive::Tui::Subprocess.singleton_class.send(:remove_method, :__orig_run_quiet)
+      "legacy kill-class rows must keep reason+exit_code race protection"
   end
-
 
   def test_heal_marker_evicts_cache_when_marker_clear_fails
     row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)

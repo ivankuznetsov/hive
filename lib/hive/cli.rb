@@ -542,12 +542,14 @@ module Hive
         hive markers clear FOLDER --name REVIEW_STALE
         hive markers clear my-task-slug --name REVIEW_CI_STALE --project myproj
         hive markers clear FOLDER --name REVIEW_ERROR --json
+        hive markers clear FOLDER --name ERROR --match-attr marker_id=abc123
         hive markers clear FOLDER --name ERROR --match-attr reason=exit_code,exit_code=143
 
       Use --match-attr KEY=VALUE, or comma-separated KEY=VALUE pairs, to refuse
-      the clear unless the current marker carries the named attributes. The
-      auto-healer in `hive tui` uses this to avoid erasing a different marker
-      that landed between observation and heal under cross-process concurrency.
+      the clear unless the current marker carries the named attributes. The TUI
+      prefers generated ERROR marker_id attrs when available, with observed
+      reason/exit_code attrs as the legacy fallback, so stale recovery workers
+      cannot erase a fresh ERROR marker that landed between observation and heal.
 
       Exit codes: 0 success; 4 marker mismatch / attr mismatch / not in
       allowlist; 64 unknown subcommand or unknown task; 70 internal error.

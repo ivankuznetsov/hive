@@ -43,6 +43,9 @@ module Hive
         @dry_run = dry_run
 
         @daemon_cfg = config["daemon"] || {}
+        @update_cfg = config["update"] || Hive::Config::DEFAULTS["update"]
+        @update_check_enabled = @update_cfg.fetch("check", true)
+        @update_auto_enabled = @update_cfg.fetch("auto", true)
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)

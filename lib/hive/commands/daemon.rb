@@ -133,7 +133,7 @@ module Hive
         # etc.) actually take effect. PR-40 review P1 #2: this used to
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
-        config = { "daemon" => daemon_cfg }
+        config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update }
 
         controller = Hive::Daemon::ConcurrencyController.new(
           max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),

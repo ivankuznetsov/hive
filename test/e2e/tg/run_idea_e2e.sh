@@ -6,9 +6,12 @@
 set -uo pipefail
 REPO="/home/asterio/Dev/hive"
 HERE="$REPO/test/e2e/tg"
-cd "$REPO"
+cd "$REPO" || exit 1
 
-set -a; . ./.env; set +a
+set -a
+# shellcheck source=/dev/null  # .env is gitignored, not present at lint time
+. ./.env
+set +a
 : "${HIVE_TEST_BOT_TOKEN:?}"; : "${TG_API_ID:?}"; : "${TG_API_HASH:?}"; : "${TG_DRIVER_ID:?}"
 export HIVE_TEST_ALLOWLIST="$TG_DRIVER_ID"
 export TG_BOT_USERNAME="Testivanshive_bot"
@@ -26,6 +29,7 @@ fi
 BASELINE="$(git -C "$STATE_REPO" rev-parse HEAD)"
 echo "scratch state repo: $STATE_REPO @ baseline $BASELINE"
 
+# shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT`
 cleanup() {
   [ -n "${BOT_PID:-}" ] && kill "$BOT_PID" 2>/dev/null
   sleep 1; [ -n "${BOT_PID:-}" ] && kill -9 "$BOT_PID" 2>/dev/null
@@ -52,6 +56,7 @@ for _ in $(seq 1 30); do
 done
 echo "bot up (pid $BOT_PID); driving..."
 
+# shellcheck source=/dev/null  # venv activate script is generated, not in-repo
 . "$HERE/.venv/bin/activate"
 python "$HERE/drive_idea.py"
 RESULT=$?

@@ -4,8 +4,11 @@
 Usage:
   python login.py request            # send the SMS/app code to TG_PHONE
   python login.py confirm <CODE>     # sign in (or sign up a new account)
-  python login.py confirm <CODE> --password <2FA>   # if 2FA is set
   python login.py whoami             # print the logged-in account id/name
+
+If the account has 2FA enabled, `confirm` prompts for the password securely
+via getpass (never read from argv, to keep it out of shell history / the
+process table). For a non-interactive run, set TG_2FA_PASSWORD in the env.
 
 Reads TG_API_ID / TG_API_HASH / TG_PHONE from the environment.
 Persists the session to hive_e2e.session and the code hash to .code_hash.
@@ -14,6 +17,7 @@ Uses explicit connect()/disconnect() so Telethon never prompts on stdin.
 import os
 import sys
 import json
+import getpass
 
 from telethon.sync import TelegramClient
 from telethon.tl.functions.auth import ResendCodeRequest
@@ -66,7 +70,19 @@ def resend():
         client.disconnect()
 
 
-def confirm(code, password=None):
+def _twofa_password():
+    # Prefer an env var for non-interactive runs; otherwise prompt securely so
+    # the password never lands in argv / shell history / the process table.
+    env = os.environ.get("TG_2FA_PASSWORD")
+    if env:
+        return env
+    if not sys.stdin.isatty():
+        print("2FA_REQUIRED: set TG_2FA_PASSWORD (no TTY to prompt on)")
+        sys.exit(2)
+    return getpass.getpass("2FA password: ")
+
+
+def confirm(code):
     with open(HASH_FILE) as fh:
         phone_code_hash = fh.read().strip()
     client = _client()
@@ -77,10 +93,7 @@ def confirm(code, password=None):
             client.sign_up(code=code, first_name="Hive E2E",
                            phone=PHONE, phone_code_hash=phone_code_hash)
         except SessionPasswordNeededError:
-            if not password:
-                print("2FA_REQUIRED: re-run with --password <your-2fa-password>")
-                sys.exit(2)
-            client.sign_in(password=password)
+            client.sign_in(password=_twofa_password())
         me = client.get_me()
         print(f"LOGGED_IN id={me.id} name={me.first_name!r} username={me.username!r}")
     finally:
@@ -107,10 +120,7 @@ if __name__ == "__main__":
     elif cmd == "resend":
         resend()
     elif cmd == "confirm":
-        pw = None
-        if "--password" in sys.argv:
-            pw = sys.argv[sys.argv.index("--password") + 1]
-        confirm(sys.argv[2], pw)
+        confirm(sys.argv[2])
     elif cmd == "whoami":
         whoami()
     else:

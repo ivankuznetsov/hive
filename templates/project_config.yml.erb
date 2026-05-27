@@ -8,8 +8,9 @@ claude:
   # tmux uses your logged-in Claude session in an attachable pane.
   # headless keeps the non-interactive `claude -p` path.
   mode: <%= claude_mode %>
-  # Applies to interactive tmux Claude sessions. bypassPermissions skips
-  # permission prompts; auto uses Claude Code's auto-mode rules.
+  # Applies to every Claude-backed stage, in both tmux and headless mode.
+  # bypassPermissions skips permission prompts (maps to
+  # --dangerously-skip-permissions); auto uses Claude Code's auto-mode rules.
   permission_mode: <%= claude_permission_mode %>
 
 # Stage-level agent for single-agent stages. (6-review uses

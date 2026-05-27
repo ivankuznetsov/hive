@@ -262,7 +262,7 @@ module Hive
 
         def prompt_claude_permission_mode
           @output.puts ""
-          @output.puts "Claude permission mode — applies to interactive tmux Claude sessions:"
+          @output.puts "Claude permission mode — applies to every Claude-backed stage (tmux and headless):"
           @output.puts "  1) bypassPermissions - skip permission prompts (recommended default)"
           @output.puts "  2) auto              - use Claude Code auto-mode rules"
           @output.puts "  3) default           - normal Claude Code permissions"

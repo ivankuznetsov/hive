@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T09:45:00Z] claude - permission_mode applies to all launches, not tmux-only
+
+**Action:** Corrected init help, the init prompt, the config template comment, and wiki wording that described `claude.permission_mode` as applying only to "interactive tmux Claude sessions." The setting is global for Claude: the suggested default `bypassPermissions` is used everywhere (both tmux and headless), and the operator may choose another mode that likewise applies to every Claude-backed stage.
+
+**Refreshed pages:**
+- [[commands/init]], [[state-model]] - reworded to "every Claude-backed stage (tmux and headless)."
+
 ## [2026-05-27T09:30:00Z] claude - unify bypassPermissions flag across tmux and headless
 
 **Action:** Made `claude.permission_mode: bypassPermissions` resolve to the same `--dangerously-skip-permissions` flag on both the headless `-p` path and the interactive tmux path. Previously the tmux wrapper emitted `--permission-mode bypassPermissions` while headless emitted `--dangerously-skip-permissions` — a documented divergence flagged in code review. Extracted the mode→argv mapping into a single `AgentProfile#permission_flags(mode)` used by both `Hive::Agent#build_cmd` and `Hive::ClaudeLauncher#wrapper_command`, and taught `interactive_claude_wrapper.sh` to forward a valueless `--dangerously-skip-permissions`.

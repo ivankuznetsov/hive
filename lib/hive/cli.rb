@@ -39,7 +39,7 @@ module Hive
 
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
         2. Claude launch mode (project-global, tmux/headless)    — default tmux
-        3. Claude permission mode for tmux sessions              — default bypassPermissions
+        3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
            (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
         4. Development agent (drives 4-execute)                  — default codex
         5. Review agents (multi-select over 3 default reviewers) — default all

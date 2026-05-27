@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb
 created: 2026-04-25
-updated: 2026-05-25
+updated: 2026-05-26
 tags: [command, status, observability, json, diagnostics, legacy-dirs]
 ---
 
@@ -35,7 +35,7 @@ When the field is non-empty, the text output prints a warning under the project 
     run `hive migrate` to move them into the current layout
 ```
 
-The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
+The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
 The `legacy_stage_dirs` field is an additive, non-breaking extension of `urn:hive:schema:status:v2` (see [[schemas]] and the policy comment in `lib/hive.rb` — additive optional fields do **not** bump `SCHEMA_VERSIONS["hive-status"]`).
 

@@ -21,12 +21,49 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
   end
 
+  def legacy_stage_dirs(task_count: 3, command: "hive migrate")
+    Hive::Bot::StatusWatcher::LegacyStageDirs.new(
+      project: "hive",
+      project_path: "/tmp/hive",
+      hive_state_path: "/tmp/hive/.hive-state",
+      legacy_stage_dirs: [
+        { "stage_dir" => "5-review", "task_count" => task_count - 1 },
+        { "stage_dir" => "6-pr", "task_count" => 1 }
+      ],
+      legacy_migrate_command: command
+    )
+  end
+
   def retry_diagnostic(command: "hive review slug --json")
     { "suggested_next_action" => { "kind" => "retry", "command" => command } }
   end
 
   def manual_diagnostic
     { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
+  end
+
+  def test_legacy_stage_dirs_notification_renders_project_count_dirs_and_command
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs)
+
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
+  end
+
+  def test_legacy_stage_dirs_notification_renders_singular_and_command_fallback
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(task_count: 1, command: nil))
+
+    assert_equal "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
+  end
+
+  def test_legacy_stage_dirs_notification_handles_malformed_command_payload
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(command: "hive 'migrate"))
+
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
   end
 
   def test_ready_to_plan_builds_approval_keyboard

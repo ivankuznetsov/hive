@@ -32,8 +32,12 @@ module Hive
       def process_rows(rows)
         current = current_notifications(rows)
         if @alert_store.fresh_install?
-          seed_silently(current)
+          immediate, seedable = current.partition do |_fingerprint, payload|
+            immediate_on_fresh_install?(payload.fetch(:row))
+          end.map(&:to_h)
+          seed_silently(seedable)
           @alert_store.mark_seeded!
+          process_current(immediate)
           return
         end
         process_recoveries(current)
@@ -57,6 +61,10 @@ module Hive
           fingerprint = NotificationBuilders.fingerprint(row)
           out[fingerprint] ||= { row: row, notification: notification }
         end
+      end
+
+      def immediate_on_fresh_install?(row)
+        NotificationBuilders.legacy_stage_dirs?(row)
       end
 
       # On a fresh AlertStore (no prior persistent state), pretend every

@@ -128,7 +128,7 @@ module Hive
         return result unless result.ok
 
         @latest_status_rows = result.rows
-        @notification_dispatcher.process_rows(result.rows)
+        @notification_dispatcher.process_rows(notification_inputs_for(result))
         result
       end
 
@@ -177,6 +177,10 @@ module Hive
           conversation_store: @conversation_store,
           status_snapshot_provider: -> { latest_status_rows }
         )
+      end
+
+      def notification_inputs_for(result)
+        Array(result.rows) + (result.respond_to?(:legacy_stage_dirs) ? Array(result.legacy_stage_dirs) : [])
       end
 
       def poll_loop
@@ -332,9 +336,9 @@ module Hive
         end
       end
 
-      def project_filter_miss_text(project, rows)
+      def project_filter_miss_text(project, rows, legacy_stage_dirs = [])
         registered = registered_project_names
-        active = rows.map { |row| row.project.to_s }.uniq
+        active = (Array(rows) + Array(legacy_stage_dirs)).map { |row| row.project.to_s }.uniq
         if registered.include?(project.to_s) || active.include?(project.to_s)
           "No tasks for project #{project}."
         else
@@ -397,18 +401,25 @@ module Hive
           end
 
           rows = fetch_result.rows
+          legacy_stage_dirs = status_legacy_stage_dirs(fetch_result)
           if result.project && !result.project.to_s.empty?
-            filtered = rows.select { |row| row.project == result.project }
-            if filtered.empty?
-              safe_send_message(chat_id: update.chat_id, text: project_filter_miss_text(result.project, rows))
+            filtered_rows = rows.select { |row| row.project == result.project }
+            filtered_legacy_stage_dirs = legacy_stage_dirs.select { |row| row.project == result.project }
+            if filtered_rows.empty? && filtered_legacy_stage_dirs.empty?
+              safe_send_message(
+                chat_id: update.chat_id,
+                text: project_filter_miss_text(result.project, rows, legacy_stage_dirs)
+              )
               return nil
             end
-            rows = filtered
+            rows = filtered_rows
+            legacy_stage_dirs = filtered_legacy_stage_dirs
           end
           if result.slug
             safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
           else
-            safe_send_message(chat_id: update.chat_id, text: render_queue(rows),
+            safe_send_message(chat_id: update.chat_id,
+                              text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
                               reply_markup: status_keyboard(rows))
           end
           return nil
@@ -626,9 +637,12 @@ module Hive
 
       QUEUE_DISPLAY_CAP = 10
 
-      def render_queue(rows)
+      def render_queue(rows, legacy_stage_dirs: [])
         actionable = actionable_queue_rows(rows)
-        return "No active Hive tasks." if actionable.empty?
+        legacy_lines = legacy_stage_dirs.map do |row|
+          Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text
+        end
+        return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
           "#{Hive::Bot::TitleFormatter.title_from_slug(row.slug)} — " \
@@ -638,7 +652,7 @@ module Hive
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
-        ([ header ] + lines).join("\n")
+        (legacy_lines + [ header ] + lines).join("\n")
       end
 
       # Inline keyboard for the /status (and /queue) reply: one button per
@@ -703,6 +717,12 @@ module Hive
 
       def actionable_queue_rows(rows)
         Array(rows).reject { |row| %w[archived agent_running].include?(row.action) }
+      end
+
+      def status_legacy_stage_dirs(fetch_result)
+        return [] unless fetch_result.respond_to?(:legacy_stage_dirs)
+
+        Array(fetch_result.legacy_stage_dirs)
       end
 
       def status_command?(argv)

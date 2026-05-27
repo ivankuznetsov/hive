@@ -32,6 +32,8 @@ class E2EBackgroundProcessTest < Minitest::Test
       proc.stop
       sleep 0.05 while proc.alive? && Time.now < deadline
       refute proc.alive?, "stop must terminate the process group"
+    ensure
+      proc&.stop # never leak the daemon if an assertion above fails
     end
   end
 

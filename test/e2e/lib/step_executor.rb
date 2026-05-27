@@ -85,16 +85,21 @@ module Hive
         @tmux_lifecycle.cleanup
       end
 
+      private
+
       # Reap any long-lived processes / stub servers a scenario started, so they
       # never outlive the scenario (TERM the daemon/bot pgroup, close the stub).
+      # Each stop is rescued independently so one failure can't abandon the rest.
       def teardown_harness_processes
-        (@ctx.harness_state[:background] || {}).each_value { |proc| proc.stop }
-        @ctx.harness_state[:releases_stub]&.stop
+        (@ctx.harness_state[:background] || {}).each_value { |proc| safe_stop(proc) }
+        safe_stop(@ctx.harness_state[:releases_stub])
+      end
+
+      def safe_stop(stoppable)
+        stoppable&.stop
       rescue StandardError
         nil
       end
-
-      private
 
       def dispatch(step)
         send("step_#{step.kind}", step)
@@ -432,9 +437,11 @@ module Hive
         # Allow the sandbox project dir OR its HIVE_HOME (run_home) — both are
         # test-controlled. The update flow's state (update_check.json) and the
         # install-channel marker live under run_home, a sibling of the project.
-        PathSafety.contained_path!(@ctx.sandbox_dir, expanded, "scenario path")
-      rescue ArgumentError
-        PathSafety.contained_path!(@ctx.run_home, expanded, "scenario path")
+        # Branch on the explicit `contained?` predicate rather than rescuing the
+        # sandbox-escape ArgumentError, so a genuinely malformed path still
+        # surfaces as itself (and escaping BOTH roots fails closed below).
+        root = PathSafety.contained?(@ctx.run_home, expanded) ? @ctx.run_home : @ctx.sandbox_dir
+        PathSafety.contained_path!(root, expanded, "scenario path")
       end
 
       def contained_relative_path(root, value, label)

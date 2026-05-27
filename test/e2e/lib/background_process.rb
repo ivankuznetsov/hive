@@ -34,7 +34,7 @@ module Hive
         # SandboxEnv.with strips leaky bundler/version-manager vars and yields
         # the sandbox env; the child inherits that cleaned env at spawn time.
         SandboxEnv.with(@sandbox_dir, @run_home, @fake_claude_path) do |env|
-          @pid = Process.spawn(env.merge(stringify(@env_overrides)), *command, **spawn_opts)
+          @pid = Process.spawn(env.merge(SandboxEnv.stringify_env(@env_overrides)), *command, **spawn_opts)
         end
         Process.detach(@pid) # reap if it exits on its own; #stop still signals it
         self
@@ -45,30 +45,30 @@ module Hive
 
         Process.kill(0, @pid)
         true
-      rescue Errno::ESRCH
+      rescue Errno::ESRCH, Errno::EPERM
+        # ESRCH: gone. EPERM: the pid was recycled to another user's process,
+        # so OUR process is gone either way.
         false
       end
 
       # TERM the whole process group, then KILL after a short grace (mirrors
       # CliDriver#terminate). The grace is a kill-escalation delay, not a
       # condition wait — scenarios wait on file/log conditions, never on sleep.
+      #
+      # `pgroup: true` at spawn makes the child its own group leader, so its
+      # pgid == @pid; signal -@pid directly rather than re-deriving the pgid
+      # (which could itself raise on a reaped/recycled pid). ESRCH (already
+      # gone) and EPERM (pid recycled to a foreign process) are both no-ops.
       def stop(grace: 0.5)
         return unless @pid
 
-        pgid = Process.getpgid(@pid)
-        Process.kill("TERM", -pgid)
+        Process.kill("TERM", -@pid)
         sleep grace
-        Process.kill("KILL", -pgid)
-      rescue Errno::ESRCH
+        Process.kill("KILL", -@pid)
+      rescue Errno::ESRCH, Errno::EPERM
         nil
       ensure
         @pid = nil
-      end
-
-      private
-
-      def stringify(env)
-        env.each_with_object({}) { |(key, value), out| out[key.to_s] = value.nil? ? nil : value.to_s }
       end
     end
   end

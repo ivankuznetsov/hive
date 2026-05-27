@@ -113,4 +113,22 @@ class UpdateCheckTest < Minitest::Test
       assert_equal "0.2.0", result.latest
     end
   end
+
+  def test_http_get_use_ssl_follows_the_url_scheme
+    response = Net::HTTPOK.new("1.1", "200", "OK")
+    response.instance_variable_set(:@read, true)
+    response.instance_variable_set(:@body, '{"tag_name":"v1.0.0"}')
+    fake_http = Object.new
+    fake_http.define_singleton_method(:request) { |_req| response }
+    captured = []
+    stub = lambda do |*_args, **kwargs, &blk|
+      captured << kwargs[:use_ssl]
+      blk.call(fake_http)
+    end
+    with_replaced_singleton_method(Net::HTTP, :start, stub) do
+      with_env("HIVE_RELEASES_API_URL" => "https://example.test/x") { Hive::UpdateCheck.latest(current: "0.1.0") }
+      with_env("HIVE_RELEASES_API_URL" => "http://127.0.0.1:9/x") { Hive::UpdateCheck.latest(current: "0.1.0") }
+    end
+    assert_equal [ true, false ], captured, "use_ssl must follow the URL scheme (https→true, http→false)"
+  end
 end

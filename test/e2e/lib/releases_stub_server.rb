@@ -41,6 +41,7 @@ module Hive
       end
 
       def respond(client)
+        client.timeout = 2 # don't let a half-open client park the serve loop (IO#timeout, Ruby 3.2+)
         client.gets("\r\n\r\n") # consume request line + headers
         body = JSON.generate("tag_name" => @tag)
         client.write("HTTP/1.1 200 OK\r\n" \

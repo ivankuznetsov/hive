@@ -23,9 +23,10 @@ class E2EReleasesStubServerTest < Minitest::Test
     server = Hive::E2E::ReleasesStubServer.new(tag: "v1.0.0")
     port = URI(server.url).port
     server.stop
-    # Port should be free to rebind after stop.
+    # Re-binding the same port must not raise Errno::EADDRINUSE — that raise-free
+    # rebind is the proof stop released the port. Assert it's the same port.
     rebind = TCPServer.new("127.0.0.1", port)
-    assert rebind, "port #{port} should be reusable after stop"
+    assert_equal port, rebind.addr[1], "stop should free the port for rebinding"
     rebind.close
   end
 end

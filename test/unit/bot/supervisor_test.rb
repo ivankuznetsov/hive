@@ -135,13 +135,15 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
-  def child_exit(exit_code: 0, envelope: nil, log_path: "/tmp/hive-bot.log", pid: 123)
+  def child_exit(exit_code: 0, envelope: nil, log_path: "/tmp/hive-bot.log", pid: 123,
+                 project: "hive",
+                 command_argv: [ "hive", "status", "--diagnose", "red-task-260518-aaaa", "--json" ])
     ChildExit.new(
       pid: pid,
       exit_code: exit_code,
-      project: "hive",
+      project: project,
       slug: "red-task-260518-aaaa",
-      command_argv: [ "hive", "status", "--diagnose", "red-task-260518-aaaa", "--json" ],
+      command_argv: command_argv,
       chat_id: 42,
       update_id: 99,
       started_at: Time.now,
@@ -467,6 +469,38 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0)),
                "clean exit must not produce a Telegram ack — 'Command completed' was operational chatter"
     assert_includes @supervisor.send(:child_completion_text, child_exit(exit_code: 17)), "Command failed with exit 17"
+  end
+
+  def test_child_completion_text_acknowledges_successful_idea_capture
+    text = @supervisor.send(
+      :child_completion_text,
+      child_exit(exit_code: 0, project: "writero",
+                 command_argv: [ "hive", "new", "writero", "an idea", "--json" ])
+    )
+
+    assert_includes text, "Captured your idea",
+                     "a successful `hive new` must confirm the capture so the picker doesn't look dead"
+    assert_includes text, "writero", "the confirmation should name the project the idea landed in"
+  end
+
+  def test_child_completion_text_acknowledges_capture_when_hive_bin_resolved
+    # ChildSupervisor#normalize_hive_bin rewrites argv[0] to a resolved
+    # binary path, so detection must key on the verb at argv[1], not argv[0].
+    text = @supervisor.send(
+      :child_completion_text,
+      child_exit(exit_code: 0, project: "writero",
+                 command_argv: [ "/usr/local/bin/hive", "new", "writero", "an idea", "--json" ])
+    )
+
+    assert_includes text, "Captured your idea",
+                     "capture ack must survive argv[0] being a resolved hive binary path"
+  end
+
+  def test_child_completion_text_stays_silent_for_non_new_success
+    assert_nil @supervisor.send(
+      :child_completion_text,
+      child_exit(exit_code: 0, command_argv: [ "hive", "run", "some-slug", "--json" ])
+    ), "exit-0 commands other than `hive new` must stay silent (signal shows in the next status row)"
   end
 
   def test_send_reconnect_summary_skips_empty_update_list

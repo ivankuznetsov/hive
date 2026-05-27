@@ -626,13 +626,28 @@ module Hive
         elsif child.exit_code == Hive::ExitCodes::TEMPFAIL
           "Try again - another run holds the lock"
         elsif child.exit_code == 0
-          # Clean success — no message. Operators see this signal via the
-          # next status row (or its absence). The "Command completed" ack
-          # was operational chatter with no actionable content.
-          nil
+          # Clean success — no message for most commands. Operators see the
+          # signal via the next status row (or its absence). The lone
+          # exception is `hive new`: idea capture is fire-and-forget with no
+          # status row the operator is watching, so silence made a successful
+          # capture look like a dead button — and because the picker token is
+          # consumed on tap, a confused re-tap then reported "idea picker
+          # expired". Acknowledge it so the operator knows the idea landed.
+          new_capture_text(child)
         else
           "Command failed with exit #{child.exit_code || 'unknown'}; see #{child.log_path}"
         end
+      end
+
+      # argv[0] is rewritten to the resolved hive binary by
+      # ChildSupervisor#normalize_hive_bin, so key on the verb at argv[1].
+      def new_capture_text(child)
+        argv = Array(child.command_argv)
+        return nil unless argv[1].to_s == "new"
+
+        project = child.project || argv[2]
+        suffix = project ? " in #{project}" : ""
+        "Captured your idea#{suffix}. It's in the inbox — move it to 2-brainstorm to start."
       end
 
       QUEUE_DISPLAY_CAP = 10

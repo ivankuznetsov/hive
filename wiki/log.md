@@ -69,6 +69,13 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T11:27:00Z] brainstorm - Claude tmux ready timeout fallback
+
+**Action:** Documented the shared Claude tmux readiness fallback. `CLAUDE_READY` now follows the shared `READY_WAIT_TIMEOUT_SEC` env override when its specific env var is unset, while keeping the long 120s bare default for slow Claude TUI startup.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] - recorded the `HIVE_CLAUDE_TMUX_*` readiness inheritance contract.
+
 ## [2026-05-26T11:14:24Z] init - prompt answer binding fail-fast
 
 **Action:** Restored `ProjectConfigBinding` to the documented "never invent defaults" contract. The binding now requires the complete current `Prompts#collect` answer hash, validates every nested budget/timeout `LIMIT_KEYS` entry, and `hive init` renders the config immediately after prompt collection so incomplete prompt data raises before `.hive-state` or `hive/state` can be created.

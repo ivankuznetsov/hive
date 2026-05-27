@@ -646,7 +646,8 @@ module Hive
     end
 
     def claude_ready_wait_timeout
-      Float(tmux_env("CLAUDE_READY_WAIT_TIMEOUT_SEC", CLAUDE_READY_WAIT_TIMEOUT_SEC.to_s))
+      shared_timeout = tmux_env("READY_WAIT_TIMEOUT_SEC", CLAUDE_READY_WAIT_TIMEOUT_SEC.to_s)
+      Float(tmux_env("CLAUDE_READY_WAIT_TIMEOUT_SEC", shared_timeout))
     end
 
     def session_ready_wait_timeout

@@ -175,27 +175,101 @@ class ClaudeLauncherTest < Minitest::Test
   end
 
   def test_legacy_brainstorm_env_timeout_is_honored
-    old_new = ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    old_legacy = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    ENV.delete("HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC")
-    ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = "12.5"
-
-    assert_equal 12.5, Hive::ClaudeLauncher.ready_wait_timeout
-  ensure
-    restore_env("HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC", old_new)
-    restore_env("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", old_legacy)
+    with_env(
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 12.5, Hive::ClaudeLauncher.ready_wait_timeout
+    end
   end
 
   def test_new_claude_env_timeout_wins_over_legacy
-    old_new = ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    old_legacy = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"] = "4.25"
-    ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = "12.5"
+    with_env(
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "4.25",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 4.25, Hive::ClaudeLauncher.ready_wait_timeout
+    end
+  end
 
-    assert_equal 4.25, Hive::ClaudeLauncher.ready_wait_timeout
-  ensure
-    restore_env("HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC", old_new)
-    restore_env("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", old_legacy)
+  def test_claude_ready_timeout_inherits_new_shared_ready_timeout_when_specific_unset
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "8.75",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 8.75, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_inherits_legacy_shared_ready_timeout_when_specific_unset
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 12.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_specific_setting_wins_over_shared_ready_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "30.5",
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "40.5",
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "8.75",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 30.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_legacy_specific_setting_wins_over_shared_ready_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "40.5",
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "8.75",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 40.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_valid_specific_setting_wins_over_invalid_shared_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "30.5",
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "not-a-float",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
+    ) do
+      assert_equal 30.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_raises_for_invalid_inherited_shared_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "not-a-float",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
+    ) do
+      assert_raises(ArgumentError) do
+        Hive::ClaudeLauncher.claude_ready_wait_timeout
+      end
+    end
+  end
+
+  def test_claude_ready_timeout_keeps_long_default_without_shared_override
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
+    ) do
+      assert_equal Hive::ClaudeLauncher::CLAUDE_READY_WAIT_TIMEOUT_SEC,
+                   Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
   end
 
   def test_spawn_claude_bang_propagates_agent_error_unchanged
@@ -385,10 +459,6 @@ class ClaudeLauncherTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       yield Hive::Task.new(folder)
     end
-  end
-
-  def restore_env(key, value)
-    value.nil? ? ENV.delete(key) : ENV[key] = value
   end
 
   # Unify on the UnboundMethod capture+rebind stub pattern used in

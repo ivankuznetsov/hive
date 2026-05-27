@@ -9,6 +9,37 @@ class E2EReproScriptWriterTest < Minitest::Test
     Hive::E2E::Step.new(kind: kind, args: args, description: "", position: position)
   end
 
+  # Regression (ce-code-review): update-flow scenarios write/assert under
+  # {run_home} and use the new stateful step kinds. The repro must NOT abort
+  # at "step 1 not replayable" — run_home paths replay, and the harness-owned
+  # kinds emit informative comments instead of a bare skip.
+  def test_run_home_paths_and_new_kinds_produce_a_usable_repro
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          steps = [
+            make_step("write_file", args: { "path" => "{run_home}/install-channel", "content" => "brew\n" }, position: 1),
+            make_step("start_releases_stub", args: { "tag" => "v999.0.0" }, position: 2),
+            make_step("spawn_background", args: { "id" => "daemon", "args" => %w[daemon start] }, position: 3),
+            make_step("state_assert", args: { "path" => "{run_home}/update_check.json", "match" => "999" }, position: 4),
+            make_step("stop_process", args: { "id" => "daemon" }, position: 5)
+          ]
+          body = File.read(Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: steps, failed_index: 5
+          ).write)
+
+          refute_match(/not replayable/, body, "run_home write_file must replay, not abort the repro")
+          assert_match(/cat > \S*install-channel/, body, "run_home write_file should emit a heredoc")
+          assert_includes body, File.join(run_home, "update_check.json")
+          assert_match(/start_releases_stub: serves release tag/, body)
+          assert_match(/spawn_background id=daemon: harness runs `hive daemon start`/, body)
+          assert_match(/stop_process id=daemon/, body)
+        end
+      end
+    end
+  end
+
   def test_writes_executable_script_with_shebang_env_and_cli_command
     Dir.mktmpdir("scenario") do |scenario_dir|
       Dir.mktmpdir("sandbox") do |sandbox|

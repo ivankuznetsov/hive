@@ -1,0 +1,34 @@
+name: update_flow_tui_footer
+description: >
+  TUI footer surfaces the update nudge while behind. A real daemon writes the
+  nudge; the TUI (launched after the daemon stops — it reads update_check.json
+  independently) renders "update <ver>: <command>" in its footer.
+  (tui-tagged: runs where a tmux/TTY is available, like the other tui scenarios.)
+tags: [update, tui]
+steps:
+  - kind: write_file
+    path: "{run_home}/install-channel"
+    content: "brew\n"
+  - kind: start_releases_stub
+    tag: "v999.0.0"
+  - kind: spawn_background
+    id: daemon
+    args: [daemon, start]
+    env:
+      HIVE_DAEMON_NO_AUTO_REEXEC: "1"
+  - kind: state_assert
+    path: "{run_home}/update_check.json"
+    match: '"latest": "999\.0\.0"'
+    timeout: 30
+  - kind: stop_process
+    id: daemon
+
+  # TUI boots, then its footer renders the nudge.
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 10
+  - kind: tui_expect
+    anchor: "update 999.0.0"
+    timeout: 10
+  - kind: tui_keys
+    keys: "q"

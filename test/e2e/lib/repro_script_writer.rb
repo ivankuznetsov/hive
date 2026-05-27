@@ -9,7 +9,7 @@ require_relative "string_expander"
 module Hive
   module E2E
     class ReproScriptWriter
-      LIVE_TMUX_KINDS = %w[tui_keys tui_expect wait_subprocess].freeze
+      LIVE_TMUX_KINDS = %w[tui_keys tui_expect tui_refute wait_subprocess].freeze
 
       def initialize(scenario_dir:, sandbox_dir:, run_home:, steps:, failed_index:, scenario_name: nil, expander_context: nil)
         @scenario_dir = scenario_dir
@@ -77,6 +77,18 @@ module Hive
           emit_assertion(step)
         when *LIVE_TMUX_KINDS
           [ "# step #{step.position} skipped: requires live tmux (kind=#{step.kind})" ]
+        when "start_releases_stub"
+          [ "# step #{step.position} start_releases_stub: serves release tag " \
+            "#{expand_string(step.args["tag"].to_s).inspect} — a harness-owned local stub; " \
+            "set HIVE_RELEASES_API_URL to a server returning that tag to replay manually" ]
+        when "spawn_background"
+          bg = expand(step.args.fetch("args")).map(&:to_s)
+          [ "# step #{step.position} spawn_background id=#{expand_string(step.args["id"].to_s)}: " \
+            "harness runs `hive #{bg.join(' ')}` attached (HIVE_DAEMON_NO_AUTO_REEXEC=1, " \
+            "HIVE_RELEASES_API_URL=<stub>) and stops it at teardown — run it manually to replay" ]
+        when "stop_process"
+          [ "# step #{step.position} stop_process id=#{expand_string(step.args["id"].to_s)}: " \
+            "harness-managed teardown; no-op in a flat repro" ]
         else
           [ "# step #{step.position} skipped: kind=#{step.kind} (stateful)" ]
         end
@@ -149,7 +161,7 @@ module Hive
       def emit_write_file(step)
         path = expand_string(step.args.fetch("path").to_s)
         content = expand_string(step.args.fetch("content").to_s)
-        full = PathSafety.contained_path!(@sandbox_dir, path, "write_file path")
+        full = PathSafety.contained_path_any!([ @sandbox_dir, @run_home ], path, "write_file path")
         [
           "# step #{step.position} write_file: #{path}",
           "mkdir -p #{Shellwords.escape(File.dirname(full))}",
@@ -196,7 +208,7 @@ module Hive
       end
 
       def emit_assertion(step)
-        path = PathSafety.contained_path!(@sandbox_dir, expand_string(step.args.fetch("path").to_s), "#{step.kind} path")
+        path = PathSafety.contained_path_any!([ @sandbox_dir, @run_home ], expand_string(step.args.fetch("path").to_s), "#{step.kind} path")
         ruby = case step.kind
         when "state_assert" then state_assert_ruby(step, path)
         when "log_assert" then log_assert_ruby(step, path)
@@ -383,8 +395,7 @@ module Hive
       end
 
       def expand_path(value)
-        expanded = expand_string(value.to_s)
-        PathSafety.contained_path!(@sandbox_dir, expanded, "scenario path")
+        PathSafety.contained_path_any!([ @sandbox_dir, @run_home ], expand_string(value.to_s), "scenario path")
       end
     end
   end

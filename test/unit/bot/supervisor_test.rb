@@ -496,6 +496,35 @@ class HiveBotSupervisorTest < Minitest::Test
                      "capture ack must survive argv[0] being a resolved hive binary path"
   end
 
+  def test_child_completion_text_falls_back_to_argv_project_when_child_project_nil
+    text = @supervisor.send(
+      :child_completion_text,
+      child_exit(exit_code: 0, project: nil,
+                 command_argv: [ "hive", "new", "writero", "an idea", "--json" ])
+    )
+
+    assert_includes text, "Captured your idea"
+    assert_includes text, "writero",
+                     "with child.project nil the ack must name the project from argv[2]"
+  end
+
+  def test_child_completion_text_omits_project_suffix_when_unknown
+    text = @supervisor.send(
+      :child_completion_text,
+      child_exit(exit_code: 0, project: nil, command_argv: [ "hive", "new" ])
+    )
+
+    assert_equal "Captured your idea. It's in the inbox — move it to 2-brainstorm to start.", text,
+                 "with no project from child or argv, the ack drops the ' in <project>' suffix"
+  end
+
+  def test_child_completion_text_stays_silent_for_short_argv
+    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0, command_argv: [ "hive" ])),
+               "a 1-element argv has no verb at argv[1], so exit-0 stays silent"
+    assert_nil @supervisor.send(:child_completion_text, child_exit(exit_code: 0, command_argv: [])),
+               "an empty argv has no verb, so exit-0 stays silent"
+  end
+
   def test_child_completion_text_stays_silent_for_non_new_success
     assert_nil @supervisor.send(
       :child_completion_text,

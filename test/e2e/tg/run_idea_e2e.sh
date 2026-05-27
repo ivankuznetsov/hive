@@ -14,7 +14,15 @@ export HIVE_TEST_ALLOWLIST="$TG_DRIVER_ID"
 export TG_BOT_USERNAME="Testivanshive_bot"
 export TG_CAPTURE_PROJECT="${TG_CAPTURE_PROJECT:-shipped}"
 
-STATE_REPO="$(ruby -Ilib -e 'require "hive"; require "hive/config"; print Hive::Config.find_project(ENV["TG_CAPTURE_PROJECT"])["hive_state_path"]')"
+# Resolve the scratch project's state repo. The `&.` guards an unregistered
+# project (find_project -> nil): without it, an empty STATE_REPO would make the
+# cleanup `git reset --hard` below operate on the MAIN hive checkout (cwd).
+STATE_REPO="$(ruby -Ilib -e 'require "hive"; require "hive/config"; p = Hive::Config.find_project(ENV["TG_CAPTURE_PROJECT"]); print(p&.fetch("hive_state_path", nil) || "")')"
+if [ -z "$STATE_REPO" ] || [ "$(git -C "$STATE_REPO" rev-parse --show-toplevel 2>/dev/null)" != "$(cd "$STATE_REPO" 2>/dev/null && pwd -P)" ]; then
+  echo "ERROR: TG_CAPTURE_PROJECT='$TG_CAPTURE_PROJECT' is not a registered hive project with its own state git repo." >&2
+  echo "       Refusing to run — cleanup would otherwise git-reset the wrong repo. Register it with 'hive init' first." >&2
+  exit 1
+fi
 BASELINE="$(git -C "$STATE_REPO" rev-parse HEAD)"
 echo "scratch state repo: $STATE_REPO @ baseline $BASELINE"
 

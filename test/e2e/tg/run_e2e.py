@@ -14,6 +14,8 @@ import subprocess
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 
+from _drive import drive
+
 REPO = os.environ.get("HIVE_REPO", "/home/asterio/Dev/hive")
 HERE = os.path.join(REPO, "test/e2e/tg")
 API_ID = int(os.environ["TG_API_ID"])
@@ -33,13 +35,13 @@ def start_bot():
         except FileNotFoundError:
             pass
     env = dict(os.environ, HIVE_TEST_ALLOWLIST=DRIVER_ID)
-    devnull = open(os.devnull, "w")
     # CI installs gems via bundler, so the bot must run under `bundle exec`;
-    # locally BOT_LAUNCHER defaults to a bare `ruby`.
+    # locally BOT_LAUNCHER defaults to a bare `ruby`. The bot logs to LOG on
+    # its own, so its stdout/stderr go to DEVNULL (subprocess owns/closes the FD).
     launcher = os.environ.get("BOT_LAUNCHER", "ruby").split()
     proc = subprocess.Popen(
         [*launcher, os.path.join(HERE, "bot_harness.rb")],
-        env=env, stdout=devnull, stderr=devnull,
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL, start_new_session=True, cwd=REPO,
     )
     for _ in range(40):
@@ -64,18 +66,6 @@ def stop_bot(proc):
     proc.wait(timeout=5)
 
 
-def wait_for(client, predicate, timeout=40, after_id=0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        for msg in client.iter_messages(BOT, limit=8):
-            if msg.id <= after_id or msg.out:
-                continue
-            if predicate(msg):
-                return msg
-        time.sleep(1.5)
-    return None
-
-
 def _session():
     # CI passes the session as a StringSession via TG_SESSION (no interactive
     # login possible); locally we fall back to the hive_e2e file session.
@@ -83,46 +73,16 @@ def _session():
     return StringSession(s) if s else SESSION
 
 
-def drive():
-    client = TelegramClient(_session(), API_ID, API_HASH)
-    client.connect()
-    try:
-        if not client.is_user_authorized():
-            print("FAIL driver not authorized"); return 1
-        baseline = max((m.id for m in client.iter_messages(BOT, limit=1)), default=0)
-        nonce = f"e2e ack probe {int(time.time())}"
-        print(f"IDEA_TEXT={nonce}")
-        client.send_message(BOT, f"/idea {nonce}")
-        picker = wait_for(client, lambda m: bool(m.buttons), after_id=baseline)
-        if not picker:
-            print("FAIL no project picker"); return 1
-        target = None
-        for row in picker.buttons:
-            for btn in row:
-                if btn.text.replace("★", "").strip() == PROJECT:
-                    target = btn
-        if not target:
-            print("FAIL project button not found:",
-                  [b.text for r in picker.buttons for b in r]); return 1
-        target.click()
-        ack = wait_for(client, lambda m: "Captured your idea" in (m.message or ""),
-                       timeout=40, after_id=picker.id)
-        if not ack:
-            print("FAIL no capture acknowledgment"); return 1
-        ok = PROJECT in ack.message
-        print(f"{'PASS' if ok else 'FAIL'} ack={ack.message!r}")
-        return 0 if ok else 1
-    finally:
-        client.disconnect()
-
-
 def main():
     proc = start_bot()
     if proc is None:
         print("FAIL bot did not start"); return 1
+    client = TelegramClient(_session(), API_ID, API_HASH)
+    client.connect()
     try:
-        return drive()
+        return drive(client, BOT, PROJECT)
     finally:
+        client.disconnect()
         stop_bot(proc)
 
 

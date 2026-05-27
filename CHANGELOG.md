@@ -2,6 +2,11 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.1.7
+
+- Added a daemon-driven update flow: the daemon checks the latest GitHub release (~daily) and, when you're behind, surfaces a nudge with the exact update command in the TUI footer and as a one-time Telegram bot push (brew/AUR/install.sh are nudge-only — hive never drives your package manager). Opt out via `update.check` / `update.auto` in the global config.
+- `hive daemon status --json` now reports `current_version` and `update_nudge` so agents can detect an available update too.
+
 ## 0.1.6
 
 - `install.sh` now manages the qmd wiki indexer; `hive doctor` gained a managed-qmd probe and clearer failure reporting.

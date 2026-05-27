@@ -380,8 +380,8 @@ module Hive
         "--cwd", cwd
       ]
       Array(add_dirs).each { |dir| command.concat([ "--add-dir", dir ]) }
+      command.concat(profile.permission_flags(permission_mode))
       command.concat([
-        "--permission-mode", permission_mode,
         "--allowedTools", allowed_tools,
         "--bin", profile.bin
       ])

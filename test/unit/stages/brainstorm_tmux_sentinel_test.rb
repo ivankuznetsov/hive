@@ -385,9 +385,9 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     end
   end
 
-  def test_wrapper_command_uses_bypass_permissions_with_limited_tools
+  def test_wrapper_command_bypass_uses_skip_flag_with_limited_tools
     with_tmp_task_folder do |task|
-      profile = Struct.new(:bin).new("/bin/claude")
+      profile = Hive::AgentProfiles.lookup(:claude)
 
       command = Hive::ClaudeLauncher.wrapper_command(
         cwd: task.folder,
@@ -396,9 +396,10 @@ class BrainstormTmuxSentinelTest < Minitest::Test
         permission_mode: "bypassPermissions"
       )
 
-      mode_index = command.index("--permission-mode")
-      refute_nil mode_index
-      assert_equal "bypassPermissions", command.fetch(mode_index + 1)
+      # bypassPermissions must map to the same --dangerously-skip-permissions
+      # flag the headless `-p` path emits — never --permission-mode bypassPermissions.
+      assert_includes command, "--dangerously-skip-permissions"
+      refute_includes command, "--permission-mode"
       tools_index = command.index("--allowedTools")
       refute_nil tools_index
       assert_equal "Read,Write,Edit,LS", command.fetch(tools_index + 1)
@@ -407,7 +408,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
 
   def test_wrapper_command_forwards_non_default_permission_mode
     with_tmp_task_folder do |task|
-      profile = Struct.new(:bin).new("/bin/claude")
+      profile = Hive::AgentProfiles.lookup(:claude)
 
       command = Hive::ClaudeLauncher.wrapper_command(
         cwd: task.folder,
@@ -420,6 +421,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
       refute_nil mode_index, "wrapper command must carry --permission-mode"
       assert_equal "plan", command.fetch(mode_index + 1),
                    "the configured permission mode must reach the tmux wrapper argv"
+      refute_includes command, "--dangerously-skip-permissions"
     end
   end
 

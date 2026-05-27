@@ -54,7 +54,7 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 
 Auto-required from `lib/hive/agent_profiles.rb`:
 
-- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, and Claude usage extraction. Min version `2.1.118`. `:state_file_marker` mode. `Hive::Agent` can replace the skip flag with `--permission-mode <mode>` when a Claude permission mode other than `bypassPermissions` is supplied.
+- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, and Claude usage extraction. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output. No native budget flag (hive enforces wall-clock timeout only). Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `~/.pi/agent/auth.json`. Min version `0.70.2`. `:output_file_exists`.
 

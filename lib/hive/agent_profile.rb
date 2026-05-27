@@ -157,6 +157,22 @@ module Hive
       override && !override.empty? ? override : @bin_default
     end
 
+    # Permission CLI flags for a spawn, shared by the headless `-p` path
+    # (Agent#build_cmd) and the interactive tmux path
+    # (ClaudeLauncher#wrapper_command) so the two never diverge. For the
+    # claude profile, `bypassPermissions` resolves to the legacy
+    # `--dangerously-skip-permissions` flag — identical to a headless
+    # spawn — while any other mode uses `--permission-mode <mode>`. A nil
+    # mode (or any non-claude profile) falls back to the profile's plain
+    # permission_skip_flag, preserving pre-permission_mode behavior.
+    def permission_flags(permission_mode = nil)
+      return [] unless @permission_skip_flag
+      return [ @permission_skip_flag ] unless @name == :claude && permission_mode
+      return [ @permission_skip_flag ] if permission_mode == "bypassPermissions"
+
+      [ "--permission-mode", permission_mode ]
+    end
+
     # Project-config override keys that may appear under
     # `agents.<name>.<key>` in <hive-state>/config.yml. Each maps to an
     # AgentProfile constructor kwarg. Unknown keys raise so a typo in

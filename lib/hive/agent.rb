@@ -258,14 +258,7 @@ module Hive
     end
 
     def permission_flags
-      return [] unless @profile.permission_skip_flag
-      return [ @profile.permission_skip_flag ] unless @profile.name == :claude && @permission_mode
-
-      if @permission_mode == "bypassPermissions"
-        [ @profile.permission_skip_flag ]
-      else
-        [ "--permission-mode", @permission_mode ]
-      end
+      @profile.permission_flags(@permission_mode)
     end
 
     def prompt_via_stdin?

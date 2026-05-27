@@ -54,8 +54,10 @@ and the watchdog keeps waiting. This preserves the manual-intervention
 model: a human may type in the attached pane, but completion still requires
 Claude to write the expected terminal marker.
 
-The wrapper starts Claude with `--permission-mode <claude.permission_mode>`
-(default `bypassPermissions`) and an explicit `--allowedTools
+The wrapper resolves `claude.permission_mode` (default `bypassPermissions`)
+to the same CLI flags the headless `-p` path uses: `bypassPermissions` becomes
+`--dangerously-skip-permissions`, and any other mode becomes
+`--permission-mode <mode>`. It also passes an explicit `--allowedTools
 Read,Write,Edit,LS` list so ordinary task-folder reads and stage-file writes
 do not stop on permission prompts. Projects can set
 `claude.permission_mode: auto` to use Claude Code auto-mode rules instead.

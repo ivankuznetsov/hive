@@ -4,7 +4,7 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 ## Goal
 
-Install the latest stable Hive release, verify `hive --version`, set up daemon autostart, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; the install channels download the same signed `.gem` and run `gem install` against it. Homebrew and the bash installer are live today; the AUR `hive-bin` package is not published yet (see Choose Channel). Daemon autostart is global install-time setup; project setup only decides whether that project is enrolled for daemon dispatch.
+Install the latest stable Hive release, verify `hive --version`, set up daemon autostart, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; all three channels (Homebrew, AUR, install.sh) download the same signed `.gem` and run `gem install` against it. Daemon autostart is global install-time setup; project setup only decides whether that project is enrolled for daemon dispatch.
 
 ## Detect
 
@@ -25,7 +25,7 @@ hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' && echo "hive i
 Use this decision tree:
 
 - macOS arm64: prefer Homebrew.
-- Arch Linux: the `hive-bin` AUR package is **not published yet** — use the bash installer for now. (The intended `yay -S hive-bin` command is documented under Install Commands but must not be run until the package exists.)
+- Arch Linux: prefer AUR through `yay` or `paru`.
 - Ubuntu 22.04+ or other glibc Linux on x86_64/aarch64: use the bash installer.
 - Alpine, NixOS, BSD, and musl Linux: stop and report unsupported tier-3 platform.
 
@@ -38,15 +38,15 @@ brew tap ivankuznetsov/hive
 brew install ivankuznetsov/hive/hive
 ```
 
-Arch Linux — **the `hive-bin` AUR package is not published yet.** Use the bash installer below for now. Once the package is published, the intended command will be (DO NOT RUN until then):
+Arch Linux:
 
 ```bash
-# Coming soon — hive-bin is not yet on the AUR.
 if command -v yay >/dev/null 2>&1; then
   yay -S --noconfirm --needed hive-bin
 elif command -v paru >/dev/null 2>&1; then
   paru -S --noconfirm --needed hive-bin
 else
+  # The agent should treat status 69 as "user must install yay or paru first" and abort.
   echo "Install yay or paru first, then run: yay -S hive-bin"
   exit 69
 fi

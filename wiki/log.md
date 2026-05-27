@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T09:30:53Z] tui - widen subprocess diagnosis marker lookup
+
+**Action:** Rebased issue #14 on top of the current TUI marker-id/backoff work. `Hive::Tui::Subprocess.diagnose_recent_failure` now starts with the existing 64 KiB marker-log tail read, then walks backward in 64 KiB increments up to 1 MiB before falling back to the generic exit-code flash. `Messages::SubprocessExited` carries the spawn id so concurrent same-verb failures diagnose the exact per-spawn capture instead of the newest same-verb marker, and marker argv serialization now round-trips quoted values such as project names with spaces. Per-spawn stdout/stderr capture remains capped separately; the wider marker lookup only recovers the BEGIN[id] line needed to map a failing verb to its capture file and argv.
+
+**Refreshed pages:**
+- [[commands/tui]] - documented the 64 KiB to 1 MiB bounded marker-log lookup and exact-spawn diagnostic routing.
+
 ## [2026-05-27T09:03:53Z] tui - throttle failed auto-heal retries
 
 **Action:** Rebased the kill-class auto-heal backoff fix on top of marker-id guarded ERROR recovery. `BubbleModel#auto_heal_kill_class_errors` now refreshes the same `HEAL_REPEAT_INTERVAL_SECONDS` folder timestamp when `hive markers clear` fails, so persistent lock or filesystem failures retry later without spawning one heal thread per status snapshot.

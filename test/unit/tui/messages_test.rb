@@ -36,10 +36,14 @@ class HiveTuiMessagesTest < Minitest::Test
     assert_equal 30, msg.rows
   end
 
-  def test_subprocess_exited_carries_verb_and_exit_code
+  def test_subprocess_exited_carries_verb_exit_code_and_optional_spawn_id
     msg = Hive::Tui::Messages::SubprocessExited.new(verb: "pr", exit_code: 4)
     assert_equal "pr", msg.verb
     assert_equal 4, msg.exit_code
+    assert_nil msg.spawn_id
+
+    msg = Hive::Tui::Messages::SubprocessExited.new(verb: "pr", exit_code: 4, spawn_id: "deadbeef")
+    assert_equal "deadbeef", msg.spawn_id
   end
 
   def test_input_editor_exited_carries_edit_result

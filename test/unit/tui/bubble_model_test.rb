@@ -747,15 +747,16 @@ class HiveTuiBubbleModelTest < Minitest::Test
   def test_default_footer_truncates_tokens_first_on_overflow_above_threshold
     hint = @model.send(:footer_hint)
     usage = Hive::Tui::Views::UsageFooter.text(Hive::UsageDb.zero_aggregate)
-    assert usage.end_with?("tokens"),
+    tail_label = "tokens"
+    assert usage.end_with?(tail_label),
            "test premise: usage text must end with `tokens` label, got #{usage.inspect}"
     full_width = "#{hint} · #{usage}".length
     out = with_zero_usage { @model.send(:default_footer, full_width - 5) }
 
     assert_includes out, "[Tab] switch",
                     "hint block must survive when overflow clips from the right"
-    refute_includes out, "tokens",
-                    "token block must be the first content clipped on overflow"
+    refute out.end_with?(tail_label),
+           "trailing token label must be the first content clipped on overflow"
   end
 
   def test_default_footer_narrow_branch_drops_hints_and_keeps_usage

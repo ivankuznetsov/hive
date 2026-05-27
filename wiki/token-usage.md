@@ -1,9 +1,9 @@
 ---
 title: Token Usage Stats
 type: observability
-source: lib/hive/usage_db.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb
+source: lib/hive/usage_db.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-05-25
+updated: 2026-05-26
 tags: [observability, tui, sqlite, agent]
 ---
 
@@ -69,10 +69,10 @@ The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is 
 
 ## TUI Surfaces
 
-`hive tui` shows a compact usage footer in grid mode. The compact footer intentionally omits the `30d` bucket; use the full `T` matrix for that window:
+`hive tui` shows a compact usage block in the grid-mode footer. On wide terminals, the keybinding hints render first, then ` · `, then the compact usage block so right-side truncation clips token counters before actions. Below 80 usable columns, the existing compact-only footer path still renders just the usage block. The compact block intentionally omits the `30d` bucket; use the full `T` matrix for that window:
 
 ```text
-today 1.2M/400k/200k • 7d ... • all ... • tokens
+[Tab] switch ... [q] quit · today 1.2M/400k/200k • 7d ... • all ... • tokens
 ```
 
 The tuple is `input/output/cached`. Units use `k` and `M` with compact one-decimal formatting. Footer scope follows the current selection:

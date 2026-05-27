@@ -17,27 +17,44 @@ module Hive
       LOCK_RETRY_DEADLINE_SEC = 5
       LOCK_RETRY_SLEEP_SEC = 0.05
 
-      def append!(brainstorm_path:, question_n:, answer_text:)
+      def append!(brainstorm_path:, question_n:, answer_text:, logger: nil)
         task_folder = File.dirname(brainstorm_path)
         raise Hive::InvalidTaskPath, "task folder does not exist: #{task_folder}" unless Dir.exist?(task_folder)
 
         deadline = Time.now + LOCK_RETRY_DEADLINE_SEC
         result = nil
+        last_holder = nil
         loop do
-          result = try_append(task_folder, brainstorm_path, question_n, answer_text)
+          result, holder = try_append(task_folder, brainstorm_path, question_n, answer_text)
           break if result || Time.now >= deadline
 
+          last_holder = holder if holder
           sleep LOCK_RETRY_SLEEP_SEC
         end
-        result ||= :lock_busy
+
+        if result.nil?
+          # Emit a structured event so operators can grep the bot log to see
+          # what was holding the per-task lock when the writer gave up.
+          # holder fields come from Hive::Lock's lock-file YAML — typically
+          # {pid:, started_at:, host:, op:, slug:, stage:, bot: …}.
+          logger&.event(:answer_lock_contention,
+                        task_folder: task_folder,
+                        question_n: question_n,
+                        deadline_sec: LOCK_RETRY_DEADLINE_SEC,
+                        holder: last_holder)
+          result = :lock_busy
+        end
 
         raise "BrainstormAnswerWriter returned unknown result #{result.inspect}" unless RESULTS.include?(result)
 
         result
       end
 
+      # Returns [result_symbol, holder_metadata_or_nil].
+      # holder_metadata is only set when the call FAILED to acquire the lock,
+      # in which case result is nil.
       def try_append(task_folder, brainstorm_path, question_n, answer_text)
-        Hive::Lock.with_task_lock(task_folder, "bot" => "brainstorm_answer") do
+        result = Hive::Lock.with_task_lock(task_folder, "bot" => "brainstorm_answer") do
           content = File.exist?(brainstorm_path) ? File.read(brainstorm_path, encoding: "UTF-8") : ""
           parsed = Hive::Bot::BrainstormParser.parse_text(content)
           if !parsed.any? { |question| question.n == question_n }
@@ -61,8 +78,11 @@ module Hive
           Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
           :written
         end
-      rescue Hive::ConcurrentRunError, Errno::ENOENT
-        nil
+        [ result, nil ]
+      rescue Hive::ConcurrentRunError => e
+        [ nil, e.holder ]
+      rescue Errno::ENOENT
+        [ nil, nil ]
       end
       private_class_method :try_append
 

@@ -116,6 +116,16 @@ class CommandsRunTest < Minitest::Test
     execute_stale = run.send(:json_next_action, t, marker(:execute_stale))
     guardrail = run.send(:json_next_action, t, marker(:review_waiting, "reason" => "fix_guardrail", "pass" => "3"))
     partial = run.send(:json_next_action, t, marker(:review_waiting, "reason" => "reviewer_partial_failure", "pass" => "4"))
+    scope_failure = run.send(
+      :json_next_action,
+      t,
+      marker(:review_error, "reason" => "fix_auto_commit_scope_failed", "files" => "reviews/auto-commit-scope-01.md")
+    )
+    signing_failure = run.send(
+      :json_next_action,
+      t,
+      marker(:review_error, "reason" => "fix_auto_commit_signing_failed", "phase" => "fix")
+    )
     unknown = run.send(:json_next_action, t, marker(:surprise_marker))
 
     assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, execute_stale.fetch("kind")
@@ -123,6 +133,15 @@ class CommandsRunTest < Minitest::Test
     assert_match(/checkbox count/, guardrail.fetch("instructions"))
     assert_equal "/tmp/task-folder/reviews/errors-04.md", partial.fetch("target")
     assert_match(/partial coverage/, partial.fetch("instructions"))
+    assert_equal Hive::Schemas::NextActionKind::EDIT, scope_failure.fetch("kind")
+    assert_equal "/tmp/task-folder/reviews/auto-commit-scope-01.md", scope_failure.fetch("target")
+    assert_match(/scope artifact/, scope_failure.fetch("instructions"))
+    assert_equal Hive::Schemas::NextActionKind::EDIT, signing_failure.fetch("kind")
+    assert_equal "/tmp/worktree", signing_failure.fetch("target")
+    assert_match(/signing config/, signing_failure.fetch("instructions"))
+    assert_match(/commit or revert/, signing_failure.fetch("instructions"))
+    assert_match(/sign_policy/, signing_failure.fetch("instructions"))
+    refute signing_failure.key?("rerun_with")
     assert_equal({ "kind" => Hive::Schemas::NextActionKind::NO_OP }, unknown)
   end
 

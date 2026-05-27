@@ -101,28 +101,250 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
-  def test_legacy_brainstorm_env_timeout_is_honored
-    old_new = ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    old_legacy = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    ENV.delete("HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC")
-    ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = "12.5"
+  def test_session_handle_passes_deadline_to_send_prompt_and_wait
+    with_tmp_task do |task|
+      captured = nil
+      original = Hive::ClaudeLauncher.method(:send_prompt_and_wait!)
+      Hive::ClaudeLauncher.define_singleton_method(:send_prompt_and_wait!) do |**kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
 
-    assert_equal 12.5, Hive::ClaudeLauncher.ready_wait_timeout
-  ensure
-    restore_env("HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC", old_new)
-    restore_env("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", old_legacy)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+      handle = Hive::ClaudeLauncher::SessionHandle.new(task: task, runner: Object.new)
+      handle.send_and_wait!(prompt: "prompt", timeout_sec: 5, deadline: deadline)
+
+      assert_equal deadline, captured.fetch(:deadline)
+    ensure
+      Hive::ClaudeLauncher.singleton_class.send(:remove_method, :send_prompt_and_wait!)
+      Hive::ClaudeLauncher.define_singleton_method(:send_prompt_and_wait!, original) if original
+    end
+  end
+
+  def test_prepare_claude_session_uses_caller_deadline_before_ready_timeout
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-test-session" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) { |bytes:| "Claude Code v2.1.128\nstill working" }
+
+    monotonic_now = 1_000.0
+    sleeps = []
+    with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, lambda { |seconds|
+        sleeps << seconds
+        monotonic_now += seconds
+      }) do
+        err = assert_raises(Hive::AgentError) do
+          Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now + 0.5)
+        end
+        assert_match(/before caller deadline/, err.message)
+      end
+    end
+
+    assert_in_delta 0.5, sleeps.sum, 0.001
+  end
+
+  def test_send_prompt_and_wait_clamps_wait_timeout_to_remaining_deadline
+    with_tmp_task do |task|
+      runner = Object.new
+      sent_prompts = []
+      runner.define_singleton_method(:send_prompt) { |prompt| sent_prompts << prompt }
+
+      monotonic_now = 1_000.0
+      captured_timeout = nil
+      captured_deadline = nil
+      with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, lambda { |_runner, deadline:|
+          captured_deadline = deadline
+          monotonic_now += 1
+          true
+        }) do
+          with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_for_status, lambda { |_task, _runner, timeout, *_args|
+            captured_timeout = timeout
+            { status: :ok, final_message: nil, final_message_source: nil }
+          }) do
+            with_replaced_singleton_method(Hive::ClaudeLauncher, :capture_pane_log, ->(*_args) { }) do
+              result = Hive::ClaudeLauncher.send_prompt_and_wait!(
+                task: task,
+                runner: runner,
+                prompt: "prompt",
+                timeout_sec: 10,
+                deadline: 1_005.0,
+                status_mode: :output_file_exists
+              )
+              assert_equal :ok, result.fetch(:status)
+            end
+          end
+        end
+      end
+
+      assert_equal [ "prompt" ], sent_prompts
+      assert_in_delta 1_005.0, captured_deadline, 0.001
+      assert_in_delta 4.0, captured_timeout, 0.001
+    end
+  end
+
+  def test_send_prompt_and_wait_returns_timeout_when_readiness_consumes_deadline
+    with_tmp_task do |task|
+      runner = Object.new
+      runner.define_singleton_method(:send_prompt) { |_prompt| flunk "prompt must not be sent after deadline" }
+
+      monotonic_now = 1_000.0
+      with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+        with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, lambda { |_runner, deadline:|
+          monotonic_now = deadline
+          true
+        }) do
+          result = Hive::ClaudeLauncher.send_prompt_and_wait!(
+            task: task,
+            runner: runner,
+            prompt: "prompt",
+            timeout_sec: 10,
+            deadline: 1_001.0,
+            status_mode: :output_file_exists
+          )
+          assert_equal :timeout, result.fetch(:status)
+          assert_match(/deadline reached before prompt/, result.fetch(:error_message))
+        end
+      end
+    end
+  end
+
+  def test_legacy_brainstorm_env_timeout_is_honored
+    with_env(
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 12.5, Hive::ClaudeLauncher.ready_wait_timeout
+    end
   end
 
   def test_new_claude_env_timeout_wins_over_legacy
-    old_new = ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    old_legacy = ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"]
-    ENV["HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC"] = "4.25"
-    ENV["HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC"] = "12.5"
+    with_env(
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "4.25",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 4.25, Hive::ClaudeLauncher.ready_wait_timeout
+    end
+  end
 
-    assert_equal 4.25, Hive::ClaudeLauncher.ready_wait_timeout
-  ensure
-    restore_env("HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC", old_new)
-    restore_env("HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC", old_legacy)
+  def test_claude_ready_timeout_inherits_new_shared_ready_timeout_when_specific_unset
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "8.75",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 8.75, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_inherits_legacy_shared_ready_timeout_when_specific_unset
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 12.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_specific_setting_wins_over_shared_ready_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "30.5",
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "40.5",
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "8.75",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 30.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_legacy_specific_setting_wins_over_shared_ready_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "40.5",
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "8.75",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => "12.5"
+    ) do
+      assert_equal 40.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_valid_specific_setting_wins_over_invalid_shared_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => "30.5",
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "not-a-float",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
+    ) do
+      assert_equal 30.5, Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_timeout_raises_for_invalid_inherited_shared_timeout
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => "not-a-float",
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
+    ) do
+      assert_raises(ArgumentError) do
+        Hive::ClaudeLauncher.claude_ready_wait_timeout
+      end
+    end
+  end
+
+  def test_claude_ready_timeout_keeps_long_default_without_shared_override
+    with_env(
+      "HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC" => nil,
+      "HIVE_BRAINSTORM_TMUX_READY_WAIT_TIMEOUT_SEC" => nil
+    ) do
+      assert_equal Hive::ClaudeLauncher::CLAUDE_READY_WAIT_TIMEOUT_SEC,
+                   Hive::ClaudeLauncher.claude_ready_wait_timeout
+    end
+  end
+
+  def test_claude_ready_prompt_accepts_observed_prompt_on_last_nonblank_line
+    pane = "Claude Code v2.1.133\nTip: try refactor\n\n❯ Try \"refactor <filepath>\""
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_stale_prompt_marker_in_scrollback
+    pane = "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\"\n\nbackground indexing update"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_accepts_current_ready_prompt_with_stale_trust_scrollback
+    pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm\n" \
+           "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\""
+
+    refute Hive::ClaudeLauncher.claude_trust_prompt?(pane)
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_accepts_current_ready_prompt_with_stale_permission_scrollback
+    pane = "Claude Code v2.1.133\nDo you want to make this edit?\n❯ 1. Yes\n" \
+           "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\""
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_numbered_menu_option_after_copy_drift
+    pane = "Claude Code v2.1.133\nProceed with the action?\n❯ 1. Yes"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_trust_prompt_matches_observed_folder_trust_prompt
+    pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm"
+
+    assert Hive::ClaudeLauncher.claude_trust_prompt?(pane)
   end
 
   def test_spawn_claude_bang_propagates_agent_error_unchanged
@@ -304,6 +526,39 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_augment_result_sets_nil_final_message_when_pane_tail_is_unavailable
+    runner = Struct.new(:name) do
+      def capture_pane_tail(bytes:)
+        raise Hive::TmuxError, "pane gone"
+      end
+    end.new("gone-pane")
+    result = {}
+
+    Hive::ClaudeLauncher.augment_result_with_final_message!(result, runner)
+
+    assert_nil result.fetch(:final_message)
+    assert_nil result.fetch(:final_message_source)
+  end
+
+  def test_capture_pane_log_warns_when_log_path_is_not_writable
+    with_tmp_dir do |dir|
+      log_dir = File.join(dir, "not-a-directory")
+      File.write(log_dir, "already a file")
+      task = Struct.new(:log_dir).new(log_dir)
+      runner = Struct.new(:pane) do
+        def capture_pane_tail(bytes:)
+          pane
+        end
+      end.new("pane tail")
+
+      _out, err = capture_io do
+        Hive::ClaudeLauncher.capture_pane_log(task, runner, "brainstorm")
+      end
+
+      assert_includes err, "could not write tmux pane log for brainstorm"
+    end
+  end
+
   private
 
   def with_tmp_task(stage: "2-brainstorm")
@@ -312,10 +567,6 @@ class ClaudeLauncherTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       yield Hive::Task.new(folder)
     end
-  end
-
-  def restore_env(key, value)
-    value.nil? ? ENV.delete(key) : ENV[key] = value
   end
 
   # Unify on the UnboundMethod capture+rebind stub pattern used in

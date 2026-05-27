@@ -7,19 +7,24 @@ require "hive/bot/title_formatter"
 module Hive
   module Bot
     class NotificationDispatcher
-      # daemon_enabled is accepted as an unused keyword arg so existing
-      # callers don't break. The old gate ("suppress ready_to_X only when
-      # the daemon is enabled for the project") leaked ready_to_X
-      # notifications whenever the daemon was off, which the eval contract
-      # classifies as noise (allow-list is agent_blocked_question /
-      # fatal_error only). ready_to_X is now always pull-only via /status;
-      # the operator decides when to advance.
+      # ready_to_X notifications are gated by daemon_enabled per project:
+      #
+      #   daemon ON  → suppress (the daemon itself dispatches the stage transition;
+      #                a Telegram ping would be redundant noise)
+      #   daemon OFF → fire ONE proactive alert per (project, slug, stage)
+      #                fingerprint; persistent dedupe prevents repeats.
+      #                The operator approves/rejects from the alert keyboard.
+      #
+      # This restores the original daemon-aware behaviour after a too-aggressive
+      # blanket-suppression fix (see eval s3 noise test, which now models a
+      # daemon-enabled project so the contract still holds).
       def initialize(telegram:, logger:, bot_config:,
-                     daemon_enabled: nil, now: -> { Time.now }, # rubocop:disable Lint/UnusedMethodArgument
+                     daemon_enabled: nil, now: -> { Time.now },
                      alert_store: nil)
         @telegram = telegram
         @logger = logger
         @bot_config = bot_config
+        @daemon_enabled = daemon_enabled
         @now = now
         @alert_store = alert_store || AlertStore.new(path: bot_config["alert_state_file"], logger: logger)
       end
@@ -27,8 +32,12 @@ module Hive
       def process_rows(rows)
         current = current_notifications(rows)
         if @alert_store.fresh_install?
-          seed_silently(current)
+          immediate, seedable = current.partition do |_fingerprint, payload|
+            immediate_on_fresh_install?(payload.fetch(:row))
+          end.map(&:to_h)
+          seed_silently(seedable)
           @alert_store.mark_seeded!
+          process_current(immediate)
           return
         end
         process_recoveries(current)
@@ -52,6 +61,10 @@ module Hive
           fingerprint = NotificationBuilders.fingerprint(row)
           out[fingerprint] ||= { row: row, notification: notification }
         end
+      end
+
+      def immediate_on_fresh_install?(row)
+        NotificationBuilders.legacy_stage_dirs?(row)
       end
 
       # On a fresh AlertStore (no prior persistent state), pretend every
@@ -250,13 +263,28 @@ module Hive
         end
       end
 
-      # ready_to_X notifications are pull-only via /status; never proactive.
-      # The eval contract limits proactive messages to agent_blocked_question
-      # (needs_input) and fatal_error (recovery/error). Stage approvals don't
-      # block the operator — they wait for an approve callback, which the
-      # operator initiates by pulling /status when ready to advance.
+      # Suppress proactive ready_to_X notifications only when the project's
+      # daemon is enabled (the daemon will dispatch the stage transition
+      # itself; a Telegram ping would duplicate work). With daemon OFF the
+      # operator needs the Approve/Reject keyboard to advance the workflow,
+      # so the alert fires.
       def suppress_ready_action?(row)
-        NotificationBuilders::READY_ACTIONS.include?(row.action)
+        return false unless NotificationBuilders::READY_ACTIONS.include?(row.action)
+
+        daemon_enabled_for?(row.project)
+      end
+
+      def daemon_enabled_for?(project)
+        return @daemon_enabled.call(project) if @daemon_enabled
+
+        entry = Hive::Config.find_project(project)
+        return false unless entry
+
+        Hive::Config.load(entry["path"]).dig("daemon", "enabled") == true
+      rescue Hive::ConfigError => e
+        @logger.event(:poll_failure, source: "daemon_check", project: project,
+                                      error_class: e.class.name, message: e.message)
+        false
       end
 
       def chat_ids

@@ -476,7 +476,8 @@ module Hive
       end
 
       def label_for(marker)
-        attrs = marker.attrs.map { |k, v| "#{k}=#{status_attr_value(v)}" }.join(" ")
+        attrs = Hive::Markers.display_attrs(marker.attrs)
+                            .map { |k, v| "#{k}=#{status_attr_value(v)}" }.join(" ")
         attrs.empty? ? marker.name.to_s : "#{marker.name} #{attrs}"
       end
 

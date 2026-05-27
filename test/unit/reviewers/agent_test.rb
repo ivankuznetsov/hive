@@ -409,6 +409,27 @@ class ReviewersAgentTest < Minitest::Test
   end
 
 
+  def test_run_in_session_passes_deadline_to_shared_handle
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      calls = []
+      handle = Object.new
+      handle.define_singleton_method(:send_and_wait!) do |**kwargs|
+        calls << kwargs
+        { status: :ok }
+      end
+
+      result = reviewer.run_in_session!(handle: handle, deadline: deadline)
+
+      assert result.ok?
+      assert_equal 1, calls.size
+      assert_equal deadline, calls.first.fetch(:deadline)
+      assert calls.first.fetch(:timeout_sec) <= 2,
+             "shared-session timeout must be clamped to the reviewer deadline"
+    end
+  end
+
   def test_run_uses_default_timeout_when_spec_omits_timeout
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir, "timeout_sec" => nil)

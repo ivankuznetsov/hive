@@ -21,12 +21,49 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
   end
 
+  def legacy_stage_dirs(task_count: 3, command: "hive migrate")
+    Hive::Bot::StatusWatcher::LegacyStageDirs.new(
+      project: "hive",
+      project_path: "/tmp/hive",
+      hive_state_path: "/tmp/hive/.hive-state",
+      legacy_stage_dirs: [
+        { "stage_dir" => "5-review", "task_count" => task_count - 1 },
+        { "stage_dir" => "6-pr", "task_count" => 1 }
+      ],
+      legacy_migrate_command: command
+    )
+  end
+
   def retry_diagnostic(command: "hive review slug --json")
     { "suggested_next_action" => { "kind" => "retry", "command" => command } }
   end
 
   def manual_diagnostic
     { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
+  end
+
+  def test_legacy_stage_dirs_notification_renders_project_count_dirs_and_command
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs)
+
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
+  end
+
+  def test_legacy_stage_dirs_notification_renders_singular_and_command_fallback
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(task_count: 1, command: nil))
+
+    assert_equal "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
+  end
+
+  def test_legacy_stage_dirs_notification_handles_malformed_command_payload
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(command: "hive 'migrate"))
+
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
   end
 
   def test_ready_to_plan_builds_approval_keyboard
@@ -96,18 +133,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_match(/Brainstorm questions/, notification.text)
     assert_match(/provide input/, notification.text)
     assert_match(%r{/answer slug-260514-abcd}, notification.text)
-    assert_equal "Answer in chat", notification.keyboard.first.first[:text]
-    assert_equal "Ask Codex", notification.keyboard[1].first[:text]
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    assert_equal [ "Answer in chat" ], labels,
+                 "brainstorm-waiting keyboard is deterministic Q-by-Q only — no Codex draft, no laptop button"
   end
 
-  def test_generic_needs_input_marker_builds_details_and_laptop_keyboard
+  def test_generic_needs_input_marker_builds_show_details_only_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "agent_waiting", attrs: { "reason" => "operator" })
     )
 
     assert_match(/Needs input: agent_waiting reason=operator/, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Show details", "Open laptop" ], labels
+    assert_equal [ "Show details" ], labels,
+                 "the only useful action for an unknown waiting marker is Show details"
   end
 
   def test_compacted_callback_round_trips
@@ -123,7 +162,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  Hive::Bot::NotificationBuilders.resolve_callback(token)
   end
 
-  def test_review_waiting_fix_guardrail_builds_operator_keyboard_without_invalid_clear
+  def test_review_waiting_fix_guardrail_builds_show_details_only_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "review_waiting", attrs: { "reason" => "fix_guardrail" })
     )
@@ -132,7 +171,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "Clear and retry",
                     "REVIEW_WAITING is not a clearable marker — must not surface a clear_retry button"
-    assert_includes labels, "Open laptop"
+    refute_includes labels, "Open laptop",
+                    "Open laptop was retired — operators are on Telegram and the button has no payload"
     assert_includes labels, "Show details"
   end
 
@@ -156,12 +196,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "review_stale must drive recovery_match_attr toward the pass=<n> key")
   end
 
-  def test_recovery_match_attr_error_uses_exit_code
-    attrs = { "exit_code" => "137" }
+  def test_recovery_match_attr_error_prefers_marker_id
+    attrs = { "reason" => "exit_code", "exit_code" => "137", "marker_id" => "err-137" }
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:exit_code=137\z/, autofix,
-                 "generic `error` marker must drive recovery_match_attr toward exit_code")
+    assert_match(/:marker_id=err-137\z/, autofix,
+                 "generic `error` marker must prefer the high-cardinality marker_id guard")
+  end
+
+  def test_recovery_match_attr_error_legacy_falls_back_to_observed_attrs
+    attrs = { "reason" => "exit_code", "exit_code" => "137" }
+    r = row(action: "error", marker: "error", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:reason=exit_code,exit_code=137\z/, autofix,
+                 "legacy `error` marker must use observed reason and exit_code together")
   end
 
   def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix
@@ -216,9 +264,10 @@ class HiveBotNotificationBuildersTest < Minitest::Test
           diagnostic: manual_diagnostic)
     )
 
-    assert_includes notification.text, "Open this task on a laptop before retrying."
+    assert_includes notification.text, "Tap Show details to see what needs manual intervention."
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    assert_equal [ "Open laptop", "Show details" ], labels
+    assert_equal [ "Show details" ], labels,
+                 "manual recovery surfaces Show details only — no Autofix, no laptop button"
     refute_includes labels, "🔧 Autofix"
   end
 
@@ -231,7 +280,9 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "🔧 Autofix"
-    assert_includes labels, "Open laptop"
+    refute_includes labels, "Open laptop",
+                    "Open laptop button retired everywhere"
+    assert_includes labels, "Show details"
   end
 
   def test_cause_sentence_for_execute_stale

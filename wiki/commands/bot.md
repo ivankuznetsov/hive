@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-05-25
+updated: 2026-05-27
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -40,11 +40,49 @@ hive bot tail
 | `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
+| `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
+| `/details <slug>` | Dispatches `hive status --diagnose <slug> --project <project> --stage <stage> --json` — same payload as the inline "Show details" button. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. |
 | `/help` | Lists the supported command set. |
 
 Free text outside an active answer conversation is rejected with a
 `/help` hint. Unauthorized chats receive no reply.
+
+The `/status` (and `/queue`) reply lists actionable rows as
+`Title — Stage` text, and attaches an **inline keyboard** with one
+button per row that has a Telegram-side next step. Tapping a button
+acts on that task in-chat. Buttons are used rather than rendered
+`/command <slug>` text links because Telegram's `bot_command` message
+entity covers only the `/command` token, not the argument — tapping a
+rendered `/answer <slug>` would send just `/answer` and hit the usage
+hint, dropping the slug. Inline callback buttons carry the full
+payload on tap. Per-row button mapping (built via
+`Supervisor#status_action_button`, reusing `NotificationBuilders`
+callback constructors so the callbacks are byte-identical to the
+push-notification buttons):
+
+- `needs_input` + `2-brainstorm` + `waiting` → **✏️ answer** (`answer:` callback)
+- `ready_to_*` → **✅ approve** (`approve:<verb>:` callback)
+- recovery row, retryable → **🔧 autofix** (`autofix:` callback)
+- recovery row, manual-only → **🔍 details** (`details:` callback)
+- anything else (e.g. in-flight `agent_running`) → no button
+
+The reply stays text-only when no row is actionable. The `/answer`,
+`/approve`, `/autofix`, `/details` slash commands remain typeable
+(and appear in the quick-actions menu) for operators who prefer
+typing or scripting.
+
+On bot start the supervisor calls Telegram's `setMyCommands` so the
+blue quick-actions menu (shown when the operator taps the `/` icon in
+the chat input) surfaces `/idea`, `/status`, `/queue`, `/answer`,
+`/approve`, `/autofix`, `/details`, `/done`, and `/help` with
+human-readable descriptions. This is a one-shot idempotent RPC at
+start — it is not re-issued on SIGHUP/config reload because the
+command list does not change with config. A network failure during
+registration is logged as `:send_failure` with
+`source: "set_my_commands"` and does not block `poll_loop` from
+starting. The command list and descriptions live in
+`Hive::Bot::Supervisor::BOT_COMMANDS`.
 
 ## Inline actions
 
@@ -53,7 +91,8 @@ Push notifications use callback data that routes to:
 - Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
 - Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
-- Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. Manual-only recovery states show `Open laptop` / `Show details`; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
+- Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. `ERROR` rows prefer `marker_id=<current>` and use observed reason/exit_code attrs only for legacy markers. Manual-only recovery states show `Open laptop` / `Show details`; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
+- Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -90,6 +129,23 @@ persistence means every restart is a burst — accept the trade-off).
 token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
 (exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
 silently.
+
+`hive bot start` also loads `~/.config/hive/.env` (next to `config.yml`)
+into `ENV` at startup so operators don't have to wire the token into a
+shell rc file. Format is the conventional `KEY=value` per line; outer
+single or double quotes are stripped; `#` starts a comment; existing env
+vars take precedence (a manual `export HIVE_TELEGRAM_BOT_TOKEN=...`
+always wins).
+
+Example `~/.config/hive/.env`:
+
+```
+HIVE_TELEGRAM_BOT_TOKEN=123456789:AAAAa-BBBb-CCCC
+```
+
+The file is read once at `hive bot start` time; `hive bot reload`
+re-reads `config.yml` but NOT `.env` (tokens are not reload-safe; restart
+the bot after rotating).
 
 ## Structured log
 

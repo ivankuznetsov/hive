@@ -195,7 +195,12 @@ jobs:
           mkdir -p "$gemroot/bin"
           cat > "$gemroot/bin/hive" <<'SH'
           #!/usr/bin/env ruby
-          puts "0.1.0"
+          if ARGV == ["daemon", "install", "--json"]
+            File.write(ENV.fetch("HIVE_DAEMON_ENV_CAPTURE"), ENV["HIVE_INVOKED_BIN"].to_s)
+            puts '{"schema":"hive-daemon-install","schema_version":1,"ok":true,"outcome":"written","platform":"linux","target_path":"/tmp/hive-daemon.service","backup_path":null,"restarted":false,"messages":[]}'
+          else
+            puts "0.1.0"
+          end
           SH
           cat > "$gemroot/bin/hv" <<'SH'
           #!/usr/bin/env ruby
@@ -249,7 +254,9 @@ jobs:
           mkdir -p "$apache_bin" "$xdg_bin" "$xdg_data"
           printf '#!/usr/bin/env bash\necho "Apache Hive 3.1.0"\n' > "$apache_bin/hive"
           chmod +x "$apache_bin/hive"
-          FIXTURES="$fixtures" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0
+          FIXTURES="$fixtures" HIVE_DAEMON_ENV_CAPTURE="$fixtures/invoked-bin" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
+          grep -q "daemon autostart enabled via hive daemon install (written)" "$fixtures/install.out"
+          grep -qx "$xdg_bin/hive" "$fixtures/invoked-bin"
           test -L "$xdg_bin/hv"
           "$xdg_bin/hv" --version | grep -q '^0\.1\.0$'
 

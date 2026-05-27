@@ -37,8 +37,6 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     cases = {
       callback_reject: [ "reject:anything", "Left unchanged." ],
       callback_open_laptop: [ "open_laptop:hive:slug", "Open laptop for this one." ],
-      callback_codex_edit: [ "codex_edit:hive:slug:1", "Send the edited answer as a message." ],
-      callback_codex_cancel: [ "codex_cancel:hive:slug:1", "Draft cancelled." ],
       unknown: [ "unknown:hive:slug", "Bot got confused - please retry from /queue." ]
     }
 
@@ -49,17 +47,23 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     end
   end
 
-  def test_answer_and_path_callbacks_start_expected_answer_modes
+  def test_legacy_codex_callbacks_route_to_retirement_notice
+    # Old messages in the wild may still have Ask Codex / Write / Edit / Cancel
+    # buttons whose callback_data routes here. Replies steer the operator to
+    # the deterministic Answer-in-chat flow that replaced the Codex draft path.
+    %i[callback_path_a_yes callback_path_a_just_type callback_codex_write_draft
+       callback_codex_edit callback_codex_cancel].each do |intent|
+      result = @handlers.handle(intent, update("anything:hive:slug:1"))
+      assert_equal :reply, result.action
+      assert_match(/Codex draft flow was removed/, result.text)
+    end
+  end
+
+  def test_answer_callback_starts_path_b_answer_mode
     answer = @handlers.handle(:callback_answer, update("answer:hive:brainstorm-task"))
-    path_a = @handlers.handle(:callback_path_a_yes, update("path_a:hive:brainstorm-task"))
-    path_b = @handlers.handle(:callback_path_a_just_type, update("path_b:hive:brainstorm-task"))
 
     assert_equal :start_answer, answer.action
     assert_equal :path_b, answer.mode
-    assert_equal :start_codex, path_a.action
-    assert_equal :path_a, path_a.mode
-    assert_equal :reply, path_b.action
-    assert_equal "Send the answer as a message.", path_b.text
   end
 
   def test_idea_project_new_deletes_pending_token_and_replies_with_scope_message
@@ -91,17 +95,10 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     refute @pending_ideas.key?("tok")
   end
 
-  def test_codex_write_validates_question_number
-    ok = @handlers.handle(:callback_codex_write_draft, update("codex_write:hive:slug:12"))
-    bad = @handlers.handle(:callback_codex_write_draft, update("codex_write:hive:slug:not-int"))
-
-    assert_equal :confirm_codex_draft, ok.action
-    assert_equal 12, ok.question_n
-    assert_equal :reply, bad.action
-    assert_match(/bot got confused/i, bad.text)
-    assert_equal :callback_malformed, @logger.events.last.fetch(:name)
-    assert_equal "non_integer_question_n", @logger.events.last.fetch(:payload).fetch(:reason)
-  end
+  # The Codex draft flow was removed; codex_write callbacks from legacy
+  # messages now route to the retirement notice. The validate-question-n
+  # path is no longer exercised because no new Codex draft buttons are
+  # emitted. See test_legacy_codex_callbacks_route_to_retirement_notice.
 
   def test_findings_accept_all_dispatches_toggle_then_retry
     result = @handlers.handle(:callback_findings_accept_all, update("findings_accept_all:any:hive:slug:6-review"))
@@ -244,6 +241,21 @@ class HiveBotCallbackHandlersTest < Minitest::Test
                  "clear_and_retry must short-circuit instead of dispatching zero commands plus an alert_reset")
     assert_nil result.alert_reset,
                "with no commands to run, alert_reset must NOT fire (otherwise the alert clears without any retry)"
+  end
+
+  def test_clear_and_retry_refuses_manual_only_marker
+    # P2b: a stale clear_retry: button on a manual-only marker (EXECUTE_STALE)
+    # must refuse, not dispatch markers-clear + a retry verb. Routing through
+    # RecoverySequence.build gives it the same manual-only guard the current
+    # Autofix paths enforce.
+    result = @handlers.handle(
+      :callback_clear_and_retry,
+      update("clear_retry:alpha:stale-task-260519-abcd:4-execute:EXECUTE_STALE")
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/no automatic recovery/, result.text)
+    assert_nil result.commands, "manual-only refusal must not dispatch any commands"
   end
 
   def test_autofix_marker_dispatches_clear_then_retry

@@ -74,6 +74,20 @@ module Hive
       # Phase 4 with the operator's existing `[x]` marks instead of
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
+      AcceptedFindings = Data.define(:text, :count)
+      AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
+      AutoCommitScopeViolation = Data.define(:path, :reason)
+      AUTO_COMMIT_SCOPE_FILENAME = "auto-commit-scope".freeze
+      AUTO_COMMIT_OP_TIMEOUT_SEC = 300
+      AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
+        /gpg/i,
+        /pinentry/i,
+        /failed to sign/i,
+        /could not sign/i,
+        /signing key/i,
+        /ssh.*sign/i,
+        /sign.*ssh/i
+      ].freeze
 
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
@@ -378,7 +392,8 @@ module Hive
           # Branch on triage output. Read per-reviewer files for [x]
           # count (source of truth). escalations file existence + line
           # count tells us whether anything was escalated.
-          accepted = collect_accepted_findings(ctx_pass)
+          accepted_findings = collect_accepted_findings_with_count(ctx_pass)
+          accepted = accepted_findings.text
           escalations_count = count_escalations(ctx_pass)
 
           if accepted.strip.empty? && escalations_count.zero?
@@ -493,13 +508,18 @@ module Hive
           post_fix_status = worktree_status(worktree_path)
           case post_fix_status
           when :dirty
-            auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted)
+            auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted_findings)
             unless auto_commit[:success]
-              Hive::Markers.set(task.state_file, :review_error,
-                                phase: :fix, reason: "fix_auto_commit_failed",
-                                message: truncate_marker_message(auto_commit[:message]),
-                                pass: pass)
-              return { commit: "fix_auto_commit_failed_pass_#{format('%02d', pass)}",
+              reason = auto_commit[:reason] || "fix_auto_commit_failed"
+              attrs = {
+                phase: :fix,
+                reason: reason,
+                message: truncate_marker_message(auto_commit[:message]),
+                pass: pass
+              }
+              attrs[:files] = auto_commit[:files] if auto_commit[:files]
+              Hive::Markers.set(task.state_file, :review_error, **attrs)
+              return { commit: "#{reason}_pass_#{format('%02d', pass)}",
                        status: :review_error }
             end
 
@@ -915,23 +935,10 @@ module Hive
           return :wall_clock_exceeded
         end
 
-        # Derive a monotonic deadline from the caller's wall-clock
-        # budget so each reviewer's adapter
-        # caps its own spawn/backoff at the remaining time. Without
-        # this, max_attempts × timeout_sec on a single reviewer can
-        # exhaust the outer review.max_wall_clock_sec before the
-        # between-reviewer check fires. We base the deadline on a
-        # monotonic clock relative to the wall-clock budget so a
-        # paused process clock doesn't move the deadline; subtract the
-        # consumed wall-clock to align.
-        deadline = nil
-        if started_at && max_wall_clock_sec
-          consumed = Time.now - started_at
-          remaining = max_wall_clock_sec - consumed
-          if remaining.positive?
-            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + remaining
-          end
-        end
+        # Keep a rolling fair share of the remaining wall-clock budget
+        # for each reviewer. A hung early reviewer can spend its share,
+        # but not the time reserved for siblings later in the pass.
+        remaining_specs = specs.length
 
         statuses = []
         # Partition into claude-tmux specs vs everything else so the
@@ -944,14 +951,21 @@ module Hive
           claude_specs, other_specs = specs.partition { |spec| claude_tmux_reviewer?(cfg, spec) }
 
           other_specs.each do |spec|
-            result = run_reviewer_spec(cfg, ctx, spec, deadline,
-                                       started_at: started_at,
-                                       max_wall_clock_sec: max_wall_clock_sec)
+            result = run_reviewer_spec(
+              cfg, ctx, spec,
+              reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+              started_at: started_at,
+              max_wall_clock_sec: max_wall_clock_sec
+            )
             return :wall_clock_exceeded if result == :wall_clock_exceeded
 
             statuses << result.status
             handle_reviewer_result(task, cfg, ctx, spec, result)
+            remaining_specs -= 1
           end
+
+          return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
+                                         wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
           Hive::ClaudeLauncher.with_shared_session(
             task: task,
@@ -962,29 +976,51 @@ module Hive
             allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
           ) do |handle|
             claude_specs.each do |spec|
-              result = run_reviewer_spec(cfg, ctx, spec, deadline,
-                                         started_at: started_at,
-                                         max_wall_clock_sec: max_wall_clock_sec,
-                                         handle: handle)
+              result = run_reviewer_spec(
+                cfg, ctx, spec,
+                reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+                started_at: started_at,
+                max_wall_clock_sec: max_wall_clock_sec,
+                handle: handle
+              )
               return :wall_clock_exceeded if result == :wall_clock_exceeded
 
               statuses << result.status
               handle_reviewer_result(task, cfg, ctx, spec, result)
+              remaining_specs -= 1
             end
           end
         else
           specs.each do |spec|
-            result = run_reviewer_spec(cfg, ctx, spec, deadline,
-                                       started_at: started_at,
-                                       max_wall_clock_sec: max_wall_clock_sec)
+            result = run_reviewer_spec(
+              cfg, ctx, spec,
+              reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+              started_at: started_at,
+              max_wall_clock_sec: max_wall_clock_sec
+            )
             return :wall_clock_exceeded if result == :wall_clock_exceeded
 
             statuses << result.status
             handle_reviewer_result(task, cfg, ctx, spec, result)
+            remaining_specs -= 1
           end
         end
 
+        return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
+                                       wall_clock_exceeded?(started_at, max_wall_clock_sec)
+
         statuses.all?(:error) ? :all_failed : :ok
+      end
+
+      def reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining:)
+        return nil unless started_at && max_wall_clock_sec
+        return nil if specs_remaining.to_i <= 0
+
+        remaining = max_wall_clock_sec - (Time.now - started_at)
+        return Process.clock_gettime(Process::CLOCK_MONOTONIC) if remaining <= 0
+
+        fair_share = remaining / specs_remaining
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ fair_share, 1 ].max
       end
 
       def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)
@@ -1164,17 +1200,27 @@ module Hive
       # All [x] lines across every per-reviewer file for the current
       # pass, concatenated. Used by Phase 4's fix-agent prompt.
       def collect_accepted_findings(ctx)
+        collect_accepted_findings_with_count(ctx).text
+      end
+
+      def collect_accepted_findings_with_count(ctx)
         out = +""
+        count = 0
         Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")].sort.each do |path|
           name = File.basename(path)
           next unless reviewer_file?(name)
 
           File.readlines(path).each do |line|
-            out << "[#{name}] #{line}" if auto_fix_finding_line?(line)
+            next unless auto_fix_finding_line?(line)
+
+            out << "[#{name}] #{line}"
+            count += 1
           end
         end
-        out << collect_answered_escalation_findings(ctx)
-        out
+
+        answered = collect_answered_escalation_findings_with_count(ctx)
+        out << answered.text
+        AcceptedFindings.new(text: out, count: count + answered.count)
       end
 
       def auto_fix_finding_line?(line)
@@ -1185,42 +1231,50 @@ module Hive
       end
 
       def collect_answered_escalation_findings(ctx)
+        collect_answered_escalation_findings_with_count(ctx).text
+      end
+
+      def collect_answered_escalation_findings_with_count(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
-        return collect_legacy_checked_escalations(path) if questions.empty?
+        return collect_legacy_checked_escalations_with_count(path) if questions.empty?
 
         answered = questions.select { |q| q[:answer].strip != "" }
-        return "" if answered.empty?
+        return AcceptedFindings.new(text: "", count: 0) if answered.empty?
 
         name = File.basename(path)
         out = +"\n# User answers from #{name}\n"
         answered.each do |q|
           out << "[#{name}] USER-ANSWERED ESCALATION Q#{q[:number]}: #{q[:question]}\n"
           body = q[:body].strip
-          out << prefixed_block(name, body) unless body.empty?
+          out << answered_escalation_context_block(name, body) unless body.empty?
           out << "[#{name}] Answer:\n"
-          out << prefixed_block(name, q[:answer].strip)
+          out << answered_escalation_context_block(name, q[:answer].strip)
           out << "\n"
         end
-        out
+        AcceptedFindings.new(text: out, count: answered.size)
       end
 
       def collect_legacy_checked_escalations(path)
-        return "" unless File.exist?(path)
+        collect_legacy_checked_escalations_with_count(path).text
+      end
+
+      def collect_legacy_checked_escalations_with_count(path)
+        return AcceptedFindings.new(text: "", count: 0) unless File.exist?(path)
 
         name = File.basename(path)
         lines = File.readlines(path).select { |line| auto_fix_finding_line?(line) }
-        return "" if lines.empty?
+        return AcceptedFindings.new(text: "", count: 0) if lines.empty?
 
         out = +"\n# Accepted legacy escalations from #{name}\n"
         lines.each { |line| out << "[#{name}] #{line}" }
-        out
+        AcceptedFindings.new(text: out, count: lines.size)
       rescue SystemCallError, IOError
-        ""
+        AcceptedFindings.new(text: "", count: 0)
       end
 
-      def prefixed_block(name, text)
-        text.lines(chomp: true).map { |line| "[#{name}] #{line}\n" }.join
+      def answered_escalation_context_block(name, text)
+        text.lines(chomp: true).map { |line| "[#{name}] >>> #{line}\n" }.join
       end
 
       def count_escalations(ctx)
@@ -1496,64 +1550,248 @@ module Hive
         status.success? ? out.strip : nil
       end
 
-      def auto_commit_fix_worktree(task, cfg, ctx, accepted)
-        # `git add -A` (not `-u`) is intentional: fix-agent fixes
-        # routinely include new files (added test cases, extracted
-        # helpers, new modules) that must land in the same commit as the
-        # tracked-file edits they support. `Hive::ProtectedFiles` already
-        # guards task.md / plan.md / worktree.yml; the worktree's own
-        # .gitignore is the line of defense against debris. The
-        # integration test `test_review_fix_agent_dirty_worktree_is_auto_committed`
-        # locks in the untracked-file behaviour.
-        add_out, add_err, add_status = Open3.capture3("git", "-C", ctx.worktree_path, "add", "-A")
-        unless add_status.success?
+      def auto_commit_scope_config(cfg)
+        defaults = Hive::Config::DEFAULTS.dig("review", "fix", "auto_commit", "scope_check") || {}
+        override = cfg.dig("review", "fix", "auto_commit", "scope_check")
+        override.is_a?(Hash) ? defaults.merge(override) : defaults
+      end
+
+      def auto_commit_scope_check_enabled?(cfg)
+        auto_commit_scope_config(cfg)["enabled"] != false
+      end
+
+      def staged_auto_commit_paths(worktree_path)
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "--no-renames", "-z"
+        )
+        unless status.success?
           return {
             success: false,
-            message: git_command_message("git add -A", add_out, add_err)
+            message: git_command_message("git diff --cached --name-only", out, err)
           }
         end
 
-        message = fix_auto_commit_message(task, cfg, ctx, accepted)
-        commit_out, commit_err, commit_status = Open3.capture3(
-          "git", "-C", ctx.worktree_path,
-          "-c", "commit.gpgsign=false",
-          "commit", "-m", message
-        )
-        unless commit_status.success?
-          commit_message = git_command_message("git commit", commit_out, commit_err)
-          reset_out, reset_err, reset_status = Open3.capture3(
-            "git", "-C", ctx.worktree_path, "reset", "HEAD", "--"
-          )
-          unless reset_status.success?
-            commit_message = "#{commit_message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
+        { success: true, paths: out.split("\0").reject(&:empty?) }
+      end
+
+      def normalize_staged_path(path)
+        normalized = path.to_s
+        parts = normalized.split("/")
+        return nil if normalized.empty? || normalized.start_with?("/")
+        return nil if normalized.include?("\0") || normalized.include?("\\")
+        return nil if parts.any? { |part| part.empty? || part == "." || part == ".." }
+
+        normalized
+      end
+
+      def staged_path_matches_glob?(pattern, path)
+        normalized_pattern = pattern.to_s.tr("\\", "/")
+        return true if File.fnmatch?(normalized_pattern, path, AUTO_COMMIT_SCOPE_GLOB_FLAGS)
+        return false unless normalized_pattern.end_with?("/**")
+
+        prefix = normalized_pattern.delete_suffix("/**")
+        path == prefix || path.start_with?("#{prefix}/")
+      end
+
+      def auto_commit_scope_violations(cfg, paths)
+        scope = auto_commit_scope_config(cfg)
+        allowed = Array(scope["allowed_paths"])
+        denied = Array(scope["denied_paths"])
+
+        paths.filter_map do |raw_path|
+          path = normalize_staged_path(raw_path)
+          if path.nil?
+            AutoCommitScopeViolation.new(path: raw_path.to_s, reason: "invalid staged path")
+          elsif (pattern = denied.find { |glob| staged_path_matches_glob?(glob, path) })
+            AutoCommitScopeViolation.new(path: path, reason: "matches denied path pattern #{pattern.inspect}")
+          elsif allowed.none? { |glob| staged_path_matches_glob?(glob, path) }
+            AutoCommitScopeViolation.new(
+              path: path,
+              reason: "outside review.fix.auto_commit.scope_check.allowed_paths"
+            )
           end
-          return { success: false, message: commit_message }
+        end
+      end
+
+      def auto_commit_scope_failure_message(violations)
+        details = violations.first(5).map { |v| "#{v.path}: #{v.reason}" }.join("; ")
+        suffix = violations.size > 5 ? "; and #{violations.size - 5} more" : ""
+        "auto-commit scope check failed: #{details}#{suffix}"
+      end
+
+      def auto_commit_scope_relative_path(pass)
+        File.join("reviews", "#{AUTO_COMMIT_SCOPE_FILENAME}-#{format('%02d', pass)}.md")
+      end
+
+      def write_auto_commit_scope_findings(ctx, violations)
+        relative = auto_commit_scope_relative_path(ctx.pass)
+        path = File.join(ctx.task_folder, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+
+        body = +"# Auto-commit scope check failed for pass #{format('%02d', ctx.pass)}\n\n"
+        body << "Hive staged the fix-agent changes, rejected the fallback commit, " \
+                "and unstaged the index. The files remain in the worktree for operator inspection.\n\n"
+        body << "| Path | Reason |\n| --- | --- |\n"
+        violations.each do |violation|
+          path_cell = violation.path.to_s.gsub("|", "\\|")
+          reason_cell = violation.reason.to_s.gsub("|", "\\|")
+          body << "| `#{path_cell}` | #{reason_cell} |\n"
+        end
+
+        File.write(path, body)
+        relative
+      end
+
+      def auto_commit_failure_with_unstage(worktree_path, message, **attrs)
+        reset_out, reset_err, reset_status = Open3.capture3(
+          "git", "-C", worktree_path, "reset", "HEAD", "--"
+        )
+        unless reset_status.success?
+          message = "#{message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
+        end
+
+        { success: false, message: message }.merge(attrs)
+      end
+
+      def auto_commit_fix_worktree(task, cfg, ctx, accepted_findings)
+        sign_policy = auto_commit_sign_policy_for(cfg)
+        sign_policy_failure = auto_commit_sign_policy_failure(ctx.worktree_path, sign_policy)
+        return sign_policy_failure if sign_policy_failure
+
+        # `git add -A` (not `-u`) is intentional: fix-agent fixes
+        # routinely include new files (added test cases, extracted
+        # helpers, new modules) that must land in the same commit as the
+        # tracked-file edits they support. Immediately after staging,
+        # the auto-commit scope check inspects the exact staged path set
+        # before Hive writes its rollback-rate trailers.
+        add_out, add_err, add_status = Open3.capture3("git", "-C", ctx.worktree_path, "add", "-A")
+        unless add_status.success?
+          return auto_commit_failure_with_unstage(
+            ctx.worktree_path,
+            git_command_message("git add -A", add_out, add_err)
+          )
+        end
+
+        if auto_commit_scope_check_enabled?(cfg)
+          staged = staged_auto_commit_paths(ctx.worktree_path)
+          return auto_commit_failure_with_unstage(ctx.worktree_path, staged[:message]) unless staged[:success]
+
+          violations = auto_commit_scope_violations(cfg, staged[:paths])
+          unless violations.empty?
+            return auto_commit_failure_with_unstage(
+              ctx.worktree_path,
+              auto_commit_scope_failure_message(violations),
+              reason: "fix_auto_commit_scope_failed",
+              files: write_auto_commit_scope_findings(ctx, violations)
+            )
+          end
+        end
+
+        message = fix_auto_commit_message(task, cfg, ctx, accepted_findings)
+        commit = auto_commit_git_commit(ctx.worktree_path, sign_policy, message)
+        unless commit[:success]
+          attrs = {}
+          reason = auto_commit_commit_failure_reason(sign_policy, commit)
+          attrs[:reason] = reason if reason
+          return auto_commit_failure_with_unstage(ctx.worktree_path, commit[:message], **attrs)
         end
 
         { success: true, head: git_head(ctx.worktree_path) }
       end
 
-      def fix_auto_commit_message(task, cfg, ctx, accepted)
+      def auto_commit_sign_policy_for(cfg)
+        policy = Hive::Config.review_fix_auto_commit_sign_policy(cfg)
+        return policy if Hive::Config::AUTO_COMMIT_SIGN_POLICIES.include?(policy)
+
+        raise Hive::ConfigError,
+              "review.fix.auto_commit.sign_policy must be one of " \
+              "#{Hive::Config::AUTO_COMMIT_SIGN_POLICIES.inspect}; got #{policy.inspect}"
+      end
+
+      def auto_commit_sign_policy_failure(worktree_path, sign_policy)
+        return nil unless sign_policy == "fail"
+
+        signing = commit_gpgsign_enabled?(worktree_path)
+        unless signing[:success]
+          return {
+            success: false,
+            reason: "fix_auto_commit_sign_policy_failed",
+            message: "auto-commit signing policy failed: #{signing[:message]}; " \
+                     "fix-agent changes remain unstaged in the worktree. Commit or revert those changes manually " \
+                     "before clearing REVIEW_ERROR and re-running"
+          }
+        end
+        return nil unless signing[:enabled]
+
+        {
+          success: false,
+          reason: "fix_auto_commit_sign_policy_failed",
+          message: "auto-commit signing policy failed: commit.gpgsign is enabled; " \
+                   "fix-agent changes remain unstaged in the worktree. Either commit/revert those changes " \
+                   "manually, fix signing config, or set review.fix.auto_commit.sign_policy to inherit or bypass " \
+                   "before clearing REVIEW_ERROR and re-running"
+        }
+      end
+
+      def commit_gpgsign_enabled?(worktree_path)
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "config", "--bool", "--get", "commit.gpgsign"
+        )
+        return { success: true, enabled: out.strip == "true" } if status.success?
+        return { success: true, enabled: false } if out.to_s.empty? && err.to_s.empty?
+
+        {
+          success: false,
+          message: git_command_message("git config --bool --get commit.gpgsign", out, err)
+        }
+      end
+
+      def auto_commit_git_commit_argv(worktree_path, sign_policy, message)
+        argv = [ "git", "-C", worktree_path ]
+        argv += [ "-c", "commit.gpgsign=false" ] if sign_policy == "bypass"
+        argv + [ "commit", "-m", message ]
+      end
+
+      def auto_commit_git_commit(worktree_path, sign_policy, message)
+        argv = auto_commit_git_commit_argv(worktree_path, sign_policy, message)
+        success, err, timed_out = Hive::GitOps.new(worktree_path).run_git_with_timeout(
+          argv,
+          timeout_sec: AUTO_COMMIT_OP_TIMEOUT_SEC
+        )
+        return { success: true } if success
+
+        detail = if timed_out
+          "git commit timed out after #{AUTO_COMMIT_OP_TIMEOUT_SEC}s; signing or commit hooks may be waiting"
+        else
+          git_command_message("git commit", "", err)
+        end
+        { success: false, message: detail, timed_out: timed_out }
+      end
+
+      def auto_commit_commit_failure_reason(sign_policy, commit)
+        return "fix_auto_commit_signing_failed" if commit[:timed_out]
+        return nil unless sign_policy == "inherit"
+        return "fix_auto_commit_signing_failed" if auto_commit_signing_error?(commit[:message])
+
+        nil
+      end
+
+      def auto_commit_signing_error?(message)
+        AUTO_COMMIT_SIGNING_ERROR_PATTERNS.any? { |pattern| message.to_s.match?(pattern) }
+      end
+
+      def fix_auto_commit_message(task, cfg, ctx, accepted_findings)
         pass = format("%02d", ctx.pass)
         <<~MSG.chomp
           fix(review): apply pass #{pass} findings
 
           Hive-Task-Slug: #{task.slug}
           Hive-Fix-Pass: #{pass}
-          Hive-Fix-Findings: #{accepted_finding_count(accepted)}
+          Hive-Fix-Findings: #{[ accepted_findings.count.to_i, 1 ].max}
           Hive-Triage-Bias: #{sanitize_trailer_value(triage_bias_for(cfg))}
           Hive-Reviewer-Sources: #{sanitize_trailer_value(reviewer_sources_for(ctx))}
           Hive-Fix-Phase: fix
         MSG
-      end
-
-      def accepted_finding_count(accepted)
-        count = accepted.to_s.lines.count do |line|
-          line.match?(/^\[[^\]]+\]\s+-\s+\[x\]\s+/) ||
-            line.match?(/^\[[^\]]+\]\s+USER-ANSWERED ESCALATION\b/)
-        end
-
-        count.positive? ? count : 1
       end
 
       def git_command_message(command, out, err)

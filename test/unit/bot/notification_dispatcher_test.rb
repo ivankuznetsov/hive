@@ -21,6 +21,19 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     )
   end
 
+  def legacy_stage_dirs(review_count: 2, pr_count: 1)
+    Hive::Bot::StatusWatcher::LegacyStageDirs.new(
+      project: "hive",
+      project_path: "/tmp/hive",
+      hive_state_path: "/tmp/hive/.hive-state",
+      legacy_stage_dirs: [
+        { "stage_dir" => "5-review", "task_count" => review_count },
+        { "stage_dir" => "6-pr", "task_count" => pr_count }
+      ],
+      legacy_migrate_command: "hive migrate"
+    )
+  end
+
   def recovery_row(attrs: { "pass" => "1" }, slug: "stuck-task-260525-abcd", stage: "6-review")
     row(action: "recover_review", marker: "review_error", attrs: attrs, slug: slug, stage: stage)
   end
@@ -53,6 +66,44 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   def logger
     @logger ||= StubLogger.new
+  end
+
+  def test_legacy_stage_dirs_notify_once_and_refire_after_clean_transition
+    d = dispatcher
+    legacy = legacy_stage_dirs
+    changed_while_dirty = legacy_stage_dirs(review_count: 3)
+
+    d.process_rows([ legacy ])
+    d.process_rows([ legacy ])
+    d.process_rows([ changed_while_dirty ])
+    d.process_rows([])
+    d.process_rows([ changed_while_dirty ])
+
+    assert_equal 2, telegram.messages.size
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 telegram.messages.first[:text]
+    assert_equal "Project hive has 4 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 telegram.messages.last[:text]
+    assert(logger.events.any? { |name, _| name == :notification_skipped_dedupe },
+           "legacy-stage warning must dedupe while the project remains legacy-dirty")
+  end
+
+  def test_fresh_install_still_alerts_legacy_stage_dirs
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path, fresh_install: true)
+      legacy = legacy_stage_dirs
+      pre_existing = recovery_row
+
+      d.process_rows([ pre_existing, legacy ])
+      d.process_rows([ pre_existing, legacy ])
+
+      assert_equal 1, telegram.messages.size
+      assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                   telegram.messages.first[:text]
+      assert(logger.events.any? { |name, attrs| name == :fresh_install_seeded && attrs[:fingerprint_count] == 1 },
+             "fresh install should seed task backlog without seeding legacy-stage migration warnings")
+    end
   end
 
   def test_process_rows_sends_new_input_gate_notification
@@ -436,18 +487,26 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     end
   end
 
-  def test_ready_actions_are_always_suppressed
-    # ready_to_X notifications are pull-only via /status. The proactive
-    # allow-list (eval contract) is agent_blocked_question / fatal_error
-    # only, so neither a daemon-on project nor a daemon-off project should
-    # ever see a proactive ready_to_X.
-    d = dispatcher
-    Hive::Bot::NotificationBuilders::READY_ACTIONS.each do |action|
-      d.process_rows([ row(action: action, marker: "complete") ])
-    end
+  def test_ready_action_suppressed_when_daemon_enabled
+    d = dispatcher(daemon_enabled: ->(_project) { true })
+    d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
 
     assert_empty telegram.messages,
-                 "ready_to_X must never produce a proactive Telegram message"
+                 "ready_to_X with daemon enabled must not produce a proactive Telegram message"
+  end
+
+  def test_ready_action_fires_alert_when_daemon_disabled
+    # With daemon disabled the operator needs the Approve/Reject keyboard to
+    # advance the workflow — fire one proactive alert per fingerprint.
+    d = dispatcher(daemon_enabled: ->(_project) { false })
+    d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+
+    assert_equal 1, telegram.messages.size,
+                 "ready_to_X with daemon disabled must fire one proactive alert"
+    assert_match(/Ready for/, telegram.messages.last[:text])
+    labels = telegram.messages.last[:reply_markup].flatten.map { |b| b[:text] }
+    assert_includes labels, "Approve"
+    assert_includes labels, "Reject"
   end
 
   def test_multi_chat_fanout_delivers_to_all_allowed_chats
@@ -528,24 +587,56 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     assert_equal 2, flaky_telegram.calls
   end
 
-  def test_ready_actions_suppressed_regardless_of_config_or_daemon_state
-    # The daemon-probe gate was removed because ready_to_X is pull-only —
-    # no proactive emission regardless of project config state. These
-    # tests previously pinned the buggy "leak when daemon disabled" path.
+  def test_ready_action_uses_config_fallback_when_no_daemon_probe
+    projects = []
+    loads = []
+    with_config_stubs(
+      find_project: ->(project) { projects << project; { "path" => "/tmp/hive" } },
+      load: ->(path) { loads << path; { "daemon" => { "enabled" => true } } }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_empty telegram.messages,
+                 "ready_to_X with daemon enabled in project config must be suppressed"
+    assert_equal [ "hive" ], projects
+    assert_equal [ "/tmp/hive" ], loads
+  end
+
+  def test_ready_action_not_suppressed_when_project_missing_from_config
     projects = []
     loads = []
     with_config_stubs(
       find_project: ->(project) { projects << project; nil },
       load: ->(_path) { loads << "loaded"; raise "Config.load should not be called" }
     ) do
-      d = dispatcher
+      d = dispatcher(daemon_enabled: nil)
       d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
     end
 
-    assert_empty telegram.messages,
-                 "ready_to_X must be suppressed even when project is missing from config"
-    assert_empty projects, "daemon-probe Config.find_project must no longer be called"
-    assert_empty loads, "daemon-probe Config.load must no longer be called"
+    assert_equal 1, telegram.messages.size,
+                 "unknown project (no config entry) defaults to daemon disabled → alert fires"
+    assert_equal [ "hive" ], projects
+    assert_empty loads, "Config.load is skipped when find_project returns nil"
+  end
+
+  def test_daemon_config_errors_are_logged_and_do_not_suppress_ready_actions
+    with_config_stubs(
+      find_project: ->(_project) { { "path" => "/tmp/hive" } },
+      load: ->(_path) { raise Hive::ConfigError, "bad config" }
+    ) do
+      d = dispatcher(daemon_enabled: nil)
+      d.process_rows([ row(action: "ready_to_plan", marker: "complete") ])
+    end
+
+    assert_equal 1, telegram.messages.size,
+                 "config load failure must not silently suppress — fail open to alerting"
+    event = logger.events.find { |name, _attrs| name == :poll_failure }
+    refute_nil event
+    assert_equal "daemon_check", event.last[:source]
+    assert_equal "hive", event.last[:project]
+    assert_equal "Hive::ConfigError", event.last[:error_class]
   end
 
   def with_config_stubs(find_project:, load:)

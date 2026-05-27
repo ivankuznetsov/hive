@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb
 created: 2026-04-25
-updated: 2026-05-25
+updated: 2026-05-26
 tags: [agent, claude, subprocess]
 ---
 
@@ -105,9 +105,9 @@ validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 
 | Condition | Marker set |
 |-----------|------------|
-| `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N -->` |
-| `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N -->` |
-| `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code -->` (corrupted state, not silent OK) |
+| `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
+| `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
+| `exit_code` is nil **and** marker is `:none` | `<!-- ERROR reason=no_marker_no_exit_code marker_id=<hex16> -->` (corrupted state, not silent OK) |
 | Otherwise | `result[:status] = Markers.current(state_file).name` (trust the marker the agent wrote) |
 
 `exit_code` can come back nil when claude streams large output and the parent's pipe-drain race loses the WNOHANG status; in that case we trust the marker the agent wrote. The nil-and-`:none` combination is treated as failure because a successful agent always writes a known marker.

@@ -1,7 +1,9 @@
 require "digest"
 require "json"
+require "shellwords"
 require "hive"
 require "hive/bot/title_formatter"
+require "hive/markers"
 
 module Hive
   module Bot
@@ -32,6 +34,8 @@ module Hive
       ].freeze
 
       def build(row, logger: nil)
+        return legacy_stage_dirs(row) if legacy_stage_dirs?(row)
+
         if READY_ACTIONS.include?(row.action)
           stage_approval(row)
         elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
@@ -43,9 +47,41 @@ module Hive
         end
       end
 
+      def legacy_stage_dirs?(row)
+        row.respond_to?(:legacy_stage_dirs) && row.action.to_s == "legacy_stage_dirs"
+      end
+
+      def legacy_stage_dirs(row)
+        command = legacy_migrate_command(row)
+        total = row.total_task_count
+        noun = total == 1 ? "task" : "tasks"
+        dirs = row.stage_dir_names.join(", ")
+        Notification.new(
+          text: "Project #{row.project} has #{total} #{noun} hidden in legacy stage dirs (#{dirs}) - " \
+                "run `#{command}`",
+          keyboard: nil
+        )
+      end
+
+      def legacy_migrate_command(row)
+        command = row.legacy_migrate_command.to_s
+        project_path = row.project_path.to_s
+        argv = command.empty? ? %w[hive migrate] : Shellwords.split(command)
+        argv << project_path unless project_path.empty?
+        Shellwords.join(argv)
+      rescue ArgumentError
+        [ "hive migrate", Shellwords.escape(project_path) ].reject(&:empty?).join(" ")
+      end
+
       def fingerprint(row)
+        return legacy_stage_dirs_fingerprint(row) if legacy_stage_dirs?(row)
+
         normalized_attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
         Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, normalized_attrs ]))
+      end
+
+      def legacy_stage_dirs_fingerprint(row)
+        Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker ]))
       end
 
       def recovery?(row)
@@ -76,8 +112,7 @@ module Hive
           Notification.new(
             text: header(row) + "\nNeeds input: #{marker_with_attrs(row)}",
             keyboard: [
-              [ button("Show details", details_callback(row)) ],
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
+              [ button("Show details", details_callback(row)) ]
             ]
           )
         end
@@ -89,9 +124,7 @@ module Hive
                 "Brainstorm questions are waiting. " \
                 "Tap Answer in chat or reply with /answer #{row.slug} to provide input.",
           keyboard: [
-            [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ],
-            [ button("Ask Codex", "path_a_yes:#{row.project}:#{row.slug}") ],
-            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ]
+            [ button("Answer in chat", "answer:#{row.project}:#{row.slug}") ]
           ]
         )
       end
@@ -102,7 +135,6 @@ module Hive
           return Notification.new(
             text: header(row) + "\nReview fix guardrail tripped: #{marker_with_attrs(row)}",
             keyboard: [
-              [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
               [ button("Show details", details_callback(row)) ]
             ]
           )
@@ -127,7 +159,7 @@ module Hive
             "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{TitleFormatter.title_from_slug(row.slug)}\"",
             cause_sentence_for(row),
             retryable ? "Tap Autofix to retry the stage cleanly." :
-              "Open this task on a laptop before retrying."
+              "Tap Show details to see what needs manual intervention."
           ].join("\n"),
           keyboard: recovery_keyboard(row, retryable: retryable)
         )
@@ -138,7 +170,6 @@ module Hive
           [ [ button("🔧 Autofix", autofix_callback(row)) ] ]
         else
           [
-            [ button("Open laptop", "open_laptop:#{row.project}:#{row.slug}") ],
             [ button("Show details", details_callback(row)) ]
           ]
         end
@@ -160,9 +191,10 @@ module Hive
 
       # Markers that are ALWAYS manual-only regardless of attrs. Adding a new
       # marker here automatically narrows both the in-row recovery check
-      # (manual_only_recovery?) and the callback-time defensive check
-      # (CallbackHandlers#manual_only_marker?) — they share this constant
-      # through manual_only? below.
+      # (manual_only_recovery?) and the recover-sequence dispatch guard
+      # (RecoverySequence.build, used by the inline Autofix button and the
+      # /autofix slash command) — they share this constant through
+      # manual_only? below.
       ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
 
       # Single source of truth for "this state has no auto-recovery".
@@ -198,7 +230,7 @@ module Hive
         when "review_stale"
                  %w[pass reason]
         when "error"
-                 %w[exit_code]
+                 return Hive::Markers.error_recovery_match_attr(attrs)
         else
                  []
         end

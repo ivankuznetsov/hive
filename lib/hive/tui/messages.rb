@@ -144,8 +144,9 @@ module Hive
       # this message handles real failures (exit_code=1 etc.) the
       # auto-healer deliberately leaves alone. The handler clears the
       # ERROR marker via `hive markers clear --name ERROR --match-attr
-      # exit_code=N` and re-runs the task with `hive run <folder>` if
-      # the clear succeeds. Mirrors RecoverReview so the user keeps a
+      # marker_id=N` when available, or observed reason/exit_code attrs
+      # for legacy rows, then re-runs the task with `hive run <folder>`
+      # if the clear succeeds. Mirrors RecoverReview so the user keeps a
       # uniform "Enter to retry" gesture across recoverable failures.
       RecoverError = Data.define(:row)
 

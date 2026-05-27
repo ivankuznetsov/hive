@@ -455,11 +455,117 @@ class HiveCommandsDaemonTest < Minitest::Test
     )
     installer.define_singleton_method(:install!) { |autostart:, force:| :written }
 
-    with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, -> { installer }) do
+    with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { installer }) do
       out, err = capture_io { command.call }
       assert_includes err, "hive: installed by fake"
       assert_includes out, "installed unit at /tmp/hive-daemon.service"
     end
+  end
+
+  def test_install_daemon_uses_invoked_wrapper_path_for_service_unit
+    require "hive/commands/daemon/service_installer"
+
+    with_tmp_dir do |dir|
+      wrapper = File.join(dir, "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(wrapper))
+      File.write(wrapper, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, wrapper)
+      shim = File.join(dir, "gems", "shims", "hive")
+      captured = nil
+      command = daemon("install", json: true)
+      installer = FakeInstaller.new(
+        target_path: "/tmp/hive-daemon.service",
+        last_backup_path: nil,
+        last_restart_invoked: false,
+        envelope_platform: "linux-systemd-user",
+        messages: []
+      )
+      installer.define_singleton_method(:install!) { |autostart:, force:| :written }
+
+      previous_program = $PROGRAM_NAME
+      with_env("HIVE_INVOKED_BIN" => wrapper) do
+        $PROGRAM_NAME = shim
+        with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, lambda { |**kwargs|
+          captured = kwargs
+          installer
+        }) do
+          capture_io { command.call }
+        end
+      ensure
+        $PROGRAM_NAME = previous_program
+      end
+
+      assert_equal wrapper, captured.fetch(:binary_path)
+    end
+  end
+
+  def test_install_daemon_json_wraps_filesystem_errors
+    require "hive/commands/daemon/service_installer"
+
+    command = daemon("install", json: true)
+    installer = FakeInstaller.new(
+      target_path: "/tmp/hive-daemon.service",
+      last_backup_path: nil,
+      last_restart_invoked: false,
+      envelope_platform: "linux-systemd-user",
+      messages: [ "before write" ]
+    )
+    installer.define_singleton_method(:install!) do |autostart:, force:|
+      raise Errno::EACCES, "denied"
+    end
+
+    out, _err = capture_io do
+      assert_raises(Hive::DaemonInstallFailed) do
+        with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { installer }) do
+          command.call
+        end
+      end
+    end
+
+    doc = JSON.parse(out)
+    assert_equal false, doc.fetch("ok")
+    assert_equal "failed", doc.fetch("outcome")
+    assert_equal "DaemonInstallFailed", doc.fetch("error_class")
+    assert_match(/Errno::EACCES/, doc.fetch("message"))
+    assert_equal [ "before write" ], doc.fetch("messages")
+  end
+
+  def test_install_daemon_reraises_hive_errors_from_installer_without_exception_envelope
+    require "hive/commands/daemon/service_installer"
+
+    command = daemon("install", json: true)
+    installer = FakeInstaller.new(
+      target_path: "/tmp/hive-daemon.service",
+      last_backup_path: nil,
+      last_restart_invoked: false,
+      envelope_platform: "linux-systemd-user",
+      messages: []
+    )
+    installer.define_singleton_method(:install!) do |autostart:, force:|
+      raise Hive::DaemonInstallFailed, "already wrapped"
+    end
+
+    out, _err = capture_io do
+      assert_raises(Hive::DaemonInstallFailed) do
+        with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { installer }) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal "", out
+  end
+
+  def test_install_exception_envelope_helpers_have_safe_fallbacks
+    command = daemon("install", json: true)
+    broken = Object.new
+    broken.define_singleton_method(:envelope_platform) { raise "platform unavailable" }
+    broken.define_singleton_method(:target_path) { raise "target unavailable" }
+    broken.define_singleton_method(:messages) { raise "messages unavailable" }
+
+    assert_equal "unsupported", command.send(:safe_install_platform, broken)
+    assert_nil command.send(:safe_install_target_path, broken)
+    assert_equal [], command.send(:safe_install_messages, broken)
   end
 
   def test_emit_install_outcome_json_success_mappings
@@ -477,13 +583,49 @@ class HiveCommandsDaemonTest < Minitest::Test
       upgraded: "upgraded",
       unchanged: "unchanged",
       unsupported: "unsupported",
+      autostart_unavailable: "unsupported",
       ok: "written"
     }
     expectations.each do |result, outcome|
       out, _err = capture_io { command.send(:emit_install_outcome, installer, result) }
       doc = JSON.parse(out)
       assert_equal outcome, doc.fetch("outcome")
+      assert_equal true, doc.fetch("ok"), "#{result} must be a success envelope"
     end
+  end
+
+  def test_emit_install_outcome_autostart_unavailable_preserves_target_path
+    command = daemon("install", json: true)
+    installer = FakeInstaller.new(
+      target_path: "/home/u/.config/systemd/user/hive-daemon.service",
+      last_backup_path: nil,
+      last_restart_invoked: false,
+      envelope_platform: "linux",
+      messages: [ "systemd not detected; daemon unit was written but autostart was not enabled." ]
+    )
+
+    out, _err = capture_io { command.send(:emit_install_outcome, installer, :autostart_unavailable) }
+    doc = JSON.parse(out)
+    assert_equal "unsupported", doc.fetch("outcome")
+    assert_equal true, doc.fetch("ok")
+    assert_equal "/home/u/.config/systemd/user/hive-daemon.service", doc.fetch("target_path"),
+                 "a written-but-not-enabled unit must still report where it lives"
+  end
+
+  def test_emit_install_success_summary_reports_autostart_unavailable_non_json
+    command = daemon("install")
+    installer = FakeInstaller.new(
+      target_path: "/home/u/.config/systemd/user/hive-daemon.service",
+      last_backup_path: nil,
+      last_restart_invoked: false,
+      envelope_platform: "linux",
+      messages: []
+    )
+
+    out, _err = capture_io { command.send(:emit_install_success_summary, installer, :autostart_unavailable) }
+    assert_includes out,
+                    "hive daemon: unit written at /home/u/.config/systemd/user/hive-daemon.service; " \
+                    "autostart not enabled on this host"
   end
 
   def test_emit_install_outcome_json_failed_raises_with_error_envelope

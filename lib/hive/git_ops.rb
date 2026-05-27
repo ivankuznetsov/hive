@@ -465,7 +465,7 @@ module Hive
                              max_bytes: GIT_CAPTURE_MAX_BYTES)
       out_r, out_w = IO.pipe
       err_r, err_w = IO.pipe
-      pid = Process.spawn(env, *cmd, in: :close, out: out_w, err: err_w)
+      pid = Process.spawn(env, *cmd, in: :close, out: out_w, err: err_w, pgroup: true)
       out_w.close
       err_w.close
 
@@ -519,19 +519,38 @@ module Hive
         return [ status.success?, err_buf, false ]
       end
 
-      # Timeout path: SIGTERM, brief grace, SIGKILL.
-      begin
-        Process.kill("TERM", pid)
-        sleep 0.5
-        Process.kill("KILL", pid)
-      rescue Errno::ESRCH
-        # already gone
-      end
-      Process.waitpid(pid)
+      terminate_timed_out_git_process(pid)
       [ out_r, err_r ].each { |r| r.close unless r.closed? }
       [ false, err_buf, true ]
     rescue StandardError => e
       [ false, e.message, false ]
+    end
+
+    def terminate_timed_out_git_process(pid)
+      begin
+        Process.kill("TERM", -pid)
+      rescue Errno::ESRCH
+        begin
+          Process.kill("TERM", pid)
+        rescue Errno::ESRCH
+          # already gone
+        end
+      end
+
+      sleep 0.5
+
+      begin
+        Process.kill("KILL", -pid)
+      rescue Errno::ESRCH
+        begin
+          Process.kill("KILL", pid)
+        rescue Errno::ESRCH
+          # already gone
+        end
+      end
+      Process.waitpid(pid)
+    rescue Errno::ECHILD
+      # already reaped
     end
 
     # `git rebase --abort`. Returns true on success, false on failure

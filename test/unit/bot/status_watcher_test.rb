@@ -94,6 +94,61 @@ class HiveBotStatusWatcherTest < Minitest::Test
     end
   end
 
+  def test_fetch_exposes_legacy_stage_dirs_for_transition_notifications
+    payload = envelope([])
+    project = payload.fetch("projects").first
+    project["legacy_stage_dirs"] = [
+      { "stage_dir" => "5-review", "task_count" => 2 },
+      { "stage_dir" => "6-pr", "task_count" => 1 }
+    ]
+    project["legacy_migrate_command"] = "hive migrate"
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
+
+      assert result.ok, result.error
+      legacy = result.legacy_stage_dirs
+      assert_equal 1, legacy.size
+      entry = legacy.first
+      assert_equal "hive", entry.project
+      assert_equal "/tmp/hive", entry.project_path
+      assert_equal "/tmp/hive/.hive-state", entry.hive_state_path
+      assert_equal [ "5-review", "6-pr" ], entry.stage_dir_names
+      assert_equal 3, entry.total_task_count
+      assert_equal "hive migrate", entry.legacy_migrate_command
+      assert_equal "legacy_stage_dirs", entry.action
+    end
+  end
+
+  def test_fetch_skips_missing_empty_and_project_error_legacy_stage_dirs
+    payload = envelope([])
+    payload.fetch("projects").first.delete("legacy_stage_dirs")
+    payload["projects"] << {
+      "name" => "clean",
+      "path" => "/tmp/clean",
+      "hive_state_path" => "/tmp/clean/.hive-state",
+      "tasks" => [],
+      "legacy_stage_dirs" => [],
+      "legacy_migrate_command" => nil
+    }
+    payload["projects"] << {
+      "name" => "broken",
+      "path" => "/tmp/broken",
+      "hive_state_path" => "/tmp/broken/.hive-state",
+      "error" => "not_initialised",
+      "tasks" => [],
+      "legacy_stage_dirs" => [ { "stage_dir" => "5-review", "task_count" => 1 } ],
+      "legacy_migrate_command" => "hive migrate"
+    }
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
+
+      assert result.ok, result.error
+      assert_empty result.legacy_stage_dirs
+    end
+  end
+
   def test_fetch_logs_nonzero_status_failure
     logger = CapturingLogger.new
 

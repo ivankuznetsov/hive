@@ -15,7 +15,7 @@ module Hive
   #
   #   Hive-Task-Slug:        <slug>
   #   Hive-Fix-Pass:         <NN>
-  #   Hive-Fix-Findings:     <count of [x] items applied>   (review-fix only)
+  #   Hive-Fix-Findings:     <count of accepted findings / answered escalations> (review-fix only)
   #   Hive-Triage-Bias:      <courageous|safetyist|custom>  (review-fix only)
   #   Hive-Reviewer-Sources: <comma-separated reviewer names> (review-fix only)
   #   Hive-Fix-Phase:        <ci|fix>

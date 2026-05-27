@@ -28,7 +28,17 @@ class HiveBotScenarioQueueTest < Minitest::Test
     refute_match(/hive\/brainstorm-a/, text)
     refute_match(/archived-a/, text)
 
-    assert_nil telegram.messages.last[:reply_markup]
+    # Actionable rows now carry inline callback buttons (Telegram text links
+    # can't carry the slug). brainstorm-a/-b → answer; pr-a → approve;
+    # review-a (review_waiting) and archived-a get no button.
+    keyboard = telegram.messages.last[:reply_markup]
+    refute_nil keyboard, "actionable /queue rows must carry inline buttons"
+    callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
+    assert_includes callbacks, "answer:hive:brainstorm-a"
+    assert_includes callbacks, "answer:hive:brainstorm-b"
+    assert_includes callbacks, "approve:finalize:hive:pr-a:2-brainstorm"
+    refute(callbacks.any? { |cb| cb.include?("review-a") },
+           "review_waiting has no /status button (parity with the prior text-link surface)")
   end
 
   def test_s3_queue_caps_at_10_rows_and_shows_more_affordance

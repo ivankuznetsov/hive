@@ -4,7 +4,7 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 ## Goal
 
-Install the latest stable Hive release, verify `hive --version`, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; all three channels (Homebrew, AUR, install.sh) download the same signed `.gem` and run `gem install` against it.
+Install the latest stable Hive release, verify `hive --version`, set up daemon autostart, offer to run `hive init` in the current project, and report any missing runtime dependencies. Do not auto-install runtime dependencies such as `git`, `gh`, or agent CLIs; the bash installer reports its own installer prerequisites (Ruby 3.4, `curl`, `jq`, checksum tool) when that channel is used. Hive ships as a rubygem (`hive-cli`) attached to the GitHub Release; the install channels download the same signed `.gem` and run `gem install` against it. Homebrew and the bash installer are live today; the AUR `hive-bin` package is not published yet (see Choose Channel). Daemon autostart is global install-time setup; project setup only decides whether that project is enrolled for daemon dispatch.
 
 ## Detect
 
@@ -25,7 +25,7 @@ hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' && echo "hive i
 Use this decision tree:
 
 - macOS arm64: prefer Homebrew.
-- Arch Linux: prefer AUR through `yay` or `paru`.
+- Arch Linux: the `hive-bin` AUR package is **not published yet** — use the bash installer for now. (The intended `yay -S hive-bin` command is documented under Install Commands but must not be run until the package exists.)
 - Ubuntu 22.04+ or other glibc Linux on x86_64/aarch64: use the bash installer.
 - Alpine, NixOS, BSD, and musl Linux: stop and report unsupported tier-3 platform.
 
@@ -38,15 +38,15 @@ brew tap ivankuznetsov/hive
 brew install ivankuznetsov/hive/hive
 ```
 
-Arch Linux:
+Arch Linux — **the `hive-bin` AUR package is not published yet.** Use the bash installer below for now. Once the package is published, the intended command will be (DO NOT RUN until then):
 
 ```bash
+# Coming soon — hive-bin is not yet on the AUR.
 if command -v yay >/dev/null 2>&1; then
   yay -S --noconfirm --needed hive-bin
 elif command -v paru >/dev/null 2>&1; then
   paru -S --noconfirm --needed hive-bin
 else
-  # The agent should treat status 69 as "user must install yay or paru first" and abort.
   echo "Install yay or paru first, then run: yay -S hive-bin"
   exit 69
 fi
@@ -79,27 +79,38 @@ Run:
 
 ```bash
 if hive --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  hive --version
+  hive_cmd=hive
 elif hv --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  hv --version
+  hive_cmd=hv
 else
   echo "verify failed: expected Hive CLI version X.Y.Z from hive or hv" >&2
   exit 1
 fi
+"$hive_cmd" --version
 ```
 
 If `hive` is shadowed by Apache Hive, try `hv --version` and tell the user to use `hv` or adjust PATH.
+
+## Daemon Autostart
+
+Do not ask the user whether to initialize the daemon. Hive install includes the per-user daemon service by default. After version verification, run this once for every channel and report the outcome:
+
+```bash
+"$hive_cmd" daemon install --json
+```
+
+The bash installer already runs the same command after installing the gem; rerunning it is idempotent when the unit matches. If the command reports a drifted/customized unit, leave it untouched and report the `"$hive_cmd" daemon install --force` recovery command instead of forcing an overwrite. If systemd-user or launchd is unavailable, keep Hive installed and report that daemon autostart could not be enabled on this host.
 
 ## Initialize Project
 
 If the current directory is a git project and the user wants Hive enabled here, ask before running:
 
 ```bash
-hive init .
-hive doctor || true
+"$hive_cmd" init .
+"$hive_cmd" doctor || true
 ```
 
-During `hive init`, keep the user's prompt choices. If this is non-interactive, Hive uses recommended defaults and writes the daemon service unit without starting it. `hive doctor` runs AFTER `hive init` because it requires an initialized project root.
+During `hive init`, keep the user's prompt choices. The daemon prompt is per-project enrollment (`daemon.enabled`) only; the service autostart has already been installed globally. If init is non-interactive, Hive uses recommended defaults and enrolls the project. `hive doctor` runs AFTER `hive init` because it requires an initialized project root.
 
 ## Optional Skills
 
@@ -119,7 +130,8 @@ Report:
 
 - channel used
 - command run
-- `hive --version` output
+- Hive CLI version output (`"$hive_cmd" --version`)
+- daemon autostart setup result from `"$hive_cmd" daemon install --json`
 - whether `hive init` was run
 - missing runtime dependencies from `hive doctor`
 - whether the optional skills package was installed or skipped

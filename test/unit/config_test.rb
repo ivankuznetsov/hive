@@ -443,6 +443,95 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_register_project_preserves_malformed_registry_container_for_prune
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => { "bad" => "shape" },
+          "daemon" => { "autostart" => false }
+        }.to_yaml
+      )
+
+      Hive::Config.register_project(name: "good", path: "/tmp/good")
+
+      data = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      rows = data.fetch("registered_projects")
+      assert rows.any? { |row| !row.is_a?(Hash) },
+             "malformed registry content must stay visible to prune"
+      assert_includes rows.select { |row| row.is_a?(Hash) }.map { |row| row["name"] }, "good"
+      assert_equal false, data.dig("daemon", "autostart"),
+                   "register_project must preserve sibling global config blocks"
+    end
+  end
+
+  def test_concurrent_register_project_preserves_all_entries
+    with_tmp_global_config do |home|
+      count = 8
+      roots = count.times.map do |i|
+        File.join(home, "project-#{i}").tap { |dir| FileUtils.mkdir_p(dir) }
+      end
+
+      run_concurrent_global_config_writers(count) do |i|
+        Hive::Config.register_project(name: "p#{i}", path: roots.fetch(i))
+      end
+
+      names = Hive::Config.registered_projects.map { |project| project["name"] }.sort
+      assert_equal count.times.map { |i| "p#{i}" }, names
+    end
+  end
+
+  def test_concurrent_register_and_unregister_preserves_both_mutations
+    with_tmp_global_config do |home|
+      count = 6
+      new_roots = count.times.map do |i|
+        File.join(home, "new-project-#{i}").tap { |dir| FileUtils.mkdir_p(dir) }
+      end
+      Hive::Config.register_project(name: "keep", path: File.join(home, "keep").tap { |dir| FileUtils.mkdir_p(dir) })
+      count.times do |i|
+        Hive::Config.register_project(name: "drop#{i}", path: "/tmp/hive-drop-#{Process.pid}-#{i}")
+      end
+
+      run_concurrent_global_config_writers(count * 2) do |i|
+        if i < count
+          Hive::Config.register_project(name: "new#{i}", path: new_roots.fetch(i))
+        else
+          Hive::Config.unregister_project(name: "drop#{i - count}")
+        end
+      end
+
+      data = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      names = Array(data["registered_projects"]).map { |entry| entry["name"] }.sort
+      assert_equal [ "keep", *count.times.map { |i| "new#{i}" } ], names
+    end
+  end
+
+  def test_concurrent_register_and_prune_preserves_added_entries_and_removed_stale_rows
+    with_tmp_global_config do |home|
+      count = 6
+      live = File.join(home, "live").tap { |dir| FileUtils.mkdir_p(dir) }
+      new_roots = count.times.map do |i|
+        File.join(home, "prune-new-#{i}").tap { |dir| FileUtils.mkdir_p(dir) }
+      end
+      Hive::Config.register_project(name: "live", path: live)
+      count.times do |i|
+        Hive::Config.register_project(name: "dead#{i}", path: "/tmp/hive-dead-#{Process.pid}-#{i}")
+      end
+
+      run_concurrent_global_config_writers(count * 2) do |i|
+        if i < count
+          Hive::Config.register_project(name: "new#{i}", path: new_roots.fetch(i))
+        else
+          Hive::Config.prune_missing_projects!
+        end
+      end
+
+      data = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      names = Array(data["registered_projects"]).map { |entry| entry["name"] }.sort
+      assert_equal [ "live", *count.times.map { |i| "new#{i}" } ], names
+    end
+  end
+
   def test_load_raises_on_non_hash_yaml
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -717,6 +806,111 @@ class ConfigTest < Minitest::Test
                      "error message must explain why #{bad.inspect} was rejected")
       end
     end
+  end
+
+  def test_load_accepts_auto_commit_scope_check_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              scope_check:
+                enabled: false
+                allowed_paths:
+                  - custom/**
+                denied_paths:
+                  - forbidden/**
+      YAML
+      cfg = Hive::Config.load(dir)
+      scope = cfg.dig("review", "fix", "auto_commit", "scope_check")
+
+      assert_equal false, scope["enabled"]
+      assert_equal [ "custom/**" ], scope["allowed_paths"]
+      assert_equal [ "forbidden/**" ], scope["denied_paths"]
+    end
+  end
+
+  def test_load_rejects_malformed_auto_commit_scope_check
+    cases = [
+      [ "scope_check: nope\n", /scope_check.*must be a Hash/ ],
+      [ "scope_check:\n  enabled: maybe\n", /scope_check\.enabled.*must be true or false/ ],
+      [ "scope_check:\n  allowed_paths: lib/**\n", /allowed_paths.*must be an Array/ ],
+      [ "scope_check:\n  allowed_paths:\n", /allowed_paths.*must be an Array/ ],
+      [ "scope_check:\n  denied_paths:\n", /denied_paths.*must be an Array/ ],
+      [ "scope_check:\n  allowed_paths:\n    - ' '\n", /allowed_paths\[0\].*non-empty String/ ],
+      [ "scope_check:\n  denied_paths:\n    - /abs/**\n", /denied_paths\[0\].*relative path glob/ ],
+      [ "scope_check:\n  denied_paths:\n    - ../**\n", /denied_paths\[0\].*relative path glob/ ],
+      [ "scope_check:\n  denied_paths:\n    - 'C:\\secrets\\**'\n", /denied_paths\[0\].*relative path glob/ ]
+    ]
+
+    cases.each do |body, pattern|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          review:
+            fix:
+              auto_commit:
+                #{body.gsub("\n", "\n                ")}
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match pattern, err.message
+      end
+    end
+  end
+
+  def test_load_rejects_malformed_review_fix_container
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_rejects_malformed_auto_commit_container
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit.*must be a Hash/, err.message)
+      assert_match(/scope_check\.enabled/, err.message)
+    end
+  end
+
+  def test_auto_commit_scope_validation_allows_missing_legacy_scope
+    cfg = { "review" => { "fix" => {} } }
+
+    Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
+    assert_nil Hive::Config.send(:validate_path_glob_list!, nil, "review.fix.auto_commit.scope_check.allowed_paths", "test")
+  end
+
+  def test_auto_commit_scope_direct_validator_accepts_scope_config
+    cfg = {
+      "review" => {
+        "fix" => {
+          "auto_commit" => {
+            "scope_check" => {
+              "enabled" => true,
+              "allowed_paths" => [ "lib/**" ],
+              "denied_paths" => [ "config/**" ]
+            }
+          }
+        }
+      }
+    }
+
+    Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
   end
 
   def test_load_accepts_max_attempts_one_and_three
@@ -1223,6 +1417,60 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_prune_missing_projects_ignores_malformed_private_real_path_metadata
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              {
+                "name" => "live",
+                "path" => live_dir,
+                "hive_state_path" => File.join(live_dir, ".hive-state"),
+                "real_path" => 123
+              }
+            ]
+          }.to_yaml
+        )
+
+        result = Hive::Config.prune_missing_projects!
+
+        assert_empty result.fetch(:removed),
+                     "invalid private real_path metadata must fall back to legacy path-existence behavior"
+        assert_equal 1, result.fetch(:kept_count)
+        assert_equal [ "live" ], Hive::Config.registered_projects.map { |project| project["name"] }
+      end
+    end
+  end
+
+  def test_prune_missing_projects_ignores_unexpandable_private_real_path_metadata
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              {
+                "name" => "live",
+                "path" => live_dir,
+                "hive_state_path" => File.join(live_dir, ".hive-state"),
+                "real_path" => [ "bad", "path" ].join(0.chr)
+              }
+            ]
+          }.to_yaml
+        )
+
+        result = Hive::Config.prune_missing_projects!
+
+        assert_empty result.fetch(:removed),
+                     "unexpandable private real_path metadata must fall back to legacy path-existence behavior"
+        assert_equal 1, result.fetch(:kept_count)
+        assert_equal [ "live" ], Hive::Config.registered_projects.map { |project| project["name"] }
+      end
+    end
+  end
+
   # Regression for the P0 Array#- subtraction bug: two registry rows
   # with identical content (same name + same path) used to be both
   # deleted by `entries - [removed]` because Array# uses Hash#==
@@ -1376,14 +1624,118 @@ class ConfigTest < Minitest::Test
     with_tmp_global_config do |home|
       path = File.join(home, "config.yml")
       File.write(path, { "registered_projects" => [] }.to_yaml)
-      File.chmod(0o400, path) # read-only
+      FileUtils.chmod(0o500, home)
 
       err = assert_raises(Hive::ConfigError) do
         Hive::Config.send(:write_global_config!, { "registered_projects" => [ { "name" => "x", "path" => "/tmp/x" } ] })
       end
-      assert_match(/could not be written/, err.message)
+      assert_match(/could not be locked/, err.message)
     ensure
+      FileUtils.chmod(0o700, home) if home && File.directory?(home)
       File.chmod(0o644, path) if path && File.exist?(path)
+    end
+  end
+
+  def test_write_global_config_preserves_existing_file_mode
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [] }.to_yaml)
+      File.chmod(0o600, path)
+
+      Hive::Config.send(:write_global_config!, { "registered_projects" => [ { "name" => "x", "path" => "/tmp/x" } ] })
+
+      assert_equal 0o600, File.stat(path).mode & 0o777
+      assert_equal [ "x" ], Hive::Config.registered_projects.map { |project| project["name"] }
+    end
+  end
+
+  def test_write_global_config_preserves_existing_file_mode_under_restrictive_umask
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [] }.to_yaml)
+      File.chmod(0o644, path)
+      previous_umask = File.umask(0o077)
+
+      Hive::Config.send(:write_global_config!, { "registered_projects" => [ { "name" => "x", "path" => "/tmp/x" } ] })
+
+      assert_equal 0o644, File.stat(path).mode & 0o777,
+                   "atomic rewrite must restore the previous mode after tempfile creation applies umask"
+    ensure
+      File.umask(previous_umask) if previous_umask
+    end
+  end
+
+  def test_write_global_config_rewraps_config_path_directory_as_config_error
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      FileUtils.rm_f(path)
+      FileUtils.mkdir_p(path)
+
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:write_global_config!, { "registered_projects" => [] })
+      end
+
+      assert_match(/could not be written/, err.message)
+    end
+  end
+
+  def test_global_config_lock_rewraps_lock_path_directory_as_config_error
+    with_tmp_global_config do |home|
+      FileUtils.mkdir_p(File.join(home, "config.yml.lock"))
+
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.register_project(name: "x", path: "/tmp/x")
+      end
+
+      assert_match(/could not be locked/, err.message)
+    end
+  end
+
+  def test_global_config_lock_rewraps_flock_errors_and_closes_lock
+    with_tmp_global_config do |home|
+      lock_path = File.join(home, "config.yml.lock")
+      fake_lock = Object.new
+      closed = false
+      fake_lock.define_singleton_method(:flock) { |_mode| raise Errno::EIO, "flock failed" }
+      fake_lock.define_singleton_method(:close) { closed = true }
+      original_open = File.method(:open)
+      replacement = lambda do |*args, &block|
+        args.first == lock_path ? fake_lock : original_open.call(*args, &block)
+      end
+
+      err = nil
+      with_replaced_singleton_method(File, :open, replacement) do
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.send(:with_global_config_lock) { flunk "lock body must not run" }
+        end
+      end
+
+      assert_match(/could not be locked/, err.message)
+      assert_equal true, closed, "flock failure must still close the lock fd"
+    end
+  end
+
+  def test_write_global_config_cleans_tempfile_when_rename_fails
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [] }.to_yaml)
+      original_rename = File.method(:rename)
+      replacement = lambda do |*args|
+        raise Errno::ENOSPC, "full" if args.last == path
+
+        original_rename.call(*args)
+      end
+
+      err = nil
+      with_replaced_singleton_method(File, :rename, replacement) do
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.send(:write_global_config!, { "registered_projects" => [ { "name" => "x", "path" => "/tmp/x" } ] })
+        end
+      end
+
+      assert_match(/could not be written/, err.message)
+      assert_empty Dir.glob(File.join(home, ".config.yml.tmp.*")), "failed atomic writes must clean tempfiles"
+      assert_equal [], Hive::Config.registered_projects
     end
   end
 
@@ -1797,6 +2149,84 @@ class ConfigTest < Minitest::Test
   # ---- Auto-rebase `rebase:` block (plan
   # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md U5) ----
 
+  def test_review_fix_auto_commit_sign_policy_defaults_to_inherit
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal "inherit", cfg.dig("review", "fix", "auto_commit", "sign_policy")
+    end
+  end
+
+  def test_review_fix_auto_commit_sign_policy_override_is_respected
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              sign_policy: bypass
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "bypass", cfg.dig("review", "fix", "auto_commit", "sign_policy")
+    end
+  end
+
+  def test_review_fix_must_be_hash_for_auto_commit_config
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix: claude
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_review_fix_auto_commit_must_be_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit: inherit
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_review_fix_auto_commit_sign_policy_must_be_known
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              sign_policy: always
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit\.sign_policy.*must be one of/, err.message)
+      assert_match(/inherit/, err.message)
+      assert_match(/bypass/, err.message)
+      assert_match(/fail/, err.message)
+    end
+  end
+
+  def test_review_fix_auto_commit_sign_policy_must_be_string
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              sign_policy: true
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit\.sign_policy.*must be one of/, err.message)
+      assert_match(/TrueClass/, err.message)
+    end
+  end
+
   def test_rebase_defaults_when_block_absent
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -1931,5 +2361,40 @@ class ConfigTest < Minitest::Test
   ensure
     $stderr = STDERR
     Hive::Config.singleton_class.send(:private, :warn_deprecated_bot_dedupe!)
+  end
+
+  private
+
+  def run_concurrent_global_config_writers(count)
+    skip "fork unavailable" unless Process.respond_to?(:fork)
+
+    reader, writer = IO.pipe
+    pids = count.times.map do |i|
+      Process.fork do
+        writer.close
+        reader.read(1)
+        yield i
+        exit! 0
+      rescue Exception => e # rubocop:disable Lint/RescueException
+        warn e.full_message
+        exit! 1
+      ensure
+        reader&.close unless reader&.closed?
+      end
+    end
+
+    reader.close
+    count.times { writer.write(".") }
+    writer.close
+    statuses = pids.map { |pid| Process.wait2(pid).last }
+    assert statuses.all?(&:success?), "all child config writers must exit cleanly"
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+    pids&.each do |pid|
+      Process.wait(pid)
+    rescue Errno::ECHILD
+      nil
+    end
   end
 end

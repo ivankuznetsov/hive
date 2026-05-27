@@ -18,6 +18,7 @@ If `~/.local/bin` is not on your `PATH`, put the symlink in a directory that is 
 
 ```bash
 hive --version
+hive daemon install
 ```
 
 ## Step 2 - Attach Hive To A Project

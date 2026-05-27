@@ -157,7 +157,10 @@ jobs:
       - name: Install toolchain
         # base-devel (makepkg, fakeroot, sudo) ships in the image; add
         # the rest. git is needed before actions/checkout can run.
-        run: pacman -Syu --noconfirm --needed git openssh cosign ruby jq github-cli
+        # ruby-erb: Arch splits the erb stdlib into its own package, and
+        # packaging/render.rb does `require "erb"` — without it the render
+        # step dies with `cannot load such file -- erb (LoadError)`.
+        run: pacman -Syu --noconfirm --needed git openssh cosign ruby ruby-erb jq github-cli
       - uses: actions/checkout@v4
       - name: Download and cosign-verify release artifacts
         env:

@@ -6037,11 +6037,12 @@ class HiveTuiBubbleModelTest < Minitest::Test
       "legacy kill-class rows must keep reason+exit_code race protection"
   end
 
-  def test_heal_marker_evicts_cache_when_marker_clear_fails
+  def test_heal_marker_keeps_backoff_window_when_marker_clear_fails
     row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
     cache = @model.instance_variable_get(:@healed_folders)
-    cache[row.folder] = Time.now
+    cache[row.folder] = Time.now - (Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS + 1)
     logs = []
+    before = Time.now
 
     with_run_quiet_stub(->(_argv) { [ 1, "", "clear failed\nmore" ] }) do
       with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
@@ -6051,16 +6052,18 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
     end
 
-    refute cache.key?(row.folder)
+    assert cache.key?(row.folder)
+    assert_operator cache[row.folder], :>=, before
     assert_equal "auto_heal", logs.dig(0, 0)
     assert_match(/clear failed/, logs.dig(0, 1))
   end
 
-  def test_heal_marker_evicts_cache_when_clear_raises
+  def test_heal_marker_keeps_backoff_window_when_clear_raises
     row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
     cache = @model.instance_variable_get(:@healed_folders)
-    cache[row.folder] = Time.now
+    cache[row.folder] = Time.now - (Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS + 1)
     logs = []
+    before = Time.now
 
     with_run_quiet_stub(->(_argv) { raise RuntimeError, "boom" }) do
       with_singleton_method_stub(Hive::Tui::Debug, :log, lambda { |tag, message = nil|
@@ -6070,9 +6073,34 @@ class HiveTuiBubbleModelTest < Minitest::Test
       end
     end
 
-    refute cache.key?(row.folder)
+    assert cache.key?(row.folder)
+    assert_operator cache[row.folder], :>=, before
     assert_equal "auto_heal", logs.dig(0, 0)
     assert_match(/RuntimeError: boom/, logs.dig(0, 1))
+  end
+
+  def test_failed_heal_attempt_throttles_retries_until_interval_elapses
+    row = make_error_row(slug: "killed", folder: "/x/.hive-state/stages/6-review/killed", exit_code: 143)
+    snap = snapshot_with([ row ])
+    calls = 0
+
+    with_run_quiet_stub(->(_argv) { calls += 1; [ 1, "", "clear failed" ] }) do
+      @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+      @model.wait_for_background_threads
+      @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+      @model.wait_for_background_threads
+
+      assert_equal 1, calls,
+        "persistent marker-clear failure must not spawn a new heal Thread on every snapshot"
+
+      @model.instance_variable_get(:@healed_folders)[row.folder] =
+        Time.now - (Hive::Tui::BubbleModel::HEAL_REPEAT_INTERVAL_SECONDS + 1)
+      @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: snap))
+      @model.wait_for_background_threads
+    end
+
+    assert_equal 2, calls,
+      "failed marker clears must retry after HEAL_REPEAT_INTERVAL_SECONDS elapses"
   end
 
 

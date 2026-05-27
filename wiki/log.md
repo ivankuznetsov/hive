@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T09:03:53Z] tui - throttle failed auto-heal retries
+
+**Action:** Rebased the kill-class auto-heal backoff fix on top of marker-id guarded ERROR recovery. `BubbleModel#auto_heal_kill_class_errors` now refreshes the same `HEAL_REPEAT_INTERVAL_SECONDS` folder timestamp when `hive markers clear` fails, so persistent lock or filesystem failures retry later without spawning one heal thread per status snapshot.
+
+**Refreshed pages:**
+- [[commands/tui]] - documented kill-class auto-heal retry throttling on clear failure.
+
 ## [2026-05-27T07:57:49Z] init - JSON success envelope and partial rollback
 
 **Action:** Rebased and documented issue #24's `hive init` hardening on top of the current daemon-autostart behavior: `--json` now emits a single `hive-init.v1` success payload with resolved prompt answers and project metadata, the non-TTY defaults prose is suppressed in JSON mode, and the disk-writing init window snapshots and rolls back `.hive-state/config.yml`, the `.hive-state` worktree, `hive/state`, init-created main-checkout commits/files, runtime hook/scheduler files, and the global registry path before surfacing failures as typed Hive errors. Prompt edge cases were also pinned: digit-only agent profile names resolve as names before indexes, leading-comma timeout-only limits remain valid, and trailing-comma budget-only limits re-prompt.

@@ -1,5 +1,7 @@
 require "test_helper"
+require "tmpdir"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 
 # Pin the concurrency controller's caps + cooldown + quarantine + daily-
 # rate semantics. Pure unit — no I/O, no Process.spawn. The controller
@@ -365,5 +367,87 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
       count = c.daily_count_for(proj, T0)
       assert count >= 0, "#{proj} daily count went negative"
     end
+  end
+
+  # ── dispatch-baseline persistence (restart survival) ───────────────────
+
+  def with_store
+    Dir.mktmpdir do |dir|
+      yield File.join(dir, "baselines.json")
+    end
+  end
+
+  def controller_with(store)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50, dispatch_state: store
+    )
+  end
+
+  def test_observe_baseline_survives_a_simulated_restart
+    with_store do |path|
+      answered = T0 - 30
+      controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+        .observe_state_file_mtime(project: "writero", slug: "add-x", mtime: answered)
+
+      # Fresh controller (new process) seeded from the same store on disk.
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_equal answered,
+                   revived.last_dispatched_state_file_mtime_for(project: "writero", slug: "add-x"),
+                   "baseline must survive a restart so a pre-restart answer isn't re-stranded"
+    end
+  end
+
+  def test_record_dispatch_baseline_survives_a_simulated_restart
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      dispatch(c, 100, "xbookmark", "use-y", mtime: T0 - 90)
+
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_equal T0 - 90,
+                   revived.last_dispatched_state_file_mtime_for(project: "xbookmark", slug: "use-y")
+    end
+  end
+
+  def test_prune_drops_absent_keys_and_persists
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "p", slug: "keep", mtime: T0)
+      c.observe_state_file_mtime(project: "p", slug: "drop", mtime: T0)
+
+      c.prune_dispatch_baselines([ %w[p keep] ])
+
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "keep")
+      assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
+      # Prune persisted: a freshly-revived controller doesn't see the dropped key.
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_nil revived.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
+    end
+  end
+
+  def test_nil_store_keeps_state_in_memory_and_writes_nothing
+    Dir.mktmpdir do |dir|
+      # Default `make` has no dispatch_state — pure in-memory, no file I/O.
+      c = make
+      c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
+      dispatch(c, 1, "p", "s2", mtime: T0)
+      c.prune_dispatch_baselines([ %w[p s] ])
+
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
+      assert_empty Dir.glob(File.join(dir, "*")), "nil store must not write any file"
+    end
+  end
+
+  def test_persistence_error_does_not_crash_dispatch
+    raising_store = Object.new
+    def raising_store.load = {}
+    def raising_store.write(_map) = raise(IOError, "simulated disk failure")
+    c = controller_with(raising_store)
+
+    # A store that raises must not propagate out of a controller mutation.
+    c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
+    dispatch(c, 1, "p", "s2", mtime: T0)
+
+    assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
   end
 end

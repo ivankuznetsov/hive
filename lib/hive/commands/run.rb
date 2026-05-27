@@ -352,6 +352,20 @@ module Hive
             }
           end
 
+          if %w[fix_auto_commit_sign_policy_failed fix_auto_commit_signing_failed].include?(marker.attrs["reason"].to_s)
+            target = task.respond_to?(:worktree_path) && task.worktree_path ? task.worktree_path : task.folder
+            return {
+              "kind" => Hive::Schemas::NextActionKind::EDIT,
+              "target" => target,
+              "phase" => marker.attrs["phase"],
+              "reason" => marker.attrs["reason"],
+              "error" => marker.attrs,
+              "instructions" => "inspect the fix-agent worktree changes and signing config; " \
+                                "manually commit or revert remaining worktree changes before clearing REVIEW_ERROR; " \
+                                "fix signing or adjust review.fix.auto_commit.sign_policy before re-running"
+            }
+          end
+
           {
             "kind" => Hive::Schemas::NextActionKind::NO_OP,
             "phase" => marker.attrs["phase"],

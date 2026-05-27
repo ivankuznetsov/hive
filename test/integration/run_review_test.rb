@@ -613,9 +613,10 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix", marker.attrs["phase"]
-        assert_equal "fix_auto_commit_failed", marker.attrs["reason"]
+        assert_equal "fix_auto_commit_sign_policy_failed", marker.attrs["reason"]
         assert_match(/auto-commit signing policy failed/, marker.attrs["message"])
         assert_match(/commit\.gpgsign is enabled/, marker.attrs["message"])
+        assert_match(/changes remain unstaged/, marker.attrs["message"])
 
         assert_equal "needs signing\n", File.read(dirty_file)
         git_status = `git -C #{worktree} status --porcelain`

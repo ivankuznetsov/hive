@@ -449,14 +449,18 @@ class CurrentMainCoverageGapTest < Minitest::Test
       responses = [
         [ "", "", ok_status ],
         [ "test/fix_test.rb\0", "", ok_status ],
-        [ "stdout detail", "stderr detail", fail_status ],
         [ "", "", ok_status ]
       ]
       with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { responses.shift }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+        with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_git_commit, lambda { |_worktree, _policy, _message|
+          { success: false, message: "git commit failed: stderr detail\nstdout detail" }
+        }) do
+          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
-        refute result[:success]
-        assert_equal "git commit failed: stderr detail\nstdout detail", result[:message]
+          refute result[:success]
+          assert_equal "git commit failed: stderr detail\nstdout detail", result[:message]
+          assert_nil result[:reason]
+        end
       end
     end
   end
@@ -477,21 +481,24 @@ class CurrentMainCoverageGapTest < Minitest::Test
       responses = [
         [ "", "", ok_status ],
         [ "test/fix_test.rb\0", "", ok_status ],
-        [ "", "commit boom", fail_status ],
         [ "", "", ok_status ]
       ]
       with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
         captured_argv << argv
         responses.shift
       }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+        with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_git_commit, lambda { |_worktree, _policy, _message|
+          { success: false, message: "git commit failed: commit boom" }
+        }) do
+          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
-        refute result[:success]
-        assert_includes result[:message], "git commit failed"
+          refute result[:success]
+          assert_includes result[:message], "git commit failed"
+        end
       end
 
-      assert_equal 4, captured_argv.length
-      assert_equal [ "git", "-C", worktree, "reset" ], captured_argv[3].first(4)
+      assert_equal 3, captured_argv.length
+      assert_equal [ "git", "-C", worktree, "reset" ], captured_argv[2].first(4)
     end
   end
 
@@ -510,15 +517,18 @@ class CurrentMainCoverageGapTest < Minitest::Test
       responses = [
         [ "", "", ok_status ],
         [ "test/fix_test.rb\0", "", ok_status ],
-        [ "", "commit boom", fail_status ],
         [ "", "reset boom", fail_status ]
       ]
       with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { responses.shift }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+        with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_git_commit, lambda { |_worktree, _policy, _message|
+          { success: false, message: "git commit failed: commit boom" }
+        }) do
+          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
-        refute result[:success]
-        assert_includes result[:message], "git commit failed"
-        assert_includes result[:message], "git reset HEAD -- failed"
+          refute result[:success]
+          assert_includes result[:message], "git commit failed"
+          assert_includes result[:message], "git reset HEAD -- failed"
+        end
       end
     end
   end
@@ -624,15 +634,17 @@ class CurrentMainCoverageGapTest < Minitest::Test
       ]
 
       with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-after" }) do
-        with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
-          captured_argv << argv
-          responses.shift
-        }) do
-          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+        with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_git_commit, ->(_worktree, _policy, _message) { { success: true } }) do
+          with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+            captured_argv << argv
+            responses.shift
+          }) do
+            result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
-          assert result[:success]
-          assert_equal "head-after", result[:head]
-          refute captured_argv.any? { |argv| argv.include?("diff") }
+            assert result[:success]
+            assert_equal "head-after", result[:head]
+            refute captured_argv.any? { |argv| argv.include?("diff") }
+          end
         end
       end
     end
@@ -653,21 +665,28 @@ class CurrentMainCoverageGapTest < Minitest::Test
       responses = [
         [ "", "", ok_status ],
         [ "test/fix_test.rb\0", "", ok_status ],
-        [ "", "", ok_status ],
         [ "head-after-auto-commit\n", "", ok_status ]
       ]
+      commit_calls = []
 
-      with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
-        captured_argv << argv
-        responses.shift
+      with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_git_commit, lambda { |commit_worktree, policy, message|
+        commit_calls << [ commit_worktree, policy, message ]
+        { success: true }
       }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+        with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+          captured_argv << argv
+          responses.shift
+        }) do
+          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
-        assert result[:success]
-        assert_equal "head-after-auto-commit", result[:head]
+          assert result[:success]
+          assert_equal "head-after-auto-commit", result[:head]
+        end
       end
 
-      commit_argv = captured_argv[2]
+      assert_equal worktree, commit_calls.fetch(0).fetch(0)
+      assert_equal "inherit", commit_calls.fetch(0).fetch(1)
+      commit_argv = Hive::Stages::Review.send(:auto_commit_git_commit_argv, worktree, "inherit", "message")
       assert_equal [ "git", "-C", worktree, "commit" ], commit_argv.first(4)
       refute_includes commit_argv, "commit.gpgsign=false"
     end
@@ -688,22 +707,191 @@ class CurrentMainCoverageGapTest < Minitest::Test
       responses = [
         [ "", "", ok_status ],
         [ "test/fix_test.rb\0", "", ok_status ],
-        [ "", "", ok_status ],
         [ "head-after-auto-commit\n", "", ok_status ]
       ]
+      commit_calls = []
 
-      with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
-        captured_argv << argv
-        responses.shift
+      with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_git_commit, lambda { |commit_worktree, policy, message|
+        commit_calls << [ commit_worktree, policy, message ]
+        { success: true }
       }) do
-        result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
+        with_replaced_singleton_method(Open3, :capture3, ->(*argv) {
+          captured_argv << argv
+          responses.shift
+        }) do
+          result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
-        assert result[:success]
+          assert result[:success]
+        end
       end
 
-      commit_argv = captured_argv[2]
+      assert_equal worktree, commit_calls.fetch(0).fetch(0)
+      assert_equal "bypass", commit_calls.fetch(0).fetch(1)
+      commit_argv = Hive::Stages::Review.send(:auto_commit_git_commit_argv, worktree, "bypass", "message")
       assert_equal [ "git", "-C", worktree, "-c", "commit.gpgsign=false", "commit" ], commit_argv.first(6)
     end
+  end
+
+  def test_auto_commit_sign_policy_for_rejects_unknown_hand_built_policy
+    cfg = { "review" => { "fix" => { "auto_commit" => { "sign_policy" => "always" } } } }
+
+    err = assert_raises(Hive::ConfigError) do
+      Hive::Stages::Review.send(:auto_commit_sign_policy_for, cfg)
+    end
+
+    assert_match(/sign_policy.*must be one of/, err.message)
+  end
+
+  def test_run_git_with_timeout_kills_process_group_on_timeout
+    calls = []
+    clock_values = [ 0.0, 2.0 ]
+
+    with_replaced_singleton_method(Process, :spawn, lambda { |*argv, **kwargs|
+      calls << [ :spawn, argv, kwargs ]
+      12_345
+    }) do
+      with_replaced_singleton_method(Process, :clock_gettime, ->(_clock) { clock_values.shift || 2.0 }) do
+        with_replaced_singleton_method(Process, :kill, lambda { |signal, target|
+          calls << [ :kill, signal, target ]
+          1
+        }) do
+          with_replaced_singleton_method(Process, :waitpid, lambda { |pid|
+            calls << [ :waitpid, pid ]
+            pid
+          }) do
+            success, err, timed_out = Hive::GitOps.new("/tmp/worktree").run_git_with_timeout(
+              [ "git", "status" ],
+              timeout_sec: 1
+            )
+
+            refute success
+            assert_empty err
+            assert timed_out
+          end
+        end
+      end
+    end
+
+    spawn_call = calls.find { |call| call.first == :spawn }
+    assert_equal true, spawn_call.fetch(2).fetch(:pgroup)
+    assert_includes calls, [ :kill, "TERM", -12_345 ]
+    assert_includes calls, [ :kill, "KILL", -12_345 ]
+    assert_includes calls, [ :waitpid, 12_345 ]
+  end
+
+  def test_timed_git_cleanup_falls_back_to_parent_pid_when_group_is_gone
+    ops = Hive::GitOps.new("/tmp/worktree")
+    ops.define_singleton_method(:sleep) { |_seconds| nil }
+    calls = []
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, target|
+      calls << [ signal, target ]
+      raise Errno::ESRCH if target.negative?
+
+      1
+    }) do
+      with_replaced_singleton_method(Process, :waitpid, ->(pid) { calls << [ "waitpid", pid ]; pid }) do
+        ops.send(:terminate_timed_out_git_process, 12_345)
+      end
+    end
+
+    assert_includes calls, [ "TERM", -12_345 ]
+    assert_includes calls, [ "TERM", 12_345 ]
+    assert_includes calls, [ "KILL", -12_345 ]
+    assert_includes calls, [ "KILL", 12_345 ]
+    assert_includes calls, [ "waitpid", 12_345 ]
+  end
+
+  def test_auto_commit_git_commit_uses_bounded_git_helper
+    worktree = "/tmp/hive-worktree"
+    captured = {}
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git_with_timeout) do |argv, timeout_sec:|
+      captured[:argv] = argv
+      captured[:timeout_sec] = timeout_sec
+      [ true, "", false ]
+    end
+
+    with_replaced_singleton_method(Hive::GitOps, :new, lambda { |path|
+      captured[:worktree_path] = path
+      fake_ops
+    }) do
+      result = Hive::Stages::Review.send(:auto_commit_git_commit, worktree, "inherit", "commit message")
+
+      assert result[:success]
+    end
+
+    assert_equal worktree, captured.fetch(:worktree_path)
+    assert_equal [ "git", "-C", worktree, "commit", "-m", "commit message" ], captured.fetch(:argv)
+    assert_equal Hive::Stages::Review::AUTO_COMMIT_OP_TIMEOUT_SEC, captured.fetch(:timeout_sec)
+  end
+
+  def test_auto_commit_git_commit_reports_timeout
+    captured = {}
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git_with_timeout) do |_argv, timeout_sec:|
+      captured[:timeout_sec] = timeout_sec
+      [ false, "", true ]
+    end
+
+    with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { fake_ops }) do
+      result = Hive::Stages::Review.send(:auto_commit_git_commit, "/tmp/worktree", "inherit", "message")
+
+      refute result[:success]
+      assert result[:timed_out]
+      assert_includes result[:message], "timed out after"
+      assert_includes result[:message], "signing or commit hooks"
+    end
+
+    assert_equal Hive::Stages::Review::AUTO_COMMIT_OP_TIMEOUT_SEC, captured.fetch(:timeout_sec)
+  end
+
+  def test_auto_commit_git_commit_reports_non_timeout_failure
+    captured = {}
+    fake_ops = Object.new
+    fake_ops.define_singleton_method(:run_git_with_timeout) do |_argv, timeout_sec:|
+      captured[:timeout_sec] = timeout_sec
+      [ false, "fatal: commit failed", false ]
+    end
+
+    with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { fake_ops }) do
+      result = Hive::Stages::Review.send(:auto_commit_git_commit, "/tmp/worktree", "inherit", "message")
+
+      refute result[:success]
+      refute result[:timed_out]
+      assert_equal "git commit failed: fatal: commit failed", result[:message]
+    end
+
+    assert_equal Hive::Stages::Review::AUTO_COMMIT_OP_TIMEOUT_SEC, captured.fetch(:timeout_sec)
+  end
+
+  def test_auto_commit_commit_failure_reason_marks_only_signing_shaped_inherited_failures
+    generic_reason = Hive::Stages::Review.send(
+      :auto_commit_commit_failure_reason,
+      "inherit",
+      { success: false, message: "git commit failed: pre-commit hook declined" }
+    )
+    assert_nil generic_reason
+
+    signing_reason = Hive::Stages::Review.send(
+      :auto_commit_commit_failure_reason,
+      "inherit",
+      { success: false, message: "git commit failed: gpg failed to sign the data" }
+    )
+    assert_equal "fix_auto_commit_signing_failed", signing_reason
+
+    timeout_reason = Hive::Stages::Review.send(
+      :auto_commit_commit_failure_reason,
+      "bypass",
+      { success: false, message: "git commit timed out", timed_out: true }
+    )
+    assert_equal "fix_auto_commit_signing_failed", timeout_reason
+
+    assert_nil Hive::Stages::Review.send(
+      :auto_commit_commit_failure_reason,
+      "bypass",
+      { success: false, message: "git commit failed" }
+    )
   end
 
   def test_review_auto_commit_fail_sign_policy_rejects_signed_repos_before_staging
@@ -726,8 +914,10 @@ class CurrentMainCoverageGapTest < Minitest::Test
         result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
+        assert_equal "fix_auto_commit_sign_policy_failed", result[:reason]
         assert_includes result[:message], "auto-commit signing policy failed"
         assert_includes result[:message], "commit.gpgsign is enabled"
+        assert_includes result[:message], "changes remain unstaged"
       end
 
       assert_equal 1, captured_argv.length
@@ -751,7 +941,9 @@ class CurrentMainCoverageGapTest < Minitest::Test
         result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
-        assert_equal "git config --bool --get commit.gpgsign failed: fatal: bad config", result[:message]
+        assert_equal "fix_auto_commit_sign_policy_failed", result[:reason]
+        assert_includes result[:message], "git config --bool --get commit.gpgsign failed: fatal: bad config"
+        assert_includes result[:message], "Commit or revert those changes manually"
       end
     end
   end

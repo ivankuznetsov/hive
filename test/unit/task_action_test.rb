@@ -1231,6 +1231,7 @@ class TaskActionTest < Minitest::Test
       File.write(task.state_file, "<!-- REVIEW_ERROR phase=fix reason=fix_auto_commit_scope_failed pass=1 -->\n")
       artifact = File.join(task.folder, "reviews", "auto-commit-scope-01.md")
       File.write(artifact, "# Auto-commit scope check failed\n\n| `bin/pwn` | denied |\n")
+      File.write(File.join(task.folder, "reviews", "escalations-01.md"), "older escalation context\n")
 
       diagnostic = Hive::TaskAction.for(
         task,
@@ -1246,8 +1247,10 @@ class TaskActionTest < Minitest::Test
       assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
       assert_nil diagnostic.fetch("suggested_next_action")["command"]
       assert_includes diagnostic.fetch("artifact_paths"), artifact
+      assert_match(/\A#{Regexp.escape(artifact)}:/, diagnostic.fetch("detail"))
       assert_match(/bin\/pwn/, diagnostic.fetch("detail"))
 
+      FileUtils.rm_f(File.join(task.folder, "reviews", "escalations-01.md"))
       missing_artifact_diagnostic = Hive::TaskAction.for(
         task,
         marker(
@@ -1258,6 +1261,25 @@ class TaskActionTest < Minitest::Test
         )
       ).diagnostic
       assert_match(/Hive rejected the fix-agent fallback commit/, missing_artifact_diagnostic.fetch("detail"))
+    end
+  end
+
+  def test_auto_commit_signing_failures_are_manual_fix
+    with_tmp_dir do |dir|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
+
+      %w[fix_auto_commit_sign_policy_failed fix_auto_commit_signing_failed].each do |reason|
+        diagnostic = Hive::TaskAction.for(
+          task,
+          marker(:review_error, "phase" => "fix", "reason" => reason, "pass" => "1")
+        ).diagnostic
+
+        assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
+        assert_nil diagnostic.fetch("suggested_next_action")["command"]
+        assert_match(/signing/, diagnostic.fetch("detail"))
+        assert_match(/review\.fix\.auto_commit\.sign_policy/, diagnostic.fetch("detail"))
+        assert_match(/commit or revert/, diagnostic.fetch("detail"))
+      end
     end
   end
 

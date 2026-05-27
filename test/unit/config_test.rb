@@ -760,8 +760,26 @@ class ConfigTest < Minitest::Test
   def test_auto_commit_scope_validation_allows_missing_legacy_scope
     cfg = { "review" => { "fix" => {} } }
 
-    assert_nil Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
+    Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
     assert_nil Hive::Config.send(:validate_path_glob_list!, nil, "review.fix.auto_commit.scope_check.allowed_paths", "test")
+  end
+
+  def test_auto_commit_scope_direct_validator_accepts_scope_config
+    cfg = {
+      "review" => {
+        "fix" => {
+          "auto_commit" => {
+            "scope_check" => {
+              "enabled" => true,
+              "allowed_paths" => [ "lib/**" ],
+              "denied_paths" => [ "config/**" ]
+            }
+          }
+        }
+      }
+    }
+
+    Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
   end
 
   def test_load_accepts_max_attempts_one_and_three

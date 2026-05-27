@@ -2135,3 +2135,5 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[stages/review]]
+- [[modules/config]]
+- [[state-model]]

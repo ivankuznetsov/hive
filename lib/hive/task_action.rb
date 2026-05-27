@@ -510,10 +510,10 @@ module Hive
       phase = marker.attrs["phase"].to_s
       reason = marker.attrs["reason"].to_s
       paths = []
+      paths.concat(paths_from_marker_files)
       paths << task_artifact("reviews", "errors-#{pass}.md") if pass
       paths << task_artifact("reviews", "fix-guardrail-#{pass}.md") if pass && reason == "fix_guardrail"
       paths << task_artifact("reviews", "escalations-#{pass}.md") if pass
-      paths.concat(paths_from_marker_files)
       paths.concat(review_phase_logs(phase, pass))
       paths.concat(latest_log_artifacts)
       paths
@@ -667,6 +667,14 @@ module Hive
         ].join("\n")
       end
 
+      if auto_commit_signing_failure?
+        return [
+          marker_summary,
+          "Hive could not create the fix-agent fallback commit because commit signing policy or signing execution blocked it.",
+          "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then clear REVIEW_ERROR and re-run."
+        ].join("\n")
+      end
+
       lines = [ marker_summary ]
       lines << "No diagnostic artifact was found under #{task.folder}."
       lines.join("\n")
@@ -803,7 +811,7 @@ module Hive
         return { "kind" => "manual_fix", "command" => nil }
       end
 
-      if auto_commit_scope_failure?
+      if auto_commit_manual_failure?
         return { "kind" => "manual_fix", "command" => nil }
       end
 
@@ -940,8 +948,25 @@ module Hive
         !legacy_execute_findings?
     end
 
+    AUTO_COMMIT_MANUAL_FAILURE_REASONS = %w[
+      fix_auto_commit_scope_failed
+      fix_auto_commit_sign_policy_failed
+      fix_auto_commit_signing_failed
+    ].freeze
+
     def auto_commit_scope_failure?
       marker.name == :review_error && marker.attrs["reason"].to_s == "fix_auto_commit_scope_failed"
+    end
+
+    def auto_commit_signing_failure?
+      marker.name == :review_error && %w[
+        fix_auto_commit_sign_policy_failed
+        fix_auto_commit_signing_failed
+      ].include?(marker.attrs["reason"].to_s)
+    end
+
+    def auto_commit_manual_failure?
+      marker.name == :review_error && AUTO_COMMIT_MANUAL_FAILURE_REASONS.include?(marker.attrs["reason"].to_s)
     end
 
     def legacy_execute_findings?

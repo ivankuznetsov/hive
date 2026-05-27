@@ -78,6 +78,16 @@ module Hive
       AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
       AutoCommitScopeViolation = Data.define(:path, :reason)
       AUTO_COMMIT_SCOPE_FILENAME = "auto-commit-scope".freeze
+      AUTO_COMMIT_OP_TIMEOUT_SEC = 300
+      AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
+        /gpg/i,
+        /pinentry/i,
+        /failed to sign/i,
+        /could not sign/i,
+        /signing key/i,
+        /ssh.*sign/i,
+        /sign.*ssh/i
+      ].freeze
 
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
@@ -1678,38 +1688,48 @@ module Hive
         end
 
         message = fix_auto_commit_message(task, cfg, ctx, accepted_findings)
-        commit_out, commit_err, commit_status = Open3.capture3(
-          *auto_commit_git_commit_argv(ctx.worktree_path, sign_policy, message)
-        )
-        unless commit_status.success?
-          commit_message = git_command_message("git commit", commit_out, commit_err)
-          return auto_commit_failure_with_unstage(ctx.worktree_path, commit_message)
+        commit = auto_commit_git_commit(ctx.worktree_path, sign_policy, message)
+        unless commit[:success]
+          attrs = {}
+          reason = auto_commit_commit_failure_reason(sign_policy, commit)
+          attrs[:reason] = reason if reason
+          return auto_commit_failure_with_unstage(ctx.worktree_path, commit[:message], **attrs)
         end
 
         { success: true, head: git_head(ctx.worktree_path) }
       end
 
       def auto_commit_sign_policy_for(cfg)
-        review = cfg["review"]
-        fix = review["fix"] if review.is_a?(Hash)
-        auto_commit = fix["auto_commit"] if fix.is_a?(Hash)
-        policy = auto_commit["sign_policy"] if auto_commit.is_a?(Hash)
+        policy = Hive::Config.review_fix_auto_commit_sign_policy(cfg)
+        return policy if Hive::Config::AUTO_COMMIT_SIGN_POLICIES.include?(policy)
 
-        policy || "inherit"
+        raise Hive::ConfigError,
+              "review.fix.auto_commit.sign_policy must be one of " \
+              "#{Hive::Config::AUTO_COMMIT_SIGN_POLICIES.inspect}; got #{policy.inspect}"
       end
 
       def auto_commit_sign_policy_failure(worktree_path, sign_policy)
         return nil unless sign_policy == "fail"
 
         signing = commit_gpgsign_enabled?(worktree_path)
-        return signing unless signing[:success]
+        unless signing[:success]
+          return {
+            success: false,
+            reason: "fix_auto_commit_sign_policy_failed",
+            message: "auto-commit signing policy failed: #{signing[:message]}; " \
+                     "fix-agent changes remain unstaged in the worktree. Commit or revert those changes manually " \
+                     "before clearing REVIEW_ERROR and re-running"
+          }
+        end
         return nil unless signing[:enabled]
 
         {
           success: false,
+          reason: "fix_auto_commit_sign_policy_failed",
           message: "auto-commit signing policy failed: commit.gpgsign is enabled; " \
-                   "set review.fix.auto_commit.sign_policy to inherit to let git sign fallback commits, " \
-                   "or bypass to force unsigned automation commits"
+                   "fix-agent changes remain unstaged in the worktree. Either commit/revert those changes " \
+                   "manually, fix signing config, or set review.fix.auto_commit.sign_policy to inherit or bypass " \
+                   "before clearing REVIEW_ERROR and re-running"
         }
       end
 
@@ -1730,6 +1750,34 @@ module Hive
         argv = [ "git", "-C", worktree_path ]
         argv += [ "-c", "commit.gpgsign=false" ] if sign_policy == "bypass"
         argv + [ "commit", "-m", message ]
+      end
+
+      def auto_commit_git_commit(worktree_path, sign_policy, message)
+        argv = auto_commit_git_commit_argv(worktree_path, sign_policy, message)
+        success, err, timed_out = Hive::GitOps.new(worktree_path).run_git_with_timeout(
+          argv,
+          timeout_sec: AUTO_COMMIT_OP_TIMEOUT_SEC
+        )
+        return { success: true } if success
+
+        detail = if timed_out
+          "git commit timed out after #{AUTO_COMMIT_OP_TIMEOUT_SEC}s; signing or commit hooks may be waiting"
+        else
+          git_command_message("git commit", "", err)
+        end
+        { success: false, message: detail, timed_out: timed_out }
+      end
+
+      def auto_commit_commit_failure_reason(sign_policy, commit)
+        return "fix_auto_commit_signing_failed" if commit[:timed_out]
+        return nil unless sign_policy == "inherit"
+        return "fix_auto_commit_signing_failed" if auto_commit_signing_error?(commit[:message])
+
+        nil
+      end
+
+      def auto_commit_signing_error?(message)
+        AUTO_COMMIT_SIGNING_ERROR_PATTERNS.any? { |pattern| message.to_s.match?(pattern) }
       end
 
       def fix_auto_commit_message(task, cfg, ctx, accepted_findings)

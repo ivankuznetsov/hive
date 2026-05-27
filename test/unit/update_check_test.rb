@@ -86,4 +86,31 @@ class UpdateCheckTest < Minitest::Test
       assert_nil Hive::UpdateCheck.latest(current: "0.1.5"), "a non-2xx response yields no info"
     end
   end
+
+  def test_releases_url_defaults_to_github
+    with_env("HIVE_RELEASES_API_URL" => nil) do
+      assert_equal Hive::UpdateCheck::API_URL, Hive::UpdateCheck.releases_url
+    end
+  end
+
+  def test_releases_url_honors_env_override
+    with_env("HIVE_RELEASES_API_URL" => "http://127.0.0.1:9999/releases/latest") do
+      assert_equal "http://127.0.0.1:9999/releases/latest", Hive::UpdateCheck.releases_url
+    end
+  end
+
+  def test_releases_url_treats_empty_override_as_unset
+    with_env("HIVE_RELEASES_API_URL" => "") do
+      assert_equal Hive::UpdateCheck::API_URL, Hive::UpdateCheck.releases_url
+    end
+  end
+
+  def test_latest_probes_the_overridden_url
+    with_env("HIVE_RELEASES_API_URL" => "http://localhost:1234/x") do
+      seen = nil
+      result = Hive::UpdateCheck.latest(current: "0.1.5", http: ->(url) { seen = url; '{"tag_name":"v0.2.0"}' })
+      assert_equal "http://localhost:1234/x", seen, "the probe must hit the overridden URL"
+      assert_equal "0.2.0", result.latest
+    end
+  end
 end

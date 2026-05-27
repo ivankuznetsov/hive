@@ -103,15 +103,22 @@ module Hive
         pid_file = File.join(Hive::Paths.state_home, ".bot.pid")
         return unless File.exist?(pid_file)
 
-        # The bot's pid file is a YAML payload ({pid:, started_at:}), unlike
-        # the daemon's bare-integer .daemon.pid — parse it, don't to_i the
-        # raw text (which would read "---" and silently no-op).
-        payload = YAML.safe_load(File.read(pid_file)) || {}
+        # The bot's pid file is a YAML Hash payload ({pid:, started_at:}),
+        # unlike the daemon's bare-integer .daemon.pid. Guard is_a?(Hash)
+        # before indexing: a corrupt/legacy bare scalar is still valid YAML
+        # (e.g. "12345" parses to an Integer), and Integer#[] would raise an
+        # unrescued TypeError that aborts the entire uninstall after only the
+        # daemon was deregistered. Mirror Bot#pid_file_payload's guard, and
+        # rescue Psych::Exception (covers SyntaxError AND DisallowedClass for
+        # a stray Date/Symbol scalar) so a malformed file degrades to a no-op.
+        payload = YAML.safe_load(File.read(pid_file))
+        return unless payload.is_a?(Hash)
+
         pid = payload["pid"].to_i
         return if pid.zero?
 
         Process.kill("TERM", pid)
-      rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT, Psych::SyntaxError
+      rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT, Psych::Exception
         nil
       end
 

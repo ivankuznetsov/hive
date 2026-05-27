@@ -445,6 +445,12 @@ class DaemonServiceInstallerTest < Minitest::Test
       assert_includes commands, %w[systemctl --user restart hive-daemon],
                       "force upgrade should restart the running unit so new Environment= lines take effect; enable --now would no-op an already-enabled unit"
       refute_includes commands, %w[systemctl --user enable --now hive-daemon]
+      # The daemon's upgrade_restart_warning hook (moved from inline to a
+      # subclass override during the ServiceInstaller::Base extraction) must
+      # still surface the TimeoutStopSec block warning before the blocking
+      # restart. Pins the one moved behavior the byte-identical net misses.
+      assert installer.messages.any? { |msg| msg.include?("TimeoutStopSec") && msg.include?("900s") },
+             "force-upgrade restart must warn about the up-to-900s block, got: #{installer.messages.inspect}"
     end
   end
 

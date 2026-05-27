@@ -113,7 +113,12 @@ class BotServiceInstallerTest < Minitest::Test
       assert_includes body, "<string>start</string>"
       assert_includes body, "<string>--foreground</string>"
       assert_includes body, "<key>RunAtLoad</key>"
-      assert_includes body, "<key>KeepAlive</key>"
+      # KeepAlive must be the SuccessfulExit:false dict form (matching the
+      # daemon plist), NOT unconditional <true/>. With <true/>, launchd
+      # respawns even on the clean exit 0 the `[ -x "$0" ] || exit 0` wrapper
+      # produces for a missing binary — defeating the respawn circuit-breaker.
+      assert_match(%r{<key>KeepAlive</key>\s*<dict>\s*<key>SuccessfulExit</key>\s*<false/>\s*</dict>}m, body,
+                   "bot plist KeepAlive must gate on SuccessfulExit:false, not unconditional true")
       refute_includes body, "HIVE_TELEGRAM_BOT_TOKEN",
                        "the bot plist must not embed a token; the bot loads ~/.config/hive/.env itself"
       assert_equal [ [ "launchctl", "load", plist ] ], commands

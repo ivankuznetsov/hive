@@ -267,6 +267,39 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_stop_foreground_bot_tolerates_bare_scalar_pid_file_without_aborting
+    # A corrupt/legacy bare-integer .bot.pid is valid YAML (parses to an
+    # Integer). Indexing it with ["pid"] would raise TypeError; the guard
+    # must degrade to a no-op so the rest of uninstall still runs.
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"), "12345\n")
+
+      with_replaced_singleton_method(Process, :kill, ->(_s, _p) { raise "must not kill on a non-Hash pid file" }) do
+        # Must not raise.
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_bot)
+      end
+    end
+  end
+
+  def test_uninstall_completes_when_bot_pid_file_is_corrupt
+    # Regression: a malformed .bot.pid must not abort the whole uninstall
+    # (it runs after deregister_daemon, so an unrescued raise would strand
+    # the bot unit + skip config/data/symlink cleanup).
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"), "- not\n- a\n- hash\n")
+      out = StringIO.new
+
+      status = Hive::Commands::Uninstall.new(
+        purge: true, output: out, runner: ->(_argv) { true }, host_os: "linux"
+      ).call
+
+      assert_equal 0, status, "uninstall must finish cleanly despite a corrupt bot pid file"
+      assert_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
   def test_stop_foreground_bot_ignores_stale_pid
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)

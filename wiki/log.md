@@ -2103,6 +2103,3 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[commands/bot]]
-
-## 2026-05-27
-- `wiki/commands/bot.md`: documented the new `hive bot install [--force] [--json]` subcommand (platform-native unit write + autostart via the shared `ServiceInstaller::Base`, `--force` backup/reload, `unsupported`/`70` outcomes, `hive-bot-install.v1` envelope, torn down by `hive uninstall`). Mirrors `hive daemon install`.

@@ -208,8 +208,11 @@ jobs:
       - name: Push to AUR
         run: |
           install -dm700 ~/.ssh
-          # TOFU on first contact; AUR's host key is stable thereafter.
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          # Accept AUR's host key on first connect (TOFU) and record it.
+          # ssh-keyscan was unreliable in the container (clone failed with
+          # "Host key verification failed"); accept-new auto-trusts the key
+          # on first use. The SSH key auth below is the real access gate.
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           eval "$(ssh-agent -s)"
           # Load the key straight from env into the agent via stdin — the
           # private key is never written to disk (so a compromised gem dep

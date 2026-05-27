@@ -272,6 +272,45 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_claude_ready_prompt_accepts_observed_prompt_on_last_nonblank_line
+    pane = "Claude Code v2.1.133\nTip: try refactor\n\n❯ Try \"refactor <filepath>\""
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_stale_prompt_marker_in_scrollback
+    pane = "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\"\n\nbackground indexing update"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_accepts_current_ready_prompt_with_stale_trust_scrollback
+    pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm\n" \
+           "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\""
+
+    refute Hive::ClaudeLauncher.claude_trust_prompt?(pane)
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_accepts_current_ready_prompt_with_stale_permission_scrollback
+    pane = "Claude Code v2.1.133\nDo you want to make this edit?\n❯ 1. Yes\n" \
+           "Claude Code v2.1.133\n❯ Try \"refactor <filepath>\""
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_numbered_menu_option_after_copy_drift
+    pane = "Claude Code v2.1.133\nProceed with the action?\n❯ 1. Yes"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_trust_prompt_matches_observed_folder_trust_prompt
+    pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm"
+
+    assert Hive::ClaudeLauncher.claude_trust_prompt?(pane)
+  end
+
   def test_spawn_claude_bang_propagates_agent_error_unchanged
     # `spawn_claude!` no longer catches tmux-unavailable AgentErrors;
     # the propagation is what lets the review stage's outer rescue

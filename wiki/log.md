@@ -69,6 +69,13 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T11:37:50Z] brainstorm - pin Claude TUI ready predicates
+
+**Action:** Documented the Claude TUI predicate contract for tmux mode. Trust and ready markers are pinned in `Hive::ClaudeLauncher` to the observed Claude Code 2.1.133 TUI; readiness is based on the current prompt block, requires the prompt marker on the last non-blank pane line, ignores stale trust/permission scrollback, and rejects numbered menu options as non-ready.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] - recorded the pinned TUI predicate and stale-scrollback guard.
+
 ## [2026-05-26T11:27:00Z] brainstorm - Claude tmux ready timeout fallback
 
 **Action:** Documented the shared Claude tmux readiness fallback. `CLAUDE_READY` now follows the shared `READY_WAIT_TIMEOUT_SEC` env override when its specific env var is unset, while keeping the long 120s bare default for slow Claude TUI startup.

@@ -169,6 +169,170 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_linux_bot_unit_disable_removes_unit
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-bot.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      assert_includes calls, %w[systemctl --user disable --now hive-bot]
+      refute File.exist?(unit), "bot unit must be removed after a successful disable"
+    end
+  end
+
+  def test_linux_bot_disable_failure_leaves_unit_in_place
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-bot.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      out = StringIO.new
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: out,
+        runner: ->(argv) { argv.include?("hive-bot") ? false : true }, host_os: "linux"
+      ).call
+
+      assert File.exist?(unit)
+      assert_match(/systemctl --user disable failed for hive-bot/, out.string)
+    end
+  end
+
+  def test_macos_bot_plist_unload_removes_plist
+    with_xdg_home do
+      plist = File.expand_path("~/Library/LaunchAgents/local.hive-bot.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "plist\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "darwin"
+      ).call
+
+      assert_includes calls, [ "launchctl", "unload", plist ]
+      refute File.exist?(plist)
+    end
+  end
+
+  def test_macos_bot_plist_unload_failure_leaves_plist_in_place
+    with_xdg_home do
+      plist = File.expand_path("~/Library/LaunchAgents/local.hive-bot.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "plist\n")
+      out = StringIO.new
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: out,
+        runner: ->(_argv) { false }, host_os: "darwin"
+      ).call
+
+      assert File.exist?(plist), "a failed launchctl unload must leave the bot plist in place"
+      assert_match(/launchctl unload failed for #{Regexp.escape(plist)}/, out.string)
+    end
+  end
+
+  def test_bot_teardown_noops_when_unit_absent
+    with_xdg_home do
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      refute(calls.any? { |argv| argv.include?("hive-bot") },
+             "no bot unit present → no bot service-manager calls")
+    end
+  end
+
+  def test_stop_foreground_bot_terms_pid_from_yaml_payload
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      # The bot pid file is YAML, not a bare integer.
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
+                 { "pid" => 456, "started_at" => "2026-05-27T00:00:00Z" }.to_yaml)
+      signals = []
+
+      with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_bot)
+      end
+
+      assert_equal [ [ "TERM", 456 ] ], signals
+    end
+  end
+
+  def test_stop_foreground_bot_tolerates_bare_scalar_pid_file_without_aborting
+    # A corrupt/legacy bare-integer .bot.pid is valid YAML (parses to an
+    # Integer). Indexing it with ["pid"] would raise TypeError; the guard
+    # must degrade to a no-op so the rest of uninstall still runs.
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"), "12345\n")
+
+      with_replaced_singleton_method(Process, :kill, ->(_s, _p) { raise "must not kill on a non-Hash pid file" }) do
+        # Must not raise.
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_bot)
+      end
+    end
+  end
+
+  def test_uninstall_completes_when_bot_pid_file_is_corrupt
+    # Regression: a malformed .bot.pid must not abort the whole uninstall
+    # (it runs after deregister_daemon, so an unrescued raise would strand
+    # the bot unit + skip config/data/symlink cleanup).
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"), "- not\n- a\n- hash\n")
+      out = StringIO.new
+
+      status = Hive::Commands::Uninstall.new(
+        purge: true, output: out, runner: ->(_argv) { true }, host_os: "linux"
+      ).call
+
+      assert_equal 0, status, "uninstall must finish cleanly despite a corrupt bot pid file"
+      assert_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
+  def test_stop_foreground_bot_ignores_stale_pid
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
+                 { "pid" => 789, "started_at" => "2026-05-27T00:00:00Z" }.to_yaml)
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+        # A dead/stale bot pid must be swallowed, not re-raised, so a
+        # vanished bot never aborts the rest of the uninstall.
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(:stop_foreground_bot)
+      end
+    end
+  end
+
+  def test_stop_foreground_bot_warns_but_continues_on_eperm
+    # EPERM means the bot is alive but owned by another uid. Unlike the
+    # dead/corrupt cases this must NOT be a silent no-op: the operator's bot
+    # may keep running against state we're about to delete, so it warns
+    # (without aborting the destructive uninstall).
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
+                 { "pid" => 999, "started_at" => "2026-05-27T00:00:00Z" }.to_yaml)
+      out = StringIO.new
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+        Hive::Commands::Uninstall.new(output: out).send(:stop_foreground_bot)
+      end
+
+      assert_match(/bot pid 999 is alive but could not be signalled \(EPERM\)/, out.string)
+    end
+  end
+
   def test_macos_launch_agent_noops_when_plist_missing
     with_xdg_home do
       calls = []

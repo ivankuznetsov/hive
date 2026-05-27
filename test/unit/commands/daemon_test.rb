@@ -21,6 +21,14 @@ class HiveCommandsDaemonTest < Minitest::Test
   FakeInstaller = Struct.new(:target_path, :last_backup_path, :last_restart_invoked,
                              :envelope_platform, :messages, keyword_init: true)
 
+  # install! now returns a ServiceInstaller::Outcome (carrying the kind plus
+  # backup_path/restarted), so the emit_* helpers and install! stubs are
+  # driven with real Outcome objects rather than bare symbols.
+  def fake_outcome(kind, backup_path: nil, restarted: false)
+    require "hive/commands/service_installer/outcome"
+    Hive::Commands::ServiceInstaller::Outcome.new(kind, backup_path: backup_path, restarted: restarted)
+  end
+
   def setup
     @home = Dir.mktmpdir("hive-daemon-command")
   end
@@ -211,6 +219,68 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal true, doc.fetch("running")
     assert_equal 1234, doc.fetch("pid")
     assert_operator doc.fetch("uptime_sec"), :>=, 0
+  end
+
+
+  def test_status_json_merges_service_state_fields
+    command = daemon("status", json: true)
+    write_pid_payload(pid: 1234)
+    File.utime(Time.now - 7, Time.now - 7, command.pid_file)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    # Inject a fake installer so the merged service-state fields are
+    # deterministic and we exercise the merge, not the host's systemd.
+    state = {
+      "platform" => "linux",
+      "unit_path" => "/home/u/.config/systemd/user/hive-daemon.service",
+      "service_installed" => true,
+      "service_enabled" => true
+    }
+    fake = Struct.new(:state) do
+      def service_state = state
+    end.new(state)
+    require "hive/commands/daemon/service_installer"
+    out, _err = with_replaced_singleton_method(
+      Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { fake }
+    ) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal "hive-daemon-status", doc.fetch("schema")
+    assert_equal true, doc.fetch("service_installed")
+    assert_equal true, doc.fetch("service_enabled")
+    assert_equal "/home/u/.config/systemd/user/hive-daemon.service", doc.fetch("unit_path")
+    # Existing fields must survive the merge.
+    assert_equal true, doc.fetch("running")
+    assert_equal 1234, doc.fetch("pid")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-status"))))
+    assert_empty schema.validate(doc).map { |error| error["error"] }
+  end
+
+  def test_status_json_degrades_service_fields_to_null_when_probe_raises
+    command = daemon("status", json: true)
+    write_pid_payload(pid: 1234)
+    File.utime(Time.now - 7, Time.now - 7, command.pid_file)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    fake = Object.new
+    fake.define_singleton_method(:service_state) { raise "probe blew up" }
+    require "hive/commands/daemon/service_installer"
+    out, _err = with_replaced_singleton_method(
+      Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { fake }
+    ) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_nil doc.fetch("service_installed")
+    assert_nil doc.fetch("service_enabled")
+    assert_nil doc.fetch("unit_path")
+    assert_equal true, doc.fetch("running")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-status"))))
+    assert_empty schema.validate(doc).map { |error| error["error"] },
+                 "null service fields must still validate against the required-but-nullable schema"
   end
 
 
@@ -407,10 +477,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     )
 
     out, _err = capture_io do
-      command.send(:emit_install_success_summary, installer, :written)
-      command.send(:emit_install_success_summary, installer, :upgraded)
-      command.send(:emit_install_success_summary, installer, :unchanged)
-      command.send(:emit_install_success_summary, installer, :unsupported)
+      command.send(:emit_install_success_summary, installer, fake_outcome(:written))
+      command.send(:emit_install_success_summary, installer,
+                   fake_outcome(:upgraded, backup_path: "/tmp/hive-daemon.service.bak", restarted: true))
+      command.send(:emit_install_success_summary, installer, fake_outcome(:unchanged))
+      command.send(:emit_install_success_summary, installer, fake_outcome(:unsupported))
     end
 
     assert_includes out, "installed unit"
@@ -431,7 +502,7 @@ class HiveCommandsDaemonTest < Minitest::Test
 
     out, _err = capture_io do
       assert_raises(Hive::DaemonInstallDriftError) do
-        command.send(:emit_install_outcome, installer, :drifted)
+        command.send(:emit_install_outcome, installer, fake_outcome(:drifted))
       end
     end
 
@@ -453,7 +524,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       envelope_platform: "linux-systemd-user",
       messages: [ "installed by fake" ]
     )
-    installer.define_singleton_method(:install!) { |autostart:, force:| :written }
+    installer.define_singleton_method(:install!) { |autostart:, force:| Hive::Commands::ServiceInstaller::Outcome.new(:written) }
 
     with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { installer }) do
       out, err = capture_io { command.call }
@@ -480,7 +551,7 @@ class HiveCommandsDaemonTest < Minitest::Test
         envelope_platform: "linux-systemd-user",
         messages: []
       )
-      installer.define_singleton_method(:install!) { |autostart:, force:| :written }
+      installer.define_singleton_method(:install!) { |autostart:, force:| Hive::Commands::ServiceInstaller::Outcome.new(:written) }
 
       previous_program = $PROGRAM_NAME
       with_env("HIVE_INVOKED_BIN" => wrapper) do
@@ -583,11 +654,10 @@ class HiveCommandsDaemonTest < Minitest::Test
       upgraded: "upgraded",
       unchanged: "unchanged",
       unsupported: "unsupported",
-      autostart_unavailable: "unsupported",
-      ok: "written"
+      autostart_unavailable: "unsupported"
     }
     expectations.each do |result, outcome|
-      out, _err = capture_io { command.send(:emit_install_outcome, installer, result) }
+      out, _err = capture_io { command.send(:emit_install_outcome, installer, fake_outcome(result)) }
       doc = JSON.parse(out)
       assert_equal outcome, doc.fetch("outcome")
       assert_equal true, doc.fetch("ok"), "#{result} must be a success envelope"
@@ -604,7 +674,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       messages: [ "systemd not detected; daemon unit was written but autostart was not enabled." ]
     )
 
-    out, _err = capture_io { command.send(:emit_install_outcome, installer, :autostart_unavailable) }
+    out, _err = capture_io { command.send(:emit_install_outcome, installer, fake_outcome(:autostart_unavailable)) }
     doc = JSON.parse(out)
     assert_equal "unsupported", doc.fetch("outcome")
     assert_equal true, doc.fetch("ok")
@@ -622,7 +692,7 @@ class HiveCommandsDaemonTest < Minitest::Test
       messages: []
     )
 
-    out, _err = capture_io { command.send(:emit_install_success_summary, installer, :autostart_unavailable) }
+    out, _err = capture_io { command.send(:emit_install_success_summary, installer, fake_outcome(:autostart_unavailable)) }
     assert_includes out,
                     "hive daemon: unit written at /home/u/.config/systemd/user/hive-daemon.service; " \
                     "autostart not enabled on this host"
@@ -640,7 +710,7 @@ class HiveCommandsDaemonTest < Minitest::Test
 
     out, _err = capture_io do
       assert_raises(Hive::DaemonInstallFailed) do
-        command.send(:emit_install_outcome, installer, :failed)
+        command.send(:emit_install_outcome, installer, fake_outcome(:failed))
       end
     end
 

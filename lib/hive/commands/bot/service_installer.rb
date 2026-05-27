@@ -4,56 +4,57 @@ require "hive/commands/service_installer/base"
 
 module Hive
   module Commands
-    class Daemon
+    class Bot
+      # Per-user autostart installer for the Telegram bot. Inherits the
+      # platform-agnostic mechanics (drift/backup, atomic write, shim-PATH
+      # detection, enable/load orchestration) from the shared base and
+      # supplies only the bot's identity and rendered unit/plist bodies.
+      #
+      # Differs from the daemon installer in three ways that matter for the
+      # templates: the bot loads its token from ~/.config/hive/.env itself
+      # via Hive::EnvFile.load! (so no inline HIVE_TELEGRAM_BOT_TOKEN and no
+      # HIVE_BIN line), and it has no in-flight child drain (so no
+      # TimeoutStopSec=900 / KillMode=mixed and no upgrade-restart warning).
       class ServiceInstaller < Hive::Commands::ServiceInstaller::Base
         def service_name
-          "hive-daemon"
+          "hive-bot"
         end
 
         def cli_label
-          "daemon"
+          "bot"
         end
 
         def service_noun
-          "daemon service"
+          "bot service"
         end
 
         def unit_noun
-          "daemon unit"
+          "bot unit"
         end
 
         def target_path
           case platform
-          when :macos then File.join(@home, "Library/LaunchAgents/local.hive-daemon.plist")
-          when :linux then File.join(@home, ".config/systemd/user/hive-daemon.service")
+          when :macos then File.join(@home, "Library/LaunchAgents/local.hive-bot.plist")
+          when :linux then File.join(@home, ".config/systemd/user/hive-bot.service")
           end
-        end
-
-        # Surfaced before the blocking force-upgrade restart so operators
-        # know it can hang while in-flight children drain under the unit's
-        # TimeoutStopSec=900.
-        def upgrade_restart_warning
-          "restarting hive-daemon; if the running daemon is mid-tick with " \
-            "active children, this can block up to TimeoutStopSec (900s by " \
-            "default) before returning"
         end
 
         private
 
         def render_systemd
-          template = File.read(File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__))
+          template = File.read(File.expand_path("../../../../examples/systemd/hive-bot.service", __dir__))
           # systemd .service files are POSIX-shell-ish — escape the
           # resolved binary path so whitespace, `%`, or other special
-          # characters don't produce a malformed unit.
+          # characters don't produce a malformed unit. No HIVE_BIN line to
+          # rewrite (only the daemon's status_consumer needs that).
           escaped = Shellwords.escape(resolved_binary)
           template
-            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} daemon start")
-            .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
+            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} bot start --foreground")
             .sub(/^Environment=PATH=.*$/, build_path_line)
         end
 
         def render_launchd
-          template = File.read(File.expand_path("../../../../examples/launchd/hive-daemon.plist", __dir__))
+          template = File.read(File.expand_path("../../../../examples/launchd/hive-bot.plist", __dir__))
           binary = resolved_binary
           # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get
           # the correct directory segmentation; then escape both for

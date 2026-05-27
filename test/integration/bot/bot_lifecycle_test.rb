@@ -33,6 +33,11 @@ class HiveBotLifecycleTest < Minitest::Test
       assert_equal "hive-bot-status", doc["schema"]
       assert_equal false, doc["running"]
       assert_equal File.join(home, ".bot.pid"), doc["pid_file"]
+      # Non-mutating autostart-state probe must ride along in the envelope
+      # so agents can query install state without `bot install`.
+      assert doc.key?("service_installed"), "status --json must carry service_installed"
+      assert doc.key?("service_enabled"), "status --json must carry service_enabled"
+      assert doc.key?("unit_path"), "status --json must carry unit_path"
 
       schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
       assert_empty schema.validate(doc).map { |error| error["error"] }

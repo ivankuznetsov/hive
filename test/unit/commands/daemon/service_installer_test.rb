@@ -62,7 +62,7 @@ class DaemonServiceInstallerTest < Minitest::Test
         )
 
         out, _err = capture_io do
-          assert_equal :written, installer.install!(autostart: true)
+          assert_equal :written, installer.install!(autostart: true).kind
         end
 
         assert_equal "", out
@@ -82,7 +82,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :autostart_unavailable, result,
+      assert_equal :autostart_unavailable, result.kind,
                    "no systemd-user is a known-platform limitation, not a failure"
       assert File.exist?(File.join(dir, ".config/systemd/user/hive-daemon.service")),
              "unit must still be written so the operator can enable autostart later"
@@ -102,7 +102,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :failed, result
+      assert_equal :failed, result.kind
       assert installer.messages.any? { |msg| msg.include?("systemctl --user enable failed") }
     end
   end
@@ -135,7 +135,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :failed, result
+      assert_equal :failed, result.kind
       assert installer.messages.any? { |msg| msg.include?("launchctl load failed") }
     end
   end
@@ -180,7 +180,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :unsupported, result
+      assert_equal :unsupported, result.kind
       assert installer.messages.any? { |msg| msg.include?("daemon autostart not supported") },
              "freebsd install should surface a friendly skip message, got: #{installer.messages.inspect}"
     end
@@ -199,7 +199,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: false)
-      assert_equal :drifted, result
+      assert_equal :drifted, result.kind
       assert_equal "custom\n", File.read(unit)
       assert installer.messages.any? { |msg| msg.include?("leaving user-customized") }
     end
@@ -220,7 +220,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :drifted, result
+      assert_equal :drifted, result.kind
       assert_empty commands
       assert installer.messages.any? { |msg| msg.include?("hive daemon install --force") },
              "drift message should point users at the --force upgrade flow, got: #{installer.messages.inspect}"
@@ -389,7 +389,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: false, force: true)
-      assert_equal :upgraded, result
+      assert_equal :upgraded, result.kind
       backups = Dir["#{unit}.bak-*"]
       assert_equal 1, backups.size,
                    "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed and a second --force doesn't clobber the original backup"
@@ -440,11 +440,17 @@ class DaemonServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true, force: true)
-      assert_equal :upgraded, result
+      assert_equal :upgraded, result.kind
       assert_includes commands, %w[systemctl --user daemon-reload]
       assert_includes commands, %w[systemctl --user restart hive-daemon],
                       "force upgrade should restart the running unit so new Environment= lines take effect; enable --now would no-op an already-enabled unit"
       refute_includes commands, %w[systemctl --user enable --now hive-daemon]
+      # The daemon's upgrade_restart_warning hook (moved from inline to a
+      # subclass override during the ServiceInstaller::Base extraction) must
+      # still surface the TimeoutStopSec block warning before the blocking
+      # restart. Pins the one moved behavior the byte-identical net misses.
+      assert installer.messages.any? { |msg| msg.include?("TimeoutStopSec") && msg.include?("900s") },
+             "force-upgrade restart must warn about the up-to-900s block, got: #{installer.messages.inspect}"
     end
   end
 
@@ -495,9 +501,9 @@ class DaemonServiceInstallerTest < Minitest::Test
 
       result = installer.install!(autostart: true, force: true)
 
-      assert_equal :upgraded, result
+      assert_equal :upgraded, result.kind
       assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ], commands
-      assert installer.last_restart_invoked
+      assert result.restarted
       assert installer.messages.any? { |msg| msg.include?("launchctl unload returned non-zero") }
     end
   end

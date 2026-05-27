@@ -35,7 +35,7 @@ Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed wit
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | `brew install ivankuznetsov/hive/hive` |
-| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.3/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.1.4/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | _Coming soon_ (`yay -S hive-bin`) — use the Linux installer above until the AUR package is published. |
 
 Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, authenticated `gh`, and `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `gem`, checksum tool) on first run.

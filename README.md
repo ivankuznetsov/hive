@@ -25,6 +25,9 @@ Full-quality MP4 (~4&nbsp;MB): [docs/assets/hive-demo.mp4](docs/assets/hive-demo
 
 The result Hive built in that reel lives at [ivankuznetsov/shipped](https://github.com/ivankuznetsov/shipped) — a real public repo seeded with a one-sentence idea ("a Telegram bot that sends a daily digest of what was shipped"), driven through brainstorm → plan → execute → multi-agent review → finalize, and landed as [PR #1](https://github.com/ivankuznetsov/shipped/pull/1).
 
+> [!IMPORTANT]
+> **Hive is a token-heavy workflow.** You can customize it, but by default it runs a lot of subagents and several different coding agents, and it burns through a LOT of tokens. I strongly recommend a **Claude Max** subscription plus **ChatGPT Pro** for Codex to run it properly — the best results come from the top-tier subscriptions. If you're really tight on budget, you might try the **Pi** agent with the latest **Kimi** model for some parts of the workflow, though the Pi integration is not yet properly tested or performance-evaluated.
+
 ## Install
 
 Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed with cosign keyless attestation. Each available channel below downloads the same `.gem`, verifies the signature, and runs `gem install` against it. The `install.sh` channel then runs `hive daemon install` automatically; the Homebrew (and, once published, AUR) package prints a one-line reminder to run it once, and `hive init .` also ensures it. Either way the per-user systemd-user (Linux) or launchd (macOS) daemon service ends up enabled by default, and `hive init .` only decides whether that project is enrolled for daemon dispatch.

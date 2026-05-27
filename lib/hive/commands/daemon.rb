@@ -307,6 +307,8 @@ module Hive
         end
 
         if @json
+          require "hive/commands/daemon/service_installer"
+          service_state = Hive::Commands::Daemon::ServiceInstaller.new.service_state
           puts JSON.generate(
             "schema" => "hive-daemon-status",
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
@@ -315,7 +317,10 @@ module Hive
             "pid" => running ? pid : nil,
             "uptime_sec" => uptime_sec,
             "pid_file" => pid_file,
-            "log_file" => log_file
+            "log_file" => log_file,
+            "service_installed" => service_state["service_installed"],
+            "service_enabled" => service_state["service_enabled"],
+            "unit_path" => service_state["unit_path"]
           )
         elsif running
           puts "hive daemon: running (pid #{pid}, uptime #{uptime_sec}s)"

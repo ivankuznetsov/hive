@@ -179,6 +179,40 @@ class HiveCommandsBotTest < Minitest::Test
     assert_includes out, "hive bot: running (pid 1234, uptime s)"
   end
 
+  def test_status_json_merges_service_state_fields
+    command = configured_bot("status", json: true)
+    command.define_singleton_method(:live_pid) { nil }
+    # Inject a fake installer so the merged service-state fields are
+    # deterministic and we exercise the merge, not the host's systemd.
+    state = {
+      "platform" => "linux",
+      "unit_path" => "/home/u/.config/systemd/user/hive-bot.service",
+      "service_installed" => true,
+      "service_enabled" => false
+    }
+    fake = Struct.new(:state) do
+      def service_state = state
+    end.new(state)
+    require "hive/commands/bot/service_installer"
+    out, _err = with_replaced_singleton_method(
+      Hive::Commands::Bot::ServiceInstaller, :new, ->(**_kwargs) { fake }
+    ) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal "hive-bot-status", doc.fetch("schema")
+    assert_equal true, doc.fetch("service_installed")
+    assert_equal false, doc.fetch("service_enabled")
+    assert_equal "/home/u/.config/systemd/user/hive-bot.service", doc.fetch("unit_path")
+    # Existing fields must survive the merge.
+    assert_equal false, doc.fetch("running")
+    assert doc.key?("pid_file")
+    assert doc.key?("log_file")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    assert_empty schema.validate(doc).map { |error| error["error"] }
+  end
+
   def test_tail_missing_log_warns_and_raises
     command = configured_bot("tail")
 

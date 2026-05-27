@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T09:50:00Z] bot/daemon — service-state in status --json + uninstall teardown doc
+
+**Action:** Review follow-up on the autostart PR. Added a non-mutating `service_state` probe to `ServiceInstaller::Base` (read-only `systemctl --user is-enabled` / `launchctl list`) and surfaced `service_installed` / `service_enabled` / `unit_path` in BOTH `hive bot status --json` and `hive daemon status --json` (additive to the v1 envelopes), closing the agent-native gap where an agent could install/uninstall the autostart unit but not query its state without a mutating call. Documented the new fields in [[commands/bot]] and [[commands/daemon]], and filled the [[commands/uninstall]] gap (it documented the daemon-service teardown but never the bot-service teardown added in this PR). Also made the `hive bot install` `--help` long_desc spell out the `outcome`-branching agent idiom (parse the envelope's `outcome`, re-run with `--force` on `drifted`).
+
+**Refreshed pages:**
+- [[commands/bot]], [[commands/daemon]], [[commands/uninstall]]
+
 ## [2026-05-27T01:30:00Z] bot — autostart service (`hive bot install`)
 
 **Action:** Added `hive bot install [--force] [--json]`, a per-user autostart service for the Telegram bot (systemd-user unit on Linux, launchd plist on macOS) that survives reboot/login and starts the bot immediately — one command, no separate `hive bot start`. Implemented by extracting `Hive::Commands::ServiceInstaller::Base` from the daemon installer (daemon behavior byte-identical) and a `Bot::ServiceInstaller` subclass; the unit runs `hive bot start --foreground` with no inline token (the bot loads `~/.config/hive/.env`) and no `TimeoutStopSec=900`. Opt-in only — not wired into `install.sh`/`hive init`. `hive uninstall` tears the unit down. New `hive-bot-install.v1` schema; exit codes mirror the daemon (0 / 64 drift / 70 service-manager failure). Documented the new subcommand, an Autostart section, and exit codes in [[commands/bot]]; updated `docs/cli.md`.

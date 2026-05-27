@@ -43,6 +43,18 @@
         "log_file": {
           "type": "string",
           "description": "Absolute path of the bot JSON-line log file."
+        },
+        "service_installed": {
+          "type": "boolean",
+          "description": "Whether the per-user autostart unit file exists on disk (non-mutating probe)."
+        },
+        "service_enabled": {
+          "type": "boolean",
+          "description": "Whether the service manager reports the autostart unit as enabled/loaded (non-mutating probe)."
+        },
+        "unit_path": {
+          "type": ["string", "null"],
+          "description": "Absolute path of the autostart unit file, or null on unsupported platforms."
         }
       }
     }

@@ -716,7 +716,12 @@ module Hive
                                           overwritten) and restarts the
                                           running bot. Autostart is opt-in:
                                           `hive install` never touches it.
-                                          --json emits hive-bot-install.v1.
+                                          --json emits hive-bot-install.v1;
+                                          branch on its `outcome`
+                                          (written/upgraded/unchanged/
+                                          unsupported/drifted/failed) rather
+                                          than parsing prose — on `drifted`,
+                                          re-run with --force.
 
       The bot reads the global `bot:` block from ~/.config/hive/config.yml.
       Its Telegram token comes only from HIVE_TELEGRAM_BOT_TOKEN. Incoming

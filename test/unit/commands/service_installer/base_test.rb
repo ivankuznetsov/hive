@@ -210,6 +210,91 @@ class ServiceInstallerBaseTest < Minitest::Test
     end
   end
 
+  # ── service_state (non-mutating status probe) ──────────────────────
+
+  def test_service_state_linux_installed_and_enabled
+    with_tmp_dir do |dir|
+      # is-enabled invoked → return true (enabled). Capture the argv so
+      # we can assert it is the read-only `is-enabled` query, never a
+      # mutating enable/start.
+      seen = []
+      runner = ->(argv) { seen << argv; true }
+      installer = TestInstaller.new(host_os: "linux", home: dir,
+                                    systemctl_available: true, runner: runner)
+      FileUtils.mkdir_p(File.dirname(installer.target_path))
+      File.write(installer.target_path, "unit\n")
+
+      state = installer.service_state
+
+      assert_equal "linux", state["platform"]
+      assert_equal installer.target_path, state["unit_path"]
+      assert state["service_installed"], "unit file exists on disk → installed=true"
+      assert state["service_enabled"], "is-enabled exit 0 → enabled=true"
+      assert_equal [ %w[systemctl --user is-enabled hive-test] ], seen,
+                   "service_enabled? must use the read-only is-enabled query only"
+    end
+  end
+
+  def test_service_state_linux_not_installed_and_disabled
+    with_tmp_dir do |dir|
+      runner = ->(_argv) { false }
+      installer = TestInstaller.new(host_os: "linux", home: dir,
+                                    systemctl_available: true, runner: runner)
+
+      state = installer.service_state
+
+      refute state["service_installed"], "no unit file on disk → installed=false"
+      refute state["service_enabled"], "is-enabled non-zero → enabled=false"
+    end
+  end
+
+  def test_service_state_linux_disabled_when_systemctl_unavailable
+    with_tmp_dir do |dir|
+      # systemctl missing → enabled must be false and the runner must
+      # never be called (no probe to a non-existent service manager).
+      called = false
+      runner = ->(_argv) { called = true }
+      installer = TestInstaller.new(host_os: "linux", home: dir,
+                                    systemctl_available: false, runner: runner)
+
+      state = installer.service_state
+
+      refute state["service_enabled"]
+      refute called, "must not probe systemctl when it is unavailable"
+    end
+  end
+
+  def test_service_state_macos_uses_launchctl_list
+    with_tmp_dir do |dir|
+      seen = []
+      runner = ->(argv) { seen << argv; true }
+      installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner)
+
+      state = installer.service_state
+
+      assert_equal "macos", state["platform"]
+      assert state["service_enabled"], "launchctl list exit 0 → loaded → enabled=true"
+      assert_equal [ %w[launchctl list local.hive-test] ], seen,
+                   "macOS probe must be the read-only launchctl list query"
+    end
+  end
+
+  def test_service_state_unsupported_platform
+    installer = TestInstaller.new(host_os: "sunos", runner: ->(_argv) { true })
+
+    state = installer.service_state
+
+    assert_equal "unsupported", state["platform"]
+    assert_nil state["unit_path"]
+    refute state["service_installed"]
+    refute state["service_enabled"]
+  end
+
+  def test_launchd_label_matches_service_name
+    installer = TestInstaller.new(host_os: "darwin")
+    assert_equal "local.hive-test", installer.launchd_label
+  end
+
   # ── abstract subclass hooks ────────────────────────────────────────
   # A bare subclass that overrides NOTHING must raise NotImplementedError
   # for every identity/render hook, so a half-built subclass fails loudly

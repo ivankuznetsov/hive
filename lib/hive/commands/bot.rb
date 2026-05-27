@@ -137,6 +137,8 @@ module Hive
               end
             end
           end
+        require "hive/commands/bot/service_installer"
+        service_state = Hive::Commands::Bot::ServiceInstaller.new.service_state
         payload = {
           "schema" => "hive-bot-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"),
@@ -145,7 +147,10 @@ module Hive
           "pid" => pid,
           "uptime_sec" => uptime,
           "pid_file" => pid_file,
-          "log_file" => log_file
+          "log_file" => log_file,
+          "service_installed" => service_state["service_installed"],
+          "service_enabled" => service_state["service_enabled"],
+          "unit_path" => service_state["unit_path"]
         }
         if @json
           puts_json(payload)

@@ -1222,6 +1222,11 @@ class HiveDaemonCommandTest < Minitest::Test
       errors = schema.validate(doc).map { |e| e["error"] }
       assert_empty errors,
                    "real CLI subprocess stdout must validate against hive-daemon-status.v1; got: #{errors.inspect}"
+      # Non-mutating autostart-state probe must ride along in the envelope
+      # so agents can query install state without `daemon install`.
+      assert doc.key?("service_installed"), "status --json must carry service_installed"
+      assert doc.key?("service_enabled"), "status --json must carry service_enabled"
+      assert doc.key?("unit_path"), "status --json must carry unit_path"
     end
   end
 

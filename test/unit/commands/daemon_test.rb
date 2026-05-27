@@ -214,6 +214,43 @@ class HiveCommandsDaemonTest < Minitest::Test
   end
 
 
+  def test_status_json_merges_service_state_fields
+    command = daemon("status", json: true)
+    write_pid_payload(pid: 1234)
+    File.utime(Time.now - 7, Time.now - 7, command.pid_file)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    # Inject a fake installer so the merged service-state fields are
+    # deterministic and we exercise the merge, not the host's systemd.
+    state = {
+      "platform" => "linux",
+      "unit_path" => "/home/u/.config/systemd/user/hive-daemon.service",
+      "service_installed" => true,
+      "service_enabled" => true
+    }
+    fake = Struct.new(:state) do
+      def service_state = state
+    end.new(state)
+    require "hive/commands/daemon/service_installer"
+    out, _err = with_replaced_singleton_method(
+      Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kwargs) { fake }
+    ) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_equal "hive-daemon-status", doc.fetch("schema")
+    assert_equal true, doc.fetch("service_installed")
+    assert_equal true, doc.fetch("service_enabled")
+    assert_equal "/home/u/.config/systemd/user/hive-daemon.service", doc.fetch("unit_path")
+    # Existing fields must survive the merge.
+    assert_equal true, doc.fetch("running")
+    assert_equal 1234, doc.fetch("pid")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-status"))))
+    assert_empty schema.validate(doc).map { |error| error["error"] }
+  end
+
+
   def test_status_text_reports_running_daemon
     command = daemon("status")
     write_pid_payload(pid: 2468)

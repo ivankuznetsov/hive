@@ -62,6 +62,27 @@ module Hive
           end
         end
 
+        # Non-mutating snapshot of autostart state for status envelopes.
+        # Reports whether the unit file exists on disk and whether the
+        # service manager has it enabled/loaded — WITHOUT writing,
+        # enabling, or loading anything. Used by `hive bot status` /
+        # `hive daemon status` so agents can query install state without
+        # the side effects of `install!`.
+        def service_state
+          {
+            "platform" => envelope_platform,
+            "unit_path" => target_path,
+            "service_installed" => !target_path.nil? && File.exist?(target_path),
+            "service_enabled" => service_enabled?
+          }
+        end
+
+        # launchd plist Label for this service. Matches the `<key>Label</key>`
+        # value in the bundled plists (local.hive-daemon / local.hive-bot).
+        def launchd_label
+          "local.#{service_name}"
+        end
+
         # ── Subclass hooks ─────────────────────────────────────────────
         # Subclasses MUST override these. The base raises so a missing
         # override fails loudly rather than rendering a half-built unit.
@@ -345,6 +366,25 @@ module Hive
           system("systemctl", "--user", "--version", out: File::NULL, err: File::NULL)
         rescue Errno::ENOENT
           false
+        end
+
+        # Non-mutating "is autostart enabled?" probe. Each platform uses a
+        # read-only service-manager query that exits 0 when the service is
+        # enabled/loaded; nothing is written, enabled, or loaded here.
+        def service_enabled?
+          case platform
+          when :linux
+            return false unless systemctl_available?
+
+            # `is-enabled` exits 0 only when the unit is enabled — purely
+            # a query, no state change.
+            @runner.call([ "systemctl", "--user", "is-enabled", service_name ])
+          when :macos
+            # `launchctl list <label>` exits 0 only when the job is loaded.
+            @runner.call([ "launchctl", "list", launchd_label ])
+          else
+            false
+          end
         end
       end
     end

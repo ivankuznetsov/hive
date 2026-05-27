@@ -175,6 +175,22 @@ class PruneCommandTest < Minitest::Test
     end
   end
 
+  def test_prune_lock_sidecar_directory_emits_config_error
+    with_tmp_global_config do |home|
+      FileUtils.mkdir_p(File.join(home, "config.yml.lock"))
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Prune.new(json: true).call
+      end
+      assert_equal Hive::ExitCodes::CONFIG, status
+
+      payload = JSON.parse(out)
+      assert_equal "config", payload["error_kind"]
+      assert_equal "ConfigError", payload["error_class"]
+      assert_match(/could not be locked/, payload["message"])
+    end
+  end
+
   # NEW-1: typoed $HIVE_HOME must surface as CONFIG, not silently no-op.
   def test_prune_with_typoed_hive_home_emits_config_error
     bad = "/tmp/hive-typo-#{Process.pid}-#{rand(1_000_000)}"

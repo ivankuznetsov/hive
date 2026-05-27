@@ -1,5 +1,6 @@
 require "yaml"
 require "fileutils"
+require "securerandom"
 require "hive/agent_profiles"
 require "hive/paths"
 
@@ -513,7 +514,7 @@ module Hive
     # same `error_kind: "config"` envelope the TUI's narrow rescue catches.
     #
     # EACCES specifically is the most user-facing of the IO group:
-    # `chmod 000 ~/Dev/hive/config.yml` (or running as a different
+    # `chmod 000` on the global config file (or running as a different
     # user) used to surface as `internal error: Errno::EACCES: ...`
     # at exit 70. The root cause is configuration access, not a Hive
     # bug — exit 78 is the right shape.
@@ -525,15 +526,95 @@ module Hive
       raise ConfigError, "global config at #{path} is not readable: #{e.message}"
     end
 
-    # Atomic + EACCES-aware writer for ~/Dev/hive/config.yml. Mirrors
-    # the shape of `Hive::Markers.write_atomic` so a future flock
-    # upgrade (Issue #31) can swap in here without rewriting every
-    # call site. Permission errors on write surface as ConfigError
-    # (exit 78), matching the read-side classification.
+    GLOBAL_CONFIG_WRITE_ERRORS = [
+      Errno::EACCES, Errno::EPERM, Errno::EROFS, Errno::ENOSPC, Errno::EXDEV,
+      Errno::EDQUOT, Errno::ENOMEM, Errno::EIO, Errno::ENOENT, Errno::EISDIR,
+      Errno::ENOTDIR, Errno::EEXIST, Errno::ELOOP, Errno::ENAMETOOLONG
+    ].freeze
+
+    # Locked read-modify-write helper for the XDG global config.yml. The
+    # sibling lock file serializes writers across File.rename, unlike
+    # locking config.yml itself whose inode changes on every atomic
+    # replace.
+    def update_global_config!
+      Hive::Paths.ensure_migrated!
+      FileUtils.mkdir_p(hive_home)
+      with_global_config_lock do
+        path = global_config_path
+        data = File.exist?(path) ? load_global_config(path) : {}
+        raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+        result = yield data
+        write_global_config_atomic!(data)
+        result
+      end
+    end
+
+    # Atomic + filesystem-error-aware writer for the XDG global config.yml.
+    # Direct callers get the same lock discipline as read-modify-write helpers;
+    # methods that already hold the lock call write_global_config_atomic!
+    # directly to keep the whole mutation in one critical section.
     def write_global_config!(data)
-      File.write(global_config_path, data.to_yaml)
-    rescue Errno::EACCES, Errno::EROFS, Errno::ENOSPC => e
-      raise ConfigError, "global config at #{global_config_path} could not be written: #{e.message}"
+      Hive::Paths.ensure_migrated!
+      FileUtils.mkdir_p(hive_home)
+      with_global_config_lock { write_global_config_atomic!(data) }
+    end
+
+    def with_global_config_lock
+      lock_path = "#{global_config_path}.lock"
+      lock = begin
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600)
+      rescue *GLOBAL_CONFIG_WRITE_ERRORS => e
+        raise ConfigError, "global config at #{global_config_path} could not be locked: #{e.message}"
+      end
+
+      begin
+        lock.flock(File::LOCK_EX)
+      rescue *GLOBAL_CONFIG_WRITE_ERRORS => e
+        lock.close
+        raise ConfigError, "global config at #{global_config_path} could not be locked: #{e.message}"
+      end
+
+      begin
+        yield
+      ensure
+        lock.close
+      end
+    end
+
+    def write_global_config_atomic!(data)
+      path = global_config_path
+      dir = File.dirname(path)
+      mode = File.exist?(path) ? File.stat(path).mode & 0o7777 : 0o644
+      tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}.#{::SecureRandom.hex(4)}")
+      renamed = false
+
+      File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, mode, encoding: "UTF-8") do |f|
+        f.chmod(mode)
+        f.write(data.to_yaml)
+        f.flush
+        f.fsync
+      end
+      File.rename(tmp, path)
+      renamed = true
+      fsync_parent_dir(dir)
+      data
+    rescue *GLOBAL_CONFIG_WRITE_ERRORS => e
+      raise ConfigError, "global config at #{path} could not be written: #{e.message}"
+    ensure
+      if !renamed && tmp && File.exist?(tmp)
+        begin
+          File.delete(tmp)
+        rescue StandardError
+          # Best-effort cleanup must not mask the original write error.
+        end
+      end
+    end
+
+    def fsync_parent_dir(dir)
+      File.open(dir, File::RDONLY) { |f| f.fsync }
+    rescue Errno::EINVAL, NotImplementedError
+      # Filesystem does not support fsync on directories.
     end
 
     def find_project(name)
@@ -541,7 +622,7 @@ module Hive
     end
 
     # Load and validate the global `daemon` block from
-    # `~/Dev/hive/config.yml`. Returns the merged Hash (operator
+    # the global config.yml under `Hive::Paths.config_home`. Returns the merged Hash (operator
     # overrides on top of `Config::DEFAULTS["daemon"]`). Used by
     # `hive daemon start` / `reload` so operator knobs in the global
     # config (max_concurrent_runs, poll_interval_sec, log_*, etc.)
@@ -610,26 +691,21 @@ module Hive
     end
 
     def register_project(name:, path:)
-      Hive::Paths.ensure_migrated!
-      FileUtils.mkdir_p(hive_home)
-      data = if File.exist?(global_config_path)
-               load_global_config(global_config_path)
-      else
-               {}
+      entry = nil
+      update_global_config! do |data|
+        data["registered_projects"] = Array(data["registered_projects"])
+        abs_path = File.expand_path(path)
+        hive_state_path = File.join(abs_path, ".hive-state")
+        entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
+        real_path = realpath_or_nil(abs_path)
+        entry["real_path"] = real_path if real_path
+        existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
+        if existing
+          existing.replace(entry)
+        else
+          data["registered_projects"] << entry
+        end
       end
-      data["registered_projects"] ||= []
-      abs_path = File.expand_path(path)
-      hive_state_path = File.join(abs_path, ".hive-state")
-      entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
-      real_path = realpath_or_nil(abs_path)
-      entry["real_path"] = real_path if real_path
-      existing = data["registered_projects"].find { |p| p["name"] == name }
-      if existing
-        existing.replace(entry)
-      else
-        data["registered_projects"] << entry
-      end
-      write_global_config!(data)
       entry
     end
 
@@ -655,23 +731,28 @@ module Hive
       validate_hive_home!
       return nil unless File.exist?(global_config_path)
 
-      data = load_global_config(global_config_path)
-      raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
+      removed = nil
+      with_global_config_lock do
+        if File.exist?(global_config_path)
+          data = load_global_config(global_config_path)
+          raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
-      # Stringify both sides of the name match. CLI passes argv as a
-      # String; hand-edited registry entries can carry an Integer
-      # "name" (e.g. `name: 42` in YAML), which would never match
-      # `Integer == "42"` and silently exit `unknown_project`.
-      key = name.to_s
-      entries = Array(data["registered_projects"])
-      idx = entries.index { |p| p.is_a?(Hash) && p["name"].to_s == key }
-      return nil if idx.nil?
-
-      removed = entries[idx]
-      remaining = entries.dup
-      remaining.delete_at(idx)
-      data["registered_projects"] = remaining
-      write_global_config!(data)
+          # Stringify both sides of the name match. CLI passes argv as a
+          # String; hand-edited registry entries can carry an Integer
+          # "name" (e.g. `name: 42` in YAML), which would never match
+          # `Integer == "42"` and silently exit `unknown_project`.
+          key = name.to_s
+          entries = Array(data["registered_projects"])
+          idx = entries.index { |p| p.is_a?(Hash) && p["name"].to_s == key }
+          if idx
+            removed = entries[idx]
+            remaining = entries.dup
+            remaining.delete_at(idx)
+            data["registered_projects"] = remaining
+            write_global_config_atomic!(data)
+          end
+        end
+      end
       removed
     end
 
@@ -699,17 +780,20 @@ module Hive
       validate_hive_home!
       return { removed: [], kept_count: 0 } unless File.exist?(global_config_path)
 
-      data = load_global_config(global_config_path)
-      raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
+      result = { removed: [], kept_count: 0 }
+      with_global_config_lock do
+        if File.exist?(global_config_path)
+          data = load_global_config(global_config_path)
+          raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
-      entries = Array(data["registered_projects"])
-      removed, kept = entries.partition { |entry| droppable_registry_entry?(entry) }
-      result = { removed: removed, kept_count: kept.size }
-      return result if removed.empty?
-
-      unless dry_run
-        data["registered_projects"] = kept
-        write_global_config!(data)
+          entries = Array(data["registered_projects"])
+          removed, kept = entries.partition { |entry| droppable_registry_entry?(entry) }
+          result = { removed: removed, kept_count: kept.size }
+          if removed.any? && !dry_run
+            data["registered_projects"] = kept
+            write_global_config_atomic!(data)
+          end
+        end
       end
       result
     end

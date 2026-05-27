@@ -139,11 +139,10 @@ module Hive
       end
 
       def record_daemon_autostart!(autostart)
-        path = Hive::Config.global_config_path
-        data = File.exist?(path) ? Hive::Config.load_global_config(path) : {}
-        data["daemon"] = {} unless data["daemon"].is_a?(Hash)
-        data["daemon"]["autostart"] = autostart ? true : false
-        Hive::Config.write_global_config!(data)
+        Hive::Config.update_global_config! do |data|
+          data["daemon"] = {} unless data["daemon"].is_a?(Hash)
+          data["daemon"]["autostart"] = autostart ? true : false
+        end
       end
 
       def current_binary_path

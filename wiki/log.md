@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T07:08:56Z] config - atomic registry review hardening
+
+**Action:** Code-review follow-up for #184: global config atomic rewrites now restore the existing file mode after tempfile creation so a restrictive process umask cannot silently narrow `config.yml`; lock/write path-shape failures such as directory lockfiles, `EISDIR`, `ENOTDIR`, and symlink loops are rewrapped as `Hive::ConfigError`; and mixed register/forget/prune fork tests cover the locked read-modify-write paths. Refreshed config/state docs to name the XDG global config path while preserving the migrated legacy `~/Dev/hive/config.yml` note.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[state-model]]
+
 ## [2026-05-27T06:32:37Z] prune - real_path review hardening
 
 **Action:** Code-review follow-up for #182: malformed private `real_path` metadata is now treated like legacy absence instead of being trusted as a comparison target, so a hand-edited non-string value cannot prune a live project row. Refreshed prune schema/help prose to name realpath-mismatch removals alongside missing paths and invalid rows.
@@ -2256,3 +2264,13 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/config]]
 - [[commands/prune]]
 - [[state-model]]
+
+## [2026-05-26T14:39:00Z] config — lock and atomically rewrite global registry
+
+**Action:** `Hive::Config.update_global_config!` now serializes global config read-modify-write operations on the sibling `config.yml.lock`, and `write_global_config!` writes through tempfile + fsync + atomic rename while preserving mode bits. `register_project`, `unregister_project`, `prune_missing_projects!`, and init daemon-autostart recording use the locked path so concurrent shells cannot lose registry updates or expose torn YAML.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[state-model]]
+- [[dependencies]]
+

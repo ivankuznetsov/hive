@@ -14,6 +14,7 @@ require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/title_formatter"
 require "hive/task"
+require "hive/update_check/state"
 
 module Hive
   module Bot
@@ -32,9 +33,16 @@ module Hive
 
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
-                     conversation_store: nil, dry_run: false)
+                     conversation_store: nil, dry_run: false, update_state: nil)
         @config = config
         @dry_run = dry_run
+        # Shared update-check state (written by the daemon). The bot owns the
+        # once-per-version push; the daemon never touches last_notified_version.
+        @update_state = update_state || Hive::UpdateCheck::State.new
+        # Process-lifetime latch of versions already pushed. Backs up the
+        # persisted dedup: if record_notified! can't write (read-only/full
+        # state dir), this still stops the status loop re-pushing every tick.
+        @nudged_versions = {}
         @logger = logger || Hive::Bot::Logger.new(
           path: config.fetch("log_file"),
           max_bytes: config.fetch("log_max_bytes"),
@@ -219,6 +227,7 @@ module Hive
           begin
             reload_config_if_requested
             status_tick
+            push_update_nudge
           rescue StandardError => e
             @logger.event(:fatal, source: "status_loop", error_class: e.class.name,
                                    message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
@@ -778,6 +787,32 @@ module Hive
 
       def chat_ids
         Array(@config.fetch("chat_id_allowlist"))
+      end
+
+      # Push the daemon-written update nudge to the allowlist exactly once per
+      # newly-seen version. De-duped by BOTH the persisted state (survives a
+      # restart) and an in-memory latch (survives a failed state write). Records
+      # "notified" only after a send succeeds, so an all-failed push retries
+      # next tick. Resilient: any error is logged and never breaks the loop.
+      def push_update_nudge
+        nudge = @update_state.nudge
+        return unless nudge
+        return if @nudged_versions[nudge.latest]
+        return unless @update_state.should_notify?(nudge.latest)
+
+        text = update_nudge_message(nudge)
+        delivered = chat_ids.map { |chat_id| safe_send_message(chat_id: chat_id, text: text) }
+        return unless delivered.any?
+
+        @nudged_versions[nudge.latest] = true
+        @update_state.record_notified!(nudge.latest)
+        @logger.event(:update_nudge_pushed, latest: nudge.latest, channel: nudge.channel)
+      rescue StandardError => e
+        @logger.event(:update_nudge_error, error_class: e.class.name, message: e.message)
+      end
+
+      def update_nudge_message(nudge)
+        "hive #{nudge.latest} is available (current #{Hive::VERSION}).\nUpdate: #{nudge.command}"
       end
 
       def read_last_seen_update_id

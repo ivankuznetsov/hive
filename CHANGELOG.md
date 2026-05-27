@@ -2,6 +2,20 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.1.8
+
+- Fixed a crash in v0.1.7's update flow: the daemon's update-check log events (`update_available`, `update_check_no_result`, `update_check_error`, `update_nudge_no_command`) and the bot's (`update_nudge_pushed`, `update_nudge_error`) were never added to the loggers' closed event enums, so a real daemon raised `ArgumentError` on its first "behind" tick and crashed (and the bot logged a spurious fatal). The events are now registered, with regression tests that exercise the real loggers.
+
+## 0.1.7
+
+- Added a daemon-driven update flow: the daemon checks the latest GitHub release (~daily) and, when you're behind, surfaces a nudge with the exact update command in the TUI footer and as a one-time Telegram bot push (brew/AUR/install.sh are nudge-only — hive never drives your package manager). Opt out via `update.check` / `update.auto` in the global config.
+- `hive daemon status --json` now reports `current_version` and `update_nudge` so agents can detect an available update too.
+
+## 0.1.6
+
+- `install.sh` now manages the qmd wiki indexer; `hive doctor` gained a managed-qmd probe and clearer failure reporting.
+- Fixed `hive tui` footer ordering (hints render before token counters).
+
 ## 0.1.5
 
 - Fixed `yay -S hive-bin`: the AUR `package()` aborted on an invalid `gem install --ignore-dependencies=false` flag — the published package never actually installed. Caught by the new real-install CI matrix.

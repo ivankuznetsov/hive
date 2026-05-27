@@ -45,6 +45,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[dependencies]] — `wiki/dependencies.md`
 - [[e2e]] — `wiki/e2e.md`
 - [[gaps]] — `wiki/gaps.md`
+- [[update-flow]] — `wiki/update-flow.md`
 - [[index]] — `wiki/index.md`
 - [[log]] — `wiki/log.md`
 - [[modules/agent]] — `wiki/modules/agent.md`

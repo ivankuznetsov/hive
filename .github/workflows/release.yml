@@ -99,6 +99,10 @@ jobs:
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      # Job-level so the announce step's `if:` can read it — a step-level
+      # env is not yet in scope for that step's own condition (same reason
+      # HOMEBREW_TAP_TOKEN lives here). Optional: absent secret => skip.
+      DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
     # `aur_enabled` lets the separate `aur-publish` job gate on the
     # presence of the AUR secret. A job-level `if:` CANNOT read
     # `secrets.*` (and job-scoped `env` is not yet in scope there), so we
@@ -137,6 +141,25 @@ jobs:
             --title "$REF_NAME" \
             --notes "Hive $REF_NAME" \
             --verify-tag
+      - name: Announce release on Discord
+        if: ${{ env.DISCORD_RELEASE_WEBHOOK != '' }}
+        # Non-fatal: a Discord webhook hiccup must never abort the release or
+        # block the downstream brew/AUR jobs. The webhook URL stays a secret —
+        # only the message body (built with jq, fed to curl via stdin) is
+        # constructed here, and nothing echoes the URL.
+        continue-on-error: true
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          content="🚀 **hive ${REF_NAME}** is out — \`gem install hive-cli\`"$'\n'"Release notes: https://github.com/${REPO}/releases/tag/${REF_NAME}"
+          jq -nc --arg c "$content" '{content: $c, allowed_mentions: {parse: []}}' \
+            | curl -sSf -X POST -H 'Content-Type: application/json' -d @- "$DISCORD_RELEASE_WEBHOOK" >/dev/null
+          echo "discord: announced ${REF_NAME}"
+      - name: Announce release on Discord (audit when skipped)
+        if: ${{ env.DISCORD_RELEASE_WEBHOOK == '' }}
+        run: |
+          echo "discord: skipped; DISCORD_RELEASE_WEBHOOK is not set"
       - name: Notify Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         # Non-fatal: a tap dispatch hiccup must not abort the release or

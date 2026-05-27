@@ -169,7 +169,12 @@ bot:
   log_max_bytes: 10485760
   log_max_files: 5
   last_seen_state_file: ~/.local/state/hive/.bot.last_seen_update_id
+update:                          # update-check knobs (plan 2026-05-27-002, U4)
+  check: true                    # daemon probes GitHub latest release when idle
+  auto: true                     # self-update when possible; false keeps checks/nudges only
 ```
+
+`update:` is a global block merged over `DEFAULTS["update"]` by `Config.load_global_update` (used by `hive daemon start`). Both keys are booleans validated by `Config.validate_update!` (a non-Hash block or non-boolean key raises `ConfigError`, exit 78). `auto: false` keeps the daily check and brew/AUR nudge but never self-updates. The check's bookkeeping lives in the `update_check.json` runtime file (see below), not in this config.
 
 Managed by `Hive::Config.register_project`; deregistered by `unregister_project` (one row, by name) and `prune_missing_projects!` (every row whose `path` is missing, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid). Registry writers serialize on the sticky sibling `config.yml.lock` and replace `config.yml` via tempfile + `fsync` + atomic rename. `HIVE_HOME` overrides the XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated when no XDG config exists.
 

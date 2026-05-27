@@ -1313,6 +1313,18 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "status exploded", event.fetch(:payload).fetch(:message)
   end
 
+  def test_status_loop_invokes_update_nudge_push
+    supervisor = @supervisor
+    pushed = false
+    @supervisor.define_singleton_method(:status_tick) { supervisor.request_shutdown! }
+    @supervisor.define_singleton_method(:push_update_nudge) { pushed = true }
+    @supervisor.define_singleton_method(:interruptible_sleep) { |_seconds| }
+
+    @supervisor.send(:status_loop)
+
+    assert pushed, "status_loop must invoke push_update_nudge each iteration"
+  end
+
   def test_reaper_loop_logs_reap_failures
     supervisor = @supervisor
     @supervisor.define_singleton_method(:reap_children) do

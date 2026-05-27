@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T18:00:00Z] feat — daemon-driven update flow (check + nudge, U1–U5)
+
+**Action:** Added the update flow (plan 2026-05-27-002): `Hive::UpdateCheck` release probe, `UpdateCheck::State` shared JSON store, `update.check`/`update.auto` config, dispatcher integration (throttled check + per-channel nudge), and the nudge surfaces (TUI footer + once-per-version bot push). Every channel is nudge-only for now; bash auto-update (U7) is deferred.
+
+**New/refreshed pages:**
+- [[update-flow]]
+
 ## [2026-05-27T12:00:00Z] ci — cross-OS install verification (real installs)
 
 **Action:** CI now does real installs of every channel on its native OS via `packaging/verify-channel.sh` + the reusable `.github/workflows/install-verify.yml` (matrix: bash/ubuntu x86+arm, brew/macos-15, aur/arch container). Three layers: a pre-release `install-gate` in `release.yml` (gem-installs on macos+ubuntu-arm before publishing), `post-release-verify` (real brew/yay/install.sh of the published version), and a weekly `install-canary.yml`. Failures open/update a single `install-failure` GitHub issue. This matrix immediately caught and drove fixes for real channel bugs (broken `yay -S hive-bin`, brew `hv` shim, brew marker path) shipped in v0.1.5. aarch64-AUR deferred (official `archlinux` image is x86_64-only). Runbook: `docs/RELEASING.md#install-verification`.

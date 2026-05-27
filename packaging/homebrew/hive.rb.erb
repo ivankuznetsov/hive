@@ -18,21 +18,29 @@ class Hive < Formula
            "--install-dir", libexec,
            "--no-document",
            "--bindir", libexec/"bin"
-    (libexec/"share/hive").mkpath
-    (libexec/"share/hive/install-channel").write "brew\n"
+    # Marker under <prefix>/share (linked into the Homebrew prefix), NOT
+    # libexec/share — libexec is private and never linked, so a marker
+    # there is invisible to Hive::InstallChannel, which probes
+    # <prefix>/share/hive/install-channel.
+    (share/"hive").mkpath
+    (share/"hive/install-channel").write "brew\n"
 
-    # Symlink user-facing bins through libexec wrappers so GEM_PATH
-    # is set when hive resolves bubbletea, lipgloss, etc.
-    %w[hive hv].each do |name|
-      (bin/name).write <<~SH
-        #!/bin/bash
-        export GEM_HOME="#{libexec}"
-        export GEM_PATH="${GEM_HOME}${GEM_PATH:+:$GEM_PATH}"
-        export HIVE_INVOKED_BIN="${HIVE_INVOKED_BIN:-$0}"
-        exec "#{libexec}/bin/#{name}" "$@"
-      SH
-      (bin/name).chmod 0755
-    end
+    # User-facing bin/hive wrapper that exports GEM_HOME/GEM_PATH before
+    # exec'ing the gem-installed hive so it resolves bubbletea, lipgloss, etc.
+    (bin/"hive").write <<~SH
+      #!/bin/bash
+      export GEM_HOME="#{libexec}"
+      export GEM_PATH="${GEM_HOME}${GEM_PATH:+:$GEM_PATH}"
+      export HIVE_INVOKED_BIN="${HIVE_INVOKED_BIN:-$0}"
+      exec "#{libexec}/bin/hive" "$@"
+    SH
+    (bin/"hive").chmod 0755
+
+    # hv is a symlink to the hive wrapper, NOT the gem's bin/hv: bin/hv is
+    # a bash script and `gem install` wraps every executable in a Ruby
+    # binstub that cannot run it. The symlink gives a working Apache-Hive
+    # collision shim that runs our hive.
+    bin.install_symlink "hive" => "hv"
   end
 
   def caveats

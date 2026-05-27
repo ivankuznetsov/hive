@@ -10,6 +10,12 @@ module Hive
     # active nudge payload the TUI footer renders. JSON on disk, atomic write,
     # fail-closed load (a corrupt file degrades to empty rather than raising).
     # Mirrors Hive::Bot::AlertStore's persistence discipline.
+    #
+    # This file is shared across processes: the daemon writes `nudge` +
+    # `last_check_at`, the bot writes `last_notified_version`, and the TUI
+    # reads `nudge`. To avoid one process clobbering another's keys with a
+    # stale in-memory copy, every operation re-reads the file from disk first
+    # — the daily cadence makes the extra read negligible.
     class State
       SCHEMA_VERSION = 1
       DEFAULT_WINDOW_SEC = 86_400 # ~daily
@@ -33,6 +39,7 @@ module Hive
       # when never checked (e.g. on daemon start).
       def due?(now, window: DEFAULT_WINDOW_SEC)
         synchronize do
+          load!
           last = parse_time(@data["last_check_at"])
           last.nil? || (now - last) >= window
         end
@@ -40,6 +47,7 @@ module Hive
 
       def record_check!(now)
         synchronize do
+          load!
           @data["last_check_at"] = timestamp(now)
           persist_locked!
         end
@@ -48,11 +56,15 @@ module Hive
       # Have we already notified about this version? De-dupes the bot push so
       # it fires once per newly-seen release, not once per tick.
       def should_notify?(version)
-        synchronize { @data["last_notified_version"].to_s != version.to_s }
+        synchronize do
+          load!
+          @data["last_notified_version"].to_s != version.to_s
+        end
       end
 
       def record_notified!(version)
         synchronize do
+          load!
           @data["last_notified_version"] = version.to_s
           persist_locked!
         end
@@ -60,6 +72,7 @@ module Hive
 
       def set_nudge(latest:, channel:, command:)
         synchronize do
+          load!
           @data["nudge"] = { "latest" => latest.to_s, "channel" => channel.to_s, "command" => command.to_s }
           persist_locked!
         end
@@ -67,6 +80,7 @@ module Hive
 
       def clear_nudge!
         synchronize do
+          load!
           next if @data["nudge"].nil?
 
           @data["nudge"] = nil
@@ -76,6 +90,7 @@ module Hive
 
       def nudge
         synchronize do
+          load!
           raw = @data["nudge"]
           next nil unless raw.is_a?(Hash) && !raw["latest"].to_s.empty?
 

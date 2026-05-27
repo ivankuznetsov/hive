@@ -9,6 +9,10 @@ require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/logger"
+require "hive/update_check"
+require "hive/update_check/state"
+require "hive/install_channel"
+require "hive/commands/update"
 
 module Hive
   module Daemon
@@ -33,7 +37,8 @@ module Hive
       # @param merge_watcher [PrMergeWatcher, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
-                     merge_watcher: nil, dry_run: false)
+                     merge_watcher: nil, dry_run: false,
+                     update_state: nil, update_checker: nil, channel_detector: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -41,6 +46,13 @@ module Hive
         @logger = logger
         @merge_watcher = merge_watcher
         @dry_run = dry_run
+
+        # Update-flow collaborators (plan 2026-05-27-002). The check runs
+        # only when a state store is injected (the daemon does so); existing
+        # tests that omit it get an inert dispatcher with no network access.
+        @update_state = update_state
+        @update_checker = update_checker || -> { Hive::UpdateCheck.latest }
+        @channel_detector = channel_detector || -> { Hive::InstallChannel.detect }
 
         @daemon_cfg = config["daemon"] || {}
         @update_cfg = config["update"] || Hive::Config::DEFAULTS["update"]
@@ -118,6 +130,10 @@ module Hive
         @enabled_cache.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
+
+        # 0. Throttled release check (independent of task status). Sets the
+        # TUI-footer nudge state when behind; resilient — never crashes a tick.
+        maybe_check_for_update(now: now)
 
         # 1. Reap completed children, update controller, log decisions
         reap_completed(now: now)
@@ -239,6 +255,37 @@ module Hive
       end
 
       private
+
+      # Throttled (~daily) probe of the latest published release. On the
+      # brew/AUR/bash channels it records a nudge (version + exact update
+      # command) into the shared state file; the TUI footer renders it and
+      # the bot pushes it once per version. Auto-update for the bash channel
+      # is deferred to U7 (gated by `@update_auto_enabled`) — every channel
+      # is nudge-only for now. dev clones are skipped. Resilient by contract:
+      # an offline/rate-limited/parse failure degrades silently (R7/G4) and
+      # never raises out of a tick.
+      def maybe_check_for_update(now:)
+        return unless @update_check_enabled
+        return unless @update_state
+        return unless @update_state.due?(now)
+
+        @update_state.record_check!(now)
+        result = @update_checker.call
+        return if result.nil?
+
+        channel = @channel_detector.call
+        if channel == "dev" || !result.behind?
+          @update_state.clear_nudge!
+          return
+        end
+
+        command = Hive::Commands::Update.nudge_command(channel)
+        @update_state.set_nudge(latest: result.latest, channel: channel, command: command)
+        @logger.event(:update_available, current: result.current, latest: result.latest,
+                                         channel: channel, command: command)
+      rescue StandardError => e
+        @logger.event(:update_check_error, error_class: e.class.name, message: e.message)
+      end
 
       # SHA-256 of lib/hive.rb (the file holding SCHEMA_VERSIONS). Used
       # as a cheap drift signal — if the on-disk file's digest no longer

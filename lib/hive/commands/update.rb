@@ -16,6 +16,20 @@ module Hive
       BREW_TAP = "#{REPO_OWNER}/#{REPO_NAME}/hive".freeze
       INSTALL_URL = "https://raw.githubusercontent.com/#{REPO_OWNER}/#{REPO_NAME}/main/install.sh".freeze
 
+      # Canonical one-line command shown to the user when they're behind,
+      # per channel. Reuses BREW_TAP so a tap rename stays a one-diff change.
+      # Returns nil for dev (git clone — `git pull` is the right move, but
+      # there's no single canonical command to nudge). The bash channel is
+      # nudge-only until the daemon auto-update spike (U7) lands; `hive update`
+      # re-runs the installer in place.
+      def self.nudge_command(channel)
+        case channel
+        when "brew" then "brew upgrade #{BREW_TAP}"
+        when "aur" then "yay -S hive-bin"
+        when "bash" then "hive update"
+        end
+      end
+
       def initialize(dry_run: false, output: $stdout, runner: nil, env: ENV, channel: nil)
         @dry_run = dry_run
         @output = output

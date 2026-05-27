@@ -154,7 +154,8 @@ module Hive
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
-          merge_watcher: merge_watcher, dry_run: @dry_run
+          merge_watcher: merge_watcher, dry_run: @dry_run,
+          update_state: Hive::UpdateCheck::State.new
         )
 
         reexec_requested = false

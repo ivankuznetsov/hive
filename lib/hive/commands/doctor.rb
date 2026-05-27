@@ -147,13 +147,14 @@ module Hive
         end
 
         diagnostic = first_diagnostic_line(err, out)
+        detail = diagnostic.empty? ? "" : " (#{diagnostic})"
         [ warning_row(
           stage: "wiki",
           label: "wiki/qmd",
           agent: "qmd",
           configured_skill: "@tobilu/qmd",
           skill: "qmd",
-          message: "qmd is installed at #{qmd} but failed to start#{diagnostic.empty? ? "" : " (#{diagnostic})"}; " \
+          message: "qmd is installed at #{qmd} but failed to start#{detail}; " \
                    "reinstall with `npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" " \
                    "@tobilu/qmd`, or rebuild the active npm install with `npm rebuild better-sqlite3` " \
                    "(`hive update` also repairs qmd on bash-channel installs)"

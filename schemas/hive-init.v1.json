@@ -39,6 +39,7 @@
       "required": [
         "planning_agent",
         "claude_mode",
+        "claude_permission_mode",
         "development_agent",
         "enabled_reviewers",
         "triage_bias",
@@ -49,6 +50,7 @@
       "properties": {
         "planning_agent": { "type": "string" },
         "claude_mode": { "type": "string", "enum": ["tmux", "headless"] },
+        "claude_permission_mode": { "type": "string", "enum": ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"] },
         "development_agent": { "type": "string" },
         "enabled_reviewers": { "type": "array", "items": { "type": "string" } },
         "triage_bias": { "type": "string", "enum": ["courageous", "safetyist"] },

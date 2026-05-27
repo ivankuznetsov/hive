@@ -1989,6 +1989,29 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_update_falls_back_to_defaults_when_no_file
+    Dir.mktmpdir do |dir|
+      old = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = dir
+      cfg = Hive::Config.load_global_update
+      assert_equal true, cfg["check"]
+      assert_equal true, cfg["auto"]
+    ensure
+      ENV["HIVE_HOME"] = old
+    end
+  end
+
+  def test_load_global_update_rejects_non_hash_block
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        update: enabled
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_update }
+      assert_match(/update.*must be a Hash/, err.message)
+    end
+  end
+
   def test_load_global_update_rejects_non_boolean
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)

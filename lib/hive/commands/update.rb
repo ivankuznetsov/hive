@@ -5,30 +5,26 @@ require "shellwords"
 module Hive
   module Commands
     class Update
-      # Centralised org+repo + brew tap so a future rename of the
-      # repository is a one-diff change. The installer URL pins to the
-      # default branch so older bash-channel installs can fetch the
-      # newest installer rather than re-running their own vX.Y.Z script
-      # forever. The script is downloaded to a tmpfile before execution;
+      # Org+repo come from Hive::REPO_OWNER/REPO_NAME (one rename point). The
+      # installer URL pins to the default branch so older bash-channel installs
+      # fetch the newest installer rather than re-running their own vX.Y.Z
+      # script forever. The script is downloaded to a tmpfile before execution;
       # no pipe-to-bash path is used here.
-      REPO_OWNER = "ivankuznetsov".freeze
-      REPO_NAME = "hive".freeze
-      BREW_TAP = "#{REPO_OWNER}/#{REPO_NAME}/hive".freeze
-      INSTALL_URL = "https://raw.githubusercontent.com/#{REPO_OWNER}/#{REPO_NAME}/main/install.sh".freeze
+      BREW_TAP = "#{Hive::REPO_OWNER}/#{Hive::REPO_NAME}/hive".freeze
+      INSTALL_URL = "https://raw.githubusercontent.com/#{Hive::REPO_OWNER}/#{Hive::REPO_NAME}/main/install.sh".freeze
 
       # Canonical one-line command shown to the user when they're behind,
       # per channel. Reuses BREW_TAP so a tap rename stays a one-diff change.
       # Returns nil for dev (git clone — `git pull` is the right move, but
-      # there's no single canonical command to nudge). The bash channel is
-      # nudge-only until the daemon auto-update spike (U7) lands; `hive update`
-      # re-runs the installer in place. The aur nudge mirrors `aur_command`'s
-      # `-Syu` (not a bare `-S`): a DB sync is required, or a stale local DB
-      # would "update" to an older hive-bin than the release being nudged.
+      # there's no single canonical command to nudge). bash and aur both nudge
+      # `hive update`: bash because auto-update (U7) isn't built yet, and aur
+      # because the real updater picks yay OR paru at runtime — a hardcoded
+      # `yay …` nudge would fail for paru-only users. `hive update` re-dispatches
+      # to whichever helper the install actually has.
       def self.nudge_command(channel)
         case channel
         when "brew" then "brew upgrade #{BREW_TAP}"
-        when "aur" then "yay -Syu hive-bin"
-        when "bash" then "hive update"
+        when "aur", "bash" then "hive update"
         end
       end
 

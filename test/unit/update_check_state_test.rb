@@ -3,6 +3,14 @@ require "tmpdir"
 require "hive/update_check/state"
 
 class UpdateCheckStateTest < Minitest::Test
+  include HiveTestHelper
+
+  class RecordingLogger
+    attr_reader :events
+    def initialize = @events = []
+    def event(name, **attrs) = @events << [ name, attrs ]
+  end
+
   def setup
     @dir = Dir.mktmpdir
     @path = File.join(@dir, "update_check.json")
@@ -64,9 +72,33 @@ class UpdateCheckStateTest < Minitest::Test
     assert_nil s.nudge
   end
 
-  def test_wrong_schema_version_degrades_to_empty
-    File.write(@path, JSON.generate({ "schema_version" => 99, "last_notified_version" => "9.9.9" }))
-    assert state.should_notify?("0.1.7"), "incompatible schema must not leak stale notified-version"
+  def test_newer_schema_is_read_but_not_overwritten
+    # Forward-compat: a newer hive wrote schema_version 99. An older process
+    # must read recognized keys but never write back (no downgrade churn
+    # during a rolling micro-release upgrade).
+    File.write(@path, JSON.generate({ "schema_version" => 99, "last_notified_version" => "9.9.9",
+                                       "nudge" => { "latest" => "9.9.9", "channel" => "brew",
+                                                    "command" => "brew upgrade x" } }))
+    s = state
+    assert_equal "9.9.9", s.nudge.latest, "recognized keys from a newer file are still read"
+    refute s.should_notify?("9.9.9"), "the newer file's notified-version is honored"
+
+    s.record_check!(@now) # write suspended — must not rewrite the newer file
+    on_disk = JSON.parse(File.read(@path))
+    assert_equal 99, on_disk["schema_version"], "older process must not downgrade a newer-schema file"
+    assert_nil on_disk["last_check_at"], "suspended write left the newer file untouched"
+  end
+
+  def test_non_integer_schema_degrades_to_empty
+    File.write(@path, JSON.generate({ "schema_version" => "two", "last_notified_version" => "9.9.9" }))
+    assert state.should_notify?("0.1.7"), "a non-integer schema_version is corrupt → reset to empty"
+  end
+
+  def test_clear_nudge_is_idempotent
+    s = state
+    assert_nil s.nudge
+    s.clear_nudge! # already nil — must not raise
+    assert_nil state.nudge
   end
 
   def test_persists_across_instances
@@ -98,5 +130,75 @@ class UpdateCheckStateTest < Minitest::Test
     assert_equal "0.1.7", fresh.nudge.latest
     refute fresh.should_notify?("0.1.7"), "notified-version (bot-written) must survive the daemon's write"
     refute fresh.due?(@now + 10, window: 86_400), "check timestamp must survive too"
+  end
+
+  def test_older_schema_degrades_to_empty
+    File.write(@path, JSON.generate({ "schema_version" => 0, "last_notified_version" => "9.9.9" }))
+    assert state.should_notify?("0.1.7"), "an older schema_version is reset to empty"
+  end
+
+  def test_malformed_last_check_at_is_treated_as_never_checked
+    File.write(@path, JSON.generate({ "schema_version" => 1, "last_check_at" => "not-a-date" }))
+    assert state.due?(@now), "an unparseable timestamp degrades to never-checked, never raises"
+  end
+
+  def test_stale_orphan_tmp_is_swept_but_fresh_one_kept
+    stale = File.join(@dir, ".update_check.json.1.1.tmp")
+    fresh = File.join(@dir, ".update_check.json.2.2.tmp")
+    File.write(stale, "old")
+    File.write(fresh, "in-flight")
+    File.utime(Time.now - 300, Time.now - 300, stale)
+    Hive::UpdateCheck::State.new(path: @path)
+    refute File.exist?(stale), "stragglers older than the stale window are swept"
+    assert File.exist?(fresh), "a fresh tmp may be a live process's in-flight write — keep it"
+  end
+
+  def test_dangling_symlink_tmp_does_not_abort_sweep
+    link = File.join(@dir, ".update_check.json.x.tmp")
+    File.symlink(File.join(@dir, "no-such-target"), link)
+    # File.mtime on the dangling link raises ENOENT — the per-entry rescue
+    # must skip it without aborting construction.
+    Hive::UpdateCheck::State.new(path: @path)
+  end
+
+  def test_glob_failure_during_sweep_is_logged
+    logger = RecordingLogger.new
+    with_replaced_singleton_method(Dir, :glob, ->(*_a, **_k) { raise IOError, "synthetic glob failure" }) do
+      Hive::UpdateCheck::State.new(path: @path, logger: logger)
+    end
+    assert(logger.events.any? { |name, _| name == :update_check_tmp_sweep_error })
+  end
+
+  def test_unwritable_state_dir_degrades_without_raising
+    logger = RecordingLogger.new
+    afile = File.join(@dir, "afile")
+    File.write(afile, "x")
+    # Parent of the path is a regular file → mkdir_p raises ENOTDIR in both
+    # acquire_lock and persist_locked!; both rescues must fire, no crash.
+    s = Hive::UpdateCheck::State.new(path: File.join(afile, "sub", "update_check.json"), logger: logger)
+    s.record_check!(@now)
+    assert(logger.events.any? { |name, _| name == :update_check_state_lock_error })
+    assert(logger.events.any? { |name, _| name == :update_check_state_write_error })
+  end
+
+  def test_unreadable_file_is_treated_as_corrupt
+    logger = RecordingLogger.new
+    File.write(@path, JSON.generate({ "schema_version" => 1, "last_notified_version" => "9.9.9" }))
+    File.chmod(0o000, @path)
+    s = Hive::UpdateCheck::State.new(path: @path, logger: logger)
+    assert s.should_notify?("0.1.7"), "an unreadable file degrades to empty (corrupt), never raises"
+    assert(logger.events.any? { |name, _| name == :update_check_state_corrupt })
+  ensure
+    File.chmod(0o644, @path) if @path && File.exist?(@path)
+  end
+
+  def test_release_lock_swallows_errors
+    bad = Object.new
+    def bad.flock(_mode) = raise(IOError, "boom")
+    state.send(:release_lock, bad) # must not raise
+  end
+
+  def test_fsync_dir_swallows_errors
+    state.send(:fsync_dir, File.join(@dir, "does-not-exist")) # Dir.open raises → nil
   end
 end

@@ -43,7 +43,7 @@ The bash channel deliberately downloads to a tempfile rather than piping remote 
 
 ## Nudge command (shared with the update flow)
 
-`Hive::Commands::Update.nudge_command(channel)` returns the canonical one-line update command per channel — `brew upgrade ivankuznetsov/hive/hive`, `yay -Syu hive-bin`, or `hive update` (bash) — and `nil` for `dev` (git clone has no single canonical command). The daemon-driven [[update-flow]] uses this string when it records a per-version nudge; the bash channel stays nudge-only until the auto-update spike (U7). The `aur` nudge mirrors `aur_command`'s `-Syu` so a stale local DB can't "update" to an older `hive-bin`.
+`Hive::Commands::Update.nudge_command(channel)` returns the canonical one-line update command per channel — `brew upgrade ivankuznetsov/hive/hive` for brew, and `hive update` for both `aur` and `bash` — and `nil` for `dev` (git clone has no single canonical command). The daemon-driven [[update-flow]] uses this string when it records a per-version nudge. The `aur` and `bash` channels nudge `hive update` rather than a raw package-manager command: `aur` because the real updater picks `yay` or `paru` at runtime (a hardcoded `yay …` would fail for paru-only users), and `bash` because in-place auto-update (U7) isn't built yet.
 
 ## Tests
 

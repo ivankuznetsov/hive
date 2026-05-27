@@ -91,6 +91,16 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
     assert_equal "hive update", @state.nudge.command, "bash is nudge-only until U7 lands"
   end
 
+  def test_unknown_channel_does_not_persist_nudge
+    checker = Checker.new(result(latest: "0.1.7", behind: true))
+    dispatcher, logger = build(checker: checker, channel: "snap")
+    dispatcher.tick(now: T0)
+
+    assert_nil @state.nudge, "an unknown channel has no canonical command — no nudge"
+    assert_empty events(logger, :update_available)
+    assert_equal 1, events(logger, :update_nudge_no_command).size
+  end
+
   def test_dev_channel_skips_and_clears_nudge
     @state.set_nudge(latest: "0.1.6", channel: "brew", command: "brew upgrade x")
     checker = Checker.new(result(latest: "0.1.7", behind: true))

@@ -12,6 +12,7 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/logger"
 require "hive/invoked_binary"
+require "hive/update_check/state"
 
 module Hive
   module Commands
@@ -320,7 +321,11 @@ module Hive
             "log_file" => log_file,
             "service_installed" => service_state["service_installed"],
             "service_enabled" => service_state["service_enabled"],
-            "unit_path" => service_state["unit_path"]
+            "unit_path" => service_state["unit_path"],
+            # Agent-native parity with the TUI footer / bot push: expose the
+            # update nudge so a programmatic caller can detect "behind" too.
+            "current_version" => Hive::VERSION,
+            "update_nudge" => update_nudge_payload
           )
         elsif running
           puts "hive daemon: running (pid #{pid}, uptime #{uptime_sec}s)"
@@ -341,6 +346,17 @@ module Hive
         Hive::Commands::Daemon::ServiceInstaller.new.service_state
       rescue StandardError
         { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
+      end
+
+      # The daemon-written update nudge, as a plain Hash for the status
+      # envelope (nil when current or unknown). Never raises out of status.
+      def update_nudge_payload
+        nudge = Hive::UpdateCheck::State.new.nudge
+        return nil unless nudge
+
+        { "latest" => nudge.latest, "channel" => nudge.channel, "command" => nudge.command }
+      rescue StandardError
+        nil
       end
 
       def reload_daemon

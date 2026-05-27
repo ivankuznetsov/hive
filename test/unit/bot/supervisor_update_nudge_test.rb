@@ -70,6 +70,35 @@ class HiveBotSupervisorUpdateNudgeTest < Minitest::Test
     assert_empty @telegram.messages
   end
 
+  def test_push_swallows_state_errors
+    boom = Object.new
+    def boom.nudge = raise(StandardError, "state boom")
+    sup = Hive::Bot::Supervisor.new(
+      config: { "chat_id_allowlist" => [ 42 ], "conversation_ttl_sec" => 60, "poll_interval_sec" => 1 },
+      token: "t", logger: @logger, telegram: @telegram,
+      status_watcher: Object.new, notification_dispatcher: Object.new,
+      router: Object.new, child_supervisor: Object.new,
+      conversation_store: Object.new, update_state: boom
+    )
+    sup.send(:push_update_nudge) # must not raise
+    assert_empty @telegram.messages
+    assert_includes event_names, :update_nudge_error
+  end
+
+  def test_in_memory_latch_prevents_repush_after_persisted_dedup_lost
+    @state.set_nudge(latest: "0.1.7", channel: "brew", command: "brew upgrade x")
+    sup = supervisor
+    sup.send(:push_update_nudge)
+    assert_equal 2, @telegram.messages.size
+
+    # Simulate the persisted dedup being lost (write failed / file reset): the
+    # in-memory latch must still suppress a re-push for this process lifetime.
+    @state.record_notified!("")
+    assert @state.should_notify?("0.1.7"), "precondition: disk no longer remembers the notify"
+    sup.send(:push_update_nudge)
+    assert_equal 2, @telegram.messages.size, "in-memory latch prevents re-push when disk dedup is lost"
+  end
+
   def test_all_sends_fail_does_not_record_and_retries_next_tick
     failing = FakeTelegram.new(messages: [], fail_all: true)
     @state.set_nudge(latest: "0.1.7", channel: "brew", command: "brew upgrade x")

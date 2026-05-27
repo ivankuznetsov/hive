@@ -292,6 +292,13 @@ module Hive
         end
 
         command = Hive::Commands::Update.nudge_command(channel)
+        if command.nil?
+          # An unrecognized channel has no canonical command; don't persist a
+          # nudge with an empty command (it would render "update X.Y.Z: ").
+          @logger.event(:update_nudge_no_command, channel: channel, latest: result.latest)
+          return
+        end
+
         @update_state.set_nudge(latest: result.latest, channel: channel, command: command)
         @logger.event(:update_available, current: result.current, latest: result.latest,
                                          channel: channel, command: command)
@@ -733,7 +740,9 @@ module Hive
         # PR-40 review P1 #2: rebase on the global ~/Dev/hive/config.yml's
         # daemon block, not bare DEFAULTS.
         @daemon_cfg = Hive::Config.load_global_daemon
-        @config = { "daemon" => @daemon_cfg }
+        @update_cfg = Hive::Config.load_global_update
+        @config = { "daemon" => @daemon_cfg, "update" => @update_cfg }
+        @update_check_enabled = @update_cfg.fetch("check", true)
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)

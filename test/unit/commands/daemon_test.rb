@@ -225,6 +225,37 @@ class HiveCommandsDaemonTest < Minitest::Test
   end
 
 
+  def test_status_json_includes_update_nudge_when_present
+    with_env("HIVE_HOME" => @home) do
+      Hive::UpdateCheck::State.new.set_nudge(latest: "9.9.9", channel: "brew",
+                                             command: "brew upgrade ivankuznetsov/hive/hive")
+      command = daemon("status", json: true)
+      write_pid_payload(pid: 1234)
+      command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+      command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+
+      out, _err = capture_io { command.call }
+      doc = JSON.parse(out)
+      assert_equal "9.9.9", doc.dig("update_nudge", "latest")
+      assert_equal "brew", doc.dig("update_nudge", "channel")
+      assert_equal Hive::VERSION, doc.fetch("current_version")
+    end
+  end
+
+  def test_status_json_update_nudge_null_when_state_raises
+    command = daemon("status", json: true)
+    write_pid_payload(pid: 1234)
+    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+
+    out, _err = with_replaced_singleton_method(
+      Hive::UpdateCheck::State, :new, ->(*_a, **_k) { raise "state boom" }
+    ) { capture_io { command.call } }
+    doc = JSON.parse(out)
+    assert_nil doc.fetch("update_nudge"), "a failed state read degrades update_nudge to null, not a crash"
+    assert_equal true, doc.fetch("running")
+  end
+
   def test_status_json_merges_service_state_fields
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)

@@ -39,6 +39,10 @@ module Hive
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
         @update_state = update_state || Hive::UpdateCheck::State.new
+        # Process-lifetime latch of versions already pushed. Backs up the
+        # persisted dedup: if record_notified! can't write (read-only/full
+        # state dir), this still stops the status loop re-pushing every tick.
+        @nudged_versions = {}
         @logger = logger || Hive::Bot::Logger.new(
           path: config.fetch("log_file"),
           max_bytes: config.fetch("log_max_bytes"),
@@ -771,18 +775,21 @@ module Hive
       end
 
       # Push the daemon-written update nudge to the allowlist exactly once per
-      # newly-seen version (de-duped via the shared state). Records "notified"
-      # only after a send succeeds, so an all-failed push retries next tick.
-      # Resilient: any error is logged and never breaks the status loop.
+      # newly-seen version. De-duped by BOTH the persisted state (survives a
+      # restart) and an in-memory latch (survives a failed state write). Records
+      # "notified" only after a send succeeds, so an all-failed push retries
+      # next tick. Resilient: any error is logged and never breaks the loop.
       def push_update_nudge
         nudge = @update_state.nudge
         return unless nudge
+        return if @nudged_versions[nudge.latest]
         return unless @update_state.should_notify?(nudge.latest)
 
         text = update_nudge_message(nudge)
         delivered = chat_ids.map { |chat_id| safe_send_message(chat_id: chat_id, text: text) }
         return unless delivered.any?
 
+        @nudged_versions[nudge.latest] = true
         @update_state.record_notified!(nudge.latest)
         @logger.event(:update_nudge_pushed, latest: nudge.latest, channel: nudge.channel)
       rescue StandardError => e

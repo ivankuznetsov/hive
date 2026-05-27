@@ -7,7 +7,7 @@ Append-only log of all wiki operations.
 **Action:** Added the update flow (plan 2026-05-27-002): `Hive::UpdateCheck` release probe, `UpdateCheck::State` shared JSON store, `update.check`/`update.auto` config, dispatcher integration (throttled check + per-channel nudge), and the nudge surfaces (TUI footer + once-per-version bot push). Every channel is nudge-only for now; bash auto-update (U7) is deferred.
 
 **New/refreshed pages:**
-- [[update-flow]]
+- [[update-flow]] · [[state-model]] · [[commands/update]]
 
 ## [2026-05-27T12:00:00Z] ci — cross-OS install verification (real installs)
 

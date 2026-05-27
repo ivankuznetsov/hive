@@ -11,9 +11,7 @@ module Hive
   # unparseable version) returns nil. The daemon calls this on a tick and must
   # not crash because GitHub is unreachable or rate-limiting.
   module UpdateCheck
-    REPO_OWNER = "ivankuznetsov".freeze
-    REPO_NAME = "hive".freeze
-    API_URL = "https://api.github.com/repos/#{REPO_OWNER}/#{REPO_NAME}/releases/latest".freeze
+    API_URL = "https://api.github.com/repos/#{Hive::REPO_OWNER}/#{Hive::REPO_NAME}/releases/latest".freeze
 
     Result = Data.define(:current, :latest, :behind) do
       def behind? = behind

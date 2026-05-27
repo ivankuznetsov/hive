@@ -2,6 +2,14 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T02:41:29Z] dependencies - faraday audit floor
+
+**Action:** Updated the lockfile security floor for Telegram Bot API HTTP transport after `bundler-audit --update` began flagging `faraday` 2.14.1 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. `Gemfile.lock` now resolves `faraday` 2.14.2 and `faraday-net_http` 3.4.3.
+
+**Refreshed pages:**
+- [[dependencies]] - recorded the Faraday audit floor behind `telegram-bot-ruby`.
+
+
 ## [2026-05-26T23:30:00Z] daemon - reclassify no-systemd autostart as unsupported (review follow-up)
 
 **Action:** Code-review follow-up on the autostart-install branch. A Linux host with no systemd-user no longer reports a `failed` / exit-70 envelope (this supersedes the 22:55Z entry below): the unit is still written, but autostart-unavailable is now a `:autostart_unavailable` installer result that maps to the `unsupported` success outcome (exit 0) with `target_path` set to the written unit. A genuine service-manager rejection (systemctl enable/reload, or macOS launchctl load) still exits 70. Also hardened: `install.sh daemon_autostart_setup` captures the real exit code in an `else` branch (was always reporting `exit 0`) and treats `unsupported`/unreadable-JSON distinctly; `hive init`'s `register_daemon_service!` now degrades any unexpected `StandardError` to a warning so it can't abort an already-committed init; dead `which` delegators removed in favor of `Hive::InvokedBinary`; README scoped so only `install.sh` is described as auto-running `hive daemon install`.
@@ -60,6 +68,13 @@ Append-only log of all wiki operations.
 **Action:** Documented the launcher's new backup/restore behavior for `.claude/settings.json`. Root cause was that `StopHookInstaller.install_at` unconditionally deleted-and-overwrote the file, then `cleanup_scratch` unconditionally deleted it on spawn end — destructive for any project that committed `.claude/settings.json` via `hive init`'s llm-wiki bootstrap (`git_ops.rb:140`). Symptom was a recurring `dirty_worktree` marker in 4-execute / 6-review / 8-finalize because the post-stage check saw the deletion in `git status`. Fix: snapshot the existing file to `.claude/settings.json.hive-pre-install` before the install overwrite (only on first install per spawn pair, to avoid backing up the hive stub on re-entry), and have `cleanup_scratch` prefer restore-from-backup over delete.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
+
+## [2026-05-26T11:14:24Z] init - prompt answer binding fail-fast
+
+**Action:** Restored `ProjectConfigBinding` to the documented "never invent defaults" contract. The binding now requires the complete current `Prompts#collect` answer hash, validates every nested budget/timeout `LIMIT_KEYS` entry, and `hive init` renders the config immediately after prompt collection so incomplete prompt data raises before `.hive-state` or `hive/state` can be created.
+
+**Refreshed pages:**
+- [[commands/init]] - documented the complete-answer fail-fast contract, pre-side-effect render order, nested limit validation, and unit/integration coverage.
 
 ## [2026-05-26T10:30:00Z] review - accepted finding count source of truth
 

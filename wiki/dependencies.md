@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, Gemfile.lock
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-27
 tags: [dependencies, gems, runtime]
 ---
 
@@ -17,6 +17,8 @@ tags: [dependencies, gems, runtime]
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
+
+`telegram-bot-ruby` pulls Faraday for HTTP transport. `Gemfile.lock` keeps `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1` for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

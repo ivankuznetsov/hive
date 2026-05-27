@@ -175,6 +175,37 @@ version until you bump it manually or set the token.
 
 ---
 
+## Install verification
+
+CI does **real installs** of every channel on its native OS (no macOS/Ubuntu
+hardware needed — GitHub-hosted runners + containers). Three layers, all backed
+by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-verify.yml`:
+
+1. **Pre-release gate** (`install-gate` in `release.yml`) — `gem install`s the
+   freshly-built gem on `macos-15` + `ubuntu-24.04-arm` before publishing.
+   `release-finalize` `needs:` it, so a gem that won't install never reaches
+   brew/AUR. Native runners only (the gem is `arch=any`; no emulated cell can
+   block a release).
+2. **Post-release verification** (`post-release-verify` in `release.yml`) — after
+   publish, runs the **real** `brew install` / `yay -S hive-bin` / `install.sh`
+   of the just-released version.
+3. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
+   — re-installs the latest release to catch dependency / base-image drift.
+
+Any failure opens or updates a single **`install-failure`** GitHub issue (one
+aggregation job, so no duplicate spam) naming the run. To check a specific
+version on demand:
+
+```sh
+gh workflow run install-verify.yml -f version=vX.Y.Z
+```
+
+Scope note: aarch64 covers `install.sh` (`ubuntu-24.04-arm`) and macOS (arm64);
+aarch64-AUR is deferred (the official `archlinux` image is x86_64-only — needs an
+Arch-Linux-ARM image).
+
+---
+
 ## Troubleshooting
 
 - **AUR job skipped** → `AUR_SSH_PRIVATE_KEY` is unset, or `release-finalize`

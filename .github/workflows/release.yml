@@ -52,10 +52,47 @@ jobs:
           path: hive-cli-*.gem
           if-no-files-found: error
 
+  install-gate:
+    name: gem-install gate / ${{ matrix.runs-on }}
+    runs-on: ${{ matrix.runs-on }}
+    needs: build
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on: [macos-15, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hive-cli-gem
+          path: dist
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: gem install the built gem
+        # Native-runner expansion of build's "Smoke test built gem":
+        # confirm the gem installs + runs on macOS arm64 and Linux arm64
+        # before publishing. x86_64 is already covered by `build`. The
+        # gem is arch=any Ruby, so no Arch/emulated cell here — a flaky
+        # emulated cell must never block a release (real Arch install is
+        # covered post-release by install-verify.yml).
+        run: |
+          gem_file="$(ls dist/hive-cli-*.gem | head -n 1)"
+          [[ -s "$gem_file" ]] || { echo "no hive-cli-*.gem artifact" >&2; exit 1; }
+          sandbox="$(mktemp -d)/gem-sandbox"
+          mkdir -p "$sandbox"
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" gem install "$gem_file" \
+            --install-dir "$sandbox" \
+            --bindir "$sandbox/bin" \
+            --no-document \
+            --source https://rubygems.org
+          GEM_HOME="$sandbox" GEM_PATH="$sandbox" "$sandbox/bin/hive" --version
+
   release-finalize:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
-    needs: build
+    needs: [build, install-gate]
     permissions:
       contents: write
       id-token: write
@@ -233,3 +270,17 @@ jobs:
             git commit -m "hive-bin ${PKG_VERSION}"
             git push
           fi
+
+  # Post-release: now that the gem is released and the brew/AUR packages
+  # are published, do the REAL channel installs (brew install / yay -S /
+  # install.sh) of this version. Runs whenever release-finalize succeeded,
+  # regardless of whether aur-publish ran (it self-skips without the secret).
+  post-release-verify:
+    needs: [release-finalize, aur-publish]
+    if: ${{ always() && needs.release-finalize.result == 'success' }}
+    uses: ./.github/workflows/install-verify.yml
+    with:
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      issues: write

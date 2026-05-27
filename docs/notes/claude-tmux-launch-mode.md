@@ -120,6 +120,12 @@ the runtime can override them in the calling shell:
   pasting the prompt into tmux and pressing Enter. Claude Code processes
   large bracketed pastes asynchronously, so a short delay prevents Enter
   from racing ahead of the pasted prompt.
+  If tmux disappears before the explicit Enter submit, `TmuxRunner#send_prompt`
+  raises the typed tmux failure immediately rather than waiting for the stage
+  timeout.
+- `HIVE_TMUX_COMMAND_TIMEOUT_SEC` (default `10.0`) — per-tmux-command
+  wall-clock guard. A wedged tmux client is killed and surfaced as a typed
+  timeout error instead of bypassing the stage timeout.
 - `HIVE_TMUX_BIN` (default `tmux`) — override the tmux executable path,
   e.g., to point at a homebrew-installed binary on macOS.
 - `HIVE_TMUX_SOCKET` — optional `-L` socket name, used by integration

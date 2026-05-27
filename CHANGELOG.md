@@ -2,6 +2,12 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.1.5
+
+- Fixed `yay -S hive-bin`: the AUR `package()` aborted on an invalid `gem install --ignore-dependencies=false` flag — the published package never actually installed. Caught by the new real-install CI matrix.
+- Fixed the `hv` shim on Homebrew and AUR: it pointed at the gem's bash `bin/hv` via a Ruby binstub that can't run it; `hv` is now a symlink to the working `hive` wrapper.
+- Fixed Homebrew install-channel detection: the marker is now written under `<prefix>/share/hive` (was `libexec/share`, which is never linked) so `hive update` recognizes brew installs.
+
 ## 0.1.4
 
 - Fixed AUR publishing: accept the `aur.archlinux.org` SSH host key on first connect so the `hive-bin` push no longer fails host-key verification.

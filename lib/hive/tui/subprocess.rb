@@ -58,10 +58,11 @@ module Hive
       RUN_QUIET_TIMEOUT_SECONDS = 30
 
       # Background spawn for workflow verbs (hive brainstorm/plan/
-      # develop/review/pr/archive). Returns nil (no Bubbletea Cmd) —
-      # the TUI keeps running its render loop while the child runs in
-      # parallel; multiple agents across multiple projects can run
-      # concurrently. A reaper Thread waits for the child and
+      # develop/review/pr/archive). Returns nil when the child starts
+      # (no Bubbletea Cmd) and false when spawn fails before a child
+      # exists. The TUI keeps running its render loop while the child
+      # runs in parallel; multiple agents can run concurrently
+      # across projects. A reaper Thread waits for the child and
       # dispatches `Messages::SubprocessExited(verb:, exit_code:)` so
       # the TUI flashes the result.
       #
@@ -94,7 +95,7 @@ module Hive
         pid = spawn_background_child(argv, spawn_id)
         if pid.nil?
           dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: COMMAND_NOT_FOUND_EXIT))
-          return nil
+          return false
         end
 
         spawn_reaper_thread(pid, verb, argv, dispatch, spawn_id)

@@ -124,7 +124,18 @@ module HiveTestHelper
   def with_tmp_global_config(home: nil)
     dir = Dir.mktmpdir("hive-global")
     begin
-      with_env("HIVE_HOME" => dir, "HOME" => home || dir) do
+      fake_bin = File.join(dir, "fake-bin")
+      FileUtils.mkdir_p(fake_bin)
+      %w[systemctl launchctl].each do |name|
+        path = File.join(fake_bin, name)
+        File.write(path, "#!/bin/sh\nexit 1\n")
+        FileUtils.chmod(0o755, path)
+      end
+      with_env(
+        "HIVE_HOME" => dir,
+        "HOME" => home || dir,
+        "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      ) do
         File.write(File.join(dir, "config.yml"), { "registered_projects" => [] }.to_yaml)
         yield(dir)
       end

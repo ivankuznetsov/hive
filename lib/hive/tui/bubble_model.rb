@@ -809,16 +809,14 @@ module Hive
       # transient failure would leave the row stuck in Error
       # indefinitely while `@healed_folders` blocked re-heals.
       #
-      # `--match-attr exit_code=<observed>` ties the clear to the
-      # specific kill-class marker we observed. If a concurrent
-      # `hive run` writes a NEW `:error exit_code=1` (real failure)
-      # between snapshot and heal, the match refuses, eviction fires,
-      # and the next snapshot's auto-heal pass sees the real failure
-      # instead of erasing it.
+      # `--match-attr marker_id=<observed>` ties the clear to the
+      # specific kill-class marker we observed. Legacy rows without a
+      # marker_id fall back to the observed reason/exit_code attrs so a
+      # same-code marker with a different reason is not erased.
       def heal_marker(row)
-        observed_exit = row.attrs && row.attrs["exit_code"]
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        argv += [ "--match-attr", "exit_code=#{observed_exit}" ] if observed_exit
+        match_attr = error_recovery_match_attr(row)
+        argv += [ "--match-attr", match_attr ] if match_attr
         exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
         return if exit_code.zero?
 
@@ -1041,19 +1039,7 @@ module Hive
           return
         end
 
-        begin
-          Hive::Tui::Subprocess.dispatch_background([ "hive", "run", row.folder ], dispatch: @dispatch)
-        rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-          Hive::Tui::Debug.log(
-            "review_recovery",
-            "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
-          )
-          flash_async(
-            "review recovery: marker cleared, but `hive run` failed to start: " \
-            "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
-          )
-          return
-        end
+        return unless dispatch_recovery_rerun(row, label: "review recovery", debug_scope: "review_recovery")
 
         detail = review_recovery_detail(row, marker_name)
         flash_async("review recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
@@ -1062,6 +1048,31 @@ module Hive
         flash_async(
           "review recovery failed: #{e.class.name}: #{Hive::Tui::Text.sanitize(e.message)[0, 80]}"
         )
+      end
+
+      def dispatch_recovery_rerun(row, label:, debug_scope:)
+        started = Hive::Tui::Subprocess.dispatch_background(
+          [ "hive", "run", row.folder ],
+          dispatch: @dispatch
+        )
+        return true unless started == false
+
+        Hive::Tui::Debug.log(debug_scope, "dispatch returned false for #{row.slug} (marker cleared)")
+        flash_async(
+          "#{label}: marker cleared, but `hive run` failed to start; " \
+          "run `hive run #{row.folder}` manually"
+        )
+        false
+      rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
+        Hive::Tui::Debug.log(
+          debug_scope,
+          "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
+        )
+        flash_async(
+          "#{label}: marker cleared, but `hive run` failed to start: " \
+          "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
+        )
+        false
       end
 
       def flash_async(text)
@@ -1143,11 +1154,12 @@ module Hive
 
       # Enter-driven ERROR-marker recovery. Mirrors `recover_review` but
       # targets the generic ERROR marker any stage emits when the agent
-      # exited with a non-kill-class code — the case auto-heal
-      # deliberately skips because exit codes outside 130/137/143
-      # generally mean "the agent ran and decided to fail" rather than
-      # "we killed it". Before this gesture existed those rows sat in
-      # "Error" forever and the only recovery path was a shell-level
+      # is not in the explicit signal-kill shape
+      # (`reason=exit_code exit_code=130|137|143`). Auto-heal owns that
+      # interrupted-task shape; other structured reasons remain
+      # recoverable even when they carry the same numeric code. Before
+      # this gesture existed those rows sat in "Error" forever and the
+      # only recovery path was a shell-level
       # `hive markers clear --name ERROR`.
       #
       # Same threading model as `recover_review`: the bubbletea update
@@ -1164,7 +1176,7 @@ module Hive
         end
 
         attrs = row.attrs || {}
-        if KILL_CLASS_EXIT_CODES.include?(attrs["exit_code"].to_s)
+        if kill_class_error?(row)
           return [ flashed("error recovery: kill-class exit_code=#{attrs['exit_code']} auto-heals"), nil ]
         end
 
@@ -1237,19 +1249,7 @@ module Hive
           return
         end
 
-        begin
-          Hive::Tui::Subprocess.dispatch_background([ "hive", "run", row.folder ], dispatch: @dispatch)
-        rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
-          Hive::Tui::Debug.log(
-            "error_recovery",
-            "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
-          )
-          flash_async(
-            "error recovery: marker cleared, but `hive run` failed to start: " \
-            "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
-          )
-          return
-        end
+        return unless dispatch_recovery_rerun(row, label: "error recovery", debug_scope: "error_recovery")
 
         detail = error_recovery_detail(row)
         flash_async("error recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
@@ -1260,24 +1260,22 @@ module Hive
         )
       end
 
-      # `hive markers clear --match-attr exit_code=N` ties the clear to
-      # the SPECIFIC marker we observed at snapshot time. If a concurrent
-      # `hive run` writes a fresher ERROR with a different exit_code in
-      # the dispatch window, the match refuses (`WrongStage`), the
-      # eviction in spawn_error_recovery_thread's ensure releases the
-      # dedup slot, and the next Enter retries against the current
-      # marker. Without the match-attr, recovery would silently erase
-      # newer real failures.
+      # `hive markers clear --match-attr marker_id=N` ties the clear
+      # to the specific ERROR marker observed at snapshot time. Legacy
+      # rows without marker_id fall back to the observed reason/exit_code
+      # attrs, preserving same-code/different-reason race protection.
       def error_recovery_clear_argv(row)
         argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        attrs = row.attrs || {}
-        exit_code = attrs["exit_code"].to_s
-        argv += [ "--match-attr", "exit_code=#{exit_code}" ] unless exit_code.empty?
-        argv
+        match_attr = error_recovery_match_attr(row)
+        match_attr ? argv + [ "--match-attr", match_attr ] : argv
+      end
+
+      def error_recovery_match_attr(row)
+        Hive::Markers.error_recovery_match_attr(row.attrs)
       end
 
       def error_recovery_detail(row)
-        attrs = row.attrs || {}
+        attrs = Hive::Markers.display_attrs(row.attrs)
         keys = ERROR_RECOVERY_DETAIL_ATTRS.select { |key| attrs.key?(key) }
         keys += (attrs.keys.map(&:to_s) - keys).sort
         attr_text = keys.map { |key| "#{key}=#{attrs[key]}" }.join(" ")

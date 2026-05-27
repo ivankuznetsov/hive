@@ -140,6 +140,9 @@ review:
   fix:
     agent: claude
     prompt_template: fix_prompt.md.erb
+    auto_commit:
+      scope_check:
+        enabled: true
   browser_test:
     enabled: false
     agent: claude

@@ -433,7 +433,7 @@ module Hive
 
       {
         "summary" => summary,
-        "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, recover via `hive markers clear #{task.slug} --name ERROR` or the standard red-status flow. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
+        "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, re-read `hive status --json` or use the standard red-status flow, then run the reported suggested_next_action.command so the current ERROR marker guard is included. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
         "source" => "marker",
         "source_path" => nil,
         "artifact_paths" => [],
@@ -510,10 +510,10 @@ module Hive
       phase = marker.attrs["phase"].to_s
       reason = marker.attrs["reason"].to_s
       paths = []
+      paths.concat(paths_from_marker_files)
       paths << task_artifact("reviews", "errors-#{pass}.md") if pass
       paths << task_artifact("reviews", "fix-guardrail-#{pass}.md") if pass && reason == "fix_guardrail"
       paths << task_artifact("reviews", "escalations-#{pass}.md") if pass
-      paths.concat(paths_from_marker_files)
       paths.concat(review_phase_logs(phase, pass))
       paths.concat(latest_log_artifacts)
       paths
@@ -621,7 +621,8 @@ module Hive
       return "FINALIZE_MISSING_PR_URL" if finalize_missing_pr_url?
       return "FINALIZE_PR_URL_MISMATCH" if finalize_pr_url_mismatch?
 
-      attrs = marker.attrs.map { |key, value| "#{key}=#{value}" }.join(" ")
+      attrs = Hive::Markers.display_attrs(marker.attrs)
+                           .map { |key, value| "#{key}=#{value}" }.join(" ")
       marker_name = marker.name.to_s.upcase
       attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
     end
@@ -656,6 +657,22 @@ module Hive
           "FINALIZE_PR_URL_MISMATCH",
           "Finalize cannot archive because the COMPLETE marker pr_url does not match pr.md frontmatter.",
           "Rerun finalize or repair pr.md so both PR URLs match."
+        ].join("\n")
+      end
+
+      if auto_commit_scope_failure?
+        return [
+          marker_summary,
+          "Hive rejected the fix-agent fallback commit because staged paths were outside review.fix.auto_commit.scope_check.",
+          "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check before clearing REVIEW_ERROR."
+        ].join("\n")
+      end
+
+      if auto_commit_signing_failure?
+        return [
+          marker_summary,
+          "Hive could not create the fix-agent fallback commit because commit signing policy or signing execution blocked it.",
+          "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then clear REVIEW_ERROR and re-run."
         ].join("\n")
       end
 
@@ -795,6 +812,10 @@ module Hive
         return { "kind" => "manual_fix", "command" => nil }
       end
 
+      if auto_commit_manual_failure?
+        return { "kind" => "manual_fix", "command" => nil }
+      end
+
       cmd = retry_command_string
       return nil if cmd.nil?
 
@@ -822,10 +843,10 @@ module Hive
       File.exist?(File.join(folder.to_s, "reviews", "escalations-#{format('%02d', pass.to_i)}.md"))
     end
 
-    # `hive markers clear` accepts a single --match-attr KEY=VALUE; pick
-    # the most-identifying attr per marker shape. The recipe stays a
-    # copy-pasteable one-liner so external agents (and humans) can run
-    # it from a shell unchanged.
+    # `hive markers clear` accepts --match-attr KEY=VALUE or comma-separated
+    # KEY=VALUE pairs; pick the most-identifying guard per marker shape. The
+    # recipe stays a copy-pasteable one-liner so external agents and humans can
+    # run it from a shell unchanged.
     def retry_command_string
       attrs = marker.attrs || {}
       case marker.name
@@ -840,7 +861,8 @@ module Hive
                        "--name", "REVIEW_STALE", *attr_pair ]
         "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
       when :error
-        attr_pair = priority_match_attr(attrs, %w[exit_code])
+        match_attr = Hive::Markers.error_recovery_match_attr(attrs)
+        attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
         clear_argv = [ "hive", "markers", "clear", task.folder,
                        "--name", "ERROR", *attr_pair ]
         "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
@@ -926,6 +948,27 @@ module Hive
       task.stage_name == "execute" &&
         marker.name == :execute_waiting &&
         !legacy_execute_findings?
+    end
+
+    AUTO_COMMIT_MANUAL_FAILURE_REASONS = %w[
+      fix_auto_commit_scope_failed
+      fix_auto_commit_sign_policy_failed
+      fix_auto_commit_signing_failed
+    ].freeze
+
+    def auto_commit_scope_failure?
+      marker.name == :review_error && marker.attrs["reason"].to_s == "fix_auto_commit_scope_failed"
+    end
+
+    def auto_commit_signing_failure?
+      marker.name == :review_error && %w[
+        fix_auto_commit_sign_policy_failed
+        fix_auto_commit_signing_failed
+      ].include?(marker.attrs["reason"].to_s)
+    end
+
+    def auto_commit_manual_failure?
+      marker.name == :review_error && AUTO_COMMIT_MANUAL_FAILURE_REASONS.include?(marker.attrs["reason"].to_s)
     end
 
     def legacy_execute_findings?

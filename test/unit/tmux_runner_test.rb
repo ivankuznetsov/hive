@@ -66,6 +66,77 @@ class TmuxRunnerTest < Minitest::Test
     end
   end
 
+  def test_send_prompt_raises_when_server_disappears_before_enter_submit
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "tmux.log")
+      fake = write_fake_tmux(dir, <<~RUBY)
+        #!/usr/bin/env ruby
+        args = ARGV.dup
+        args.shift(2) if args.first == "-L"
+        File.open(#{log_path.dump}, "a") { |log| log.puts(args.join(" ")) }
+        case args.first
+        when "load-buffer", "paste-buffer", "delete-buffer"
+          exit 0
+        when "send-keys"
+          warn "no server running on /tmp/tmux-test"
+          exit 1
+        else
+          exit 0
+        end
+      RUBY
+      runner = Hive::TmuxRunner.new(
+        name: unique_name("submit-lost"),
+        cwd: dir,
+        tmux_bin: fake,
+        socket_name: @socket_name
+      )
+
+      error = assert_raises(Hive::TmuxRunner::NoServerRunning) do
+        runner.send_prompt("hello")
+      end
+
+      assert_match(/send-keys/, error.message)
+      assert_prompt_buffer_cleaned_up(log_path)
+    end
+  end
+
+  def test_send_prompt_times_out_when_enter_submit_hangs
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "tmux.log")
+      fake = write_fake_tmux(dir, <<~RUBY)
+        #!/usr/bin/env ruby
+        args = ARGV.dup
+        args.shift(2) if args.first == "-L"
+        File.open(#{log_path.dump}, "a") { |log| log.puts(args.join(" ")) }
+        case args.first
+        when "load-buffer", "paste-buffer", "delete-buffer"
+          exit 0
+        when "send-keys"
+          sleep 5
+          exit 0
+        else
+          exit 0
+        end
+      RUBY
+      runner = Hive::TmuxRunner.new(
+        name: unique_name("submit-hang"),
+        cwd: dir,
+        tmux_bin: fake,
+        socket_name: @socket_name
+      )
+
+      error = with_env("HIVE_TMUX_COMMAND_TIMEOUT_SEC" => "0.25") do
+        assert_raises(Hive::TmuxRunner::CommandTimedOut) do
+          runner.send_prompt("hello")
+        end
+      end
+
+      assert_match(/send-keys/, error.message)
+      assert_match(/timed out after 0.25s/, error.message)
+      assert_prompt_buffer_cleaned_up(log_path)
+    end
+  end
+
   def test_capture_pane_tail_returns_bounded_output
     with_tmp_dir do |dir|
       runner = runner(name: unique_name("tail"), cwd: dir)
@@ -182,6 +253,36 @@ class TmuxRunnerTest < Minitest::Test
   end
 
   private
+
+  def assert_prompt_buffer_cleaned_up(log_path)
+    lines = File.read(log_path).lines.map(&:strip)
+    load_index = command_index(lines, "load-buffer")
+    paste_index = command_index(lines, "paste-buffer")
+    send_index = command_index(lines, "send-keys")
+    delete_index = command_index(lines, "delete-buffer")
+    buffer_name = option_value(lines.fetch(load_index), "-b")
+
+    assert_operator load_index, :<, paste_index
+    assert_operator paste_index, :<, send_index
+    assert_operator send_index, :<, delete_index
+    assert_equal buffer_name, option_value(lines.fetch(paste_index), "-b")
+    assert_equal buffer_name, option_value(lines.fetch(delete_index), "-b")
+  end
+
+  def command_index(lines, command)
+    index = lines.index { |line| line.split.first == command }
+    flunk "missing tmux #{command} call in #{lines.inspect}" unless index
+
+    index
+  end
+
+  def option_value(line, option)
+    parts = line.split
+    option_index = parts.index(option)
+    flunk "missing #{option} in #{line.inspect}" unless option_index
+
+    parts.fetch(option_index + 1)
+  end
 
   def runner(name:, cwd:, env: {})
     Hive::TmuxRunner.new(name: name, cwd: cwd, env: env, socket_name: @socket_name)

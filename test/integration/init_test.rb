@@ -1,5 +1,7 @@
 require "test_helper"
 require "json"
+require "stringio"
+require "json_schemer"
 require "hive/commands/init"
 require "hive/llm_wiki_bootstrap"
 require "hive/reviewers/agent"
@@ -59,8 +61,67 @@ class InitTest < Minitest::Test
         assert File.exist?(File.join(home, ".config/systemd/user/hive-daemon.service")),
                "init should register the per-user daemon service unit"
         global = YAML.safe_load(File.read(File.join(home, "config.yml")))
-        assert_equal false, global.dig("daemon", "autostart"),
-                     "non-TTY init writes the service unit but does not start it by default"
+        assert_equal true, global.dig("daemon", "autostart"),
+                     "init registers the daemon service for autostart; project config controls enrollment only"
+      end
+    end
+  end
+
+  def test_init_json_emits_parseable_success_payload_without_prose
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        out, _err = capture_io { Hive::Commands::Init.new(dir, json: true).call }
+        payload = JSON.parse(out)
+
+        assert_equal 1, out.lines.size
+        refute_includes out, "hive: using defaults"
+        refute_includes out, "hive: initialized"
+        assert_equal "hive-init", payload.fetch("schema")
+        assert_equal 1, payload.fetch("schema_version")
+        assert_equal true, payload.fetch("ok")
+        assert_equal File.basename(dir), payload.fetch("project")
+        assert_equal File.expand_path(dir), payload.fetch("path")
+        assert_equal File.join(dir, ".hive-state"), payload.fetch("hive_state_path")
+        assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
+        assert_equal payload.fetch("answers").fetch("budgets"), payload.fetch("budgets")
+        assert_equal true, payload.fetch("daemon_autostart_requested")
+
+        schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+        errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
+        assert_empty errors, "hive init --json payload must validate: #{errors.inspect}"
+      end
+    end
+  end
+
+  def test_init_json_mirrors_non_default_prompt_answers
+    inputs = ([ "codex", "2", "pi", "2", "safetyist", "60,120" ] +
+              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
+              [ "n", "" ]).join("\n") + "\n"
+
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        prompts = make_tty_prompts(inputs)
+        out, _err = capture_io { Hive::Commands::Init.new(dir, json: true, prompts: prompts).call }
+        payload = JSON.parse(out)
+        answers = payload.fetch("answers")
+
+        assert_equal "codex", answers.fetch("planning_agent")
+        assert_equal "headless", answers.fetch("claude_mode")
+        assert_equal "pi", answers.fetch("development_agent")
+        assert_equal [ "codex-ce-code-review" ], answers.fetch("enabled_reviewers")
+        assert_equal "safetyist", answers.fetch("triage_bias")
+        assert_equal 60, answers.fetch("budgets").fetch("brainstorm")
+        assert_equal 120, answers.fetch("timeouts").fetch("brainstorm")
+        assert_equal false, answers.fetch("daemon_enabled")
+
+        %w[
+          planning_agent claude_mode development_agent enabled_reviewers
+          triage_bias budgets timeouts daemon_enabled
+        ].each do |key|
+          assert_equal answers.fetch(key), payload.fetch(key), "top-level #{key} must mirror answers"
+        end
+        assert_equal true, payload.fetch("daemon_autostart_requested"),
+                     "JSON reports global daemon autostart intent, not service-manager outcome"
       end
     end
   end
@@ -229,12 +290,35 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_rejects_non_git_repo_with_json_flag_using_legacy_stderr_contract
+    with_tmp_global_config do
+      with_tmp_dir do |dir|
+        out, err, status = with_captured_exit { Hive::Commands::Init.new(dir, json: true).call }
+        assert_equal "", out
+        assert_equal 1, status
+        assert_includes err, "not a git repository"
+      end
+    end
+  end
+
   def test_rejects_dirty_tree_without_force
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         # Modify a tracked file to make the tree dirty (untracked files alone don't fail).
         File.write(File.join(dir, "README.md"), "modified\n")
         _, err, status = with_captured_exit { Hive::Commands::Init.new(dir).call }
+        assert_equal 1, status
+        assert_includes err, "uncommitted modifications"
+      end
+    end
+  end
+
+  def test_rejects_dirty_tree_with_json_flag_using_legacy_stderr_contract
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        File.write(File.join(dir, "README.md"), "modified\n")
+        out, err, status = with_captured_exit { Hive::Commands::Init.new(dir, json: true).call }
+        assert_equal "", out
         assert_equal 1, status
         assert_includes err, "uncommitted modifications"
       end
@@ -270,6 +354,18 @@ class InitTest < Minitest::Test
         _, err, status = with_captured_exit { Hive::Commands::Init.new(dir).call }
         assert_equal Hive::ExitCodes::ALREADY_INITIALIZED, status,
                      "second init must raise Hive::AlreadyInitialized (exit 2), not bare exit"
+        assert_includes err, "already initialized"
+      end
+    end
+  end
+
+  def test_double_init_with_json_flag_uses_legacy_stderr_contract
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        out, err, status = with_captured_exit { Hive::Commands::Init.new(dir, json: true).call }
+        assert_equal "", out
+        assert_equal Hive::ExitCodes::ALREADY_INITIALIZED, status
         assert_includes err, "already initialized"
       end
     end
@@ -354,7 +450,6 @@ class InitTest < Minitest::Test
   # test/unit/commands/init/prompts_test.rb but inlined here so init_test
   # stays self-contained.
   def make_tty_prompts(input_text)
-    require "stringio"
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true }
     Hive::Commands::Init::Prompts.new(
@@ -364,6 +459,29 @@ class InitTest < Minitest::Test
     )
   end
 
+  def make_incomplete_prompts(missing_key)
+    prompts = Object.new
+    prompts.define_singleton_method(:collect) do
+      input = StringIO.new
+      input.define_singleton_method(:tty?) { false }
+      answers = Hive::Commands::Init::Prompts.new(
+        input: input,
+        output: StringIO.new,
+        summary_io: StringIO.new
+      ).collect
+      answers.delete(missing_key)
+      answers
+    end
+    prompts
+  end
+
+  def assert_clean_failed_init(dir)
+    refute File.exist?(File.join(dir, ".hive-state"))
+    assert_empty `git -C #{dir} branch --list hive/state`.strip
+    assert_equal "", `git -C #{dir} status --porcelain`.strip
+    refute Hive::Config.find_project(File.basename(dir))
+  end
+
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect. Choose codex for planning, default
     # claude_mode, codex for development, safetyist triage, only first +
@@ -371,7 +489,7 @@ class InitTest < Minitest::Test
     inputs = [
       "codex", "", "2", "1,3", "safetyist",
       "", "30,900", "", "", "", "", "", "", "", "",
-      "", "", ""
+      "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -403,10 +521,10 @@ class InitTest < Minitest::Test
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), dev=blank,
     # reviewers=blank, triage=blank, limit blanks, daemon-enable=blank,
-    # daemon-autostart=blank, confirm=blank.
+    # confirm=blank.
     inputs = ([ "", "2", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
-              [ "", "", "" ]).join("\n") + "\n"
+              [ "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -426,10 +544,9 @@ class InitTest < Minitest::Test
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
     # Blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, limits. Then "n" for daemon-enable, blank for
-    # daemon-autostart, blank for confirm.
+    # triage bias, limits. Then "n" for daemon-enable and blank for confirm.
     inputs = (([ "" ] * (5 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
-              [ "n", "", "" ]).join("\n") + "\n"
+              [ "n", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
@@ -445,8 +562,8 @@ class InitTest < Minitest::Test
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
     # Blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, limits, daemon-enable, daemon-autostart.
-    inputs = (([ "" ] * (7 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    # triage bias, limits, daemon-enable.
+    inputs = (([ "" ] * (6 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -470,6 +587,110 @@ class InitTest < Minitest::Test
                         "orphan hive/state branch must not exist after abort"
         refute Hive::Config.find_project(File.basename(dir)),
                "global registry must not list the aborted project"
+      end
+    end
+  end
+
+  def test_init_incomplete_prompt_answers_fail_before_disk_side_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        error = assert_raises(Hive::InternalError) do
+          capture_io do
+            Hive::Commands::Init.new(dir, prompts: make_incomplete_prompts("claude_mode")).call
+          end
+        end
+        assert_includes error.message, "KeyError"
+        assert_includes error.message, "claude_mode"
+
+        refute File.directory?(File.join(dir, ".hive-state")),
+               ".hive-state must not exist after an incomplete prompt answer hash"
+        log = `git -C #{dir} log --format=%s 2>&1`.strip
+        refute_includes log, "chore: ignore .hive-state worktree",
+                        "master must not have the gitignore commit"
+        branches = `git -C #{dir} branch --list`
+        refute_includes branches, "hive/state",
+                        "orphan hive/state branch must not exist after incomplete prompt answers"
+        refute Hive::Config.find_project(File.basename(dir)),
+               "global registry must not list the failed project"
+      end
+    end
+  end
+
+  def test_init_rolls_back_hive_state_when_disk_step_fails_after_orphan_init
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        command = Hive::Commands::Init.new(dir)
+        command.define_singleton_method(:write_per_project_config) do |_ops, content:|
+          raise "boom after hive_state_init"
+        end
+
+        _out, err = capture_io do
+          error = assert_raises(Hive::InternalError) { command.call }
+          assert_includes error.message, "RuntimeError: boom after hive_state_init"
+        end
+
+        assert_includes err, "partial init failed; rolled back"
+        refute File.exist?(File.join(dir, ".hive-state"))
+        assert_empty `git -C #{dir} branch --list hive/state`.strip
+        refute Hive::Config.find_project(File.basename(dir))
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+        assert File.directory?(File.join(dir, ".hive-state"))
+      end
+    end
+  end
+
+  def test_init_rolls_back_when_hive_state_init_raises_after_partial_create
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        original_new = Hive::GitOps.method(:new)
+        with_replaced_singleton_method(Hive::GitOps, :new, lambda { |path|
+          ops = original_new.call(path)
+          original_init = ops.method(:hive_state_init)
+          ops.define_singleton_method(:hive_state_init) do
+            original_init.call
+            raise "boom inside hive_state_init"
+          end
+          ops
+        }) do
+          _out, err = capture_io do
+            error = assert_raises(Hive::InternalError) { Hive::Commands::Init.new(dir).call }
+            assert_includes error.message, "RuntimeError: boom inside hive_state_init"
+          end
+          assert_includes err, "partial init failed; rolled back"
+        end
+
+        assert_clean_failed_init(dir)
+        capture_io { Hive::Commands::Init.new(dir).call }
+        assert File.directory?(File.join(dir, ".hive-state"))
+      end
+    end
+  end
+
+  def test_init_rolls_back_main_checkout_side_effects_when_later_step_fails
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        original_head = `git -C #{dir} rev-parse HEAD`.strip
+        with_replaced_singleton_method(Hive::LlmWikiBootstrap, :install!, lambda { |project_root, **_kwargs|
+          FileUtils.mkdir_p(File.join(project_root, ".llm-wiki"))
+          File.write(File.join(project_root, ".llm-wiki", "config.json"), "{}\n")
+          raise "boom after gitignore commit"
+        }) do
+          _out, err = capture_io do
+            error = assert_raises(Hive::InternalError) { Hive::Commands::Init.new(dir).call }
+            assert_includes error.message, "RuntimeError: boom after gitignore commit"
+          end
+          assert_includes err, "main checkout commits"
+          assert_includes err, "main checkout side effects"
+        end
+
+        assert_equal original_head, `git -C #{dir} rev-parse HEAD`.strip
+        assert_clean_failed_init(dir)
+        refute File.exist?(File.join(dir, ".gitignore"))
+        refute File.exist?(File.join(dir, ".llm-wiki"))
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+        assert File.directory?(File.join(dir, ".hive-state"))
       end
     end
   end

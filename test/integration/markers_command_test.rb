@@ -431,6 +431,47 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  def test_match_attr_clears_when_all_values_match
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code", exit_code: 143 })
+        state = File.join(folder, "task.md")
+
+        capture_io do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "reason=exit_code,exit_code=143"
+          ).call
+        end
+
+        marker = Hive::Markers.current(state)
+        assert_equal :none, marker.name,
+                     "all comma-separated --match-attr values must match before clear succeeds"
+      end
+    end
+  end
+
+  def test_match_attr_refuses_when_any_value_differs
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "shutdown", exit_code: 143 })
+        state = File.join(folder, "task.md")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "reason=exit_code,exit_code=143"
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status,
+                     "any attr mismatch must refuse so stale workers cannot erase same-code/different-reason markers"
+        assert_match(/reason/, err)
+        marker = Hive::Markers.current(state)
+        assert_equal :error, marker.name,
+                     "marker must remain on disk when one match attr refuses"
+      end
+    end
+  end
+
   def test_match_attr_refuses_when_value_differs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -470,6 +511,55 @@ class MarkersCommandTest < Minitest::Test
                      "missing attr key must refuse with WrongStage"
         marker = Hive::Markers.current(state)
         assert_equal :error, marker.name
+      end
+    end
+  end
+
+
+  def test_match_attr_marker_id_clears_when_current_value_matches
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code", exit_code: 1 })
+        state = File.join(folder, "task.md")
+        marker_id = Hive::Markers.current(state).attrs.fetch("marker_id")
+
+        capture_io do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "marker_id=#{marker_id}"
+          ).call
+        end
+
+        marker = Hive::Markers.current(state)
+        assert_equal :none, marker.name,
+                     "current marker_id must allow the ERROR marker clear"
+      end
+    end
+  end
+
+  def test_match_attr_marker_id_refuses_fresh_error_with_same_exit_code
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(dir, marker_attrs: { reason: "exit_code", exit_code: 1 })
+        state = File.join(folder, "task.md")
+        first_id = Hive::Markers.current(state).attrs.fetch("marker_id")
+
+        Hive::Markers.set(state, :error, reason: "exit_code", exit_code: 1)
+        fresh = Hive::Markers.current(state)
+        second_id = fresh.attrs.fetch("marker_id")
+        refute_equal first_id, second_id
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "marker_id=#{first_id}"
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status,
+                     "stale marker_id must refuse even when exit_code still matches"
+        marker = Hive::Markers.current(state)
+        assert_equal :error, marker.name
+        assert_equal second_id, marker.attrs["marker_id"],
+                     "fresh same-exit-code ERROR marker must remain on disk"
       end
     end
   end

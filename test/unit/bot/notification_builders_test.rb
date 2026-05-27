@@ -21,12 +21,49 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
   end
 
+  def legacy_stage_dirs(task_count: 3, command: "hive migrate")
+    Hive::Bot::StatusWatcher::LegacyStageDirs.new(
+      project: "hive",
+      project_path: "/tmp/hive",
+      hive_state_path: "/tmp/hive/.hive-state",
+      legacy_stage_dirs: [
+        { "stage_dir" => "5-review", "task_count" => task_count - 1 },
+        { "stage_dir" => "6-pr", "task_count" => 1 }
+      ],
+      legacy_migrate_command: command
+    )
+  end
+
   def retry_diagnostic(command: "hive review slug --json")
     { "suggested_next_action" => { "kind" => "retry", "command" => command } }
   end
 
   def manual_diagnostic
     { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
+  end
+
+  def test_legacy_stage_dirs_notification_renders_project_count_dirs_and_command
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs)
+
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
+  end
+
+  def test_legacy_stage_dirs_notification_renders_singular_and_command_fallback
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(task_count: 1, command: nil))
+
+    assert_equal "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
+  end
+
+  def test_legacy_stage_dirs_notification_handles_malformed_command_payload
+    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(command: "hive 'migrate"))
+
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 notification.text
+    assert_nil notification.keyboard
   end
 
   def test_ready_to_plan_builds_approval_keyboard
@@ -159,12 +196,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "review_stale must drive recovery_match_attr toward the pass=<n> key")
   end
 
-  def test_recovery_match_attr_error_uses_exit_code
-    attrs = { "exit_code" => "137" }
+  def test_recovery_match_attr_error_prefers_marker_id
+    attrs = { "reason" => "exit_code", "exit_code" => "137", "marker_id" => "err-137" }
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:exit_code=137\z/, autofix,
-                 "generic `error` marker must drive recovery_match_attr toward exit_code")
+    assert_match(/:marker_id=err-137\z/, autofix,
+                 "generic `error` marker must prefer the high-cardinality marker_id guard")
+  end
+
+  def test_recovery_match_attr_error_legacy_falls_back_to_observed_attrs
+    attrs = { "reason" => "exit_code", "exit_code" => "137" }
+    r = row(action: "error", marker: "error", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+    assert_match(/:reason=exit_code,exit_code=137\z/, autofix,
+                 "legacy `error` marker must use observed reason and exit_code together")
   end
 
   def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix

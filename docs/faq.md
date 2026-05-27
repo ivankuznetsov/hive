@@ -18,9 +18,9 @@ Hive state changes often and should not pollute the project's code history or tr
 
 `mv` is the primitive. `hive approve` wraps the same transition with marker validation, locking, commits, retry checks, and JSON output.
 
-### Why opt-in daemon, not always-on?
+### Why project-level daemon enrollment?
 
-The daemon can spend real agent time and move many tasks. Per-project enrollment is the durable consent signal, and `--dry-run` lets you inspect dispatches before live mode.
+The daemon service is installed as global user infrastructure so it survives login and reboot. Project enrollment stays explicit because the daemon can spend real agent time and move many tasks; `daemon.enabled: true` is the durable consent signal for a specific repository, and `--dry-run` lets you inspect dispatches before live mode.
 
 ### Why no built-in web UI?
 

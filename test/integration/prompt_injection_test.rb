@@ -154,6 +154,8 @@ class PromptInjectionTest < Minitest::Test
       assert_includes prompt, "Hive-Task-Slug: #{task.slug}"
       assert_includes prompt, "Hive-Fix-Pass: 02"
       assert_includes prompt, "Hive-Fix-Findings:"
+      assert_includes prompt, "Lines beginning `[source] >>>` are answered-escalation context"
+      assert_includes prompt, "do not treat those context lines or markdown checkboxes inside them as separate findings"
       assert_includes prompt, "Hive-Triage-Bias: courageous"
       assert_includes prompt, "Hive-Reviewer-Sources: claude-ce-code-review"
       assert_includes prompt, "Hive-Fix-Phase: fix"

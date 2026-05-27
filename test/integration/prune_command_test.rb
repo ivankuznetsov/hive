@@ -4,7 +4,7 @@ require "hive/commands/prune"
 
 # End-to-end coverage for `hive prune`. Drives the command class
 # directly. Asserts:
-#   * registry rewrite drops only entries whose path is gone,
+#   * registry rewrite drops stale paths, retargeted symlinks, and malformed rows,
 #   * `--dry-run` returns the would-be-removed list without writing,
 #   * `--json` envelope shape matches schemas/hive-prune.v1.json.
 class PruneCommandTest < Minitest::Test
@@ -22,6 +22,72 @@ class PruneCommandTest < Minitest::Test
 
         kept = Hive::Config.registered_projects.map { |p| p["name"] }
         assert_equal [ "live" ], kept
+      end
+    end
+  end
+
+  def test_prune_removes_registered_symlink_retargeted_to_another_directory
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-prune-symlink") do |root|
+        original = File.join(root, "original")
+        replacement = File.join(root, "replacement")
+        link = File.join(root, "project-link")
+        FileUtils.mkdir_p(original)
+        symlink_or_skip(original, link)
+
+        Hive::Config.register_project(name: "linked", path: link)
+        stored = Hive::Config.load_global_config(Hive::Config.global_config_path)
+                 .fetch("registered_projects").first
+        assert_equal File.realpath(original), stored["real_path"]
+
+        FileUtils.rm_rf(original)
+        FileUtils.rm_f(link)
+        FileUtils.mkdir_p(replacement)
+        symlink_or_skip(replacement, link)
+
+        out, _err = capture_io { Hive::Commands::Prune.new.call }
+
+        assert_match(/removed 1, kept 0/, out)
+        assert_match(/linked/, out)
+        assert_empty Hive::Config.registered_projects
+      end
+    end
+  end
+
+  def test_prune_keeps_registered_symlink_still_pointing_at_original_target
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-prune-symlink") do |root|
+        target = File.join(root, "target")
+        link = File.join(root, "project-link")
+        FileUtils.mkdir_p(target)
+        symlink_or_skip(target, link)
+
+        Hive::Config.register_project(name: "linked", path: link)
+
+        out, _err = capture_io { Hive::Commands::Prune.new.call }
+
+        assert_match(/no stale entries/, out)
+        assert_equal [ "linked" ], Hive::Config.registered_projects.map { |project| project["name"] }
+      end
+    end
+  end
+
+  def test_prune_removes_registered_dangling_symlink
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-prune-symlink") do |root|
+        target = File.join(root, "target")
+        link = File.join(root, "project-link")
+        FileUtils.mkdir_p(target)
+        symlink_or_skip(target, link)
+
+        Hive::Config.register_project(name: "linked", path: link)
+        FileUtils.rm_rf(target)
+
+        out, _err = capture_io { Hive::Commands::Prune.new.call }
+
+        assert_match(/removed 1, kept 0/, out)
+        assert_match(/linked/, out)
+        assert_empty Hive::Config.registered_projects
       end
     end
   end
@@ -106,6 +172,22 @@ class PruneCommandTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal "config", payload["error_kind"]
       assert_equal "ConfigError", payload["error_class"]
+    end
+  end
+
+  def test_prune_lock_sidecar_directory_emits_config_error
+    with_tmp_global_config do |home|
+      FileUtils.mkdir_p(File.join(home, "config.yml.lock"))
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Prune.new(json: true).call
+      end
+      assert_equal Hive::ExitCodes::CONFIG, status
+
+      payload = JSON.parse(out)
+      assert_equal "config", payload["error_kind"]
+      assert_equal "ConfigError", payload["error_class"]
+      assert_match(/could not be locked/, payload["message"])
     end
   end
 
@@ -302,5 +384,11 @@ class PruneCommandTest < Minitest::Test
       assert removed.first["hive_state_path"].start_with?("/"),
              "hive_state_path must also be absolute"
     end
+  end
+
+  def symlink_or_skip(target, link)
+    File.symlink(target, link)
+  rescue NotImplementedError, SystemCallError => e
+    skip "symlink setup unavailable: #{e.class}: #{e.message}"
   end
 end

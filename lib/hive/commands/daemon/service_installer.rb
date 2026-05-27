@@ -20,7 +20,7 @@ module Hive
           # HOME stay hermetic.
           @home = File.expand_path(home || ENV["HOME"] || Dir.home)
           @binary_path = binary_path
-          @runner = runner || ->(argv) { system(*argv) }
+          @runner = runner || ->(argv) { system(*argv, out: File::NULL) }
           @systemctl_available = systemctl_available
           @messages = []
           @last_backup_path = nil
@@ -138,7 +138,16 @@ module Hive
                 return :failed
               end
             else
-              @messages << "systemd not detected; enable systemd in WSL or run `hive daemon start` manually."
+              # The unit file was written above, but this host has no
+              # systemd-user to enable it with. That is a known-platform
+              # limitation (WSL without systemd, minimal containers), not
+              # a failure — return :autostart_unavailable so the caller
+              # exits 0 and does not treat a reboot-survivable repair as
+              # a software fault. macOS keeps returning :failed when
+              # launchctl actually rejects a load, because launchd is
+              # always present there.
+              @messages << "systemd not detected; daemon unit was written but autostart was not enabled. Enable systemd in WSL or run `hive daemon start` manually."
+              return :autostart_unavailable
             end
           end
           # Preserve the write_result distinction for the operator-facing

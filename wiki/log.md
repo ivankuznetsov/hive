@@ -9,6 +9,13 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[commands/init]], [[state-model]] - reworded to "every Claude-backed stage (tmux and headless)."
 
+## [2026-05-27T09:30:53Z] tui - widen subprocess diagnosis marker lookup
+
+**Action:** Rebased issue #14 on top of the current TUI marker-id/backoff work. `Hive::Tui::Subprocess.diagnose_recent_failure` now starts with the existing 64 KiB marker-log tail read, then walks backward in 64 KiB increments up to 1 MiB before falling back to the generic exit-code flash. `Messages::SubprocessExited` carries the spawn id so concurrent same-verb failures diagnose the exact per-spawn capture instead of the newest same-verb marker, and marker argv serialization now round-trips quoted values such as project names with spaces. Per-spawn stdout/stderr capture remains capped separately; the wider marker lookup only recovers the BEGIN[id] line needed to map a failing verb to its capture file and argv.
+
+**Refreshed pages:**
+- [[commands/tui]] - documented the 64 KiB to 1 MiB bounded marker-log lookup and exact-spawn diagnostic routing.
+
 ## [2026-05-27T09:30:00Z] claude - unify bypassPermissions flag across tmux and headless
 
 **Action:** Made `claude.permission_mode: bypassPermissions` resolve to the same `--dangerously-skip-permissions` flag on both the headless `-p` path and the interactive tmux path. Previously the tmux wrapper emitted `--permission-mode bypassPermissions` while headless emitted `--dangerously-skip-permissions` — a documented divergence flagged in code review. Extracted the mode→argv mapping into a single `AgentProfile#permission_flags(mode)` used by both `Hive::Agent#build_cmd` and `Hive::ClaudeLauncher#wrapper_command`, and taught `interactive_claude_wrapper.sh` to forward a valueless `--dangerously-skip-permissions`.

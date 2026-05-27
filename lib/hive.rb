@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.1.0".freeze
+  VERSION = "0.1.2".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
 
   module Schemas

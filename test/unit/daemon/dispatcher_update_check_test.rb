@@ -118,6 +118,8 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
     assert_nil @state.nudge
     assert_empty events(logger, :update_available)
     assert_empty events(logger, :update_check_error), "nil result is not an error, just no info"
+    assert_equal 1, events(logger, :update_check_no_result).size,
+                 "an unreachable check logs a distinct signal so operators can see it"
   end
 
   def test_checker_exception_does_not_crash_tick

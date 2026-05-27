@@ -71,19 +71,22 @@ class HiveCommandsDaemonTest < Minitest::Test
     config = daemon_config
     captured = nil
 
+    update_config = { "check" => true, "auto" => true }
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
       with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
-        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
-          captured = kwargs
-          dispatcher
-        }) do
-          command.call
+        with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
+          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+            captured = kwargs
+            dispatcher
+          }) do
+            command.call
+          end
         end
       end
     end
 
     assert_equal [ :run_forever ], dispatcher.calls
-    assert_equal({ "daemon" => config }, captured.fetch(:config))
+    assert_equal({ "daemon" => config, "update" => update_config }, captured.fetch(:config))
     assert_equal true, captured.fetch(:dry_run)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end

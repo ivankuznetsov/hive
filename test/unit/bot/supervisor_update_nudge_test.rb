@@ -5,8 +5,9 @@ require "hive/update_check/state"
 
 # Pins the bot's once-per-version update push (plan 2026-05-27-002, U5).
 class HiveBotSupervisorUpdateNudgeTest < Minitest::Test
-  FakeTelegram = Struct.new(:messages, :fail_first, keyword_init: true) do
+  FakeTelegram = Struct.new(:messages, :fail_first, :fail_all, keyword_init: true) do
     def send_message(chat_id:, text:, reply_markup: nil)
+      raise "telegram down" if fail_all
       if fail_first && messages.empty? && !@failed
         @failed = true
         raise "telegram boom"
@@ -67,6 +68,18 @@ class HiveBotSupervisorUpdateNudgeTest < Minitest::Test
   def test_no_push_when_no_nudge
     supervisor.send(:push_update_nudge)
     assert_empty @telegram.messages
+  end
+
+  def test_all_sends_fail_does_not_record_and_retries_next_tick
+    failing = FakeTelegram.new(messages: [], fail_all: true)
+    @state.set_nudge(latest: "0.1.7", channel: "brew", command: "brew upgrade x")
+    sup = supervisor(telegram: failing)
+    sup.send(:push_update_nudge)
+
+    assert_empty failing.messages
+    assert @state.should_notify?("0.1.7"),
+           "a total send failure must NOT mark notified, so the next tick retries"
+    refute_includes event_names, :update_nudge_pushed
   end
 
   def test_partial_success_records_notified

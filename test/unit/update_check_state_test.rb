@@ -73,4 +73,30 @@ class UpdateCheckStateTest < Minitest::Test
     state.record_check!(@now)
     refute state.due?(@now + 10, window: 86_400), "check timestamp must survive a reload"
   end
+
+  def test_due_exactly_at_window_boundary
+    s = state
+    s.record_check!(@now)
+    assert state.due?(@now + 86_400, window: 86_400),
+           "due? uses >= so a check is due exactly one window later (no off-by-one drift)"
+  end
+
+  def test_cross_process_writes_do_not_clobber_each_other
+    # The whole reason every op re-reads disk: the daemon writes `nudge` while
+    # the bot writes `last_notified_version`, each from its own instance. A
+    # stale in-memory copy in either would erase the other's key. Interleave
+    # three separate instances against one file, then assert all keys survive.
+    daemon = state
+    bot = state
+
+    daemon.set_nudge(latest: "0.1.7", channel: "brew", command: "brew upgrade x")
+    bot.record_notified!("0.1.7")   # bot must not erase the daemon's nudge
+    daemon.record_check!(@now)       # daemon must not erase the bot's notified-version
+
+    fresh = state
+    assert fresh.nudge, "nudge (daemon-written) must survive the bot's write"
+    assert_equal "0.1.7", fresh.nudge.latest
+    refute fresh.should_notify?("0.1.7"), "notified-version (bot-written) must survive the daemon's write"
+    refute fresh.due?(@now + 10, window: 86_400), "check timestamp must survive too"
+  end
 end

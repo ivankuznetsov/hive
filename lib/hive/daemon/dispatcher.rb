@@ -57,7 +57,9 @@ module Hive
         @daemon_cfg = config["daemon"] || {}
         @update_cfg = config["update"] || Hive::Config::DEFAULTS["update"]
         @update_check_enabled = @update_cfg.fetch("check", true)
-        @update_auto_enabled = @update_cfg.fetch("auto", true)
+        # NOTE: `update.auto` is intentionally NOT read here yet — bash
+        # auto-update (U7) is the only consumer and is deferred, so every
+        # channel is nudge-only. U7 will read it when it lands.
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
@@ -259,11 +261,16 @@ module Hive
       # Throttled (~daily) probe of the latest published release. On the
       # brew/AUR/bash channels it records a nudge (version + exact update
       # command) into the shared state file; the TUI footer renders it and
-      # the bot pushes it once per version. Auto-update for the bash channel
-      # is deferred to U7 (gated by `@update_auto_enabled`) — every channel
-      # is nudge-only for now. dev clones are skipped. Resilient by contract:
-      # an offline/rate-limited/parse failure degrades silently (R7/G4) and
-      # never raises out of a tick.
+      # the bot pushes it once per version. Auto-update (bash channel, U7) is
+      # deferred, so every channel is nudge-only for now. dev clones are
+      # skipped. Resilient by contract: an offline/rate-limited/parse failure
+      # degrades silently (R7/G4) and never raises out of a tick.
+      #
+      # `record_check!` runs BEFORE the probe on purpose: a failed probe still
+      # consumes the daily throttle so an offline daemon can't hammer GitHub
+      # (and trip the 60/hr anonymous rate limit) every tick. The cost is that
+      # a transient blip defers the next attempt by ~a day — acceptable given
+      # the daily cadence and nudge-only stakes.
       def maybe_check_for_update(now:)
         return unless @update_check_enabled
         return unless @update_state
@@ -271,7 +278,12 @@ module Hive
 
         @update_state.record_check!(now)
         result = @update_checker.call
-        return if result.nil?
+        if result.nil?
+          # Distinguish "checked, GitHub unreachable" from "checked, current"
+          # so an operator debugging a missing nudge has a signal.
+          @logger.event(:update_check_no_result)
+          return
+        end
 
         channel = @channel_detector.call
         if channel == "dev" || !result.behind?

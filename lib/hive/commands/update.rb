@@ -21,11 +21,13 @@ module Hive
       # Returns nil for dev (git clone — `git pull` is the right move, but
       # there's no single canonical command to nudge). The bash channel is
       # nudge-only until the daemon auto-update spike (U7) lands; `hive update`
-      # re-runs the installer in place.
+      # re-runs the installer in place. The aur nudge mirrors `aur_command`'s
+      # `-Syu` (not a bare `-S`): a DB sync is required, or a stale local DB
+      # would "update" to an older hive-bin than the release being nudged.
       def self.nudge_command(channel)
         case channel
         when "brew" then "brew upgrade #{BREW_TAP}"
-        when "aur" then "yay -S hive-bin"
+        when "aur" then "yay -Syu hive-bin"
         when "bash" then "hive update"
         end
       end

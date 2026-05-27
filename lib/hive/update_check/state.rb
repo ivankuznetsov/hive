@@ -92,7 +92,9 @@ module Hive
         synchronize do
           load!
           raw = @data["nudge"]
-          next nil unless raw.is_a?(Hash) && !raw["latest"].to_s.empty?
+          # Require both latest AND command: a hand-edited/partial file with a
+          # version but no command would otherwise render "update X.Y.Z: ".
+          next nil unless raw.is_a?(Hash) && !raw["latest"].to_s.empty? && !raw["command"].to_s.empty?
 
           Nudge.new(latest: raw["latest"], channel: raw["channel"], command: raw["command"])
         end
@@ -146,8 +148,12 @@ module Hive
         return unless File.directory?(dir)
 
         Dir.glob(File.join(dir, ".#{File.basename(@path)}.*.tmp")).each { |orphan| FileUtils.rm_f(orphan) }
-      rescue StandardError
-        nil
+      rescue StandardError => e
+        # Best-effort, but log it: a persistently failing sweep (broken
+        # permissions on the state dir) would otherwise silently leak tmp
+        # files forever with no diagnostic.
+        @logger&.event(:update_check_tmp_sweep_error, path: @path,
+                                                      error_class: e.class.name, message: e.message)
       end
 
       def persist_locked!

@@ -161,7 +161,7 @@ class UpdateCommandTest < Minitest::Test
 
   def test_nudge_command_per_channel
     assert_equal "brew upgrade ivankuznetsov/hive/hive", Hive::Commands::Update.nudge_command("brew")
-    assert_equal "yay -S hive-bin", Hive::Commands::Update.nudge_command("aur")
+    assert_equal "yay -Syu hive-bin", Hive::Commands::Update.nudge_command("aur")
     assert_equal "hive update", Hive::Commands::Update.nudge_command("bash")
     assert_nil Hive::Commands::Update.nudge_command("dev")
   end

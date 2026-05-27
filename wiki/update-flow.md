@@ -25,7 +25,7 @@ tags: [architecture, daemon, bot, tui, update, decision]
 
 - **install.sh (bash)** — nudge-only today (`hive update`). Auto-update (re-run installer + ADR-031 self-re-exec when idle) is deferred to U7.
 - **brew** — nudge `brew upgrade ivankuznetsov/hive/hive`. hive never drives brew.
-- **aur** — nudge `yay -S hive-bin`. hive never drives the AUR helper.
+- **aur** — nudge `yay -Syu hive-bin` (mirrors `aur_command`'s `-Syu`; a DB sync is required or a stale local DB could install an older `hive-bin`). hive never drives the AUR helper.
 - **dev** — git clone; skipped entirely.
 
 ## Deferred (U7)

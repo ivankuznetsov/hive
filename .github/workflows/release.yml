@@ -102,22 +102,24 @@ jobs:
             --verify-tag
       - name: Notify Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        # Non-fatal: a tap dispatch hiccup must not abort the release or
+        # block the downstream aur-publish job (which `needs` this job).
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           version="${REF_NAME#v}"
           gem_sha="$(awk '/hive-cli-/ {print $1}' dist/SHA256SUMS)"
-          # Build the payload via jq so version/sha values can't break
-          # out of the JSON object (a tag like `v0.1","event_type":"x`
-          # injected via string concat would otherwise smuggle keys).
-          payload="$(jq -nc --arg version "$version" --arg sha "$gem_sha" \
-            '{version: $version, sha256_gem: $sha}')"
+          # Send the WHOLE request body via jq + --input so client_payload
+          # is a real JSON object. (`--raw-field client_payload=<json>`
+          # sends it as a string, which the dispatch API rejects with
+          # HTTP 422 "is not an object".) Building it with jq also keeps
+          # version/sha from breaking out of the JSON.
           echo "notify-homebrew: dispatching event_type=hive-release version=${version}"
-          gh api repos/ivankuznetsov/homebrew-hive/dispatches \
-            --method POST \
-            --field event_type=hive-release \
-            --raw-field "client_payload=${payload}"
+          jq -nc --arg version "$version" --arg sha "$gem_sha" \
+            '{event_type: "hive-release", client_payload: {version: $version, sha256_gem: $sha}}' \
+            | gh api repos/ivankuznetsov/homebrew-hive/dispatches --method POST --input -
       - name: Notify Homebrew tap (audit when skipped)
         if: ${{ env.HOMEBREW_TAP_TOKEN == '' }}
         run: |

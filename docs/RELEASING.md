@@ -185,6 +185,12 @@ version until you bump it manually or set the token.
   identity didn't match the pinned identity. This is the supply-chain gate
   working; do **not** loosen the `--certificate-identity-regexp`. Investigate
   the release artifact.
+- **`Host key verification failed` in `aur-publish`** → the AUR SSH first-contact
+  trust path failed before key authorization. The job intentionally uses
+  `StrictHostKeyChecking=accept-new` for CI TOFU: host identity checking stays
+  enabled, the first key is recorded in `~/.ssh/known_hosts`, and later changes
+  still fail closed. A missing or invalid `AUR_SSH_PRIVATE_KEY` fails later as
+  `Permission denied (publickey)`.
 - **Re-running a tag** → both publish paths are idempotent (a no-op when the
   channel is already at that version), so re-runs are safe.
 - **`aarch64` AUR install fails** → a precompiled dependency gem may be missing

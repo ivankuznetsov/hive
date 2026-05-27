@@ -100,7 +100,8 @@ class ServiceInstallerBaseTest < Minitest::Test
       backups = Dir["#{path}.bak-*"]
       assert_equal 1, backups.size, "force must back up the prior content exactly once"
       assert_equal "stale\n", File.read(backups.first)
-      assert_equal backups.first, installer.last_backup_path
+      assert_equal backups.first, installer.instance_variable_get(:@last_backup_path),
+                   "write_if_safe must record the backup path so install! can surface it on the Outcome"
       assert installer.messages.any? { |m| m.include?("upgraded existing unit") }
     end
   end
@@ -268,7 +269,8 @@ class ServiceInstallerBaseTest < Minitest::Test
     with_tmp_dir do |dir|
       seen = []
       runner = ->(argv) { seen << argv; true }
-      installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner)
+      installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner,
+                                    launchctl_available: true)
 
       state = installer.service_state
 
@@ -276,6 +278,40 @@ class ServiceInstallerBaseTest < Minitest::Test
       assert state["service_enabled"], "launchctl list exit 0 → loaded → enabled=true"
       assert_equal [ %w[launchctl list local.hive-test] ], seen,
                    "macOS probe must be the read-only launchctl list query"
+    end
+  end
+
+  def test_service_state_macos_disabled_when_launchctl_unavailable
+    with_tmp_dir do |dir|
+      # launchctl missing → enabled must be false and the runner must never
+      # be probed, mirroring the systemctl-unavailable guard so a probe that
+      # could not run never reports a confident-but-wrong enabled=true.
+      called = false
+      runner = ->(_argv) { called = true }
+      installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner,
+                                    launchctl_available: false)
+
+      state = installer.service_state
+
+      refute state["service_enabled"]
+      refute called, "must not probe launchctl when it is unavailable"
+    end
+  end
+
+  def test_service_state_macos_detects_launchctl_via_path_lookup
+    with_tmp_dir do |dir|
+      # With no injected launchctl_available flag, the guard falls back to a
+      # PATH lookup for launchctl. Stub `which` so the probe runs and the
+      # read-only launchctl list query is issued.
+      seen = []
+      runner = ->(argv) { seen << argv; true }
+      installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner)
+      installer.define_singleton_method(:which) { |name| name == "launchctl" ? "/bin/launchctl" : nil }
+
+      state = installer.service_state
+
+      assert state["service_enabled"], "launchctl present + list exit 0 → enabled=true"
+      assert_equal [ %w[launchctl list local.hive-test] ], seen
     end
   end
 
@@ -318,5 +354,34 @@ class ServiceInstallerBaseTest < Minitest::Test
   def test_upgrade_restart_warning_defaults_to_nil
     installer = BareInstaller.new(host_os: "linux")
     assert_nil installer.upgrade_restart_warning
+  end
+
+  # ── Outcome value object ───────────────────────────────────────────────
+
+  def test_outcome_rejects_unknown_kind_loudly
+    # An unmapped outcome kind must raise in the constructor rather than
+    # silently degrading to a false-error envelope downstream (the failure
+    # mode the old else-less case mapping allowed).
+    error = assert_raises(ArgumentError) do
+      Hive::Commands::ServiceInstaller::Outcome.new(:bogus)
+    end
+    assert_match(/unknown install outcome :bogus/, error.message)
+  end
+
+  def test_outcome_wire_mapping_and_success_classification
+    require "hive/commands/service_installer/outcome"
+    outcome_class = Hive::Commands::ServiceInstaller::Outcome
+
+    assert_equal "unsupported", outcome_class.new(:autostart_unavailable).wire_outcome,
+                 ":autostart_unavailable collapses to the wire `unsupported` success outcome"
+    assert outcome_class.new(:written).success?
+    assert outcome_class.new(:autostart_unavailable).success?
+    refute outcome_class.new(:drifted).success?
+    assert outcome_class.new(:drifted).drifted?
+    assert outcome_class.new(:failed).failed?
+
+    upgraded = outcome_class.new(:upgraded, backup_path: "/tmp/x.bak", restarted: true)
+    assert_equal "/tmp/x.bak", upgraded.backup_path
+    assert upgraded.restarted
   end
 end

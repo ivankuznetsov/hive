@@ -3,7 +3,7 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-05-14
+updated: 2026-05-27
 tags: [roadmap, status]
 ---
 
@@ -30,7 +30,8 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 | Repo hygiene | `CHANGELOG.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | Authored |
 | Docs | `README.md`, `wiki/` knowledge base | Authored |
 | Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
-| Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. |
+| Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. `hive bot install` adds an opt-in reboot-survivable per-user service (systemd-user/launchd) that runs `hive bot start --foreground` with no inline token; torn down by `hive uninstall`. |
+| Shared service installer | `lib/hive/commands/service_installer/base.rb`, `lib/hive/commands/{daemon,bot}/service_installer.rb`, `lib/hive/invoked_binary.rb`, `schemas/hive-{bot,daemon}-install.v1.json`, `docs/solutions/…cross-platform-service-installer-base…` | `ServiceInstaller::Base` extracted from the daemon installer (daemon behavior byte-identical) and subclassed by daemon + bot. Content-hash drift detection (`--force` to overwrite), `unsupported` outcome on hosts with no service manager, exit codes 0/64/70, and a read-only `service_state` probe surfaced as `service_installed`/`service_enabled`/`unit_path` in both `bot`/`daemon status --json`. |
 | Global Claude launch mode (ADR-030) | `lib/hive/claude_launcher.rb`, `lib/hive/stages/base.rb` (`spawn_claude!`), `lib/hive/commands/init/prompts.rb`, `lib/hive/commands/doctor.rb`, `docs/adrs/030-global-claude-launch-mode.md`, `docs/notes/claude-tmux-launch-mode.md` | Top-level `claude.mode` (default `tmux`) routes every Claude-backed stage (brainstorm/plan/execute/open-pr/artifacts/finalize + 6-review Claude reviewers) through one shared tmux launcher per pass. `tmux >= 3.0` is a hard runtime dep when mode is `tmux`. `hive init` prompts; `hive doctor` reports. `brainstorm.runtime` deprecated to brainstorm-only fallback. |
 
 ## Phase 1 deferred work

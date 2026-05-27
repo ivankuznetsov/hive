@@ -137,8 +137,7 @@ module Hive
               end
             end
           end
-        require "hive/commands/bot/service_installer"
-        service_state = Hive::Commands::Bot::ServiceInstaller.new.service_state
+        service_state = probe_service_state
         payload = {
           "schema" => "hive-bot-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"),
@@ -158,6 +157,18 @@ module Hive
           puts(running ? "hive bot: running (pid #{pid}, uptime #{uptime}s)" : "hive bot: not running")
         end
         raise Hive::Error, "bot not running" if !running && !@json
+      end
+
+      # Read-only autostart-state snapshot for the status envelope. A status
+      # probe must never take down the running/pid reporting that precedes
+      # it, so any failure degrades the three service fields to null (the
+      # status schema marks them required-but-nullable) instead of raising
+      # out of the whole command.
+      def probe_service_state
+        require "hive/commands/bot/service_installer"
+        Hive::Commands::Bot::ServiceInstaller.new.service_state
+      rescue StandardError
+        { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
       end
 
       def reload_bot
@@ -230,15 +241,15 @@ module Hive
       # Bare-text positive confirmation on the non-JSON success path so
       # operators can distinguish first-time install / no-op / in-place
       # upgrade at a glance. Mirrors `daemon#emit_install_success_summary`.
-      def emit_install_success_summary(installer, result)
+      def emit_install_success_summary(installer, outcome)
         return if @json
 
-        case result
-        when :ok, :written
+        case outcome.kind
+        when :written
           puts "hive bot: installed unit at #{installer.target_path}"
         when :upgraded
           msg = "hive bot: upgraded unit at #{installer.target_path}"
-          msg += " (backup: #{installer.last_backup_path})" if installer.last_backup_path
+          msg += " (backup: #{outcome.backup_path})" if outcome.backup_path
           puts msg
         when :unchanged
           puts "hive bot: unit already up to date at #{installer.target_path}"
@@ -251,58 +262,36 @@ module Hive
         end
       end
 
-      def emit_install_outcome(installer, result)
-        outcome_str =
-          case result
-          when :written then "written"
-          when :upgraded then "upgraded"
-          when :unchanged then "unchanged"
-          # The unit was written but autostart could not be enabled because
-          # the host has no supported service manager (Linux without
-          # systemd-user). A known-platform limitation, not a software
-          # failure, so it reports the `unsupported` success outcome
-          # (exit 0); `target_path` still points at the written unit.
-          when :autostart_unavailable then "unsupported"
-          when :unsupported then "unsupported"
-          when :drifted then "drifted"
-          when :failed then "failed"
-          when :ok then "written"
-          end
-        success = %w[written upgraded unchanged unsupported].include?(outcome_str)
-
+      def emit_install_outcome(installer, outcome)
         if @json
-          if success
-            puts JSON.generate(install_envelope(installer, outcome: outcome_str))
+          if outcome.success?
+            puts JSON.generate(install_envelope(installer, outcome))
           else
-            install_emit_error_envelope(installer, outcome: outcome_str)
+            install_emit_error_envelope(installer, outcome: outcome.wire_outcome)
           end
         end
 
-        case result
-        when :drifted
+        if outcome.drifted?
           msg = "bot unit at #{installer.target_path} differs from the current template. " \
                 "Re-run with `hive bot install --force` to overwrite (a timestamped .bak " \
                 "will be saved)."
           raise Hive::BotInstallDriftError, msg
-        when :failed
+        elsif outcome.failed?
           raise Hive::BotInstallFailed,
                 "bot service install reported a failure; see messages above"
         end
       end
 
-      def install_envelope(installer, outcome:)
-        restarted = outcome == "upgraded" ? installer.last_restart_invoked : false
-        backup_path = outcome == "upgraded" ? installer.last_backup_path : nil
-        target = installer.target_path
+      def install_envelope(installer, outcome)
         {
           "schema" => "hive-bot-install",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-install"),
           "ok" => true,
-          "outcome" => outcome,
+          "outcome" => outcome.wire_outcome,
           "platform" => installer.envelope_platform,
-          "target_path" => target,
-          "backup_path" => backup_path,
-          "restarted" => restarted,
+          "target_path" => installer.target_path,
+          "backup_path" => outcome.backup_path,
+          "restarted" => outcome.restarted,
           "messages" => installer.messages.dup
         }
       end

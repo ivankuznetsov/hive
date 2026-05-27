@@ -10,8 +10,7 @@ class HiveCommandsBotTest < Minitest::Test
     end
   end
 
-  FakeInstaller = Struct.new(:target_path, :last_backup_path, :last_restart_invoked,
-                             :envelope_platform, :messages, keyword_init: true)
+  FakeInstaller = Struct.new(:target_path, :envelope_platform, :messages, keyword_init: true)
 
   FakeLockFile = Struct.new(:calls) do
     def flock(_mode)
@@ -213,6 +212,32 @@ class HiveCommandsBotTest < Minitest::Test
     assert_empty schema.validate(doc).map { |error| error["error"] }
   end
 
+  def test_status_json_degrades_service_fields_to_null_when_probe_raises
+    # A read-only status probe must never take down the running/pid
+    # reporting. If service_state raises, the three service fields degrade
+    # to null (the schema marks them required-but-nullable) and the envelope
+    # still emits and validates.
+    command = configured_bot("status", json: true)
+    command.define_singleton_method(:live_pid) { nil }
+    fake = Object.new
+    fake.define_singleton_method(:service_state) { raise "probe blew up" }
+    require "hive/commands/bot/service_installer"
+    out, _err = with_replaced_singleton_method(
+      Hive::Commands::Bot::ServiceInstaller, :new, ->(**_kwargs) { fake }
+    ) { capture_io { command.call } }
+
+    doc = JSON.parse(out)
+    assert_nil doc.fetch("service_installed")
+    assert_nil doc.fetch("service_enabled")
+    assert_nil doc.fetch("unit_path")
+    assert_equal false, doc.fetch("running")
+
+    require "json_schemer"
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    assert_empty schema.validate(doc).map { |error| error["error"] },
+                 "null service fields must still validate against the required-but-nullable schema"
+  end
+
   def test_tail_missing_log_warns_and_raises
     command = configured_bot("tail")
 
@@ -258,16 +283,22 @@ class HiveCommandsBotTest < Minitest::Test
 
   # ── install: routing, success summary, envelopes, exit codes ───────────
 
-  def stub_installer(messages: [], last_backup_path: nil, last_restart_invoked: false,
+  # The install! block returns the raw outcome kind (or raises); stub_installer
+  # wraps a returned kind in a real ServiceInstaller::Outcome so the command
+  # layer exercises the actual value object, and bakes backup_path/restarted
+  # onto it (these now live on the Outcome, not the installer).
+  def stub_installer(messages: [], backup_path: nil, restarted: false,
                      target_path: "/tmp/hive-bot.service", envelope_platform: "linux", &install)
+    require "hive/commands/service_installer/outcome"
     installer = FakeInstaller.new(
       target_path: target_path,
-      last_backup_path: last_backup_path,
-      last_restart_invoked: last_restart_invoked,
       envelope_platform: envelope_platform,
       messages: messages
     )
-    installer.define_singleton_method(:install!, &install)
+    installer.define_singleton_method(:install!) do |autostart:, force:|
+      kind = install.call(autostart: autostart, force: force)
+      Hive::Commands::ServiceInstaller::Outcome.new(kind, backup_path: backup_path, restarted: restarted)
+    end
     installer
   end
 
@@ -316,7 +347,7 @@ class HiveCommandsBotTest < Minitest::Test
 
   def test_install_upgraded_json_reports_backup_and_restart
     command = bot("install", json: true, force: true)
-    installer = stub_installer(last_backup_path: "/tmp/hive-bot.service.bak", last_restart_invoked: true) do |autostart:, force:|
+    installer = stub_installer(backup_path: "/tmp/hive-bot.service.bak", restarted: true) do |autostart:, force:|
       :upgraded
     end
 
@@ -451,8 +482,8 @@ class HiveCommandsBotTest < Minitest::Test
     success_cases.each do |result, outcome|
       command = bot("install", json: true, force: result == :upgraded)
       installer = stub_installer(
-        last_backup_path: result == :upgraded ? "/tmp/hive-bot.service.bak" : nil,
-        last_restart_invoked: result == :upgraded
+        backup_path: result == :upgraded ? "/tmp/hive-bot.service.bak" : nil,
+        restarted: result == :upgraded
       ) { |autostart:, force:| result }
 
       out, _err = run_install(command, installer) { capture_io { command.call } }
@@ -481,7 +512,7 @@ class HiveCommandsBotTest < Minitest::Test
 
   def test_install_upgraded_text_summary_names_backup
     command = bot("install", force: true)
-    installer = stub_installer(last_backup_path: "/tmp/hive-bot.service.bak-20260527") do |autostart:, force:|
+    installer = stub_installer(backup_path: "/tmp/hive-bot.service.bak-20260527") do |autostart:, force:|
       :upgraded
     end
 
@@ -511,18 +542,6 @@ class HiveCommandsBotTest < Minitest::Test
     assert_includes out,
                     "hive bot: unit written at /home/u/.config/systemd/user/hive-bot.service; " \
                     "autostart not enabled on this host"
-  end
-
-  # The installer's legacy :ok result still maps to the "written" summary
-  # line (and the "written" envelope outcome) so an older installer return
-  # value keeps reporting success rather than falling silent.
-  def test_install_legacy_ok_text_summary_reports_written
-    command = bot("install")
-    installer = stub_installer { |autostart:, force:| :ok }
-
-    out, _err = run_install(command, installer) { capture_io { command.call } }
-
-    assert_includes out, "hive bot: installed unit at /tmp/hive-bot.service"
   end
 
   # ── install: safe_install_* rescue fallbacks on a hostile installer ────

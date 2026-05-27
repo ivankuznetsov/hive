@@ -49,7 +49,7 @@ class BotServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :written, result
+      assert_equal :written, result.kind
       assert_includes commands, %w[systemctl --user daemon-reload]
       assert_includes commands, %w[systemctl --user enable --now hive-bot]
     end
@@ -67,7 +67,7 @@ class BotServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :autostart_unavailable, result,
+      assert_equal :autostart_unavailable, result.kind,
                    "no systemd-user is a known-platform limitation, not a failure"
       assert File.exist?(File.join(dir, ".config/systemd/user/hive-bot.service")),
              "unit must still be written so the operator can enable autostart later"
@@ -88,7 +88,7 @@ class BotServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :failed, result
+      assert_equal :failed, result.kind
       assert installer.messages.any? { |msg| msg.include?("enable --now hive-bot") },
              "recovery message should name the manual `enable --now hive-bot` command, got: #{installer.messages.inspect}"
     end
@@ -135,7 +135,7 @@ class BotServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: true)
-      assert_equal :unsupported, result
+      assert_equal :unsupported, result.kind
       assert installer.messages.any? { |msg| msg.include?("bot autostart not supported") && msg.include?("hive bot start") },
              "freebsd install should surface a friendly skip message, got: #{installer.messages.inspect}"
     end
@@ -154,7 +154,7 @@ class BotServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: false)
-      assert_equal :drifted, result
+      assert_equal :drifted, result.kind
       assert_equal "custom\n", File.read(unit)
       assert installer.messages.any? { |msg| msg.include?("hive bot install --force") }
     end
@@ -173,12 +173,55 @@ class BotServiceInstallerTest < Minitest::Test
       )
 
       result = installer.install!(autostart: false, force: true)
-      assert_equal :upgraded, result
+      assert_equal :upgraded, result.kind
       backups = Dir["#{unit}.bak-*"]
       assert_equal 1, backups.size,
                    "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed"
       assert_equal "previous-stale-content\n", File.read(backups.first)
       assert_includes File.read(unit), "ExecStart=/tmp/hive bot start --foreground"
+    end
+  end
+
+  # The bot subclass overrides render_launchd independently of the daemon, so
+  # its macOS force-upgrade chain (unload BEFORE load, so launchd picks up the
+  # rewritten plist instead of silently reusing the loaded one) needs its own
+  # coverage rather than inferring it from the daemon's shared-base test.
+  def test_macos_force_autostart_unloads_then_loads_and_marks_restarted
+    with_tmp_dir do |dir|
+      plist = File.join(dir, "Library/LaunchAgents/local.hive-bot.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "stale plist\n")
+      commands = []
+      installer = Hive::Commands::Bot::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: dir,
+        binary_path: "/opt/hive/bin/hive",
+        runner: ->(argv) { commands << argv; true }
+      )
+
+      result = installer.install!(autostart: true, force: true)
+
+      assert_equal :upgraded, result.kind
+      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ], commands,
+                   "force upgrade must unload before load so launchd refreshes the rewritten plist"
+      assert result.restarted,
+             "an upgraded macOS install must report restarted so the envelope's `restarted` is truthful"
+    end
+  end
+
+  def test_macos_autostart_returns_failed_when_launchctl_load_fails
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Bot::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: dir,
+        binary_path: "/opt/hive/bin/hive",
+        runner: ->(_argv) { false }
+      )
+
+      result = installer.install!(autostart: true)
+      assert_equal :failed, result.kind
+      assert installer.messages.any? { |msg| msg.include?("launchctl load failed") },
+             "a macOS load failure must surface the manual `launchctl load` recovery hint"
     end
   end
 

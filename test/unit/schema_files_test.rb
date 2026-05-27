@@ -1144,9 +1144,12 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-status")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     # The producer's exhaustive key set (kept in sync with
-    # Hive::Commands::Daemon#status_daemon's JSON.generate call).
+    # Hive::Commands::Daemon#status_daemon's JSON.generate call). The three
+    # service_* fields are always emitted (null on probe failure), so they
+    # are required-but-nullable in the schema.
     producer_required = %w[
       schema schema_version ok running pid uptime_sec pid_file log_file
+      service_installed service_enabled unit_path
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-daemon-status.v1.json"

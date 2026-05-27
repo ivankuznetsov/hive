@@ -42,60 +42,46 @@ module Hive
 
       def deregister_daemon
         stop_foreground_daemon
-        case @host_os
-        when /darwin/i
-          plist = File.expand_path("~/Library/LaunchAgents/local.hive-daemon.plist")
-          if File.exist?(plist)
-            ok = @runner.call([ "launchctl", "unload", plist ])
-            unless ok
-              @output.puts "hive: warning: launchctl unload failed for #{plist}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
-              return
-            end
-            safe_unlink(plist)
-          end
-        when /linux/i
-          unit = File.expand_path("~/.config/systemd/user/hive-daemon.service")
-          if File.exist?(unit)
-            ok = @runner.call(%w[systemctl --user disable --now hive-daemon])
-            unless ok
-              @output.puts "hive: warning: systemctl --user disable failed for hive-daemon; leaving #{unit} in place. Fix systemd state and re-run `hive uninstall`."
-              return
-            end
-            safe_unlink(unit)
-            ok_reload = @runner.call(%w[systemctl --user daemon-reload])
-            @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{unit}; run it manually" unless ok_reload
-          end
-        end
+        require "hive/commands/daemon/service_installer"
+        deregister_unit(Hive::Commands::Daemon::ServiceInstaller.new(host_os: @host_os))
       end
 
       # Mirror of deregister_daemon for the opt-in bot autostart service
-      # (installed by `hive bot install`). Warn-and-continue on failure so a
-      # stuck service manager never aborts the rest of the uninstall.
+      # (installed by `hive bot install`).
       def deregister_bot
         stop_foreground_bot
+        require "hive/commands/bot/service_installer"
+        deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(host_os: @host_os))
+      end
+
+      # Deregister a per-user autostart unit using the installer's OWN
+      # identity (`target_path` / `service_name`) as the single source of
+      # truth, so install and uninstall can never drift on paths or names —
+      # if `hive bot install` ever changes where it writes the unit, this
+      # follows automatically. Warn-and-continue on any service-manager
+      # failure so one stuck manager never aborts the rest of the uninstall.
+      def deregister_unit(installer)
+        path = installer.target_path
+        return unless path && File.exist?(path)
+
         case @host_os
         when /darwin/i
-          plist = File.expand_path("~/Library/LaunchAgents/local.hive-bot.plist")
-          if File.exist?(plist)
-            ok = @runner.call([ "launchctl", "unload", plist ])
-            unless ok
-              @output.puts "hive: warning: launchctl unload failed for #{plist}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
-              return
-            end
-            safe_unlink(plist)
+          ok = @runner.call([ "launchctl", "unload", path ])
+          unless ok
+            @output.puts "hive: warning: launchctl unload failed for #{path}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
+            return
           end
+          safe_unlink(path)
         when /linux/i
-          unit = File.expand_path("~/.config/systemd/user/hive-bot.service")
-          if File.exist?(unit)
-            ok = @runner.call(%w[systemctl --user disable --now hive-bot])
-            unless ok
-              @output.puts "hive: warning: systemctl --user disable failed for hive-bot; leaving #{unit} in place. Fix systemd state and re-run `hive uninstall`."
-              return
-            end
-            safe_unlink(unit)
-            ok_reload = @runner.call(%w[systemctl --user daemon-reload])
-            @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{unit}; run it manually" unless ok_reload
+          service = installer.service_name
+          ok = @runner.call([ "systemctl", "--user", "disable", "--now", service ])
+          unless ok
+            @output.puts "hive: warning: systemctl --user disable failed for #{service}; leaving #{path} in place. Fix systemd state and re-run `hive uninstall`."
+            return
           end
+          safe_unlink(path)
+          ok_reload = @runner.call(%w[systemctl --user daemon-reload])
+          @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{path}; run it manually" unless ok_reload
         end
       end
 
@@ -118,7 +104,14 @@ module Hive
         return if pid.zero?
 
         Process.kill("TERM", pid)
-      rescue Errno::ESRCH, Errno::EPERM, Errno::ENOENT, Psych::Exception
+      rescue Errno::EPERM
+        # The process is alive but owned by another uid, so we can't TERM
+        # it. Don't abort the destructive uninstall, but the operator's bot
+        # may keep running against state we're about to delete — so unlike
+        # the corrupt-pid / dead-pid cases this gets an explicit warning
+        # rather than a silent no-op.
+        @output.puts "hive: warning: bot pid #{pid} is alive but could not be signalled (EPERM); it may still be running after uninstall"
+      rescue Errno::ESRCH, Errno::ENOENT, Psych::Exception
         nil
       end
 

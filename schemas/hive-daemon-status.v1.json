@@ -18,7 +18,10 @@
         "pid",
         "uptime_sec",
         "pid_file",
-        "log_file"
+        "log_file",
+        "service_installed",
+        "service_enabled",
+        "unit_path"
       ],
       "properties": {
         "schema": { "const": "hive-daemon-status" },
@@ -45,16 +48,16 @@
           "description": "Absolute path of the daemon's JSON-line log file."
         },
         "service_installed": {
-          "type": "boolean",
-          "description": "Whether the per-user autostart unit file exists on disk (non-mutating probe)."
+          "type": ["boolean", "null"],
+          "description": "Whether the per-user autostart unit file exists on disk (non-mutating probe). Always present; null only if the probe itself could not run."
         },
         "service_enabled": {
-          "type": "boolean",
-          "description": "Whether the service manager reports the autostart unit as enabled/loaded (non-mutating probe)."
+          "type": ["boolean", "null"],
+          "description": "Whether the service manager reports the autostart unit as enabled/loaded (non-mutating probe). Always present; null only if the probe itself could not run."
         },
         "unit_path": {
           "type": ["string", "null"],
-          "description": "Absolute path of the autostart unit file, or null on unsupported platforms."
+          "description": "Absolute path of the autostart unit file; null on unsupported platforms or if the probe could not run."
         }
       }
     }

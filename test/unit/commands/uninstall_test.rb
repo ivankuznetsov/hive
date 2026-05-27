@@ -314,6 +314,25 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_stop_foreground_bot_warns_but_continues_on_eperm
+    # EPERM means the bot is alive but owned by another uid. Unlike the
+    # dead/corrupt cases this must NOT be a silent no-op: the operator's bot
+    # may keep running against state we're about to delete, so it warns
+    # (without aborting the destructive uninstall).
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
+                 { "pid" => 999, "started_at" => "2026-05-27T00:00:00Z" }.to_yaml)
+      out = StringIO.new
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+        Hive::Commands::Uninstall.new(output: out).send(:stop_foreground_bot)
+      end
+
+      assert_match(/bot pid 999 is alive but could not be signalled \(EPERM\)/, out.string)
+    end
+  end
+
   def test_macos_launch_agent_noops_when_plist_missing
     with_xdg_home do
       calls = []

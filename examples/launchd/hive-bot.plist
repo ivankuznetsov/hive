@@ -13,8 +13,8 @@
     $EDITOR ~/Library/LaunchAgents/local.hive-bot.plist   # confirm absolute paths
     launchctl load ~/Library/LaunchAgents/local.hive-bot.plist
 
-  Verify it actually started (catches a wrong binary path before the
-  circuit-breaker silently throttles):
+  Verify it actually started (a wrong binary path exits cleanly via the
+  precheck, so the circuit-breaker stops respawning it rather than churning):
     launchctl list | grep hive-bot
     cat ~/Library/Logs/hive-bot.err.log
 

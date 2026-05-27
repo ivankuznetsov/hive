@@ -1,6 +1,7 @@
 require "cgi"
 require "fileutils"
 require "hive/install_channel"
+require "hive/commands/service_installer/outcome"
 require "rbconfig"
 require "shellwords"
 
@@ -15,10 +16,10 @@ module Hive
       # `upgrade_restart_warning` string appended on a Linux force-upgrade
       # restart.
       class Base
-        attr_reader :messages, :last_backup_path, :last_restart_invoked
+        attr_reader :messages
 
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
-                       systemctl_available: nil)
+                       systemctl_available: nil, launchctl_available: nil)
           @host_os = host_os
           # Anchor on the real user home for launchd/systemd paths —
           # HIVE_HOME is a config/test override that does not apply
@@ -29,6 +30,7 @@ module Hive
           @binary_path = binary_path
           @runner = runner || ->(argv) { system(*argv, out: File::NULL) }
           @systemctl_available = systemctl_available
+          @launchctl_available = launchctl_available
           @messages = []
           @last_backup_path = nil
           @last_restart_invoked = false
@@ -43,13 +45,15 @@ module Hive
         def install!(autostart:, force: false)
           @last_backup_path = nil
           @last_restart_invoked = false
-          case platform
-          when :macos then install_macos!(autostart: autostart, force: force)
-          when :linux then install_linux!(autostart: autostart, force: force)
-          when :unsupported_host
-            @messages << "#{cli_label} autostart not supported on this platform; run `hive #{cli_label} start` manually."
-            :unsupported
-          end
+          kind =
+            case platform
+            when :macos then install_macos!(autostart: autostart, force: force)
+            when :linux then install_linux!(autostart: autostart, force: force)
+            when :unsupported_host
+              @messages << "#{cli_label} autostart not supported on this platform; run `hive #{cli_label} start` manually."
+              :unsupported
+            end
+          Outcome.new(kind, backup_path: @last_backup_path, restarted: @last_restart_invoked)
         end
 
         # Wire-friendly platform key for the install envelope. Mirrors
@@ -378,13 +382,27 @@ module Hive
 
             # `is-enabled` exits 0 only when the unit is enabled — purely
             # a query, no state change.
-            @runner.call([ "systemctl", "--user", "is-enabled", service_name ])
+            !!@runner.call([ "systemctl", "--user", "is-enabled", service_name ])
           when :macos
+            return false unless launchctl_available?
+
             # `launchctl list <label>` exits 0 only when the job is loaded.
-            @runner.call([ "launchctl", "list", launchd_label ])
+            !!@runner.call([ "launchctl", "list", launchd_label ])
           else
             false
           end
+        end
+
+        # Mirror systemctl_available? for macOS: distinguish "launchctl
+        # missing" from "launchctl ran". launchd is effectively always
+        # present on macOS, but without this guard a probe that could not
+        # run (custom runner / unusual host) would report a confident
+        # `service_enabled = false` indistinguishable from a real
+        # not-loaded result. `which` is a pure PATH lookup, no spawn.
+        def launchctl_available?
+          return @launchctl_available unless @launchctl_available.nil?
+
+          !!which("launchctl")
         end
       end
     end

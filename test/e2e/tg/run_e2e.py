@@ -34,10 +34,13 @@ def start_bot():
             pass
     env = dict(os.environ, HIVE_TEST_ALLOWLIST=DRIVER_ID)
     devnull = open(os.devnull, "w")
+    # CI installs gems via bundler, so the bot must run under `bundle exec`;
+    # locally BOT_LAUNCHER defaults to a bare `ruby`.
+    launcher = os.environ.get("BOT_LAUNCHER", "ruby").split()
     proc = subprocess.Popen(
-        ["ruby", os.path.join(HERE, "bot_harness.rb")],
+        [*launcher, os.path.join(HERE, "bot_harness.rb")],
         env=env, stdout=devnull, stderr=devnull,
-        stdin=subprocess.DEVNULL, start_new_session=True,
+        stdin=subprocess.DEVNULL, start_new_session=True, cwd=REPO,
     )
     for _ in range(40):
         if proc.poll() is not None:

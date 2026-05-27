@@ -39,7 +39,7 @@ hive bot install [--force] [--json]
 |--------------|----------|
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
-| `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>`. |
+| `/idea <text>` | Shows a project picker. Tapping a project dispatches `hive new <project> <text>` and, on success, replies `"Captured your idea in <project>. It's in the inbox — move it to 2-brainstorm to start."` The picker token is single-use (consumed on tap); a re-tap of a spent picker replies `"That idea picker expired. Send /idea <text> again."` |
 | `/answer <slug>` | Starts Path B brainstorm answering; each free-text reply writes the current unanswered `### A<N>.` block under the task lock. |
 | `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
@@ -73,6 +73,26 @@ The reply stays text-only when no row is actionable. The `/answer`,
 `/approve`, `/autofix`, `/details` slash commands remain typeable
 (and appear in the quick-actions menu) for operators who prefer
 typing or scripting.
+
+### Dispatch acknowledgment on success
+
+Commands dispatched as child processes (`hive new`, `hive approve`,
+`hive run`, recovery sequences) are **silent on exit 0** by design:
+`Supervisor#child_completion_text` only speaks on failure, because the
+operator normally sees the effect in the next status row or push
+notification. The lone exception is `hive new`: an idea lands in
+`1-inbox`, whose `ready_to_brainstorm` notification is **suppressed
+entirely when the project's daemon is disabled** (`suppress_ready_action?`)
+and otherwise delayed a full status tick — so a silent success looked
+like a dead button, and because the picker token is consumed on tap, a
+confused re-tap reported "idea picker expired." `child_completion_text`
+therefore acknowledges a successful `hive new` (keyed on the verb at
+`argv[1]`, since `ChildSupervisor#normalize_hive_bin` rewrites `argv[0]`
+to a resolved binary path). `/approve` and `/done` share the same
+silent-success shape but degrade gracefully — they advance the task into
+a state the daemon/next tick re-surfaces, and a double-tap hits
+`WRONG_STAGE` → `"Already advanced by another device"` rather than a
+misleading message.
 
 On bot start the supervisor calls Telegram's `setMyCommands` so the
 blue quick-actions menu (shown when the operator taps the `/` icon in

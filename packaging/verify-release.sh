@@ -437,7 +437,10 @@ if [[ "$DAEMON_INSTALL_AVAILABLE" -eq 1 ]]; then
   set -e
 
   DAEMON_SCHEMA="$(jq -r '.schema // empty' "$DAEMON_INSTALL_JSON" 2>/dev/null || true)"
-  DAEMON_OK="$(jq -r '.ok // empty' "$DAEMON_INSTALL_JSON" 2>/dev/null || true)"
+  # `.ok | tostring` not `.ok // empty`: jq's `//` treats boolean false as
+  # absent, so `.ok // empty` yields "" when ok is false — making the
+  # rc=70/ok=false assertion below never match. tostring gives "false".
+  DAEMON_OK="$(jq -r '.ok | tostring' "$DAEMON_INSTALL_JSON" 2>/dev/null || true)"
   DAEMON_OUTCOME="$(jq -r '.outcome // empty' "$DAEMON_INSTALL_JSON" 2>/dev/null || true)"
 
   if [[ "$DAEMON_SCHEMA" == "hive-daemon-install" ]]; then

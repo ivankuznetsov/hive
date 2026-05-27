@@ -495,8 +495,11 @@ class RunReviewTest < Minitest::Test
 
           ### Q1. Which config key should the fix use?
           Source: local-reviewer-01.md
+          Context checklist that must not inflate the trailer count:
+          - [x] this is answer context, not a separate finding
           ### A1.
           Use execute.agent.
+          - [x] this answer checklist is context too
         MD
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 

@@ -2,6 +2,10 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T12:00:00Z] ci — cross-OS install verification (real installs)
+
+**Action:** CI now does real installs of every channel on its native OS via `packaging/verify-channel.sh` + the reusable `.github/workflows/install-verify.yml` (matrix: bash/ubuntu x86+arm, brew/macos-15, aur/arch container). Three layers: a pre-release `install-gate` in `release.yml` (gem-installs on macos+ubuntu-arm before publishing), `post-release-verify` (real brew/yay/install.sh of the published version), and a weekly `install-canary.yml`. Failures open/update a single `install-failure` GitHub issue. This matrix immediately caught and drove fixes for real channel bugs (broken `yay -S hive-bin`, brew `hv` shim, brew marker path) shipped in v0.1.5. aarch64-AUR deferred (official `archlinux` image is x86_64-only). Runbook: `docs/RELEASING.md#install-verification`.
+
 ## [2026-05-27T09:50:00Z] bot/daemon — service-state in status --json + uninstall teardown doc
 
 **Action:** Review follow-up on the autostart PR. Added a non-mutating `service_state` probe to `ServiceInstaller::Base` (read-only `systemctl --user is-enabled` / `launchctl list`) and surfaced `service_installed` / `service_enabled` / `unit_path` in BOTH `hive bot status --json` and `hive daemon status --json` (additive to the v1 envelopes), closing the agent-native gap where an agent could install/uninstall the autostart unit but not query its state without a mutating call. Documented the new fields in [[commands/bot]] and [[commands/daemon]], and filled the [[commands/uninstall]] gap (it documented the daemon-service teardown but never the bot-service teardown added in this PR). Also made the `hive bot install` `--help` long_desc spell out the `outcome`-branching agent idiom (parse the envelope's `outcome`, re-run with `--force` on `drifted`).

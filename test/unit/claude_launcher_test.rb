@@ -341,6 +341,29 @@ class ClaudeLauncherTest < Minitest::Test
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
   end
 
+  # 2026-05-27 Claude Code build: the input caret moved to the END of a
+  # context-prefixed line (`<cwd> <git-status>  ❯`) and a hint footer renders
+  # BENEATH it, so the caret is no longer the last line. The previous
+  # last-line/line-start anchoring missed this and timed out every launch.
+  def test_claude_ready_prompt_accepts_caret_at_line_end_with_hint_footer
+    pane = "Claude Code v2.1.133\n\n" \
+           ".hive-state/stages/2-brainstorm/add-download-icon-260527 hive/state ?  ❯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the idle caret at line end (with a hint footer below it) must read as ready"
+  end
+
+  # A numbered menu option must stay rejected even when a hint footer now
+  # renders beneath it, so scanning the region (not just the last line) for
+  # the caret does not start treating an interactive selection as idle.
+  def test_claude_ready_prompt_rejects_menu_option_with_hint_footer
+    pane = "Claude Code v2.1.133\nProceed with the action?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
   def test_claude_trust_prompt_matches_observed_folder_trust_prompt
     pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm"
 

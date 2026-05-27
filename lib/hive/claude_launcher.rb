@@ -29,15 +29,29 @@ module Hive
     CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
     MIN_TMUX_VERSION = "3.0"
     TERMINAL_MARKERS = %i[waiting complete error execute_complete review_complete review_waiting review_error].freeze
-    # Observed against Claude Code 2.1.133 during the 2026-05-25 tmux dogfood.
-    # Update these constants and their tests if Claude Code interactive TUI copy changes.
+    # Observed against Claude Code 2.1.133 (2026-05-25 dogfood) and the
+    # 2026-05-27 build that moved the input caret to the end of a
+    # context-prefixed line and added a hint footer beneath it.
+    #
+    # Robustness note: readiness detection keys on the DURABLE `❯` input
+    # caret, which has survived every Claude Code TUI revision so far. What
+    # churns between releases is the caret's POSITION on the line (older
+    # builds: `❯ Try …` at line start; newer: `<cwd> <git-status>  ❯` at
+    # line end) and what renders BELOW it (e.g. a `⏵⏵ bypass permissions …`
+    # hint footer, so the caret is no longer the last line). We therefore
+    # scan the whole current prompt region for the caret rather than
+    # anchoring it to the start of the last line. The only copy we still
+    # match is the NEGATIVE guards (trust / permission prompts) — misreading
+    # one of those as "ready" is the dangerous case, so those strings stay
+    # version-coupled and are what to update when Claude Code changes them.
     CLAUDE_TRUST_PROMPT_MARKERS = [
       "Quick safety check",
       "Yes, I trust this folder"
     ].freeze
     CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
     CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
-    CLAUDE_READY_PROMPT_LINE = /\A\s*❯(?:\s|$)/.freeze
+    # Caret at line start (`❯ …`) OR after the cwd/git context (`… ?  ❯`).
+    CLAUDE_READY_PROMPT_LINE = /(?:\A|\s)❯(?:\s|$)/.freeze
     CLAUDE_MENU_OPTION_LINE = /\A\s*❯\s*\d+\./.freeze
     CLAUDE_PROMPT_CONTEXT_LINES = 4
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
@@ -493,16 +507,21 @@ module Hive
     end
 
     def claude_ready_prompt?(pane)
-      lines = nonblank_pane_lines(pane)
       current_text = current_prompt_text(pane)
-      last_line = lines.last.to_s
+      current_lines = current_text.each_line.map(&:strip).reject(&:empty?)
 
       return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
       return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
-      return false if last_line.match?(CLAUDE_MENU_OPTION_LINE)
       return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
 
-      last_line.match?(CLAUDE_READY_PROMPT_LINE)
+      # The idle prompt is whatever line in the current region bears the
+      # input caret. A numbered menu option (`❯ 1.`) is an interactive
+      # selection mid-flow, not the idle prompt, so it never counts — even
+      # when it is the caret line. Scanning the region (rather than only the
+      # last line) tolerates a hint footer rendered beneath the caret.
+      current_lines.any? do |line|
+        line.match?(CLAUDE_READY_PROMPT_LINE) && !line.match?(CLAUDE_MENU_OPTION_LINE)
+      end
     end
 
     def current_prompt_text(pane)
@@ -514,10 +533,6 @@ module Hive
       current_lines = raw_lines[start_index..] || []
 
       current_lines.reject(&:empty?).last(CLAUDE_PROMPT_CONTEXT_LINES).join("\n")
-    end
-
-    def nonblank_pane_lines(pane)
-      pane.each_line.map(&:strip).reject(&:empty?)
     end
 
     def wait_for_terminal_marker(task, runner, timeout)

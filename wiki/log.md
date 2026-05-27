@@ -52,6 +52,12 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[dependencies]] - recorded the Faraday audit floor behind `telegram-bot-ruby`.
 
+## [2026-05-27T00:00:00Z] release — implement Homebrew + AUR publishing (gem-based)
+
+**Action:** Implemented the brew/AUR last mile (per ADR-032). Added `packaging/render.rb` — one fail-closed ERB renderer for both the Homebrew formula and the AUR PKGBUILD. Replaced the `exit 1` AUR placeholder in `release.yml` with a real signature-gated `aur-publish` container job (pinned cosign identity, `makepkg --printsrcinfo`-generated `.SRCINFO`, idempotent push). Deleted the stale tebako `.SRCINFO.template`. Created the `ivankuznetsov/homebrew-hive` tap (serving v0.1.0). Added the `docs/RELEASING.md` maintainer runbook. Rewrote `gaps.md` "Release install follow-ups" §1: automation built; remaining work is the human AUR account/key/bootstrap + secrets + `v*` tag protection.
+
+**Refreshed pages:**
+- [[gaps]]
 
 ## [2026-05-26T23:30:00Z] daemon - reclassify no-systemd autostart as unsupported (review follow-up)
 

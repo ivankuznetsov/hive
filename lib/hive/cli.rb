@@ -542,12 +542,12 @@ module Hive
         hive markers clear FOLDER --name REVIEW_STALE
         hive markers clear my-task-slug --name REVIEW_CI_STALE --project myproj
         hive markers clear FOLDER --name REVIEW_ERROR --json
-        hive markers clear FOLDER --name ERROR --match-attr exit_code=143
+        hive markers clear FOLDER --name ERROR --match-attr reason=exit_code,exit_code=143
 
-      Use --match-attr KEY=VALUE to refuse the clear unless the current marker
-      carries the named attribute. The auto-healer in `hive tui` uses this to
-      avoid erasing a real-failure marker that landed between observation and
-      heal under cross-process concurrency.
+      Use --match-attr KEY=VALUE, or comma-separated KEY=VALUE pairs, to refuse
+      the clear unless the current marker carries the named attributes. The
+      auto-healer in `hive tui` uses this to avoid erasing a different marker
+      that landed between observation and heal under cross-process concurrency.
 
       Exit codes: 0 success; 4 marker mismatch / attr mismatch / not in
       allowlist; 64 unknown subcommand or unknown task; 70 internal error.
@@ -556,7 +556,7 @@ module Hive
                   desc: "marker name to remove (e.g. REVIEW_STALE)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :match_attr, type: :string,
-                        desc: "refuse clear unless marker has the named attr (KEY=VALUE)"
+                        desc: "refuse clear unless marker has attr(s): KEY=VALUE[,KEY=VALUE]"
     def markers(subcommand, target = nil)
       require "hive/commands/markers"
       Hive::Commands::Markers.new(

@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-05-25
+updated: 2026-05-27
 tags: [marker, protocol, flock]
 ---
 
@@ -33,7 +33,7 @@ tags: [marker, protocol, flock]
 
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
 
-`KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). When an `ERROR` marker's `exit_code` attr is in this list the task was interrupted, not broken. Single source of truth shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears them) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
+`KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). Only an `ERROR` marker shaped as `reason=exit_code exit_code=130|137|143` means the task was interrupted rather than broken. Same numeric codes with another reason remain structured recoverable failures. The numeric list is shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears explicit signal-kill markers) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
 
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-name boundary, and captures attrs until the terminating `-->` without crossing another `<!--`. Quoted error details may contain `>` (for example Git stderr `branch -> branch`) and newlines. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).
 

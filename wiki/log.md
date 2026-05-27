@@ -2214,3 +2214,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[commands/tui]]
+
+## [2026-05-26T13:07:56Z] tui — align kill-class error predicates
+
+**Action:** Aligned TUI kill-class routing with auto-heal semantics: only `ERROR reason=exit_code exit_code=130|137|143` is treated as auto-healed/log-tail-only. Markers with the same numeric code but another reason now remain recoverable through red-status detail and `RecoverError`. `hive markers clear --match-attr` now accepts comma-separated attr pairs, and the TUI uses both `reason` and `exit_code` when present so stale auto-heal/recovery workers cannot erase same-code/different-reason markers.
+
+**Refreshed pages:**
+- [[commands/tui]]
+- [[commands/markers]]
+- [[modules/markers]]

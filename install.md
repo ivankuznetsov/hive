@@ -84,7 +84,7 @@ if command -v npm >/dev/null 2>&1; then
   qmd_prefix="${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd"
   qmd_bin_home="${XDG_BIN_HOME:-$HOME/.local/bin}"
   mkdir -p "$qmd_bin_home"
-  npm install --global --prefix "$qmd_prefix" --no-audit --no-fund @tobilu/qmd
+  npm install --global --prefix "$qmd_prefix" --no-audit --no-fund "${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
   npm rebuild --global --prefix "$qmd_prefix" better-sqlite3 >/dev/null 2>&1 || true
   ln -sfn "$qmd_prefix/bin/qmd" "$qmd_bin_home/qmd"
   "$qmd_prefix/bin/qmd" --version

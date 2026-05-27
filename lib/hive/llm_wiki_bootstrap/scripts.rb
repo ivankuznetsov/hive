@@ -59,15 +59,26 @@ module Hive
           find_qmd >/dev/null 2>&1
         }
 
+        # run_qmd never aborts the caller: a missing qmd is a silent no-op,
+        # and a timeout (exit 124) or other failure is reported to stderr
+        # (captured by callers that log stderr) instead of propagating under
+        # `set -e`, so callers need no trailing `|| true`.
         run_qmd() {
-          local qmd_bin
+          local qmd_bin rc
           qmd_bin="$(find_qmd)" || return 0
 
           if command -v timeout >/dev/null 2>&1; then
-            timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@" || return 0
+            timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@" && return 0 || rc=$?
           else
-            "$qmd_bin" "$@" || return 0
+            "$qmd_bin" "$@" && return 0 || rc=$?
           fi
+
+          if [ "$rc" -eq 124 ]; then
+            echo "qmd $1 timed out after ${LLM_WIKI_QMD_TIMEOUT:-900}s; wiki index may be stale" >&2
+          else
+            echo "qmd $1 failed (exit $rc); wiki index may be stale" >&2
+          fi
+          return 0
         }
       BASH
 
@@ -89,7 +100,7 @@ module Hive
           }
 
           if qmd_available; then
-            run_qmd update >/dev/null 2>&1 || true
+            run_qmd update >/dev/null 2>&1
           fi
 
           prompt="$(cat <<'PROMPT'
@@ -113,8 +124,8 @@ module Hive
           codex_status=0
           run_codex || codex_status=$?
 
-          run_qmd update >/dev/null 2>&1 || true
-          run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 >/dev/null 2>&1 || true
+          run_qmd update >/dev/null 2>&1
+          run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 >/dev/null 2>&1
 
           exit "$codex_status"
         BASH
@@ -212,8 +223,8 @@ module Hive
 
           if [ "$ran_refresh" -eq 1 ]; then
             if qmd_available; then
-              run_qmd update >>"$log_file" 2>&1 || true
-              run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 >>"$log_file" 2>&1 || true
+              run_qmd update >>"$log_file" 2>&1
+              run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 >>"$log_file" 2>&1
             fi
 
             for sync_dir in "$HOME/wikis/.sync-needed" "$(dirname "$project_root")/wikis/.sync-needed"; do

@@ -67,7 +67,7 @@ A new agent profile becomes "doctorable" by registering a `Hive::SkillCheck::*` 
     {"kind": "stage", "stage": "plan", "label": "plan", "agent": "pi", "configured_skill": "/llm-wiki:wiki-plan", "skill": "/skill:wiki-plan", "status": "present", "message": "..."},
     {"kind": "reviewer", "stage": "6-review", "name": "claude-ce-code-review", "label": "6-review/claude-ce-code-review", "agent": "claude", "configured_skill": "ce-code-review", "skill": "/ce-code-review", "status": "missing", "message": "..."}
   ],
-  "summary": {"missing": 1, "present": 2, "not_applicable": 0}
+  "summary": {"missing": 1, "version_too_old": 0, "present": 2, "not_applicable": 0, "warning": 0}
 }
 ```
 

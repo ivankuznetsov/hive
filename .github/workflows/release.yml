@@ -210,8 +210,9 @@ jobs:
           install -dm700 ~/.ssh
           # Accept AUR's host key on first connect (TOFU) and record it.
           # ssh-keyscan was unreliable in the container (clone failed with
-          # "Host key verification failed"); accept-new auto-trusts the key
-          # on first use. The SSH key auth below is the real access gate.
+          # "Host key verification failed"); accept-new keeps host identity
+          # checking enabled while allowing non-interactive first contact.
+          # The AUR SSH key remains the separate write-authorization gate.
           export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           eval "$(ssh-agent -s)"
           # Load the key straight from env into the agent via stdin — the

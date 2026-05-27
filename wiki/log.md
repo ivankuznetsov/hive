@@ -2346,3 +2346,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 **Refreshed pages:**
 - [[commands/forget]]
 - [[cli]]
+
+## [2026-05-27T10:39:00Z] release — document AUR SSH host-key CI TOFU
+
+**Action:** Clarified that the AUR publish job uses `StrictHostKeyChecking=accept-new` only for non-interactive host-key first contact. Host identity checking remains enabled and later host-key changes still fail closed; `AUR_SSH_PRIVATE_KEY` remains the separate write-authorization gate.
+
+**Refreshed pages:**
+- [[decisions]]

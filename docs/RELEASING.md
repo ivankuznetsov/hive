@@ -25,6 +25,36 @@ release's version/sha is substituted identically everywhere.
 
 ---
 
+## Versioning policy
+
+Hive follows [SemVer](https://semver.org) `MAJOR.MINOR.PATCH` and ships **frequent
+micro-releases**, modeled on Claude Code's cadence (which patch-bumps multiple
+times a day). The bias is to release small and often, not to batch changes into
+big versions.
+
+- **PATCH** (`0.1.3` → `0.1.4`) — the common case. Bug fixes, small changes, doc
+  updates, packaging/CI tweaks. Cut one freely for nearly any merged change;
+  don't agonize over whether a release is "worth it," and don't worry about
+  churn (two patches minutes apart is fine). Gaps in the patch sequence are fine
+  too — a tag that fails to publish is simply superseded by the next.
+- **MINOR** (`0.1.x` → `0.2.0`) — a notable feature or a batch of them.
+- **MAJOR** (`0.x` → `1.0.0`) — milestones / intentional breaking changes. Hive
+  is pre-1.0; `1.0.0` is reserved for when the CLI/JSON contracts are declared
+  stable.
+
+**How to cut a release:** bump `VERSION` in `lib/hive.rb`, sync `Gemfile.lock`
+(`hive-cli (X.Y.Z)`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
+`install.md`, add a `## X.Y.Z` CHANGELOG section, PR → merge → `git tag vX.Y.Z
+&& git push origin vX.Y.Z`. The tag drives `release.yml` (above). The owner
+bypasses the `v*` tag-protection ruleset.
+
+**CHANGELOG style:** newest-first `## X.Y.Z` sections with terse `-` bullets
+(prefix fixes with "Fixed"); no `[Unreleased]` accumulator, no per-category
+subheadings, no dates — the git tag carries the date. A release with nothing
+user-facing gets a one-line "no user-facing changes" note.
+
+---
+
 ## One-time setup
 
 Do these **once**, before relying on the automated channels. They are the

@@ -30,6 +30,7 @@ module Hive
             log_label: build_log_label(attempts),
             profile: profile,
             expected_output: output_path,
+            cfg: @cfg,
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must
             # persist across each reviewer's spawn.
@@ -49,7 +50,8 @@ module Hive
             expected_output: output_path,
             timeout_sec: spawn_timeout || configured_timeout,
             status_mode: :output_file_exists,
-            log_label: build_log_label(attempts)
+            log_label: build_log_label(attempts),
+            deadline: deadline
           )
         end
       end

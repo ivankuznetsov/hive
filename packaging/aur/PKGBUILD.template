@@ -1,4 +1,24 @@
 # Maintainer: Hive maintainers <maintainers@users.noreply.github.com>
+#
+# Packaging model (read before editing):
+#   * This is a `-bin` package: it ships the prebuilt `hive-cli` rubygem
+#     attached to the GitHub Release, not a build of hive from source.
+#   * `package()` runs `gem install`, which fetches hive's RUNTIME
+#     dependency gems (sqlite3, lipgloss, bubbletea, thor, ...) from
+#     rubygems.org. This needs network access during package(): fine for
+#     `yay`/`paru` (networked builds), but a network-isolated clean
+#     chroot (`makechrootpkg`) will fail. Documented tradeoff; see the
+#     project plan for the deferred "vendor deps into the gem" follow-up.
+#   * `arch=('any')` is correct despite those deps being platform-native:
+#     rubygems resolves the right precompiled binary gem per host at
+#     install time. If a precompiled binary is absent for the resolved
+#     version on a given arch (notably aarch64), `gem install` compiles
+#     from source — which needs a C toolchain + Ruby headers. `base-devel`
+#     (always present for makepkg) covers that, so it is not duplicated in
+#     makedepends below.
+#   * .SRCINFO is GENERATED (`makepkg --printsrcinfo`), never hand-edited.
+#     There is intentionally no .SRCINFO.template — a hand-maintained one
+#     drifted from this PKGBUILD in the past (tebako-era tarball refs).
 pkgname=hive-bin
 pkgver=<%= version %>
 pkgrel=1

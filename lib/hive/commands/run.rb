@@ -334,6 +334,38 @@ module Hive
           # branch on the structured payload without parsing the marker
           # themselves. Echoes every other attr (pass, files, …) under
           # "error" so no signal is lost.
+          if marker.attrs["reason"].to_s == "fix_auto_commit_scope_failed"
+            relative = marker.attrs["files"].to_s.split(/[,\s]+/).find do |candidate|
+              !candidate.empty? && !candidate.include?("..") && !candidate.start_with?("/")
+            end
+            target = relative ? File.join(task.folder, relative) : task.folder
+            return {
+              "kind" => Hive::Schemas::NextActionKind::EDIT,
+              "target" => target,
+              "phase" => marker.attrs["phase"],
+              "reason" => marker.attrs["reason"],
+              "error" => marker.attrs,
+              "instructions" => "inspect the auto-commit scope artifact and worktree changes; " \
+                                "remove/revert rejected files or adjust review.fix.auto_commit.scope_check, " \
+                                "then clear REVIEW_ERROR and re-run",
+              "rerun_with" => "hive run #{task.folder}"
+            }
+          end
+
+          if %w[fix_auto_commit_sign_policy_failed fix_auto_commit_signing_failed].include?(marker.attrs["reason"].to_s)
+            target = task.respond_to?(:worktree_path) && task.worktree_path ? task.worktree_path : task.folder
+            return {
+              "kind" => Hive::Schemas::NextActionKind::EDIT,
+              "target" => target,
+              "phase" => marker.attrs["phase"],
+              "reason" => marker.attrs["reason"],
+              "error" => marker.attrs,
+              "instructions" => "inspect the fix-agent worktree changes and signing config; " \
+                                "manually commit or revert remaining worktree changes before clearing REVIEW_ERROR; " \
+                                "fix signing or adjust review.fix.auto_commit.sign_policy before re-running"
+            }
+          end
+
           {
             "kind" => Hive::Schemas::NextActionKind::NO_OP,
             "phase" => marker.attrs["phase"],

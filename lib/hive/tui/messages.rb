@@ -36,14 +36,19 @@ module Hive
       # `cols`/`rows` so view layout decisions can read them.
       WindowSized = Data.define(:cols, :rows)
 
-      # Sent by the takeover callable after a workflow-verb subprocess
-      # exits. `verb` is the second argv element (e.g., "pr",
-      # "develop") supplied by the dispatcher at Message construction
-      # time — Update doesn't re-derive it. `exit_code` carries the
-      # POSIX-shell-convention status (0 success; 128+signo for signal
-      # kills; 127 command-not-found).
-      #
-      SubprocessExited = Data.define(:verb, :exit_code)
+      # Sent by a workflow-verb subprocess reaper after the child exits.
+      # `verb` is the second argv element (e.g., "pr", "develop")
+      # supplied by the dispatcher at Message construction time — Update
+      # doesn't re-derive it. `exit_code` carries the POSIX-shell-
+      # convention status (0 success; 128+signo for signal kills; 127
+      # command-not-found). `spawn_id` is the optional 8-char correlation
+      # id used to read the exact per-spawn capture for diagnosis; nil
+      # keeps legacy/manual message construction working.
+      SubprocessExited = Data.define(:verb, :exit_code, :spawn_id) do
+        def initialize(verb:, exit_code:, spawn_id: nil)
+          super(verb: verb, exit_code: exit_code, spawn_id: spawn_id)
+        end
+      end
 
       # Cooperative shutdown signal — set by the SIGHUP trap (via
       # `runner.send`) and by `q`-keystroke dispatch in grid mode.
@@ -144,8 +149,9 @@ module Hive
       # this message handles real failures (exit_code=1 etc.) the
       # auto-healer deliberately leaves alone. The handler clears the
       # ERROR marker via `hive markers clear --name ERROR --match-attr
-      # exit_code=N` and re-runs the task with `hive run <folder>` if
-      # the clear succeeds. Mirrors RecoverReview so the user keeps a
+      # marker_id=N` when available, or observed reason/exit_code attrs
+      # for legacy rows, then re-runs the task with `hive run <folder>`
+      # if the clear succeeds. Mirrors RecoverReview so the user keeps a
       # uniform "Enter to retry" gesture across recoverable failures.
       RecoverError = Data.define(:row)
 

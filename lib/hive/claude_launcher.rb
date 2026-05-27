@@ -29,6 +29,17 @@ module Hive
     CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
     MIN_TMUX_VERSION = "3.0"
     TERMINAL_MARKERS = %i[waiting complete error execute_complete review_complete review_waiting review_error].freeze
+    # Observed against Claude Code 2.1.133 during the 2026-05-25 tmux dogfood.
+    # Update these constants and their tests if Claude Code interactive TUI copy changes.
+    CLAUDE_TRUST_PROMPT_MARKERS = [
+      "Quick safety check",
+      "Yes, I trust this folder"
+    ].freeze
+    CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
+    CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
+    CLAUDE_READY_PROMPT_LINE = /\A\s*❯(?:\s|$)/.freeze
+    CLAUDE_MENU_OPTION_LINE = /\A\s*❯\s*\d+\./.freeze
+    CLAUDE_PROMPT_CONTEXT_LINES = 4
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
     # them as constants means a policy change lands in one place; previous
     # PRs inlined the string literal across 11 sites and silently drifted
@@ -37,7 +48,6 @@ module Hive
     PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
     IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
-    DEFAULT_PERMISSION_MODE = "bypassPermissions".freeze
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
     # Patterns that mark tmux itself as unavailable (binary missing, too
@@ -65,7 +75,7 @@ module Hive
 
     SessionHandle = Struct.new(:task, :runner, keyword_init: true) do
       def send_and_wait!(prompt:, expected_output: nil, timeout_sec:,
-                         status_mode: nil, log_label: nil)
+                         status_mode: nil, log_label: nil, deadline: nil)
         Hive::ClaudeLauncher.send_prompt_and_wait!(
           task: task,
           runner: runner,
@@ -73,7 +83,8 @@ module Hive
           expected_output: expected_output,
           timeout_sec: timeout_sec,
           status_mode: status_mode,
-          log_label: log_label
+          log_label: log_label,
+          deadline: deadline
         )
       end
     end
@@ -84,9 +95,10 @@ module Hive
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
                 allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                permission_mode: DEFAULT_PERMISSION_MODE)
+                permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
+      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       if Hive::Config.claude_mode(cfg) == :headless
         require "hive/stages/base"
@@ -100,7 +112,8 @@ module Hive
           log_label: log_label,
           profile: profile,
           expected_output: expected_output,
-          status_mode: status_mode
+          status_mode: status_mode,
+          permission_mode: permission_mode
         )
       end
 
@@ -128,9 +141,10 @@ module Hive
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                            permission_mode: DEFAULT_PERMISSION_MODE)
+                            permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
+      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       runner = build_runner(task: task, session_name: session_name, cwd: cwd)
       # Pre-clean signal files BEFORE the preflight check so a stale
@@ -186,10 +200,17 @@ module Hive
 
     def send_prompt_and_wait!(task:, runner:, prompt:, timeout_sec:,
                               expected_output: nil, status_mode: nil,
-                              log_label: nil)
+                              log_label: nil, deadline: nil)
       reset_signal_files(task)
       cleanup_expected_output(expected_output)
-      prepare_claude_session!(runner)
+      prepare_claude_session!(runner, deadline: deadline)
+      effective_timeout_sec = timeout_sec
+      if deadline
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return { status: :timeout, error_message: "deadline reached before prompt was sent" } if remaining <= 0
+
+        effective_timeout_sec = [ timeout_sec, remaining ].compact.min
+      end
       effective_mode = status_mode || :state_file_marker
       # Parity with `Hive::Agent#run!`: only the :state_file_marker mode
       # stamps the AGENT_WORKING transient marker (the orchestrator
@@ -202,7 +223,7 @@ module Hive
                           started: Time.now.utc.iso8601)
       end
       runner.send_prompt(prompt)
-      result = wait_for_status(task, runner, timeout_sec, status_mode, expected_output, log_label)
+      result = wait_for_status(task, runner, effective_timeout_sec, status_mode, expected_output, log_label)
       # Headless launches drop a `<log_label>-<ts>.log` under
       # `task.log_dir`; tmux launches need the same shared log path so
       # downstream Claude-driven stages can find per-invocation output.
@@ -370,16 +391,16 @@ module Hive
       ENV.fetch("HIVE_TMUX_BIN", "tmux")
     end
 
-    def wrapper_command(cwd:, add_dirs:, profile:, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                        permission_mode: DEFAULT_PERMISSION_MODE)
+    def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS)
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
         "--cwd", cwd
       ]
       Array(add_dirs).each { |dir| command.concat([ "--add-dir", dir ]) }
+      command.concat(profile.permission_flags(permission_mode))
       command.concat([
-        "--permission-mode", permission_mode,
         "--allowedTools", allowed_tools,
         "--bin", profile.bin
       ])
@@ -415,7 +436,9 @@ module Hive
       nil
     end
 
-    def prepare_claude_session!(runner)
+    # `deadline:` is an optional CLOCK_MONOTONIC timestamp supplied by
+    # callers that need readiness waits to count against an outer budget.
+    def prepare_claude_session!(runner, deadline: nil)
       # Distinguish "session was alive, claude inside it died" from
       # "trust prompt never appeared" — both look like "last_tail
       # didn't show the ready prompt" by the deadline, but a dead
@@ -431,41 +454,70 @@ module Hive
         end
       end
 
-      deadline = Time.now + claude_ready_wait_timeout
+      ready_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + claude_ready_wait_timeout
+      caller_deadline = deadline
+      deadline = [ ready_deadline, caller_deadline ].compact.min
       last_tail = ""
       loop do
         last_tail = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
 
         if claude_trust_prompt?(last_tail)
           runner.send_keys("Enter")
-          sleep CLAUDE_READY_POLL_INTERVAL_SEC
-          break if Time.now >= deadline
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          break if remaining <= 0
+
+          sleep [ CLAUDE_READY_POLL_INTERVAL_SEC, remaining ].min
           next
         end
 
         return true if claude_ready_prompt?(last_tail)
 
-        break if Time.now >= deadline
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        break if remaining <= 0
 
-        sleep CLAUDE_READY_POLL_INTERVAL_SEC
+        sleep [ CLAUDE_READY_POLL_INTERVAL_SEC, remaining ].min
       end
 
+      reason = caller_deadline && deadline == caller_deadline ? "before caller deadline" : "in tmux session #{runner.name}"
       raise Hive::AgentError,
-            "claude interactive prompt did not become ready in tmux session #{runner.name}; " \
+            "claude interactive prompt did not become ready #{reason}; " \
             "last pane tail: #{last_tail.byteslice(-500, 500).to_s.scrub.inspect}"
     rescue Hive::TmuxError => e
       raise Hive::AgentError, "could not inspect claude tmux session #{runner.name}: #{e.message}"
     end
 
     def claude_trust_prompt?(pane)
-      pane.include?("Quick safety check") && pane.include?("Yes, I trust this folder")
+      current_prompt_text(pane).then do |text|
+        CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| text.include?(marker) }
+      end
     end
 
     def claude_ready_prompt?(pane)
-      return false if claude_trust_prompt?(pane)
-      return false if pane.include?("Do you want to")
+      lines = nonblank_pane_lines(pane)
+      current_text = current_prompt_text(pane)
+      last_line = lines.last.to_s
 
-      pane.include?("Claude Code") && pane.include?("❯")
+      return false if CLAUDE_TRUST_PROMPT_MARKERS.all? { |marker| current_text.include?(marker) }
+      return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
+      return false if last_line.match?(CLAUDE_MENU_OPTION_LINE)
+      return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
+
+      last_line.match?(CLAUDE_READY_PROMPT_LINE)
+    end
+
+    def current_prompt_text(pane)
+      raw_lines = pane.each_line.map(&:strip)
+      last_blank_index = raw_lines.rindex("")
+      last_banner_index = raw_lines.rindex { |line| line.include?(CLAUDE_READY_BANNER_MARKER) }
+      last_blank_start = last_blank_index ? last_blank_index + 1 : nil
+      start_index = [ last_banner_index, last_blank_start, 0 ].compact.max
+      current_lines = raw_lines[start_index..] || []
+
+      current_lines.reject(&:empty?).last(CLAUDE_PROMPT_CONTEXT_LINES).join("\n")
+    end
+
+    def nonblank_pane_lines(pane)
+      pane.each_line.map(&:strip).reject(&:empty?)
     end
 
     def wait_for_terminal_marker(task, runner, timeout)
@@ -630,7 +682,8 @@ module Hive
     end
 
     def claude_ready_wait_timeout
-      Float(tmux_env("CLAUDE_READY_WAIT_TIMEOUT_SEC", CLAUDE_READY_WAIT_TIMEOUT_SEC.to_s))
+      shared_timeout = tmux_env("READY_WAIT_TIMEOUT_SEC", CLAUDE_READY_WAIT_TIMEOUT_SEC.to_s)
+      Float(tmux_env("CLAUDE_READY_WAIT_TIMEOUT_SEC", shared_timeout))
     end
 
     def session_ready_wait_timeout

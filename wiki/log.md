@@ -9,12 +9,97 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[commands/bot]], [[commands/daemon]], [[commands/uninstall]]
 
+## [2026-05-27T09:45:00Z] claude - permission_mode applies to all launches, not tmux-only
+
+**Action:** Corrected init help, the init prompt, the config template comment, and wiki wording that described `claude.permission_mode` as applying only to "interactive tmux Claude sessions." The setting is global for Claude: the suggested default `bypassPermissions` is used everywhere (both tmux and headless), and the operator may choose another mode that likewise applies to every Claude-backed stage.
+
+**Refreshed pages:**
+- [[commands/init]], [[state-model]] - reworded to "every Claude-backed stage (tmux and headless)."
+
+## [2026-05-27T09:30:53Z] tui - widen subprocess diagnosis marker lookup
+
+**Action:** Rebased issue #14 on top of the current TUI marker-id/backoff work. `Hive::Tui::Subprocess.diagnose_recent_failure` now starts with the existing 64 KiB marker-log tail read, then walks backward in 64 KiB increments up to 1 MiB before falling back to the generic exit-code flash. `Messages::SubprocessExited` carries the spawn id so concurrent same-verb failures diagnose the exact per-spawn capture instead of the newest same-verb marker, and marker argv serialization now round-trips quoted values such as project names with spaces. Per-spawn stdout/stderr capture remains capped separately; the wider marker lookup only recovers the BEGIN[id] line needed to map a failing verb to its capture file and argv.
+
+**Refreshed pages:**
+- [[commands/tui]] - documented the 64 KiB to 1 MiB bounded marker-log lookup and exact-spawn diagnostic routing.
+
+## [2026-05-27T09:30:00Z] claude - unify bypassPermissions flag across tmux and headless
+
+**Action:** Made `claude.permission_mode: bypassPermissions` resolve to the same `--dangerously-skip-permissions` flag on both the headless `-p` path and the interactive tmux path. Previously the tmux wrapper emitted `--permission-mode bypassPermissions` while headless emitted `--dangerously-skip-permissions` — a documented divergence flagged in code review. Extracted the mode→argv mapping into a single `AgentProfile#permission_flags(mode)` used by both `Hive::Agent#build_cmd` and `Hive::ClaudeLauncher#wrapper_command`, and taught `interactive_claude_wrapper.sh` to forward a valueless `--dangerously-skip-permissions`.
+
+**Refreshed pages:**
+- [[modules/config]], [[stages/brainstorm]], [[modules/agent_profile]] - documented the shared `permission_flags` mapping and the bypassPermissions equivalence.
+
+## [2026-05-27T09:03:53Z] tui - throttle failed auto-heal retries
+
+**Action:** Rebased the kill-class auto-heal backoff fix on top of marker-id guarded ERROR recovery. `BubbleModel#auto_heal_kill_class_errors` now refreshes the same `HEAL_REPEAT_INTERVAL_SECONDS` folder timestamp when `hive markers clear` fails, so persistent lock or filesystem failures retry later without spawning one heal thread per status snapshot.
+
+**Refreshed pages:**
+- [[commands/tui]] - documented kill-class auto-heal retry throttling on clear failure.
+
+## [2026-05-27T07:57:49Z] init - JSON success envelope and partial rollback
+
+**Action:** Rebased and documented issue #24's `hive init` hardening on top of the current daemon-autostart behavior: `--json` now emits a single `hive-init.v1` success payload with resolved prompt answers and project metadata, the non-TTY defaults prose is suppressed in JSON mode, and the disk-writing init window snapshots and rolls back `.hive-state/config.yml`, the `.hive-state` worktree, `hive/state`, init-created main-checkout commits/files, runtime hook/scheduler files, and the global registry path before surfacing failures as typed Hive errors. Prompt edge cases were also pinned: digit-only agent profile names resolve as names before indexes, leading-comma timeout-only limits remain valid, and trailing-comma budget-only limits re-prompt.
+
+**Refreshed pages:**
+- [[commands/init]] - usage, JSON shape, rollback/recovery semantics, daemon autostart semantics, prompt edge-case contract, tests.
+- [[cli]] - command table and `--json` support matrix updated for `hive init --json`.
+
+## [2026-05-27T07:08:56Z] config - atomic registry review hardening
+
+**Action:** Code-review follow-up for #184: global config atomic rewrites now restore the existing file mode after tempfile creation so a restrictive process umask cannot silently narrow `config.yml`; lock/write path-shape failures such as directory lockfiles, `EISDIR`, `ENOTDIR`, and symlink loops are rewrapped as `Hive::ConfigError`; and mixed register/forget/prune fork tests cover the locked read-modify-write paths. Refreshed config/state docs to name the XDG global config path while preserving the migrated legacy `~/Dev/hive/config.yml` note.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[state-model]]
+
+## [2026-05-27T06:32:37Z] prune - real_path review hardening
+
+**Action:** Code-review follow-up for #182: malformed private `real_path` metadata is now treated like legacy absence instead of being trusted as a comparison target, so a hand-edited non-string value cannot prune a live project row. Refreshed prune schema/help prose to name realpath-mismatch removals alongside missing paths and invalid rows.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[commands/prune]]
+- [[cli]]
+- [[state-model]]
+
+## [2026-05-27T04:25:37Z] bot - legacy warning status parity
+
+**Action:** Code-review follow-up for #174: Telegram legacy-stage warnings now render project-scoped `hive migrate <project_path>` commands and the pull `/status`/`/queue` surface includes the same project-level warning even when there are no canonical task rows. Bot docs now describe daemon-aware ready notifications and the text-only legacy warning.
+
+**Refreshed pages:**
+- [[modules/bot]] - corrected ready-alert semantics and recorded `/status` legacy warning parity.
+- [[commands/bot]] - documented the text-only legacy-stage warning.
+- [[commands/status]] - recorded the bot's project-path-scoped migrate command.
+
+## [2026-05-27T04:17:33Z] bot - legacy warning dedupe follow-up
+
+**Action:** Code-review follow-up for #174: legacy-stage Telegram warning fingerprints are project-level, so changes to hidden task counts or stage-dir detail do not re-alert until the project reports clean and later regresses again. Fresh alert-store seeding now leaves legacy-stage migration warnings eligible for immediate delivery. Added dispatcher/status-watcher/builder regression coverage.
+
+**Refreshed pages:**
+- [[modules/bot]] - clarified project-level dedupe while legacy-dirty.
+- [[commands/status]] - clarified bot dedupe semantics.
+
+## [2026-05-27T02:41:29Z] dependencies - faraday audit floor
+
+**Action:** Updated the lockfile security floor for Telegram Bot API HTTP transport after `bundler-audit --update` began flagging `faraday` 2.14.1 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. `Gemfile.lock` now resolves `faraday` 2.14.2 and `faraday-net_http` 3.4.3.
+
+**Refreshed pages:**
+- [[dependencies]] - recorded the Faraday audit floor behind `telegram-bot-ruby`.
+
 ## [2026-05-27T01:30:00Z] bot — autostart service (`hive bot install`)
 
 **Action:** Added `hive bot install [--force] [--json]`, a per-user autostart service for the Telegram bot (systemd-user unit on Linux, launchd plist on macOS) that survives reboot/login and starts the bot immediately — one command, no separate `hive bot start`. Implemented by extracting `Hive::Commands::ServiceInstaller::Base` from the daemon installer (daemon behavior byte-identical) and a `Bot::ServiceInstaller` subclass; the unit runs `hive bot start --foreground` with no inline token (the bot loads `~/.config/hive/.env`) and no `TimeoutStopSec=900`. Opt-in only — not wired into `install.sh`/`hive init`. `hive uninstall` tears the unit down. New `hive-bot-install.v1` schema; exit codes mirror the daemon (0 / 64 drift / 70 service-manager failure). Documented the new subcommand, an Autostart section, and exit codes in [[commands/bot]]; updated `docs/cli.md`.
 
 **Refreshed pages:**
 - [[commands/bot]]
+
+## [2026-05-27T00:00:00Z] release — implement Homebrew + AUR publishing (gem-based)
+
+**Action:** Implemented the brew/AUR last mile (per ADR-032). Added `packaging/render.rb` — one fail-closed ERB renderer for both the Homebrew formula and the AUR PKGBUILD. Replaced the `exit 1` AUR placeholder in `release.yml` with a real signature-gated `aur-publish` container job (pinned cosign identity, `makepkg --printsrcinfo`-generated `.SRCINFO`, idempotent push). Deleted the stale tebako `.SRCINFO.template`. Created the `ivankuznetsov/homebrew-hive` tap (serving v0.1.0). Added the `docs/RELEASING.md` maintainer runbook. Rewrote `gaps.md` "Release install follow-ups" §1: automation built; remaining work is the human AUR account/key/bootstrap + secrets + `v*` tag protection.
+
+**Refreshed pages:**
+- [[gaps]]
 
 ## [2026-05-26T23:30:00Z] daemon - reclassify no-systemd autostart as unsupported (review follow-up)
 
@@ -23,6 +108,13 @@ Append-only log of all wiki operations.
 **Impact:** WSL/containers without systemd-user get a clean exit 0 and a quiet `hive init` instead of a spurious failure; the `hive-daemon-install.v1` `unsupported` outcome can now carry a `target_path`. Schema description updated accordingly.
 
 **Refs:** [[commands/daemon]], [[commands/init]], [[operating]]
+
+## [2026-05-26T23:18:07Z] review - enforce wall-clock attribution for fair-share deadlines
+
+**Action:** Review-code follow-up for #155: when all reviewers return errors after consuming rolling shares, `run_reviewers` re-checks the outer wall clock before falling back to `:all_failed`, preserving `REVIEW_STALE reason=wall_clock`. Shared Claude review sends now thread the reviewer deadline into tmux readiness, so a busy shared session cannot spend time outside that reviewer's fair share.
+
+**Refreshed pages:**
+- [[stages/review]] - noted that shared Claude tmux readiness waits count against the current reviewer deadline.
 
 ## [2026-05-26T22:55:00Z] daemon - autostart install repair
 
@@ -68,6 +160,50 @@ Append-only log of all wiki operations.
 
 **Refreshed pages:** None — fix is internal launcher plumbing; existing module pages remain accurate.
 
+## [2026-05-26T12:19:00Z] bot - legacy stage directory notifications
+
+**Action:** Documented the Telegram bot parity path for `legacy_stage_dirs`. `StatusWatcher` now surfaces project-level legacy-stage warnings, `Supervisor#status_tick` feeds them through the alert lifecycle with task rows, and the bot sends one deduped notification on the clean-to-legacy transition telling the operator to run `hive migrate`.
+
+**Refreshed pages:**
+- [[modules/bot]] - recorded the watcher/supervisor/dispatcher notification flow.
+- [[commands/status]] - noted bot parity for legacy-stage warnings.
+
+## [2026-05-26T11:49:11Z] brainstorm - fail fast on tmux prompt submit loss
+
+**Action:** Documented the tmux prompt submit failure path. `TmuxRunner#send_prompt` now lets `NoServerRunning`, hung tmux commands, and other `send-keys Enter` failures propagate while retaining buffer cleanup, so an unsubmitted prompt fails immediately instead of waiting for the stage timeout. `HIVE_TMUX_COMMAND_TIMEOUT_SEC` bounds each tmux client call.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] - recorded the fail-fast tmux submit semantics.
+
+## [2026-05-26T11:37:50Z] brainstorm - pin Claude TUI ready predicates
+
+**Action:** Documented the Claude TUI predicate contract for tmux mode. Trust and ready markers are pinned in `Hive::ClaudeLauncher` to the observed Claude Code 2.1.133 TUI; readiness is based on the current prompt block, requires the prompt marker on the last non-blank pane line, ignores stale trust/permission scrollback, and rejects numbered menu options as non-ready.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] - recorded the pinned TUI predicate and stale-scrollback guard.
+
+## [2026-05-26T11:27:00Z] brainstorm - Claude tmux ready timeout fallback
+
+**Action:** Documented the shared Claude tmux readiness fallback. `CLAUDE_READY` now follows the shared `READY_WAIT_TIMEOUT_SEC` env override when its specific env var is unset, while keeping the long 120s bare default for slow Claude TUI startup.
+
+**Refreshed pages:**
+- [[stages/brainstorm]] - recorded the `HIVE_CLAUDE_TMUX_*` readiness inheritance contract.
+
+## [2026-05-26T11:14:24Z] init - prompt answer binding fail-fast
+
+**Action:** Restored `ProjectConfigBinding` to the documented "never invent defaults" contract. The binding now requires the complete current `Prompts#collect` answer hash, validates every nested budget/timeout `LIMIT_KEYS` entry, and `hive init` renders the config immediately after prompt collection so incomplete prompt data raises before `.hive-state` or `hive/state` can be created.
+
+**Refreshed pages:**
+- [[commands/init]] - documented the complete-answer fail-fast contract, pre-side-effect render order, nested limit validation, and unit/integration coverage.
+
+## [2026-05-26T10:30:00Z] review - accepted finding count source of truth
+
+**Action:** Fixed issue #156 by carrying accepted-findings text and count together through the 6-review Phase 4 path. The auto-commit fallback now writes `Hive-Fix-Findings` from the collector's count instead of reparsing rendered accepted-findings lines, removing the duplicate line-format regexes.
+
+**Refreshed pages:**
+- [[stages/review]] - documented that auto-commit fallback uses the collector count for `Hive-Fix-Findings`.
+- [[modules/metrics]] - clarified the trailer's count source.
+
 ## [2026-05-26T10:15:00Z] daemon - self-reexec on source-file drift
 
 **Action:** Surfaced the daemon's new auto-re-exec behavior triggered by `lib/hive.rb` SHA-256 drift. Adds `ADR-031` recording the diagnosis (8,946 `schema_version` mismatches between PR #78 and the next restart) and the chosen mitigation. Updates `wiki/modules/daemon.md` with operator-facing details: fingerprint scope, rate-limit (60s), kill switch (`HIVE_DAEMON_NO_AUTO_REEXEC=1`), and what kinds of edits do and don't trigger re-exec.
@@ -75,6 +211,31 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[decisions]] - new ADR-031 inserted ahead of ADR-030.
 - [[modules/daemon]] - added "Self-reexec on source drift" section before Backlinks.
+
+## [2026-05-26T10:07:52Z] review - auto-commit staged path scope gate
+
+**Action:** Fixed issue #157 by adding a default-on staged-path scope check before Hive Phase 4 auto-commit fallback writes a trailered fix commit. The runner still stages with `git add -A`, but then reads `git diff --cached --name-only -z`, rejects denied/out-of-allowlist paths from `review.fix.auto_commit.scope_check`, unstages on failure, and surfaces the block as `REVIEW_ERROR phase=fix reason=fix_auto_commit_failed`.
+
+**Refreshed pages:**
+- [[stages/review]] - documented the staged-path gate in Phase 4.
+- [[architecture]] - added the scope gate to the review-stage safety boundary list.
+- [[state-model]] - documented the new review.fix.auto_commit.scope_check config shape.
+
+## [2026-05-26T10:00:00Z] review - fair per-reviewer wall-clock deadlines
+
+**Action:** Fixed issue #155 by changing `Stages::Review.run_reviewers` to give each reviewer a rolling fair share of the remaining `review.max_wall_clock_sec` budget instead of handing every reviewer the full remaining deadline. This preserves sequential reviewer execution while preventing one hung reviewer from starving later reviewers in the same pass.
+
+**Refreshed pages:**
+- [[stages/review]] - documented the rolling fair-share deadline behavior for Phase 2 reviewers.
+
+## [2026-05-25T18:28:15Z] claude.mode - init permission-mode selection
+
+**Action:** Added project config and `hive init` support for `claude.permission_mode`. Fresh projects now render `bypassPermissions` by default for every Claude-backed stage (tmux and headless), while the init prompt lets operators choose `auto` for Claude Code auto-mode rules or another supported Claude Code permission mode. `Hive::ClaudeLauncher` now reads the configured value before building the tmux wrapper command.
+
+**Refreshed pages:**
+- [[commands/init]] - documented the new prompt, defaults summary, and scripted-answer contract.
+- [[modules/config]] - documented defaults, validation, and `Config.claude_permission_mode`.
+- [[stages/brainstorm]] and [[state-model]] - recorded the launcher/config surface.
 
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
@@ -2097,6 +2258,21 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[commands/daemon]]
 - [[operating]]
 
+## [2026-05-25T19:06:41Z] refresh - architecture, daemon liveness, gaps
+
+**Action:** Refreshed the project wiki after reading `.llm-wiki/config.json`, agent instructions, the current wiki index/gaps/log, the configured cross-project wiki at `/home/asterio/wikis/master/wiki`, recent git history, and the dirty working-tree source changes. Documented PR #151's `live_task_lock` daemon path, updated stale architecture/active-area stage and AgentProfile descriptions, recorded the uncommitted `claude.permission_mode` surface in adjacent module/ADR pages, and made the gaps page explicit that source coverage is a representative domain map rather than an automated one-file audit.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[active-areas]]
+- [[modules/daemon]]
+- [[commands/daemon]]
+- [[modules/agent]]
+- [[modules/agent_profile]]
+- [[decisions]]
+- [[gaps]]
+- [[index]]
+
 ## [2026-05-25T19:30:41Z] review — reject pre-existing dirty fix worktrees
 
 **Action:** Tightened the Phase 4 auto-commit path so Hive refuses worktrees that are already dirty before the fix agent runs. Auto-commit now only captures edits introduced by a successful fix-agent spawn from a clean tree, preventing unrelated manual changes from being bundled into rollback-rate trailered fix commits.
@@ -2110,3 +2286,84 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[commands/bot]]
+
+## [2026-05-26T10:36:10Z] review — inherit signing for fallback fix commits
+
+**Action:** Changed Phase 4 fallback auto-commits to inherit the worktree's normal `commit.gpgsign` policy by default instead of forcing `commit.gpgsign=false`. Added `review.fix.auto_commit.sign_policy` with `inherit`, `bypass`, and `fail` modes so signed repositories can sign Hive fallback commits and operators can still opt into unsigned automation or a clear pause.
+
+**Refreshed pages:**
+- [[stages/review]]
+- [[modules/config]]
+- [[state-model]]
+
+## [2026-05-26T10:52:00Z] review — keep user-answer checkboxes out of finding counts
+
+**Action:** Changed answered escalation body and answer prose in Phase 4 accepted findings to use `[source] >>> ...` context lines. User-provided markdown checkboxes still reach the fix agent as context, but no longer match the accepted-finding counter that fills `Hive-Fix-Findings`.
+
+**Refreshed pages:**
+- [[stages/review]]
+- [[state-model]]
+- [[modules/metrics]]
+
+## [2026-05-26T12:46:42Z] tui — spawn-failure recovery flash
+
+**Action:** Refined `Hive::Tui::Subprocess.dispatch_background` so immediate spawn failures return a `false` sentinel after dispatching `SubprocessExited(exit_code: 127)`, and recovery workers now treat that sentinel like a failed rerun start instead of flashing that `hive run` is running after the marker was cleared.
+
+**Refreshed pages:**
+- [[commands/tui]]
+
+## [2026-05-26T13:07:56Z] tui — align kill-class error predicates
+
+**Action:** Aligned TUI kill-class routing with auto-heal semantics: only `ERROR reason=exit_code exit_code=130|137|143` is treated as auto-healed/log-tail-only. Markers with the same numeric code but another reason now remain recoverable through red-status detail and `RecoverError`. `hive markers clear --match-attr` now accepts comma-separated attr pairs, and the TUI uses both `reason` and `exit_code` when present so stale auto-heal/recovery workers cannot erase same-code/different-reason markers.
+
+**Refreshed pages:**
+- [[commands/tui]]
+- [[commands/markers]]
+- [[modules/markers]]
+
+## [2026-05-26T13:42:13Z] tui — guard ERROR recovery with marker_id
+
+**Action:** Added generated `marker_id` attrs to new `ERROR` markers and changed TUI error recovery / kill-class auto-heal to clear by `--match-attr marker_id=...` when available. This closes the same-exit-code aliasing window where a stale recovery worker could clear a fresh `ERROR reason=exit_code exit_code=1` marker that the operator never reviewed. Legacy rows without `marker_id` fall back to observed `reason` and `exit_code` attrs when present.
+
+**Refreshed pages:**
+- [[modules/markers]]
+- [[modules/agent]]
+- [[commands/tui]]
+- [[commands/markers]]
+- [[state-model]]
+- [[modules/task_action]]
+- [[modules/bot]]
+- [[commands/bot]]
+
+## [2026-05-26T14:06:06Z] prune — detect relinked symlink registry entries
+
+**Action:** `Hive::Config.register_project` now stores a private `real_path` when the registered path resolves, and `prune_missing_projects!` drops rows whose current realpath no longer matches that stored target. This catches a registered symlink that was retargeted to a different directory after the original project disappeared while preserving legacy rows without `real_path`.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[commands/prune]]
+- [[state-model]]
+
+## [2026-05-26T14:39:00Z] config — lock and atomically rewrite global registry
+
+**Action:** `Hive::Config.update_global_config!` now serializes global config read-modify-write operations on the sibling `config.yml.lock`, and `write_global_config!` writes through tempfile + fsync + atomic rename while preserving mode bits. `register_project`, `unregister_project`, `prune_missing_projects!`, and init daemon-autostart recording use the locked path so concurrent shells cannot lose registry updates or expose torn YAML.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[state-model]]
+- [[dependencies]]
+
+## [2026-05-26T15:08:00Z] forget — add retry-safe --if-exists
+
+**Action:** `hive forget NAME --if-exists` now exits 0 when the registry row is already absent, while the default `hive forget NAME` path still returns `unknown_project` / exit 64 for typo detection. The `hive-forget` success envelope now carries `removed: true` for actual removals and `removed: false` for `--if-exists` no-ops.
+
+**Refreshed pages:**
+- [[commands/forget]]
+- [[cli]]
+
+## [2026-05-27T10:39:00Z] release — document AUR SSH host-key CI TOFU
+
+**Action:** Clarified that the AUR publish job uses `StrictHostKeyChecking=accept-new` only for non-interactive host-key first contact. Host identity checking remains enabled and later host-key changes still fail closed; `AUR_SSH_PRIVATE_KEY` remains the separate write-authorization gate.
+
+**Refreshed pages:**
+- [[decisions]]

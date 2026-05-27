@@ -3,7 +3,7 @@ title: Hive::Metrics
 type: module
 source: lib/hive/metrics.rb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-05-26T10:30:00Z
 tags: [metrics, rollback, trailers, observability]
 ---
 
@@ -35,7 +35,7 @@ Fix-agent commits emit the following trailers (see `templates/fix_prompt.md.erb`
 |---------|-----------|-------|
 | `Hive-Task-Slug` | both | Task slug (folder basename). |
 | `Hive-Fix-Pass` | both | `01` … `NN` zero-padded. The presence of this trailer is what marks a commit as a "fix-agent commit." |
-| `Hive-Fix-Findings` | review-fix only | Count of `[x]` items applied in this commit. |
+| `Hive-Fix-Findings` | review-fix only | Count of accepted reviewer findings plus answered escalations applied in this commit; markdown checkboxes inside answered-escalation context do not increment it. The review runner carries this count alongside the accepted-findings text so auto-commit fallback does not reparse prompt text. |
 | `Hive-Triage-Bias` | review-fix only | `courageous` / `safetyist` / custom. |
 | `Hive-Reviewer-Sources` | review-fix only | Comma-separated reviewer-file basenames (no NN). |
 | `Hive-Fix-Phase` | both | `ci` (Phase 1) or `fix` (Phase 4). |

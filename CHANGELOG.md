@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed — release channel publishing
+
+- Fixed the `release.yml` Homebrew-tap dispatch, which sent `client_payload` as a JSON string (rejected with HTTP 422) and aborted the publish job before the AUR step. The dispatch now sends a proper object, and the tap-notify step is non-fatal so it can never block the AUR publish.
+
+### Added — Homebrew tap + AUR publishing
+
+- Finished the Homebrew and AUR install channels (previously only `install.sh` worked). A `vX.Y.Z` tag now publishes the signed `hive-cli` gem and fans out to both channels: `release.yml` dispatches to the `ivankuznetsov/homebrew-hive` tap (which renders `Formula/hive.rb` from the repo's ERB template) and runs an `aur-publish` job that cosign-verifies the gem (pinned signing identity) before rendering the `PKGBUILD`, regenerating `.SRCINFO` via `makepkg --printsrcinfo`, and pushing to the AUR `hive-bin` package.
+- Added `packaging/render.rb` — a single fail-closed ERB renderer shared by both channels, so the formula and PKGBUILD can never drift on the substituted version/sha. Removed the stale hand-maintained `packaging/aur/.SRCINFO.template`.
+- Added `docs/RELEASING.md` (release + channel-bootstrap runbook) and recorded the design in ADR-032.
+
 ### Added — token usage stats
 
 - Hive now records one SQLite `token_usage` row for each hive-driven agent spawn that emits structured usage, with per-agent/profile extractors for Claude, Codex, and Pi. `hive tui` shows scoped token aggregates in the footer and opens a full-screen token matrix with `T`.

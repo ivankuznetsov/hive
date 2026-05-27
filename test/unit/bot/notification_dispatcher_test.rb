@@ -21,6 +21,19 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     )
   end
 
+  def legacy_stage_dirs(review_count: 2, pr_count: 1)
+    Hive::Bot::StatusWatcher::LegacyStageDirs.new(
+      project: "hive",
+      project_path: "/tmp/hive",
+      hive_state_path: "/tmp/hive/.hive-state",
+      legacy_stage_dirs: [
+        { "stage_dir" => "5-review", "task_count" => review_count },
+        { "stage_dir" => "6-pr", "task_count" => pr_count }
+      ],
+      legacy_migrate_command: "hive migrate"
+    )
+  end
+
   def recovery_row(attrs: { "pass" => "1" }, slug: "stuck-task-260525-abcd", stage: "6-review")
     row(action: "recover_review", marker: "review_error", attrs: attrs, slug: slug, stage: stage)
   end
@@ -53,6 +66,44 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
 
   def logger
     @logger ||= StubLogger.new
+  end
+
+  def test_legacy_stage_dirs_notify_once_and_refire_after_clean_transition
+    d = dispatcher
+    legacy = legacy_stage_dirs
+    changed_while_dirty = legacy_stage_dirs(review_count: 3)
+
+    d.process_rows([ legacy ])
+    d.process_rows([ legacy ])
+    d.process_rows([ changed_while_dirty ])
+    d.process_rows([])
+    d.process_rows([ changed_while_dirty ])
+
+    assert_equal 2, telegram.messages.size
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 telegram.messages.first[:text]
+    assert_equal "Project hive has 4 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                 telegram.messages.last[:text]
+    assert(logger.events.any? { |name, _| name == :notification_skipped_dedupe },
+           "legacy-stage warning must dedupe while the project remains legacy-dirty")
+  end
+
+  def test_fresh_install_still_alerts_legacy_stage_dirs
+    with_tmp_dir do |dir|
+      path = File.join(dir, "alerts.json")
+      d = dispatcher(path: path, fresh_install: true)
+      legacy = legacy_stage_dirs
+      pre_existing = recovery_row
+
+      d.process_rows([ pre_existing, legacy ])
+      d.process_rows([ pre_existing, legacy ])
+
+      assert_equal 1, telegram.messages.size
+      assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+                   telegram.messages.first[:text]
+      assert(logger.events.any? { |name, attrs| name == :fresh_install_seeded && attrs[:fingerprint_count] == 1 },
+             "fresh install should seed task backlog without seeding legacy-stage migration warnings")
+    end
   end
 
   def test_process_rows_sends_new_input_gate_notification

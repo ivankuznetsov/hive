@@ -7,32 +7,37 @@ updated: 2026-05-27
 tags: [roadmap, status]
 ---
 
-**TLDR**: Phase 1 MVP shipped Apr-25. The 6-review loop, PR-first draft/finalize flow, daemon dispatcher, rollback-rate metric, auto-rebase pre-step, and Telegram bot mobile surface are now implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, and daemon/bot operational polish.
+**TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and project-global Claude tmux/headless routing are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and cross-platform smoke depth.
 
 ## Status
 
-Working tree clean as of 2026-04-25. Three commits on `main`:
-1. `c2098f0` — initial Phase 1 MVP (folder-as-agent pipeline).
-2. `873b1ae` — post-MVP review hardening (P0 worktree-hijack + 9 P1 fixes).
-3. `1b05ccb` — agent-failure propagation, live-claude smoke, secondary review fixes.
+Recent history inspected on 2026-05-25:
+
+| Commit | Area | Notes |
+|--------|------|-------|
+| `ea025846` | Daemon liveness | Propagates `live_task_lock` through `StatusConsumer`, `StaleAgentHealer`, and dispatcher capacity accounting so externally-running tasks count during the pre-Claude PID window. |
+| `0419b880` | Coverage | Restores strict 100% default coverage on current main and keeps CI explicit with `HIVE_COVERAGE_MIN_LINE=100`. |
+| `7e5989cd` | Runtime status/open-pr | Tightens marker parsing, live-lock status display, and merged-PR recovery `headRefOid` matching. |
+| `4b3d934d` | Token usage | Records and surfaces agent token usage through `UsageDB`, usage extractors, TUI footer, and token matrix. |
+| `3cd6ebc1` | Bot eval | Adds the opt-in Telegram bot evaluation harness under `test/eval/` and `bin/hive-eval`. |
+| `80d35a0a` | Claude launch mode | Adds project-global `claude.mode` and `Hive::ClaudeLauncher` for every Claude-backed stage. |
+
+Working tree at refresh time is intentionally not clean: uncommitted source edits add `claude.permission_mode` defaults, validation, `hive init` prompting, and propagation through `Hive::ClaudeLauncher`, `Hive::Agent`, reviewer spawns, rebase conflict spawns, and bot Codex conversations. Existing wiki edits already document part of that permission-mode surface; this refresh updates adjacent architecture/module pages.
 
 ## What exists
 
 | Area | Files | Status |
 |------|-------|--------|
-| CLI surface | `bin/hive`, `lib/hive/cli.rb`, `lib/hive/commands/{init,new,run,status}.rb` | Implemented + integration-tested |
-| Stage runners | `lib/hive/stages/{base,inbox,brainstorm,plan,execute,pr,done}.rb` | Implemented + integration-tested |
-| Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,config}.rb` | Implemented + unit-tested |
-| Templates | `templates/*.erb` (8 files) | Drafted |
-| Tests | `test/unit/*.rb`, `test/integration/*.rb` (94 tests / 299 assertions) | All green |
-| Live smoke | `test/smoke/live_claude_smoke_test.rb` (`rake smoke`) | Opt-in; verified 2 / 11 cases |
-| CI | `.github/workflows/ci.yml`, `.github/dependabot.yml`, `config/brakeman.ignore` | Wired |
-| Repo hygiene | `CHANGELOG.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md` | Authored |
-| Docs | `README.md`, `wiki/` knowledge base | Authored |
-| Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`. Per-project enrolled at `hive init` (default Y). |
+| CLI surface | `bin/hive`, `lib/hive/cli.rb`, `lib/hive/commands/*.rb` | Implemented. Command pages exist for the active Thor surface, including daemon, bot, TUI, markers, migrate, findings, metrics, update, uninstall, and stage-action helpers. |
+| Stage runners | `lib/hive/stages/{inbox,brainstorm,plan,execute,open_pr,review,artifacts,finalize,done}.rb` | Nine-stage pipeline implemented and documented in [[stages/index]]. `7-artifacts` is agent-backed and sits between review and finalize. |
+| Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,agent_profile,config,task_action,...}.rb` | Implemented + unit-tested by domain. Agent spawning is AgentProfile-driven; Claude launches can be tmux or headless via `Hive::ClaudeLauncher`. |
+| Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`, heals stale AGENT_WORKING markers, and now counts `live_task_lock` rows toward capacity. |
+| TUI | `lib/hive/tui/*`, `wiki/commands/tui.md`, `wiki/token-usage.md` | Bubbletea-ruby MVU dashboard with grid/detail flows, red-status detail, manual steering, token footer, and token matrix. |
 | Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. `hive bot install` adds an opt-in reboot-survivable per-user service (systemd-user/launchd) that runs `hive bot start --foreground` with no inline token; torn down by `hive uninstall`. |
-| Shared service installer | `lib/hive/commands/service_installer/base.rb`, `lib/hive/commands/{daemon,bot}/service_installer.rb`, `lib/hive/invoked_binary.rb`, `schemas/hive-{bot,daemon}-install.v1.json`, `docs/solutions/…cross-platform-service-installer-base…` | `ServiceInstaller::Base` extracted from the daemon installer (daemon behavior byte-identical) and subclassed by daemon + bot. Content-hash drift detection (`--force` to overwrite), `unsupported` outcome on hosts with no service manager, exit codes 0/64/70, and a read-only `service_state` probe surfaced as `service_installed`/`service_enabled`/`unit_path` in both `bot`/`daemon status --json`. |
-| Global Claude launch mode (ADR-030) | `lib/hive/claude_launcher.rb`, `lib/hive/stages/base.rb` (`spawn_claude!`), `lib/hive/commands/init/prompts.rb`, `lib/hive/commands/doctor.rb`, `docs/adrs/030-global-claude-launch-mode.md`, `docs/notes/claude-tmux-launch-mode.md` | Top-level `claude.mode` (default `tmux`) routes every Claude-backed stage (brainstorm/plan/execute/open-pr/artifacts/finalize + 6-review Claude reviewers) through one shared tmux launcher per pass. `tmux >= 3.0` is a hard runtime dep when mode is `tmux`. `hive init` prompts; `hive doctor` reports. `brainstorm.runtime` deprecated to brainstorm-only fallback. |
+| Shared service installer | `lib/hive/commands/service_installer/{base,outcome}.rb`, `lib/hive/commands/{daemon,bot}/service_installer.rb`, `schemas/hive-{bot,daemon}-install.v1.json`, `docs/solutions/…cross-platform-service-installer-base…` | `ServiceInstaller::Base` extracted from the daemon installer (daemon behavior byte-identical) and subclassed by daemon + bot, returning a `ServiceInstaller::Outcome` value object. Content-comparison drift detection (`--force` to overwrite), `unsupported` outcome on hosts with no service manager, exit codes 0/64/70, and a read-only `service_state` probe surfaced as `service_installed`/`service_enabled`/`unit_path` in both `bot`/`daemon status --json`. |
+| Testing and eval | `test/unit/`, `test/integration/`, `test/e2e/`, `test/eval/`, `Rakefile`, `bin/hive-eval` | Default `bundle exec rake test`; strict `bundle exec rake coverage`; opt-in e2e and Telegram bot eval layers. |
+| Release/install | `install.sh`, `install.md`, `packaging/`, `.github/workflows/install-smoke.yml` | v0.1.0 install/update/uninstall path, release artifact verification, daemon service install JSON envelope, and AUR/macOS x86_64 follow-ups are documented in [[operating]] and [[gaps]]. |
+| Docs/wiki | `README.md`, `docs/notes/`, `wiki/`, `.llm-wiki/` | Managed llm-wiki context is installed for Codex/Claude/Pi; refresh automation is Codex-owned by `.llm-wiki/config.json`. |
 
 ## Phase 1 deferred work
 
@@ -57,7 +62,6 @@ Working tree clean as of 2026-04-25. Three commits on `main`:
 ## What's NOT implemented yet (per plan)
 
 - `--force` flag on `hive run` for `EXECUTE_STALE` recovery — current MVP requires manual marker removal + frontmatter edit.
-- macOS fallback for PID-reuse detection (currently Linux `/proc/<pid>/stat` only).
 - Pre-commit hook integration on `hive/state` commits — flagged as a known caveat in the plan's Risks table.
 
 ## Backlinks

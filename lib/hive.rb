@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.1.0".freeze
+  VERSION = "0.1.4".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
 
   module Schemas
@@ -9,6 +9,7 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 2,
+      "hive-init" => 1,
       "hive-status-diagnose" => 1,
       "hive-run" => 2,
       "hive-approve" => 2,

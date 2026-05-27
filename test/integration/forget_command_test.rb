@@ -30,6 +30,7 @@ class ForgetCommandTest < Minitest::Test
       assert_equal "hive-forget", payload["schema"]
       assert_equal 1, payload["schema_version"]
       assert_equal true, payload["ok"]
+      assert_equal true, payload["removed"]
       assert_equal "drop", payload["name"]
       assert_equal "/tmp/drop", payload["path"]
       assert_equal "/tmp/drop/.hive-state", payload["hive_state_path"]
@@ -67,6 +68,75 @@ class ForgetCommandTest < Minitest::Test
     end
   end
 
+  def test_forget_if_exists_removes_existing_name_and_reports_removed_true
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "drop", path: "/tmp/drop")
+
+      out, _err = capture_io do
+        Hive::Commands::Forget.new("drop", json: true, if_exists: true).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal true, payload["ok"]
+      assert_equal true, payload["removed"]
+      assert_equal "drop", payload["name"]
+      assert_equal "/tmp/drop", payload["path"]
+      assert_equal "/tmp/drop/.hive-state", payload["hive_state_path"]
+      assert_empty Hive::Config.registered_projects
+    end
+  end
+
+  def test_forget_if_exists_unknown_name_exits_success_without_rewriting_registry
+    with_tmp_global_config do |home|
+      Hive::Config.register_project(name: "keep", path: "/tmp/keep")
+      before = File.read(File.join(home, "config.yml"))
+
+      out, _err = capture_io do
+        Hive::Commands::Forget.new("ghost", if_exists: true).call
+      end
+
+      assert_match(/already absent/, out)
+      assert_equal [ "keep" ], Hive::Config.registered_projects.map { |p| p["name"] }
+      assert_equal before, File.read(File.join(home, "config.yml"))
+    end
+  end
+
+  def test_forget_if_exists_unknown_name_json_emits_removed_false_success
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "keep", path: "/tmp/keep")
+
+      out, _err = capture_io do
+        Hive::Commands::Forget.new("ghost", json: true, if_exists: true).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "hive-forget", payload["schema"]
+      assert_equal true, payload["ok"]
+      assert_equal false, payload["removed"]
+      assert_equal "ghost", payload["name"]
+      refute payload.key?("path")
+      refute payload.key?("hive_state_path")
+      assert_equal [ "keep" ], Hive::Config.registered_projects.map { |p| p["name"] }
+    end
+  end
+
+  def test_forget_if_exists_makes_second_forget_retry_safe
+    with_tmp_global_config do
+      Hive::Config.register_project(name: "drop", path: "/tmp/drop")
+
+      capture_io { Hive::Commands::Forget.new("drop").call }
+      out, _err = capture_io do
+        Hive::Commands::Forget.new("drop", json: true, if_exists: true).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal true, payload["ok"]
+      assert_equal false, payload["removed"]
+      assert_equal "drop", payload["name"]
+      assert_empty Hive::Config.registered_projects
+    end
+  end
+
   def test_forget_missing_name_argument_exits_usage
     with_tmp_global_config do
       _out, err, status = with_captured_exit do
@@ -90,6 +160,19 @@ class ForgetCommandTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal "missing_name", payload["error_kind"],
                    "empty NAME positional must surface as missing_name, not unknown_project"
+      assert_equal "UsageError", payload["error_class"]
+    end
+  end
+
+  def test_forget_if_exists_missing_name_still_emits_missing_name_error_kind
+    with_tmp_global_config do
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Forget.new("  ", json: true, if_exists: true).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, status
+
+      payload = JSON.parse(out)
+      assert_equal "missing_name", payload["error_kind"]
       assert_equal "UsageError", payload["error_class"]
     end
   end
@@ -154,6 +237,23 @@ class ForgetCommandTest < Minitest::Test
     payload = JSON.parse(out)
     assert_equal "config", payload["error_kind"],
                  "typoed HIVE_HOME must not masquerade as unknown_project"
+  ensure
+    ENV["HIVE_HOME"] = prev
+  end
+
+  def test_forget_if_exists_with_typoed_hive_home_still_emits_config_error
+    bad = "/tmp/hive-typo-#{Process.pid}-#{rand(1_000_000)}"
+    prev = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = bad
+
+    out, _err, status = with_captured_exit do
+      Hive::Commands::Forget.new("anything", json: true, if_exists: true).call
+    end
+    assert_equal Hive::ExitCodes::CONFIG, status,
+                 "--if-exists must not hide global config access failures"
+
+    payload = JSON.parse(out)
+    assert_equal "config", payload["error_kind"]
   ensure
     ENV["HIVE_HOME"] = prev
   end

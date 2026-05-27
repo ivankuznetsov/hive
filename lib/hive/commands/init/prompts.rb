@@ -26,8 +26,16 @@ module Hive
         DEFAULT_PLANNING_AGENT = "claude".freeze
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
         DEFAULT_CLAUDE_MODE = "tmux".freeze
+        DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions".freeze
         CLAUDE_MODES = Hive::Config::CLAUDE_MODES
+        CLAUDE_PERMISSION_MODES = Hive::Config::CLAUDE_PERMISSION_MODES
         CLAUDE_MODE_CHOICES = [ "tmux", "headless" ].freeze
+        # Display/index order for the prompt menu; CLAUDE_PERMISSION_MODES is the
+        # sorted allowlist used for validation. They must cover the same set —
+        # numeric answers index CHOICES while name answers match MODES, so drift
+        # would silently break one resolution path. Guard it at load time.
+        CLAUDE_PERMISSION_MODE_CHOICES = [ "bypassPermissions", "auto", "default", "acceptEdits", "dontAsk", "plan" ].freeze
+        raise "permission-mode choices/allowlist drift: #{CLAUDE_PERMISSION_MODE_CHOICES.sort.inspect} vs #{CLAUDE_PERMISSION_MODES.sort.inspect}" unless CLAUDE_PERMISSION_MODE_CHOICES.sort == CLAUDE_PERMISSION_MODES.sort
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
 
@@ -96,6 +104,7 @@ module Hive
         #   {
         #     "planning_agent"    => String,           # one of @registered_agents
         #     "claude_mode"      => String,           # tmux | headless
+        #     "claude_permission_mode" => String,      # Claude Code permission mode
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
         #     "triage_bias"       => String,           # courageous | safetyist
@@ -110,6 +119,7 @@ module Hive
           intro
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
           claude_mode = prompt_claude_mode
+          claude_permission_mode = prompt_claude_permission_mode
           development = prompt_agent("Development agent (4-execute)", DEFAULT_DEVELOPMENT_AGENT)
           reviewers = prompt_reviewers
           triage_bias = prompt_triage_bias
@@ -119,6 +129,7 @@ module Hive
           answers = {
             "planning_agent" => planning,
             "claude_mode" => claude_mode,
+            "claude_permission_mode" => claude_permission_mode,
             "development_agent" => development,
             "enabled_reviewers" => reviewers,
             "triage_bias" => triage_bias,
@@ -146,6 +157,7 @@ module Hive
           answers = {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
             "claude_mode" => DEFAULT_CLAUDE_MODE,
+            "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
             "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
             "enabled_reviewers" => DEFAULT_REVIEWER_NAMES.dup,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
@@ -158,6 +170,7 @@ module Hive
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
             "claude_mode=#{DEFAULT_CLAUDE_MODE}, " \
+            "claude_permission_mode=#{DEFAULT_CLAUDE_PERMISSION_MODE}, " \
             "dev=#{DEFAULT_DEVELOPMENT_AGENT}, " \
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled"
@@ -202,13 +215,15 @@ module Hive
         end
 
         def resolve_agent_choice(answer)
+          match = @registered_agents.find { |a| a.casecmp(answer).zero? }
+          return match if match
+
           if answer =~ /\A\d+\z/
             idx = answer.to_i
             return @registered_agents[idx - 1] if idx >= 1 && idx <= @registered_agents.size
 
-            return nil
+            nil
           end
-          @registered_agents.find { |a| a.casecmp(answer).zero? }
         end
 
         def prompt_claude_mode
@@ -238,6 +253,39 @@ module Hive
             return nil
           end
           CLAUDE_MODES.find { |mode| mode.casecmp(answer).zero? }
+        end
+
+        def prompt_claude_permission_mode
+          @output.puts ""
+          @output.puts "Claude permission mode — applies to every Claude-backed stage (tmux and headless):"
+          @output.puts "  1) bypassPermissions - skip permission prompts (recommended default)"
+          @output.puts "  2) auto              - use Claude Code auto-mode rules"
+          @output.puts "  3) default           - normal Claude Code permissions"
+          @output.puts "  4) acceptEdits       - auto-accept file edits only"
+          @output.puts "  5) dontAsk           - refuse instead of asking for permissions"
+          @output.puts "  6) plan              - plan mode"
+          loop do
+            @output.print "Claude permission mode [#{DEFAULT_CLAUDE_PERMISSION_MODE}]: "
+            @output.flush
+            answer = read_line
+            return DEFAULT_CLAUDE_PERMISSION_MODE if answer.empty?
+
+            resolved = resolve_claude_permission_mode_choice(answer)
+            return resolved if resolved
+
+            @output.puts "  unknown Claude permission mode #{answer.inspect}; pick " \
+                         "#{CLAUDE_PERMISSION_MODES.join('/')} or 1..#{CLAUDE_PERMISSION_MODE_CHOICES.size}"
+          end
+        end
+
+        def resolve_claude_permission_mode_choice(answer)
+          if answer =~ /\A\d+\z/
+            idx = answer.to_i
+            return CLAUDE_PERMISSION_MODE_CHOICES[idx - 1] if idx.between?(1, CLAUDE_PERMISSION_MODE_CHOICES.size)
+
+            return nil
+          end
+          CLAUDE_PERMISSION_MODES.find { |mode| mode.casecmp(answer).zero? }
         end
 
         def prompt_reviewers
@@ -352,6 +400,11 @@ module Hive
             end
 
             b_str, t_str = parts
+            if !b_str.empty? && t_str.empty?
+              @output.puts "  timeout is required when budget is provided; use <budget>,<timeout> or blank for defaults"
+              next
+            end
+
             b = b_str.empty? ? default_b : parse_positive_int(b_str)
             t = t_str.empty? ? default_t : parse_positive_int(t_str)
             if b.nil? || t.nil?
@@ -393,9 +446,10 @@ module Hive
         def summarize(answers)
           @output.puts ""
           @output.puts "Summary:"
-          @output.puts "  planning_agent    = #{answers['planning_agent']}"
-          @output.puts "  claude_mode       = #{answers['claude_mode']}"
-          @output.puts "  development_agent = #{answers['development_agent']}"
+          @output.puts "  planning_agent          = #{answers['planning_agent']}"
+          @output.puts "  claude_mode             = #{answers['claude_mode']}"
+          @output.puts "  claude_permission_mode  = #{answers['claude_permission_mode']}"
+          @output.puts "  development_agent       = #{answers['development_agent']}"
           @output.puts "  review_agents     = [#{answers['enabled_reviewers'].join(', ')}]"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  limits            = #{summarize_limits(answers)}"

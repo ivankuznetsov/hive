@@ -7,12 +7,14 @@ module Hive
       true
     end
 
-    # `--json` is honoured by `status`, `run`, `approve`, `findings`,
+    # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, and the workflow verbs
-    # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `init` and `new`
-    # accept the flag silently so an automated caller can pass it
-    # uniformly. Each emitting command produces a typed JSON document on
-    # success and a structured error envelope on every failure path.
+    # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `new` accepts
+    # the flag silently so an automated caller can pass it uniformly. Most
+    # emitting commands produce a typed JSON document on success and a
+    # structured error envelope on every failure path; init currently
+    # publishes the success envelope while precondition failures keep the
+    # legacy stderr + exit-code contract.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
@@ -39,11 +41,13 @@ module Hive
 
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
         2. Claude launch mode (project-global, tmux/headless)    — default tmux
-        3. Development agent (drives 4-execute)                  — default codex
-        4. Review agents (multi-select over 3 default reviewers) — default all
-        5. Triage bias (courageous / safetyist)                  — default courageous
-        6. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        7. Daemon enrollment                                     — default enabled
+        3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
+           (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
+        4. Development agent (drives 4-execute)                  — default codex
+        5. Review agents (multi-select over 3 default reviewers) — default all
+        6. Triage bias (courageous / safetyist)                  — default courageous
+        7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        8. Daemon enrollment                                     — default enabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -53,8 +57,11 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux, dev=codex,
-        reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
+        hive: using defaults — planning=claude, claude_mode=tmux, claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
+
+      With --json, init suppresses that prose and emits a single
+      hive-init.v1 success payload containing the resolved answers plus
+      project path, default branch, hive-state path, and worktree root.
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
@@ -71,17 +78,20 @@ module Hive
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
-      Hive::Commands::Init.new(project_path, force: options[:force]).call
+      Hive::Commands::Init.new(project_path, force: options[:force], json: options[:json]).call
     end
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
     long_desc <<~DESC
-      Drops the entry whose `name` matches NAME from ~/Dev/hive/config.yml.
+      Drops the entry whose `name` matches NAME from the global registry
+      (`~/.config/hive/config.yml` by default, or `HIVE_HOME/config.yml`
+      when overridden).
       The project's .hive-state directory on disk (if any) is left alone.
 
       An unknown name is a USAGE error (64), mirroring `hive metrics
-      --project NAME`. To bulk-remove every entry whose path no longer
-      exists, use `hive prune` instead.
+      --project NAME`. Pass --if-exists when a retry-safe cleanup script
+      should exit 0 if the entry is already absent. To bulk-remove every
+      entry whose path no longer exists, use `hive prune` instead.
 
       Exit codes: 0 success; 64 unknown project / missing NAME positional;
       70 internal error; 78 bad config (malformed config.yml or typoed
@@ -91,18 +101,21 @@ module Hive
 
         hive forget demo                  # remove the entry named 'demo'
         hive forget demo --json           # same, machine-readable envelope
+        hive forget demo --if-exists      # exit 0 even when demo is already absent
         hive forget nonexistent --json    # error envelope w/ error_kind: unknown_project
     DESC
+    option :if_exists, type: :boolean, default: false, desc: "exit 0 if NAME is already absent"
     def forget(name = nil)
       require "hive/commands/forget"
-      Hive::Commands::Forget.new(name, json: options[:json]).call
+      Hive::Commands::Forget.new(name, json: options[:json], if_exists: options[:if_exists]).call
     end
 
-    desc "prune", "Drop registry entries whose project path no longer exists"
+    desc "prune", "Drop stale, retargeted, or malformed registry entries"
     long_desc <<~DESC
-      Walks ~/Dev/hive/config.yml and removes every `registered_projects`
-      entry whose `path` is not a directory on disk OR whose row shape is
-      invalid (non-Hash, missing `path`, etc. — hand-edit accidents).
+      Walks the global config.yml and removes every `registered_projects`
+      entry whose `path` is not a directory on disk, whose stored
+      `real_path` no longer matches the current target, OR whose row shape
+      is invalid (non-Hash, missing `path`, etc. — hand-edit accidents).
       Useful after running `hive init` against `mktemp -d` directories
       that have since been cleaned up — the entries linger forever
       otherwise and the TUI's project list keeps showing them as
@@ -542,12 +555,14 @@ module Hive
         hive markers clear FOLDER --name REVIEW_STALE
         hive markers clear my-task-slug --name REVIEW_CI_STALE --project myproj
         hive markers clear FOLDER --name REVIEW_ERROR --json
-        hive markers clear FOLDER --name ERROR --match-attr exit_code=143
+        hive markers clear FOLDER --name ERROR --match-attr marker_id=abc123
+        hive markers clear FOLDER --name ERROR --match-attr reason=exit_code,exit_code=143
 
-      Use --match-attr KEY=VALUE to refuse the clear unless the current marker
-      carries the named attribute. The auto-healer in `hive tui` uses this to
-      avoid erasing a real-failure marker that landed between observation and
-      heal under cross-process concurrency.
+      Use --match-attr KEY=VALUE, or comma-separated KEY=VALUE pairs, to refuse
+      the clear unless the current marker carries the named attributes. The TUI
+      prefers generated ERROR marker_id attrs when available, with observed
+      reason/exit_code attrs as the legacy fallback, so stale recovery workers
+      cannot erase a fresh ERROR marker that landed between observation and heal.
 
       Exit codes: 0 success; 4 marker mismatch / attr mismatch / not in
       allowlist; 64 unknown subcommand or unknown task; 70 internal error.
@@ -556,7 +571,7 @@ module Hive
                   desc: "marker name to remove (e.g. REVIEW_STALE)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :match_attr, type: :string,
-                        desc: "refuse clear unless marker has the named attr (KEY=VALUE)"
+                        desc: "refuse clear unless marker has attr(s): KEY=VALUE[,KEY=VALUE]"
     def markers(subcommand, target = nil)
       require "hive/commands/markers"
       Hive::Commands::Markers.new(

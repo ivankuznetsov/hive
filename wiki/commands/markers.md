@@ -3,7 +3,7 @@ title: hive markers
 type: command
 source: lib/hive/commands/markers.rb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-05-27
 tags: [command, markers, recovery, json]
 ---
 
@@ -16,6 +16,8 @@ hive markers clear <slug>          --name REVIEW_STALE       # bare slug
 hive markers clear <task-folder>   --name REVIEW_CI_STALE    # explicit path
 hive markers clear <slug>          --name REVIEW_ERROR --project myproj
 hive markers clear <slug>          --name REVIEW_STALE --json
+hive markers clear <folder>        --name ERROR --match-attr marker_id=abc123
+hive markers clear <folder>        --name ERROR --match-attr reason=exit_code,exit_code=143
 ```
 
 ## Allowlist
@@ -38,9 +40,10 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 2. Resolve `FOLDER`: path-shaped (contains `/` or starts with `~`/`.`) → used directly; bare slug → searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous (mirrors `hive approve`).
 3. Validate the requested `--name` against `Hive::Commands::Markers::ALLOWED_NAMES`. Anything else raises `Hive::WrongStage` (exit 4).
 4. Read the current marker via `Hive::Markers.current(state_file)`. If the marker name does NOT match `--name`, raise `Hive::WrongStage` — refusing to silently clear a different state.
-5. Remove the marker line: `File.read` the body, `sub` out the exact `marker.raw` comment plus its trailing newline (if it sat alone on a line), then `Hive::Markers.write_atomic` the result. Surrounding prose, headings, and other markers stay untouched.
-6. Record a `hive_commit` on the `hive/state` branch (`hive: <stage>/<slug> markers clear <NAME>`).
-7. Emit a stdout summary (or one-line `hive-markers-clear` JSON document with `--json`); print a `next: hive run <folder>` hint to stderr.
+5. If `--match-attr` is present, require every supplied `KEY=VALUE` pair to match the current marker. Comma-separated pairs such as `reason=exit_code,exit_code=143` are all checked; any mismatch raises `Hive::WrongStage`. TUI ERROR recovery prefers generated `marker_id` attrs when available and uses observed reason/exit_code attrs for legacy rows.
+6. Remove the marker line: `File.read` the body, `sub` out the exact `marker.raw` comment plus its trailing newline (if it sat alone on a line), then `Hive::Markers.write_atomic` the result. Surrounding prose, headings, and other markers stay untouched.
+7. Record a `hive_commit` on the `hive/state` branch (`hive: <stage>/<slug> markers clear <NAME>`).
+8. Emit a stdout summary (or one-line `hive-markers-clear` JSON document with `--json`); print a `next: hive run <folder>` hint to stderr.
 
 ## JSON contract (`schema = "hive-markers-clear"`, version 1)
 
@@ -82,6 +85,7 @@ The `error_kind` enum mirrors `hive approve --json`: `ambiguous_slug`, `wrong_st
 | Slug ambiguous (cross-project or multi-stage in one project) | 64 (`USAGE`) | `Hive::AmbiguousSlug` |
 | Marker not in allowlist (e.g. `REVIEW_COMPLETE`) | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
 | Requested `--name` does not match the actual marker on the file | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
+| Any `--match-attr` key/value does not match the current marker attrs | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
 | Internal failure (git, fs) | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
 ## Why a typed command instead of `sed -i`?

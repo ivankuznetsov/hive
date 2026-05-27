@@ -38,6 +38,7 @@ class InitPromptsTest < Minitest::Test
     {
       "planning_agent" => "claude",
       "claude_mode" => "tmux",
+      "claude_permission_mode" => "bypassPermissions",
       "development_agent" => "codex",
       "enabled_reviewers" => REVIEWER_NAMES,
       "triage_bias" => "courageous",
@@ -54,19 +55,20 @@ class InitPromptsTest < Minitest::Test
   # Helper to build an interactive input string. The flow asks:
   #   1. planning agent
   #   2. claude mode
-  #   3. development agent
-  #   4. reviewer multi-select
-  #   5. triage bias
-  #   6-15. ten limit prompts (brainstorm, plan, execute_implementation,
+  #   3. claude permission mode
+  #   4. development agent
+  #   5. reviewer multi-select
+  #   6. triage bias
+  #   7-16. ten limit prompts (brainstorm, plan, execute_implementation,
   #         open_pr, artifacts, finalize, review_ci, review_triage, review_fix,
   #         review_browser)
-  #  16. daemon enable Y/n            (added under ADR-024)
-  #  17. confirmation Y/n
+  #  17. daemon enable Y/n            (added under ADR-024)
+  #  18. confirmation Y/n
   # Each line is one answer; blank line = accept default.
-  def interactive_input(planning: "", claude_mode: "", development: "", reviewers: "",
+  def interactive_input(planning: "", claude_mode: "", claude_permission_mode: "", development: "", reviewers: "",
                         triage_bias: "", limits: ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size),
                         daemon: "", confirm: "")
-    answers = [ planning, claude_mode ]
+    answers = [ planning, claude_mode, claude_permission_mode ]
     answers.concat([ development, reviewers, triage_bias, *limits, daemon, confirm ])
     answers.map { |a| "#{a}\n" }.join
   end
@@ -89,6 +91,7 @@ class InitPromptsTest < Minitest::Test
     assert_match(/hive: using defaults/, summary)
     assert_match(/planning=claude/, summary)
     assert_match(/claude_mode=tmux/, summary)
+    assert_match(/claude_permission_mode=bypassPermissions/, summary)
     assert_match(/dev=codex/, summary)
     assert_match(/reviewers=all3/, summary)
     assert_match(/triage=courageous/, summary)
@@ -142,13 +145,22 @@ class InitPromptsTest < Minitest::Test
     assert_equal "codex", answers["planning_agent"]
   end
 
+  def test_interactive_planning_agent_digit_name_prefers_name_over_index
+    prompts, _output = make_prompts(
+      interactive_input(planning: "42"),
+      registered_agents: %w[claude codex 42]
+    )
+    answers = prompts.collect
+    assert_equal "42", answers["planning_agent"]
+  end
+
   def test_interactive_planning_agent_unknown_reprompts_then_accepts
     # First answer is invalid → re-prompt; second answer is valid.
     # Reads total: planning (invalid + retry) + claude mode
     # + dev + reviewers + triage bias + limits + daemon + confirm.
     # Each blank line accepts the default.
     raw = ([ "nonexistent", "claude" ] +
-           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 6))).join("\n") + "\n"
+           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 7))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "claude", answers["planning_agent"]
@@ -157,7 +169,7 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_planning_agent_index_out_of_range_reprompts
     raw = ([ "7", "claude" ] +
-           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 6))).join("\n") + "\n"
+           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 7))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "claude", answers["planning_agent"]
@@ -187,7 +199,7 @@ class InitPromptsTest < Minitest::Test
   def test_interactive_claude_mode_unknown_reprompts
     # Trailing blanks: dev + reviewers + triage + limits + daemon + confirm.
     raw = ([ "", "warm_pool", "2" ] +
-           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 5))).join("\n") + "\n"
+           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 6))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(raw)
     answers = prompts.collect
     assert_equal "headless", answers["claude_mode"]
@@ -206,6 +218,41 @@ class InitPromptsTest < Minitest::Test
     prompts, output = make_prompts(interactive_input(claude_mode: "headless"))
     prompts.collect
     assert_match(/claude_mode\s+= headless/, output.string)
+  end
+
+  # --- claude permission mode: name, index, validation ---------------------
+
+  def test_interactive_claude_permission_mode_blank_defaults_to_bypass
+    prompts, _output = make_prompts(interactive_input(claude_permission_mode: ""))
+    answers = prompts.collect
+    assert_equal "bypassPermissions", answers["claude_permission_mode"]
+  end
+
+  def test_interactive_claude_permission_mode_by_name
+    prompts, _output = make_prompts(interactive_input(claude_permission_mode: "auto"))
+    answers = prompts.collect
+    assert_equal "auto", answers["claude_permission_mode"]
+  end
+
+  def test_interactive_claude_permission_mode_by_index
+    prompts, _output = make_prompts(interactive_input(claude_permission_mode: "2"))
+    answers = prompts.collect
+    assert_equal "auto", answers["claude_permission_mode"]
+  end
+
+  def test_interactive_claude_permission_mode_unknown_reprompts
+    raw = ([ "", "", "reckless", "2" ] +
+           ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 6))).join("\n") + "\n"
+    prompts, output, _summary = make_prompts(raw)
+    answers = prompts.collect
+    assert_equal "auto", answers["claude_permission_mode"]
+    assert_match(/unknown Claude permission mode "reckless"/, output.string)
+  end
+
+  def test_interactive_claude_permission_mode_summary_shows_choice
+    prompts, output = make_prompts(interactive_input(claude_permission_mode: "auto"))
+    prompts.collect
+    assert_match(/claude_permission_mode\s+= auto/, output.string)
   end
 
   # --- reviewer multi-select: indices, names, mixed ------------------------
@@ -240,9 +287,9 @@ class InitPromptsTest < Minitest::Test
   def test_interactive_reviewers_out_of_range_index_reprompts
     # Build the input manually since interactive_input doesn't allow
     # multi-line reviewer answers cleanly. Leading blanks fill planning,
-    # claude mode, and dev; trailing values are triage bias,
+    # claude mode, Claude permission mode, and dev; trailing values are triage bias,
     # limits, daemon, and confirm.
-    input = ([ "", "", "", "7", "1,2" ] +
+    input = ([ "", "", "", "", "7", "1,2" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 3))).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
@@ -251,7 +298,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_reviewers_unknown_name_reprompts
-    input = ([ "", "", "", "nope", "1" ] +
+    input = ([ "", "", "", "", "nope", "1" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 3))).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
@@ -286,7 +333,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_triage_bias_unknown_reprompts
-    input = ([ "", "", "", "", "bad", "2" ] +
+    input = ([ "", "", "", "", "", "bad", "2" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 2))).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
@@ -295,7 +342,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_interactive_triage_bias_index_out_of_range_reprompts
-    input = ([ "", "", "", "", "7", "2" ] + ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 2))).join("\n") + "\n"
+    input = ([ "", "", "", "", "", "7", "2" ] + ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 2))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
     assert_equal "safetyist", answers["triage_bias"]
@@ -339,12 +386,21 @@ class InitPromptsTest < Minitest::Test
     assert_equal 900, answers["timeouts"]["brainstorm"]
   end
 
+  def test_interactive_limits_trailing_comma_reprompts
+    input = ([ "", "", "", "", "", "", "10,", "10,600" ] +
+             ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 2))).join("\n") + "\n"
+    prompts, output = make_prompts(input)
+    answers = prompts.collect
+    assert_equal 10, answers["budgets"]["brainstorm"]
+    assert_equal 600, answers["timeouts"]["brainstorm"]
+    assert_match(/timeout is required when budget is provided/, output.string)
+  end
+
   def test_interactive_limits_zero_budget_reprompts
     # First answer 0,300 fails validation → re-prompt; second answer 10,600 accepted.
-    # 5 leading blanks fill planning, claude mode, dev, reviewers,
-    # triage; trailing blanks fill remaining limits + daemon
-    # + confirm.
-    input = ([ "", "", "", "", "", "0,300", "10,600" ] +
+    # 6 leading blanks fill planning, claude mode, Claude permission mode, dev,
+    # reviewers, triage; trailing blanks fill remaining limits + daemon + confirm.
+    input = ([ "", "", "", "", "", "", "0,300", "10,600" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 1))).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
@@ -355,7 +411,7 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_limits_malformed_format_reprompts
     # "30" without comma fails the <budget>,<timeout> shape → re-prompt
-    input = ([ "", "", "", "", "", "30", "30,900" ] +
+    input = ([ "", "", "", "", "", "", "30", "30,900" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 1))).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
@@ -409,9 +465,10 @@ class InitPromptsTest < Minitest::Test
 
   def test_interactive_daemon_unknown_reprompts
     # First answer "maybe" is unrecognised → re-prompt; second answer y → enabled.
-    # Feed all prompts up to daemon, then an invalid daemon answer,
+    # Feed all prompts up to daemon (planning, claude mode, Claude permission
+    # mode, dev, reviewers, triage + limits), then an invalid daemon answer,
     # a valid retry, and a blank confirmation.
-    input = (([ "" ] * (5 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    input = (([ "" ] * (6 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
              [ "maybe", "y", "" ]).join("\n") + "\n"
     prompts, output = make_prompts(input)
     answers = prompts.collect
@@ -530,7 +587,7 @@ class InitPromptsTest < Minitest::Test
     # Truncate the input transcript right before confirmation. read_line
     # must distinguish nil-from-gets (EOF) from an empty line and bubble
     # Aborted up the stack rather than silently confirming.
-    inputs = ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 6)).join("\n") + "\n"  # all pre-confirmation reads, then EOF
+    inputs = ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 7)).join("\n") + "\n"  # all pre-confirmation reads, then EOF
     prompts, _output, _summary = make_prompts(inputs)
     assert_raises(Hive::Commands::Init::Prompts::Aborted) { prompts.collect }
   end
@@ -558,9 +615,9 @@ class InitPromptsTest < Minitest::Test
   # that would produce an invalid YAML key (parses to nil) which
   # validate_reviewers! rejects on the next `hive run`. Re-prompt instead.
   def test_reviewers_comma_only_reprompts
-    # Leading values default planning/claude-mode/development agents.
+    # Leading values default planning/claude-mode/Claude-permission-mode/development agents.
     # Trailing values are triage bias, limits, daemon, and confirm.
-    input = ([ "", "", "", ",", "1" ] +
+    input = ([ "", "", "", "", ",", "1" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 3))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
@@ -569,7 +626,7 @@ class InitPromptsTest < Minitest::Test
   end
 
   def test_reviewers_whitespace_only_reprompts
-    input = ([ "", "", "", "  ,  ,  ", "2" ] +
+    input = ([ "", "", "", "", "  ,  ,  ", "2" ] +
              ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 3))).join("\n") + "\n"
     prompts, output, _summary = make_prompts(input)
     answers = prompts.collect
@@ -629,6 +686,13 @@ class InitPromptsTest < Minitest::Test
     assert_match(/claude/, err.message)
     assert_match(/codex/, err.message)
   end
+
+  def test_resolve_claude_permission_mode_choice_rejects_numeric_out_of_range
+    prompts, _output = make_prompts(interactive_input)
+
+    assert_nil prompts.send(:resolve_claude_permission_mode_choice, "99")
+  end
+
   def test_resolve_claude_mode_choice_rejects_numeric_out_of_range
     prompts, _output = make_prompts(interactive_input)
 

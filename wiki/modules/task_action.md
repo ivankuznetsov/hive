@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-05-24
+updated: 2026-05-27
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -31,7 +31,7 @@ Diagnostic artifacts are resolved with `File.realpath` and accepted only when th
 
 `marker_signature` is the SHA256 hex of `marker.name + sorted(attrs)` joined by newline. It's the freshness key shared with `Hive::DiagnosisAgent` (which validates it pre-write) and the TUI live-update gate (`Hive::Tui::Update#red_status_marker_signature`); producer + both consumers compute identical bytes.
 
-`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers via `retry_command_string` (`hive markers clear ... && hive run ...` as a shell one-liner). For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-passes `:review_stale`, the value reports `kind: manual_fix` with `command: nil` — the operator must edit or inspect findings before retry.
+`suggested_next_action` is populated for `:review_error` / `:review_ci_stale` / wall-clock `:review_stale` / `:error` markers via `retry_command_string` (`hive markers clear ... && hive run ...` as a shell one-liner). `:error` retry commands prefer `--match-attr marker_id=<current>` and fall back to observed `reason`/`exit_code` pairs for legacy markers; marker summaries and details hide internal `marker_id` values. For `:execute_stale`, legacy `:execute_waiting findings_count>0`, and max-passes `:review_stale`, the value reports `kind: manual_fix` with `command: nil` — the operator must edit or inspect findings before retry.
 
 EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non-nil `diagnostic` even though `Hive::Tui::KeyMap#red_detail_row?` does not yet open the detail view for them; bot/daemon/external-agent consumers of `hive status --json` rely on the field to explain why an EXECUTE_STALE task is stuck.
 
@@ -68,7 +68,7 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 
 - **`live_task_lock: true`** → `agent_running` (label "Agent running", command nil). `Hive::Commands::Status` sets this when a task `.lock` holder PID is alive and its recorded process start time still matches. This covers pre-marker work inside `hive run`, such as auto-rebase before `REVIEW_WORKING` is written, so status and the TUI do not offer a duplicate runnable command that would immediately hit `ConcurrentRunError`.
 - **`:agent_working`** → `agent_running` (label "Agent running", command nil) when the agent is actually alive. A `hive run` is in flight; surfacing a workflow command would send the user (or an agent retry loop) straight into `ConcurrentRunError`. **Stale carve-out:** when the caller passes `pid_alive:` and `state_file_mtime:` kwargs and either (a) `pid_alive` is `false` (the per-task `.lock` recorded a `claude_pid` that's now dead), or (b) `pid_alive` is `nil` (no `.lock` claude_pid), the marker has no `pid` attr, and the state-file mtime is older than `agent_marker_grace_sec` (default 300s; threaded from `daemon.agent_marker_grace_sec` by `Hive::Commands::Status`), the action is reclassified as `:error` with a synthesized diagnostic (summary describes "agent process not alive" / "agent never attached"; detail explains the daemon will heal the on-disk marker within ~30s). This makes the row a recoverable red status immediately, without waiting for the daemon's `StaleAgentHealer` to rewrite the marker on disk.
-- **`:error`** → always `error`. The stage agent recorded a failure; recovery is manual (edit reviews/, lower frontmatter pass:, remove EXECUTE_STALE marker, etc.). The healer-written subset (`reason=agent_died` / `reason=agent_orphaned`) recovers via the standard `hive markers clear <slug> --name ERROR` flow once the on-disk rewrite lands.
+- **`:error`** → always `error`. The stage agent recorded a failure; recovery is manual unless diagnostics expose a guarded retry command. The healer-written subset (`reason=agent_died` / `reason=agent_orphaned`) must be re-read through `hive status --json` / red-status detail after the daemon rewrites the marker so consumers use the current `suggested_next_action.command` with the `marker_id` guard.
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug>` rather than a workflow verb. Legacy `:execute_waiting findings_count>0` uses the same recovery surface so old state folders do not fall through to generic edit guidance. Running `hive develop <slug>` on either shape would refuse or loop on a non-terminal marker; pointing the user at `findings` opens the recovery loop instead.
 

@@ -1,0 +1,84 @@
+name: Update formula
+
+# Triggered by the hive release workflow, which sends a repository_dispatch
+# `hive-release` event with {version, sha256_gem} after publishing a signed
+# GitHub Release. We render Formula/hive.rb from hive's own ERB template
+# (single source of truth) and commit it.
+
+on:
+  repository_dispatch:
+    types: [hive-release]
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: Render and commit hive.rb
+    runs-on: ubuntu-24.04
+    env:
+      # client_payload is UNTRUSTED external input (a holder of the
+      # dispatch token sends it). Route it through env and validate
+      # before use — never interpolate ${{ ... }} into a run: script or
+      # a git ref directly.
+      PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
+      PAYLOAD_SHA: ${{ github.event.client_payload.sha256_gem }}
+    steps:
+      - name: Validate dispatch payload
+        # Reject anything that is not a clean semver / 64-hex sha BEFORE
+        # it is ever used as a git ref. Without this, a crafted version
+        # like `0.1.1/../../evil` could steer the checkout below.
+        run: |
+          if [[ ! "$PAYLOAD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "rejecting non-semver version: '${PAYLOAD_VERSION}'" >&2
+            exit 1
+          fi
+          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "rejecting malformed sha256_gem" >&2
+            exit 1
+          fi
+          {
+            echo "VERSION=${PAYLOAD_VERSION}"
+            echo "GEM_SHA=${PAYLOAD_SHA}"
+          } >> "$GITHUB_ENV"
+      - name: Checkout tap
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Fetch hive render helper and template at the release tag
+        # Public repo, no auth needed. Retry to ride out tag-propagation
+        # lag — the dispatch is sent immediately after the release (and
+        # its tag) is created, which can briefly precede global visibility.
+        run: |
+          tag="v${VERSION}"
+          for attempt in 1 2 3 4 5; do
+            if git clone --depth 1 --branch "$tag" \
+                 https://github.com/ivankuznetsov/hive.git hive-src; then
+              break
+            fi
+            echo "clone of ${tag} failed (attempt ${attempt}/5); retrying in 15s"
+            sleep 15
+          done
+          test -d hive-src || { echo "could not clone hive at ${tag}" >&2; exit 1; }
+      - name: Render formula
+        run: |
+          ruby hive-src/packaging/render.rb \
+            hive-src/packaging/homebrew/hive.rb.erb \
+            "version=${VERSION}" "sha256_gem=${GEM_SHA}" > Formula/hive.rb
+          # Hard gate: the rendered formula must be syntactically valid Ruby.
+          ruby -c Formula/hive.rb
+          # Best-effort style check — informational so a personal-tap
+          # nitpick never blocks an otherwise-valid version bump.
+          brew style Formula/hive.rb || echo "::warning::brew style reported issues in Formula/hive.rb"
+      - name: Commit and push
+        run: |
+          rm -rf hive-src
+          git config user.name "hive release bot"
+          git config user.email "maintainers@users.noreply.github.com"
+          git add Formula/hive.rb
+          # Idempotent: a redundant dispatch for the current version is a
+          # clean no-op rather than an empty-commit failure.
+          if git diff --cached --quiet; then
+            echo "formula already at ${VERSION}; nothing to commit"
+          else
+            git commit -m "hive ${VERSION}"
+            git push
+          fi

@@ -3,11 +3,11 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi}.rb
 created: 2026-04-26
-updated: 2026-04-26
+updated: 2026-05-25
 tags: [agent, profile, registry, architecture]
 ---
 
-**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, headless flag, add-dir flag, version requirement, status-detection mode). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, and `pi` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
+**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, headless flag, add-dir flag, version requirement, status-detection mode, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, and `pi` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
 
 ## `Hive::AgentProfile` — value object
 
@@ -29,6 +29,8 @@ Constructor kwargs (every profile freezes after init):
 | `headless_supported:` | Defaults `true`; profiles without headless support raise on `check_version!`. |
 | `min_version:` | Required minimum version (semver tuple compare). |
 | `preflight:` | Optional `Proc` invoked before each spawn (e.g., `pi` checks `~/.pi/agent/auth.json`). |
+| `usage_extractor:` | Optional callable that parses streaming agent events into token/cost usage rows for [[token-usage]]. Missing or unrecognized payloads return nil/zero-fill rather than failing the spawn. |
+| `skill_verifier:` | Optional callable used by `verify_skill` for profile-specific skill/slash-command resolution. |
 
 ### Key methods
 
@@ -52,7 +54,7 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 
 Auto-required from `lib/hive/agent_profiles.rb`:
 
-- `claude` — `--dangerously-skip-permissions`, `--add-dir`, `--budget`, headless via `-p`. Min version `2.1.118`. `:state_file_marker` mode.
+- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, and Claude usage extraction. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output. No native budget flag (hive enforces wall-clock timeout only). Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `~/.pi/agent/auth.json`. Min version `0.70.2`. `:output_file_exists`.
 
@@ -60,6 +62,7 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 
 - `Stages::Base.spawn_agent` — calls `profile.check_version!` then `profile.preflight!` before spawning. Honors `add_dir_flag`; logs an isolation-reduced warning when callers pass `add_dirs:` to a profile that lacks the flag.
 - `Hive::Agent#build_cmd` — composes the argv from the profile's flags.
+- `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
 
 ## Tests

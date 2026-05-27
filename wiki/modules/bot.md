@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-05-25
+updated: 2026-05-27
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -21,8 +21,8 @@ and subprocess I/O.
 | `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, message splitting, markdown escaping, and typed `Update` records. |
 | `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. |
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. |
-| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed rows. |
-| `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery/ready rows through a persistent alert lifecycle store. Suppresses ready notifications when the daemon is enabled for that project, sends one recovery confirmation when a recovery row leaves the active set, treats same-task recovery fingerprint changes as superseded rather than recovered, and sends one reminder for unchanged recovery rows. |
+| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows plus project-level legacy-stage warnings. |
+| `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery rows, daemon-disabled ready approvals, and project-level legacy-stage warnings through a persistent alert lifecycle store. Ready notifications are suppressed when the daemon is enabled for that project; recovery rows get one confirmation when they leave the active set, same-task recovery fingerprint changes are treated as superseded rather than recovered, and unchanged recovery rows get one reminder. |
 | `AlertStore` | `lib/hive/bot/alert_store.rb` | JSON sidecar for alert fingerprints, first-seen timestamps, reminder timestamps, and row snapshots. Corrupt files are renamed aside so the bot keeps running. |
 | `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Marker/action-specific text and inline keyboards. Recovery alerts are human-readable; Autofix is exposed only when the diagnostic `suggested_next_action.kind` is `retry`, while manual-only states show laptop/details actions. Fingerprints include project, slug, stage, marker, and marker attrs. |
 | `BrainstormParser` | `lib/hive/bot/brainstorm_parser.rb` | Pure parser for `## Round`, `### Q<N>.`, and `### A<N>.` blocks. |
@@ -53,11 +53,15 @@ plain-language cause sentence. `Autofix` is shown only for retryable
 diagnostics; manual-only states such as `EXECUTE_STALE` and
 fix-tampered review errors show `Open laptop` / `Show details` instead.
 Autofix callbacks carry a marker attribute such as `pass=2` when one is
-available, so stale Telegram buttons cannot clear a newer marker, and
-the dispatcher clears the persisted alert entry for that task before
+available, so stale Telegram buttons cannot clear a newer marker. For
+`ERROR` rows they prefer the generated `marker_id` and fall back to
+observed `reason`/`exit_code` attrs for legacy markers. The dispatcher
+clears the persisted alert entry for that task before
 spawning the retry sequence. `/status [project]` is an explicit pull
 surface and renders actionable rows as `Title… — Stage` without inline
 buttons.
+
+Legacy stage-directory warnings are proactive as project-level notifications. `StatusWatcher` converts non-empty `legacy_stage_dirs` project payloads into synthetic notification inputs, `Supervisor#status_tick` feeds them through the same `NotificationDispatcher` as task rows, and `NotificationBuilders` renders a message like `Project P has N tasks hidden in legacy stage dirs (...) - run hive migrate <project_path>`. The same warning appears in `/status` and `/queue` replies. The alert-store fingerprint is project-level rather than count-level, so the warning dedupes while the project remains legacy-dirty, drops when the project returns clean, and alerts again on a later clean-to-legacy transition. Fresh alert-store seeding still suppresses historical task backlog, but legacy-stage warnings alert immediately because first bot startup after an upgrade is when operators need the migration prompt.
 
 ## Trust boundary
 

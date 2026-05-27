@@ -76,13 +76,13 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 | `hive doctor` | Verify configured stage and reviewer skills. |
 | `hive doctor --json` | Emit the same checks in a machine-readable envelope. |
 | `hive version` or `hive --version` | Print the Hive version. |
-| `hive forget NAME` | Remove one project from the global registry. |
+| `hive forget NAME [--if-exists]` | Remove one project from the global registry; `--if-exists` makes already-absent entries exit 0. |
 | `hive prune` | Remove registry rows whose project path is gone. |
 | `hive metrics rollback-rate` | Report the fraction of fix-agent commits later reverted. |
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), and daemon control all support `--json` and emit a single typed envelope with `ok: true` on success or `ok: false` on failure. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `init`, `new`, `migrate`, `forget`, `prune`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v1` success payload with resolved answers and project metadata; its precondition failures keep the legacy stderr + exit-code contract. Workflow verbs emit a `hive-stage-action` envelope. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
 
 ## Exit Codes
 

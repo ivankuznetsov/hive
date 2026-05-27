@@ -97,6 +97,76 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_claude_permission_mode_from_cfg_reaches_headless_spawn
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        cfg: { "claude" => { "permission_mode" => "auto" } }
+      )
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "arg=--permission-mode"
+      assert_includes argv, "arg=auto"
+      refute_includes argv, "arg=--dangerously-skip-permissions"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
+  # claude.permission_mode is a Claude-only setting. A non-claude (codex)
+  # profile spawn that now receives cfg: (codex_conversation / rebase /
+  # reviewers all thread it through) must NOT gain a --permission-mode flag;
+  # it keeps its own skip flag. Guards the `profile.name == :claude` gate in
+  # spawn_agent so the new cfg threading can't leak Claude flags into codex.
+  def test_codex_profile_with_cfg_does_not_receive_permission_mode_flags
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      argv_log = File.join(dir, "codex-argv.log")
+      fake_codex = File.join(dir, "fake-codex")
+      File.write(fake_codex, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo "codex-cli 1.0.0"; exit 0; fi
+        printf '%s\n' "$@" > "#{argv_log}"
+        cat > /dev/null
+        exit 0
+      SH
+      File.chmod(0o755, fake_codex)
+      profile = Hive::AgentProfile.new(
+        name: :codex,
+        bin_default: fake_codex,
+        headless_flag: "exec",
+        version_flag: "--version",
+        permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only
+      )
+
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :exit_code_only,
+        cfg: { "claude" => { "permission_mode" => "auto" } }
+      )
+
+      argv = File.read(argv_log).lines.map(&:chomp)
+      refute_includes argv, "--permission-mode",
+                       "codex spawns must never receive Claude's --permission-mode flag"
+      refute_includes argv, "auto"
+      assert_includes argv, "--dangerously-bypass-approvals-and-sandbox",
+                      "codex keeps its own skip flag regardless of claude.permission_mode in cfg"
+    end
+  end
+
   # --- preflight ordering --------------------------------------------------
 
   def test_preflight_runs_before_agent_spawn_returns_error_envelope

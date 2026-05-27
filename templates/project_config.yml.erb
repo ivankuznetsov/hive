@@ -8,6 +8,10 @@ claude:
   # tmux uses your logged-in Claude session in an attachable pane.
   # headless keeps the non-interactive `claude -p` path.
   mode: <%= claude_mode %>
+  # Applies to every Claude-backed stage, in both tmux and headless mode.
+  # bypassPermissions skips permission prompts (maps to
+  # --dangerously-skip-permissions); auto uses Claude Code's auto-mode rules.
+  permission_mode: <%= claude_permission_mode %>
 
 # Stage-level agent for single-agent stages. (6-review uses
 # the per-role agent fields under `review.{ci,triage,fix,browser_test}`
@@ -89,6 +93,17 @@ review:
   fix:
     agent: claude
     prompt_template: fix_prompt.md.erb
+    auto_commit:
+      # inherit preserves the repository's commit signing config. Use
+      # bypass to force unsigned automation commits, or fail to pause
+      # when commit.gpgsign is enabled.
+      sign_policy: inherit
+      scope_check:
+        # Before Hive auto-commits uncommitted fix-agent edits, it checks
+        # the staged paths against default allowed/denied glob lists. Override
+        # `allowed_paths` / `denied_paths` here if your project needs a
+        # different fallback commit scope.
+        enabled: true
   browser_test:
     # Set to true for projects that have a browsable surface (Rails apps,
     # web frontends). Hive itself (CLI tool) leaves this disabled.

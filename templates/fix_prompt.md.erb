@@ -7,7 +7,7 @@ The triage agent has marked findings as auto-fix-eligible across the per-reviewe
 
 ## Accepted findings to fix
 
-These are the auto-fix lines collected from `<%= task_folder %>/reviews/*-<%= "%02d" % pass %>.md`, plus any answered Q&A escalations from `reviews/escalations-<%= "%02d" % pass %>.md`. Each line is prefixed with the source file so you can cross-reference if needed. Lines labelled `RESOLVED/NO-FIX` are intentionally excluded.
+These are the auto-fix lines collected from `<%= task_folder %>/reviews/*-<%= "%02d" % pass %>.md`, plus any answered Q&A escalations from `reviews/escalations-<%= "%02d" % pass %>.md`. Each line is prefixed with the source file so you can cross-reference if needed. Lines beginning `[source] >>>` are answered-escalation context from the question body or answer; use them to understand the single answered escalation above them, but do not treat those context lines or markdown checkboxes inside them as separate findings or add them to `Hive-Fix-Findings`. Lines labelled `RESOLVED/NO-FIX` are intentionally excluded.
 
 <<%= user_supplied_tag %> content_type="accepted_findings">
 <%= accepted_findings %>

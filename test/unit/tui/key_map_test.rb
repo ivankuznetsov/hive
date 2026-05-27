@@ -639,6 +639,26 @@ class TuiKeyMapMessageForTest < Minitest::Test
     end
   end
 
+  def test_enter_on_error_with_kill_class_code_but_non_exit_code_reason_opens_red_status_detail
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: { "reason" => "shutdown", "exit_code" => "143" },
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::OpenRedStatusDetail, msg,
+                   "non-exit_code kill-class rows are not auto-healed, so Enter must expose recovery"
+    assert_same row, msg.row
+  end
+
+  def test_error_message_with_kill_class_code_but_non_exit_code_reason_returns_recover_error
+    row = make_row(action_key: "error", action_label: "Error",
+                   marker: "error", attrs: { "reason" => "shutdown", "exit_code" => "143" },
+                   suggested_command: nil)
+    msg = Hive::Tui::KeyMap.error_message(row)
+    assert_kind_of Hive::Tui::Messages::RecoverError, msg,
+                   "only reason=exit_code kill-class rows belong to the auto-healer"
+    assert_same row, msg.row
+  end
+
   # ERROR markers without an `exit_code` attr (legacy or hand-written)
   # take the recovery path because there is no other gesture available
   # and `hive markers clear --name ERROR` accepts them.

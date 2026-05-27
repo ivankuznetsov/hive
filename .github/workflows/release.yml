@@ -62,6 +62,13 @@ jobs:
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    # `aur_enabled` lets the separate `aur-publish` job gate on the
+    # presence of the AUR secret. A job-level `if:` CANNOT read
+    # `secrets.*` (and job-scoped `env` is not yet in scope there), so we
+    # compute the eligibility here — where the secret IS readable as
+    # env — and expose it as a job output for `needs.…outputs` to consume.
+    outputs:
+      aur_enabled: ${{ steps.aur_gate.outputs.enabled }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -95,30 +102,134 @@ jobs:
             --verify-tag
       - name: Notify Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        # Non-fatal: a tap dispatch hiccup must not abort the release or
+        # block the downstream aur-publish job (which `needs` this job).
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           version="${REF_NAME#v}"
           gem_sha="$(awk '/hive-cli-/ {print $1}' dist/SHA256SUMS)"
-          # Build the payload via jq so version/sha values can't break
-          # out of the JSON object (a tag like `v0.1","event_type":"x`
-          # injected via string concat would otherwise smuggle keys).
-          payload="$(jq -nc --arg version "$version" --arg sha "$gem_sha" \
-            '{version: $version, sha256_gem: $sha}')"
+          # Send the WHOLE request body via jq + --input so client_payload
+          # is a real JSON object. (`--raw-field client_payload=<json>`
+          # sends it as a string, which the dispatch API rejects with
+          # HTTP 422 "is not an object".) Building it with jq also keeps
+          # version/sha from breaking out of the JSON.
           echo "notify-homebrew: dispatching event_type=hive-release version=${version}"
-          gh api repos/ivankuznetsov/homebrew-hive/dispatches \
-            --method POST \
-            --field event_type=hive-release \
-            --raw-field "client_payload=${payload}"
+          jq -nc --arg version "$version" --arg sha "$gem_sha" \
+            '{event_type: "hive-release", client_payload: {version: $version, sha256_gem: $sha}}' \
+            | gh api repos/ivankuznetsov/homebrew-hive/dispatches --method POST --input -
       - name: Notify Homebrew tap (audit when skipped)
         if: ${{ env.HOMEBREW_TAP_TOKEN == '' }}
         run: |
           echo "notify-homebrew: skipped; HOMEBREW_TAP_TOKEN is not set"
-      - name: AUR publish (placeholder)
-        if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
+      - name: Determine AUR publish eligibility
+        id: aur_gate
+        # Only tests the secret for emptiness — never echoes it. The
+        # real AUR publish runs in the separate `aur-publish` job
+        # (needs an Arch container for makepkg); this just signals it.
         run: |
-          echo "AUR publish is enabled by secret; packaging/aur templates are the source of truth for the publish job."
-          echo "TODO: wire up packaging/aur/PKGBUILD.template publishing here (cosign verify the .gem before bumping pkgver)."
-          echo "Failing loudly so a configured AUR secret cannot be mistaken for a real publish." >&2
-          exit 1
+          if [[ -n "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "aur-publish: enabled (AUR_SSH_PRIVATE_KEY is set)"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "aur-publish: skipped; AUR_SSH_PRIVATE_KEY is not set"
+          fi
+
+  aur-publish:
+    name: Publish AUR hive-bin
+    runs-on: ubuntu-24.04
+    needs: release-finalize
+    # Gate on the output computed in release-finalize — a job-level `if:`
+    # can read `needs.<job>.outputs.*` but NOT `secrets.*`. When the
+    # secret is absent the job is skipped entirely (the Arch container
+    # never even boots).
+    if: ${{ needs.release-finalize.outputs.aur_enabled == 'true' }}
+    container: archlinux:base-devel
+    permissions:
+      contents: read
+    env:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - name: Install toolchain
+        # base-devel (makepkg, fakeroot, sudo) ships in the image; add
+        # the rest. git is needed before actions/checkout can run.
+        # ruby-erb: Arch splits the erb stdlib into its own package, and
+        # packaging/render.rb does `require "erb"` — without it the render
+        # step dies with `cannot load such file -- erb (LoadError)`.
+        run: pacman -Syu --noconfirm --needed git openssh cosign ruby ruby-erb jq github-cli
+      - uses: actions/checkout@v4
+      - name: Download and cosign-verify release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "$REF_NAME" --repo ivankuznetsov/hive \
+            --pattern 'hive-cli-*.gem' \
+            --pattern 'SHA256SUMS' \
+            --pattern 'SHA256SUMS.sig' \
+            --pattern 'SHA256SUMS.pem' \
+            --dir dist
+          # Pin the keyless identity to OUR release workflow. An unpinned
+          # verify accepts ANY Fulcio-issued cert from ANY repo, which is
+          # not a real gate. Mirrors install.sh's verification.
+          cosign verify-blob \
+            --certificate dist/SHA256SUMS.pem \
+            --signature dist/SHA256SUMS.sig \
+            --certificate-identity-regexp '^https://github\.com/ivankuznetsov/hive/' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            dist/SHA256SUMS
+          version="${REF_NAME#v}"
+          gem_file="hive-cli-${version}.gem"
+          # Confirm the gem's digest is the one cosign just vouched for.
+          ( cd dist && grep -F "  ${gem_file}" SHA256SUMS | sha256sum -c - )
+          gem_sha="$(awk -v f="$gem_file" '$2 == f {print $1}' dist/SHA256SUMS)"
+          [[ -n "$gem_sha" ]] || { echo "no checksum for ${gem_file} in SHA256SUMS" >&2; exit 1; }
+          {
+            echo "GEM_SHA=$gem_sha"
+            echo "PKG_VERSION=$version"
+          } >> "$GITHUB_ENV"
+      - name: Render PKGBUILD and generate .SRCINFO
+        # makepkg refuses to run as root, even for --printsrcinfo, so the
+        # generation runs as a non-root build user.
+        run: |
+          useradd -m builder
+          mkdir -p build
+          ruby packaging/render.rb packaging/aur/PKGBUILD.template \
+            "version=${PKG_VERSION}" "sha256_gem=${GEM_SHA}" > build/PKGBUILD
+          cp packaging/aur/hive.install build/hive.install
+          chown -R builder build
+          # Redirect runs inside the builder shell so .SRCINFO is written
+          # as builder (sudo does not apply to a root-shell redirect).
+          ( cd build && sudo -u builder bash -c 'makepkg --printsrcinfo > .SRCINFO' )
+      - name: Push to AUR
+        run: |
+          install -dm700 ~/.ssh
+          # Accept AUR's host key on first connect (TOFU) and record it.
+          # ssh-keyscan was unreliable in the container (clone failed with
+          # "Host key verification failed"); accept-new keeps host identity
+          # checking enabled while allowing non-interactive first contact.
+          # The AUR SSH key remains the separate write-authorization gate.
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          eval "$(ssh-agent -s)"
+          # Load the key straight from env into the agent via stdin — the
+          # private key is never written to disk (so a compromised gem dep
+          # fetched elsewhere in the pipeline cannot read it off disk).
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" | ssh-add - >/dev/null
+          git config --global user.name "hive release bot"
+          git config --global user.email "maintainers@users.noreply.github.com"
+          git clone ssh://aur@aur.archlinux.org/hive-bin.git aur-repo
+          cp build/PKGBUILD build/.SRCINFO build/hive.install aur-repo/
+          cd aur-repo
+          git add -A
+          # Idempotent: a re-run of an already-published tag is a clean
+          # no-op instead of a `set -e` failure on "nothing to commit".
+          if git diff --cached --quiet; then
+            echo "aur-publish: hive-bin already at ${PKG_VERSION}; nothing to push"
+          else
+            git commit -m "hive-bin ${PKG_VERSION}"
+            git push
+          fi

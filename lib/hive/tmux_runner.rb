@@ -16,10 +16,12 @@ module Hive
     class ExecutableMissing < Hive::TmuxError; end
     class NoServerRunning < Hive::TmuxError; end
     class CommandFailed < Hive::TmuxError; end
+    class CommandTimedOut < Hive::TmuxError; end
 
     DEFAULT_COLS = 200
     DEFAULT_ROWS = 50
     DEFAULT_PROMPT_SUBMIT_DELAY_SEC = 0.2
+    DEFAULT_COMMAND_TIMEOUT_SEC = 10.0
 
     attr_reader :name, :cwd, :env
 
@@ -75,11 +77,9 @@ module Hive
         # send_keys("Enter") below is the single, intended submit.
         run_tmux("paste-buffer", "-d", "-r", "-b", buffer_name, "-t", target_pane)
         sleep prompt_submit_delay_sec
-        begin
-          send_keys("Enter")
-        rescue NoServerRunning
-          nil
-        end
+        # If tmux disappears here, the prompt was pasted but never submitted.
+        # Surface the typed failure immediately instead of waiting for stage timeout.
+        send_keys("Enter")
       ensure
         delete_buffer(buffer_name)
       end
@@ -142,9 +142,25 @@ module Hive
     end
 
     def capture_tmux(*args)
-      Open3.capture3(*tmux_argv(args))
+      timeout = tmux_command_timeout_sec
+      Open3.popen3(*tmux_argv(args)) do |stdin, stdout, stderr, wait_thr|
+        stdin.close
+        out_reader = Thread.new { stdout.read }
+        err_reader = Thread.new { stderr.read }
+        unless wait_thr.join(timeout)
+          Process.kill("KILL", wait_thr.pid) rescue nil
+          wait_thr.join
+          raise CommandTimedOut, "tmux #{args.inspect} timed out after #{timeout}s"
+        end
+
+        [ out_reader.value, err_reader.value, wait_thr.value ]
+      end
     rescue Errno::ENOENT, Errno::EACCES => e
       raise ExecutableMissing, "tmux executable not found: #{@tmux_bin} (#{e.class}: #{e.message})"
+    end
+
+    def tmux_command_timeout_sec
+      Float(ENV.fetch("HIVE_TMUX_COMMAND_TIMEOUT_SEC", DEFAULT_COMMAND_TIMEOUT_SEC.to_s))
     end
 
     def tmux_argv(args)

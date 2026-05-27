@@ -25,6 +25,21 @@ class RunReviewersTest < Minitest::Test
     )
   end
 
+  def with_fake_clocks(wall_start: Time.utc(2026, 5, 26, 12, 0, 0), monotonic_start: 1_000.0)
+    wall_now = wall_start
+    monotonic_now = monotonic_start
+    advance = lambda do |seconds|
+      wall_now += seconds
+      monotonic_now += seconds
+    end
+
+    with_replaced_singleton_method(Time, :now, -> { wall_now }) do
+      with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
+        yield advance
+      end
+    end
+  end
+
   # Refs are full `refs/remotes/origin/<branch>` paths so the test matches
   # how `reviewer_compare_ref` probes existence in production (the short
   # form `origin/<branch>` is ambiguous with a like-named tag).
@@ -182,6 +197,35 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class DeadlineCaptureReviewer < Hive::Reviewers::Base
+    attr_reader :deadline_seconds
+
+    def run!(deadline: nil)
+      @deadline_seconds = deadline && (deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      ensure_reviews_dir!
+      File.write(output_path, "## Low\n\n- [ ] captured deadline\n")
+      Hive::Reviewers::Result.new(
+        name: name,
+        output_path: output_path,
+        status: :ok,
+        error_message: nil
+      )
+    end
+  end
+
+  class AdvancingDeadlineCaptureReviewer < DeadlineCaptureReviewer
+    def initialize(spec, ctx, advance:)
+      super(spec, ctx)
+      @advance = advance
+    end
+
+    def run!(deadline: nil)
+      result = super
+      @advance.call
+      result
+    end
+  end
+
   class SharedSessionReviewer < Hive::Reviewers::Base
     attr_reader :headless_runs, :session_runs
 
@@ -211,6 +255,15 @@ class RunReviewersTest < Minitest::Test
         status: :ok,
         error_message: nil
       )
+    end
+  end
+
+  class DeadlineCaptureSharedReviewer < SharedSessionReviewer
+    attr_reader :session_deadline_seconds
+
+    def run_in_session!(handle:, deadline: nil)
+      @session_deadline_seconds = deadline && (deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      super
     end
   end
 
@@ -287,6 +340,82 @@ class RunReviewersTest < Minitest::Test
           assert_equal [ 1, 1 ], adapters.map(&:session_runs)
         end
       end
+    end
+  end
+
+  def test_shared_session_reviewers_receive_fair_deadlines
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" },
+            { "name" => "claude-b", "output_basename" => "claude-b", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| DeadlineCaptureSharedReviewer.new(spec, ctx) }
+
+      with_fake_clocks do
+        with_stubbed_dispatch(adapters) do
+          with_stubbed_claude_session do
+            result = Hive::Stages::Review.run_reviewers(
+              cfg,
+              ctx,
+              Task.new(dir, File.join(dir, "task.md")),
+              started_at: Time.now,
+              max_wall_clock_sec: 60
+            )
+            assert_equal :ok, result
+          end
+        end
+      end
+
+      assert_in_delta 30, adapters[0].session_deadline_seconds, 0.001,
+                      "first shared-session reviewer should receive half of the remaining 60s budget"
+      assert_in_delta 60, adapters[1].session_deadline_seconds, 0.001,
+                      "last shared-session reviewer may use the remaining budget"
+    end
+  end
+
+  def test_mixed_tmux_and_headless_reviewers_share_the_same_deadline_counter
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a", "kind" => "agent", "agent" => "claude" },
+            { "name" => "codex-a", "output_basename" => "codex-a", "kind" => "agent", "agent" => "codex" },
+            { "name" => "codex-b", "output_basename" => "codex-b", "kind" => "agent", "agent" => "codex" },
+            { "name" => "claude-b", "output_basename" => "claude-b", "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map do |spec|
+        spec["agent"] == "claude" ? DeadlineCaptureSharedReviewer.new(spec, ctx) : DeadlineCaptureReviewer.new(spec, ctx)
+      end
+
+      with_fake_clocks do
+        with_stubbed_dispatch(adapters) do
+          with_stubbed_claude_session do
+            result = Hive::Stages::Review.run_reviewers(
+              cfg,
+              ctx,
+              Task.new(dir, File.join(dir, "task.md")),
+              started_at: Time.now,
+              max_wall_clock_sec: 120
+            )
+            assert_equal :ok, result
+          end
+        end
+      end
+
+      assert_in_delta 30, adapters[1].deadline_seconds, 0.001
+      assert_in_delta 40, adapters[2].deadline_seconds, 0.001
+      assert_in_delta 60, adapters[0].session_deadline_seconds, 0.001
+      assert_in_delta 120, adapters[3].session_deadline_seconds, 0.001
     end
   end
 
@@ -539,6 +668,78 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_run_reviewers_caps_first_reviewer_to_fair_wall_clock_share
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" },
+            { "name" => "rev-b", "output_basename" => "rev-b" },
+            { "name" => "rev-c", "output_basename" => "rev-c" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| DeadlineCaptureReviewer.new(spec, ctx) }
+
+      with_fake_clocks do
+        with_stubbed_dispatch(adapters) do
+          result = Hive::Stages::Review.run_reviewers(
+            cfg,
+            ctx,
+            Task.new(dir, File.join(dir, "task.md")),
+            started_at: Time.now,
+            max_wall_clock_sec: 90
+          )
+          assert_equal :ok, result
+        end
+      end
+
+      assert_in_delta 30, adapters[0].deadline_seconds, 0.001,
+                      "first of three reviewers should receive one third of the remaining 90s budget"
+      assert_in_delta 45, adapters[1].deadline_seconds, 0.001,
+                      "second reviewer should receive half of the still-remaining budget"
+      assert_in_delta 90, adapters[2].deadline_seconds, 0.001,
+                      "last reviewer may use the remaining budget"
+    end
+  end
+
+  def test_run_reviewers_uses_elapsed_wall_clock_for_later_fair_share
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" },
+            { "name" => "rev-b", "output_basename" => "rev-b" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+
+      with_fake_clocks do |advance|
+        adapters = [
+          AdvancingDeadlineCaptureReviewer.new(cfg["review"]["reviewers"][0], ctx, advance: -> { advance.call(30) }),
+          DeadlineCaptureReviewer.new(cfg["review"]["reviewers"][1], ctx)
+        ]
+
+        with_stubbed_dispatch(adapters) do
+          result = Hive::Stages::Review.run_reviewers(
+            cfg,
+            ctx,
+            Task.new(dir, File.join(dir, "task.md")),
+            started_at: Time.now,
+            max_wall_clock_sec: 90
+          )
+          assert_equal :ok, result
+        end
+
+        assert_in_delta 45, adapters[0].deadline_seconds, 0.001
+        assert_in_delta 60, adapters[1].deadline_seconds, 0.001,
+                        "second reviewer deadline must be based on the reduced remaining wall clock"
+      end
+    end
+  end
+
   def test_run_reviewers_returns_wall_clock_exceeded_before_dispatch_when_budget_spent
     with_tmp_dir do |dir|
       cfg = {
@@ -570,18 +771,52 @@ class RunReviewersTest < Minitest::Test
   # non-raise error path (the common case: adapter loop exhausted
   # retries, returns the :error envelope).
   class ErroringReviewer < Hive::Reviewers::Base
-    def initialize(spec, ctx, error_message:)
+    def initialize(spec, ctx, error_message:, advance: nil)
       super(spec, ctx)
       @error_message = error_message
+      @advance = advance
     end
 
     def run!(deadline: nil)
+      @advance.call if @advance
       Hive::Reviewers::Result.new(
         name: name,
         output_path: output_path,
         status: :error,
         error_message: @error_message
       )
+    end
+  end
+
+  def test_all_failed_returns_wall_clock_exceeded_when_errors_consume_budget
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "rev-a", "output_basename" => "rev-a" },
+            { "name" => "rev-b", "output_basename" => "rev-b" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+
+      with_fake_clocks do |advance|
+        adapters = cfg["review"]["reviewers"].map do |spec|
+          ErroringReviewer.new(spec, ctx, error_message: "timed out", advance: -> { advance.call(1) })
+        end
+
+        with_stubbed_dispatch(adapters) do
+          result = Hive::Stages::Review.run_reviewers(
+            cfg,
+            ctx,
+            Task.new(dir, File.join(dir, "task.md")),
+            started_at: Time.now,
+            max_wall_clock_sec: 2
+          )
+          assert_equal :wall_clock_exceeded, result,
+                       "wall-clock exhaustion must win over the all_failed fallback"
+        end
+      end
     end
   end
 

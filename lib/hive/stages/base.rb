@@ -238,7 +238,8 @@ module Hive
       # for this spawn (per ADR-018).
       def spawn_agent(task, prompt:, max_budget_usd:, timeout_sec:,
                       add_dirs: [], cwd: nil, log_label: nil,
-                      profile: nil, expected_output: nil, status_mode: nil)
+                      profile: nil, expected_output: nil, status_mode: nil,
+                      cfg: nil, permission_mode: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -258,6 +259,8 @@ module Hive
           warn_isolation_reduced(task, profile, add_dirs)
         end
 
+        permission_mode ||= Hive::Config.claude_permission_mode(cfg) if cfg && profile.name == :claude
+
         started_at = Time.now.utc.iso8601
         result = Hive::Agent.new(
           task: task,
@@ -269,7 +272,8 @@ module Hive
           log_label: log_label,
           profile: profile,
           expected_output: expected_output,
-          status_mode: status_mode
+          status_mode: status_mode,
+          permission_mode: permission_mode
         ).run!
         record_usage(task, profile, result, started_at)
         result

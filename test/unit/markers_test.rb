@@ -98,6 +98,52 @@ class MarkersTest < Minitest::Test
     end
   end
 
+
+  def test_error_markers_get_unique_marker_id
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+
+      Hive::Markers.set(file, :error, reason: "exit_code", exit_code: 1)
+      first_id = Hive::Markers.current(file).attrs["marker_id"]
+
+      Hive::Markers.set(file, :error, reason: "exit_code", exit_code: 1)
+      second_id = Hive::Markers.current(file).attrs["marker_id"]
+
+      assert_match(/\A[0-9a-f]{16}\z/, first_id)
+      assert_match(/\A[0-9a-f]{16}\z/, second_id)
+      refute_equal first_id, second_id,
+                   "same-shaped ERROR marker rotations need distinct recovery ids"
+    end
+  end
+
+  def test_error_markers_preserve_explicit_marker_id
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+
+      Hive::Markers.set(file, :error, reason: "boom", marker_id: "stable-id")
+
+      assert_equal "stable-id", Hive::Markers.current(file).attrs["marker_id"]
+    end
+  end
+
+  def test_error_recovery_match_attr_prefers_marker_id
+    attrs = { "reason" => "exit_code", "exit_code" => "70", "marker_id" => "err-70" }
+
+    assert_equal "marker_id=err-70", Hive::Markers.error_recovery_match_attr(attrs)
+  end
+
+  def test_error_recovery_match_attr_falls_back_to_reason_and_exit_code
+    attrs = { "reason" => "agent_failed", "exit_code" => "70" }
+
+    assert_equal "reason=agent_failed,exit_code=70", Hive::Markers.error_recovery_match_attr(attrs)
+  end
+
+  def test_display_attrs_hides_internal_marker_id
+    attrs = { "reason" => "exit_code", "marker_id" => "err-70" }
+
+    assert_equal({ "reason" => "exit_code" }, Hive::Markers.display_attrs(attrs))
+  end
+
   def test_set_appends_marker_to_empty_file
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

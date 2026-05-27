@@ -58,7 +58,8 @@ module Hive
           cwd: task.folder,
           log_label: "bot-codex",
           profile: profile,
-          status_mode: :exit_code_only
+          status_mode: :exit_code_only,
+          cfg: config
         )
       end
 

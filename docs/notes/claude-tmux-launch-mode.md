@@ -1,7 +1,7 @@
 # Claude Tmux Launch Mode
 
 **Status:** project-global Claude launch mode
-**Config:** `claude.mode: tmux`
+**Config:** `claude.mode: tmux`, `claude.permission_mode: bypassPermissions` by default
 
 ## Why this exists
 
@@ -16,6 +16,12 @@ logged-in OAuth/subscription auth rather than API-key billing. Hive waits
 until Claude's TUI is ready before pasting the stage prompt; if Claude
 shows its first-run folder-trust prompt, Hive confirms it for the task
 folder and then waits for the normal prompt.
+
+The trust and ready predicates are pinned in `Hive::ClaudeLauncher` against the
+Claude Code 2.1.133 TUI observed during the 2026-05-25 dogfood, and
+ready detection requires the prompt marker on the last non-blank pane line,
+classifies trust and permission prompts from the current prompt block instead of
+stale scrollback, and rejects numbered menu options as non-ready.
 
 ## Scope
 
@@ -54,11 +60,15 @@ and the watchdog keeps waiting. This preserves the manual-intervention
 model: a human may type in the attached pane, but completion still requires
 Claude to write the expected terminal marker.
 
-The wrapper starts Claude with `--permission-mode bypassPermissions` and an
-explicit `--allowedTools Read,Write,Edit,LS` list so ordinary task-folder
-reads and `brainstorm.md` writes do not stop on permission prompts. This
-does not turn brainstorm into a shell-execution stage; Bash is not in the
-allowed tool list, and the prompt still instructs Claude to modify only
+The wrapper resolves `claude.permission_mode` (default `bypassPermissions`)
+to the same CLI flags the headless `-p` path uses: `bypassPermissions` becomes
+`--dangerously-skip-permissions`, and any other mode becomes
+`--permission-mode <mode>`. It also passes an explicit `--allowedTools
+Read,Write,Edit,LS` list so ordinary task-folder reads and stage-file writes
+do not stop on permission prompts. Projects can set
+`claude.permission_mode: auto` to use Claude Code auto-mode rules instead.
+This does not turn brainstorm into a shell-execution stage; Bash is not in
+the allowed tool list, and the prompt still instructs Claude to modify only
 `brainstorm.md` and not to invoke shell/network tools.
 
 ## Failure Modes
@@ -97,21 +107,29 @@ the runtime can override them in the calling shell:
   Hive captures the pane tail as a fallback when the Stop hook does not
   fire.
 - `HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC` (default `5`) — shared
-  default for the two ready-waits below. Override one of them directly
-  to tune that wait without affecting the other.
+  override for the readiness waits below when their specific env vars
+  are unset. Override one of them directly to tune that wait without
+  affecting the others.
 - `HIVE_CLAUDE_TMUX_SESSION_READY_WAIT_TIMEOUT_SEC` (defaults to the
   shared `READY_WAIT_TIMEOUT_SEC`) — budget for tmux session creation
   after `new-session -d`.
 - `HIVE_CLAUDE_TMUX_PID_READY_WAIT_TIMEOUT_SEC` (defaults to the
   shared `READY_WAIT_TIMEOUT_SEC`) — budget for the claude PID to appear
   in the pane after the wrapper execs.
-- `HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC` (default `30`) —
-  budget for Claude's interactive prompt to become ready after the tmux
+- `HIVE_CLAUDE_TMUX_CLAUDE_READY_WAIT_TIMEOUT_SEC` (defaults to the
+  shared `READY_WAIT_TIMEOUT_SEC` when set, otherwise `120`) — budget
+  for the Claude interactive prompt to become ready after the tmux
   session starts.
 - `HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC` (default `0.2`) — delay between
   pasting the prompt into tmux and pressing Enter. Claude Code processes
   large bracketed pastes asynchronously, so a short delay prevents Enter
   from racing ahead of the pasted prompt.
+  If tmux disappears before the explicit Enter submit, `TmuxRunner#send_prompt`
+  raises the typed tmux failure immediately rather than waiting for the stage
+  timeout.
+- `HIVE_TMUX_COMMAND_TIMEOUT_SEC` (default `10.0`) — per-tmux-command
+  wall-clock guard. A wedged tmux client is killed and surfaced as a typed
+  timeout error instead of bypassing the stage timeout.
 - `HIVE_TMUX_BIN` (default `tmux`) — override the tmux executable path,
   e.g., to point at a homebrew-installed binary on macOS.
 - `HIVE_TMUX_SOCKET` — optional `-L` socket name, used by integration

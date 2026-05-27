@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-prune.v1.json",
   "title": "hive prune output (v1)",
-  "description": "Stable contract emitted by `hive prune --json`. Drops every registry entry in ~/Dev/hive/config.yml whose `path` no longer points at a directory on disk. With `--dry-run` the registry is not rewritten and the would-be-removed list is returned for inspection.",
+  "description": "Stable contract emitted by `hive prune --json`. Drops every registry entry in ~/Dev/hive/config.yml whose row is invalid, whose `path` no longer points at a directory on disk, or whose stored realpath no longer matches the current target for that path. With `--dry-run` the registry is not rewritten and the would-be-removed list is returned for inspection.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -30,7 +30,7 @@
         },
         "removed": {
           "type": "array",
-          "description": "Entries that were (or would have been) dropped because their path is gone.",
+          "description": "Entries that were (or would have been) dropped because their row is invalid, their path no longer points at a directory, or their stored realpath no longer matches the current target.",
           "items": {
             "type": "object",
             "additionalProperties": false,

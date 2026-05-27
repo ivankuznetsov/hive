@@ -1,6 +1,11 @@
 module Hive
   VERSION = "0.1.6".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
+  # Canonical GitHub org + repo. Referenced by the release probe
+  # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
+  # One place to change on a repository rename.
+  REPO_OWNER = "ivankuznetsov".freeze
+  REPO_NAME = "hive".freeze
 
   module Schemas
     # JSON schema versions for the agent-callable contracts emitted by the

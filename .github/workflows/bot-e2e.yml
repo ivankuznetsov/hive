@@ -7,6 +7,10 @@ name: bot-e2e
 # a time, so this must not run concurrently or on every push.
 on:
   workflow_dispatch:
+  # Temporary: lets the workflow run on this feature branch before it lands on
+  # the default branch (where workflow_dispatch registers). Remove before merge.
+  push:
+    branches: [fix-idea-ack]
 
 concurrency:
   group: bot-e2e

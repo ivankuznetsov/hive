@@ -2,6 +2,11 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.1.9
+
+- Fixed every tmux-mode Claude launch failing with `claude_launch_failed` after a Claude Code TUI update moved the input caret to the end of a context-prefixed line (`<cwd> <git-status>  ❯`) with a hint footer beneath it. The readiness check now detects the caret at the start or end of its line and tolerates the footer, so brainstorm/plan/review stop timing out. Hardened to be robust to future caret repositioning.
+- Fixed the Telegram bot `/idea` flow giving no feedback on success: capturing an idea through the silent project picker now sends an acknowledgement.
+
 ## 0.1.8
 
 - Fixed a crash in v0.1.7's update flow: the daemon's update-check log events (`update_available`, `update_check_no_result`, `update_check_error`, `update_nudge_no_command`) and the bot's (`update_nudge_pushed`, `update_nudge_error`) were never added to the loggers' closed event enums, so a real daemon raised `ArgumentError` on its first "behind" tick and crashed (and the bot logged a spurious fatal). The events are now registered, with regression tests that exercise the real loggers.

@@ -70,6 +70,36 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
     logger.events.select { |n, _| n == name }
   end
 
+  # Regression (v0.1.7 P0): the dispatcher emitted update events that were not
+  # in Hive::Daemon::Logger::EVENTS, so a REAL daemon raised ArgumentError on
+  # the first behind-tick and crashed run_forever. Unit tests used a permissive
+  # StubLogger and never caught it. Exercise the real logger here.
+  def test_behind_tick_does_not_raise_against_real_daemon_logger
+    require "hive/daemon/logger"
+    log = File.join(@dir, "daemon.log")
+    logger = Hive::Daemon::Logger.new(path: log)
+    dispatcher = Hive::Daemon::Dispatcher.new(
+      config: { "daemon" => { "poll_interval_sec" => 30 }, "update" => { "check" => true, "auto" => true } },
+      controller: Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 5, max_concurrent_per_project: 5, max_runs_per_day_per_project: 100
+      ),
+      supervisor: FakeSupervisor.new, status_consumer: FakeStatusConsumer.new, logger: logger,
+      update_state: @state, update_checker: -> { result(latest: "9.9.9", behind: true) },
+      channel_detector: -> { "brew" }
+    )
+    dispatcher.tick(now: T0) # must NOT raise
+    logger.close
+    assert_match(/update_available/, File.read(log))
+  end
+
+  def test_all_dispatcher_update_events_are_registered
+    require "hive/daemon/logger"
+    %i[update_available update_check_no_result update_check_error update_nudge_no_command].each do |event|
+      assert_includes Hive::Daemon::Logger::EVENTS, event,
+                      "Dispatcher#maybe_check_for_update emits #{event}; an unregistered event crashes the daemon tick"
+    end
+  end
+
   def test_behind_on_brew_sets_nudge_and_logs
     checker = Checker.new(result(latest: "0.1.7", behind: true))
     dispatcher, logger = build(checker: checker, channel: "brew")

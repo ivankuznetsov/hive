@@ -4,6 +4,7 @@ require "tmpdir"
 require "hive/markers"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
@@ -97,7 +98,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
-                      project_enabled: true)
+                      project_enabled: true, dispatch_state: nil, status_result: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -107,11 +108,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
     }
     controller = Hive::Daemon::ConcurrencyController.new(
       max_concurrent_runs: 5, max_concurrent_per_project: 5,
-      max_runs_per_day_per_project: 100
+      max_runs_per_day_per_project: 100,
+      dispatch_state: dispatch_state
     )
     supervisor = FakeSupervisor.new
     status = FakeStatusConsumer.new
-    status.next_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: rows, error: nil)
+    status.next_result = status_result ||
+                         Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: rows, error: nil)
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
 
@@ -1080,5 +1083,80 @@ end
 
   def events_include?(logger, name)
     logger.events.any? { |(n, _)| n == name }
+  end
+
+  # ── dispatch-baseline persistence across restart ───────────────────────
+
+  def seed_baseline(path, project:, slug:, mtime:)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 5, max_concurrent_per_project: 5,
+      max_runs_per_day_per_project: 100,
+      dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+    ).observe_state_file_mtime(project: project, slug: slug, mtime: mtime)
+  end
+
+  # The core fix: a needs_input row answered BEFORE a daemon restart must
+  # dispatch, not be re-stranded. The pre-restart "ask" baseline is persisted;
+  # the live state-file mtime (the user's answer) is newer, so the freshly
+  # restarted dispatcher dispatches. Without persistence the reloaded baseline
+  # would be nil → first-sight → :record_baseline → skip (the bug).
+  def test_pre_restart_answer_dispatches_after_restart_via_persisted_baseline
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "writero", slug: "add-x", mtime: T0 - 600) # the ask
+
+      answered = row(project: "writero", slug: "add-x", stage: "2-brainstorm",
+                     action: "needs_input",
+                     command: "hive brainstorm add-x --from 2-brainstorm",
+                     mtime: T0 - 40) # user's answer: newer than ask, past 30s debounce
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [ answered ],
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_equal 1, sup.spawned.size, "a pre-restart answer must dispatch, not be re-stranded"
+      assert events_include?(logger, :dispatched)
+    end
+  end
+
+  def test_tick_prunes_baselines_for_tasks_absent_from_status
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "p", slug: "gone", mtime: T0 - 600)
+      seed_baseline(path, project: "p", slug: "present", mtime: T0 - 600)
+
+      present = row(project: "p", slug: "present", stage: "2-brainstorm",
+                    action: "needs_input",
+                    command: "hive brainstorm present --from 2-brainstorm",
+                    mtime: T0 - 600) # equal to baseline → :skip, no re-dispatch
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        rows: [ present ],
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      _dispatcher.tick(now: T0)
+
+      assert_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "gone"),
+                 "a task absent from the status scan must be pruned from baselines"
+      refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "present"),
+                 "a task still present must keep its baseline"
+    end
+  end
+
+  def test_failed_status_fetch_does_not_prune_baselines
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "p", slug: "keep", mtime: T0 - 600)
+
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path),
+        status_result: Hive::Daemon::StatusConsumer::Result.new(ok: false, rows: [], error: "boom")
+      )
+      _dispatcher.tick(now: T0)
+
+      refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "keep"),
+                 "a transient status failure must NOT wipe persisted baselines"
+    end
   end
 end

@@ -7,6 +7,7 @@ require "hive/paths"
 require "hive/lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
@@ -139,7 +140,11 @@ module Hive
         controller = Hive::Daemon::ConcurrencyController.new(
           max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
           max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
-          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project")
+          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project"),
+          # Persist first-sight dispatch baselines so a daemon restart doesn't
+          # re-strand already-answered needs_input tasks (mirrors how
+          # UpdateCheck::State is wired — no logger; it degrades safely).
+          dispatch_state: Hive::Daemon::DispatchBaselines.new
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
         status_consumer = Hive::Daemon::StatusConsumer.new

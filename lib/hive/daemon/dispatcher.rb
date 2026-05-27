@@ -202,6 +202,12 @@ module Hive
         # 4. Per-row dispatch
         result.rows.each { |row| handle_row(row, now: now) }
 
+        # 5. Bound the persisted dispatch-baseline file to the live task set.
+        # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
+        # early return above guards a transient empty/failed scan from wiping
+        # baselines), so pruning here can't re-strand a task on a hiccup.
+        @controller.prune_dispatch_baselines(result.rows.map { |row| [ row.project, row.slug ] })
+
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
       end

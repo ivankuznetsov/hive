@@ -37,7 +37,10 @@ class LiveClaudeSmokeTest < Minitest::Test
   end
 
   def test_brainstorm_round_one_runs_against_real_claude
-    with_tmp_global_config do
+    # Keep the real HOME so the spawned claude reuses the operator's logged-in
+    # session (~/.claude); only HIVE_HOME is isolated. Otherwise claude drops
+    # to its login screen and the run stalls.
+    with_tmp_global_config(home: ENV.fetch("HOME")) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         project = File.basename(dir)
@@ -65,7 +68,7 @@ class LiveClaudeSmokeTest < Minitest::Test
   end
 
   def test_hostile_idea_does_not_escape_user_supplied_wrapper
-    with_tmp_global_config do
+    with_tmp_global_config(home: ENV.fetch("HOME")) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         project = File.basename(dir)

@@ -70,6 +70,34 @@ class HiveBotSupervisorUpdateNudgeTest < Minitest::Test
     assert_empty @telegram.messages
   end
 
+  # Regression (v0.1.7 P0): :update_nudge_pushed / :update_nudge_error were not
+  # in Hive::Bot::Logger::EVENTS, so a REAL bot logger raised ArgumentError on
+  # push. The FakeLogger accepts any event and hid it — exercise the real one.
+  def test_push_does_not_raise_against_real_bot_logger
+    require "hive/bot/logger"
+    log = File.join(@dir, "bot.log")
+    real_logger = Hive::Bot::Logger.new(path: log)
+    @state.set_nudge(latest: "0.1.7", channel: "brew", command: "brew upgrade x")
+    sup = Hive::Bot::Supervisor.new(
+      config: { "chat_id_allowlist" => [ 42 ], "conversation_ttl_sec" => 60, "poll_interval_sec" => 1 },
+      token: "t", logger: real_logger, telegram: @telegram,
+      status_watcher: Object.new, notification_dispatcher: Object.new,
+      router: Object.new, child_supervisor: Object.new,
+      conversation_store: Object.new, update_state: @state
+    )
+    sup.send(:push_update_nudge) # must NOT raise
+    real_logger.close
+    assert_match(/update_nudge_pushed/, File.read(log))
+  end
+
+  def test_all_bot_update_events_are_registered
+    require "hive/bot/logger"
+    %i[update_nudge_pushed update_nudge_error].each do |event|
+      assert_includes Hive::Bot::Logger::EVENTS, event,
+                      "Supervisor#push_update_nudge emits #{event}; an unregistered event raises in the bot loop"
+    end
+  end
+
   def test_push_swallows_state_errors
     boom = Object.new
     def boom.nudge = raise(StandardError, "state boom")

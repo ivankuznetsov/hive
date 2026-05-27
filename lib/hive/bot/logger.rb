@@ -35,6 +35,8 @@ module Hive
         unknown_stage_label
         alert_store_corrupt
         deprecated_config
+        update_nudge_pushed
+        update_nudge_error
         fatal
       ].freeze
 

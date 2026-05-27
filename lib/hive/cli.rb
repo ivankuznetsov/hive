@@ -7,12 +7,14 @@ module Hive
       true
     end
 
-    # `--json` is honoured by `status`, `run`, `approve`, `findings`,
+    # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
     # `accept-finding`, `reject-finding`, and the workflow verbs
-    # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `init` and `new`
-    # accept the flag silently so an automated caller can pass it
-    # uniformly. Each emitting command produces a typed JSON document on
-    # success and a structured error envelope on every failure path.
+    # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `new` accepts
+    # the flag silently so an automated caller can pass it uniformly. Most
+    # emitting commands produce a typed JSON document on success and a
+    # structured error envelope on every failure path; init currently
+    # publishes the success envelope while precondition failures keep the
+    # legacy stderr + exit-code contract.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
@@ -56,6 +58,10 @@ module Hive
         hive: using defaults — planning=claude, claude_mode=tmux, dev=codex,
         reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 
+      With --json, init suppresses that prose and emits a single
+      hive-init.v1 success payload containing the resolved answers plus
+      project path, default branch, hive-state path, and worktree root.
+
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
       for the schema). Piped STDIN is intentionally NOT consumed.
@@ -71,7 +77,7 @@ module Hive
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
-      Hive::Commands::Init.new(project_path, force: options[:force]).call
+      Hive::Commands::Init.new(project_path, force: options[:force], json: options[:json]).call
     end
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"

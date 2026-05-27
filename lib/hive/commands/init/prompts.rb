@@ -202,13 +202,15 @@ module Hive
         end
 
         def resolve_agent_choice(answer)
+          match = @registered_agents.find { |a| a.casecmp(answer).zero? }
+          return match if match
+
           if answer =~ /\A\d+\z/
             idx = answer.to_i
             return @registered_agents[idx - 1] if idx >= 1 && idx <= @registered_agents.size
 
-            return nil
+            nil
           end
-          @registered_agents.find { |a| a.casecmp(answer).zero? }
         end
 
         def prompt_claude_mode
@@ -352,6 +354,11 @@ module Hive
             end
 
             b_str, t_str = parts
+            if !b_str.empty? && t_str.empty?
+              @output.puts "  timeout is required when budget is provided; use <budget>,<timeout> or blank for defaults"
+              next
+            end
+
             b = b_str.empty? ? default_b : parse_positive_int(b_str)
             t = t_str.empty? ? default_t : parse_positive_int(t_str)
             if b.nil? || t.nil?

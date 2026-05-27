@@ -5,6 +5,7 @@ require "hive/commands/approve"
 require "hive/commands/daemon"
 require "hive/commands/drop"
 require "hive/commands/forget"
+require "hive/commands/init"
 require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
@@ -879,6 +880,54 @@ class SchemaFilesTest < Minitest::Test
       by_bias by_phase project project_root reverted_commits rollback_rate total_fix_commits
     ].sort, project_required,
                  "schema/producer required-key drift in hive-metrics-rollback-rate.v1.json (project)"
+  end
+
+  # ── hive-init ──────────────────────────────────────────────────────────
+
+  def test_hive_init_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-init")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-init",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_init_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    expected = %w[
+      answers budgets claude_mode daemon_autostart_requested daemon_enabled default_branch
+      development_agent enabled_reviewers hive_state_path ok path planning_agent
+      project schema schema_version timeouts triage_bias worktree_root
+    ].sort
+    assert_equal expected, schema_required,
+                 "schema/producer required-key drift in hive-init.v1.json"
+
+    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
+    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
+    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+    producer = Hive::Commands::Init.new("/tmp/demo", json: true).send(
+      :success_payload, entry: entry, ops: ops, answers: answers
+    )
+    assert_equal schema_required, producer.keys.sort,
+                 "Init#success_payload must emit exactly the schema's required keys"
+  end
+
+  def test_hive_init_success_payload_validates
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-init"))))
+    ops = Struct.new(:default_branch, :hive_state_path).new("main", "/tmp/demo/.hive-state")
+    entry = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
+    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+    payload = Hive::Commands::Init.new("/tmp/demo", json: true).send(
+      :success_payload, entry: entry, ops: ops, answers: answers
+    )
+
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "hive-init SuccessPayload must validate (errors: #{errors.inspect})"
   end
 
   # ── hive-forget ────────────────────────────────────────────────────────

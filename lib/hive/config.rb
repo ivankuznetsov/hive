@@ -12,7 +12,8 @@ module Hive
       "default_branch" => nil,
       "project_name" => nil,
       "claude" => {
-        "mode" => "tmux"
+        "mode" => "tmux",
+        "permission_mode" => "bypassPermissions"
       },
       # Budget and timeout caps are GENEROUS sanity caps for runaway agents,
       # not cost targets. Most tasks finish well within them; a stuck loop
@@ -325,6 +326,7 @@ module Hive
     # a non-legacy override.
     LEGACY_WIKI_PLAN_ALIAS = "/plan"
     CLAUDE_MODES = %w[headless tmux].freeze
+    CLAUDE_PERMISSION_MODES = %w[acceptEdits auto bypassPermissions default dontAsk plan].freeze
     AUTO_COMMIT_SIGN_POLICIES = %w[inherit bypass fail].freeze
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
@@ -385,6 +387,15 @@ module Hive
       else
         raise ConfigError, "claude.mode must be one of #{CLAUDE_MODES.inspect}; got #{raw.inspect}"
       end
+    end
+
+    def claude_permission_mode(cfg)
+      raw = cfg.dig("claude", "permission_mode")
+      raw = DEFAULTS.dig("claude", "permission_mode") if raw.nil?
+      return raw if CLAUDE_PERMISSION_MODES.include?(raw)
+
+      raise ConfigError,
+            "claude.permission_mode must be one of #{CLAUDE_PERMISSION_MODES.inspect}; got #{raw.inspect}"
     end
 
     def nested_key?(hash, *path)
@@ -884,6 +895,7 @@ module Hive
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
+      validate_claude_permission_mode!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
@@ -1226,6 +1238,15 @@ module Hive
       raise ConfigError,
             "claude.mode in #{describe_source(source_path)} must be one of " \
             "#{CLAUDE_MODES.inspect}; got #{mode.inspect} (#{mode.class})"
+    end
+
+    def validate_claude_permission_mode!(cfg, source_path)
+      permission_mode = cfg.dig("claude", "permission_mode")
+      return if CLAUDE_PERMISSION_MODES.include?(permission_mode)
+
+      raise ConfigError,
+            "claude.permission_mode in #{describe_source(source_path)} must be one of " \
+            "#{CLAUDE_PERMISSION_MODES.inspect}; got #{permission_mode.inspect} (#{permission_mode.class})"
     end
 
     def validate_brainstorm_runtime!(cfg, source_path)

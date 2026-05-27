@@ -60,12 +60,13 @@ module Hive
         Hive::ClaudeLauncher.tmux_bin
       end
 
-      def wrapper_command(task, profile)
+      def wrapper_command(task, profile, cfg)
         Hive::ClaudeLauncher.wrapper_command(
           cwd: task.folder,
           add_dirs: [ task.folder ],
           profile: profile,
-          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
+          allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
+          permission_mode: Hive::Config.claude_permission_mode(cfg)
         )
       end
 

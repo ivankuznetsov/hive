@@ -158,6 +158,53 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_claude_headless_permission_mode_auto_uses_permission_mode_flag
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      Hive::Agent.new(
+        task: task,
+        prompt: "do work",
+        max_budget_usd: 5,
+        timeout_sec: 5,
+        permission_mode: "auto"
+      ).run!
+      argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv_log, "arg=--permission-mode"
+      assert_includes argv_log, "arg=auto"
+      refute_includes argv_log, "arg=--dangerously-skip-permissions"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
+  # The default config resolves claude.permission_mode to "bypassPermissions",
+  # which must map to the legacy --dangerously-skip-permissions flag (NOT
+  # --permission-mode bypassPermissions). This is the branch every default
+  # production run hits, so pin it explicitly.
+  def test_claude_headless_permission_mode_bypass_uses_skip_flag
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      Hive::Agent.new(
+        task: task,
+        prompt: "do work",
+        max_budget_usd: 5,
+        timeout_sec: 5,
+        permission_mode: "bypassPermissions"
+      ).run!
+      argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv_log, "arg=--dangerously-skip-permissions"
+      refute_includes argv_log, "arg=--permission-mode"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # Regression: real claude requires --verbose whenever -p is paired with
   # --output-format=stream-json. Smoke test caught this; the original argv test
   # didn't assert it. Keep this assertion permanent so future drift fails fast.
@@ -342,7 +389,7 @@ class AgentTest < Minitest::Test
       stdin_log = File.join(dir, "stdin.log")
       File.write(fake_codex, <<~SH)
         #!/usr/bin/env bash
-        printf '%s\\n' "$@" > "#{argv_log}"
+        printf '%s\n' "$@" > "#{argv_log}"
         cat > "#{stdin_log}"
         exit 0
       SH
@@ -389,7 +436,7 @@ class AgentTest < Minitest::Test
         #!/usr/bin/env bash
         target="#{task.state_file}"
         tmp="$(mktemp)"
-        printf '## Round 1\\n<!-- WAITING -->\\n' > "$tmp"
+        printf '## Round 1\n<!-- WAITING -->\n' > "$tmp"
         mv "$tmp" "$target"
         exit 0
       SH

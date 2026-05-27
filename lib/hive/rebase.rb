@@ -319,7 +319,8 @@ module Hive
         cwd: task.worktree_path,
         log_label: "rebase_conflict",
         profile: profile,
-        status_mode: :exit_code_only
+        status_mode: :exit_code_only,
+        cfg: cfg
       )
     end
 

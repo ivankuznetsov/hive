@@ -3,7 +3,7 @@ title: 2-brainstorm stage
 type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/stages/brainstorm_tmux.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-05-26
+updated: 2026-05-27
 tags: [stage, brainstorm, qa, tmux]
 ---
 
@@ -13,7 +13,7 @@ tags: [stage, brainstorm, qa, tmux]
 
 - **State file**: `brainstorm.md` (touched empty if absent so the marker write has a target).
 - **Prompt**: `templates/brainstorm_prompt.md.erb`, rendered with `project_name`, `task_folder`, `idea_text`. Idea text is wrapped in `<user_supplied content_type="idea_text">…</user_supplied>` per the prompt-injection boundary policy.
-- **Agent invocation**: `cwd = task.folder`, `--add-dir <task.folder>`, `log_label = "brainstorm"`. For `claude.mode: tmux`, `Hive::ClaudeLauncher` starts Claude through `interactive_claude_wrapper.sh`, unsets API-key env vars, passes `--permission-mode bypassPermissions` and `--allowedTools Read,Write,Edit,LS`, waits for the TUI prompt, and then pastes/submits the rendered prompt with a short delay so Enter does not race the paste.
+- **Agent invocation**: `cwd = task.folder`, `--add-dir <task.folder>`, `log_label = "brainstorm"`. For `claude.mode: tmux`, `Hive::ClaudeLauncher` starts Claude through `interactive_claude_wrapper.sh`, unsets API-key env vars, maps `claude.permission_mode` (default `bypassPermissions`) to the same flags the headless path uses (`bypassPermissions` → `--dangerously-skip-permissions`, otherwise `--permission-mode <mode>`) plus `--allowedTools Read,Write,Edit,LS`, waits for the TUI prompt, and then pastes/submits the rendered prompt with a short delay so Enter does not race the paste.
 - **Tmux readiness env vars**: `Hive::ClaudeLauncher` owns `HIVE_CLAUDE_TMUX_*` readiness settings. `SESSION_READY`, `PID_READY`, and `CLAUDE_READY` inherit `HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC` when their specific env var is unset; `CLAUDE_READY` otherwise keeps a 120s bare default for slow Claude TUI startup. Legacy `HIVE_BRAINSTORM_TMUX_*` names remain fallback inputs during the migration window.
 - **Claude TUI readiness predicates**: Trust and ready strings are named constants in `Hive::ClaudeLauncher`, pinned to the Claude Code 2.1.133 TUI observed during the 2026-05-25 tmux dogfood. `claude_ready_prompt?` requires the prompt marker on the last non-blank pane line, classifies trust and permission prompts from the current prompt block instead of stale scrollback, and rejects numbered menu options as non-ready.
 - **Tmux submit failures**: `Hive::TmuxRunner#send_prompt` loads and pastes the prompt through a tmux buffer, then sends one explicit Enter. If tmux disappears before that Enter submit or a tmux command exceeds `HIVE_TMUX_COMMAND_TIMEOUT_SEC`, the typed tmux error propagates immediately; Hive no longer waits for the brainstorm timeout on an unsubmitted prompt.

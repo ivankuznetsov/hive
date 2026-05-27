@@ -98,11 +98,12 @@ module Hive
       Hive::Commands::Forget.new(name, json: options[:json]).call
     end
 
-    desc "prune", "Drop registry entries whose project path no longer exists"
+    desc "prune", "Drop stale, retargeted, or malformed registry entries"
     long_desc <<~DESC
       Walks ~/Dev/hive/config.yml and removes every `registered_projects`
-      entry whose `path` is not a directory on disk OR whose row shape is
-      invalid (non-Hash, missing `path`, etc. — hand-edit accidents).
+      entry whose `path` is not a directory on disk, whose stored
+      `real_path` no longer matches the current target, OR whose row shape
+      is invalid (non-Hash, missing `path`, etc. — hand-edit accidents).
       Useful after running `hive init` against `mktemp -d` directories
       that have since been cleaned up — the entries linger forever
       otherwise and the TUI's project list keeps showing them as

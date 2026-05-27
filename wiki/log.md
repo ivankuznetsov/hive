@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T06:32:37Z] prune - real_path review hardening
+
+**Action:** Code-review follow-up for #182: malformed private `real_path` metadata is now treated like legacy absence instead of being trusted as a comparison target, so a hand-edited non-string value cannot prune a live project row. Refreshed prune schema/help prose to name realpath-mismatch removals alongside missing paths and invalid rows.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[commands/prune]]
+- [[cli]]
+- [[state-model]]
+
 ## [2026-05-27T04:25:37Z] bot - legacy warning status parity
 
 **Action:** Code-review follow-up for #174: Telegram legacy-stage warnings now render project-scoped `hive migrate <project_path>` commands and the pull `/status`/`/queue` surface includes the same project-level warning even when there are no canonical task rows. Bot docs now describe daemon-aware ready notifications and the text-only legacy warning.
@@ -2237,3 +2247,12 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/task_action]]
 - [[modules/bot]]
 - [[commands/bot]]
+
+## [2026-05-26T14:06:06Z] prune — detect relinked symlink registry entries
+
+**Action:** `Hive::Config.register_project` now stores a private `real_path` when the registered path resolves, and `prune_missing_projects!` drops rows whose current realpath no longer matches that stored target. This catches a registered symlink that was retargeted to a different directory after the original project disappeared while preserving legacy rows without `real_path`.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[commands/prune]]
+- [[state-model]]

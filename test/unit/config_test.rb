@@ -1286,6 +1286,60 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_prune_missing_projects_ignores_malformed_private_real_path_metadata
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              {
+                "name" => "live",
+                "path" => live_dir,
+                "hive_state_path" => File.join(live_dir, ".hive-state"),
+                "real_path" => 123
+              }
+            ]
+          }.to_yaml
+        )
+
+        result = Hive::Config.prune_missing_projects!
+
+        assert_empty result.fetch(:removed),
+                     "invalid private real_path metadata must fall back to legacy path-existence behavior"
+        assert_equal 1, result.fetch(:kept_count)
+        assert_equal [ "live" ], Hive::Config.registered_projects.map { |project| project["name"] }
+      end
+    end
+  end
+
+  def test_prune_missing_projects_ignores_unexpandable_private_real_path_metadata
+    with_tmp_global_config do |home|
+      Dir.mktmpdir("hive-live-project") do |live_dir|
+        File.write(
+          File.join(home, "config.yml"),
+          {
+            "registered_projects" => [
+              {
+                "name" => "live",
+                "path" => live_dir,
+                "hive_state_path" => File.join(live_dir, ".hive-state"),
+                "real_path" => [ "bad", "path" ].join(0.chr)
+              }
+            ]
+          }.to_yaml
+        )
+
+        result = Hive::Config.prune_missing_projects!
+
+        assert_empty result.fetch(:removed),
+                     "unexpandable private real_path metadata must fall back to legacy path-existence behavior"
+        assert_equal 1, result.fetch(:kept_count)
+        assert_equal [ "live" ], Hive::Config.registered_projects.map { |project| project["name"] }
+      end
+    end
+  end
+
   # Regression for the P0 Array#- subtraction bug: two registry rows
   # with identical content (same name + same path) used to be both
   # deleted by `entries - [removed]` because Array# uses Hash#==

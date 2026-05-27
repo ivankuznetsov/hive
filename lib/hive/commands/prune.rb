@@ -4,9 +4,10 @@ require "hive/config"
 module Hive
   module Commands
     # `hive prune [--dry-run] [--json]` — drop every registry entry in
-    # ~/Dev/hive/config.yml whose `path` no longer points at a directory.
-    # Also drops malformed entries (non-Hash rows, rows missing `path`,
-    # rows whose `path` isn't a String) — these are hand-edit accidents
+    # ~/Dev/hive/config.yml whose `path` no longer points at a directory,
+    # whose stored realpath no longer matches the current target, or whose
+    # row shape is invalid. Malformed entries (non-Hash rows, rows missing
+    # `path`, rows whose `path` isn't a String) are hand-edit accidents
     # and have always been undisplayable in `hive status`. The
     # .hive-state directory on disk (when present) is not touched.
     #

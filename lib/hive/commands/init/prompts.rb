@@ -35,10 +35,7 @@ module Hive
         # numeric answers index CHOICES while name answers match MODES, so drift
         # would silently break one resolution path. Guard it at load time.
         CLAUDE_PERMISSION_MODE_CHOICES = [ "bypassPermissions", "auto", "default", "acceptEdits", "dontAsk", "plan" ].freeze
-        unless CLAUDE_PERMISSION_MODE_CHOICES.sort == CLAUDE_PERMISSION_MODES.sort
-          raise "CLAUDE_PERMISSION_MODE_CHOICES and Config::CLAUDE_PERMISSION_MODES must cover the same set; " \
-                "choices=#{CLAUDE_PERMISSION_MODE_CHOICES.inspect} modes=#{CLAUDE_PERMISSION_MODES.inspect}"
-        end
+        raise "permission-mode choices/allowlist drift: #{CLAUDE_PERMISSION_MODE_CHOICES.sort.inspect} vs #{CLAUDE_PERMISSION_MODES.sort.inspect}" unless CLAUDE_PERMISSION_MODE_CHOICES.sort == CLAUDE_PERMISSION_MODES.sort
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
 

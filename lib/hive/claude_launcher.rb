@@ -33,27 +33,38 @@ module Hive
     # 2026-05-27 build that moved the input caret to the end of a
     # context-prefixed line and added a hint footer beneath it.
     #
-    # Robustness note: readiness detection keys on the DURABLE `❯` input
-    # caret, which has survived every Claude Code TUI revision so far. What
-    # churns between releases is the caret's POSITION on the line (older
-    # builds: `❯ Try …` at line start; newer: `<cwd> <git-status>  ❯` at
-    # line end) and what renders BELOW it (e.g. a `⏵⏵ bypass permissions …`
-    # hint footer, so the caret is no longer the last line). We therefore
-    # scan the whole current prompt region for the caret rather than
-    # anchoring it to the start of the last line. The only copy we still
-    # match is the NEGATIVE guards (trust / permission prompts) — misreading
-    # one of those as "ready" is the dangerous case, so those strings stay
-    # version-coupled and are what to update when Claude Code changes them.
+    # Robustness note: readiness detection keys on the `❯` input caret, the
+    # most stable signal across the Claude Code TUI revisions seen so far.
+    # What churns between releases is the caret's POSITION on its line
+    # (older builds: `❯ Try …` at line start; newer: `<cwd> <git-status>  ❯`
+    # at line end) and what renders BELOW it (e.g. a `⏵⏵ bypass permissions …`
+    # hint footer, so the caret is no longer the last line). To tolerate that
+    # without treating a `❯` Claude prints in its OWN output (shell snippets,
+    # prose, bullets) as ready, we (a) require the caret to be the first or
+    # last glyph of its line — never mid-prose — and (b) only look at the
+    # bottom of the input box: the last non-blank line, or the line above it
+    # when a one-line hint footer renders beneath the caret.
+    #
+    # Copy strings still gate readiness in two places, both version-coupled
+    # and both to update when Claude Code changes them: the positive
+    # `Claude Code` banner, and the NEGATIVE trust/permission guards
+    # (misreading one of those as "ready" is the dangerous case).
     CLAUDE_TRUST_PROMPT_MARKERS = [
       "Quick safety check",
       "Yes, I trust this folder"
     ].freeze
     CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
     CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
-    # Caret at line start (`❯ …`) OR after the cwd/git context (`… ?  ❯`).
-    CLAUDE_READY_PROMPT_LINE = /(?:\A|\s)❯(?:\s|$)/.freeze
+    # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
+    # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
+    # context). A caret embedded mid-line is Claude's own output, not the
+    # idle prompt, so it is intentionally not matched.
+    CLAUDE_READY_PROMPT_LINE = /\A❯(?:\s|\z)|\s❯\z/.freeze
     CLAUDE_MENU_OPTION_LINE = /\A\s*❯\s*\d+\./.freeze
     CLAUDE_PROMPT_CONTEXT_LINES = 4
+    # Lines at the bottom of the input box to inspect for the idle caret:
+    # the caret line itself plus at most one hint footer rendered below it.
+    CLAUDE_PROMPT_TAIL_LINES = 2
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
     # them as constants means a policy change lands in one place; previous
     # PRs inlined the string literal across 11 sites and silently drifted
@@ -514,12 +525,13 @@ module Hive
       return false if current_text.include?(CLAUDE_PERMISSION_PROMPT_MARKER)
       return false unless pane.include?(CLAUDE_READY_BANNER_MARKER)
 
-      # The idle prompt is whatever line in the current region bears the
-      # input caret. A numbered menu option (`❯ 1.`) is an interactive
-      # selection mid-flow, not the idle prompt, so it never counts — even
-      # when it is the caret line. Scanning the region (rather than only the
-      # last line) tolerates a hint footer rendered beneath the caret.
-      current_lines.any? do |line|
+      # The idle caret sits at the bottom of the input box: it is the last
+      # non-blank line, or the line above it when a one-line hint footer
+      # renders beneath it. Limiting the scan to those two lines (rather than
+      # the whole region) keeps a caret Claude printed earlier in its own
+      # output from reading as ready. A numbered menu option (`❯ 1.`) is an
+      # interactive selection, not the idle prompt, so it never counts.
+      current_lines.last(CLAUDE_PROMPT_TAIL_LINES).any? do |line|
         line.match?(CLAUDE_READY_PROMPT_LINE) && !line.match?(CLAUDE_MENU_OPTION_LINE)
       end
     end

@@ -364,6 +364,34 @@ class ClaudeLauncherTest < Minitest::Test
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
   end
 
+  # The `❯` glyph appears in Claude's OWN output (prose, shell snippets,
+  # bullets). A caret embedded mid-line is not the idle prompt; matching it
+  # would send the prompt into a busy pane and silently lose keystrokes.
+  def test_claude_ready_prompt_rejects_caret_embedded_in_output_text
+    pane = "Claude Code v2.1.133\n\nLook for the ❯ marker in the logs, then continue"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a caret embedded mid-line is Claude's own output, not the idle prompt"
+  end
+
+  # The idle caret is at the BOTTOM of the input box. A caret with two or
+  # more non-footer lines below it is stale output, not the live prompt, so
+  # restricting the scan to the last two lines must exclude it.
+  def test_claude_ready_prompt_rejects_caret_above_the_input_box_tail
+    pane = "Claude Code v2.1.133\n\n❯ Try \"refactor <filepath>\"\n" \
+           "running build step 1\nrunning build step 2"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a caret with non-footer output below it is not the live idle prompt"
+  end
+
+  # A bare caret line is a legitimate idle prompt; lock it as intentional.
+  def test_claude_ready_prompt_accepts_bare_caret
+    pane = "Claude Code v2.1.133\n\n❯"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
   def test_claude_trust_prompt_matches_observed_folder_trust_prompt
     pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm"
 

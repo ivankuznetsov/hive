@@ -2396,3 +2396,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[decisions]]
+
+## [2026-05-27T13:30:00Z] bot — acknowledge successful /idea capture
+
+**Action:** Fixed the `/idea` project picker appearing to do nothing on tap. `Supervisor#child_completion_text` returned nil for every exit-0 child, so a successful `hive new` (idea capture) sent no confirmation; the picker token was already consumed, so a confused re-tap reported "idea picker expired." `child_completion_text` now confirms a successful `hive new` (keyed on the verb at `argv[1]`, since `normalize_hive_bin` rewrites `argv[0]`). Audit found `/approve` and `/done` share the silent-success shape but degrade gracefully (downstream notification + WRONG_STAGE on re-tap), so they were left as-is.
+
+**Refreshed pages:**
+- [[commands/bot]]

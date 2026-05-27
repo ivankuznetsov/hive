@@ -230,6 +230,7 @@ review:                 # 6-review stage config (U2)
     agent: claude
     prompt_template: fix_prompt.md.erb
     auto_commit:
+      sign_policy: inherit   # inherit | bypass | fail
       scope_check:
         enabled: true
         allowed_paths: [...] # default source/test/docs/wiki/manifests allowlist

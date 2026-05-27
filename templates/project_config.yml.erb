@@ -90,6 +90,10 @@ review:
     agent: claude
     prompt_template: fix_prompt.md.erb
     auto_commit:
+      # inherit preserves the repository's commit signing config. Use
+      # bypass to force unsigned automation commits, or fail to pause
+      # when commit.gpgsign is enabled.
+      sign_policy: inherit
       scope_check:
         # Before Hive auto-commits uncommitted fix-agent edits, it checks
         # the staged paths against default allowed/denied glob lists. Override

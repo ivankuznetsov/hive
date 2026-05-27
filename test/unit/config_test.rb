@@ -760,8 +760,26 @@ class ConfigTest < Minitest::Test
   def test_auto_commit_scope_validation_allows_missing_legacy_scope
     cfg = { "review" => { "fix" => {} } }
 
-    assert_nil Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
+    Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
     assert_nil Hive::Config.send(:validate_path_glob_list!, nil, "review.fix.auto_commit.scope_check.allowed_paths", "test")
+  end
+
+  def test_auto_commit_scope_direct_validator_accepts_scope_config
+    cfg = {
+      "review" => {
+        "fix" => {
+          "auto_commit" => {
+            "scope_check" => {
+              "enabled" => true,
+              "allowed_paths" => [ "lib/**" ],
+              "denied_paths" => [ "config/**" ]
+            }
+          }
+        }
+      }
+    }
+
+    Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
   end
 
   def test_load_accepts_max_attempts_one_and_three
@@ -1841,6 +1859,84 @@ class ConfigTest < Minitest::Test
 
   # ---- Auto-rebase `rebase:` block (plan
   # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md U5) ----
+
+  def test_review_fix_auto_commit_sign_policy_defaults_to_inherit
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+      assert_equal "inherit", cfg.dig("review", "fix", "auto_commit", "sign_policy")
+    end
+  end
+
+  def test_review_fix_auto_commit_sign_policy_override_is_respected
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              sign_policy: bypass
+      YAML
+      cfg = Hive::Config.load(dir)
+      assert_equal "bypass", cfg.dig("review", "fix", "auto_commit", "sign_policy")
+    end
+  end
+
+  def test_review_fix_must_be_hash_for_auto_commit_config
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix: claude
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_review_fix_auto_commit_must_be_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit: inherit
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_review_fix_auto_commit_sign_policy_must_be_known
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              sign_policy: always
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit\.sign_policy.*must be one of/, err.message)
+      assert_match(/inherit/, err.message)
+      assert_match(/bypass/, err.message)
+      assert_match(/fail/, err.message)
+    end
+  end
+
+  def test_review_fix_auto_commit_sign_policy_must_be_string
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              sign_policy: true
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit\.sign_policy.*must be one of/, err.message)
+      assert_match(/TrueClass/, err.message)
+    end
+  end
 
   def test_rebase_defaults_when_block_absent
     with_tmp_dir do |dir|

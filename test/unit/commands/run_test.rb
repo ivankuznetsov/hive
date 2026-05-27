@@ -121,6 +121,11 @@ class CommandsRunTest < Minitest::Test
       t,
       marker(:review_error, "reason" => "fix_auto_commit_scope_failed", "files" => "reviews/auto-commit-scope-01.md")
     )
+    signing_failure = run.send(
+      :json_next_action,
+      t,
+      marker(:review_error, "reason" => "fix_auto_commit_signing_failed", "phase" => "fix")
+    )
     unknown = run.send(:json_next_action, t, marker(:surprise_marker))
 
     assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, execute_stale.fetch("kind")
@@ -131,6 +136,12 @@ class CommandsRunTest < Minitest::Test
     assert_equal Hive::Schemas::NextActionKind::EDIT, scope_failure.fetch("kind")
     assert_equal "/tmp/task-folder/reviews/auto-commit-scope-01.md", scope_failure.fetch("target")
     assert_match(/scope artifact/, scope_failure.fetch("instructions"))
+    assert_equal Hive::Schemas::NextActionKind::EDIT, signing_failure.fetch("kind")
+    assert_equal "/tmp/worktree", signing_failure.fetch("target")
+    assert_match(/signing config/, signing_failure.fetch("instructions"))
+    assert_match(/commit or revert/, signing_failure.fetch("instructions"))
+    assert_match(/sign_policy/, signing_failure.fetch("instructions"))
+    refute signing_failure.key?("rerun_with")
     assert_equal({ "kind" => Hive::Schemas::NextActionKind::NO_OP }, unknown)
   end
 

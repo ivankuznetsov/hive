@@ -97,6 +97,27 @@ class InteractiveWrapperScriptTest < Minitest::Test
     end
   end
 
+  def test_dangerously_skip_permissions_flag_is_forwarded_to_claude
+    with_tmp_dir do |dir|
+      log_dir = File.join(dir, "logs")
+      FileUtils.mkdir_p(log_dir)
+      env = { "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir }
+
+      _out, err, status = Open3.capture3(
+        env,
+        SCRIPT,
+        "--cwd", dir,
+        "--dangerously-skip-permissions",
+        "--allowedTools", "Read,Write,Edit,LS",
+        "--bin", FAKE_BIN
+      )
+
+      assert status.success?, err
+      argv_log = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_equal [ "--dangerously-skip-permissions", "--allowedTools", "Read,Write,Edit,LS" ], argv_args(argv_log)
+    end
+  end
+
   private
 
   def argv_args(log)

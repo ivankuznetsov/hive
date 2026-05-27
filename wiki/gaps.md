@@ -3,43 +3,30 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/
 created: 2026-04-25
-updated: 2026-05-22
+updated: 2026-05-25
 tags: [gap, todo]
 ---
 
-**TLDR**: Bootstrap is complete for every source file in `lib/` and every CLI command. Remaining gaps are around live behavioural verification, not codebase coverage.
+**TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, testing, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
-## Source-file coverage (✓ = page exists)
+## Source-file coverage (representative map)
 
-| File | Page |
-|------|------|
-| `bin/hive` | ✓ [[cli]] |
-| `lib/hive.rb` | ✓ [[cli]] (constants/errors), [[architecture]] (version pin) |
-| `lib/hive/cli.rb` | ✓ [[cli]] |
-| `lib/hive/config.rb` | ✓ [[modules/config]] |
-| `lib/hive/task.rb` | ✓ [[modules/task]] |
-| `lib/hive/markers.rb` | ✓ [[modules/markers]] |
-| `lib/hive/lock.rb` | ✓ [[modules/lock]] |
-| `lib/hive/worktree.rb` | ✓ [[modules/worktree]] |
-| `lib/hive/git_ops.rb` | ✓ [[modules/git_ops]] |
-| `lib/hive/agent.rb` | ✓ [[modules/agent]] |
-| `lib/hive/agent_profiles/usage_extractors.rb` | ✓ [[token-usage]] |
-| `lib/hive/usage_db.rb` | ✓ [[token-usage]] |
-| `lib/hive/llm_wiki_bootstrap*.rb` | ✓ [[commands/init]] |
-| `lib/hive/commands/init.rb` | ✓ [[commands/init]] |
-| `lib/hive/commands/new.rb` | ✓ [[commands/new]] |
-| `lib/hive/commands/run.rb` | ✓ [[commands/run]] |
-| `lib/hive/commands/status.rb` | ✓ [[commands/status]] |
-| `lib/hive/stages/base.rb` | ✓ (covered in [[templates]] + [[stages/index]]) |
-| `lib/hive/stages/inbox.rb` | ✓ [[stages/inbox]] |
-| `lib/hive/stages/brainstorm.rb` | ✓ [[stages/brainstorm]] |
-| `lib/hive/stages/plan.rb` | ✓ [[stages/plan]] |
-| `lib/hive/stages/execute.rb` | ✓ [[stages/execute]] |
-| `lib/hive/stages/open_pr.rb` | ✓ [[stages/open-pr]] |
-| `lib/hive/stages/finalize.rb` | ✓ [[stages/finalize]] |
-| `lib/hive/stages/done.rb` | ✓ [[stages/done]] |
-| `templates/*.erb` (all 9) | ✓ [[templates]] |
-| `test/**` | ✓ [[testing]] |
+| Area / file set | Page |
+|-----------------|------|
+| `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] |
+| `lib/hive/commands/*.rb` | ✓ `wiki/commands/*` pages cover the active command surface, including daemon, bot, init, status, run, stage-action, markers, migrate, findings, metrics, update, uninstall, and rebase-status. |
+| `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
+| `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] |
+| `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
+| `lib/hive/tui/**` | ✓ [[commands/tui]], [[architecture]], and [[token-usage]] cover the MVU/TUI surfaces. |
+| `lib/hive/agent.rb`, `lib/hive/agent_profile*.rb`, `lib/hive/agent_profiles/**` | ✓ [[modules/agent]], [[modules/agent_profile]], [[token-usage]] |
+| `lib/hive/config.rb`, `templates/project_config.yml.erb` | ✓ [[modules/config]], [[commands/init]], [[state-model]] |
+| `lib/hive/task_action.rb`, status/recovery helpers | ✓ [[modules/task_action]], [[commands/status]], [[modules/execute_waiting_action]], [[modules/diagnosis_agent]] |
+| Core task/state helpers: `task`, `markers`, `lock`, `worktree`, `git_ops`, `rebase`, `workflows`, `metrics`, `secret_patterns`, `protected_files`, `events` | ✓ `wiki/modules/*` pages exist for each named domain. |
+| `templates/*.erb` and prompt files | ✓ [[templates]] plus stage pages |
+| `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile` | ✓ [[testing]] and [[e2e]] |
+
+Uncertainty: this table was refreshed manually from `rg --files lib/hive` and wiki frontmatter on 2026-05-25. It verifies domain coverage, not exact one-to-one file coverage. A future refresh could add a small script that compares `rg --files lib/hive` to `wiki/**/source:` patterns and reports unmapped files.
 
 ## Open questions about the codebase
 
@@ -52,6 +39,8 @@ tags: [gap, todo]
 7. ~~**Asciinema local verification**~~ — closed 2026-04-30. `/usr/bin/asciinema` 3.2.0 is visible on this shell's PATH, and a smoke run created an asciicast v2 file. `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema` remains the fallback for installs outside PATH.
 8. **R2 misdiagnosis artifact validation** — e2e artifacts exist, but the "fresh agent course-corrects from a wrong first diagnosis" case needs the first organic failure or a third-party synthetic failure.
 9. **Codex and Pi token usage payloads need real-stream refinement.** [[token-usage]] ships zero-fill extractors for missing or unrecognized usage payloads so hive-driven spawns still record rows, but the exact non-zero JSON shapes should be updated after one captured Codex and one captured Pi spawn.
+10. **`live_task_lock` daemon behavior is unit-pinned but not live-smoked.** PR #151 adds StatusConsumer parsing, stale-healer skips, and dispatcher capacity accounting for rows whose only liveness signal is a verified task `.lock`. Unit tests cover the contracts; no live daemon restart/rebase smoke artifact was found in-tree.
+11. **`claude.permission_mode` should be live-checked against current Claude Code.** Config, init prompts, tmux wrapper docs, and headless argv tests now cover the supported values, but there is no recorded live run proving every accepted mode still matches the installed Claude CLI's current behavior.
 
 ## Release install follow-ups
 
@@ -62,14 +51,14 @@ tags: [gap, todo]
 ## Patterns detected in code but not yet documented
 
 1. **`Stages::Base::TemplateBindings` reflection pattern** — used as a generic kw-args → instance vars adapter. Worth a one-paragraph note in [[templates]] if the pattern appears elsewhere.
-2. **Idempotency conventions** — `Init` exits with code 2 when already initialised; `New` exits with code 1 on slug collision; the `Pr` stage idempotent-PR path returns `:complete` without spawning. There's no centralised exit-code policy.
+2. **Idempotency conventions** — `Init` exits with code 2 when already initialised; `New` exits with code 1 on slug collision; the `OpenPr` stage idempotent-PR path returns `:complete` without spawning. There's no centralised exit-code policy.
 3. **Two patterns for marker writes** — `Markers.set` (now uses flock + tempfile-rename atomic write) vs the agent writing into the state file via `Edit`/`Write`. The orchestrator now owns the terminal marker after every stage (the reviewer template explicitly does not write `task.md`), so concurrent-write races on the state file should not arise during normal flow. The remaining unprotected case is a user editing the state file in vim/VSCode while AGENT_WORKING — documented as "don't do that" in the README.
 
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.
 - `wiki/security.md` — dedicated page for the trust model, prompt-injection policy, and the protected-files SHA-256 check. Currently spread across `[[architecture]]`, `[[decisions]]` ADR-008, and `[[modules/agent]]`.
-- `wiki/operating.md` — log rotation, `.hive-state` backup strategy, recovering from a deleted feature worktree. Defer until ops practice exists.
+- `wiki/operating.md` — expand the existing page with deeper log rotation, `.hive-state` backup strategy, recovering from a deleted feature worktree, and live daemon restart playbooks once ops practice exists.
 - `wiki/roadmap.md` — Phase 2/3 work is listed in [[active-areas]]; a dedicated roadmap with status columns would be more navigable once Phase 2 work begins.
 
 ## Backlinks

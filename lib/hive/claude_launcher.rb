@@ -48,7 +48,6 @@ module Hive
     PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
     IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
-    DEFAULT_PERMISSION_MODE = "bypassPermissions".freeze
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
     # Patterns that mark tmux itself as unavailable (binary missing, too
@@ -96,9 +95,10 @@ module Hive
                 timeout_sec:, log_label:, session_name:, status_mode: nil,
                 expected_output: nil, profile: nil,
                 allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                permission_mode: DEFAULT_PERMISSION_MODE)
+                permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
+      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       if Hive::Config.claude_mode(cfg) == :headless
         require "hive/stages/base"
@@ -112,7 +112,8 @@ module Hive
           log_label: log_label,
           profile: profile,
           expected_output: expected_output,
-          status_mode: status_mode
+          status_mode: status_mode,
+          permission_mode: permission_mode
         )
       end
 
@@ -140,9 +141,10 @@ module Hive
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                            permission_mode: DEFAULT_PERMISSION_MODE)
+                            permission_mode: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
+      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
 
       runner = build_runner(task: task, session_name: session_name, cwd: cwd)
       # Pre-clean signal files BEFORE the preflight check so a stale
@@ -389,16 +391,16 @@ module Hive
       ENV.fetch("HIVE_TMUX_BIN", "tmux")
     end
 
-    def wrapper_command(cwd:, add_dirs:, profile:, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                        permission_mode: DEFAULT_PERMISSION_MODE)
+    def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS)
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
         "--cwd", cwd
       ]
       Array(add_dirs).each { |dir| command.concat([ "--add-dir", dir ]) }
+      command.concat(profile.permission_flags(permission_mode))
       command.concat([
-        "--permission-mode", permission_mode,
         "--allowedTools", allowed_tools,
         "--bin", profile.bin
       ])

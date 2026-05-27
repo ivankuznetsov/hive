@@ -2,12 +2,26 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T09:45:00Z] claude - permission_mode applies to all launches, not tmux-only
+
+**Action:** Corrected init help, the init prompt, the config template comment, and wiki wording that described `claude.permission_mode` as applying only to "interactive tmux Claude sessions." The setting is global for Claude: the suggested default `bypassPermissions` is used everywhere (both tmux and headless), and the operator may choose another mode that likewise applies to every Claude-backed stage.
+
+**Refreshed pages:**
+- [[commands/init]], [[state-model]] - reworded to "every Claude-backed stage (tmux and headless)."
+
 ## [2026-05-27T09:30:53Z] tui - widen subprocess diagnosis marker lookup
 
 **Action:** Rebased issue #14 on top of the current TUI marker-id/backoff work. `Hive::Tui::Subprocess.diagnose_recent_failure` now starts with the existing 64 KiB marker-log tail read, then walks backward in 64 KiB increments up to 1 MiB before falling back to the generic exit-code flash. `Messages::SubprocessExited` carries the spawn id so concurrent same-verb failures diagnose the exact per-spawn capture instead of the newest same-verb marker, and marker argv serialization now round-trips quoted values such as project names with spaces. Per-spawn stdout/stderr capture remains capped separately; the wider marker lookup only recovers the BEGIN[id] line needed to map a failing verb to its capture file and argv.
 
 **Refreshed pages:**
 - [[commands/tui]] - documented the 64 KiB to 1 MiB bounded marker-log lookup and exact-spawn diagnostic routing.
+
+## [2026-05-27T09:30:00Z] claude - unify bypassPermissions flag across tmux and headless
+
+**Action:** Made `claude.permission_mode: bypassPermissions` resolve to the same `--dangerously-skip-permissions` flag on both the headless `-p` path and the interactive tmux path. Previously the tmux wrapper emitted `--permission-mode bypassPermissions` while headless emitted `--dangerously-skip-permissions` — a documented divergence flagged in code review. Extracted the mode→argv mapping into a single `AgentProfile#permission_flags(mode)` used by both `Hive::Agent#build_cmd` and `Hive::ClaudeLauncher#wrapper_command`, and taught `interactive_claude_wrapper.sh` to forward a valueless `--dangerously-skip-permissions`.
+
+**Refreshed pages:**
+- [[modules/config]], [[stages/brainstorm]], [[modules/agent_profile]] - documented the shared `permission_flags` mapping and the bypassPermissions equivalence.
 
 ## [2026-05-27T09:03:53Z] tui - throttle failed auto-heal retries
 
@@ -200,6 +214,14 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[stages/review]] - documented the rolling fair-share deadline behavior for Phase 2 reviewers.
 
+## [2026-05-25T18:28:15Z] claude.mode - init permission-mode selection
+
+**Action:** Added project config and `hive init` support for `claude.permission_mode`. Fresh projects now render `bypassPermissions` by default for every Claude-backed stage (tmux and headless), while the init prompt lets operators choose `auto` for Claude Code auto-mode rules or another supported Claude Code permission mode. `Hive::ClaudeLauncher` now reads the configured value before building the tmux wrapper command.
+
+**Refreshed pages:**
+- [[commands/init]] - documented the new prompt, defaults summary, and scripted-answer contract.
+- [[modules/config]] - documented defaults, validation, and `Config.claude_permission_mode`.
+- [[stages/brainstorm]] and [[state-model]] - recorded the launcher/config surface.
 
 ## [2026-05-25T14:33:37Z] testing - live global Claude tmux dogfood
 
@@ -2221,6 +2243,21 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 - [[modules/reviewers]]
 - [[commands/daemon]]
 - [[operating]]
+
+## [2026-05-25T19:06:41Z] refresh - architecture, daemon liveness, gaps
+
+**Action:** Refreshed the project wiki after reading `.llm-wiki/config.json`, agent instructions, the current wiki index/gaps/log, the configured cross-project wiki at `/home/asterio/wikis/master/wiki`, recent git history, and the dirty working-tree source changes. Documented PR #151's `live_task_lock` daemon path, updated stale architecture/active-area stage and AgentProfile descriptions, recorded the uncommitted `claude.permission_mode` surface in adjacent module/ADR pages, and made the gaps page explicit that source coverage is a representative domain map rather than an automated one-file audit.
+
+**Refreshed pages:**
+- [[architecture]]
+- [[active-areas]]
+- [[modules/daemon]]
+- [[commands/daemon]]
+- [[modules/agent]]
+- [[modules/agent_profile]]
+- [[decisions]]
+- [[gaps]]
+- [[index]]
 
 ## [2026-05-25T19:30:41Z] review — reject pre-existing dirty fix worktrees
 

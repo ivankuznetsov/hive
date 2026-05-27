@@ -7,7 +7,7 @@ updated: 2026-05-27
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode`, review-stage roles). `Config.load(project_root)` **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`) are replaced wholesale, never per-element merged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -17,7 +17,7 @@ tags: [config, yaml, validation]
   "worktree_root"     => nil,
   "default_branch"    => nil,
   "project_name"      => nil,
-  "claude"            => { "mode" => "tmux" },
+  "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions" },
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
   # caps for runaway agents, not cost targets. The deprecated
   # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
@@ -85,6 +85,8 @@ tags: [config, yaml, validation]
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
 | `write_global_config!(data)` | Direct locked atomic write for the global config; restores existing mode bits after tempfile creation so umask cannot narrow them, leaves a sticky sibling lock file, and rewraps lock/write filesystem errors as `ConfigError`. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |
+| `claude_mode(cfg)` | Returns `:tmux` or `:headless` after validating `claude.mode`. |
+| `claude_permission_mode(cfg)` | Returns the configured Claude Code permission mode, defaulting to `bypassPermissions`. Valid values mirror Claude Code: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. |
 | `deep_merge(base, override)` | Recursive merge: Hash-vs-Hash recurses; everything else (scalar, Array, mismatched types) replaces. |
 | `deep_dup(obj)` | Recursive Hash/Array deep-copy. |
 
@@ -107,6 +109,9 @@ Runs after merge so a default value can never trigger a failure — only user in
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
 5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
+6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
+
+The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

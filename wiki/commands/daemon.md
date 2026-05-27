@@ -63,6 +63,13 @@ value) and routes:
 | `archived`            | Skip — terminal. |
 | `error`               | Skip. |
 
+`agent_running` rows also feed daemon capacity accounting when status
+has positive liveness evidence. The dispatcher counts both rows with a
+live recorded Claude PID and rows with `live_task_lock: true` (a verified
+`hive run` task-lock holder before Claude has attached). This keeps a
+daemon restart during auto-rebase or other pre-agent work from spawning
+extra tasks past `max_concurrent_runs` / `max_concurrent_per_project`.
+
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.
 

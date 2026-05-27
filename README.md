@@ -68,7 +68,7 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
    hive init .
    ```
 
-   During `hive init`, choose the Claude launch mode for the project. `tmux` is the default: Claude-backed stages run in attachable tmux sessions using your logged-in Claude session. Pick `headless` for service-only hosts or CI-style runs that should use normal non-interactive CLI spawns.
+   During `hive init`, choose the Claude launch mode and permission mode for the project. `tmux` is the default: Claude-backed stages run in attachable tmux sessions using your logged-in Claude session. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules. Pick `headless` for service-only hosts or CI-style runs that should use normal non-interactive CLI spawns.
 
    When `hive init` asks about the daemon, keep the project enabled. The service itself is already global autostart infrastructure; this prompt only controls whether this project is picked up. The daemon is the worker: it polls Hive, starts the next stage when a task is ready, and stops at human-input or recovery gates.
 

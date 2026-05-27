@@ -3,11 +3,11 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-05-26
+updated: 2026-05-27
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for hive and `--json` emits the resolved bootstrap contract: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) to use, what budget+timeout sanity caps to set, and whether this project should be enrolled for daemon dispatch, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service is installed for autostart.
+**TLDR**: `hive init [PATH]` bootstraps a project for hive and `--json` emits the resolved bootstrap contract: creates the orphan `hive/state` branch, attaches it as a worktree at `<project>/.hive-state/`, scaffolds stage folders, asks the operator (on TTY) which agents to use for planning / development / review, which project-global Claude launch mode (`claude.mode`) and permission mode (`claude.permission_mode`) to use, what budget+timeout sanity caps to set, and whether this project should be enrolled for daemon dispatch, scaffolds `config.yml` from those answers, ignores `.hive-state/` in master, initializes managed llm-wiki context with Codex as the headless wiki refresher, registers the project globally, and idempotently ensures the global per-user daemon service is installed for autostart.
 
 ## Usage
 
@@ -60,13 +60,14 @@ On TTY input streams the prompt walks the operator through the following section
 
 1. **Planning agent** (`brainstorm.agent` + `plan.agent`): one combined choice; the answer maps to both keys. Recommended default `claude`.
 2. **Claude launch mode** (`claude.mode`): `tmux` (default) runs every Claude-backed stage in an attachable tmux pane using the logged-in Claude session; `headless` keeps the non-interactive `claude -p` path. The setting is global for Claude only — Codex/Pi stages remain on their normal headless profile path.
-3. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
-4. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
-5. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the triage agent in the 6-review autonomous loop.
-6. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
-7. **Daemon enrollment** (`daemon.enabled`): whether to opt this project into the auto-advance daemon (default yes). The per-user daemon service is global install-time infrastructure; project init no longer asks whether to start or autostart it.
+3. **Claude permission mode** (`claude.permission_mode`): applies to every Claude-backed stage, in both tmux and headless mode. Recommended default `bypassPermissions` skips Claude Code permission prompts for dogfood runs (maps to `--dangerously-skip-permissions`); `auto` uses Claude Code auto-mode rules. The same prompt also accepts `default`, `acceptEdits`, `dontAsk`, and `plan`.
+4. **Development agent** (`execute.agent`): the implementer in `4-execute`. Recommended default `codex` (its edit-mode is more efficient for implementation work). Codex's status-detection mode is `:output_file_exists`, but the execute spawn pins `status_mode: :state_file_marker` because the stage's lifecycle contract is the marker the agent writes — the pin keeps that contract independent of the chosen profile.
+5. **Review agents** (`review.reviewers[]`): multi-select over the three default reviewers (claude-ce-code-review, codex-ce-code-review, pr-review-toolkit). Disabled entries are omitted from the rendered array.
+6. **Triage bias** (`review.triage.bias`): `courageous` (default) or `safetyist`. Picks the bias preset used by the triage agent in the 6-review autonomous loop.
+7. **Per-stage limits**: budget+timeout for each of 10 effective keys (`brainstorm`, `plan`, `execute_implementation`, `open_pr`, `artifacts`, `finalize`, `review_ci`, `review_triage`, `review_fix`, `review_browser`). Defaults are generous sanity caps — most tasks finish well within them.
+8. **Daemon enrollment** (`daemon.enabled`): whether to opt this project into the auto-advance daemon (default yes). The per-user daemon service is global install-time infrastructure; project init no longer asks whether to start or autostart it.
 
-Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). Agent names are resolved before numeric indexes, so a future digit-only profile name such as `42` remains addressable by name. The Claude mode prompt follows the same rule (`tmux` / `headless` or `1` / `2`). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
+Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g., `codex` or `2`; `claude-ce-code-review,pr-review-toolkit` or `1,3`). Agent names are resolved before numeric indexes, so a future digit-only profile name such as `42` remains addressable by name. The Claude mode and permission-mode prompts follow the same rule (`tmux` / `headless` or `1` / `2`; `bypassPermissions` / `auto` / etc. or `1` / `2` / ...). Name strings are the recommended path for scripted automation since they're stable across template-default reordering.
 
 ### Stable-iteration-order contract
 
@@ -81,7 +82,7 @@ Reordering either is a **breaking change for scripted automation** that uses ind
 When `$stdin.tty?` is false the prompt module skips every question and emits exactly one line to `$stdout`:
 
 ```
-hive: using defaults — planning=claude, claude_mode=tmux, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
+hive: using defaults — planning=claude, claude_mode=tmux, claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled
 ```
 
 Piped input is **not** consumed — `printf 'codex\n...' | hive init` ignores the piped data and uses defaults. Document this contract for any automation that wants to set non-default values: use `--force` plus an explicitly-edited YAML rather than expecting heredoc piping to populate answers.
@@ -113,7 +114,7 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 - `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including non-default answer mirroring and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, the rendered template's stage-agent/runtime blocks, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, and the U5 piped-input + abort + already-initialized-guard scenarios.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
-- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, limit-pair edge re-prompts, the Claude mode prompt, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins `schemas/hive-init.v1.json` to the producer's success payload.
+- `test/unit/commands/init/prompts_test.rb` covers the prompt module in isolation: happy paths, digit-only agent names, limit-pair edge re-prompts, the Claude mode and permission-mode prompts, the non-TTY summary contract, and the testability invariant. `test/unit/schema_files_test.rb` pins `schemas/hive-init.v1.json` to the producer's success payload.
 
 ## Backlinks
 

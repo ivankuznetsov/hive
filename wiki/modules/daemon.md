@@ -3,15 +3,15 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-05-15
+updated: 2026-05-25
 tags: [daemon, module, automation, dispatcher]
 ---
 
-**TLDR**: Six small modules under `Hive::Daemon::*` that together form
+**TLDR**: Small modules under `Hive::Daemon::*` that together form
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
 `ConcurrencyController`) is separated from I/O (`StatusConsumer`,
-`ChildSupervisor`, `Logger`, `PrMergeWatcher`) so the safety-relevant
-decisions are unit-testable without forking.
+`ChildSupervisor`, `Logger`, `PrMergeWatcher`, `StaleAgentHealer`) so
+the safety-relevant decisions are unit-testable without forking.
 
 ## Module map
 
@@ -19,10 +19,12 @@ decisions are unit-testable without forking.
 |--------|------|---------|
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage context, and mtime debounce → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:skip`. Source of truth for "should this row fire a child?". |
 | `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), cooldowns, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. |
-| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates schema version; surfaces parse failures as `Result(ok: false)`. |
+| `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records. Validates schema version; surfaces parse failures as `Result(ok: false)`. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; reaps via `Process.wait(-1, WNOHANG)`; parses JSON envelopes from child stdout; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
+| `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
+| `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots, half-migrated projects, and rows with `live_task_lock: true`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail`). Owns the PID file + signal-based stop/reload. |
 
@@ -38,6 +40,7 @@ hive daemon start
             ├─ Hive::Daemon::ChildSupervisor   (Process.spawn pgroup: true)
             ├─ Hive::Daemon::StatusConsumer    (Open3.capture3 hive status --json)
             ├─ Hive::Daemon::PrMergeWatcher    (Open3.capture3 gh pr view)
+            ├─ Hive::Daemon::StaleAgentHealer  (AGENT_WORKING repair)
             └─ Hive::Daemon::Policy            (pure decisions)
 ```
 
@@ -72,8 +75,30 @@ stage does not move and no workflow verb fires from either path.
    stage entry that no agent ever attached to, older than
    `daemon.agent_marker_grace_sec`, default 300s). Skips rows whose
    project has a half-migrated layout (`legacy_stage_dirs`) and rows
-   for which the `ConcurrencyController` has a live in-flight slot.
+   for which the `ConcurrencyController` has a live in-flight slot, or
+   rows where `StatusConsumer` reports `live_task_lock: true` because an
+   external `hive run` still holds a verified task lock. The
+   `live_task_lock` skip matters during pre-Claude work such as
+   auto-rebase, when the runner is active but has not yet written
+   `claude_pid` into `.lock`.
    Heal/skip events are logged as `marker_healed` / `marker_heal_failed`.
+
+## External liveness and capacity
+
+`Hive::Commands::Status` emits `tasks[].live_task_lock` when a task
+`.lock` holder PID is alive and its recorded process start time still
+matches. `StatusConsumer` carries that boolean into each row. The
+dispatcher then treats `agent_running` rows as externally active only
+when there is positive liveness evidence: either `claude_pid_alive ==
+true` or `live_task_lock == true`.
+
+That predicate feeds both the global external-active count and the
+per-project active count used by `ConcurrencyController`. A row whose
+only liveness signal is `live_task_lock` consumes daemon capacity, so a
+daemon restart during auto-rebase cannot dispatch extra work past the
+configured caps. Rows with no live Claude PID and no live task lock do
+not consume capacity; if they are stale `AGENT_WORKING` rows, the healer
+will rewrite them on the same tick or a later retry.
 
 `3-plan`/`needs_input` is the policy exception to the generic
 edit-resume debounce. A generated plan in `WAITING` is an approval
@@ -113,6 +138,8 @@ dev runs).
 ## Backlinks
 
 - [[commands/daemon]]
+- [[commands/status]]
+- [[modules/task_action]]
 - [[decisions]] (ADR-024)
 - [[architecture]]
 - [[cli]]

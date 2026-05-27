@@ -94,7 +94,9 @@ class InitTest < Minitest::Test
   end
 
   def test_init_json_mirrors_non_default_prompt_answers
-    inputs = ([ "codex", "2", "pi", "2", "safetyist", "60,120" ] +
+    # Order: planning, claude_mode, claude_permission_mode, development,
+    # reviewers, triage, then limits, daemon-enable, confirm.
+    inputs = ([ "codex", "2", "", "pi", "2", "safetyist", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "" ]).join("\n") + "\n"
 
@@ -385,6 +387,8 @@ class InitTest < Minitest::Test
                      "brainstorm.agent must default to claude"
         assert_equal "tmux", cfg.dig("claude", "mode"),
                      "claude.mode must default to tmux in fresh templates"
+        assert_equal "bypassPermissions", cfg.dig("claude", "permission_mode"),
+                     "claude.permission_mode must default to bypassPermissions in fresh templates"
         refute raw_cfg.fetch("brainstorm").key?("runtime"),
                "fresh templates must not render legacy brainstorm.runtime"
         assert_equal "claude", cfg.dig("plan", "agent"),
@@ -487,7 +491,7 @@ class InitTest < Minitest::Test
     # claude_mode, codex for development, safetyist triage, only first +
     # third reviewer, override `plan` budget/timeout, accept the rest.
     inputs = [
-      "codex", "", "2", "1,3", "safetyist",
+      "codex", "", "", "2", "1,3", "safetyist",
       "", "30,900", "", "", "", "", "", "", "", "",
       "", ""
     ].join("\n") + "\n"
@@ -499,6 +503,7 @@ class InitTest < Minitest::Test
         cfg = Hive::Config.load(dir)
         assert_equal "codex", cfg.dig("brainstorm", "agent")
         assert_equal "headless", cfg.dig("brainstorm", "runtime")
+        assert_equal "bypassPermissions", cfg.dig("claude", "permission_mode")
         assert_equal "codex", cfg.dig("plan", "agent")
         assert_equal "codex", cfg.dig("execute", "agent")
         assert_equal "safetyist", cfg.dig("review", "triage", "bias")
@@ -519,10 +524,10 @@ class InitTest < Minitest::Test
   end
 
   def test_init_with_headless_claude_mode_writes_matching_config
-    # planning=blank(claude), claude_mode="2"(headless), dev=blank,
-    # reviewers=blank, triage=blank, limit blanks, daemon-enable=blank,
+    # planning=blank(claude), claude_mode="2"(headless), claude_permission_mode=blank,
+    # dev=blank, reviewers=blank, triage=blank, limit blanks, daemon-enable=blank,
     # confirm=blank.
-    inputs = ([ "", "2", "", "", "" ] +
+    inputs = ([ "", "2", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -535,17 +540,36 @@ class InitTest < Minitest::Test
         raw_cfg = YAML.safe_load(File.read(config_path))
         assert_equal "claude", cfg.dig("brainstorm", "agent")
         assert_equal "headless", cfg.dig("claude", "mode")
+        assert_equal "bypassPermissions", cfg.dig("claude", "permission_mode")
         refute raw_cfg.fetch("brainstorm").key?("runtime"),
                "fresh init config must not render legacy brainstorm.runtime"
       end
     end
   end
 
+  def test_init_with_claude_permission_mode_auto_writes_matching_config
+    # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
+    # dev/reviewers/triage=blank, limits blank, daemon/confirm blank.
+    inputs = ([ "", "", "2", "", "", "" ] +
+              ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+              [ "", "" ]).join("\n") + "\n"
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        prompts = make_tty_prompts(inputs)
+        capture_io { Hive::Commands::Init.new(dir, prompts: prompts).call }
+
+        cfg = Hive::Config.load(dir)
+        assert_equal "tmux", cfg.dig("claude", "mode")
+        assert_equal "auto", cfg.dig("claude", "permission_mode")
+      end
+    end
+  end
+
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    # Blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, limits. Then "n" for daemon-enable and blank for confirm.
-    inputs = (([ "" ] * (5 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    # Blanks: planning (claude), claude mode, Claude permission mode, dev,
+    # reviewers, triage bias, limits. Then "n" for daemon-enable and blank for confirm.
+    inputs = (([ "" ] * (6 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -561,9 +585,9 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # Blanks: planning (claude), claude mode, dev, reviewers,
-    # triage bias, limits, daemon-enable.
-    inputs = (([ "" ] * (6 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    # Blanks: planning (claude), claude mode, Claude permission mode, dev,
+    # reviewers, triage bias, limits, daemon-enable.
+    inputs = (([ "" ] * (7 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

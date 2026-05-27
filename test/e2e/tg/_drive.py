@@ -52,6 +52,9 @@ def drive(client, bot, project):
         for btn in row:
             if btn.text.replace("★", "").strip() == project:
                 target = btn
+                break
+        if target:
+            break
     if not target:
         labels = [b.text for row in picker.buttons for b in row]
         print(f"FAIL project '{project}' not in picker; saw {labels}")

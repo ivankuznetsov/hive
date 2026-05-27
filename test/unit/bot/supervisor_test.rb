@@ -404,6 +404,22 @@ class HiveBotSupervisorTest < Minitest::Test
                  "exit_code 0 must not produce a Telegram ack (child_completion_text returns nil)"
   end
 
+  def test_reap_children_delivers_idea_capture_ack_through_the_full_reaper_path
+    @child_supervisor.reap_batches << [
+      child_exit(exit_code: 0, project: "writero",
+                 command_argv: [ "hive", "new", "writero", "an idea", "--json" ])
+    ]
+
+    @supervisor.reap_children
+
+    # End-to-end wiring: reap_children -> reply_for_child -> child_completion_text
+    # -> @telegram.send_message. Unit tests calling child_completion_text directly
+    # would miss a regression where reply_for_child stops reaching it for exit-0.
+    message = @telegram.messages.last
+    assert_equal 42, message.fetch(:chat_id), "the ack must go to the child's chat_id"
+    assert_includes message.fetch(:text), "Captured your idea in writero"
+  end
+
   def test_finalize_completed_brainstorm_in_dry_run_announces_without_dispatching
     supervisor = Hive::Bot::Supervisor.new(
       config: @config, token: "test-token", logger: @logger, telegram: @telegram,

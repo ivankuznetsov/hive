@@ -11,7 +11,7 @@ related_components:
 symptoms:
   - "Tapping a project in the /idea picker produced no reply — the button looked dead"
   - "A second tap of the same project button replied \"That idea picker expired. Send /idea <text> again.\""
-  - "For daemon-off projects the captured inbox idea produced zero follow-up signal"
+  - "The captured inbox idea produced no immediate signal — its ready_to_brainstorm notification is suppressed on daemon-on projects and only fires on a later poll tick when daemon-off"
 root_cause: logic_error
 resolution_type: code_fix
 tags:
@@ -34,7 +34,7 @@ Picking a project from the Telegram `/idea` picker dispatched `hive new` as a ch
 
 - After `/idea <text>`, tapping a project in the inline picker appeared to do nothing (no confirmation, no error).
 - A confused second tap replied: `That idea picker expired. Send /idea <text> again.`
-- The idea was actually captured into `1-inbox` the whole time — there was just no acknowledgment, and no delayed follow-up either: inbox tasks carry action `ready_to_brainstorm`, which `NotificationDispatcher#suppress_ready_action?` suppresses when the project daemon is disabled.
+- The idea was actually captured into `1-inbox` the whole time — there was just no acknowledgment, and no *immediate* follow-up either: inbox tasks carry action `ready_to_brainstorm`, which `NotificationDispatcher#suppress_ready_action?` suppresses when the project daemon is **enabled** (the daemon dispatches the transition itself); when the daemon is off the alert fires, but only on a later dispatcher poll tick, never at tap time.
 
 ## What Didn't Work
 
@@ -44,7 +44,7 @@ Future readers: do **not** chase the token/expiry logic in `CallbackHandlers#ide
 
 ## Solution
 
-Commit `64f8db64`, `lib/hive/bot/supervisor.rb`.
+PR #226, `lib/hive/bot/supervisor.rb`.
 
 Before:
 
@@ -86,7 +86,7 @@ Detection keys on `argv[1]`, **not** `argv[0]`: `ChildSupervisor#normalize_hive_
 The root cause is two compounding gaps:
 
 1. The dispatch path (`CallbackHandlers#idea_project` → `dispatch_then_reply` → `hive new`) was **silent on success**.
-2. The resulting `1-inbox` state has **no follow-up signal** — its `ready_to_brainstorm` action is suppressed with the daemon off, and there is no status row the operator is watching for a freshly-captured idea.
+2. The resulting `1-inbox` state has **no immediate follow-up signal** — its `ready_to_brainstorm` action is suppressed entirely when the daemon is on, and when the daemon is off it only fires on a later poll tick (never at tap time); there is no status row the operator is watching for a freshly-captured idea.
 
 Most commands are fine staying silent because their effect surfaces in the next status row or a downstream notification; `hive new` had neither, so the only correct fix is an explicit ack at the moment the result lands. `/approve` and `/done` share the silent-success shape but were deliberately left unchanged: they degrade gracefully — a re-tap hits `WRONG_STAGE` → "Already advanced by another device", and the stage advance emits a downstream notification.
 

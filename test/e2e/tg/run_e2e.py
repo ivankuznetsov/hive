@@ -25,35 +25,56 @@ PROJECT = os.environ.get("TG_CAPTURE_PROJECT", "shipped")
 DRIVER_ID = os.environ["TG_DRIVER_ID"]
 SESSION = os.path.join(HERE, "hive_e2e")
 LOG = "/tmp/hive-e2e-bot.log"
+BOT_OUT = "/tmp/hive-e2e-bot.out"
+
+
+def _dump_bot_output(reason):
+    print(f"FAIL bot did not start: {reason}")
+    try:
+        with open(BOT_OUT) as fh:
+            tail = fh.read().splitlines()[-20:]
+        if tail:
+            print("--- bot output (last 20 lines) ---")
+            print("\n".join(tail))
+    except FileNotFoundError:
+        print(f"(no bot output captured at {BOT_OUT})")
 
 
 def start_bot():
-    for p in ("/tmp/hive-e2e-bot.log", "/tmp/hive-e2e-bot.last_seen",
-              "/tmp/hive-e2e-bot.alerts", "/tmp/hive-e2e-bot.pid"):
+    for p in (LOG, "/tmp/hive-e2e-bot.last_seen",
+              "/tmp/hive-e2e-bot.alerts", "/tmp/hive-e2e-bot.pid", BOT_OUT):
         try:
             os.remove(p)
         except FileNotFoundError:
             pass
     env = dict(os.environ, HIVE_TEST_ALLOWLIST=DRIVER_ID)
     # CI installs gems via bundler, so the bot must run under `bundle exec`;
-    # locally BOT_LAUNCHER defaults to a bare `ruby`. The bot logs to LOG on
-    # its own, so its stdout/stderr go to DEVNULL (subprocess owns/closes the FD).
+    # locally BOT_LAUNCHER defaults to a bare `ruby`. Capture the bot's
+    # stdout/stderr to BOT_OUT (not /dev/null) so a startup crash is
+    # diagnosable; the file — not this process's stdout pipe — receives it.
     launcher = os.environ.get("BOT_LAUNCHER", "ruby").split()
-    proc = subprocess.Popen(
-        [*launcher, os.path.join(HERE, "bot_harness.rb")],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL, start_new_session=True, cwd=REPO,
-    )
+    with open(BOT_OUT, "w") as out:
+        proc = subprocess.Popen(
+            [*launcher, os.path.join(HERE, "bot_harness.rb")],
+            env=env, stdout=out, stderr=out,
+            stdin=subprocess.DEVNULL, start_new_session=True, cwd=REPO,
+        )
     for _ in range(40):
         if proc.poll() is not None:
+            _dump_bot_output(f"process exited early (code {proc.returncode})")
             return None
         try:
-            if '"event":"bot_started"' in open(LOG).read():
-                return proc
+            with open(LOG) as fh:
+                if '"event":"bot_started"' in fh.read():
+                    return proc
         except FileNotFoundError:
             pass
         time.sleep(0.5)
-    return proc  # started but no log line; let driver try anyway
+    # Alive but never reported bot_started — wedged. Fail loudly rather than
+    # letting the driver burn its picker timeout and mis-blame the protocol.
+    stop_bot(proc)
+    _dump_bot_output("alive but never logged bot_started within the deadline")
+    return None
 
 
 def stop_bot(proc):
@@ -76,7 +97,7 @@ def _session():
 def main():
     proc = start_bot()
     if proc is None:
-        print("FAIL bot did not start"); return 1
+        return 1  # start_bot already printed the FAIL + bot output
     client = TelegramClient(_session(), API_ID, API_HASH)
     client.connect()
     try:

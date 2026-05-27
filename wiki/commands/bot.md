@@ -82,10 +82,11 @@ Commands dispatched as child processes (`hive new`, `hive approve`,
 operator normally sees the effect in the next status row or push
 notification. The lone exception is `hive new`: an idea lands in
 `1-inbox`, whose `ready_to_brainstorm` notification is **suppressed
-entirely when the project's daemon is disabled** (`suppress_ready_action?`)
-and otherwise delayed a full status tick — so a silent success looked
-like a dead button, and because the picker token is consumed on tap, a
-confused re-tap reported "idea picker expired." `child_completion_text`
+entirely when the project's daemon is enabled** (`suppress_ready_action?`,
+since the daemon dispatches the transition itself) and, when the daemon
+is off, only fires on a later dispatcher poll tick — never at tap time.
+So a silent success looked like a dead button, and because the picker
+token is consumed on tap, a confused re-tap reported "idea picker expired." `child_completion_text`
 therefore acknowledges a successful `hive new` (keyed on the verb at
 `argv[1]`, since `ChildSupervisor#normalize_hive_bin` rewrites `argv[0]`
 to a resolved binary path). `/approve` and `/done` share the same

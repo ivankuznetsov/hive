@@ -148,7 +148,9 @@ class MarkersTest < Minitest::Test
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
       Hive::Markers.set(file, :waiting)
-      assert_includes File.read(file), "<!-- WAITING -->"
+      # Waiting-class markers carry an internal `ts` write-time stamp.
+      assert_match(/<!-- WAITING ts=\S+ -->/, File.read(file))
+      assert_equal :waiting, Hive::Markers.current(file).name
     end
   end
 
@@ -382,5 +384,48 @@ class MarkersTest < Minitest::Test
       file = File.join(dir, "task.md")
       assert_raises(ArgumentError) { Hive::Markers.set(file, :review_typo) }
     end
+  end
+
+  # --- waiting-marker `ts` stamp (daemon first-sight baseline) ------------
+
+  # The daemon's first-sight edit policy needs the agent's "ask time" to
+  # tell an already-answered task from a freshly-asked one. set stamps a
+  # `ts` on waiting-class markers; it must round-trip through current.
+  def test_waiting_class_markers_carry_ts_that_round_trips
+    with_tmp_dir do |dir|
+      %i[waiting execute_waiting review_waiting].each do |name|
+        file = File.join(dir, "#{name}.md")
+        Hive::Markers.set(file, name)
+        ts = Hive::Markers.current(file).attrs["ts"]
+        refute_nil ts, "#{name} should carry a ts stamp"
+        # Parses as an ISO-8601 UTC time.
+        assert_kind_of Time, Time.parse(ts)
+      end
+    end
+  end
+
+  def test_waiting_marker_preserves_caller_supplied_ts
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      Hive::Markers.set(file, :waiting, ts: "2020-01-01T00:00:00Z")
+      assert_equal "2020-01-01T00:00:00Z", Hive::Markers.current(file).attrs["ts"]
+    end
+  end
+
+  def test_non_waiting_markers_get_no_ts
+    with_tmp_dir do |dir|
+      %i[complete agent_working execute_complete review_complete].each do |name|
+        file = File.join(dir, "#{name}.md")
+        Hive::Markers.set(file, name)
+        assert_nil Hive::Markers.current(file).attrs["ts"],
+                   "#{name} must not carry a ts stamp"
+      end
+    end
+  end
+
+  def test_display_attrs_hides_internal_ts
+    attrs = { "escalations" => "1", "ts" => "2026-05-27T12:00:00Z" }
+
+    assert_equal({ "escalations" => "1" }, Hive::Markers.display_attrs(attrs))
   end
 end

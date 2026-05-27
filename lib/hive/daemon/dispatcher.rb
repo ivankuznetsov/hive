@@ -442,7 +442,8 @@ module Hive
           last_dispatched_state_file_mtime:
             @controller.last_dispatched_state_file_mtime_for(project: row.project, slug: row.slug),
           now: now,
-          edit_debounce_sec: @edit_debounce_sec
+          edit_debounce_sec: @edit_debounce_sec,
+          marker_ts: row.marker_ts
         )
 
         case decision

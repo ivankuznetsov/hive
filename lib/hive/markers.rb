@@ -1,4 +1,5 @@
 require "securerandom"
+require "time"
 
 module Hive
   module Markers
@@ -45,7 +46,15 @@ module Hive
     # code here updates both consumers; previously each module had its
     # own private copy and would drift on edit.
     KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
-    INTERNAL_ATTR_KEYS = %w[marker_id].freeze
+    INTERNAL_ATTR_KEYS = %w[marker_id ts].freeze
+
+    # Waiting-class markers carry an internal `ts` write-time stamp (see
+    # `attrs_with_waiting_ts`). The daemon's first-sight edit policy uses
+    # it as the baseline floor: any state-file edit after the marker was
+    # written is treated as user input, so an answer that predates the
+    # daemon's first sight of the row (after a restart, or when the bot
+    # dispatched the brainstorm) is no longer stranded.
+    WAITING_MARKER_NAMES = %w[WAITING EXECUTE_WAITING REVIEW_WAITING].freeze
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
@@ -82,6 +91,7 @@ module Hive
       raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
 
       attrs = attrs_with_error_marker_id(marker_name, attrs)
+      attrs = attrs_with_waiting_ts(marker_name, attrs)
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do
@@ -144,6 +154,18 @@ module Hive
       return attrs unless attrs["marker_id"].to_s.empty? && attrs[:marker_id].to_s.empty?
 
       attrs.merge("marker_id" => SecureRandom.hex(8))
+    end
+
+    # Stamp the UTC write-time on waiting-class markers so the daemon can
+    # tell "agent just asked" from "user already answered". Skips non-
+    # waiting markers, and preserves any caller-supplied `ts` (string or
+    # symbol key) — important for deterministic tests that pin the stamp.
+    def attrs_with_waiting_ts(marker_name, attrs)
+      attrs = attrs ? attrs.to_h : {}
+      return attrs unless WAITING_MARKER_NAMES.include?(marker_name)
+      return attrs unless attrs["ts"].to_s.empty? && attrs[:ts].to_s.empty?
+
+      attrs.merge("ts" => Time.now.utc.iso8601)
     end
 
     def display_attrs(attrs)

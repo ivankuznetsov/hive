@@ -140,13 +140,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def row(project: "p1", slug: "s1", stage: "1-inbox", marker: "waiting",
           action: "ready_to_brainstorm", command: "hive brainstorm s1",
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
-          state_file: nil, folder: nil)
+          state_file: nil, folder: nil, marker_ts: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
       folder: folder,
       state_file: state_file || File.join(folder, "idea.md"),
-      state_file_mtime: mtime, action: action,
+      state_file_mtime: mtime, marker_ts: marker_ts, action: action,
       suggested_command: command, claude_pid_alive: claude_pid_alive,
       live_task_lock: live_task_lock
     )
@@ -402,6 +402,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # Logged as :skipped with reason: baseline_recorded
     skipped = logger.events.find { |(n, a)| n == :skipped && a[:reason] == "baseline_recorded" }
     refute_nil skipped, "must log :skipped reason: baseline_recorded"
+  end
+
+  def test_edit_action_first_sight_with_marker_ts_dispatches_answered_task
+    # Regression: a brainstorm/needs_input task the user already answered
+    # before the daemon's first sight (after a daemon restart, or when the
+    # bot dispatched the brainstorm so no baseline was recorded) used to be
+    # stranded forever. With the agent's WAITING-marker write-time
+    # (marker_ts) as the baseline floor, a state-file edit newer than the
+    # ask is recognised as user input and dispatched on first sight.
+    asked_at = T0 - 600
+    answered_at = T0 - 60 # after the ask, past the 30s debounce
+    rows = [ row(action: "needs_input", marker: "waiting",
+                 command: "hive brainstorm s1 --from 2-brainstorm",
+                 mtime: answered_at, marker_ts: asked_at) ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size,
+                 "an answer that predates the daemon's first sight must still dispatch"
+    assert_equal "hive brainstorm s1 --from 2-brainstorm", sup.spawned.first[:command]
+    assert events_include?(logger, :dispatched)
   end
 
   def test_plan_needs_input_first_sight_dispatches_without_baseline

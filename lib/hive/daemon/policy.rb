@@ -30,12 +30,18 @@ module Hive
     #   an early dispatch).
     #
     # First-sight policy on `kind: edit`: the daemon sees a `_WAITING`
-    # task with no prior observation. We CANNOT distinguish "agent just
-    # wrote the WAITING marker" from "user already answered hours ago",
-    # so the safe choice is to skip + record the current mtime as the
-    # baseline. The next genuine user edit (mtime > baseline) triggers
-    # dispatch. Operators of dormant-task scenarios can `touch` the
-    # state file to wake the daemon.
+    # task with no prior observation. When the row carries a `marker_ts`
+    # (the agent's WAITING-marker write-time), we use it as the baseline
+    # floor — a state-file write strictly newer than the marker is
+    # genuine user input, so we can dispatch an answer that predates the
+    # daemon's first sight (e.g. after a restart that dropped in-memory
+    # baselines, or when the bot dispatched the brainstorm so no baseline
+    # was ever recorded). Without a `marker_ts` (legacy markers) we CANNOT
+    # distinguish "agent just wrote the WAITING marker" from "user already
+    # answered hours ago", so the safe choice is to skip + record the
+    # current mtime as the baseline; the next genuine user edit (mtime >
+    # baseline) triggers dispatch. Operators of dormant-task scenarios can
+    # `touch` the state file to wake the daemon.
     #
     # Post-completion mtime refresh (handled by Dispatcher, not Policy):
     # after every child reaps, the controller's recorded mtime is
@@ -82,6 +88,12 @@ module Hive
       # @param now [Time] current time (injected for testability)
       # @param edit_debounce_sec [Integer] minimum age of mtime before a
       #   `:edit`-class row is eligible for dispatch (default 30s)
+      # @param marker_ts [Time, nil] the write-time stamped on the row's
+      #   waiting-class marker (`Hive::Markers` `ts` attr). On first sight
+      #   of an edit-resume row it serves as the baseline floor: a state
+      #   file edited after the marker was written is genuine user input.
+      #   nil for legacy markers / non-waiting rows — first-sight then
+      #   falls back to the original `:record_baseline` behavior.
       #
       # @return [Symbol] one of :dispatch, :poll_for_merge, :wait_for_debounce,
       #   :record_baseline, :skip
@@ -91,7 +103,7 @@ module Hive
       # ConcurrencyController#observe_state_file_mtime so the next tick
       # has a baseline to compare against.
       def decide(action:, stage: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
-                 now:, edit_debounce_sec: 30)
+                 now:, edit_debounce_sec: 30, marker_ts: nil)
         return :skip if action.nil?
         # Three branches dispatch the row's command verbatim (advance,
         # plan_approval) or via the edit-resume path (edit_resume).
@@ -114,7 +126,8 @@ module Hive
           decide_edit(state_file_mtime: state_file_mtime,
                       last_dispatched: last_dispatched_state_file_mtime,
                       now: now,
-                      debounce_sec: edit_debounce_sec)
+                      debounce_sec: edit_debounce_sec,
+                      marker_ts: marker_ts)
         else
           # `recover_execute` / `recover_review` / `agent_running` /
           # `archived` / `error` plus any unknown future TaskActionKind
@@ -147,11 +160,29 @@ module Hive
         action == "needs_input" && stage == "3-plan"
       end
 
-      def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:)
+      def decide_edit(state_file_mtime:, last_dispatched:, now:, debounce_sec:, marker_ts: nil)
         return :skip if state_file_mtime.nil?
 
         if last_dispatched.nil?
-          # First sight of this `kind: edit` row. We can't distinguish
+          # First sight of this `kind: edit` row.
+          #
+          # With a `marker_ts` (the agent's WAITING-marker write-time) we
+          # CAN distinguish "agent just asked" from "user already
+          # answered": the marker fixes the ask time, so any state-file
+          # write strictly newer than it is genuine user input. This is
+          # the baseline floor — it lets us dispatch an answer that
+          # predates the daemon's first sight of the row (after a restart
+          # that lost the in-memory baseline, or when the bot dispatched
+          # the brainstorm so no baseline was ever recorded). Debounce
+          # still applies so a mid-save draft doesn't fire early.
+          unless marker_ts.nil?
+            return :record_baseline if state_file_mtime <= marker_ts
+            return :wait_for_debounce if (now - state_file_mtime) < debounce_sec
+
+            return :dispatch
+          end
+
+          # Legacy / non-waiting markers carry no `ts`. We can't tell
           # "agent just wrote the WAITING marker" from "user answered
           # hours ago", so we record the current mtime as the baseline
           # and skip. The dispatcher must observe this signal to seed

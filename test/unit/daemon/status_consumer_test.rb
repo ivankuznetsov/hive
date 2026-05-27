@@ -185,6 +185,81 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  # ── marker_ts plumbing (daemon first-sight baseline floor) ─────────────
+
+  def test_marker_ts_parsed_from_waiting_marker
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "idea.md")
+      Hive::Markers.set(state_file, :waiting, ts: "2026-05-27T10:00:00Z")
+
+      task = task_row(slug: "ts-row")
+      task["state_file"] = state_file
+      payload = make_envelope(projects: [ {
+        "name" => "p", "path" => dir, "hive_state_path" => File.join(dir, ".h"),
+        "tasks" => [ task ]
+      } ])
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+        assert result.ok
+        assert_equal Time.parse("2026-05-27T10:00:00Z"), result.rows.first.marker_ts
+      end
+    end
+  end
+
+  def test_marker_ts_nil_when_marker_has_no_ts
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "idea.md")
+      # Non-waiting marker → no ts stamp.
+      Hive::Markers.set(state_file, :complete)
+
+      task = task_row(slug: "no-ts")
+      task["state_file"] = state_file
+      payload = make_envelope(projects: [ {
+        "name" => "p", "path" => dir, "hive_state_path" => File.join(dir, ".h"),
+        "tasks" => [ task ]
+      } ])
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+        assert result.ok
+        assert_nil result.rows.first.marker_ts
+      end
+    end
+  end
+
+  def test_marker_ts_nil_on_unparseable_value
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "idea.md")
+      File.write(state_file, "<!-- WAITING ts=not-a-time -->\n")
+
+      task = task_row(slug: "bad-ts")
+      task["state_file"] = state_file
+      payload = make_envelope(projects: [ {
+        "name" => "p", "path" => dir, "hive_state_path" => File.join(dir, ".h"),
+        "tasks" => [ task ]
+      } ])
+
+      with_fake_status(JSON.generate(payload)) do |bin|
+        result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+        assert result.ok
+        assert_nil result.rows.first.marker_ts
+      end
+    end
+  end
+
+  def test_marker_ts_nil_when_state_file_missing
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task_row(slug: "gone") ]
+    } ])
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+      assert result.ok
+      assert_nil result.rows.first.marker_ts
+    end
+  end
+
   # ── failure modes ─────────────────────────────────────────────────────
 
   def test_non_zero_exit_returns_not_ok

@@ -1,6 +1,7 @@
 require "open3"
 require "json"
 require "time"
+require "hive/markers"
 
 module Hive
   module Daemon
@@ -17,7 +18,7 @@ module Hive
       # healer and dispatcher both need this so they don't race the runner
       # during the pre-claude window (issue #144).
       Row = Struct.new(:project, :slug, :stage, :marker, :folder, :state_file,
-                       :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
+                       :state_file_mtime, :marker_ts, :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :diagnostic,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
@@ -90,6 +91,7 @@ module Hive
               folder: task["folder"],
               state_file: task["state_file"],
               state_file_mtime: parse_mtime(task["mtime"], task["state_file"]),
+              marker_ts: read_marker_ts(task["state_file"]),
               action: task["action"],
               suggested_command: task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
@@ -126,6 +128,22 @@ module Hive
         # If the envelope didn't include mtime, or it didn't parse,
         # stat the state file directly. nil if the file is gone.
         File.mtime(state_file_path) if state_file_path && File.exist?(state_file_path)
+      end
+
+      # The write-time stamped on a waiting-class marker (see
+      # Hive::Markers.attrs_with_waiting_ts), parsed to a Time. The daemon
+      # policy uses it as the first-sight baseline floor for edit-resume
+      # rows. nil when there is no state file, no `ts` attr (legacy or
+      # non-waiting marker), or the value doesn't parse.
+      def read_marker_ts(state_file_path)
+        return nil unless state_file_path && File.exist?(state_file_path)
+
+        ts = Hive::Markers.current(state_file_path).attrs["ts"]
+        return nil if ts.nil? || ts.empty?
+
+        Time.parse(ts)
+      rescue ArgumentError
+        nil
       end
     end
   end

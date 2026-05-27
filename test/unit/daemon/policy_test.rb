@@ -185,6 +185,57 @@ class HiveDaemonPolicyTest < Minitest::Test
                                             edit_debounce_sec: 60)
   end
 
+  # ── edit-resume first-sight with a marker_ts baseline floor ────────────
+  # When the row carries the agent's WAITING-marker write-time, first
+  # sight can tell "agent just asked" from "user already answered": a
+  # state-file write strictly newer than the marker is genuine input. This
+  # de-strands tasks answered before the daemon's first sight (after a
+  # restart, or when the bot dispatched the brainstorm).
+
+  def test_first_sight_with_marker_ts_older_than_edit_dispatches
+    # User answered AFTER the marker was written, debounce elapsed → fire,
+    # even though this is the daemon's first sight (last_dispatched nil).
+    assert_equal :dispatch,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil,
+                        marker_ts: T0 - 600)
+  end
+
+  def test_first_sight_with_marker_ts_older_but_within_debounce_waits
+    # Answer landed after the ask but only 5s ago — let the file settle.
+    assert_equal :wait_for_debounce,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 5,
+                        last_dispatched_state_file_mtime: nil,
+                        marker_ts: T0 - 600)
+  end
+
+  def test_first_sight_with_marker_ts_equal_to_mtime_records_baseline
+    # Unanswered: the only write to the file IS the agent's WAITING marker
+    # (mtime == marker_ts). Not user input → record baseline, don't fire.
+    asked_at = T0 - 600
+    assert_equal :record_baseline,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: asked_at,
+                        last_dispatched_state_file_mtime: nil,
+                        marker_ts: asked_at)
+  end
+
+  def test_first_sight_with_nil_marker_ts_records_baseline
+    # Back-compat: legacy markers carry no ts → original first-sight
+    # behavior (record baseline, never dispatch on first sight).
+    assert_equal :record_baseline,
+                 decide(action: "needs_input",
+                        command: "hive brainstorm slug-a --from 2-brainstorm",
+                        state_file_mtime: T0 - 60,
+                        last_dispatched_state_file_mtime: nil,
+                        marker_ts: nil)
+  end
+
   # ── skip actions: human-required states ────────────────────────────────
 
   def test_recover_execute_skips
@@ -323,7 +374,8 @@ class HiveDaemonPolicyTest < Minitest::Test
   private
 
   def decide(action:, command:, stage: nil, state_file_mtime: nil,
-             last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30)
+             last_dispatched_state_file_mtime: nil, now: T0, edit_debounce_sec: 30,
+             marker_ts: nil)
     Hive::Daemon::Policy.decide(
       action: action,
       stage: stage,
@@ -331,7 +383,8 @@ class HiveDaemonPolicyTest < Minitest::Test
       state_file_mtime: state_file_mtime,
       last_dispatched_state_file_mtime: last_dispatched_state_file_mtime,
       now: now,
-      edit_debounce_sec: edit_debounce_sec
+      edit_debounce_sec: edit_debounce_sec,
+      marker_ts: marker_ts
     )
   end
 end

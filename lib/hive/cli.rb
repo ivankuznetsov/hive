@@ -76,12 +76,15 @@ module Hive
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
     long_desc <<~DESC
-      Drops the entry whose `name` matches NAME from ~/Dev/hive/config.yml.
+      Drops the entry whose `name` matches NAME from the global registry
+      (`~/.config/hive/config.yml` by default, or `HIVE_HOME/config.yml`
+      when overridden).
       The project's .hive-state directory on disk (if any) is left alone.
 
       An unknown name is a USAGE error (64), mirroring `hive metrics
-      --project NAME`. To bulk-remove every entry whose path no longer
-      exists, use `hive prune` instead.
+      --project NAME`. Pass --if-exists when a retry-safe cleanup script
+      should exit 0 if the entry is already absent. To bulk-remove every
+      entry whose path no longer exists, use `hive prune` instead.
 
       Exit codes: 0 success; 64 unknown project / missing NAME positional;
       70 internal error; 78 bad config (malformed config.yml or typoed
@@ -91,16 +94,18 @@ module Hive
 
         hive forget demo                  # remove the entry named 'demo'
         hive forget demo --json           # same, machine-readable envelope
+        hive forget demo --if-exists      # exit 0 even when demo is already absent
         hive forget nonexistent --json    # error envelope w/ error_kind: unknown_project
     DESC
+    option :if_exists, type: :boolean, default: false, desc: "exit 0 if NAME is already absent"
     def forget(name = nil)
       require "hive/commands/forget"
-      Hive::Commands::Forget.new(name, json: options[:json]).call
+      Hive::Commands::Forget.new(name, json: options[:json], if_exists: options[:if_exists]).call
     end
 
     desc "prune", "Drop stale, retargeted, or malformed registry entries"
     long_desc <<~DESC
-      Walks ~/Dev/hive/config.yml and removes every `registered_projects`
+      Walks the global config.yml and removes every `registered_projects`
       entry whose `path` is not a directory on disk, whose stored
       `real_path` no longer matches the current target, OR whose row shape
       is invalid (non-Hash, missing `path`, etc. — hand-edit accidents).

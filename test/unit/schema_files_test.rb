@@ -889,30 +889,68 @@ class SchemaFilesTest < Minitest::Test
 
     doc = JSON.parse(File.read(path))
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
-    assert_equal "hive-forget",
-                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
-                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    %w[RemovedSuccessPayload AlreadyAbsentSuccessPayload].each do |def_name|
+      assert_equal "hive-forget",
+                   doc.dig("$defs", def_name, "properties", "schema", "const")
+      assert_equal 1,
+                   doc.dig("$defs", def_name, "properties", "schema_version", "const")
+    end
   end
 
-  def test_hive_forget_required_keys_match_producer_emission
+  def test_hive_forget_success_payload_variants_match_schema
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget")))
-    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    removed_required = doc.dig("$defs", "RemovedSuccessPayload", "required").sort
+    absent_required = doc.dig("$defs", "AlreadyAbsentSuccessPayload", "required").sort
 
-    assert_equal %w[hive_state_path name ok path schema schema_version].sort,
-                 schema_required,
-                 "schema/producer required-key drift in hive-forget.v1.json"
+    assert_equal %w[hive_state_path name ok path removed schema schema_version].sort,
+                 removed_required,
+                 "removed success required-key drift in hive-forget.v1.json"
+    assert_equal %w[name ok removed schema schema_version].sort,
+                 absent_required,
+                 "already-absent success required-key drift in hive-forget.v1.json"
 
-    # Producer-driven check: build a payload via the actual emitter and
-    # confirm its keys match the schema's required set. If a future
-    # producer change adds or removes a field without a schema update,
-    # this will fail before CI.
-    producer = Hive::Commands::Forget.new("anything", json: true).send(
+    command = Hive::Commands::Forget.new("ghost", json: true)
+    removed_payload = command.send(
       :success_payload,
       { "name" => "demo", "path" => "/tmp/hive-demo", "hive_state_path" => "/tmp/hive-demo/.hive-state" }
     )
-    assert_equal schema_required, producer.keys.sort,
-                 "Forget#success_payload must emit exactly the schema's required keys"
+    absent_payload = command.send(:success_payload, nil)
+
+    assert_equal removed_required, removed_payload.keys.sort,
+                 "Forget#success_payload must emit exactly the removed-success schema keys"
+    assert_equal absent_required, absent_payload.keys.sort,
+                 "Forget#success_payload must emit exactly the already-absent schema keys"
+
+    schemer = JSONSchemer.schema(doc)
+    assert schemer.valid?(removed_payload),
+           "removed success payload must validate (errors: #{schemer.validate(removed_payload).map { |e| e['error'] }.inspect})"
+    assert schemer.valid?(absent_payload),
+           "already-absent success payload must validate (errors: #{schemer.validate(absent_payload).map { |e| e['error'] }.inspect})"
+  end
+
+  def test_hive_forget_success_payload_schema_rejects_invalid_variants
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget"))))
+    base = {
+      "schema" => "hive-forget",
+      "schema_version" => 1,
+      "ok" => true,
+      "name" => "demo"
+    }
+
+    invalid_absent_with_removed_path = base.merge(
+      "removed" => false,
+      "path" => "/tmp/demo",
+      "hive_state_path" => "/tmp/demo/.hive-state"
+    )
+    invalid_removed_without_paths = base.merge("removed" => true)
+    invalid_missing_removed = base.dup
+
+    refute schemer.valid?(invalid_absent_with_removed_path),
+           "already-absent success must not accept removed-entry path fields"
+    refute schemer.valid?(invalid_removed_without_paths),
+           "removed success must require path and hive_state_path"
+    refute schemer.valid?(invalid_missing_removed),
+           "all hive-forget success variants must require removed"
   end
 
   def test_hive_forget_error_kinds_match_closed_enum

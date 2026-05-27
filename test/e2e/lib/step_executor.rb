@@ -429,7 +429,12 @@ module Hive
 
       def expand_path(value)
         expanded = expand_string(value.to_s)
+        # Allow the sandbox project dir OR its HIVE_HOME (run_home) — both are
+        # test-controlled. The update flow's state (update_check.json) and the
+        # install-channel marker live under run_home, a sibling of the project.
         PathSafety.contained_path!(@ctx.sandbox_dir, expanded, "scenario path")
+      rescue ArgumentError
+        PathSafety.contained_path!(@ctx.run_home, expanded, "scenario path")
       end
 
       def contained_relative_path(root, value, label)

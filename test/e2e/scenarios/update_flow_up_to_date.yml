@@ -1,0 +1,36 @@
+name: update_flow_up_to_date
+description: >
+  Up-to-date path: the stub serves a version at/below the running one, so the
+  daemon's check finds nothing behind — no nudge is written and
+  `hive daemon status --json` reports update_nudge null.
+tags: [update, daemon]
+steps:
+  - kind: write_file
+    path: "{run_home}/install-channel"
+    content: "brew\n"
+
+  # A version below the running one → never "behind".
+  - kind: start_releases_stub
+    tag: "v0.0.1"
+
+  - kind: spawn_background
+    id: daemon
+    args: [daemon, start]
+    env:
+      HIVE_DAEMON_NO_AUTO_REEXEC: "1"
+
+  # Wait until the check has run (last_check_at is recorded at the start of the
+  # check, immediately before the synchronous probe), then assert no nudge.
+  - kind: state_assert
+    path: "{run_home}/update_check.json"
+    match: '"last_check_at": "20'
+    timeout: 30
+
+  - kind: json_assert
+    args: [daemon, status, --json]
+    schema: hive-daemon-status
+    pick: [update_nudge]
+    equals: null
+
+  - kind: stop_process
+    id: daemon

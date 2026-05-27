@@ -1,0 +1,16 @@
+name: update_flow_tui_no_nudge
+description: >
+  Negative: with no nudge present, the TUI footer shows no update notice. Pairs
+  with update_flow_tui_footer.yml (positive) to verify both states (per the
+  project E2E rules: assert presence AND absence).
+  (tui-tagged: runs where a tmux/TTY is available.)
+tags: [update, tui]
+steps:
+  - kind: tui_expect
+    anchor: "hive tui"
+    timeout: 10
+  - kind: tui_refute
+    anchor: "update 999"
+    timeout: 3
+  - kind: tui_keys
+    keys: "q"

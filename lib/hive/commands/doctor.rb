@@ -1,5 +1,6 @@
 require "json"
 require "open3"
+require "timeout"
 
 require "hive"
 require "hive/config"
@@ -111,12 +112,27 @@ module Hive
             agent: "qmd",
             configured_skill: "@tobilu/qmd",
             skill: "qmd",
-            message: "qmd is not installed or not discoverable; install Node.js/npm and rerun `hive update`, " \
-                     "or set HIVE_QMD_BIN to an executable qmd"
+            message: "qmd is not installed or not discoverable; install Node.js/npm then run " \
+                     "`npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" @tobilu/qmd` " \
+                     "(`hive update` also repairs qmd on bash-channel installs), or set HIVE_QMD_BIN to an executable qmd"
           ) ]
         end
 
-        out, err, status = Open3.capture3(qmd, "--version")
+        begin
+          out, err, status = Timeout.timeout(15) { Open3.capture3(qmd, "--version") }
+        rescue Timeout::Error, SystemCallError => e
+          return [ warning_row(
+            stage: "wiki",
+            label: "wiki/qmd",
+            agent: "qmd",
+            configured_skill: "@tobilu/qmd",
+            skill: "qmd",
+            message: "qmd at #{qmd} timed out or could not be executed (#{e.message}); reinstall with " \
+                     "`npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" @tobilu/qmd` " \
+                     "(or rebuild better-sqlite3 with `npm rebuild better-sqlite3`)"
+          ) ]
+        end
+
         if status.success?
           return [ {
             kind: "dependency",
@@ -124,7 +140,7 @@ module Hive
             label: "wiki/qmd",
             agent: "qmd",
             configured_skill: "@tobilu/qmd",
-            skill: qmd,
+            skill: "qmd",
             status: "present",
             message: [ qmd, out.strip ].reject(&:empty?).join(" ")
           } ]
@@ -136,10 +152,11 @@ module Hive
           label: "wiki/qmd",
           agent: "qmd",
           configured_skill: "@tobilu/qmd",
-          skill: qmd,
+          skill: "qmd",
           message: "qmd is installed at #{qmd} but failed to start#{diagnostic.empty? ? "" : " (#{diagnostic})"}; " \
-                   "rerun `hive update` to reinstall Hive-managed qmd, or rebuild the active npm install with " \
-                   "`npm rebuild better-sqlite3`"
+                   "reinstall with `npm install --global --prefix \"${XDG_DATA_HOME:-$HOME/.local/share}/hive/qmd\" " \
+                   "@tobilu/qmd`, or rebuild the active npm install with `npm rebuild better-sqlite3` " \
+                   "(`hive update` also repairs qmd on bash-channel installs)"
         ) ]
       end
 

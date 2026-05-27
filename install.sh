@@ -29,6 +29,14 @@ prereqs (\`curl\`, \`jq\`, checksum tool) on first run. When npm is
 available, the installer also installs Hive's qmd wiki indexer into the
 Hive data directory and links it beside the \`hive\` executable. Set
 HIVE_INSTALL_QMD=0 to skip that step.
+
+QMD env knobs:
+  HIVE_QMD_NPM_PACKAGE  Override the npm package spec used for the QMD
+                        install; defaults to \`@tobilu/qmd\`.
+  HIVE_QMD_BIN          Runtime override read by generated wiki scripts
+                        and \`hive doctor\`; points at an executable
+                        \`qmd\` when PATH or the managed install path is
+                        not enough.
 USAGE
 }
 

@@ -300,15 +300,35 @@ class TuiSubprocessDispatchBackgroundTest < Minitest::Test
     # `dispatch_background` itself dispatches the SubprocessExited so
     # the TUI gets immediate feedback rather than waiting on a phantom
     # reaper that has no child to wait for.
-    Hive::Tui::Subprocess.dispatch_background(
+    result = Hive::Tui::Subprocess.dispatch_background(
       [ "/path/that/does/not/exist/hive-fake", "develop" ],
       dispatch: @dispatch
     )
+    assert_equal false, result,
+                 "spawn ENOENT must return a sentinel so recovery callers do not claim a rerun started"
     assert wait_for_messages(1, timeout: 0.5),
       "spawn ENOENT must dispatch SubprocessExited synchronously; no thread to wait on"
     msg = @messages.first
     assert_equal 127, msg.exit_code, "ENOENT translates to 127 (POSIX command-not-found)"
     assert_equal "develop", msg.verb
+  end
+
+  def test_reaper_dispatches_command_not_found_synchronously_when_binary_not_executable
+    Tempfile.create("hive-tui-non-executable") do |file|
+      file.write("#!/bin/sh\nexit 0\n")
+      file.close
+      File.chmod(0o600, file.path)
+
+      result = Hive::Tui::Subprocess.dispatch_background([ file.path, "develop" ], dispatch: @dispatch)
+
+      assert_equal false, result,
+                   "spawn EACCES must return the same sentinel as ENOENT"
+      assert wait_for_messages(1, timeout: 0.5),
+        "spawn EACCES must dispatch SubprocessExited synchronously; no thread to wait on"
+      msg = @messages.first
+      assert_equal 127, msg.exit_code, "EACCES translates to the spawn-failure sentinel"
+      assert_equal "develop", msg.verb
+    end
   end
 
   def test_concurrent_dispatches_run_in_parallel

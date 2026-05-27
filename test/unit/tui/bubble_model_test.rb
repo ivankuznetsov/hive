@@ -2469,6 +2469,53 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "partial-failure flash must give the operator the manual recovery command")
   end
 
+  def test_recover_review_flashes_partial_failure_when_dispatch_returns_false_after_clear_succeeds
+    folder = "/tmp/hive/spawn-false"
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "spawn-false",
+      stage: "6-review",
+      folder: folder,
+      marker: "review_error",
+      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+    events = []
+    @model.instance_variable_set(:@dispatch, ->(message) {
+      events << :subprocess_exited if message.is_a?(Hive::Tui::Messages::SubprocessExited)
+      events << :flash if message.is_a?(Hive::Tui::Messages::Flash)
+      @messages << message
+    })
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; events << :clear; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, dispatch:, **_kwargs) {
+        dispatch.call(Hive::Tui::Messages::SubprocessExited.new(verb: "run", exit_code: 127))
+        false
+      }) do
+        @model.update(Hive::Tui::Messages::RecoverReview.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [ "hive", "markers", "clear", folder, "--name", "REVIEW_ERROR", "--match-attr", "pass=2" ],
+                 clear_argv
+    assert_equal [ :clear, :subprocess_exited, :flash ], events
+    assert_kind_of Hive::Tui::Messages::SubprocessExited, @messages[-2]
+    assert_equal 127, @messages[-2].exit_code
+    assert_kind_of Hive::Tui::Messages::Flash, @messages[-1]
+    final_flash = last_async_flash_text
+    assert_match(/marker cleared/, final_flash,
+                 "sentinel false means the marker WAS cleared but no rerun started")
+    assert_match(/hive run.*failed to start/, final_flash,
+                 "sentinel false must use the partial-failure flash, not the success flash")
+    assert_match(/run `hive run #{Regexp.escape(folder)}` manually/, final_flash,
+                 "partial-failure flash must give the operator the manual recovery command")
+    refute_match(/running.*hive run/, final_flash,
+                 "recovery must not claim hive run is running when dispatch_background returned false")
+  end
+
   def test_recover_review_flashes_when_folder_missing
     row = make_task_row(
       action_key: "recover_review",
@@ -3076,6 +3123,49 @@ class HiveTuiBubbleModelTest < Minitest::Test
                  "partial-failure flash must say the rerun did not start")
     assert_match(/run `hive run #{Regexp.escape(folder)}` manually/, final_flash,
                  "partial-failure flash must give the operator the manual recovery command")
+  end
+
+  def test_recover_error_flashes_partial_failure_when_dispatch_returns_false_after_clear_succeeds
+    folder = "/tmp/hive/error-spawn-false"
+    row = make_task_row(
+      action_key: "error", action_label: "Error",
+      slug: "error-spawn-false", stage: "3-plan", folder: folder,
+      marker: "error", attrs: { "reason" => "exit_code", "exit_code" => "1" },
+      suggested_command: nil
+    )
+    clear_argv = nil
+    events = []
+    @model.instance_variable_set(:@dispatch, ->(message) {
+      events << :subprocess_exited if message.is_a?(Hive::Tui::Messages::SubprocessExited)
+      events << :flash if message.is_a?(Hive::Tui::Messages::Flash)
+      @messages << message
+    })
+
+    with_run_quiet_stub(->(argv) { clear_argv = argv; events << :clear; [ 0, "", "" ] }) do
+      with_dispatch_background_stub(->(_argv, dispatch:, **_kwargs) {
+        dispatch.call(Hive::Tui::Messages::SubprocessExited.new(verb: "run", exit_code: 127))
+        false
+      }) do
+        @model.update(Hive::Tui::Messages::RecoverError.new(row: row))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal [ "hive", "markers", "clear", folder, "--name", "ERROR", "--match-attr", "exit_code=1" ],
+                 clear_argv
+    assert_equal [ :clear, :subprocess_exited, :flash ], events
+    assert_kind_of Hive::Tui::Messages::SubprocessExited, @messages[-2]
+    assert_equal 127, @messages[-2].exit_code
+    assert_kind_of Hive::Tui::Messages::Flash, @messages[-1]
+    final_flash = last_async_flash_text
+    assert_match(/marker cleared/, final_flash,
+                 "sentinel false means the marker WAS cleared but no rerun started")
+    assert_match(/hive run.*failed to start/, final_flash,
+                 "sentinel false must use the partial-failure flash, not the success flash")
+    assert_match(/run `hive run #{Regexp.escape(folder)}` manually/, final_flash,
+                 "partial-failure flash must give the operator the manual recovery command")
+    refute_match(/running.*hive run/, final_flash,
+                 "recovery must not claim hive run is running when dispatch_background returned false")
   end
 
   def test_recover_error_flashes_when_folder_missing

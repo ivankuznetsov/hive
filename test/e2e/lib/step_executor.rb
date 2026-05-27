@@ -433,15 +433,10 @@ module Hive
       end
 
       def expand_path(value)
-        expanded = expand_string(value.to_s)
         # Allow the sandbox project dir OR its HIVE_HOME (run_home) — both are
         # test-controlled. The update flow's state (update_check.json) and the
         # install-channel marker live under run_home, a sibling of the project.
-        # Branch on the explicit `contained?` predicate rather than rescuing the
-        # sandbox-escape ArgumentError, so a genuinely malformed path still
-        # surfaces as itself (and escaping BOTH roots fails closed below).
-        root = PathSafety.contained?(@ctx.run_home, expanded) ? @ctx.run_home : @ctx.sandbox_dir
-        PathSafety.contained_path!(root, expanded, "scenario path")
+        PathSafety.contained_path_any!([ @ctx.sandbox_dir, @ctx.run_home ], expand_string(value.to_s), "scenario path")
       end
 
       def contained_relative_path(root, value, label)

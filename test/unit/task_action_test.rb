@@ -1224,6 +1224,43 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_auto_commit_scope_failure_diagnostic_is_manual_fix
+    with_tmp_dir do |dir|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
+      FileUtils.mkdir_p(File.join(task.folder, "reviews"))
+      File.write(task.state_file, "<!-- REVIEW_ERROR phase=fix reason=fix_auto_commit_scope_failed pass=1 -->\n")
+      artifact = File.join(task.folder, "reviews", "auto-commit-scope-01.md")
+      File.write(artifact, "# Auto-commit scope check failed\n\n| `bin/pwn` | denied |\n")
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(
+          :review_error,
+          "phase" => "fix",
+          "reason" => "fix_auto_commit_scope_failed",
+          "pass" => "1",
+          "files" => "reviews/auto-commit-scope-01.md"
+        )
+      ).diagnostic
+
+      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_includes diagnostic.fetch("artifact_paths"), artifact
+      assert_match(/bin\/pwn/, diagnostic.fetch("detail"))
+
+      missing_artifact_diagnostic = Hive::TaskAction.for(
+        task,
+        marker(
+          :review_error,
+          "phase" => "fix",
+          "reason" => "fix_auto_commit_scope_failed",
+          "pass" => "1"
+        )
+      ).diagnostic
+      assert_match(/Hive rejected the fix-agent fallback commit/, missing_artifact_diagnostic.fetch("detail"))
+    end
+  end
+
   def test_review_stale_and_error_retry_commands_include_priority_match_attrs
     review_task = fake_task(stage_name: "review", stage_index: 6)
     review_suggested = Hive::TaskAction.for(

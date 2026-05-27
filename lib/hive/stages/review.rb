@@ -77,6 +77,7 @@ module Hive
       AcceptedFindings = Data.define(:text, :count)
       AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
       AutoCommitScopeViolation = Data.define(:path, :reason)
+      AUTO_COMMIT_SCOPE_FILENAME = "auto-commit-scope".freeze
 
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
@@ -499,11 +500,16 @@ module Hive
           when :dirty
             auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted_findings)
             unless auto_commit[:success]
-              Hive::Markers.set(task.state_file, :review_error,
-                                phase: :fix, reason: "fix_auto_commit_failed",
-                                message: truncate_marker_message(auto_commit[:message]),
-                                pass: pass)
-              return { commit: "fix_auto_commit_failed_pass_#{format('%02d', pass)}",
+              reason = auto_commit[:reason] || "fix_auto_commit_failed"
+              attrs = {
+                phase: :fix,
+                reason: reason,
+                message: truncate_marker_message(auto_commit[:message]),
+                pass: pass
+              }
+              attrs[:files] = auto_commit[:files] if auto_commit[:files]
+              Hive::Markers.set(task.state_file, :review_error, **attrs)
+              return { commit: "#{reason}_pass_#{format('%02d', pass)}",
                        status: :review_error }
             end
 
@@ -1546,7 +1552,7 @@ module Hive
 
       def staged_auto_commit_paths(worktree_path)
         out, err, status = Open3.capture3(
-          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "-z"
+          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "--no-renames", "-z"
         )
         unless status.success?
           return {
@@ -1559,10 +1565,11 @@ module Hive
       end
 
       def normalize_staged_path(path)
-        normalized = path.to_s.tr("\\", "/")
+        normalized = path.to_s
         parts = normalized.split("/")
         return nil if normalized.empty? || normalized.start_with?("/")
-        return nil if normalized.include?("\0") || parts.include?("..")
+        return nil if normalized.include?("\0") || normalized.include?("\\")
+        return nil if parts.any? { |part| part.empty? || part == "." || part == ".." }
 
         normalized
       end
@@ -1602,7 +1609,30 @@ module Hive
         "auto-commit scope check failed: #{details}#{suffix}"
       end
 
-      def auto_commit_failure_with_unstage(worktree_path, message)
+      def auto_commit_scope_relative_path(pass)
+        File.join("reviews", "#{AUTO_COMMIT_SCOPE_FILENAME}-#{format('%02d', pass)}.md")
+      end
+
+      def write_auto_commit_scope_findings(ctx, violations)
+        relative = auto_commit_scope_relative_path(ctx.pass)
+        path = File.join(ctx.task_folder, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+
+        body = +"# Auto-commit scope check failed for pass #{format('%02d', ctx.pass)}\n\n"
+        body << "Hive staged the fix-agent changes, rejected the fallback commit, " \
+                "and unstaged the index. The files remain in the worktree for operator inspection.\n\n"
+        body << "| Path | Reason |\n| --- | --- |\n"
+        violations.each do |violation|
+          path_cell = violation.path.to_s.gsub("|", "\\|")
+          reason_cell = violation.reason.to_s.gsub("|", "\\|")
+          body << "| `#{path_cell}` | #{reason_cell} |\n"
+        end
+
+        File.write(path, body)
+        relative
+      end
+
+      def auto_commit_failure_with_unstage(worktree_path, message, **attrs)
         reset_out, reset_err, reset_status = Open3.capture3(
           "git", "-C", worktree_path, "reset", "HEAD", "--"
         )
@@ -1610,7 +1640,7 @@ module Hive
           message = "#{message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
         end
 
-        { success: false, message: message }
+        { success: false, message: message }.merge(attrs)
       end
 
       def auto_commit_fix_worktree(task, cfg, ctx, accepted_findings)
@@ -1622,10 +1652,10 @@ module Hive
         # before Hive writes its rollback-rate trailers.
         add_out, add_err, add_status = Open3.capture3("git", "-C", ctx.worktree_path, "add", "-A")
         unless add_status.success?
-          return {
-            success: false,
-            message: git_command_message("git add -A", add_out, add_err)
-          }
+          return auto_commit_failure_with_unstage(
+            ctx.worktree_path,
+            git_command_message("git add -A", add_out, add_err)
+          )
         end
 
         if auto_commit_scope_check_enabled?(cfg)
@@ -1636,7 +1666,9 @@ module Hive
           unless violations.empty?
             return auto_commit_failure_with_unstage(
               ctx.worktree_path,
-              auto_commit_scope_failure_message(violations)
+              auto_commit_scope_failure_message(violations),
+              reason: "fix_auto_commit_scope_failed",
+              files: write_auto_commit_scope_findings(ctx, violations)
             )
           end
         end

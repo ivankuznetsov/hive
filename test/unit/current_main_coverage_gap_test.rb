@@ -442,7 +442,8 @@ class CurrentMainCoverageGapTest < Minitest::Test
         result = Hive::Stages::Review.send(:auto_commit_fix_worktree, task, cfg, ctx, accepted_findings)
 
         refute result[:success]
-        assert_equal "git add -A failed", result[:message]
+        assert_includes result[:message], "git add -A failed"
+        assert_includes result[:message], "git reset HEAD -- failed"
       end
 
       responses = [
@@ -563,6 +564,9 @@ class CurrentMainCoverageGapTest < Minitest::Test
         refute result[:success]
         assert_includes result[:message], "auto-commit scope check failed"
         assert_includes result[:message], "bin/pwn"
+        assert_equal "fix_auto_commit_scope_failed", result[:reason]
+        assert_equal "reviews/auto-commit-scope-01.md", result[:files]
+        assert_includes File.read(File.join(folder, result[:files])), "bin/pwn"
         assert captured_argv.none? { |argv| argv.include?("commit") }
         assert_equal [ "git", "-C", worktree, "reset" ], captured_argv.last.first(4)
       end
@@ -648,21 +652,60 @@ class CurrentMainCoverageGapTest < Minitest::Test
       }
     }
 
+    backslash_path = "test" + "\\" + "payload"
     violations = Hive::Stages::Review.send(
       :auto_commit_scope_violations,
       cfg,
-      [ "/abs", "bin/pwn", "README.md", "test/nested/fix_test.rb" ]
+      [ "/abs", backslash_path, "bin/pwn", "README.md", "test/nested/fix_test.rb" ]
     )
 
-    assert_equal [ "/abs", "bin/pwn", "README.md" ], violations.map(&:path)
+    assert_equal [ "/abs", backslash_path, "bin/pwn", "README.md" ], violations.map(&:path)
     assert_includes violations[0].reason, "invalid staged path"
-    assert_includes violations[1].reason, "denied path pattern"
-    assert_includes violations[2].reason, "outside review.fix.auto_commit.scope_check.allowed_paths"
+    assert_includes violations[1].reason, "invalid staged path"
+    assert_includes violations[2].reason, "denied path pattern"
+    assert_includes violations[3].reason, "outside review.fix.auto_commit.scope_check.allowed_paths"
 
     message = Hive::Stages::Review.send(:auto_commit_scope_failure_message, violations * 2)
-    assert_includes message, "and 1 more"
+    assert_includes message, "and 3 more"
   end
 
+  def test_auto_commit_scope_defaults_block_nested_env_and_lockfiles
+    cfg = { "review" => {} }
+
+    violations = Hive::Stages::Review.send(
+      :auto_commit_scope_violations,
+      cfg,
+      [ "app/.env.local", "services/api/package-lock.json", "app/models/user.rb" ]
+    )
+
+    assert_equal [ "app/.env.local", "services/api/package-lock.json" ], violations.map(&:path)
+    assert_includes violations[0].reason, "denied path pattern"
+    assert_includes violations[1].reason, "denied path pattern"
+  end
+
+  def test_staged_auto_commit_paths_include_both_sides_of_denied_rename
+  with_tmp_dir do |root|
+    worktree = File.join(root, "worktree")
+    FileUtils.mkdir_p(File.join(worktree, "config"))
+    run!("git", "-C", worktree, "init", "-b", "main", "--quiet")
+    run!("git", "-C", worktree, "config", "user.email", "test@example.com")
+    run!("git", "-C", worktree, "config", "user.name", "Test")
+    File.write(File.join(worktree, "config", "secret.yml"), "secret: nope\n")
+    run!("git", "-C", worktree, "add", ".")
+    run!("git", "-C", worktree, "commit", "-m", "init", "--quiet")
+    FileUtils.mkdir_p(File.join(worktree, "docs"))
+    FileUtils.mv(File.join(worktree, "config", "secret.yml"), File.join(worktree, "docs", "secret.yml"))
+    run!("git", "-C", worktree, "add", "-A")
+
+    result = Hive::Stages::Review.send(:staged_auto_commit_paths, worktree)
+
+    assert result[:success]
+    assert_includes result[:paths], "config/secret.yml"
+    assert_includes result[:paths], "docs/secret.yml"
+    violations = Hive::Stages::Review.send(:auto_commit_scope_violations, { "review" => {} }, result[:paths])
+    assert_includes violations.map(&:path), "config/secret.yml"
+  end
+  end
 
   def test_fix_auto_commit_message_sanitizes_trailer_newlines
     with_tmp_dir do |root|

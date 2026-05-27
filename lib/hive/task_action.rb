@@ -659,6 +659,14 @@ module Hive
         ].join("\n")
       end
 
+      if auto_commit_scope_failure?
+        return [
+          marker_summary,
+          "Hive rejected the fix-agent fallback commit because staged paths were outside review.fix.auto_commit.scope_check.",
+          "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check before clearing REVIEW_ERROR."
+        ].join("\n")
+      end
+
       lines = [ marker_summary ]
       lines << "No diagnostic artifact was found under #{task.folder}."
       lines.join("\n")
@@ -795,6 +803,10 @@ module Hive
         return { "kind" => "manual_fix", "command" => nil }
       end
 
+      if auto_commit_scope_failure?
+        return { "kind" => "manual_fix", "command" => nil }
+      end
+
       cmd = retry_command_string
       return nil if cmd.nil?
 
@@ -926,6 +938,10 @@ module Hive
       task.stage_name == "execute" &&
         marker.name == :execute_waiting &&
         !legacy_execute_findings?
+    end
+
+    def auto_commit_scope_failure?
+      marker.name == :review_error && marker.attrs["reason"].to_s == "fix_auto_commit_scope_failed"
     end
 
     def legacy_execute_findings?

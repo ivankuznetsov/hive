@@ -410,6 +410,106 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  def test_llm_wiki_qmd_uses_install_prefix_sidecar_binary
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        with_tmp_dir do |data_home|
+          with_tmp_dir do |prefix|
+            # No qmd at the default <data_home>/hive/qmd/bin/qmd candidate;
+            # the install-prefix sidecar points at a separate prefix dir.
+            write_file(File.join(data_home, "hive", "install-prefix"), "#{prefix}\n")
+            qmd = File.join(prefix, "hive", "qmd", "bin", "qmd")
+            write_file(qmd, <<~SH)
+              #!/bin/sh
+              echo "qmd 2.2.0"
+            SH
+            File.chmod(0o755, qmd)
+
+            out = StringIO.new
+            cfg = base_config(
+              "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+              "plan" => { "agent" => "claude", "skill" => "/x" }
+            )
+
+            with_env("XDG_DATA_HOME" => data_home, "PATH" => "", "HIVE_QMD_BIN" => nil) do
+              doctor = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out)
+              exit_code = doctor.call
+
+              assert_equal 0, exit_code
+              assert_match(%r{wiki/qmd.*✓ present}, out.string)
+              qmd_row = doctor.rows.find { |row| row[:label] == "wiki/qmd" }
+              assert_match(/qmd 2\.2\.0/, qmd_row.fetch(:message),
+                "doctor must resolve qmd via the install-prefix sidecar")
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_llm_wiki_qmd_warning_when_not_found
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        with_tmp_dir do |data_home|
+          # Empty data_home: no qmd at the default candidate and no
+          # install-prefix sidecar file.
+          out = StringIO.new
+          cfg = base_config(
+            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+            "plan" => { "agent" => "claude", "skill" => "/x" }
+          )
+
+          with_env("XDG_DATA_HOME" => data_home, "PATH" => "", "HIVE_QMD_BIN" => nil) do
+            exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
+
+            assert_equal 0, exit_code
+            assert_match(%r{wiki/qmd.*! warning}, out.string)
+            assert_match(/qmd is not installed or not discoverable/, out.string)
+          end
+        end
+      end
+    end
+  end
+
+  def test_llm_wiki_qmd_warning_when_binary_cannot_be_executed
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      with_tmp_dir do |project|
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        with_tmp_dir do |bin_dir|
+          # Executable file whose shebang names a missing interpreter, so
+          # Open3.capture3 raises Errno::ENOENT — FIX 1 must rescue it.
+          qmd = File.join(bin_dir, "qmd")
+          write_file(qmd, <<~SH)
+            #!/nonexistent/xyz
+            echo unreachable
+          SH
+          File.chmod(0o755, qmd)
+
+          out = StringIO.new
+          cfg = base_config(
+            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+            "plan" => { "agent" => "claude", "skill" => "/x" }
+          )
+
+          with_env("HIVE_QMD_BIN" => qmd) do
+            # No assert_nothing_raised: if FIX 1's rescue is absent the
+            # call raises Errno::ENOENT and this test errors out.
+            exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
+
+            assert_equal 0, exit_code
+            assert_match(%r{wiki/qmd.*! warning}, out.string)
+            assert_match(/timed out or could not be executed/, out.string)
+          end
+        end
+      end
+    end
+  end
+
   def test_legacy_brainstorm_runtime_row_warns_to_migrate
     with_fake_home do |home|
       write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")

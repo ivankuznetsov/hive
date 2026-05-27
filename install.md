@@ -93,6 +93,8 @@ else
 fi
 ```
 
+Two env knobs tune this step: `HIVE_QMD_BIN` is a runtime override pointing at an executable `qmd` (read by the generated wiki scripts and `hive doctor` when PATH or the managed install path is not enough), and `HIVE_QMD_NPM_PACKAGE` overrides the npm package spec used for the install (defaults to `@tobilu/qmd`).
+
 Do not install Node.js/npm automatically. If npm is missing, report that Hive core is installed but QMD-backed wiki search needs Node.js/npm.
 
 ## Verify

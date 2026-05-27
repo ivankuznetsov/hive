@@ -3,6 +3,74 @@ module Hive
     module Scripts
       module_function
 
+      # Shared bash QMD helpers interpolated verbatim into both generated
+      # scripts. Defined with a non-interpolating heredoc so bash `${...}`
+      # and `$(...)` are preserved literally.
+      QMD_BASH_HELPERS = <<~'BASH'
+        configure_qmd_environment() {
+          local cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
+          if ! mkdir -p "$cache_home/qmd" 2>/dev/null || ! touch "$cache_home/qmd/.write-test" 2>/dev/null; then
+            export XDG_CACHE_HOME="$project_root/.llm-wiki/qmd-cache"
+            mkdir -p "$XDG_CACHE_HOME/qmd"
+            export LLM_WIKI_QMD_CACHE_DIR="$XDG_CACHE_HOME/qmd"
+          else
+            rm -f "$cache_home/qmd/.write-test"
+            export LLM_WIKI_QMD_CACHE_DIR="$cache_home/qmd"
+          fi
+        }
+
+        configure_qmd_environment
+
+        find_qmd() {
+          if [ -n "${HIVE_QMD_BIN:-}" ] && [ -x "$HIVE_QMD_BIN" ]; then
+            printf '%s\n' "$HIVE_QMD_BIN"
+            return 0
+          fi
+
+          if command -v qmd >/dev/null 2>&1; then
+            command -v qmd
+            return 0
+          fi
+
+          local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+          local candidate
+          for candidate in "$data_home/hive/qmd/bin/qmd" "$HOME/.local/share/hive/qmd/bin/qmd"; do
+            if [ -x "$candidate" ]; then
+              printf '%s\n' "$candidate"
+              return 0
+            fi
+          done
+
+          local prefix_file="$data_home/hive/install-prefix"
+          if [ -r "$prefix_file" ]; then
+            local prefix
+            prefix="$(sed -n '1p' "$prefix_file")"
+            candidate="${prefix%/}/hive/qmd/bin/qmd"
+            if [ -x "$candidate" ]; then
+              printf '%s\n' "$candidate"
+              return 0
+            fi
+          fi
+
+          return 1
+        }
+
+        qmd_available() {
+          find_qmd >/dev/null 2>&1
+        }
+
+        run_qmd() {
+          local qmd_bin
+          qmd_bin="$(find_qmd)" || return 0
+
+          if command -v timeout >/dev/null 2>&1; then
+            timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@" || return 0
+          else
+            "$qmd_bin" "$@" || return 0
+          fi
+        }
+      BASH
+
       def refresh_wiki
         <<~BASH
           #!/usr/bin/env bash
@@ -11,69 +79,7 @@ module Hive
           project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
           cd "$project_root"
 
-          configure_qmd_environment() {
-            local cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
-            if ! mkdir -p "$cache_home/qmd" 2>/dev/null || ! touch "$cache_home/qmd/.write-test" 2>/dev/null; then
-              export XDG_CACHE_HOME="$project_root/.llm-wiki/qmd-cache"
-              mkdir -p "$XDG_CACHE_HOME/qmd"
-              export LLM_WIKI_QMD_CACHE_DIR="$XDG_CACHE_HOME/qmd"
-            else
-              rm -f "$cache_home/qmd/.write-test"
-              export LLM_WIKI_QMD_CACHE_DIR="$cache_home/qmd"
-            fi
-          }
-
-          configure_qmd_environment
-
-          find_qmd() {
-            if [ -n "${HIVE_QMD_BIN:-}" ] && [ -x "$HIVE_QMD_BIN" ]; then
-              printf '%s\n' "$HIVE_QMD_BIN"
-              return 0
-            fi
-
-            if command -v qmd >/dev/null 2>&1; then
-              command -v qmd
-              return 0
-            fi
-
-            local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-            local candidate
-            for candidate in "$data_home/hive/qmd/bin/qmd" "$HOME/.local/share/hive/qmd/bin/qmd"; do
-              if [ -x "$candidate" ]; then
-                printf '%s\n' "$candidate"
-                return 0
-              fi
-            done
-
-            local prefix_file="$data_home/hive/install-prefix"
-            if [ -r "$prefix_file" ]; then
-              local prefix
-              prefix="$(sed -n '1p' "$prefix_file")"
-              candidate="${prefix%/}/hive/qmd/bin/qmd"
-              if [ -x "$candidate" ]; then
-                printf '%s\n' "$candidate"
-                return 0
-              fi
-            fi
-
-            return 1
-          }
-
-          qmd_available() {
-            find_qmd >/dev/null 2>&1
-          }
-
-          run_qmd() {
-            local qmd_bin
-            qmd_bin="$(find_qmd)" || return 0
-
-            if command -v timeout >/dev/null 2>&1; then
-              timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@"
-            else
-              "$qmd_bin" "$@"
-            fi
-          }
-
+          #{QMD_BASH_HELPERS}
           run_codex() {
             if command -v timeout >/dev/null 2>&1; then
               timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root" "$prompt"
@@ -122,69 +128,7 @@ module Hive
           project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
           cd "$project_root"
 
-          configure_qmd_environment() {
-            local cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
-            if ! mkdir -p "$cache_home/qmd" 2>/dev/null || ! touch "$cache_home/qmd/.write-test" 2>/dev/null; then
-              export XDG_CACHE_HOME="$project_root/.llm-wiki/qmd-cache"
-              mkdir -p "$XDG_CACHE_HOME/qmd"
-              export LLM_WIKI_QMD_CACHE_DIR="$XDG_CACHE_HOME/qmd"
-            else
-              rm -f "$cache_home/qmd/.write-test"
-              export LLM_WIKI_QMD_CACHE_DIR="$cache_home/qmd"
-            fi
-          }
-
-          configure_qmd_environment
-
-          find_qmd() {
-            if [ -n "${HIVE_QMD_BIN:-}" ] && [ -x "$HIVE_QMD_BIN" ]; then
-              printf '%s\n' "$HIVE_QMD_BIN"
-              return 0
-            fi
-
-            if command -v qmd >/dev/null 2>&1; then
-              command -v qmd
-              return 0
-            fi
-
-            local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-            local candidate
-            for candidate in "$data_home/hive/qmd/bin/qmd" "$HOME/.local/share/hive/qmd/bin/qmd"; do
-              if [ -x "$candidate" ]; then
-                printf '%s\n' "$candidate"
-                return 0
-              fi
-            done
-
-            local prefix_file="$data_home/hive/install-prefix"
-            if [ -r "$prefix_file" ]; then
-              local prefix
-              prefix="$(sed -n '1p' "$prefix_file")"
-              candidate="${prefix%/}/hive/qmd/bin/qmd"
-              if [ -x "$candidate" ]; then
-                printf '%s\n' "$candidate"
-                return 0
-              fi
-            fi
-
-            return 1
-          }
-
-          qmd_available() {
-            find_qmd >/dev/null 2>&1
-          }
-
-          run_qmd() {
-            local qmd_bin
-            qmd_bin="$(find_qmd)" || return 0
-
-            if command -v timeout >/dev/null 2>&1; then
-              timeout "${LLM_WIKI_QMD_TIMEOUT:-900}" "$qmd_bin" "$@"
-            else
-              "$qmd_bin" "$@"
-            fi
-          }
-
+          #{QMD_BASH_HELPERS}
           log_file="$project_root/.llm-wiki/post-commit-refresh.log"
           lock_dir="$project_root/.llm-wiki/post-commit-refresh.lock"
           changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"

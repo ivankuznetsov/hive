@@ -1,0 +1,116 @@
+name: Install verify
+
+# Real installs of every channel on its native OS, run as a reusable workflow.
+# Callers: a post-release trigger and a weekly canary (added in a later unit).
+# `workflow_dispatch` lets a maintainer exercise it on demand against any
+# published version.
+#
+# This does NOT gate releases (that's the separate pre-release gem-install gate
+# in release.yml). It confirms the *published* packages actually install.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release tag to verify (e.g. v0.1.4)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to verify (e.g. v0.1.4)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.channel }} / ${{ matrix.runs-on }}
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: bash
+            runs-on: ubuntu-24.04
+          - channel: bash
+            runs-on: ubuntu-24.04-arm
+          - channel: brew
+            runs-on: macos-15
+          - channel: aur
+            runs-on: ubuntu-24.04
+            container: archlinux:base-devel
+          # aarch64-AUR is deferred (Scope: Deferred to Follow-Up in the plan):
+          # the official archlinux image is x86_64-only, so it needs an
+          # Arch-Linux-ARM image + the base-devel/fakeroot/non-root-makepkg
+          # go/no-go checks. Land bash+macos arm first.
+    env:
+      VERSION: ${{ inputs.version }}
+      CHANNEL: ${{ matrix.channel }}
+    steps:
+      # Arch container needs git before actions/checkout can run.
+      - name: Bootstrap Arch toolchain
+        if: ${{ matrix.channel == 'aur' }}
+        run: |
+          pacman -Syu --noconfirm --needed git ruby ruby-erb base-devel sudo
+          # makepkg refuses root; create a passwordless-sudo build user.
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby (bash channel)
+        if: ${{ matrix.channel == 'bash' }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Verify channel
+        if: ${{ matrix.channel != 'aur' }}
+        run: bash packaging/verify-channel.sh --channel "$CHANNEL" --version "$VERSION"
+
+      - name: Verify channel (AUR, as non-root builder)
+        if: ${{ matrix.channel == 'aur' }}
+        run: |
+          chown -R builder .
+          sudo -u builder env VERSION="$VERSION" \
+            bash packaging/verify-channel.sh --channel aur --version "$VERSION"
+
+  report:
+    name: Report failure
+    needs: verify
+    if: ${{ failure() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the install-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Single job touches issues → no per-cell create race.
+          gh label create install-failure --repo "$REPO" \
+            --color B60205 --description "Cross-OS install verification failed" 2>/dev/null || true
+          body="Install verification failed for \`${VERSION}\`.
+
+          Run: ${RUN_URL}
+
+          One or more channel/OS cells failed. See the run for the failing matrix cells.
+          This issue auto-updates on repeat failures; close it once installs are green."
+          existing="$(gh issue list --repo "$REPO" --label install-failure --state open \
+            --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "updated existing install-failure issue #${existing}"
+          else
+            gh issue create --repo "$REPO" --label install-failure \
+              --title "Install verification failing" --body "$body"
+            echo "opened a new install-failure issue"
+          fi

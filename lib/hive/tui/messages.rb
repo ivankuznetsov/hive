@@ -36,14 +36,19 @@ module Hive
       # `cols`/`rows` so view layout decisions can read them.
       WindowSized = Data.define(:cols, :rows)
 
-      # Sent by the takeover callable after a workflow-verb subprocess
-      # exits. `verb` is the second argv element (e.g., "pr",
-      # "develop") supplied by the dispatcher at Message construction
-      # time — Update doesn't re-derive it. `exit_code` carries the
-      # POSIX-shell-convention status (0 success; 128+signo for signal
-      # kills; 127 command-not-found).
-      #
-      SubprocessExited = Data.define(:verb, :exit_code)
+      # Sent by a workflow-verb subprocess reaper after the child exits.
+      # `verb` is the second argv element (e.g., "pr", "develop")
+      # supplied by the dispatcher at Message construction time — Update
+      # doesn't re-derive it. `exit_code` carries the POSIX-shell-
+      # convention status (0 success; 128+signo for signal kills; 127
+      # command-not-found). `spawn_id` is the optional 8-char correlation
+      # id used to read the exact per-spawn capture for diagnosis; nil
+      # keeps legacy/manual message construction working.
+      SubprocessExited = Data.define(:verb, :exit_code, :spawn_id) do
+        def initialize(verb:, exit_code:, spawn_id: nil)
+          super(verb: verb, exit_code: exit_code, spawn_id: spawn_id)
+        end
+      end
 
       # Cooperative shutdown signal — set by the SIGHUP trap (via
       # `runner.send`) and by `q`-keystroke dispatch in grid mode.

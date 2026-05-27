@@ -7,7 +7,7 @@ require "hive/tui/subprocess"
 # parsing helpers. Pre-existing coverage exercised this only through
 # `BubbleModel#diagnose_subprocess_exit` (two cases: happy path +
 # fall-through). The parser branches — empty log, no BEGIN, missing
-# END, 64KB cap, concurrent verb interleaving, interactive-variant
+# END, bounded marker-log lookback, concurrent verb interleaving, interactive-variant
 # stamps — needed direct coverage so a regression in
 # `recent_log_section_for` / `parse_argv_from_section` /
 # `extract_project` surfaces immediately rather than hiding behind
@@ -175,17 +175,117 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     end
   end
 
-  def test_returns_nil_when_begin_outside_64kb_tail_cap
+  def test_marker_argv_shell_quoting_preserves_project_names_with_spaces
     with_isolated_log do |path|
-      # Push the BEGIN past the 64KB read window.
+      argv = [ "hive", "pr", "slug", "--project", "My App", "--from", "6-review" ]
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "BEGIN", argv)
+      File.open(path, "a") do |f|
+        f.puts "fatal: 'origin' does not appear to be a git repository"
+      end
+      Hive::Tui::Subprocess.send(:stamp_subprocess_log, "END exit=1", argv)
+
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+      assert_match(/My App:.*project not set up/i, result,
+        "diagnosis must round-trip quoted argv values from marker lines")
+    end
+  end
+
+  def test_finds_legacy_begin_near_diagnosis_log_lookback_limit
+    with_isolated_log do |path|
+      # Push the BEGIN far beyond small expanded tails while keeping it
+      # just inside the bounded 1MiB diagnosis lookback.
       File.open(path, "a") do |f|
         f.puts "----- 2026-04-28T10:00:00Z BEGIN: hive pr slug --project p -----"
         f.puts "fatal: 'origin' does not appear to be a git repository"
         f.puts "----- 2026-04-28T10:00:01Z END exit=1: hive pr slug --project p -----"
-        f.puts "junk line\n" * 10_000 # > 64KB of unrelated content after the BEGIN
+        f.write "x" * (Hive::Tui::Subprocess::DIAGNOSIS_LOG_MAX_LOOKBACK_BYTES - 512)
+      end
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr")
+      assert_match(/p:.*project not set up/i, result,
+        "diagnosis must walk backward to nearly the full 1MiB cap before falling back")
+    end
+  end
+
+  def test_finds_per_spawn_begin_near_marker_log_lookback_limit
+    with_isolated_log do |path|
+      spawn_id = "cafebabe"
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-29T10:00:00Z BEGIN[#{spawn_id}]: hive pr slug --project demo-pr -----"
+        f.puts "----- 2026-04-29T10:00:01Z END[#{spawn_id}] exit=1: hive pr slug --project demo-pr -----"
+        f.write "x" * (Hive::Tui::Subprocess::DIAGNOSIS_LOG_MAX_LOOKBACK_BYTES - 512)
+      end
+
+      capture_path = Hive::Tui::Subprocess.spawn_capture_path(spawn_id)
+      File.write(capture_path, "fatal: 'origin' does not appear to be a git repository\n")
+
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr", spawn_id: spawn_id)
+      assert_match(/demo-pr:.*project not set up/i, result,
+        "per-spawn diagnosis must find BEGIN[id] close to the 1MiB marker-log cap")
+    ensure
+      File.delete(capture_path) if capture_path && File.exist?(capture_path)
+    end
+  end
+
+  def test_spawn_id_diagnosis_uses_exiting_spawn_not_newest_same_verb
+    with_isolated_log do |path|
+      alpha_id = "aaaaaaaa"
+      beta_id = "bbbbbbbb"
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-29T10:00:00Z BEGIN[#{alpha_id}]: hive pr slug --project alpha -----"
+        f.puts "----- 2026-04-29T10:00:01Z END[#{alpha_id}] exit=1: hive pr slug --project alpha -----"
+        f.puts "----- 2026-04-29T10:00:02Z BEGIN[#{beta_id}]: hive pr slug --project beta -----"
+        f.puts "----- 2026-04-29T10:00:03Z END[#{beta_id}] exit=1: hive pr slug --project beta -----"
+      end
+
+      alpha_capture = Hive::Tui::Subprocess.spawn_capture_path(alpha_id)
+      beta_capture = Hive::Tui::Subprocess.spawn_capture_path(beta_id)
+      File.write(alpha_capture, "fatal: 'origin' does not appear to be a git repository\n")
+      File.write(beta_capture, "Permission denied (publickey).\n")
+
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr", spawn_id: alpha_id)
+      assert_match(/alpha:.*project not set up/i, result,
+        "diagnosis must use the exiting spawn id, not the newest same-verb BEGIN")
+      refute_match(/git auth failed/i, result)
+    ensure
+      File.delete(alpha_capture) if alpha_capture && File.exist?(alpha_capture)
+      File.delete(beta_capture) if beta_capture && File.exist?(beta_capture)
+    end
+  end
+
+  def test_per_spawn_diagnosis_reads_only_capture_tail_cap
+    with_isolated_log do |path|
+      spawn_id = "0badcafe"
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-29T10:00:00Z BEGIN[#{spawn_id}]: hive pr slug --project capped -----"
+        f.puts "----- 2026-04-29T10:00:01Z END[#{spawn_id}] exit=1: hive pr slug --project capped -----"
+      end
+
+      capture_path = Hive::Tui::Subprocess.spawn_capture_path(spawn_id)
+      error = "fatal: 'origin' does not appear to be a git repository\n"
+      cap = Hive::Tui::Subprocess::DIAGNOSIS_CAPTURE_TAIL_BYTES
+      File.write(capture_path, error + ("x" * cap))
+      assert_nil Hive::Tui::Subprocess.diagnose_recent_failure("pr", spawn_id: spawn_id),
+        "diagnosis must not scan matching stderr before the 64KiB capture tail"
+
+      File.write(capture_path, ("x" * cap) + "\n" + error)
+      result = Hive::Tui::Subprocess.diagnose_recent_failure("pr", spawn_id: spawn_id)
+      assert_match(/capped:.*project not set up/i, result,
+        "diagnosis must still match known stderr inside the 64KiB capture tail")
+    ensure
+      File.delete(capture_path) if capture_path && File.exist?(capture_path)
+    end
+  end
+
+  def test_returns_nil_when_begin_outside_diagnosis_log_lookback
+    with_isolated_log do |path|
+      File.open(path, "a") do |f|
+        f.puts "----- 2026-04-28T10:00:00Z BEGIN: hive pr slug --project p -----"
+        f.puts "fatal: 'origin' does not appear to be a git repository"
+        f.puts "----- 2026-04-28T10:00:01Z END exit=1: hive pr slug --project p -----"
+        f.puts "junk line\n" * 120_000
       end
       assert_nil Hive::Tui::Subprocess.diagnose_recent_failure("pr"),
-        "out-of-cap BEGIN must return nil rather than crash on a partial scan"
+        "diagnosis stays bounded when the BEGIN is older than the 1MiB lookback"
     end
   end
 
@@ -565,6 +665,13 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
 
   def test_parse_argv_from_section_returns_nil_for_unmatched_header
     assert_nil Hive::Tui::Subprocess.send(:parse_argv_from_section, "not a BEGIN line\n")
+  end
+
+  def test_parse_argv_from_section_falls_back_for_malformed_shell_quote
+    section = "----- 2026-04-28T11:00:00Z BEGIN: hive pr slug --project 'broken -----\n"
+
+    assert_equal [ "hive", "pr", "slug", "--project", "'broken" ],
+      Hive::Tui::Subprocess.send(:parse_argv_from_section, section)
   end
 
   def with_log_dir

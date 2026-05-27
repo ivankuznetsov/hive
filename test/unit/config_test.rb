@@ -677,6 +677,93 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_accepts_auto_commit_scope_check_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit:
+              scope_check:
+                enabled: false
+                allowed_paths:
+                  - custom/**
+                denied_paths:
+                  - forbidden/**
+      YAML
+      cfg = Hive::Config.load(dir)
+      scope = cfg.dig("review", "fix", "auto_commit", "scope_check")
+
+      assert_equal false, scope["enabled"]
+      assert_equal [ "custom/**" ], scope["allowed_paths"]
+      assert_equal [ "forbidden/**" ], scope["denied_paths"]
+    end
+  end
+
+  def test_load_rejects_malformed_auto_commit_scope_check
+    cases = [
+      [ "scope_check: nope\n", /scope_check.*must be a Hash/ ],
+      [ "scope_check:\n  enabled: maybe\n", /scope_check\.enabled.*must be true or false/ ],
+      [ "scope_check:\n  allowed_paths: lib/**\n", /allowed_paths.*must be an Array/ ],
+      [ "scope_check:\n  allowed_paths:\n", /allowed_paths.*must be an Array/ ],
+      [ "scope_check:\n  denied_paths:\n", /denied_paths.*must be an Array/ ],
+      [ "scope_check:\n  allowed_paths:\n    - ' '\n", /allowed_paths\[0\].*non-empty String/ ],
+      [ "scope_check:\n  denied_paths:\n    - /abs/**\n", /denied_paths\[0\].*relative path glob/ ],
+      [ "scope_check:\n  denied_paths:\n    - ../**\n", /denied_paths\[0\].*relative path glob/ ],
+      [ "scope_check:\n  denied_paths:\n    - 'C:\\secrets\\**'\n", /denied_paths\[0\].*relative path glob/ ]
+    ]
+
+    cases.each do |body, pattern|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          review:
+            fix:
+              auto_commit:
+                #{body.gsub("\n", "\n                ")}
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match pattern, err.message
+      end
+    end
+  end
+
+  def test_load_rejects_malformed_review_fix_container
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_rejects_malformed_auto_commit_container
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          fix:
+            auto_commit: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.fix\.auto_commit.*must be a Hash/, err.message)
+      assert_match(/scope_check\.enabled/, err.message)
+    end
+  end
+
+  def test_auto_commit_scope_validation_allows_missing_legacy_scope
+    cfg = { "review" => { "fix" => {} } }
+
+    assert_nil Hive::Config.send(:validate_review_fix_auto_commit_scope!, cfg, "test")
+    assert_nil Hive::Config.send(:validate_path_glob_list!, nil, "review.fix.auto_commit.scope_check.allowed_paths", "test")
+  end
+
   def test_load_accepts_max_attempts_one_and_three
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

@@ -89,6 +89,13 @@ review:
   fix:
     agent: claude
     prompt_template: fix_prompt.md.erb
+    auto_commit:
+      scope_check:
+        # Before Hive auto-commits uncommitted fix-agent edits, it checks
+        # the staged paths against default allowed/denied glob lists. Override
+        # `allowed_paths` / `denied_paths` here if your project needs a
+        # different fallback commit scope.
+        enabled: true
   browser_test:
     # Set to true for projects that have a browsable surface (Rails apps,
     # web frontends). Hive itself (CLI tool) leaves this disabled.

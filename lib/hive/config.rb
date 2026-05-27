@@ -124,7 +124,102 @@ module Hive
         },
         "fix" => {
           "agent" => "claude",
-          "prompt_template" => "fix_prompt.md.erb"
+          "prompt_template" => "fix_prompt.md.erb",
+          "auto_commit" => {
+            "scope_check" => {
+              "enabled" => true,
+              "allowed_paths" => [
+                "app/**",
+                "app/**/*",
+                "lib/**",
+                "lib/**/*",
+                "src/**",
+                "src/**/*",
+                "test/**",
+                "test/**/*",
+                "tests/**",
+                "tests/**/*",
+                "spec/**",
+                "spec/**/*",
+                "docs/**",
+                "docs/**/*",
+                "wiki/**",
+                "wiki/**/*",
+                "README",
+                "README.*",
+                "CHANGELOG",
+                "CHANGELOG.*",
+                "LICENSE",
+                "LICENSE.*",
+                "Gemfile",
+                "*.gemspec",
+                "Rakefile",
+                "Makefile",
+                "package.json",
+                "pyproject.toml",
+                "requirements.txt",
+                "requirements-*.txt",
+                "go.mod",
+                "Cargo.toml",
+                "composer.json",
+                "mix.exs"
+              ],
+              "denied_paths" => [
+                ".git/**",
+                ".git/**/*",
+                "bin/**",
+                "bin/**/*",
+                "config/**",
+                "config/**/*",
+                ".github/**",
+                ".github/**/*",
+                ".gitlab-ci.yml",
+                ".gitlab-ci.yaml",
+                ".circleci/**",
+                ".circleci/**/*",
+                "Jenkinsfile",
+                "bitbucket-pipelines.yml",
+                "bitbucket-pipelines.yaml",
+                ".azure-pipelines.yml",
+                ".azure-pipelines.yaml",
+                ".travis.yml",
+                ".env",
+                ".env.*",
+                "**/.env",
+                "**/.env.*",
+                "**/secrets.yml",
+                "**/secrets.yaml",
+                "**/credentials.yml",
+                "**/credentials.yaml",
+                "**/credentials.yml.enc",
+                "**/credentials.yaml.enc",
+                "**/.npmrc",
+                "**/.pypirc",
+                "Gemfile.lock",
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "pnpm-lock.yml",
+                "yarn.lock",
+                "Cargo.lock",
+                "go.sum",
+                "poetry.lock",
+                "Pipfile.lock",
+                "composer.lock",
+                "uv.lock",
+                "**/Gemfile.lock",
+                "**/package-lock.json",
+                "**/pnpm-lock.yaml",
+                "**/pnpm-lock.yml",
+                "**/yarn.lock",
+                "**/Cargo.lock",
+                "**/go.sum",
+                "**/poetry.lock",
+                "**/Pipfile.lock",
+                "**/composer.lock",
+                "**/uv.lock"
+              ]
+            }
+          }
         },
         "browser_test" => {
           "enabled" => false,
@@ -673,6 +768,7 @@ module Hive
       validate_hash_shaped_keys!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
+      validate_review_fix_auto_commit_scope!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
@@ -765,6 +861,75 @@ module Hive
           raise ConfigError,
                 "#{label} in #{describe_source(source_path)} must be a positive integer (>= 1); " \
                 "got #{value.inspect} (#{value.class})"
+        end
+      end
+    end
+
+    def validate_review_fix_auto_commit_scope!(cfg, source_path)
+      fix = cfg.dig("review", "fix")
+      return if fix.nil?
+
+      unless fix.is_a?(Hash)
+        raise ConfigError,
+              "review.fix in #{describe_source(source_path)} must be a Hash; got #{fix.inspect} (#{fix.class})"
+      end
+
+      auto_commit = fix["auto_commit"]
+      return if auto_commit.nil?
+
+      unless auto_commit.is_a?(Hash)
+        raise ConfigError,
+              "review.fix.auto_commit in #{describe_source(source_path)} must be a Hash; " \
+              "got #{auto_commit.inspect} (#{auto_commit.class}). To disable the fallback scope check, " \
+              "set review.fix.auto_commit.scope_check.enabled to false."
+      end
+
+      scope = auto_commit["scope_check"]
+      return if scope.nil?
+
+      unless scope.is_a?(Hash)
+        raise ConfigError,
+              "review.fix.auto_commit.scope_check in #{describe_source(source_path)} must be a Hash; " \
+              "got #{scope.inspect} (#{scope.class})"
+      end
+
+      enabled = scope["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "review.fix.auto_commit.scope_check.enabled in #{describe_source(source_path)} " \
+              "must be true or false; got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      %w[allowed_paths denied_paths].each do |key|
+        label = "review.fix.auto_commit.scope_check.#{key}"
+        if scope.key?(key) && scope[key].nil?
+          raise ConfigError,
+                "#{label} in #{describe_source(source_path)} must be an Array of path globs; got NilClass"
+        end
+
+        validate_path_glob_list!(scope[key], label, source_path)
+      end
+    end
+
+    def validate_path_glob_list!(value, label, source_path)
+      return if value.nil?
+
+      unless value.is_a?(Array)
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} must be an Array of path globs; got #{value.class}"
+      end
+
+      value.each_with_index do |entry, idx|
+        unless entry.is_a?(String) && !entry.strip.empty?
+          raise ConfigError,
+                "#{label}[#{idx}] in #{describe_source(source_path)} must be a non-empty String"
+        end
+
+        normalized = entry.tr("\\", "/")
+        if entry.match?(%r{\A[A-Za-z]:[\\/]}) || normalized.start_with?("/") || normalized.include?("\0") ||
+           normalized.split("/").any? { |part| part.empty? || part == "." || part == ".." }
+          raise ConfigError,
+                "#{label}[#{idx}] in #{describe_source(source_path)} must be a relative path glob without traversal or null bytes"
         end
       end
     end

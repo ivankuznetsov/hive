@@ -37,7 +37,6 @@ module Hive
     PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
     IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
-    DEFAULT_PERMISSION_MODE = "bypassPermissions".freeze
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
     # Patterns that mark tmux itself as unavailable (binary missing, too
@@ -373,8 +372,8 @@ module Hive
       ENV.fetch("HIVE_TMUX_BIN", "tmux")
     end
 
-    def wrapper_command(cwd:, add_dirs:, profile:, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                        permission_mode: DEFAULT_PERMISSION_MODE)
+    def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
+                        allowed_tools: DEFAULT_ALLOWED_TOOLS)
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),

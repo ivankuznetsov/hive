@@ -40,6 +40,7 @@ module Hive
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
         2. Claude launch mode (project-global, tmux/headless)    — default tmux
         3. Claude permission mode for tmux sessions              — default bypassPermissions
+           (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
         4. Development agent (drives 4-execute)                  — default codex
         5. Review agents (multi-select over 3 default reviewers) — default all
         6. Triage bias (courageous / safetyist)                  — default courageous
@@ -54,9 +55,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux,
-        claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
-        triage=courageous, limits=defaults, daemon=enabled
+        hive: using defaults — planning=claude, claude_mode=tmux, claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3, triage=courageous, limits=defaults, daemon=enabled, daemon_autostart=disabled
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`

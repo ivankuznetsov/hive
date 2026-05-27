@@ -1,20 +1,35 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## 0.1.5
 
-## [Unreleased]
+- Fixed `yay -S hive-bin`: the AUR `package()` aborted on an invalid `gem install --ignore-dependencies=false` flag — the published package never actually installed. Caught by the new real-install CI matrix.
+- Fixed the `hv` shim on Homebrew and AUR: it pointed at the gem's bash `bin/hv` via a Ruby binstub that can't run it; `hv` is now a symlink to the working `hive` wrapper.
+- Fixed Homebrew install-channel detection: the marker is now written under `<prefix>/share/hive` (was `libexec/share`, which is never linked) so `hive update` recognizes brew installs.
 
-### Fixed — release channel publishing
+## 0.1.4
 
-- Fixed the `release.yml` Homebrew-tap dispatch, which sent `client_payload` as a JSON string (rejected with HTTP 422) and aborted the publish job before the AUR step. The dispatch now sends a proper object, and the tap-notify step is non-fatal so it can never block the AUR publish.
+- Fixed AUR publishing: accept the `aur.archlinux.org` SSH host key on first connect so the `hive-bin` push no longer fails host-key verification.
 
-### Added — Homebrew tap + AUR publishing
+## 0.1.3
 
-- Finished the Homebrew and AUR install channels (previously only `install.sh` worked). A `vX.Y.Z` tag now publishes the signed `hive-cli` gem and fans out to both channels: `release.yml` dispatches to the `ivankuznetsov/homebrew-hive` tap (which renders `Formula/hive.rb` from the repo's ERB template) and runs an `aur-publish` job that cosign-verifies the gem (pinned signing identity) before rendering the `PKGBUILD`, regenerating `.SRCINFO` via `makepkg --printsrcinfo`, and pushing to the AUR `hive-bin` package.
-- Added `packaging/render.rb` — a single fail-closed ERB renderer shared by both channels, so the formula and PKGBUILD can never drift on the substituted version/sha. Removed the stale hand-maintained `packaging/aur/.SRCINFO.template`.
-- Added `docs/RELEASING.md` (release + channel-bootstrap runbook) and recorded the design in ADR-032.
+- Fixed AUR publishing: install `ruby-erb` in the Arch publish container so `packaging/render.rb` can `require "erb"`.
+
+## 0.1.2
+
+- Finished Homebrew tap + AUR (`hive-bin`) publishing — previously only `install.sh` worked. A `vX.Y.Z` tag now fans out from `release.yml`: the signed `hive-cli` gem → `repository_dispatch` to the `ivankuznetsov/homebrew-hive` tap (renders `Formula/hive.rb` from the repo's ERB template), plus an `aur-publish` job that cosign-verifies the gem (pinned identity), renders the `PKGBUILD`, generates `.SRCINFO` via `makepkg --printsrcinfo`, and pushes the AUR `hive-bin` package.
+- Added `packaging/render.rb` — one fail-closed ERB renderer shared by the formula and PKGBUILD so they can't drift on the substituted version/sha; removed the stale `packaging/aur/.SRCINFO.template`.
+- Added the `docs/RELEASING.md` runbook; recorded the design in ADR-032.
+- Fixed the Homebrew-tap dispatch (`client_payload` must be a JSON object, not a string — it was rejected with HTTP 422) and made the tap-notify step non-fatal so it can't block the AUR publish.
+
+## 0.1.1
+
+- Release-pipeline shakedown; no user-facing changes.
+
+## 0.1.0
+
+Initial public release of Hive — the folder-as-agent pipeline. The entries below are the accumulated 0.1.0 changes, kept in their original categorized form; releases from 0.1.1 on use the flat per-version style above.
 
 ### Added — token usage stats
 

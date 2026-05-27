@@ -1,27 +1,97 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+<!--
+  Sample launchd plist for `hive bot` (macOS).
+
+  This file is installer-managed: `hive bot install` rewrites the binary
+  path, the bin directory in PATH, and the log directory to match the
+  resolved binary + your home, then loads it. You normally do not edit
+  this by hand — re-run `hive bot install` instead.
+
+  Install:
+    mkdir -p ~/Library/LaunchAgents
+    cp examples/launchd/hive-bot.plist ~/Library/LaunchAgents/
+    $EDITOR ~/Library/LaunchAgents/local.hive-bot.plist   # confirm absolute paths
+    launchctl load ~/Library/LaunchAgents/local.hive-bot.plist
+
+  Verify it actually started (a wrong binary path exits cleanly via the
+  precheck, so the circuit-breaker stops respawning it rather than churning):
+    launchctl list | grep hive-bot
+    cat ~/Library/Logs/hive-bot.err.log
+
+  View logs:
+    tail -f ~/Library/Logs/hive-bot.{out,err}.log    # launchd capture
+    hive bot tail                                    # the bot's own log
+
+  Stop / restart:
+    launchctl unload ~/Library/LaunchAgents/local.hive-bot.plist
+    launchctl load   ~/Library/LaunchAgents/local.hive-bot.plist
+
+  Note the absolute-path requirement: launchd doesn't read your shell's
+  rc files, so the `hive` binary must be invoked at its real location.
+  Replace `/Users/YOU/.local/bin/hive` with the path on your machine
+  (run `which hive` to find it). If installed via rbenv / asdf / mise,
+  point at the corresponding shim.
+
+  The bot loads its Telegram token from ~/.config/hive/.env itself (via
+  Hive::EnvFile.load!), so there is NO inline token env var here.
+
+  RESPAWN-LOOP CIRCUIT-BREAKER: launchd has no native equivalent of
+  systemd's StartLimitBurst. The /bin/sh wrapper below converts "binary
+  not executable" into a clean exit 0 — which KeepAlive { SuccessfulExit:
+  false } then respects (no respawn). A real bot crash still exits
+  non-zero through `exec` and respawns normally per ThrottleInterval.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- launchd Labels are conventionally reverse-DNS strings owned by
+       the publisher. Apple's `local.*` namespace is reserved for
+       per-user plists with no DNS-backed identity, so it's the right
+       neutral default for a sample. Customise to your own reverse-DNS
+       (e.g., `com.example.hive-bot`) if you want clear ownership. -->
   <key>Label</key>
-  <string>work.hive.bot</string>
+  <string>local.hive-bot</string>
+
+  <!-- ProgramArguments wraps the real invocation in a tiny /bin/sh
+       precheck. If the binary path passed as $0 is missing or not
+       executable, the wrapper exits 0 (clean) so KeepAlive's
+       SuccessfulExit:false STOPS respawning. If it IS executable, exec
+       hands the process tree to hive and a real crash will re-trigger
+       respawn through KeepAlive normally. See the RESPAWN-LOOP
+       CIRCUIT-BREAKER note above for the rationale. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/asterio/Dev/hive/bin/hive</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>[ -x "$0" ] || exit 0; exec "$0" "$@"</string>
+    <string>/Users/YOU/.local/bin/hive</string>
     <string>bot</string>
     <string>start</string>
     <string>--foreground</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>HIVE_HOME</key>
-    <string>/Users/asterio/Dev/hive</string>
-    <key>HIVE_TELEGRAM_BOT_TOKEN</key>
-    <string>replace-with-botfather-token</string>
-  </dict>
-  <key>KeepAlive</key>
-  <true/>
+
   <key>RunAtLoad</key>
   <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/hive-bot.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/hive-bot.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
 </dict>
 </plist>

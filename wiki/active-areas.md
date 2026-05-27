@@ -3,7 +3,7 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-05-25
+updated: 2026-05-27
 tags: [roadmap, status]
 ---
 
@@ -33,7 +33,8 @@ Working tree at refresh time is intentionally not clean: uncommitted source edit
 | Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,agent_profile,config,task_action,...}.rb` | Implemented + unit-tested by domain. Agent spawning is AgentProfile-driven; Claude launches can be tmux or headless via `Hive::ClaudeLauncher`. |
 | Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: polls `hive status --json`, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`, heals stale AGENT_WORKING markers, and now counts `live_task_lock` rows toward capacity. |
 | TUI | `lib/hive/tui/*`, `wiki/commands/tui.md`, `wiki/token-usage.md` | Bubbletea-ruby MVU dashboard with grid/detail flows, red-status detail, manual steering, token footer, and token matrix. |
-| Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. |
+| Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. `hive bot install` adds an opt-in reboot-survivable per-user service (systemd-user/launchd) that runs `hive bot start --foreground` with no inline token; torn down by `hive uninstall`. |
+| Shared service installer | `lib/hive/commands/service_installer/{base,outcome}.rb`, `lib/hive/commands/{daemon,bot}/service_installer.rb`, `schemas/hive-{bot,daemon}-install.v1.json`, `docs/solutions/…cross-platform-service-installer-base…` | `ServiceInstaller::Base` extracted from the daemon installer (daemon behavior byte-identical) and subclassed by daemon + bot, returning a `ServiceInstaller::Outcome` value object. Content-comparison drift detection (`--force` to overwrite), `unsupported` outcome on hosts with no service manager, exit codes 0/64/70, and a read-only `service_state` probe surfaced as `service_installed`/`service_enabled`/`unit_path` in both `bot`/`daemon status --json`. |
 | Testing and eval | `test/unit/`, `test/integration/`, `test/e2e/`, `test/eval/`, `Rakefile`, `bin/hive-eval` | Default `bundle exec rake test`; strict `bundle exec rake coverage`; opt-in e2e and Telegram bot eval layers. |
 | Release/install | `install.sh`, `install.md`, `packaging/`, `.github/workflows/install-smoke.yml` | v0.1.0 install/update/uninstall path, release artifact verification, daemon service install JSON envelope, and AUR/macOS x86_64 follow-ups are documented in [[operating]] and [[gaps]]. |
 | Docs/wiki | `README.md`, `docs/notes/`, `wiki/`, `.llm-wiki/` | Managed llm-wiki context is installed for Codex/Claude/Pi; refresh automation is Codex-owned by `.llm-wiki/config.json`. |

@@ -67,7 +67,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## Bot And TUI
 
-`hive tui` opens the terminal dashboard for humans. `hive bot start|stop|status|reload|tail` runs the Telegram surface for human-input gates. Both read the same state as the CLI; the TUI intentionally rejects `--json`.
+`hive tui` opens the terminal dashboard for humans. `hive bot start|stop|status|reload|tail|install` runs the Telegram surface for human-input gates. Both read the same state as the CLI; the TUI intentionally rejects `--json`. `hive bot install [--force] [--json]` installs and enables a per-user autostart service for the bot (systemd-user on Linux, launchd on macOS) so it survives reboot/login — opt-in, mirroring `hive daemon install`; the token comes from `~/.config/hive/.env`, and `hive uninstall` removes the service.
 
 ## Diagnostics
 

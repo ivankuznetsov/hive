@@ -12,14 +12,15 @@ require "hive/paths"
 module Hive
   module Commands
     class Bot
-      VALID_SUBCOMMANDS = %w[start stop status reload tail].freeze
+      VALID_SUBCOMMANDS = %w[start stop status reload tail install].freeze
 
       def initialize(subcommand, detach: nil, foreground: false, dry_run: false, json: false,
-                     hive_home: Hive::Paths.state_home)
+                     force: false, hive_home: Hive::Paths.state_home)
         @subcommand = subcommand
         @foreground = foreground || detach == false
         @dry_run = dry_run
         @json = json
+        @force = force
         @hive_home = hive_home
       end
 
@@ -36,6 +37,7 @@ module Hive
         when "status" then status_bot
         when "reload" then reload_bot
         when "tail" then tail_bot
+        when "install" then install_bot
         end
       end
 
@@ -135,6 +137,7 @@ module Hive
               end
             end
           end
+        service_state = probe_service_state
         payload = {
           "schema" => "hive-bot-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"),
@@ -143,7 +146,10 @@ module Hive
           "pid" => pid,
           "uptime_sec" => uptime,
           "pid_file" => pid_file,
-          "log_file" => log_file
+          "log_file" => log_file,
+          "service_installed" => service_state["service_installed"],
+          "service_enabled" => service_state["service_enabled"],
+          "unit_path" => service_state["unit_path"]
         }
         if @json
           puts_json(payload)
@@ -151,6 +157,18 @@ module Hive
           puts(running ? "hive bot: running (pid #{pid}, uptime #{uptime}s)" : "hive bot: not running")
         end
         raise Hive::Error, "bot not running" if !running && !@json
+      end
+
+      # Read-only autostart-state snapshot for the status envelope. A status
+      # probe must never take down the running/pid reporting that precedes
+      # it, so any failure degrades the three service fields to null (the
+      # status schema marks them required-but-nullable) instead of raising
+      # out of the whole command.
+      def probe_service_state
+        require "hive/commands/bot/service_installer"
+        Hive::Commands::Bot::ServiceInstaller.new.service_state
+      rescue StandardError
+        { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
       end
 
       def reload_bot
@@ -188,6 +206,157 @@ module Hive
         end
       rescue Interrupt
         nil
+      end
+
+      # `hive bot install [--force]` — (re)write the platform-native unit
+      # file (systemd-user on Linux, launchd plist on macOS) and enable
+      # autostart. Mirrors `hive daemon install` exactly: default refuses to
+      # touch an existing unit so operator hand-edits are preserved; --force
+      # overwrites and saves the prior content to `<path>.bak-<timestamp>`.
+      #
+      # With --json: emits a `hive-bot-install.v1` envelope on every
+      # outcome. Drift without --force exits 64 (USAGE — retry with
+      # --force). Service-manager failure exits 70 (SOFTWARE). Success
+      # outcomes (`written` / `upgraded` / `unchanged` / `unsupported`)
+      # exit 0.
+      def install_bot
+        require "hive/commands/bot/service_installer"
+        installer = Hive::Commands::Bot::ServiceInstaller.new(binary_path: current_binary_path)
+        begin
+          result = installer.install!(autostart: true, force: @force)
+        rescue Hive::Error
+          raise
+        rescue StandardError => e
+          install_emit_exception_envelope(installer, e) if @json
+          raise Hive::BotInstallFailed,
+                "bot service install failed: #{e.class}: #{e.message}"
+        end
+        unless @json
+          installer.messages.each { |line| warn "hive: #{line}" }
+          emit_install_success_summary(installer, result)
+        end
+        emit_install_outcome(installer, result)
+      end
+
+      # Bare-text positive confirmation on the non-JSON success path so
+      # operators can distinguish first-time install / no-op / in-place
+      # upgrade at a glance. Mirrors `daemon#emit_install_success_summary`.
+      def emit_install_success_summary(installer, outcome)
+        return if @json
+
+        case outcome.kind
+        when :written
+          puts "hive bot: installed unit at #{installer.target_path}"
+        when :upgraded
+          msg = "hive bot: upgraded unit at #{installer.target_path}"
+          msg += " (backup: #{outcome.backup_path})" if outcome.backup_path
+          puts msg
+        when :unchanged
+          puts "hive bot: unit already up to date at #{installer.target_path}"
+        when :autostart_unavailable
+          puts "hive bot: unit written at #{installer.target_path}; autostart not enabled on this host"
+        when :unsupported, :drifted, :failed
+          # :unsupported is messaged via installer.messages.
+          # :drifted / :failed are handled by emit_install_outcome
+          # (which raises); no positive summary applies.
+        end
+      end
+
+      def emit_install_outcome(installer, outcome)
+        if @json
+          if outcome.success?
+            puts JSON.generate(install_envelope(installer, outcome))
+          else
+            install_emit_error_envelope(installer, outcome: outcome.wire_outcome)
+          end
+        end
+
+        if outcome.drifted?
+          msg = "bot unit at #{installer.target_path} differs from the current template. " \
+                "Re-run with `hive bot install --force` to overwrite (a timestamped .bak " \
+                "will be saved)."
+          raise Hive::BotInstallDriftError, msg
+        elsif outcome.failed?
+          raise Hive::BotInstallFailed,
+                "bot service install reported a failure; see messages above"
+        end
+      end
+
+      def install_envelope(installer, outcome)
+        {
+          "schema" => "hive-bot-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-install"),
+          "ok" => true,
+          "outcome" => outcome.wire_outcome,
+          "platform" => installer.envelope_platform,
+          "target_path" => installer.target_path,
+          "backup_path" => outcome.backup_path,
+          "restarted" => outcome.restarted,
+          "messages" => installer.messages.dup
+        }
+      end
+
+      def install_emit_error_envelope(installer, outcome:)
+        error_class = outcome == "drifted" ? "BotInstallDriftError" : "BotInstallFailed"
+        exit_code = outcome == "drifted" ? Hive::ExitCodes::USAGE : Hive::ExitCodes::SOFTWARE
+        message =
+          if outcome == "drifted"
+            "bot unit at #{installer.target_path} differs from the current template; retry with --force."
+          else
+            "bot service install reported a failure; see messages"
+          end
+        puts JSON.generate(
+          "schema" => "hive-bot-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-install"),
+          "ok" => false,
+          "error_class" => error_class,
+          "error_kind" => outcome,
+          "exit_code" => exit_code,
+          "message" => message,
+          "outcome" => outcome,
+          "platform" => installer.envelope_platform,
+          "target_path" => installer.target_path,
+          "messages" => installer.messages.dup
+        )
+      end
+
+      def install_emit_exception_envelope(installer, error)
+        puts JSON.generate(
+          "schema" => "hive-bot-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-install"),
+          "ok" => false,
+          "error_class" => "BotInstallFailed",
+          "error_kind" => "failed",
+          "exit_code" => Hive::ExitCodes::SOFTWARE,
+          "message" => "bot service install failed: #{error.class}: #{error.message}",
+          "outcome" => "failed",
+          "platform" => safe_install_platform(installer),
+          "target_path" => safe_install_target_path(installer),
+          "messages" => safe_install_messages(installer)
+        )
+      end
+
+      def current_binary_path
+        require "hive/invoked_binary"
+        Hive::InvokedBinary.path
+      end
+
+      def safe_install_platform(installer)
+        installer.envelope_platform
+      rescue StandardError
+        "unsupported"
+      end
+
+      def safe_install_target_path(installer)
+        installer.target_path
+      rescue StandardError
+        nil
+      end
+
+      def safe_install_messages(installer)
+        installer.messages.dup
+      rescue StandardError
+        []
       end
 
       def live_pid

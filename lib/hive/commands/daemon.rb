@@ -307,6 +307,7 @@ module Hive
         end
 
         if @json
+          service_state = probe_service_state
           puts JSON.generate(
             "schema" => "hive-daemon-status",
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
@@ -315,7 +316,10 @@ module Hive
             "pid" => running ? pid : nil,
             "uptime_sec" => uptime_sec,
             "pid_file" => pid_file,
-            "log_file" => log_file
+            "log_file" => log_file,
+            "service_installed" => service_state["service_installed"],
+            "service_enabled" => service_state["service_enabled"],
+            "unit_path" => service_state["unit_path"]
           )
         elsif running
           puts "hive daemon: running (pid #{pid}, uptime #{uptime_sec}s)"
@@ -324,6 +328,18 @@ module Hive
         end
         # Exit code: 0 for running, 1 for not running (per plan U8)
         raise Hive::Error, "daemon not running" unless running
+      end
+
+      # Read-only autostart-state snapshot for the status envelope. A status
+      # probe must never take down the running/pid reporting that precedes
+      # it, so any failure degrades the three service fields to null (the
+      # status schema marks them required-but-nullable) instead of raising
+      # out of the whole command.
+      def probe_service_state
+        require "hive/commands/daemon/service_installer"
+        Hive::Commands::Daemon::ServiceInstaller.new.service_state
+      rescue StandardError
+        { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
       end
 
       def reload_daemon
@@ -450,15 +466,15 @@ module Hive
       # so operators can distinguish first-time install / no-op /
       # in-place upgrade at a glance. Mirrors what `reload_daemon`
       # already does on its success path.
-      def emit_install_success_summary(installer, result)
+      def emit_install_success_summary(installer, outcome)
         return if @json
 
-        case result
-        when :ok, :written
+        case outcome.kind
+        when :written
           puts "hive daemon: installed unit at #{installer.target_path}"
         when :upgraded
           msg = "hive daemon: upgraded unit at #{installer.target_path}"
-          msg += " (backup: #{installer.last_backup_path})" if installer.last_backup_path
+          msg += " (backup: #{outcome.backup_path})" if outcome.backup_path
           puts msg
         when :unchanged
           puts "hive daemon: unit already up to date at #{installer.target_path}"
@@ -475,65 +491,42 @@ module Hive
         end
       end
 
-      def emit_install_outcome(installer, result)
-        outcome_str =
-          case result
-          when :written  then "written"
-          when :upgraded then "upgraded"
-          when :unchanged then "unchanged"
-          # The unit was written but autostart could not be enabled
-          # because the host has no supported service manager (Linux
-          # without systemd-user). This is a known-platform limitation,
-          # not a software failure, so it reports the `unsupported`
-          # success outcome (exit 0) — `target_path` still points at the
-          # written unit so an operator can enable autostart later.
-          when :autostart_unavailable then "unsupported"
-          when :unsupported then "unsupported"
-          when :drifted then "drifted"
-          when :failed  then "failed"
-          # Pre-PR-113 callers may receive :ok from a stale ServiceInstaller
-          # in another branch; map it conservatively to "written".
-          when :ok       then "written"
-          end
-        success = %w[written upgraded unchanged unsupported].include?(outcome_str)
-
+      def emit_install_outcome(installer, outcome)
         if @json
-          if success
-            puts JSON.generate(install_envelope(installer, outcome: outcome_str))
+          if outcome.success?
+            puts JSON.generate(install_envelope(installer, outcome))
           else
-            install_emit_error_envelope(installer, outcome: outcome_str)
+            install_emit_error_envelope(installer, outcome: outcome.wire_outcome)
           end
         end
 
-        case result
-        when :drifted
+        if outcome.drifted?
           msg = "daemon unit at #{installer.target_path} differs from the current template. " \
                 "Re-run with `hive daemon install --force` to overwrite (a timestamped .bak " \
                 "will be saved)."
           raise Hive::DaemonInstallDriftError, msg
-        when :failed
+        elsif outcome.failed?
           raise Hive::DaemonInstallFailed,
                 "daemon service install reported a failure; see messages above"
         end
       end
 
-      def install_envelope(installer, outcome:)
-        restarted = outcome == "upgraded" ? installer.last_restart_invoked : false
-        backup_path = outcome == "upgraded" ? installer.last_backup_path : nil
+      def install_envelope(installer, outcome)
         # `target_path` is whatever the installer resolved: the written
         # unit path on linux/macos (including the autostart-unavailable
         # case, where the unit IS written), and nil only on a truly
-        # unsupported host where no unit exists.
-        target = installer.target_path
+        # unsupported host where no unit exists. `backup_path`/`restarted`
+        # are only set on an :upgraded install, so reading them
+        # unconditionally is correct.
         {
           "schema" => "hive-daemon-install",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-install"),
           "ok" => true,
-          "outcome" => outcome,
+          "outcome" => outcome.wire_outcome,
           "platform" => installer.envelope_platform,
-          "target_path" => target,
-          "backup_path" => backup_path,
-          "restarted" => restarted,
+          "target_path" => installer.target_path,
+          "backup_path" => outcome.backup_path,
+          "restarted" => outcome.restarted,
           "messages" => installer.messages.dup
         }
       end

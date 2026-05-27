@@ -200,7 +200,7 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Bot) do |calls|
       Hive::CLI.start([ "bot", "start", "--detach", "--dry-run", "--json" ])
       assert_equal [ "start" ], calls.first.fetch(:args)
-      assert_equal({ foreground: false, dry_run: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ foreground: false, dry_run: true, json: true, force: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Metrics) do |calls|
@@ -218,6 +218,15 @@ class HiveCliTest < Minitest::Test
 
     assert_equal Hive::ExitCodes::USAGE, status
     assert_match(/do not combine it with --foreground/, err)
+  end
+
+  def test_bot_rejects_force_on_non_install_subcommand
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "bot", "start", "--force" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/--force only applies to `install`/, err)
   end
 
   def test_daemon_argv_errors_emit_json_envelopes_before_raising

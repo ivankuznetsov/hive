@@ -1,15 +1,75 @@
+# Sample systemd-user unit for `hive bot` (Linux).
+#
+# This file is installer-managed: `hive bot install` rewrites ExecStart=
+# and Environment=PATH= to match the resolved binary + Ruby manager
+# detected on the host, then enables + starts the unit. You normally do
+# not edit this by hand — re-run `hive bot install` instead.
+#
+# BEFORE INSTALLING BY HAND: edit ExecStart= to match where YOUR `hive`
+# binary lives. `which hive` shows it. Common paths:
+#
+#   %h/.local/bin/hive                           ← README install (option-A
+#                                                  symlink: ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive)
+#   %h/Dev/hive/bin/hive                         ← README install (option-B,
+#                                                  direct from clone, no symlink)
+#   /usr/local/bin/hive                          ← system gem install
+#   %h/.local/share/mise/shims/hive              ← mise / rbenv / asdf / chruby shim
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/systemd/hive-bot.service ~/.config/systemd/user/
+#   $EDITOR ~/.config/systemd/user/hive-bot.service   # confirm ExecStart=
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hive-bot
+#
+# Verify it actually started (catches a wrong ExecStart= path before the
+# StartLimitBurst kicks in):
+#   systemctl --user status hive-bot
+#   journalctl --user -u hive-bot -n 50
+#
+# View logs:
+#   journalctl --user -u hive-bot -f      # systemd's stderr capture
+#   hive bot tail                         # the bot's own log
+#
+# Stop / restart:
+#   systemctl --user stop hive-bot
+#   systemctl --user restart hive-bot
+#
+# To survive logout (run when no user session is active):
+#   sudo loginctl enable-linger $USER
+#
+# The bot loads its Telegram token from ~/.config/hive/.env itself (via
+# Hive::EnvFile.load!), so there is NO inline token Environment= line here —
+# systemd-user starts with a minimal environment that would not see an
+# exported token anyway. This unit runs in the foreground (--foreground);
+# systemd is the supervisor and Restart=on-failure brings the bot back if
+# it crashes. StartLimit* below caps the respawn loop so a wrong ExecStart=
+# path stops cleanly with `failed` instead of relaunching forever.
+
 [Unit]
 Description=Hive Telegram bot
 After=network-online.target
 Wants=network-online.target
+# Hard cap on the auto-restart loop. If `hive bot start` exits non-zero
+# 3 times within 5 minutes, systemd marks the unit `failed` instead of
+# respawning forever. This is the safety net for a misconfigured ExecStart=
+# (binary not on PATH, typo, missing rbenv shim) — `systemctl --user status`
+# will show `failed` rather than silently churning every 10 s.
+StartLimitBurst=3
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Dev/hive
-Environment=HIVE_HOME=%h/Dev/hive
-Environment=HIVE_TELEGRAM_BOT_TOKEN=replace-with-botfather-token
-ExecStart=%h/Dev/hive/bin/hive bot start --foreground
-ExecStop=%h/Dev/hive/bin/hive bot stop
+# systemd user services do NOT inherit your interactive shell's PATH, so
+# PATH below covers (a) any incidental shell-outs the bot performs (git,
+# etc.) and (b) the gem's bin/hive wrapper whose `#!/usr/bin/env ruby`
+# shebang needs to find a Ruby with the gem's dependencies. `hive bot
+# install` detects mise/rbenv/asdf and prepends the matching shim
+# directory automatically; otherwise the minimal PATH below covers
+# system-Ruby installs. The bot's token comes from ~/.config/hive/.env,
+# not from this unit.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/hive bot start --foreground
 Restart=on-failure
 RestartSec=10
 

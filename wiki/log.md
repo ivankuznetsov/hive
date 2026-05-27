@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-27T23:40:00Z] fix(daemon) — persist dispatch baselines across restart
+
+**Action:** Documented the new `Hive::Daemon::DispatchBaselines` store and the restart-survival behavior it gives the daemon's first-sight edit baseline. The `[project, slug] → state_file_mtime` map (in `ConcurrencyController`) was in-memory only, so a daemon restart re-stranded already-answered `needs_input` tasks (a pre-restart answer stopped looking "newer than baseline"); it's now write-through-persisted to `daemon_dispatch_baselines.json` under the state home, fail-closed on load, pruned to the live task set each successful tick. Replaces the rejected marker-`ts` approach (closed PR #229) — no marker-format dependency, mtime-to-mtime comparison. Added a "Persisted dispatch baselines" section and a module-map row to [[modules/daemon]].
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
 ## [2026-05-27T18:00:00Z] feat — daemon-driven update flow (check + nudge, U1–U5)
 
 **Action:** Added the update flow (plan 2026-05-27-002): `Hive::UpdateCheck` release probe, `UpdateCheck::State` shared JSON store, `update.check`/`update.auto` config, dispatcher integration (throttled check + per-channel nudge), and the nudge surfaces (TUI footer + once-per-version bot push). Every channel is nudge-only for now; bash auto-update (U7) is deferred.

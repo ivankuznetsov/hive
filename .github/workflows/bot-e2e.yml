@@ -70,3 +70,58 @@ jobs:
           TG_DRIVER_ID: ${{ secrets.TG_DRIVER_ID }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
         run: .venv/bin/python run_e2e.py
+
+  # Runs AFTER idea-flow (never concurrently) — only one poller may hold the
+  # test token at a time. Asserts the bot proactively pushes the update nudge.
+  nudge-flow:
+    needs: idea-flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Telethon
+        working-directory: test/e2e/tg
+        run: |
+          uv venv .venv
+          uv pip install --python .venv telethon
+
+      - name: Bootstrap a scratch hive project
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          PROJ_ROOT: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          proj="$PROJ_ROOT/e2eproj"
+          mkdir -p "$proj"
+          git -C "$proj" init -q
+          git -C "$proj" config user.email ci@example.com
+          git -C "$proj" config user.name "hive ci"
+          git -C "$proj" commit --allow-empty -m init -q
+          bundle exec ruby bin/hive init "$proj" --force < /dev/null
+          printf '#!/usr/bin/env bash\ncd "%s" && exec bundle exec ruby bin/hive "$@"\n' "$WORKSPACE" > "$PROJ_ROOT/hivebin"
+          chmod +x "$PROJ_ROOT/hivebin"
+
+      - name: Run headless update-nudge push E2E
+        working-directory: test/e2e/tg
+        env:
+          HIVE_REPO: ${{ github.workspace }}
+          BOT_LAUNCHER: "bundle exec ruby"
+          HIVE_BIN: ${{ runner.temp }}/hivebin
+          TG_CAPTURE_PROJECT: e2eproj
+          TG_BOT_USERNAME: Testivanshive_bot
+          HIVE_TEST_BOT_TOKEN: ${{ secrets.HIVE_TEST_BOT_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_DRIVER_ID: ${{ secrets.TG_DRIVER_ID }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: .venv/bin/python run_nudge_e2e.py

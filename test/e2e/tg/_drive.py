@@ -70,3 +70,26 @@ def drive(client, bot, project):
     ok = project in ack.message
     print(f"{'PASS' if ok else 'FAIL'} ack={ack.message!r}")
     return 0 if ok else 1
+
+
+def drive_nudge(client, bot, version, command):
+    """Assert the bot proactively pushes the update nudge.
+
+    Unlike the /idea flow, the push is unsolicited: the bot's status loop reads
+    the seeded update_check.json and sends "hive <version> is available …".
+    The driver sends nothing — it just waits for the incoming push and checks
+    both the version and the exact update command made it through.
+    """
+    if not client.is_user_authorized():
+        print("FAIL driver not authorized; run login.py first")
+        return 1
+
+    marker = f"{version} is available"
+    push = wait_for(client, bot, lambda m: marker in (m.message or ""))
+    if not push:
+        print(f"FAIL no update nudge push containing {marker!r}")
+        return 1
+
+    ok = command in push.message
+    print(f"{'PASS' if ok else 'FAIL'} nudge={push.message!r}")
+    return 0 if ok else 1

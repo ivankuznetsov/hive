@@ -90,6 +90,19 @@ module Hive
         parsed.find { |question| question.n == question_n }
       end
 
+      # Canonical heading strings. Centralized here so supervisor copy,
+      # writer fallback messages, and any future renderer share one
+      # source of truth. If the brainstorm.md format ever changes (e.g.
+      # `### Q{n}.` becomes `### Q{n}:`), these are the single place to
+      # update.
+      def question_header(n)
+        "### Q#{n}."
+      end
+
+      def answer_header(n)
+        "### A#{n}."
+      end
+
       def finalize(out, current)
         return unless current
 

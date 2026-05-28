@@ -26,6 +26,7 @@ module Hive
         codex_failed
         answer_written
         answer_skipped_already_answered
+        answer_slot_missing
         reconnect_summary
         config_reloaded
         envelope_parse_failure

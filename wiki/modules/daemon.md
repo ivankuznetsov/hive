@@ -144,16 +144,26 @@ project that hit a per-project `error: not_initialised` /
 Same-host only.
 
 **Failure-mode visibility:** the store is constructed with the daemon
-logger so every persistence path is observable in `daemon.log`. Torn /
-wrong-shape / unsupported-version files emit
-`:daemon_dispatch_baselines_corrupt`; lock acquisition failures emit
-`:daemon_dispatch_baselines_lock_error`; write errors (ENOSPC / EROFS /
-EDQUOT) emit `:daemon_dispatch_baselines_write_error`; orphan-tmp sweep
-failures emit `:daemon_dispatch_baselines_tmp_sweep_error`; and the
-controller's defense-in-depth rescue around `persist!` emits
+logger so every persistence path is observable in `daemon.log`.
+`:daemon_dispatch_baselines_loaded` (count + `suspend_writes`) fires on
+every load so the operator has a positive boot-time signal that
+persistence is in use. Torn / wrong-shape files emit
+`:daemon_dispatch_baselines_corrupt`; a newer-schema file (downgrade
+protection — writes suspended) emits
+`:daemon_dispatch_baselines_newer_schema_suspended`; lock acquisition
+failures emit `:daemon_dispatch_baselines_lock_error`; write errors
+(ENOSPC / EROFS / EDQUOT) emit `:daemon_dispatch_baselines_write_error`;
+orphan-tmp sweep failures emit
+`:daemon_dispatch_baselines_tmp_sweep_error`; and the store's
+defense-in-depth `rescue StandardError` around `write` emits
 `:daemon_dispatch_baselines_unexpected_error` if a programmer-error class
-slips past the store's typed rescues. None of these crash a tick; all
+slips past the narrower I/O rescues. None of these crash a tick; all
 appear in `daemon.log` so a silent re-strand cannot happen unobserved.
+
+`ConcurrencyController#prune_dispatch_baselines` requires
+`scope_projects:` — there is no nil-default. Forgetting the kwarg now
+fails loud at the call site rather than silently re-stranding answered
+tasks across per-project status errors.
 
 **Accepted limitation:** if the daemon is down for the *entire* window
 between a bot-dispatched brainstorm's `WAITING` write and the user's

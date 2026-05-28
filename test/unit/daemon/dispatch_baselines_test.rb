@@ -92,6 +92,62 @@ class DaemonDispatchBaselinesTest < Minitest::Test
     assert_equal original, File.read(@path), "must not overwrite a newer-schema file"
   end
 
+  def test_newer_schema_emits_suspended_event_so_operator_can_see_downgrade_protection_engaged
+    # Without this event the operator has no signal that persistence is
+    # silently disabled — bit-flip corruption of schema_version (1 → 11) or a
+    # transient downgrade between hive releases would make the very regression
+    # this file exists to prevent (re-stranding answered tasks on restart)
+    # return invisibly.
+    File.write(@path, JSON.generate("schema_version" => 999, "baselines" => []))
+    logger = RecordingLogger.new
+    Hive::Daemon::DispatchBaselines.new(path: @path, logger: logger).load
+
+    suspended = logger.events.find { |name, _| name == :daemon_dispatch_baselines_newer_schema_suspended }
+    refute_nil suspended, "newer-schema suspend must emit a typed event, not happen silently"
+    assert_equal 999, suspended.last[:on_disk_version]
+    assert_equal Hive::Daemon::DispatchBaselines::SCHEMA_VERSION, suspended.last[:supported_version]
+  end
+
+  def test_write_catches_unexpected_error_and_logs_typed_event
+    # Defense-in-depth: the persist-narrow rescue catches IOError/SystemCallError,
+    # but a future programmer error (NoMethodError from a renamed JSON API,
+    # Encoding error on a non-UTF-8 project name, JSON::GeneratorError on an
+    # unserializable value) must NOT propagate up and crash a daemon tick.
+    # Pin the contract that DispatchBaselines#write never raises — the
+    # controller used to carry its own broad rescue for this, the contract now
+    # lives in the store. Without this, the very stranding this layer
+    # prevents could return invisibly on a future store-API change.
+    logger = RecordingLogger.new
+    s = Hive::Daemon::DispatchBaselines.new(path: @path, logger: logger)
+
+    with_replaced_singleton_method(JSON, :generate, ->(*_a, **_k) { raise(NoMethodError, "store API drift") }) do
+      s.write({ %w[p s] => Time.utc(2026, 5, 27) }) # must not raise
+    end
+
+    unexpected = logger.events.find { |name, _| name == :daemon_dispatch_baselines_unexpected_error }
+    refute_nil unexpected, "an unexpected error inside write must surface as a typed event"
+    assert_equal "NoMethodError", unexpected.last[:error_class]
+  end
+
+  def test_load_emits_loaded_event_with_count_and_suspend_flag
+    # A positive boot-time signal so an operator (or agent reading daemon.log)
+    # can see persistence is actually in use, with how many baselines came
+    # back and whether downgrade-protection is engaged. Without this the
+    # "0 baselines loaded" and "load failed silently" cases are
+    # indistinguishable in the log.
+    File.write(@path, JSON.generate(
+      "schema_version" => 1,
+      "baselines" => [ { "project" => "p", "slug" => "s", "mtime" => Time.utc(2026, 5, 27).iso8601(6) } ]
+    ))
+    logger = RecordingLogger.new
+    Hive::Daemon::DispatchBaselines.new(path: @path, logger: logger).load
+
+    loaded = logger.events.find { |name, _| name == :daemon_dispatch_baselines_loaded }
+    refute_nil loaded, "every load must emit a typed loaded event for operator observability"
+    assert_equal 1, loaded.last[:count]
+    refute loaded.last[:suspend_writes], "suspend_writes must be false on a normal load"
+  end
+
   def test_write_is_atomic_and_leaves_no_tmp_litter
     store.write({ %w[p s] => Time.utc(2026, 5, 27) })
 
@@ -107,17 +163,19 @@ class DaemonDispatchBaselinesTest < Minitest::Test
   end
 
   def test_write_failure_degrades_without_raising
-    # A read-only state dir must degrade (log + continue), never crash a tick.
-    ro = File.join(@dir, "ro")
-    FileUtils.mkdir_p(ro)
-    File.chmod(0o500, ro)
-    s = Hive::Daemon::DispatchBaselines.new(path: File.join(ro, "baselines.json"))
+    # A broken state dir must degrade (log + continue), never crash a tick.
+    # Use a regular file as the parent path (ENOTDIR) rather than chmod 0o500
+    # so the test holds under root-CI (root ignores DAC permissions and would
+    # otherwise spuriously succeed the write). Companion to
+    # test_lock_failure_degrades_when_state_path_parent_is_a_file but here we
+    # ensure persist! itself degrades, not just acquire_lock.
+    file_as_parent = File.join(@dir, "not-a-dir-2")
+    File.write(file_as_parent, "x")
+    s = Hive::Daemon::DispatchBaselines.new(path: File.join(file_as_parent, "baselines.json"))
 
     s.write({ %w[p s] => Time.utc(2026, 5, 27) }) # must not raise
 
-    refute_path_exists File.join(ro, "baselines.json")
-  ensure
-    File.chmod(0o700, ro) if ro && File.exist?(ro)
+    refute_path_exists File.join(file_as_parent, "baselines.json")
   end
 
   def test_older_schema_version_loads_empty
@@ -168,6 +226,29 @@ class DaemonDispatchBaselinesTest < Minitest::Test
            "a sweep failure must be logged, not silently leak tmp files")
   end
 
+  def test_acquire_lock_closes_handle_when_flock_raises
+    # Symmetric to test_release_lock_closes_the_handle_even_when_flock_raises:
+    # if File.open succeeds but flock raises (FUSE/NFS without lockd), the
+    # rescue path must close the open handle before returning nil — otherwise
+    # one FD leaks per acquire attempt, accumulating over the daemon lifetime
+    # to exhaust the per-process limit.
+    closed = false
+    bad = Object.new
+    bad.define_singleton_method(:flock) { |_mode| raise(IOError, "flock not supported") }
+    bad.define_singleton_method(:close) { closed = true }
+
+    logger = RecordingLogger.new
+    s = Hive::Daemon::DispatchBaselines.new(path: @path, logger: logger)
+
+    with_replaced_singleton_method(File, :open, ->(*_a, **_k) { bad }) do
+      result = s.send(:acquire_lock)
+      assert_nil result, "acquire_lock must return nil when flock raises"
+    end
+
+    assert closed, "flock failure must NOT bypass close — FDs would otherwise leak across daemon lifetime"
+    assert(logger.events.any? { |name, _| name == :daemon_dispatch_baselines_lock_error })
+  end
+
   def test_release_lock_closes_the_handle_even_when_flock_raises
     # Both halves matter: the rescue is the must-not-raise contract, AND
     # `close` must still be attempted so an FD doesn't leak each time flock
@@ -197,14 +278,22 @@ class DaemonDispatchBaselinesTest < Minitest::Test
 
   def test_release_lock_swallows_close_errors_too
     # The second-stage close rescue covers the case where flock succeeds but
-    # close itself raises (e.g. EIO on the lockfile FD).
+    # close itself raises (e.g. EIO on the lockfile FD). Pin that `close` was
+    # actually attempted (not skipped before reaching the failing call) AND
+    # the exception did not propagate — together they prove the rescue covers
+    # the contract, not just "didn't crash" for the wrong reason.
     s = store
+    close_attempted = false
     handle = Object.new
     handle.define_singleton_method(:flock) { |_mode| }
-    handle.define_singleton_method(:close) { raise(IOError, "close blew up") }
+    handle.define_singleton_method(:close) do
+      close_attempted = true
+      raise(IOError, "close blew up")
+    end
 
     s.send(:release_lock, handle) # must not raise
-    assert true
+
+    assert close_attempted, "release_lock must attempt close even after flock-unlock; otherwise FDs leak"
   end
 
   def test_lock_failure_degrades_when_state_path_parent_is_a_file

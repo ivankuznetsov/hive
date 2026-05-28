@@ -36,7 +36,7 @@ module Hive
       attr_reader :max_concurrent_runs, :max_concurrent_per_project, :max_runs_per_day_per_project
 
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
-                     dispatch_state: nil, logger: nil)
+                     dispatch_state: nil)
         @max_concurrent_runs = max_concurrent_runs
         @max_concurrent_per_project = max_concurrent_per_project
         @max_runs_per_day_per_project = max_runs_per_day_per_project
@@ -44,12 +44,10 @@ module Hive
         # `[project, slug] => mtime` baseline map survives daemon restarts so
         # an already-answered needs_input row isn't re-stranded on first sight
         # (Policy#decide_edit relies on this baseline). nil = in-memory only.
+        # The store owns its own logger and emits the full set of typed events
+        # (`:daemon_dispatch_baselines_*`) for both expected I/O errors and the
+        # defense-in-depth broad-StandardError rescue.
         @dispatch_state = dispatch_state
-        # Optional daemon logger. Only used to surface the persist-rescue
-        # defense-in-depth path (`:daemon_dispatch_baselines_unexpected_error`)
-        # so a programmer error in the store layer doesn't silently swallow
-        # — the store handles its own file-I/O errors with typed events.
-        @logger = logger
 
         # pid → { project, slug, stage, command, started_at, state_file_mtime_at_dispatch }
         @running = {}
@@ -169,24 +167,22 @@ module Hive
       # pairs the dispatcher saw this tick. The dispatcher only calls this on
       # an overall-successful fetch (never on a transient empty/failed scan).
       #
-      # `scope_projects` (nil = prune across all projects, set = prune only
-      # within these projects) is the dispatcher's guard against per-project
-      # status errors silently dropping baselines: `hive status --json` emits
-      # `error: "not_initialised"` (or `missing_project_path`) for projects
-      # whose path is briefly inaccessible — an NFS hiccup, a project being
-      # re-bootstrapped, a transient race with `hive forget`. Those projects
-      # are filtered out of both `Result#rows` and `Result#projects`, so
-      # `scope_projects` is bound to the latter and a project missing from
-      # the snapshot keeps its baselines untouched (otherwise re-stranding
-      # would silently return on the next first sight — the very regression
-      # this whole machinery prevents).
-      def prune_dispatch_baselines(live_keys, scope_projects: nil)
+      # `scope_projects` is REQUIRED: only baselines whose project is in this
+      # set get a chance to be pruned. The dispatcher passes `result.projects`
+      # so per-project status errors (`not_initialised`, `missing_project_path`)
+      # — which filter a project out of both `Result#rows` AND `Result#projects`
+      # for transient NFS hiccups, `hive forget` races, or re-bootstrapping
+      # projects — keep their baselines untouched. Letting this kwarg default
+      # would silently re-strand answered tasks the next time those failures
+      # hit, which is the exact regression the persistence layer exists to
+      # prevent. Pass an empty set to short-circuit pruning entirely.
+      def prune_dispatch_baselines(live_keys, scope_projects:)
         live = live_keys.to_set
-        scope = scope_projects && scope_projects.to_set
+        scope = scope_projects.to_set
         before = @last_dispatched_mtime.size
         @last_dispatched_mtime.select! do |(project, slug), _value|
           # Out-of-scope projects (errored this tick) keep their baselines.
-          next true if scope && !scope.include?(project)
+          next true unless scope.include?(project)
 
           live.include?([ project, slug ])
         end
@@ -280,24 +276,13 @@ module Hive
 
       private
 
-      # Write-through the baseline map to the persisted store. Best-effort:
-      # the store already logs+degrades its own file-I/O errors with typed
-      # events (`:daemon_dispatch_baselines_{corrupt,lock_error,write_error,
-      # tmp_sweep_error}`). The `rescue StandardError` here is defense in
-      # depth against everything those rescues don't catch — programmer
-      # errors (`NoMethodError` from a future store API change), encoding
-      # issues (`Encoding::CompatibilityError` on a non-UTF-8 project name),
-      # JSON serialization errors (`JSON::GeneratorError`) — so a single bad
-      # value can't crash a tick. NOT silent: we surface it as a typed event
-      # so the operator sees that persistence is broken even though dispatch
-      # kept running. (Without this, the very regression this whole machinery
-      # prevents would return invisibly on the next restart.)
+      # Write-through the baseline map to the persisted store. The store
+      # owns the entire error-handling surface: narrow IOError/SystemCallError
+      # rescues + a defense-in-depth broad StandardError rescue, each surfacing
+      # a typed `:daemon_dispatch_baselines_*` event. The controller stays
+      # ignorant of file I/O.
       def persist_dispatch_baselines!
         @dispatch_state&.write(@last_dispatched_mtime)
-      rescue StandardError => e
-        @logger&.event(:daemon_dispatch_baselines_unexpected_error,
-                       error_class: e.class.name, message: e.message)
-        nil
       end
 
       def running_count_for(project)

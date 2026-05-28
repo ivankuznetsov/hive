@@ -58,7 +58,10 @@ module Hive
       # are dropped; well-formed siblings are kept.
       def load
         @suspend_writes = false
-        return {} unless @path && File.exist?(@path)
+        unless @path && File.exist?(@path)
+          emit_loaded(0)
+          return {}
+        end
 
         parsed = JSON.parse(File.read(@path))
         return reset_corrupt("root is not a Hash") unless parsed.is_a?(Hash)
@@ -67,17 +70,23 @@ module Hive
         return reset_corrupt("missing/invalid schema_version") unless version.is_a?(Integer)
 
         if version > SCHEMA_VERSION
+          # A NEWER hive wrote this. Suspend writes so we don't clobber it on
+          # downgrade. Emit a typed event — otherwise the suspended state is
+          # indistinguishable from healthy persistence and the very regression
+          # this file exists to prevent (re-stranding answered tasks on
+          # restart) returns silently. The operator needs a positive signal.
           @suspend_writes = true
-        elsif version < SCHEMA_VERSION
-          # No older schema exists yet; treat as corrupt and reset until a
-          # real migration path is needed.
-          return reset_corrupt("unsupported schema_version #{version}")
+          @logger&.event(:daemon_dispatch_baselines_newer_schema_suspended,
+                         path: @path, on_disk_version: version, supported_version: SCHEMA_VERSION)
         end
 
         entries = parsed["baselines"]
-        return {} unless entries.is_a?(Array)
+        unless entries.is_a?(Array)
+          emit_loaded(0)
+          return {}
+        end
 
-        entries.each_with_object({}) do |entry, acc|
+        loaded = entries.each_with_object({}) do |entry, acc|
           next unless entry.is_a?(Hash)
 
           project = entry["project"]
@@ -87,6 +96,8 @@ module Hive
 
           acc[[ project, slug ]] = mtime
         end
+        emit_loaded(loaded.size)
+        loaded
       rescue JSON::ParserError, TypeError, SystemCallError, IOError => e
         handle_corrupt!(e)
         {}
@@ -106,13 +117,37 @@ module Hive
         return if @suspend_writes
 
         with_lock { persist!(map) }
+      rescue StandardError => e
+        # Defense in depth against everything `persist!`'s narrower
+        # `SystemCallError/IOError` rescue doesn't catch — programmer errors
+        # (`NoMethodError` from a future API change), encoding issues
+        # (`Encoding::CompatibilityError` on a non-UTF-8 project name), JSON
+        # serialization failures (`JSON::GeneratorError`) — so a single bad
+        # value can't crash a daemon tick. NOT silent: we surface it as a
+        # typed event so the operator sees persistence is broken even though
+        # dispatch kept running. Without this, the very regression this whole
+        # file exists to prevent would return invisibly on the next restart.
+        @logger&.event(:daemon_dispatch_baselines_unexpected_error,
+                       path: @path, error_class: e.class.name, message: e.message)
+        nil
       end
 
       private
 
       def reset_corrupt(reason)
         @logger&.event(:daemon_dispatch_baselines_corrupt, path: @path, reason: reason)
+        emit_loaded(0)
         {}
+      end
+
+      # Positive boot-time signal so an operator tailing daemon.log can confirm
+      # persistence is actually in use (entry count) and whether downgrade
+      # protection has kicked in (@suspend_writes). Without this, a silent
+      # failure (corrupt file, newer-schema suspend, missing file with wrong
+      # permissions) is indistinguishable from a healthy empty start.
+      def emit_loaded(count)
+        @logger&.event(:daemon_dispatch_baselines_loaded,
+                       path: @path, count: count, suspend_writes: @suspend_writes)
       end
 
       def handle_corrupt!(error)
@@ -140,6 +175,16 @@ module Hive
         handle.flock(File::LOCK_EX)
         handle
       rescue SystemCallError, IOError => e
+        # If File.open succeeded but a subsequent step (typically flock on a
+        # filesystem that rejects it — FUSE/NFS without lockd) raised, close
+        # the open handle before returning nil. Otherwise one FD leaks per
+        # failed acquire and the daemon runs out of descriptors over its
+        # lifetime. Symmetric to release_lock's split close.
+        begin
+          handle&.close
+        rescue StandardError
+          nil
+        end
         @logger&.event(:daemon_dispatch_baselines_lock_error, path: @path,
                                                               error_class: e.class.name, message: e.message)
         nil

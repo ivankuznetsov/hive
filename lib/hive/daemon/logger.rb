@@ -53,6 +53,8 @@ module Hive
         daemon_dispatch_baselines_write_error
         daemon_dispatch_baselines_tmp_sweep_error
         daemon_dispatch_baselines_unexpected_error
+        daemon_dispatch_baselines_loaded
+        daemon_dispatch_baselines_newer_schema_suspended
         fatal
       ].freeze
 

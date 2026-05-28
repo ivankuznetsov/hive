@@ -415,7 +415,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
       c.observe_state_file_mtime(project: "p", slug: "keep", mtime: T0)
       c.observe_state_file_mtime(project: "p", slug: "drop", mtime: T0)
 
-      c.prune_dispatch_baselines([ %w[p keep] ])
+      c.prune_dispatch_baselines([ %w[p keep] ], scope_projects: %w[p])
 
       assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "keep")
       assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
@@ -425,60 +425,39 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     end
   end
 
-  def test_nil_store_keeps_state_in_memory_and_writes_nothing
-    Dir.mktmpdir do |dir|
-      # Default `make` has no dispatch_state — pure in-memory, no file I/O.
-      c = make
+  def test_prune_dispatch_baselines_requires_scope_projects
+    # `scope_projects:` MUST be required — a default of nil would silently
+    # re-strand answered tasks on per-project status errors (the bug the
+    # whole persistence layer exists to prevent). A future caller forgetting
+    # the kwarg must fail loud, not silent.
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
       c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
-      dispatch(c, 1, "p", "s2", mtime: T0)
-      c.prune_dispatch_baselines([ %w[p s] ])
 
-      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
-      assert_empty Dir.glob(File.join(dir, "*")), "nil store must not write any file"
+      assert_raises(ArgumentError) { c.prune_dispatch_baselines([ %w[p s] ]) }
     end
   end
 
-  def test_persistence_error_does_not_crash_dispatch
-    raising_store = Object.new
-    def raising_store.load = {}
-    def raising_store.write(_map) = raise(IOError, "simulated disk failure")
-    c = controller_with(raising_store)
-
-    # A store that raises must not propagate out of a controller mutation.
+  def test_nil_store_keeps_state_in_memory_and_does_not_raise
+    # Default `make` has no dispatch_state — pure in-memory, no file I/O.
+    # The original assertion `Dir.glob(File.join(dir, '*')).empty?` was
+    # vacuous because the controller never knew about `dir` — a regression
+    # that erroneously wrote to e.g. `Hive::Paths.state_home` would still
+    # leave that tmpdir empty. The behavior we actually care about: every
+    # controller mutation succeeds without raising even when the store is nil.
+    c = make
     c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
     dispatch(c, 1, "p", "s2", mtime: T0)
+    c.prune_dispatch_baselines([ %w[p s] ], scope_projects: %w[p])
 
     assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
+    assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "s2"),
+               "prune with empty live keys for the scoped project must drop absent entries"
   end
 
-  class RecordingLogger
-    attr_reader :events
-    def initialize = @events = []
-    def event(name, **attrs) = @events << [ name, attrs ]
-  end
-
-  def test_unexpected_persistence_error_is_logged_not_silent
-    # The persist rescue is defense in depth — but it MUST be observable.
-    # Otherwise a future programmer error in the store layer silently
-    # disables persistence and re-introduces the very stranding this
-    # whole machinery prevents.
-    logger = RecordingLogger.new
-    raising_store = Object.new
-    def raising_store.load = {}
-    def raising_store.write(_map) = raise(NoMethodError, "store API drift")
-    c = Hive::Daemon::ConcurrencyController.new(
-      max_concurrent_runs: 3, max_concurrent_per_project: 1,
-      max_runs_per_day_per_project: 50,
-      dispatch_state: raising_store, logger: logger
-    )
-
-    c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
-
-    assert(logger.events.any? { |name, attrs|
-      name == :daemon_dispatch_baselines_unexpected_error &&
-        attrs[:error_class] == "NoMethodError"
-    }, "an unexpected persist error must surface as a typed event, not silent swallow")
-  end
+  # NOTE: defense-in-depth error handling now lives inside DispatchBaselines#write
+  # rather than the controller — see dispatch_baselines_test.rb's
+  # test_write_catches_unexpected_error_and_logs_typed_event for the contract pin.
 
   # `hive status --json` skips projects with `error: not_initialised` (NFS
   # hiccup, project being re-bootstrapped, transient race with `hive forget`)
@@ -500,22 +479,6 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
       assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
       assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "errored", slug: "still-here"),
                    "a project missing from the scope must keep its baselines"
-    end
-  end
-
-  def test_prune_without_scope_drops_all_absent_keys
-    # Back-compat: when scope_projects is omitted (nil), prune behaves as
-    # the original "drop everything not in live_keys" — used by tests and
-    # safe when the caller already filtered to a full-rows live set.
-    with_store do |path|
-      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
-      c.observe_state_file_mtime(project: "p", slug: "keep", mtime: T0)
-      c.observe_state_file_mtime(project: "p", slug: "drop", mtime: T0)
-
-      c.prune_dispatch_baselines([ %w[p keep] ])
-
-      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "keep")
-      assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
     end
   end
 end

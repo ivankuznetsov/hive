@@ -152,9 +152,9 @@ module Hive
           max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
           max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project"),
           # Persist first-sight dispatch baselines so a daemon restart doesn't
-          # re-strand already-answered needs_input tasks.
-          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger),
-          logger: logger
+          # re-strand already-answered needs_input tasks. The store owns all
+          # `:daemon_dispatch_baselines_*` typed events via its own logger.
+          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
         status_consumer = Hive::Daemon::StatusConsumer.new

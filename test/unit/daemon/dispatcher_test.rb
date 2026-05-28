@@ -113,8 +113,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
     supervisor = FakeSupervisor.new
     status = FakeStatusConsumer.new
+    # Mirror what StatusConsumer emits in production: a `projects` list derived
+    # from the rows being returned. Without this the dispatcher's prune scope
+    # is empty and prune_dispatch_baselines never drops anything — making the
+    # prune-on-tick path effectively dead in any test that relies on the
+    # default `status_result`.
+    projects_for_rows = rows.map(&:project).uniq.map do |name|
+      Hive::Daemon::StatusConsumer::ProjectInfo.new(name: name, legacy_stage_dirs: [])
+    end
     status.next_result = status_result ||
-                         Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: rows, error: nil)
+                         Hive::Daemon::StatusConsumer::Result.new(
+                           ok: true, rows: rows, projects: projects_for_rows, error: nil
+                         )
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
 
@@ -1078,22 +1088,12 @@ def test_interruptible_sleep_stops_after_shutdown_request
   assert_equal [ 0.5 ], sleeps
 end
 
-  private
-
-
-  def events_include?(logger, name)
-    logger.events.any? { |(n, _)| n == name }
-  end
-
   # ── dispatch-baseline persistence across restart ───────────────────────
-
-  def seed_baseline(path, project:, slug:, mtime:)
-    Hive::Daemon::ConcurrencyController.new(
-      max_concurrent_runs: 5, max_concurrent_per_project: 5,
-      max_runs_per_day_per_project: 100,
-      dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
-    ).observe_state_file_mtime(project: project, slug: slug, mtime: mtime)
-  end
+  # Tests below MUST stay above the `private` declaration further down —
+  # Minitest only discovers public test methods. A prior arrangement hid them
+  # under `private` and silently ran zero of them (line coverage stayed green
+  # via other tests indirectly exercising `prune_dispatch_baselines`, masking
+  # the regression these tests pin).
 
   # The core fix: a needs_input row answered BEFORE a daemon restart must
   # dispatch, not be re-stranded. The pre-restart "ask" baseline is persisted;
@@ -1196,5 +1196,19 @@ end
       assert_equal T0 - 600,
                    ctrl.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
     end
+  end
+
+  private
+
+  def events_include?(logger, name)
+    logger.events.any? { |(n, _)| n == name }
+  end
+
+  def seed_baseline(path, project:, slug:, mtime:)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 5, max_concurrent_per_project: 5,
+      max_runs_per_day_per_project: 100,
+      dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+    ).observe_state_file_mtime(project: project, slug: slug, mtime: mtime)
   end
 end

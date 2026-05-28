@@ -66,16 +66,26 @@ module Hive
           Hive::Bot::NotificationBuilders.manual_only_reply(marker: marker, attrs: attrs)
         end
 
-        # Inline keyboard callback_data carries one `key=value` pair via
-        # `recovery_match_attr`. Split it back into a 1-key attrs Hash so
-        # `manual_only?` can apply the attrs-gated rules without needing
-        # the full row. Values like `foo=bar=baz` keep the trailing
-        # `=baz` intact via `split("=", 2)`.
+        # Inline keyboard callback_data carries `key=value` pairs via
+        # `recovery_match_attr`, comma-separated when more than one is
+        # encoded (e.g. `marker_id=abc,reason=ensure_clean_on_exit_failed`
+        # — both tokens are needed so `manual_only?` can route on
+        # `reason` while `marker_id` remains the race-safe clear
+        # guard). Split each pair on the first `=` so a value like
+        # `foo=bar=baz` keeps the trailing `=baz` intact.
         def self.attrs_from_match_attr(match_attr)
-          return nil unless match_attr.to_s.include?("=")
+          raw = match_attr.to_s
+          return nil unless raw.include?("=")
 
-          key, value = match_attr.to_s.split("=", 2)
-          { key => value }
+          attrs = {}
+          raw.split(",").each do |pair|
+            next unless pair.include?("=")
+
+            key, value = pair.split("=", 2)
+            key = key.to_s.strip
+            attrs[key] = value unless key.empty?
+          end
+          attrs.empty? ? nil : attrs
         end
 
         def self.retry_verb_for_stage(stage)

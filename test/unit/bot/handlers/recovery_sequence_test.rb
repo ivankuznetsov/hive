@@ -127,6 +127,26 @@ class HiveBotRecoverySequenceTest < Minitest::Test
     assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
   end
 
+  # Real-world callback_data carries BOTH `marker_id=<hex>` (the
+  # race-safe clear guard from `Hive::Markers.error_recovery_match_attr`)
+  # AND `reason=<...>` (so manual_only? can route on reason without
+  # re-reading the state file). Before F1, error_recovery_match_attr
+  # returned `marker_id=<hex>` alone, attrs_from_match_attr
+  # reconstructed `{ "marker_id" => "<hex>" }` with no `reason`, and
+  # the manual-only check fell through to the dispatch path — sending
+  # a retry against a dirty worktree.
+  def test_build_short_circuits_on_marker_id_plus_reason_match_attr
+    result = Hive::Bot::Handlers::RecoverySequence.build(
+      project: "hive", slug: "stuck-260528-eeee", stage: "8-finalize",
+      marker: "error",
+      match_attr: "marker_id=abc123,reason=ensure_clean_on_exit_failed",
+      result_class: Result, clear_keyboard: false
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
+  end
+
   # Other `:error` reasons keep the existing retry behaviour (clear +
   # retry verb) — the new manual-only routing must be narrowly scoped.
   def test_build_still_dispatches_for_other_error_reasons

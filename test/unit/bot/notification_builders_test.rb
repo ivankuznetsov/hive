@@ -196,12 +196,20 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "review_stale must drive recovery_match_attr toward the pass=<n> key")
   end
 
-  def test_recovery_match_attr_error_prefers_marker_id
+  def test_recovery_match_attr_error_encodes_marker_id_and_reason
     attrs = { "reason" => "exit_code", "exit_code" => "137", "marker_id" => "err-137" }
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:marker_id=err-137\z/, autofix,
-                 "generic `error` marker must prefer the high-cardinality marker_id guard")
+    # F1: when a marker_id is present, encode `marker_id=<hex>,reason=<r>` as
+    # a comma-separated pair so the callback handler's attrs_from_match_attr
+    # round-trip reconstructs both keys. manual_only? gates on `reason` to
+    # refuse dirty_worktree / ensure_clean_on_exit_failed retries on the
+    # inline-button path. marker_id stays the LEADING token so AlertStore's
+    # first-token guard (parse_match_attr) keeps using it as the race-safe
+    # invalidation key.
+    assert_match(/:marker_id=err-137,reason=exit_code\z/, autofix,
+                 "generic `error` marker must carry marker_id (race-safe guard) + reason " \
+                 "(manual-only routing key), leading with marker_id")
   end
 
   def test_recovery_match_attr_error_legacy_falls_back_to_observed_attrs

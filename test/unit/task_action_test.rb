@@ -1325,14 +1325,20 @@ class TaskActionTest < Minitest::Test
     error_suggested = error_diagnostic.fetch("suggested_next_action")
 
     assert_equal "retry", error_suggested.fetch("kind")
+    # F1: `error_recovery_match_attr` now encodes `marker_id` + `reason` as a
+    # comma-separated pair so the bot's inline-button callback path can route
+    # `manual_only?` on `reason` without re-reading the state file. The
+    # markers-clear CLI handles comma-separated pairs natively (parse_match_attrs
+    # in lib/hive/commands/markers.rb), so the encoded form is consumer-safe.
     assert_equal [
       "hive", "markers", "clear", error_task.folder,
-      "--name", "ERROR", "--match-attr", "marker_id=err-70",
+      "--name", "ERROR", "--match-attr", "marker_id=err-70,reason=agent_failed",
       "&&", "hive", "run", error_task.folder
     ], Shellwords.split(error_suggested.fetch("command"))
     refute_includes error_diagnostic.fetch("summary"), "marker_id"
     refute_includes error_diagnostic.fetch("detail"), "marker_id"
-    assert_includes Shellwords.split(error_suggested.fetch("command")), "marker_id=err-70"
+    assert_includes Shellwords.split(error_suggested.fetch("command")),
+                    "marker_id=err-70,reason=agent_failed"
 
     legacy_error_suggested = Hive::TaskAction.for(
       error_task,

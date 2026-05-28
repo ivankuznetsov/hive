@@ -60,6 +60,24 @@ If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Veri
 
 To have Claude Code, Codex, or another agent CLI install Hive for you (with OS detection, channel selection, Apache Hive collision handling, and `hive init` follow-up), paste the prompt at [install.md](install.md) into the agent. It's the canonical source for agent-driven install — keep it pinned in your agent's context if you reinstall often.
 
+## Works with OpenClaw.ai
+
+Hive includes OpenClaw skill definitions under [openclaw/skills](openclaw/skills) so OpenClaw agents can invoke Hive through slash commands such as `/hive`, `/plan`, `/work`, and `/ce-review`.
+
+Install the Hive CLI first using one of the channels above, then install the umbrella skill from a checkout:
+
+```bash
+openclaw skills install ./openclaw/skills/hive --as hive
+```
+
+After the skills are published to ClawHub, the intended marketplace install is:
+
+```bash
+openclaw skills install hive
+```
+
+Optional shortcut skills are published as separate ClawHub slugs, for example `hive-plan`, `hive-work`, and `hive-ce-review`. See [openclaw/README.md](openclaw/README.md) for the full skill table, local install loop, and publish checklist.
+
 ## Five-Minute TUI Getting Started
 
 The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is where you watch the queue and answer only when Hive needs human input. You do not need to learn the stage commands on day one.

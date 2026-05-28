@@ -283,6 +283,16 @@ redispatch.
 **Refreshed pages:**
 - [[commands/bot]]
 
+## [2026-05-28T20:50:00Z] openclaw — in-tree skill bundle
+
+**Action:** Added `openclaw/skills/` as Hive's OpenClaw skill surface. The bundle uses an umbrella `/hive` skill for arbitrary `hive ...` commands plus shortcuts for the day-to-day workflow (`/plan`, `/work`, `/ce-review`, and related stage/finding/admin helpers). Each skill preflights `command -v hive`, documents safe argument passing, and dispatches to the existing CLI instead of adding an OpenClaw TypeScript plugin runtime.
+
+**Docs:** `README.md` now has a "Works with OpenClaw.ai" section. `openclaw/README.md` records the Skills-vs-Plugin recommendation, the local install commands, planned ClawHub slugs, and the dry-run publish loop. ClawHub publication and listing evidence remain external maintainer steps.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
 ## [2026-05-27T00:00:00Z] release — implement Homebrew + AUR publishing (gem-based)
 
 **Action:** Implemented the brew/AUR last mile (per ADR-032). Added `packaging/render.rb` — one fail-closed ERB renderer for both the Homebrew formula and the AUR PKGBUILD. Replaced the `exit 1` AUR placeholder in `release.yml` with a real signature-gated `aur-publish` container job (pinned cosign identity, `makepkg --printsrcinfo`-generated `.SRCINFO`, idempotent push). Deleted the stale tebako `.SRCINFO.template`. Created the `ivankuznetsov/homebrew-hive` tap (serving v0.1.0). Added the `docs/RELEASING.md` maintainer runbook. Rewrote `gaps.md` "Release install follow-ups" §1: automation built; remaining work is the human AUR account/key/bootstrap + secrets + `v*` tag protection.

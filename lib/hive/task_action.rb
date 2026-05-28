@@ -816,6 +816,18 @@ module Hive
         return { "kind" => "manual_fix", "command" => nil }
       end
 
+      # CleanExit's `ensure_clean_on_exit_failed` is operator-resolves-
+      # the-worktree territory: scope-violating or signing-failed
+      # residue needs human inspection. Emit `manual_fix` with
+      # `command:null` so polling agents see the explicit
+      # "do not auto-retry" signal (the bot's manual-only routing in
+      # `RecoverySequence` already refuses to dispatch a retry verb
+      # for this reason; the JSON payload mirrors that decision so
+      # CLI-driven consumers don't try to construct one themselves).
+      if clean_exit_manual_failure?
+        return { "kind" => "manual_fix", "command" => nil }
+      end
+
       cmd = retry_command_string
       return nil if cmd.nil?
 
@@ -969,6 +981,16 @@ module Hive
 
     def auto_commit_manual_failure?
       marker.name == :review_error && AUTO_COMMIT_MANUAL_FAILURE_REASONS.include?(marker.attrs["reason"].to_s)
+    end
+
+    # `:error reason=ensure_clean_on_exit_failed` is the CleanExit
+    # invariant refusing to auto-commit residue: either the staged
+    # paths fell outside `review.fix.auto_commit.scope_check`, or
+    # `git add` / `git commit` / `git status` failed or timed out.
+    # Operator must inspect the worktree before any retry; there is
+    # no safe automated command to dispatch.
+    def clean_exit_manual_failure?
+      marker.name == :error && marker.attrs["reason"].to_s == "ensure_clean_on_exit_failed"
     end
 
     def legacy_execute_findings?

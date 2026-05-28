@@ -298,6 +298,18 @@ module Hive
         "log_max_files" => 5,
         "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"
       },
+      # Stage-level invariants enforced by `Hive::Stages::Base.with_stage_events`.
+      # `ensure_clean_on_exit` (default true) makes worktree-owning stages
+      # — `4-execute`, `6-review`, `8-finalize` — fail loudly when they
+      # leave residue at stage exit. Residue that passes
+      # `review.fix.auto_commit.scope_check` is auto-committed as
+      # `chore(<stage>): commit residual worktree changes`; out-of-scope
+      # residue surfaces as `:error reason=ensure_clean_on_exit_failed`.
+      # Set to `false` to opt the entire invariant out (not recommended
+      # outside legacy projects).
+      "stages" => {
+        "ensure_clean_on_exit" => true
+      },
       # Auto-rebase pre-step for `hive run` (plan
       # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).
       # Detects drift behind origin/<default_branch>, fetches, attempts

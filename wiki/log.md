@@ -2,6 +2,44 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T13:50:00Z] fix — CleanExit follow-ups: bot callback reason encoding + agent-actionable next_action
+
+**Action:** Two further CleanExit fixes:
+
+1. **`Hive::Markers.error_recovery_match_attr` encodes both `marker_id` and `reason`** when both are present (comma-separated, `marker_id=...,reason=...`). Telegram inline-button callbacks now reconstruct enough attrs for `Hive::Bot::Handlers::RecoverySequence.manual_only?` to refuse `dirty_worktree` / `ensure_clean_on_exit_failed` — previously the callback path only carried `marker_id=<hex>` and the manual-only check (which reads `attrs["reason"]`) never matched, so the bot kept dispatching the retry verb. `Hive::Bot::AlertStore.parse_match_attr` keeps using the leading token (`marker_id=...`) as its race-safe invalidation guard.
+2. **`hive run --json` next_action for `:error reason=ensure_clean_on_exit_failed`** now emits an `EDIT` envelope (target = worktree path, `residue_paths` parsed as an array, `instructions` carrying the canonical recovery one-liner, `markers_to_clear: ["error"]`, `rerun_with` set). `Hive::TaskAction#suggested_next_action_payload` gets a `clean_exit_manual_failure?` predicate returning `{kind: "manual_fix", command: nil}` — mirroring the `auto_commit_manual_failure?` shape so polling consumers see the explicit "do not auto-retry" signal that matches the bot's manual-only routing decision.
+
+**Refreshed pages:**
+- [[bot]] — `RecoverySequence` now refuses inline-button retries on the new manual-only reasons via the comma-encoded `match_attr` round-trip.
+
+## [2026-05-28T13:30:00Z] fix — CleanExit follow-ups: stale result[:commit], ConfigError surfacing, 300s git timeout
+
+**Action:** Three follow-up fixes to the CleanExit invariant landed today:
+
+1. **`enforce_clean_exit!` clears stale `result[:commit]`** — when CleanExit overwrites a runner's success marker with `ensure_clean_on_exit_failed`, `Hive::Stages::Base#enforce_clean_exit!` now returns `{status:, overwrote_marker:}`, and `with_stage_events` mutates `result[:commit] = "ensure_clean_on_exit_failed"` + `result[:status] = :error` so `commands/run.rb#commit_after` writes a hive-state commit matching the on-disk marker instead of a stale `"review_complete"`.
+2. **`Hive::ConfigError` no longer silently dropped** — invalid `review.fix.auto_commit.sign_policy` config now overwrites the marker to `:error reason=ensure_clean_on_exit_failed detail="invalid sign_policy config: ..."` (200-char truncated) instead of falling into the generic `StandardError` warn-and-continue branch. Other `StandardError` keeps the warn+nil transient path.
+3. **300s timeout on clean-exit git ops** — `CleanExit.porcelain_status` (`git status --porcelain`), `CleanExit.run!` add-step (`git add -A`), `CleanExit.failure_with_unstage` (`git reset HEAD --`), `AutoCommit.staged_auto_commit_paths` (`git diff --cached --name-only`), and `AutoCommit.auto_commit_failure_with_unstage` (`git reset HEAD --`) are now bounded by `AutoCommit.capture_git_with_timeout` (300s via `Timeout.timeout` around `Open3.capture3`). A hung pre-commit hook or frozen pager surfaces as `{success: false, timed_out: true, message: "<label> timed out after 300s"}` propagated as `:git_failed`, causing the canonical `ensure_clean_on_exit_failed` marker.
+
+**Refreshed pages:**
+- [[state-model]] — marker-grammar row for `ensure_clean_on_exit_failed` now spells out the `detail=` carrier for the ConfigError variant, the 300s timeout on git ops, and the `result[:commit]` rewrite that keeps the hive-state commit aligned with the on-disk marker.
+
+## [2026-05-28T12:00:00Z] feat — Hive::Stages::CleanExit invariant + ensure_clean_on_exit config + bot manual-only routing
+
+**Action:** Shipped the clean-worktree-on-exit invariant (`lib/hive/stages/clean_exit.rb`) as a `with_stage_events` post-yield hook gated on the new global config key `stages.ensure_clean_on_exit` (default `true`). Hooks every stage in `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`; PAUSE_MARKERS (currently `:execute_waiting`, `:review_waiting`) skip enforcement. Behavior: on a clean worktree do nothing; on dirty residue that is fully inside `review.fix.auto_commit.scope_check.allowed_paths`, auto-commit via the shared `Hive::Stages::AutoCommit` primitives so per-pass review-fix and stage-exit share one implementation; on scope-violating or git-failed residue, overwrite the current marker to `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> -->`. Finalize now also runs CleanExit as an *entry* backstop so 6-review residue self-heals before finalize logic begins. The bot routes `ensure_clean_on_exit_failed` (alongside the legacy `dirty_worktree`) into the manual-only reply path — no inline retry button — because the residue requires operator inspection. CleanExit + finalize's residue-log writer keep the marker grammar in `Hive::Markers::KNOWN_NAMES` honest by reusing the existing `ERROR` name with a new `reason` attr.
+
+**New/refreshed pages:**
+- [[stages/finalize]] — Precondition #4 rewritten to describe the entry+exit CleanExit invariant and the new `ensure_clean_on_exit_failed` marker shape.
+- [[state-model]] — marker grammar row updated to mention `ensure_clean_on_exit_failed` with `residue_paths` attr; per-project config schema documents `stages.ensure_clean_on_exit`.
+- [[stages/review]] — Phase 4 / AutoCommit ownership now also called out as the implementation shared by the stage-exit invariant.
+- [[bot]] — manual-only reply enrichment notes that `dirty_worktree` and `ensure_clean_on_exit_failed` both route to the manual path.
+
+## [2026-05-28T10:30:00Z] refactor — extract Hive::Stages::AutoCommit from Review
+
+**Action:** Pure-extract of the per-pass auto-commit primitives (scope-check, sign-policy, git-commit invocation, signing-error pattern set, unstage-on-failure) out of `Hive::Stages::Review` into `lib/hive/stages/auto_commit.rb` so the upcoming stage-exit `CleanExit` invariant can share one implementation. Review's behavior is byte-identical — same `fix(review): apply pass NN findings` commit message + Hive-Fix-* trailers + `auto_commit_fix_worktree` flow; Review's in-file consumers now delegate to `AutoCommit` module-functions, and legacy `Review::AUTO_COMMIT_*` constants remain as aliases.
+
+**Refreshed pages:**
+- [[stages/review]] — source list now includes `lib/hive/stages/auto_commit.rb`; Phase 4 prose names the module as the shared owner of the scope/sign/commit primitives.
+
 ## [2026-05-28T10:00:00Z] fix(daemon) — review-fix delta on dispatch-baseline persistence
 
 **Action:** Addressed ce-code-review findings on the persistence PR. P0: four newly-written dispatcher tests were silently dropped because they sat below `private` — Minitest only discovers public methods, so the regression that motivates the whole file had zero behavioral coverage in CI; reordered so tests stay public above `private`. P2: closed an FD leak in `DispatchBaselines#acquire_lock` (flock-raise after `File.open` succeeded skipped the close — symmetric to the existing `release_lock` fix). P2: added `:daemon_dispatch_baselines_loaded` (boot-time signal with entry count + suspend flag) and `:daemon_dispatch_baselines_newer_schema_suspended` (positive signal that downgrade protection is engaged), so a silently-disabled persistence layer cannot mask the very regression it exists to prevent. P2: made `prune_dispatch_baselines(scope_projects:)` REQUIRED (was nil-defaulted) — a future caller forgetting it would have silently re-stranded answered tasks across per-project status errors. P2: moved the broad `rescue StandardError` defense-in-depth from `ConcurrencyController#persist_dispatch_baselines!` INTO `DispatchBaselines#write` itself, so the store now owns its entire error surface (controller no longer needs a `logger:` kwarg). P3 cleanups: dropped the unreachable `version < SCHEMA_VERSION` load branch, tightened vacuous test assertions (release_lock close-attempted sentinel, root-safe write-failure test via `file_as_parent`), and rewrote `test_nil_store_keeps_state_in_memory` to assert on real behavior instead of a circular `Dir.glob`. Updated [[modules/daemon]]'s failure-mode-visibility paragraph and added the scope-projects-required note.

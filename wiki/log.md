@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T12:00:00Z] feat — Hive::Stages::CleanExit invariant + ensure_clean_on_exit config + bot manual-only routing
+
+**Action:** Shipped the clean-worktree-on-exit invariant (`lib/hive/stages/clean_exit.rb`) as a `with_stage_events` post-yield hook gated on the new global config key `stages.ensure_clean_on_exit` (default `true`). Hooks every stage in `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`; PAUSE_MARKERS (currently `:execute_waiting`, `:review_waiting`) skip enforcement. Behavior: on a clean worktree do nothing; on dirty residue that is fully inside `review.fix.auto_commit.scope_check.allowed_paths`, auto-commit via the shared `Hive::Stages::AutoCommit` primitives so per-pass review-fix and stage-exit share one implementation; on scope-violating or git-failed residue, overwrite the current marker to `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> -->`. Finalize now also runs CleanExit as an *entry* backstop so 6-review residue self-heals before finalize logic begins. The bot routes `ensure_clean_on_exit_failed` (alongside the legacy `dirty_worktree`) into the manual-only reply path — no inline retry button — because the residue requires operator inspection. CleanExit + finalize's residue-log writer keep the marker grammar in `Hive::Markers::KNOWN_NAMES` honest by reusing the existing `ERROR` name with a new `reason` attr.
+
+**New/refreshed pages:**
+- [[stages/finalize]] — Precondition #4 rewritten to describe the entry+exit CleanExit invariant and the new `ensure_clean_on_exit_failed` marker shape.
+- [[state-model]] — marker grammar row updated to mention `ensure_clean_on_exit_failed` with `residue_paths` attr; per-project config schema documents `stages.ensure_clean_on_exit`.
+- [[stages/review]] — Phase 4 / AutoCommit ownership now also called out as the implementation shared by the stage-exit invariant.
+- [[bot]] — manual-only reply enrichment notes that `dirty_worktree` and `ensure_clean_on_exit_failed` both route to the manual path.
+
 ## [2026-05-28T10:30:00Z] refactor — extract Hive::Stages::AutoCommit from Review
 
 **Action:** Pure-extract of the per-pass auto-commit primitives (scope-check, sign-policy, git-commit invocation, signing-error pattern set, unstage-on-failure) out of `Hive::Stages::Review` into `lib/hive/stages/auto_commit.rb` so the upcoming stage-exit `CleanExit` invariant can share one implementation. Review's behavior is byte-identical — same `fix(review): apply pass NN findings` commit message + Hive-Fix-* trailers + `auto_commit_fix_worktree` flow; Review's in-file consumers now delegate to `AutoCommit` module-functions, and legacy `Review::AUTO_COMMIT_*` constants remain as aliases.

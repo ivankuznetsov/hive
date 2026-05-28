@@ -27,6 +27,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots, half-migrated projects, and rows with `live_task_lock: true`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete`. On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
+| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by external callers (today: the Telegram bot via `Hive::Bot::DispatchRequestWriter`) and consumed by the dispatcher's tick loop. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: the bot writes, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail`). Owns the PID file + signal-based stop/reload. |
 
 ## Wiring
@@ -36,14 +37,23 @@ hive daemon start
   └─ Hive::Commands::Daemon
        ├─ writes ~/Dev/hive/.daemon.pid
        └─ Hive::Daemon::Dispatcher.run_forever
-            ├─ Hive::Daemon::Logger      (~/Dev/hive/logs/daemon.log, JSON-line)
+            ├─ Hive::Daemon::Logger              (~/Dev/hive/logs/daemon.log, JSON-line)
             ├─ Hive::Daemon::ConcurrencyController
-            ├─ Hive::Daemon::ChildSupervisor   (Process.spawn pgroup: true)
-            ├─ Hive::Daemon::StatusConsumer    (Open3.capture3 hive status --json)
-            ├─ Hive::Daemon::PrMergeWatcher    (Open3.capture3 gh pr view)
-            ├─ Hive::Daemon::StaleAgentHealer  (AGENT_WORKING repair)
-            └─ Hive::Daemon::Policy            (pure decisions)
+            ├─ Hive::Daemon::ChildSupervisor     (Process.spawn pgroup: true)
+            ├─ Hive::Daemon::StatusConsumer      (Open3.capture3 hive status --json)
+            ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
+            ├─ Hive::Daemon::PrMergeWatcher      (Open3.capture3 gh pr view)
+            ├─ Hive::Daemon::StaleAgentHealer    (AGENT_WORKING repair)
+            └─ Hive::Daemon::Policy              (pure decisions)
 ```
+
+Each tick runs in order: reap completed children → fetch status →
+**process dispatch requests** → handle PR-merge watcher → per-row
+dispatch → prune baselines. Dispatch requests come BEFORE the
+row-scan so a slug whose request just dispatched this tick is
+already in-flight in the controller and the row scan's per-slug
+in-flight gate (`controller.running_task?`) keeps the same tick
+from double-spawning.
 
 `Hive::Daemon::Policy` and `Hive::Daemon::ConcurrencyController` have no
 I/O at all — fully unit-testable without forking. The other modules
@@ -170,6 +180,59 @@ between a bot-dispatched brainstorm's `WAITING` write and the user's
 answer, no baseline was ever recorded, so the answer becomes the baseline
 on first start and the task waits for the next edit. The daemon is
 normally up, so the window is tiny; the operator can re-save / `touch`.
+
+## Single-dispatcher: bot writes requests, daemon dispatches
+
+Before plan 2026-05-28-002, both the daemon AND the Telegram bot
+could spawn `hive run`-class verbs. The daemon tracked an in-memory
+`last_dispatched_mtime` baseline per `(project, slug)` and refreshed
+it on every reap — but only on reaps of children IT spawned. The
+bot's `hive run` child was reaped by the bot's `ChildSupervisor`,
+so the daemon never saw the post-completion mtime bump from the
+agent's own write. On the next tick the row's mtime exceeded the
+stale baseline; Policy returned `:dispatch`; the daemon spawned a
+redundant runner that held the per-task lock for 1-2 min, during
+which the bot rejected legitimate user answers with "Try again —
+another run holds the lock".
+
+The fix collapses the two dispatchers into one. The bot is
+producer-only: it writes a JSON request file via
+`Hive::Bot::DispatchRequestWriter.write!` into
+`<state_home>/dispatch_requests/`. The daemon's tick loop consumes
+the queue via `Hive::Daemon::DispatchRequestQueue.pending`,
+validates the argv against an allowlist
+(`run develop brainstorm plan review open-pr artifacts finalize
+archive markers`), threads the `request_id` through `spawn → reap`
+so `reap_completed` can unlink the file and log the lifecycle:
+
+```
+:dispatch_request_observed   request_id=… project=… slug=…
+:dispatch_request_dispatched pid=… command=…   (only when dispatched)
+:dispatch_request_blocked    reason=in_flight|cooldown|…
+:dispatch_request_completed  pid=… exit_code=… elapsed_sec=…
+:dispatch_request_rejected   reason=invalid_argv|unknown_project|…
+:dispatch_request_expired    created_at=…
+```
+
+Lifecycle gates inside `process_dispatch_requests`:
+
+1. Allowlist (`valid_argv?`) — invalid → reject + remove.
+2. Expiry (`DispatchRequestQueue::EXPIRY_SEC` = 600s) — old → expire + remove.
+3. `find_project` lookup — unknown → reject + remove.
+4. `controller.running_task?` — already in flight for this slug →
+   blocked, file stays for the next tick.
+5. `controller.can_dispatch?` gate (caps / cooldown / quarantine) —
+   blocked → file stays for the next tick.
+6. Otherwise → spawn via `dispatch_command`, threading `request_id`
+   into `ChildSupervisor#spawn` and `ChildExit#request_id`.
+
+`reap_completed` always refreshes the controller's
+`last_dispatched_mtime` baseline (no longer just for daemon-spawned
+children — the bot doesn't spawn them anymore). The bug dissolves:
+the same code that observes the mtime is the only producer of the
+spawn.
+
+See [[architecture]] §"Dispatch flow" for the cross-layer picture.
 
 ## Self-reexec on source drift (ADR-031)
 

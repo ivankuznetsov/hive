@@ -16,6 +16,61 @@ Append-only log of all wiki operations.
 **Refreshed pages:**
 - [[modules/bot]] — `BrainstormParser` and `BrainstormAnswerWriter` rows expanded to describe the lenient-A-header rule, Q-context-aware slot location, and the `:answer_slot_missing` / `:question_not_found` mapping.
 
+## [2026-05-28T21:00:00Z] refactor — single-dispatcher via file-backed dispatch-request queue (plan 2026-05-28-002)
+
+**Action:** Eliminated the bot↔daemon dual-writer race for
+`hive run`-class verbs. Before: both the daemon AND the bot could
+spawn `hive run`, but only the daemon refreshed its
+`last_dispatched_mtime` baseline on reap. Bot-spawned reaps were
+invisible to the daemon, so the agent's own write to brainstorm.md
+looked like a new user edit on the next tick → redundant redispatch
+→ task lock held 1-2 min → bot rejects user answers with "Try again
+— another run holds the lock". Smoking gun on 2026-05-28 18:13:14
+→ 18:13:44 in `daemon.log`.
+
+The fix collapses the two dispatchers into one:
+
+- New `Hive::Daemon::DispatchRequestQueue` (`lib/hive/daemon/dispatch_request_queue.rb`):
+  file-backed queue at `<state_home>/dispatch_requests/<ts>-<id>.json`,
+  allowlists `run develop brainstorm plan review open-pr artifacts
+  finalize archive markers`. Schema `hive-dispatch-request` v1.
+- New `Hive::Bot::DispatchRequestWriter` (`lib/hive/bot/dispatch_request_writer.rb`):
+  atomic tmp+rename JSON write. Validates argv against the queue's
+  allowlist at the call site too.
+- `Hive::Daemon::Dispatcher#tick` runs
+  `process_dispatch_requests(now:)` BEFORE the per-row scan. Gates
+  per request: allowlist → expiry (10 min) → project lookup →
+  per-slug in-flight → concurrency caps → spawn. Threads
+  `request_id` through `ChildSupervisor#spawn` and `ChildExit` so
+  `reap_completed` can unlink the file and log
+  `:dispatch_request_completed`.
+- `Hive::Bot::Supervisor#execute_dispatch` rewrites queue-routable
+  argv into `DispatchRequestWriter.write!`; the bot stops being a
+  child-process launcher for those verbs.
+- Per-slug in-flight gate added to `dispatch_or_block` so the
+  row scan can't double-spawn a slug whose request just dispatched
+  earlier in the same tick.
+
+New telemetry events in `daemon.log`:
+`dispatch_request_observed/_dispatched/_completed/_blocked/
+_rejected/_expired`. Bot's `:dispatched_command` event gains a
+`via=queue` tag and `request_id` to distinguish the two paths.
+
+**Tests:** four integration tests including
+`test/integration/regression_redundant_redispatch_test.rb` which
+replays the exact 18:13 sequence and asserts no redundant
+redispatch.
+
+**Refreshed pages:**
+- [[modules/daemon]] — new module-map row for
+  `DispatchRequestQueue`; new "Single-dispatcher" section describing
+  per-step gates + telemetry.
+- [[modules/bot]] — new module-map row for `DispatchRequestWriter`;
+  new "Single-dispatcher invariant" section with the audit
+  command.
+- [[architecture]] — new "Dispatch flow" section with the bot →
+  queue → daemon → child diagram.
+
 ## [2026-05-28T13:50:00Z] fix — CleanExit follow-ups: bot callback reason encoding + agent-actionable next_action
 
 **Action:** Two further CleanExit fixes:

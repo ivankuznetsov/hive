@@ -45,21 +45,24 @@ If `hive` is missing, install it from the main project README and retry.
 
 ## Local Install For Testing
 
-From the Hive repository root:
-
-```bash
-openclaw skills install ./openclaw/skills/hive --as hive
-openclaw skills install ./openclaw/skills/plan --as plan
-openclaw skills install ./openclaw/skills/work --as work
-openclaw skills install ./openclaw/skills/ce-review --as ce-review
-```
-
-To install every checked-in shortcut from a local checkout:
+From the Hive repository root, install every checked-in skill in a single
+loop (set `DRY_RUN=1` to preview the commands without writing):
 
 ```bash
 for skill in openclaw/skills/*; do
-  openclaw skills install "$skill" --as "$(basename "$skill")"
+  name="$(basename "$skill")"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo openclaw skills install "$skill" --as "$name"
+  else
+    openclaw skills install "$skill" --as "$name"
+  fi
 done
+```
+
+To install one skill on its own (e.g. while iterating on the umbrella):
+
+```bash
+openclaw skills install ./openclaw/skills/hive --as hive
 ```
 
 ## Planned ClawHub Slugs
@@ -92,10 +95,16 @@ The intended published slugs are:
 | `hive-init` | `/init` | `hive init` |
 
 `/hive-status` is prefixed because OpenClaw already has a built-in `/status`
-command. Destructive or rarely used admin commands such as `hive drop`,
-`hive uninstall`, `hive update`, `hive forget`, `hive prune`, `hive migrate`,
-and `hive metrics` remain available through `/hive ...`, where the agent sees
-the complete command before execution.
+command. `hive tui` is intentionally not shipped as a skill — it is a
+human-only interactive dashboard and rejects `--json` with EX_USAGE (64);
+agents should drive the same data via `hive status --json` and the typed
+workflow verbs. `hive version` is omitted from the bundle because
+`hive --version` (already exposed through the umbrella `/hive`) covers
+that need without a dedicated slug. Destructive or rarely used admin
+commands such as `hive drop`, `hive uninstall`, `hive update`,
+`hive forget`, `hive prune`, `hive migrate`, and `hive metrics` remain
+available through `/hive ...`, where the agent sees the complete
+command before execution.
 
 ## Publish Checklist
 

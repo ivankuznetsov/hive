@@ -147,6 +147,52 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  # A hung pre-commit hook or frozen git op used to pin the runner
+  # indefinitely because `Open3.capture3` had no upper bound. The
+  # bounded `capture_git_with_timeout` wrapper translates a
+  # `Timeout::Error` into a `:git_failed` envelope with
+  # `timed_out: true` and the canonical "timed out after 300s" message,
+  # so callers (CleanExit, the with_stage_events hook) can mark the
+  # task `:error reason=ensure_clean_on_exit_failed` instead of
+  # blocking forever.
+  def test_porcelain_status_timeout_surfaces_git_failed
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+
+      result = with_open3_capture3_stub(
+        ->(argv) { argv.include?("status") }
+      ) do
+        Hive::Stages::CleanExit.run!(
+          worktree_path: worktree, stage: "6-review",
+          task: fake_task, cfg: @default_cfg
+        )
+      end
+
+      assert_equal :git_failed, result[:status],
+                   "a timed-out git status must surface as :git_failed"
+      assert_match(/timed out after 300s/, result[:message])
+    end
+  end
+
+  def test_git_add_timeout_surfaces_git_failed_with_unstage
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.write(File.join(worktree, "lib.rb"), "x\n")
+
+      result = with_open3_capture3_stub(
+        ->(argv) { argv.include?("add") && argv.include?("-A") }
+      ) do
+        Hive::Stages::CleanExit.run!(
+          worktree_path: worktree, stage: "6-review",
+          task: fake_task, cfg: @default_cfg
+        )
+      end
+
+      assert_equal :git_failed, result[:status]
+      assert_match(/git add -A timed out/, result[:message])
+    end
+  end
+
   def test_commit_message_template_shape_is_byte_stable
     msg = Hive::Stages::CleanExit.commit_message(
       task: fake_task("slugged-260528-aaaa"),
@@ -170,5 +216,23 @@ class HiveStagesCleanExitTest < Minitest::Test
   def deep_dup_default_cfg
     require "yaml"
     YAML.unsafe_load(YAML.dump(Hive::Config::DEFAULTS))
+  end
+
+  # Replace `Open3.capture3` with a stub that raises `Timeout::Error`
+  # whenever `predicate.call(argv)` returns truthy; otherwise delegates
+  # to the real implementation. Restores the original method on exit
+  # even when the block raises.
+  def with_open3_capture3_stub(predicate)
+    original = Open3.method(:capture3)
+    Open3.singleton_class.send(:define_method, :capture3) do |*argv, **kwargs|
+      raise Timeout::Error if predicate.call(argv)
+
+      original.call(*argv, **kwargs)
+    end
+    yield
+  ensure
+    Open3.singleton_class.send(:define_method, :capture3) do |*argv, **kwargs|
+      original.call(*argv, **kwargs)
+    end
   end
 end

@@ -41,11 +41,15 @@ module Hive
         # commit, an extracted helper) that must land alongside tracked
         # edits. The scope check inspects the exact staged path set before
         # any commit fires.
-        add_out, add_err, add_status = Open3.capture3("git", "-C", worktree_path, "add", "-A")
-        unless add_status.success?
+        add = AutoCommit.capture_git_with_timeout(
+          [ "git", "-C", worktree_path, "add", "-A" ],
+          label: "git add -A"
+        )
+        unless add[:success]
           return failure_with_unstage(
             worktree_path, :git_failed,
-            message: AutoCommit.git_command_message("git add -A", add_out, add_err)
+            message: add[:message],
+            timed_out: add[:timed_out]
           )
         end
 
@@ -105,33 +109,38 @@ module Hive
       end
 
       def porcelain_status(worktree_path)
-        out, err, status = Open3.capture3("git", "-C", worktree_path, "status", "--porcelain")
-        unless status.success?
-          return {
-            status: :git_failed,
-            message: AutoCommit.git_command_message("git status --porcelain", out, err)
-          }
+        result = AutoCommit.capture_git_with_timeout(
+          [ "git", "-C", worktree_path, "status", "--porcelain" ],
+          label: "git status --porcelain"
+        )
+        unless result[:success]
+          envelope = { status: :git_failed, message: result[:message] }
+          envelope[:timed_out] = true if result[:timed_out]
+          return envelope
         end
 
-        { status: :ok, porcelain: out.to_s }
+        { status: :ok, porcelain: result[:stdout].to_s }
       end
 
       # Wrap a non-:auto_committed result in an unstage step so a failure
-      # mid-commit doesn't leave the index loaded. The Open3 reset mirrors
-      # Hive::Stages::AutoCommit.auto_commit_failure_with_unstage but
-      # returns a CleanExit-shaped envelope (status: :scope_violation /
-      # :git_failed) so callers can dispatch on a single key.
-      def failure_with_unstage(worktree_path, status, message:, paths: nil)
-        reset_out, reset_err, reset_status = Open3.capture3(
-          "git", "-C", worktree_path, "reset", "HEAD", "--"
+      # mid-commit doesn't leave the index loaded. The reset is bounded
+      # by the same AUTO_COMMIT_OP_TIMEOUT_SEC cap so a hung reset
+      # doesn't pin the runner. Returns a CleanExit-shaped envelope
+      # (status: :scope_violation / :git_failed) so callers can
+      # dispatch on a single key.
+      def failure_with_unstage(worktree_path, status, message:, paths: nil, timed_out: false)
+        reset = AutoCommit.capture_git_with_timeout(
+          [ "git", "-C", worktree_path, "reset", "HEAD", "--" ],
+          label: "git reset HEAD --"
         )
-        unless reset_status.success?
-          message = "#{message}; " \
-                    "#{AutoCommit.git_command_message('git reset HEAD --', reset_out, reset_err)}"
+        unless reset[:success]
+          message = "#{message}; #{reset[:message]}"
+          timed_out ||= reset[:timed_out]
         end
 
         envelope = { status: status, message: message }
         envelope[:paths] = paths if paths
+        envelope[:timed_out] = true if timed_out
         envelope
       end
     end

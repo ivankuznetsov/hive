@@ -39,17 +39,55 @@ module Hive
       end
 
       def staged_auto_commit_paths(worktree_path)
-        out, err, status = Open3.capture3(
-          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "--no-renames", "-z"
+        result = capture_git_with_timeout(
+          [ "git", "-C", worktree_path, "diff", "--cached", "--name-only", "--no-renames", "-z" ],
+          label: "git diff --cached --name-only"
         )
-        unless status.success?
-          return {
+        return { success: false, message: result[:message], timed_out: result[:timed_out] } unless result[:success]
+
+        { success: true, paths: result[:stdout].split("\0").reject(&:empty?) }
+      end
+
+      # Bounded `Open3.capture3` for the auto-commit / clean-exit paths.
+      # `git status`, `git add -A`, `git reset HEAD --`, `git diff
+      # --cached --name-only` were originally `Open3.capture3` calls
+      # with no upper bound — a hung pre-commit hook or a frozen pager
+      # could pin the runner indefinitely. Use the existing
+      # `AUTO_COMMIT_OP_TIMEOUT_SEC = 300` cap so the slowest auto-
+      # commit op matches the slowest user-visible git op the runner
+      # already supports. On timeout return `timed_out: true` so
+      # callers (CleanExit etc.) surface `:error reason=
+      # ensure_clean_on_exit_failed`.
+      #
+      # Wraps `Open3.capture3` in a `Timeout.timeout` guard. When a
+      # test stubs `Open3.capture3` (current_main_coverage_gap_test.rb
+      # et al.), the stub fires inside the timeout block and returns
+      # immediately, preserving the existing stub-based test surface.
+      # The real call benefits from the bounded deadline: a hung child
+      # produces `Timeout::Error`, which we translate to
+      # `timed_out: true`.
+      def capture_git_with_timeout(argv, label:, timeout_sec: AUTO_COMMIT_OP_TIMEOUT_SEC)
+        require "timeout"
+        out, err, status = Timeout.timeout(timeout_sec) { Open3.capture3(*argv) }
+        if status.success?
+          { success: true, timed_out: false, stdout: out.to_s, stderr: err.to_s }
+        else
+          {
             success: false,
-            message: git_command_message("git diff --cached --name-only", out, err)
+            timed_out: false,
+            message: git_command_message(label, out.to_s, err.to_s),
+            stdout: out.to_s,
+            stderr: err.to_s
           }
         end
-
-        { success: true, paths: out.split("\0").reject(&:empty?) }
+      rescue Timeout::Error
+        {
+          success: false,
+          timed_out: true,
+          message: "#{label} timed out after #{AUTO_COMMIT_OP_TIMEOUT_SEC}s",
+          stdout: "",
+          stderr: ""
+        }
       end
 
       def normalize_staged_path(path)
@@ -179,11 +217,13 @@ module Hive
       end
 
       def auto_commit_failure_with_unstage(worktree_path, message, **attrs)
-        reset_out, reset_err, reset_status = Open3.capture3(
-          "git", "-C", worktree_path, "reset", "HEAD", "--"
+        reset = capture_git_with_timeout(
+          [ "git", "-C", worktree_path, "reset", "HEAD", "--" ],
+          label: "git reset HEAD --"
         )
-        unless reset_status.success?
-          message = "#{message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
+        unless reset[:success]
+          suffix = reset[:timed_out] ? reset[:message] : git_command_message("git reset HEAD --", reset[:stdout], reset[:stderr])
+          message = "#{message}; #{suffix}"
         end
 
         { success: false, message: message }.merge(attrs)

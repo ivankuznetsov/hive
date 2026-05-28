@@ -1159,4 +1159,42 @@ end
                  "a transient status failure must NOT wipe persisted baselines"
     end
   end
+
+  # Per-project errors (`not_initialised`, `missing_project_path`) cause
+  # `StatusConsumer` to drop a project from BOTH rows AND projects, even
+  # though the overall fetch is `ok: true`. Without a scope guard the prune
+  # would silently wipe every baseline for that project on the spot — the
+  # exact stranding regression. The dispatcher passes `result.projects` as
+  # the scope so an errored project keeps its baselines until it reappears.
+  def test_per_project_error_does_not_wipe_that_projects_baselines
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "writero", slug: "answered", mtime: T0 - 600)
+      seed_baseline(path, project: "errored", slug: "answered-too", mtime: T0 - 600)
+
+      writero_row = row(project: "writero", slug: "answered", stage: "2-brainstorm",
+                        action: "needs_input",
+                        command: "hive brainstorm answered --from 2-brainstorm",
+                        mtime: T0 - 600)
+      # `errored` project is filtered out of rows AND projects by the consumer
+      # — mirror that here.
+      result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [ writero_row ],
+        projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "writero", legacy_stage_dirs: []) ],
+        error: nil
+      )
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path),
+        status_result: result
+      )
+      _dispatcher.tick(now: T0)
+
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "errored", slug: "answered-too"),
+                   "a project absent from result.projects (per-project error) must NOT have its baselines pruned"
+      # Sanity: writero/answered's baseline is still there too (mtime == baseline → :skip).
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
+    end
+  end
 end

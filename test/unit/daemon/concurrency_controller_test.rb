@@ -450,4 +450,72 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
 
     assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
   end
+
+  class RecordingLogger
+    attr_reader :events
+    def initialize = @events = []
+    def event(name, **attrs) = @events << [ name, attrs ]
+  end
+
+  def test_unexpected_persistence_error_is_logged_not_silent
+    # The persist rescue is defense in depth — but it MUST be observable.
+    # Otherwise a future programmer error in the store layer silently
+    # disables persistence and re-introduces the very stranding this
+    # whole machinery prevents.
+    logger = RecordingLogger.new
+    raising_store = Object.new
+    def raising_store.load = {}
+    def raising_store.write(_map) = raise(NoMethodError, "store API drift")
+    c = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      dispatch_state: raising_store, logger: logger
+    )
+
+    c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
+
+    assert(logger.events.any? { |name, attrs|
+      name == :daemon_dispatch_baselines_unexpected_error &&
+        attrs[:error_class] == "NoMethodError"
+    }, "an unexpected persist error must surface as a typed event, not silent swallow")
+  end
+
+  # `hive status --json` skips projects with `error: not_initialised` (NFS
+  # hiccup, project being re-bootstrapped, transient race with `hive forget`)
+  # — so their tasks disappear from `result.rows` even though the overall
+  # fetch is still ok. Without a per-project scope guard the prune would
+  # wipe every baseline for that project on the spot, silently re-stranding
+  # every answered needs_input row in that project on the next first sight.
+  def test_prune_preserves_baselines_for_projects_outside_scope
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "writero", slug: "answered", mtime: T0)
+      c.observe_state_file_mtime(project: "errored", slug: "still-here", mtime: T0)
+
+      # Tick saw writero rows but `errored` project hit a per-project error
+      # → absent from both rows and projects. Scope tells the controller to
+      # leave that project's baselines alone.
+      c.prune_dispatch_baselines([ %w[writero answered] ], scope_projects: %w[writero])
+
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "errored", slug: "still-here"),
+                   "a project missing from the scope must keep its baselines"
+    end
+  end
+
+  def test_prune_without_scope_drops_all_absent_keys
+    # Back-compat: when scope_projects is omitted (nil), prune behaves as
+    # the original "drop everything not in live_keys" — used by tests and
+    # safe when the caller already filtered to a full-rows live set.
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "p", slug: "keep", mtime: T0)
+      c.observe_state_file_mtime(project: "p", slug: "drop", mtime: T0)
+
+      c.prune_dispatch_baselines([ %w[p keep] ])
+
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "keep")
+      assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
+    end
+  end
 end

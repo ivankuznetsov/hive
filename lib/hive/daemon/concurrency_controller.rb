@@ -36,7 +36,7 @@ module Hive
       attr_reader :max_concurrent_runs, :max_concurrent_per_project, :max_runs_per_day_per_project
 
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
-                     dispatch_state: nil)
+                     dispatch_state: nil, logger: nil)
         @max_concurrent_runs = max_concurrent_runs
         @max_concurrent_per_project = max_concurrent_per_project
         @max_runs_per_day_per_project = max_runs_per_day_per_project
@@ -45,6 +45,11 @@ module Hive
         # an already-answered needs_input row isn't re-stranded on first sight
         # (Policy#decide_edit relies on this baseline). nil = in-memory only.
         @dispatch_state = dispatch_state
+        # Optional daemon logger. Only used to surface the persist-rescue
+        # defense-in-depth path (`:daemon_dispatch_baselines_unexpected_error`)
+        # so a programmer error in the store layer doesn't silently swallow
+        # — the store handles its own file-I/O errors with typed events.
+        @logger = logger
 
         # pid → { project, slug, stage, command, started_at, state_file_mtime_at_dispatch }
         @running = {}
@@ -60,9 +65,11 @@ module Hive
         @quarantine = Set.new
         # Set<project> (post-CONFIG=78)
         @dropped_projects = Set.new
-        # [project, slug] → Time (mtime of state file at last dispatch).
-        # Seeded from the persisted store so a restart keeps the baselines
-        # the next tick compares against (fail-closed: {} if absent/corrupt).
+        # [project, slug] → Time (mtime LAST observed on the state file —
+        # at dispatch, post-completion refresh, or `:record_baseline` seed;
+        # see `observe_state_file_mtime` / `record_dispatch`). Seeded from
+        # the persisted store so a restart keeps the baselines the next
+        # tick compares against (fail-closed: {} if absent/corrupt).
         @last_dispatched_mtime = @dispatch_state ? @dispatch_state.load : {}
       end
 
@@ -160,13 +167,29 @@ module Hive
       # status scan, so the file doesn't grow unbounded as tasks are archived
       # or dropped. `live_keys` is the authoritative set of [project, slug]
       # pairs the dispatcher saw this tick. The dispatcher only calls this on
-      # a SUCCESSFUL fetch (never on a transient empty/failed scan) so a hiccup
-      # can't wipe baselines. A wrongly-pruned entry simply re-baselines on the
-      # next first sight — harmless unless the user answered in that window.
-      def prune_dispatch_baselines(live_keys)
+      # an overall-successful fetch (never on a transient empty/failed scan).
+      #
+      # `scope_projects` (nil = prune across all projects, set = prune only
+      # within these projects) is the dispatcher's guard against per-project
+      # status errors silently dropping baselines: `hive status --json` emits
+      # `error: "not_initialised"` (or `missing_project_path`) for projects
+      # whose path is briefly inaccessible — an NFS hiccup, a project being
+      # re-bootstrapped, a transient race with `hive forget`. Those projects
+      # are filtered out of both `Result#rows` and `Result#projects`, so
+      # `scope_projects` is bound to the latter and a project missing from
+      # the snapshot keeps its baselines untouched (otherwise re-stranding
+      # would silently return on the next first sight — the very regression
+      # this whole machinery prevents).
+      def prune_dispatch_baselines(live_keys, scope_projects: nil)
         live = live_keys.to_set
+        scope = scope_projects && scope_projects.to_set
         before = @last_dispatched_mtime.size
-        @last_dispatched_mtime.select! { |key, _value| live.include?(key) }
+        @last_dispatched_mtime.select! do |(project, slug), _value|
+          # Out-of-scope projects (errored this tick) keep their baselines.
+          next true if scope && !scope.include?(project)
+
+          live.include?([ project, slug ])
+        end
         persist_dispatch_baselines! if @last_dispatched_mtime.size != before
       end
 
@@ -258,13 +281,22 @@ module Hive
       private
 
       # Write-through the baseline map to the persisted store. Best-effort:
-      # the store already logs+degrades its own I/O errors, and this guard
-      # ensures even an unexpected error never crashes a dispatch tick — the
-      # in-memory map still serves this process; the only cost of a lost write
-      # is one task being re-baselined after the next restart.
+      # the store already logs+degrades its own file-I/O errors with typed
+      # events (`:daemon_dispatch_baselines_{corrupt,lock_error,write_error,
+      # tmp_sweep_error}`). The `rescue StandardError` here is defense in
+      # depth against everything those rescues don't catch — programmer
+      # errors (`NoMethodError` from a future store API change), encoding
+      # issues (`Encoding::CompatibilityError` on a non-UTF-8 project name),
+      # JSON serialization errors (`JSON::GeneratorError`) — so a single bad
+      # value can't crash a tick. NOT silent: we surface it as a typed event
+      # so the operator sees that persistence is broken even though dispatch
+      # kept running. (Without this, the very regression this whole machinery
+      # prevents would return invisibly on the next restart.)
       def persist_dispatch_baselines!
         @dispatch_state&.write(@last_dispatched_mtime)
-      rescue StandardError
+      rescue StandardError => e
+        @logger&.event(:daemon_dispatch_baselines_unexpected_error,
+                       error_class: e.class.name, message: e.message)
         nil
       end
 

@@ -21,10 +21,17 @@ module Hive
     # Unlike UpdateCheck::State, only ONE process writes this file (the single
     # daemon, enforced by `.daemon.pid`), so `write` persists the daemon's
     # whole map rather than doing a per-key read-modify-write. The sibling
-    # `<path>.lock` flock is kept as crash-safety/defense; a leftover lock is
-    # harmless (flock is advisory and released on process death). mtimes are
-    # stored with microsecond precision so sub-second filesystem mtimes
-    # round-trip exactly — the comparison is mtime-to-mtime, never wall-clock.
+    # `<path>.lock` flock is kept as defense in depth; a leftover lock is
+    # harmless (flock is advisory and released on process death).
+    #
+    # mtimes are serialized with `iso8601(6)` — microsecond resolution. That
+    # is sufficient given `hive status --json` emits task mtimes with bare
+    # `iso8601` (whole-second precision) at `Hive::Commands::Status`, so the
+    # LHS of `Policy#decide_edit`'s comparison is already whole-second-
+    # truncated upstream of this file. If status is ever bumped to higher
+    # precision, this serialization must follow (or be moved to two integers
+    # `tv_sec` + `tv_nsec` to stay strictly faithful). The comparison is
+    # mtime-to-mtime, never wall-clock — no clock-skew class of bug.
     class DispatchBaselines
       SCHEMA_VERSION = 1
       STALE_TMP_SEC = 60 # only sweep orphan tmp files older than this
@@ -85,9 +92,15 @@ module Hive
         {}
       end
 
-      # Persist the daemon's full baseline map atomically. No-op when there is
-      # no path (tests / in-memory mode) or when writes are suspended because
-      # the on-disk file is from a newer hive.
+      # Persist the daemon's full baseline map atomically. No-op when there
+      # is no path (tests / in-memory mode) or when writes are suspended
+      # because the on-disk file is from a newer hive. If the sibling
+      # `<path>.lock` flock cannot be acquired (exotic filesystem / EMFILE),
+      # the write still proceeds best-effort and a
+      # `:daemon_dispatch_baselines_lock_error` event is logged — single-
+      # writer is enforced by `.daemon.pid` so there is no concurrent-
+      # corruption window, only a lost durability guarantee for this one
+      # write (and atomic rename still prevents a torn destination file).
       def write(map)
         return unless @path
         return if @suspend_writes
@@ -135,17 +148,28 @@ module Hive
       def release_lock(handle)
         return unless handle
 
-        handle.flock(File::LOCK_UN)
-        handle.close
-      rescue StandardError
-        nil
+        begin
+          handle.flock(File::LOCK_UN)
+        rescue StandardError
+          nil
+        end
+        # `close` runs in its own rescue so a flock failure can't bypass the
+        # close and leak an FD over the daemon's lifetime (one write per
+        # task-lifecycle event accumulates fast if flock starts misbehaving).
+        begin
+          handle.close
+        rescue StandardError
+          nil
+        end
       end
 
       def persist!(map)
         FileUtils.mkdir_p(File.dirname(@path))
         tmp_path = File.join(File.dirname(@path), ".#{File.basename(@path)}.#{$$}.#{Thread.current.object_id}.tmp")
         File.open(tmp_path, "w") do |f|
-          f.write(JSON.pretty_generate(envelope(map)))
+          # Compact JSON — this file is machine-only (no operator hand-edits),
+          # so pretty-printing just spends bytes and fsync time for nothing.
+          f.write(JSON.generate(envelope(map)))
           f.fsync
         end
         File.rename(tmp_path, @path)
@@ -186,14 +210,19 @@ module Hive
                                                                    error_class: e.class.name, message: e.message)
       end
 
+      # Directory fsync after rename so the rename is durable on journaled
+      # filesystems. Best-effort — non-POSIX / FUSE / tmpfs can return EINVAL
+      # for `dirfd.fsync`; durability of the write itself was already done in
+      # `persist!`'s `f.fsync` before rename, so a missing dir-fsync at worst
+      # loses the rename's durability bit on an unusual crash.
       def fsync_dir(dir)
         Dir.open(dir) { |d| d.fsync }
       rescue StandardError
         nil
       end
 
-      # Microsecond precision so sub-second filesystem mtimes round-trip
-      # exactly — the daemon compares this against a live filesystem mtime.
+      # Microsecond resolution. See class doc for why µs is sufficient given
+      # `hive status --json`'s upstream whole-second mtime serialization.
       def timestamp(time)
         time.utc.iso8601(6)
       end

@@ -130,14 +130,30 @@ persists that map to `daemon_dispatch_baselines.json` under
 behind a sibling `.lock`, and a **fail-closed** load — a torn / partial /
 corrupt / newer-schema file degrades to an empty map and the daemon boots
 normally (worst case: one task is re-baselined once). The controller
-write-throughs on every baseline mutation (first-sight record, dispatch,
-post-completion refresh), so there is no batched loss window for the
-critical value; mtimes are stored at microsecond precision so the
-comparison stays mtime-to-mtime (no wall-clock / sub-second / clock-skew
-class of bug — the reason the earlier marker-`ts` approach was rejected).
-The dispatcher prunes entries absent from the live status rows once per
-**successful** tick (never on a failed/empty fetch), bounding the file to
-the live task set. Same-host only.
+write-throughs on every baseline mutation — first-sight record, dispatch,
+post-completion refresh, AND prune — so there is no batched loss window
+for the critical value; mtimes are stored at microsecond resolution,
+sufficient given upstream `hive status --json` emits whole-second mtimes.
+The comparison stays mtime-to-mtime, never wall-clock — no clock-skew
+class of bug, the reason the earlier marker-`ts` approach was rejected
+(see PR #229). The dispatcher prunes entries absent from the live status
+rows once per **successful** tick, **scoped to the projects in
+`result.projects`** — never on a failed/empty fetch, AND never wiping a
+project that hit a per-project `error: not_initialised` /
+`missing_project_path` and is absent from this tick's snapshot.
+Same-host only.
+
+**Failure-mode visibility:** the store is constructed with the daemon
+logger so every persistence path is observable in `daemon.log`. Torn /
+wrong-shape / unsupported-version files emit
+`:daemon_dispatch_baselines_corrupt`; lock acquisition failures emit
+`:daemon_dispatch_baselines_lock_error`; write errors (ENOSPC / EROFS /
+EDQUOT) emit `:daemon_dispatch_baselines_write_error`; orphan-tmp sweep
+failures emit `:daemon_dispatch_baselines_tmp_sweep_error`; and the
+controller's defense-in-depth rescue around `persist!` emits
+`:daemon_dispatch_baselines_unexpected_error` if a programmer-error class
+slips past the store's typed rescues. None of these crash a tick; all
+appear in `daemon.log` so a silent re-strand cannot happen unobserved.
 
 **Accepted limitation:** if the daemon is down for the *entire* window
 between a bot-dispatched brainstorm's `WAITING` write and the user's

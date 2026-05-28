@@ -2,6 +2,13 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T10:30:00Z] refactor — extract Hive::Stages::AutoCommit from Review
+
+**Action:** Pure-extract of the per-pass auto-commit primitives (scope-check, sign-policy, git-commit invocation, signing-error pattern set, unstage-on-failure) out of `Hive::Stages::Review` into `lib/hive/stages/auto_commit.rb` so the upcoming stage-exit `CleanExit` invariant can share one implementation. Review's behavior is byte-identical — same `fix(review): apply pass NN findings` commit message + Hive-Fix-* trailers + `auto_commit_fix_worktree` flow; Review's in-file consumers now delegate to `AutoCommit` module-functions, and legacy `Review::AUTO_COMMIT_*` constants remain as aliases.
+
+**Refreshed pages:**
+- [[stages/review]] — source list now includes `lib/hive/stages/auto_commit.rb`; Phase 4 prose names the module as the shared owner of the scope/sign/commit primitives.
+
 ## [2026-05-27T18:00:00Z] feat — daemon-driven update flow (check + nudge, U1–U5)
 
 **Action:** Added the update flow (plan 2026-05-27-002): `Hive::UpdateCheck` release probe, `UpdateCheck::State` shared JSON store, `update.check`/`update.auto` config, dispatcher integration (throttled check + per-channel nudge), and the nudge surfaces (TUI footer + once-per-version bot push). Every channel is nudge-only for now; bash auto-update (U7) is deferred.

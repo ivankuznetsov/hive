@@ -67,7 +67,7 @@ module Hive
 
           @rebase_result = perform_rebase(task, cfg)
           runner = pick_runner(task)
-          result = Hive::Stages::Base.with_stage_events(task) { runner.call(task, cfg) }
+          result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
           commit_after(task, result)
           report(task, result)
         end

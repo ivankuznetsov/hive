@@ -1544,11 +1544,11 @@ module Hive
       end
 
       # The auto-commit primitives (scope-check, sign-policy, commit) now
-       # live on Hive::Stages::AutoCommit so the per-pass review fix path and
-       # the stage-exit Hive::Stages::CleanExit invariant share one
-       # implementation. The shims below preserve the existing in-file call
-       # sites without changing their return shapes — module_function methods
-       # called as `auto_commit_*` still resolve here, but delegate.
+      # live on Hive::Stages::AutoCommit so the per-pass review fix path and
+      # the stage-exit Hive::Stages::CleanExit invariant share one
+      # implementation. The shims below preserve the existing in-file call
+      # sites without changing their return shapes — module_function methods
+      # called as `auto_commit_*` still resolve here, but delegate.
       def git_head(worktree_path)
         Hive::Stages::AutoCommit.git_head(worktree_path)
       end

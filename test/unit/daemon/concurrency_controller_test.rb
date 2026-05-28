@@ -1,5 +1,7 @@
 require "test_helper"
+require "tmpdir"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 
 # Pin the concurrency controller's caps + cooldown + quarantine + daily-
 # rate semantics. Pure unit — no I/O, no Process.spawn. The controller
@@ -364,6 +366,119 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     %w[p1 p2 p3].each do |proj|
       count = c.daily_count_for(proj, T0)
       assert count >= 0, "#{proj} daily count went negative"
+    end
+  end
+
+  # ── dispatch-baseline persistence (restart survival) ───────────────────
+
+  def with_store
+    Dir.mktmpdir do |dir|
+      yield File.join(dir, "baselines.json")
+    end
+  end
+
+  def controller_with(store)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50, dispatch_state: store
+    )
+  end
+
+  def test_observe_baseline_survives_a_simulated_restart
+    with_store do |path|
+      answered = T0 - 30
+      controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+        .observe_state_file_mtime(project: "writero", slug: "add-x", mtime: answered)
+
+      # Fresh controller (new process) seeded from the same store on disk.
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_equal answered,
+                   revived.last_dispatched_state_file_mtime_for(project: "writero", slug: "add-x"),
+                   "baseline must survive a restart so a pre-restart answer isn't re-stranded"
+    end
+  end
+
+  def test_record_dispatch_baseline_survives_a_simulated_restart
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      dispatch(c, 100, "xbookmark", "use-y", mtime: T0 - 90)
+
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_equal T0 - 90,
+                   revived.last_dispatched_state_file_mtime_for(project: "xbookmark", slug: "use-y")
+    end
+  end
+
+  def test_prune_drops_absent_keys_and_persists
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "p", slug: "keep", mtime: T0)
+      c.observe_state_file_mtime(project: "p", slug: "drop", mtime: T0)
+
+      c.prune_dispatch_baselines([ %w[p keep] ], scope_projects: %w[p])
+
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "keep")
+      assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
+      # Prune persisted: a freshly-revived controller doesn't see the dropped key.
+      revived = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      assert_nil revived.last_dispatched_state_file_mtime_for(project: "p", slug: "drop")
+    end
+  end
+
+  def test_prune_dispatch_baselines_requires_scope_projects
+    # `scope_projects:` MUST be required — a default of nil would silently
+    # re-strand answered tasks on per-project status errors (the bug the
+    # whole persistence layer exists to prevent). A future caller forgetting
+    # the kwarg must fail loud, not silent.
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
+
+      assert_raises(ArgumentError) { c.prune_dispatch_baselines([ %w[p s] ]) }
+    end
+  end
+
+  def test_nil_store_keeps_state_in_memory_and_does_not_raise
+    # Default `make` has no dispatch_state — pure in-memory, no file I/O.
+    # The original assertion `Dir.glob(File.join(dir, '*')).empty?` was
+    # vacuous because the controller never knew about `dir` — a regression
+    # that erroneously wrote to e.g. `Hive::Paths.state_home` would still
+    # leave that tmpdir empty. The behavior we actually care about: every
+    # controller mutation succeeds without raising even when the store is nil.
+    c = make
+    c.observe_state_file_mtime(project: "p", slug: "s", mtime: T0)
+    dispatch(c, 1, "p", "s2", mtime: T0)
+    c.prune_dispatch_baselines([ %w[p s] ], scope_projects: %w[p])
+
+    assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "p", slug: "s")
+    assert_nil c.last_dispatched_state_file_mtime_for(project: "p", slug: "s2"),
+               "prune with empty live keys for the scoped project must drop absent entries"
+  end
+
+  # NOTE: defense-in-depth error handling now lives inside DispatchBaselines#write
+  # rather than the controller — see dispatch_baselines_test.rb's
+  # test_write_catches_unexpected_error_and_logs_typed_event for the contract pin.
+
+  # `hive status --json` skips projects with `error: not_initialised` (NFS
+  # hiccup, project being re-bootstrapped, transient race with `hive forget`)
+  # — so their tasks disappear from `result.rows` even though the overall
+  # fetch is still ok. Without a per-project scope guard the prune would
+  # wipe every baseline for that project on the spot, silently re-stranding
+  # every answered needs_input row in that project on the next first sight.
+  def test_prune_preserves_baselines_for_projects_outside_scope
+    with_store do |path|
+      c = controller_with(Hive::Daemon::DispatchBaselines.new(path: path))
+      c.observe_state_file_mtime(project: "writero", slug: "answered", mtime: T0)
+      c.observe_state_file_mtime(project: "errored", slug: "still-here", mtime: T0)
+
+      # Tick saw writero rows but `errored` project hit a per-project error
+      # → absent from both rows and projects. Scope tells the controller to
+      # leave that project's baselines alone.
+      c.prune_dispatch_baselines([ %w[writero answered] ], scope_projects: %w[writero])
+
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
+      assert_equal T0, c.last_dispatched_state_file_mtime_for(project: "errored", slug: "still-here"),
+                   "a project missing from the scope must keep its baselines"
     end
   end
 end

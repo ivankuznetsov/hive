@@ -202,6 +202,21 @@ module Hive
         # 4. Per-row dispatch
         result.rows.each { |row| handle_row(row, now: now) }
 
+        # 5. Bound the persisted dispatch-baseline file to the live task set.
+        # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
+        # early return above guards a transient empty/failed scan from wiping
+        # baselines). `scope_projects` is the further per-project guard:
+        # `StatusConsumer` filters out projects with `error: not_initialised`
+        # / `missing_project_path` from BOTH `rows` and `projects`, so passing
+        # `result.projects` as the scope means a per-project hiccup keeps its
+        # baselines untouched until that project reappears cleanly (without
+        # this, every transient project-level error would silently re-strand
+        # every answered needs_input row in that project on the next tick).
+        @controller.prune_dispatch_baselines(
+          result.rows.map { |row| [ row.project, row.slug ] },
+          scope_projects: Array(result.projects).map(&:name)
+        )
+
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
       end

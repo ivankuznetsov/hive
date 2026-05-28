@@ -23,6 +23,18 @@ module Hive
         text
       end
 
+      # Resolve `value` against the FIRST of `roots` that contains it, falling
+      # back to the first root so an escape (or malformed path) fails closed
+      # with that root's error. Lets a path live under the sandbox project dir
+      # OR its sibling run_home (HIVE_HOME) — the update flow's state and
+      # install-channel marker live under run_home. StepExecutor#expand_path and
+      # ReproScriptWriter both call this so the live run and the generated
+      # repro.sh validate scenario paths identically.
+      def contained_path_any!(roots, value, label)
+        root = roots.find { |r| contained?(r, File.expand_path(value.to_s, r)) } || roots.first
+        contained_path!(root, value, label)
+      end
+
       def contained_path!(root, value, label)
         root_path = File.expand_path(root)
         value_text = value.to_s

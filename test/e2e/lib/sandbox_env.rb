@@ -32,6 +32,12 @@ module Hive
 
       module_function
 
+      # Stringify an env-overrides hash: keys to strings, values to strings
+      # except nil (which Process.spawn / Open3 treat as "unset this var").
+      def stringify_env(env)
+        env.each_with_object({}) { |(key, value), out| out[key.to_s] = value.nil? ? nil : value.to_s }
+      end
+
       def with(sandbox_dir, run_home, fake_claude_path = Paths.fake_claude)
         Bundler.with_unbundled_env do
           LEAKY_KEYS.each { |key| ENV.delete(key) }

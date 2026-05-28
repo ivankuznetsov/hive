@@ -1,0 +1,44 @@
+name: bot-e2e-setup
+description: >
+  Shared setup for the bot e2e jobs: Ruby + uv + Telethon, plus a freshly
+  bootstrapped scratch hive project (registered as "e2eproj") and a `hivebin`
+  wrapper so the bot's child dispatch resolves gems. Assumes the repo is
+  already checked out (a local composite action requires it).
+runs:
+  using: composite
+  steps:
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: "3.4"
+        bundler-cache: true
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+
+    - name: Install Telethon
+      working-directory: test/e2e/tg
+      shell: bash
+      run: |
+        uv venv .venv
+        uv pip install --python .venv telethon
+
+    - name: Bootstrap a scratch hive project
+      shell: bash
+      env:
+        WORKSPACE: ${{ github.workspace }}
+        PROJ_ROOT: ${{ runner.temp }}
+      run: |
+        set -euo pipefail
+        proj="$PROJ_ROOT/e2eproj"
+        mkdir -p "$proj"
+        git -C "$proj" init -q
+        git -C "$proj" config user.email ci@example.com
+        git -C "$proj" config user.name "hive ci"
+        git -C "$proj" commit --allow-empty -m init -q
+        # Non-TTY stdin => `hive init` short-circuits to recommended defaults
+        # and registers the project (named after the dir: "e2eproj").
+        bundle exec ruby bin/hive init "$proj" --force < /dev/null
+        # Wrapper so the bot's child dispatch (`hive new ...`) resolves gems.
+        printf '#!/usr/bin/env bash\ncd "%s" && exec bundle exec ruby bin/hive "$@"\n' "$WORKSPACE" > "$PROJ_ROOT/hivebin"
+        chmod +x "$PROJ_ROOT/hivebin"

@@ -4,6 +4,7 @@ require "tmpdir"
 require "hive/markers"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
@@ -97,7 +98,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
-                      project_enabled: true)
+                      project_enabled: true, dispatch_state: nil, status_result: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -107,11 +108,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
     }
     controller = Hive::Daemon::ConcurrencyController.new(
       max_concurrent_runs: 5, max_concurrent_per_project: 5,
-      max_runs_per_day_per_project: 100
+      max_runs_per_day_per_project: 100,
+      dispatch_state: dispatch_state
     )
     supervisor = FakeSupervisor.new
     status = FakeStatusConsumer.new
-    status.next_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: rows, error: nil)
+    # Mirror what StatusConsumer emits in production: a `projects` list derived
+    # from the rows being returned. Without this the dispatcher's prune scope
+    # is empty and prune_dispatch_baselines never drops anything — making the
+    # prune-on-tick path effectively dead in any test that relies on the
+    # default `status_result`.
+    projects_for_rows = rows.map(&:project).uniq.map do |name|
+      Hive::Daemon::StatusConsumer::ProjectInfo.new(name: name, legacy_stage_dirs: [])
+    end
+    status.next_result = status_result ||
+                         Hive::Daemon::StatusConsumer::Result.new(
+                           ok: true, rows: rows, projects: projects_for_rows, error: nil
+                         )
     logger = StubLogger.new
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
 
@@ -1075,10 +1088,127 @@ def test_interruptible_sleep_stops_after_shutdown_request
   assert_equal [ 0.5 ], sleeps
 end
 
-  private
+  # ── dispatch-baseline persistence across restart ───────────────────────
+  # Tests below MUST stay above the `private` declaration further down —
+  # Minitest only discovers public test methods. A prior arrangement hid them
+  # under `private` and silently ran zero of them (line coverage stayed green
+  # via other tests indirectly exercising `prune_dispatch_baselines`, masking
+  # the regression these tests pin).
 
+  # The core fix: a needs_input row answered BEFORE a daemon restart must
+  # dispatch, not be re-stranded. The pre-restart "ask" baseline is persisted;
+  # the live state-file mtime (the user's answer) is newer, so the freshly
+  # restarted dispatcher dispatches. Without persistence the reloaded baseline
+  # would be nil → first-sight → :record_baseline → skip (the bug).
+  def test_pre_restart_answer_dispatches_after_restart_via_persisted_baseline
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "writero", slug: "add-x", mtime: T0 - 600) # the ask
+
+      answered = row(project: "writero", slug: "add-x", stage: "2-brainstorm",
+                     action: "needs_input",
+                     command: "hive brainstorm add-x --from 2-brainstorm",
+                     mtime: T0 - 40) # user's answer: newer than ask, past 30s debounce
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [ answered ],
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert_equal 1, sup.spawned.size, "a pre-restart answer must dispatch, not be re-stranded"
+      assert events_include?(logger, :dispatched)
+    end
+  end
+
+  def test_tick_prunes_baselines_for_tasks_absent_from_status
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "p", slug: "gone", mtime: T0 - 600)
+      seed_baseline(path, project: "p", slug: "present", mtime: T0 - 600)
+
+      present = row(project: "p", slug: "present", stage: "2-brainstorm",
+                    action: "needs_input",
+                    command: "hive brainstorm present --from 2-brainstorm",
+                    mtime: T0 - 600) # equal to baseline → :skip, no re-dispatch
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        rows: [ present ],
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+      )
+      _dispatcher.tick(now: T0)
+
+      assert_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "gone"),
+                 "a task absent from the status scan must be pruned from baselines"
+      refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "present"),
+                 "a task still present must keep its baseline"
+    end
+  end
+
+  def test_failed_status_fetch_does_not_prune_baselines
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "p", slug: "keep", mtime: T0 - 600)
+
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path),
+        status_result: Hive::Daemon::StatusConsumer::Result.new(ok: false, rows: [], error: "boom")
+      )
+      _dispatcher.tick(now: T0)
+
+      refute_nil ctrl.last_dispatched_state_file_mtime_for(project: "p", slug: "keep"),
+                 "a transient status failure must NOT wipe persisted baselines"
+    end
+  end
+
+  # Per-project errors (`not_initialised`, `missing_project_path`) cause
+  # `StatusConsumer` to drop a project from BOTH rows AND projects, even
+  # though the overall fetch is `ok: true`. Without a scope guard the prune
+  # would silently wipe every baseline for that project on the spot — the
+  # exact stranding regression. The dispatcher passes `result.projects` as
+  # the scope so an errored project keeps its baselines until it reappears.
+  def test_per_project_error_does_not_wipe_that_projects_baselines
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "baselines.json")
+      seed_baseline(path, project: "writero", slug: "answered", mtime: T0 - 600)
+      seed_baseline(path, project: "errored", slug: "answered-too", mtime: T0 - 600)
+
+      writero_row = row(project: "writero", slug: "answered", stage: "2-brainstorm",
+                        action: "needs_input",
+                        command: "hive brainstorm answered --from 2-brainstorm",
+                        mtime: T0 - 600)
+      # `errored` project is filtered out of rows AND projects by the consumer
+      # — mirror that here.
+      result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [ writero_row ],
+        projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: "writero", legacy_stage_dirs: []) ],
+        error: nil
+      )
+      _dispatcher, _sup, ctrl, _logger, _mw = make_dispatcher(
+        dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path),
+        status_result: result
+      )
+      _dispatcher.tick(now: T0)
+
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "errored", slug: "answered-too"),
+                   "a project absent from result.projects (per-project error) must NOT have its baselines pruned"
+      # Sanity: writero/answered's baseline is still there too (mtime == baseline → :skip).
+      assert_equal T0 - 600,
+                   ctrl.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
+    end
+  end
+
+  private
 
   def events_include?(logger, name)
     logger.events.any? { |(n, _)| n == name }
+  end
+
+  def seed_baseline(path, project:, slug:, mtime:)
+    Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 5, max_concurrent_per_project: 5,
+      max_runs_per_day_per_project: 100,
+      dispatch_state: Hive::Daemon::DispatchBaselines.new(path: path)
+    ).observe_state_file_mtime(project: project, slug: slug, mtime: mtime)
   end
 end

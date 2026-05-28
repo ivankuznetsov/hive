@@ -7,6 +7,7 @@ require "hive/paths"
 require "hive/lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
+require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
@@ -136,18 +137,27 @@ module Hive
         daemon_cfg = Hive::Config.load_global_daemon
         config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update }
 
-        controller = Hive::Daemon::ConcurrencyController.new(
-          max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
-          max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
-          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project")
-        )
-        supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
-        status_consumer = Hive::Daemon::StatusConsumer.new
+        # Build the logger BEFORE the controller so both the controller and
+        # the persisted-baselines store get wired to it. Otherwise a torn
+        # baseline file / lock error / disk-full write silently no-ops via
+        # `@logger&.event` — re-stranding the very `needs_input` tasks this
+        # PR exists to protect, invisibly.
         logger = Hive::Daemon::Logger.new(
           path: daemon_cfg.fetch("log_file", log_file),
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        controller = Hive::Daemon::ConcurrencyController.new(
+          max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
+          max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
+          max_runs_per_day_per_project: daemon_cfg.fetch("max_runs_per_day_per_project"),
+          # Persist first-sight dispatch baselines so a daemon restart doesn't
+          # re-strand already-answered needs_input tasks. The store owns all
+          # `:daemon_dispatch_baselines_*` typed events via its own logger.
+          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
+        )
+        supervisor = Hive::Daemon::ChildSupervisor.new(dry_run: @dry_run)
+        status_consumer = Hive::Daemon::StatusConsumer.new
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
         )

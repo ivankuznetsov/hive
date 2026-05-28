@@ -356,7 +356,7 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     ]
     # Lines contain NO `### Q1.` header at all — simulates a parse-vs-lines
     # divergence that would otherwise let the writer misattribute.
-    lines = ["## Round 1\n", "\n", "(no Q1 line on disk)\n"]
+    lines = [ "## Round 1\n", "\n", "(no Q1 line on disk)\n" ]
 
     result = Hive::Bot::BrainstormAnswerWriter.send(:target_question_line_index, lines, fake_parsed, 1)
     assert_nil result,
@@ -419,8 +419,26 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       threads.each(&:join)
 
       outcomes = results.map(&:pop)
-      assert_equal 1, outcomes.count(:written), "exactly one concurrent writer should win"
-      assert_equal 7, outcomes.count(:already_answered), "all other writers should see already_answered"
+
+      # Exactly one writer must win — that's the core first-write-wins
+      # invariant for the per-task lock.
+      assert_equal 1, outcomes.count(:written),
+                   "exactly one concurrent writer should win"
+
+      # The remaining 7 threads must NOT see :written (no double-write)
+      # and must NOT see :question_not_found / :answer_slot_missing.
+      # They legitimately see EITHER :already_answered (the winning
+      # writer finished before they acquired the lock) OR :lock_busy
+      # (they couldn't acquire within the 5s retry deadline under heavy
+      # CI contention — semantically still a correct rejection that
+      # preserves first-write-wins). Tolerating :lock_busy here is
+      # honest about Hive::Lock's deadline-based retry contract rather
+      # than implying lock-fairness that the implementation doesn't
+      # guarantee.
+      losers = outcomes.count(:already_answered) + outcomes.count(:lock_busy)
+      assert_equal 7, losers,
+                   "the other 7 writers must see :already_answered or :lock_busy " \
+                   "(got #{outcomes.tally})"
 
       saved = Hive::Bot::BrainstormParser.parse(path).first.answer
       assert_match(/Answer from thread/, saved)

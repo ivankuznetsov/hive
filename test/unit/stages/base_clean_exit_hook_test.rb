@@ -190,6 +190,49 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal "dirty_worktree", marker.attrs["reason"]
   end
 
+  # When CleanExit overwrites the stage's marker to
+  # `:error reason=ensure_clean_on_exit_failed`, the stage's own
+  # `result[:commit]` (e.g. "review_complete") is now lying: the
+  # hive-state commit `commands/run.rb#commit_after` writes would
+  # advertise a success that didn't happen. `with_stage_events` MUST
+  # rewrite `result[:commit]` to match the actual outcome.
+  def test_with_stage_events_clears_stale_commit_when_marker_overwritten
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    result = Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+      FileUtils.mkdir_p(File.join(worktree, "unrelated"))
+      File.write(File.join(worktree, "unrelated", "path.txt"), "x\n")
+      Hive::Markers.set(task.state_file, :review_complete, attempts: 1)
+      { commit: "review_complete", status: :complete }
+    end
+
+    assert_equal :error, Hive::Markers.current(task.state_file).name
+    assert_equal "ensure_clean_on_exit_failed",
+                 Hive::Markers.current(task.state_file).attrs["reason"]
+    assert_equal "ensure_clean_on_exit_failed", result[:commit],
+                 "result[:commit] must reflect the overwritten outcome so commit_after writes the right hive-state commit"
+    assert_equal :error, result[:status]
+  end
+
+  # The clean / auto_committed branch must leave the stage's own
+  # `result[:commit]` alone — only the overwrite branch mutates.
+  def test_with_stage_events_preserves_result_commit_when_auto_committing
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    result = Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+      Hive::Markers.set(task.state_file, :review_complete, attempts: 1)
+      { commit: "review_complete", status: :complete }
+    end
+
+    assert_equal "review_complete", result[:commit],
+                 "result[:commit] must be preserved when CleanExit auto-commits residue"
+    assert_equal :complete, result[:status]
+  end
+
   private
 
   def deep_dup_default_cfg

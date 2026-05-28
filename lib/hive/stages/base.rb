@@ -134,7 +134,22 @@ module Hive
           message: "run started"
         )
         result = yield
-        enforce_clean_exit!(task, cfg, stage) if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
+        if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
+          enforce_outcome = enforce_clean_exit!(task, cfg, stage)
+          # When CleanExit overwrites the runner's marker to
+          # `:error reason=ensure_clean_on_exit_failed`, the stage's own
+          # `result[:commit]` (e.g. "review_complete") is now stale —
+          # `commands/run.rb#commit_after` would otherwise write a
+          # misleading hive-state commit advertising a success that
+          # didn't happen. Replace the commit action with the actual
+          # outcome so the hive-state commit matches the on-disk marker.
+          if enforce_outcome.is_a?(Hash) && enforce_outcome[:overwrote_marker]
+            result = (result.is_a?(Hash) ? result : {}).merge(
+              commit: "ensure_clean_on_exit_failed",
+              status: :error
+            )
+          end
+        end
         marker = Hive::Markers.current(task.state_file)
         emit_marker_event(task, stage, marker)
         Hive::Events.emit(
@@ -181,9 +196,19 @@ module Hive
       #     `:error reason=ensure_clean_on_exit_failed`, BUT never
       #     downgrade an already-terminal `:error` (the wrapped runner's
       #     own error wins for diagnostic clarity).
+      #
+      # Returns a sentinel hash describing the outcome so the caller
+      # (`with_stage_events`) can decide whether the stage's
+      # `result[:commit]` is now stale:
+      #   { status: :clean | :auto_committed | :scope_violation |
+      #             :git_failed | :skipped,
+      #     overwrote_marker: true | false }
+      # `:skipped` covers PAUSE_MARKERS and missing-worktree no-ops; any
+      # rescued StandardError returns nil so call sites keep their
+      # historical "treat as no-op" behaviour.
       def enforce_clean_exit!(task, cfg, stage)
         worktree_path = read_worktree_path(task)
-        return unless worktree_path && File.directory?(worktree_path)
+        return { status: :skipped, overwrote_marker: false } unless worktree_path && File.directory?(worktree_path)
 
         # The runner may have already paused intentionally — let that
         # marker stand and skip the invariant entirely. Without this,
@@ -191,7 +216,7 @@ module Hive
         # would be overwritten by `:error reason=ensure_clean_on_exit_failed`
         # the moment the agent dropped an out-of-scope file.
         existing_marker = Hive::Markers.current(task.state_file)
-        return if PAUSE_MARKERS.include?(existing_marker.name)
+        return { status: :skipped, overwrote_marker: false } if PAUSE_MARKERS.include?(existing_marker.name)
 
         result = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
@@ -204,9 +229,12 @@ module Hive
         case result[:status]
         when :clean, :auto_committed
           log_clean_exit_event(task, stage, result)
-          nil
+          { status: result[:status], overwrote_marker: false }
         when :scope_violation, :git_failed
-          mark_clean_exit_failure(task, result, existing_marker)
+          overwrote = mark_clean_exit_failure(task, result, existing_marker)
+          { status: result[:status], overwrote_marker: overwrote }
+        else
+          { status: result[:status], overwrote_marker: false }
         end
       rescue StandardError => e
         warn "[hive] ensure_clean_on_exit raised #{e.class}: #{e.message}; leaving marker untouched"
@@ -239,7 +267,7 @@ module Hive
 
       def mark_clean_exit_failure(task, result, existing_marker = nil)
         existing_marker ||= Hive::Markers.current(task.state_file)
-        return if error_marker?(existing_marker.name)
+        return false if error_marker?(existing_marker.name)
 
         attrs = {
           reason: "ensure_clean_on_exit_failed",
@@ -247,6 +275,7 @@ module Hive
         }
         attrs[:residue_paths] = Array(result[:paths]).join(",")[0, 200] if result[:paths]
         Hive::Markers.set(task.state_file, :error, **attrs)
+        true
       end
 
       # `error` + closing `stage_exit` pair so drill-down readers see a

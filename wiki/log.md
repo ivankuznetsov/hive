@@ -2,6 +2,17 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T13:30:00Z] fix — CleanExit follow-ups: stale result[:commit], ConfigError surfacing, 300s git timeout
+
+**Action:** Three follow-up fixes to the CleanExit invariant landed today:
+
+1. **`enforce_clean_exit!` clears stale `result[:commit]`** — when CleanExit overwrites a runner's success marker with `ensure_clean_on_exit_failed`, `Hive::Stages::Base#enforce_clean_exit!` now returns `{status:, overwrote_marker:}`, and `with_stage_events` mutates `result[:commit] = "ensure_clean_on_exit_failed"` + `result[:status] = :error` so `commands/run.rb#commit_after` writes a hive-state commit matching the on-disk marker instead of a stale `"review_complete"`.
+2. **`Hive::ConfigError` no longer silently dropped** — invalid `review.fix.auto_commit.sign_policy` config now overwrites the marker to `:error reason=ensure_clean_on_exit_failed detail="invalid sign_policy config: ..."` (200-char truncated) instead of falling into the generic `StandardError` warn-and-continue branch. Other `StandardError` keeps the warn+nil transient path.
+3. **300s timeout on clean-exit git ops** — `CleanExit.porcelain_status` (`git status --porcelain`), `CleanExit.run!` add-step (`git add -A`), `CleanExit.failure_with_unstage` (`git reset HEAD --`), `AutoCommit.staged_auto_commit_paths` (`git diff --cached --name-only`), and `AutoCommit.auto_commit_failure_with_unstage` (`git reset HEAD --`) are now bounded by `AutoCommit.capture_git_with_timeout` (300s via `Timeout.timeout` around `Open3.capture3`). A hung pre-commit hook or frozen pager surfaces as `{success: false, timed_out: true, message: "<label> timed out after 300s"}` propagated as `:git_failed`, causing the canonical `ensure_clean_on_exit_failed` marker.
+
+**Refreshed pages:**
+- [[state-model]] — marker-grammar row for `ensure_clean_on_exit_failed` now spells out the `detail=` carrier for the ConfigError variant, the 300s timeout on git ops, and the `result[:commit]` rewrite that keeps the hive-state commit aligned with the on-disk marker.
+
 ## [2026-05-28T12:00:00Z] feat — Hive::Stages::CleanExit invariant + ensure_clean_on_exit config + bot manual-only routing
 
 **Action:** Shipped the clean-worktree-on-exit invariant (`lib/hive/stages/clean_exit.rb`) as a `with_stage_events` post-yield hook gated on the new global config key `stages.ensure_clean_on_exit` (default `true`). Hooks every stage in `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`; PAUSE_MARKERS (currently `:execute_waiting`, `:review_waiting`) skip enforcement. Behavior: on a clean worktree do nothing; on dirty residue that is fully inside `review.fix.auto_commit.scope_check.allowed_paths`, auto-commit via the shared `Hive::Stages::AutoCommit` primitives so per-pass review-fix and stage-exit share one implementation; on scope-violating or git-failed residue, overwrite the current marker to `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> -->`. Finalize now also runs CleanExit as an *entry* backstop so 6-review residue self-heals before finalize logic begins. The bot routes `ensure_clean_on_exit_failed` (alongside the legacy `dirty_worktree`) into the manual-only reply path — no inline retry button — because the residue requires operator inspection. CleanExit + finalize's residue-log writer keep the marker grammar in `Hive::Markers::KNOWN_NAMES` honest by reusing the existing `ERROR` name with a new `reason` attr.

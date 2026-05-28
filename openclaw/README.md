@@ -24,7 +24,7 @@ OpenClaw Plugin:
 |---|---|---|
 | ClawHub skills | `openclaw skills install hive` plus optional shortcuts | Best fit: text instructions that call `hive`, no Node runtime |
 | OpenClaw plugin | `openclaw plugins install clawhub:<package>` | Too much machinery for this surface; plugins are for TypeScript runtime code, tools, providers, channels, and hooks |
-| Direct Git/local skill | `openclaw skills install git:ivankuznetsov/hive@<ref>` or `openclaw skills install ./openclaw/skills/hive --as hive` | Useful for testing, but no marketplace discoverability or ClawHub update tracking |
+| Direct local skill | `openclaw skills install ./openclaw/skills/hive --as hive` | Useful for testing, but no marketplace discoverability or ClawHub update tracking |
 
 OpenClaw's documented grouping support is a filesystem organization feature
 (`skills/<group>/<skill>/SKILL.md`), not a single marketplace slug that installs

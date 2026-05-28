@@ -363,11 +363,45 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
                "defensive nil must fire when parsed and raw lines disagree about Q{n}"
   end
 
-  # F2 from PR #239 ce-code-review: Errno::ENOENT in try_append used
-  # to return [nil, nil], which append!'s retry loop treated as lock
-  # contention. The bot then sent "Try again - another run holds the
-  # lock" for a missing file, a misleading diagnosis. The :enoent
-  # sentinel + :question_not_found mapping is now the correct path.
+  # F2 from PR #239 ce-code-review: when try_append returns :enoent
+  # (because brainstorm.md vanished mid-write), append!'s retry loop
+  # must short-circuit and map the sentinel to :question_not_found
+  # with a logged :answer_lock_contention event describing the
+  # cause. Exercises lines 73-78 of brainstorm_answer_writer.rb —
+  # the elsif result == :enoent branch.
+  def test_append_maps_enoent_sentinel_to_question_not_found_with_logged_cause
+    with_brainstorm(sample) do |path|
+      # Force Hive::Markers.write_atomic to raise ENOENT so try_append
+      # returns the :enoent sentinel.
+      original = Hive::Markers.method(:write_atomic)
+      Hive::Markers.define_singleton_method(:write_atomic) { |*, **| raise Errno::ENOENT }
+
+      logger = StubLogger.new
+      begin
+        result = Hive::Bot::BrainstormAnswerWriter.append!(
+          brainstorm_path: path,
+          question_n: 1,
+          answer_text: "x",
+          logger: logger
+        )
+      ensure
+        Hive::Markers.define_singleton_method(:write_atomic, original)
+      end
+
+      assert_equal :question_not_found, result,
+                   ":enoent must map to :question_not_found, not :lock_busy"
+      lock_event = logger.events.find { |(name, _)| name == :answer_lock_contention }
+      refute_nil lock_event, "the missing-file path must log answer_lock_contention with the cause"
+      holder = lock_event[1][:holder]
+      assert_equal({ reason: "brainstorm.md missing" }, holder,
+                   "the holder field must name the cause so operators can grep bot.log")
+    end
+  end
+
+  # File simply doesn't exist at all (vs. exists-but-deleted-mid-write).
+  # try_append reads "" via File.exist?-then-File.read guard; parse
+  # returns []; the writer reports :question_not_found directly.
+  # Distinct from the :enoent sentinel path tested above.
   def test_missing_brainstorm_file_returns_question_not_found_not_lock_busy
     Dir.mktmpdir("hive-enoent-test") do |dir|
       missing_path = File.join(dir, "brainstorm.md")

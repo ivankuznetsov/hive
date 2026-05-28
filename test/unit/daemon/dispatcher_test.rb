@@ -1337,6 +1337,37 @@ end
     end
   end
 
+  def test_malformed_request_file_routes_through_bad_handler
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Write a syntactically broken JSON file directly into the
+      # queue dir so DispatchRequestQueue.pending routes it through
+      # the bad_handler the dispatcher injects (which logs +
+      # unlinks).
+      dir = Q.directory(state_home: state_home)
+      File.write(File.join(dir, "20260528T180000000000-BAD.json"), "{not json")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        rejected = logger.events.find { |(n, attrs)|
+          n == :dispatch_request_rejected && attrs[:reason] == "malformed_json"
+        }
+        refute_nil rejected,
+                   ":dispatch_request_rejected reason=malformed_json must fire from the queue's bad_handler"
+        assert_empty sup.spawned
+        # The bad_handler must unlink the file so the queue doesn't
+        # re-process it on every tick.
+        assert_empty Dir.glob(File.join(dir, "*.json")),
+                     "malformed files must be unlinked once the bad_handler logs them"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
   def test_dispatch_request_expired_removed_without_dispatch
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(

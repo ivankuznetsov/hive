@@ -58,6 +58,7 @@ class HiveBotSupervisorTest < Minitest::Test
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
                         :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        :intent,
                         keyword_init: true)
   end
 
@@ -489,6 +490,43 @@ class HiveBotSupervisorTest < Minitest::Test
     failure = @logger.events.find { |e| e[:name] == :send_failure }
     refute_nil failure
     assert_equal "enqueue_dispatch_request", failure.fetch(:payload).fetch(:source)
+  end
+
+  # `auto_run_after_answers`'s outer rescue catches anything that
+  # escapes `execute_dispatch`. The queue-write path catches
+  # internally, but a writer that raises something OTHER than
+  # StandardError would skip the inner rescue. Force that path by
+  # stubbing `execute_dispatch` to raise directly.
+  def test_auto_run_after_answers_outer_rescue_surfaces_corrective_message
+    result = FakeRouter::Result.new(slug: "x-260526-aaaa", project: "hive")
+    update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
+    @supervisor.define_singleton_method(:execute_dispatch) do |*|
+      raise "spawn pipeline blew up"
+    end
+
+    @supervisor.send(:auto_run_after_answers, result, update)
+
+    assert_match(/couldn't start the next round automatically/,
+                 @telegram.messages.last.fetch(:text))
+    failure = @logger.events.find { |e| e[:name] == :send_failure }
+    refute_nil failure
+    assert_equal "auto_run_after_answers", failure.fetch(:payload).fetch(:source)
+  end
+
+  def test_trigger_for_result_maps_intents_for_telemetry
+    %i[
+      slash_done callback_autofix callback_clear_and_retry callback_approve
+      callback_findings_accept_all callback_findings_reject_all callback_show_details
+    ].each do |intent|
+      result = FakeRouter::Result.new(intent: intent)
+      trigger = @supervisor.send(:trigger_for_result, result)
+      assert_kind_of String, trigger, "intent #{intent} must map to a string trigger label"
+      refute_empty trigger
+    end
+    # Unknown intent → generic label
+    assert_equal "bot_dispatch", @supervisor.send(:trigger_for_result, FakeRouter::Result.new(intent: :something_new))
+    # Missing intent attr → generic label (responds_to? false branch)
+    assert_equal "bot_dispatch", @supervisor.send(:trigger_for_result, Object.new)
   end
 
   def test_auto_run_after_answers_writes_dispatch_request_not_spawn
@@ -928,6 +966,67 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal [ "hive", "review", "task", "--json" ],
                  @dispatch_request_writer.writes.first[:argv]
     assert_empty @child_supervisor.dispatched
+  end
+
+  # Mixed sequence: `accept-finding` (not queue-routable, spawns) +
+  # retry verb (queue-routable, writes a request). The findings
+  # callbacks are the one remaining mixed surface in the codebase
+  # — `RecoverySequence` is now all-queue. The bot waits on the
+  # accept-finding child like before; the retry verb lands in the
+  # queue with no wait.
+  def test_dispatch_command_sequence_mixed_spawn_and_queue_waits_then_enqueues
+    @child_supervisor.dispatch_pid = 700
+    @child_supervisor.completed[700] = child_exit(exit_code: 0, pid: 700)
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "accept-finding", "--all", "--stage", "6-review",
+          "--project", "hive", "task", "--json" ],
+        [ "hive", "review", "task", "--from", "6-review", "--project", "hive", "--json" ]
+      ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal 1, @child_supervisor.dispatched.length,
+                 "the non-queue-routable command (accept-finding) must spawn from the bot"
+    assert_equal [ "hive", "accept-finding", "--all", "--stage", "6-review",
+                   "--project", "hive", "task", "--json" ],
+                 @child_supervisor.dispatched.first.fetch(:command_argv)
+    assert_equal 1, @dispatch_request_writer.writes.length,
+                 "the queue-routable retry verb must land in the queue"
+    assert_equal [ "hive", "review", "task", "--from", "6-review", "--project", "hive", "--json" ],
+                 @dispatch_request_writer.writes.first[:argv]
+    assert_equal 1, @notification_dispatcher.reset_tasks.length,
+                 "alert reset fires once between the two commands"
+  end
+
+  def test_dispatch_command_sequence_mixed_aborts_when_spawn_fails
+    @child_supervisor.dispatch_pid = 701
+    @child_supervisor.completed[701] = child_exit(exit_code: 1, pid: 701)
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [
+        [ "hive", "accept-finding", "--all", "--project", "hive", "task", "--json" ],
+        [ "hive", "review", "task", "--from", "6-review", "--project", "hive", "--json" ]
+      ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal 1, @child_supervisor.dispatched.length,
+                 "only the first command spawned before the wait detected failure"
+    assert_empty @dispatch_request_writer.writes,
+                 "retry verb must NOT be enqueued when the spawn precursor fails"
+    assert_empty @notification_dispatcher.reset_tasks,
+                 "alert reset must NOT fire when the spawn precursor fails"
+    assert_includes @telegram.messages.last.fetch(:text), "Stopped because the previous command failed"
   end
 
   def test_dispatch_command_sequence_resets_alert_once_for_two_command_queue_sequence

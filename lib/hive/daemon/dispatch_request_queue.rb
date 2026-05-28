@@ -110,6 +110,10 @@ module Hive
           begin
             data = JSON.parse(File.read(path))
           rescue StandardError
+            # Race: the file disappeared (or was rewritten with
+            # malformed JSON) between glob and read. Idempotent
+            # removal already covers the desired outcome — skip and
+            # let `pending`'s next pass handle it via bad_handler.
             next
           end
           next unless data.is_a?(Hash) && data["request_id"] == request_id.to_s
@@ -119,6 +123,8 @@ module Hive
         end
         removed
       rescue Errno::ENOENT
+        # Outer race: the directory itself disappeared between
+        # `directory` and `Dir.glob`. Same idempotent contract.
         false
       end
 

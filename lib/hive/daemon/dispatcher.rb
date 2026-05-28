@@ -1,4 +1,5 @@
 require "digest"
+require "fileutils"
 require "shellwords"
 require "hive/config"
 require "hive/stages"
@@ -714,11 +715,9 @@ module Hive
           bad_handler: ->(path:, reason:) {
             @logger.event(:dispatch_request_rejected,
                           path: path, reason: reason)
-            begin
-              File.unlink(path)
-            rescue Errno::ENOENT
-              nil
-            end
+            # `rm_f` is idempotent — quietly does nothing if the
+            # file is already gone (concurrent retry, manual cleanup).
+            FileUtils.rm_f(path)
           }
         )
 

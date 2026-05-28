@@ -81,14 +81,13 @@ module Hive
         File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |f|
           f.write(JSON.generate(payload))
           f.flush
-          begin
-            f.fsync
-          rescue StandardError
-            # fsync is best-effort on exotic filesystems; the atomic
-            # rename below still guarantees a consistent observable
-            # state.
-            nil
-          end
+          # Best-effort fsync. If the filesystem returns EINVAL/ENOTSUP
+          # (tmpfs without fsync, some FUSE mounts) the atomic rename
+          # below still guarantees a consistent observable state. We
+          # don't rescue here because the surrounding `write!` rescue-
+          # nothing contract is itself wrapped by callers (the
+          # supervisor's enqueue_dispatch_request catches StandardError).
+          f.fsync
         end
         File.rename(tmp_path, final_path)
         request_id

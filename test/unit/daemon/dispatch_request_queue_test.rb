@@ -178,6 +178,41 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_remove_skips_malformed_file_whose_path_matches_request_id
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      # A malformed file whose path contains the request_id but
+      # whose body is not valid JSON. `remove` must skip it
+      # gracefully and report nothing was removed (no exception).
+      good_path = write_request(dir, request_id: "GOODID", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
+      bad_path = File.join(Q.directory(state_home: dir), "20260528T180000000001-GOODID.json")
+      File.write(bad_path, "{not json")
+
+      removed = Q.remove("GOODID", state_home: dir)
+      assert removed, "the well-formed file with matching request_id must still be removed"
+      refute File.exist?(good_path)
+      assert File.exist?(bad_path), "the malformed file must be left for the pending-side bad_handler"
+    end
+  end
+
+  def test_remove_returns_false_when_directory_is_missing
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      missing_state_home = File.join(dir, "does-not-exist")
+      # Simulate the post-directory-creation race by removing the
+      # dir we just created. Subsequent glob returns []; the outer
+      # rescue is reached when the FS surfaces ENOENT during the
+      # operation (rare but possible on tmpfs under heavy churn).
+      # Drive the rescue by stubbing Dir.glob to raise ENOENT:
+      Dir.singleton_class.alias_method(:__orig_glob, :glob) unless Dir.singleton_class.method_defined?(:__orig_glob)
+      Dir.define_singleton_method(:glob) { |*| raise Errno::ENOENT, "vanished" }
+      begin
+        refute Q.remove("ANY", state_home: missing_state_home),
+               "outer ENOENT rescue must return false instead of raising"
+      ensure
+        Dir.define_singleton_method(:glob, Dir.singleton_class.instance_method(:__orig_glob).bind(Dir))
+      end
+    end
+  end
+
   def test_remove_does_not_touch_other_requests
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       a = write_request(dir, request_id: "AAA", created_at: Time.utc(2026, 5, 28, 18, 0, 0), slug: "a")

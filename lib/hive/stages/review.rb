@@ -7,6 +7,7 @@ require "hive/config"
 require "hive/protected_files"
 require "hive/claude_launcher"
 require "hive/stages/base"
+require "hive/stages/auto_commit"
 require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
@@ -75,19 +76,16 @@ module Hive
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
       AcceptedFindings = Data.define(:text, :count)
-      AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
-      AutoCommitScopeViolation = Data.define(:path, :reason)
+      # Auto-commit scope constants now live on Hive::Stages::AutoCommit
+      # (shared with CleanExit). Aliased here as compatibility constants —
+      # external readers that referenced them via Review::CONSTANT continue
+      # to work, and the in-file consumers (auto_commit_*) delegate to
+      # AutoCommit module-functions instead of reaching for these.
+      AUTO_COMMIT_SCOPE_GLOB_FLAGS = Hive::Stages::AutoCommit::AUTO_COMMIT_SCOPE_GLOB_FLAGS
+      AutoCommitScopeViolation = Hive::Stages::AutoCommit::AutoCommitScopeViolation
       AUTO_COMMIT_SCOPE_FILENAME = "auto-commit-scope".freeze
-      AUTO_COMMIT_OP_TIMEOUT_SEC = 300
-      AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
-        /gpg/i,
-        /pinentry/i,
-        /failed to sign/i,
-        /could not sign/i,
-        /signing key/i,
-        /ssh.*sign/i,
-        /sign.*ssh/i
-      ].freeze
+      AUTO_COMMIT_OP_TIMEOUT_SEC = Hive::Stages::AutoCommit::AUTO_COMMIT_OP_TIMEOUT_SEC
+      AUTO_COMMIT_SIGNING_ERROR_PATTERNS = Hive::Stages::AutoCommit::AUTO_COMMIT_SIGNING_ERROR_PATTERNS
 
       # `reviewer_file?` is defined in `review/orchestrator_owned.rb` so
       # this module and `Review::Triage` share one definition. Re-export
@@ -1545,78 +1543,42 @@ module Hive
         File.join("reviews", "#{FIX_SUCCESS_FILENAME}-#{format('%02d', pass)}.md")
       end
 
+      # The auto-commit primitives (scope-check, sign-policy, commit) now
+       # live on Hive::Stages::AutoCommit so the per-pass review fix path and
+       # the stage-exit Hive::Stages::CleanExit invariant share one
+       # implementation. The shims below preserve the existing in-file call
+       # sites without changing their return shapes — module_function methods
+       # called as `auto_commit_*` still resolve here, but delegate.
       def git_head(worktree_path)
-        out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
-        status.success? ? out.strip : nil
+        Hive::Stages::AutoCommit.git_head(worktree_path)
       end
 
       def auto_commit_scope_config(cfg)
-        defaults = Hive::Config::DEFAULTS.dig("review", "fix", "auto_commit", "scope_check") || {}
-        override = cfg.dig("review", "fix", "auto_commit", "scope_check")
-        override.is_a?(Hash) ? defaults.merge(override) : defaults
+        Hive::Stages::AutoCommit.auto_commit_scope_config(cfg)
       end
 
       def auto_commit_scope_check_enabled?(cfg)
-        auto_commit_scope_config(cfg)["enabled"] != false
+        Hive::Stages::AutoCommit.auto_commit_scope_check_enabled?(cfg)
       end
 
       def staged_auto_commit_paths(worktree_path)
-        out, err, status = Open3.capture3(
-          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "--no-renames", "-z"
-        )
-        unless status.success?
-          return {
-            success: false,
-            message: git_command_message("git diff --cached --name-only", out, err)
-          }
-        end
-
-        { success: true, paths: out.split("\0").reject(&:empty?) }
+        Hive::Stages::AutoCommit.staged_auto_commit_paths(worktree_path)
       end
 
       def normalize_staged_path(path)
-        normalized = path.to_s
-        parts = normalized.split("/")
-        return nil if normalized.empty? || normalized.start_with?("/")
-        return nil if normalized.include?("\0") || normalized.include?("\\")
-        return nil if parts.any? { |part| part.empty? || part == "." || part == ".." }
-
-        normalized
+        Hive::Stages::AutoCommit.normalize_staged_path(path)
       end
 
       def staged_path_matches_glob?(pattern, path)
-        normalized_pattern = pattern.to_s.tr("\\", "/")
-        return true if File.fnmatch?(normalized_pattern, path, AUTO_COMMIT_SCOPE_GLOB_FLAGS)
-        return false unless normalized_pattern.end_with?("/**")
-
-        prefix = normalized_pattern.delete_suffix("/**")
-        path == prefix || path.start_with?("#{prefix}/")
+        Hive::Stages::AutoCommit.staged_path_matches_glob?(pattern, path)
       end
 
       def auto_commit_scope_violations(cfg, paths)
-        scope = auto_commit_scope_config(cfg)
-        allowed = Array(scope["allowed_paths"])
-        denied = Array(scope["denied_paths"])
-
-        paths.filter_map do |raw_path|
-          path = normalize_staged_path(raw_path)
-          if path.nil?
-            AutoCommitScopeViolation.new(path: raw_path.to_s, reason: "invalid staged path")
-          elsif (pattern = denied.find { |glob| staged_path_matches_glob?(glob, path) })
-            AutoCommitScopeViolation.new(path: path, reason: "matches denied path pattern #{pattern.inspect}")
-          elsif allowed.none? { |glob| staged_path_matches_glob?(glob, path) }
-            AutoCommitScopeViolation.new(
-              path: path,
-              reason: "outside review.fix.auto_commit.scope_check.allowed_paths"
-            )
-          end
-        end
+        Hive::Stages::AutoCommit.auto_commit_scope_violations(cfg, paths)
       end
 
       def auto_commit_scope_failure_message(violations)
-        details = violations.first(5).map { |v| "#{v.path}: #{v.reason}" }.join("; ")
-        suffix = violations.size > 5 ? "; and #{violations.size - 5} more" : ""
-        "auto-commit scope check failed: #{details}#{suffix}"
+        Hive::Stages::AutoCommit.auto_commit_scope_failure_message(violations)
       end
 
       def auto_commit_scope_relative_path(pass)
@@ -1643,14 +1605,7 @@ module Hive
       end
 
       def auto_commit_failure_with_unstage(worktree_path, message, **attrs)
-        reset_out, reset_err, reset_status = Open3.capture3(
-          "git", "-C", worktree_path, "reset", "HEAD", "--"
-        )
-        unless reset_status.success?
-          message = "#{message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
-        end
-
-        { success: false, message: message }.merge(attrs)
+        Hive::Stages::AutoCommit.auto_commit_failure_with_unstage(worktree_path, message, **attrs)
       end
 
       def auto_commit_fix_worktree(task, cfg, ctx, accepted_findings)
@@ -1700,84 +1655,31 @@ module Hive
       end
 
       def auto_commit_sign_policy_for(cfg)
-        policy = Hive::Config.review_fix_auto_commit_sign_policy(cfg)
-        return policy if Hive::Config::AUTO_COMMIT_SIGN_POLICIES.include?(policy)
-
-        raise Hive::ConfigError,
-              "review.fix.auto_commit.sign_policy must be one of " \
-              "#{Hive::Config::AUTO_COMMIT_SIGN_POLICIES.inspect}; got #{policy.inspect}"
+        Hive::Stages::AutoCommit.auto_commit_sign_policy_for(cfg)
       end
 
       def auto_commit_sign_policy_failure(worktree_path, sign_policy)
-        return nil unless sign_policy == "fail"
-
-        signing = commit_gpgsign_enabled?(worktree_path)
-        unless signing[:success]
-          return {
-            success: false,
-            reason: "fix_auto_commit_sign_policy_failed",
-            message: "auto-commit signing policy failed: #{signing[:message]}; " \
-                     "fix-agent changes remain unstaged in the worktree. Commit or revert those changes manually " \
-                     "before clearing REVIEW_ERROR and re-running"
-          }
-        end
-        return nil unless signing[:enabled]
-
-        {
-          success: false,
-          reason: "fix_auto_commit_sign_policy_failed",
-          message: "auto-commit signing policy failed: commit.gpgsign is enabled; " \
-                   "fix-agent changes remain unstaged in the worktree. Either commit/revert those changes " \
-                   "manually, fix signing config, or set review.fix.auto_commit.sign_policy to inherit or bypass " \
-                   "before clearing REVIEW_ERROR and re-running"
-        }
+        Hive::Stages::AutoCommit.auto_commit_sign_policy_failure(worktree_path, sign_policy)
       end
 
       def commit_gpgsign_enabled?(worktree_path)
-        out, err, status = Open3.capture3(
-          "git", "-C", worktree_path, "config", "--bool", "--get", "commit.gpgsign"
-        )
-        return { success: true, enabled: out.strip == "true" } if status.success?
-        return { success: true, enabled: false } if out.to_s.empty? && err.to_s.empty?
-
-        {
-          success: false,
-          message: git_command_message("git config --bool --get commit.gpgsign", out, err)
-        }
+        Hive::Stages::AutoCommit.commit_gpgsign_enabled?(worktree_path)
       end
 
       def auto_commit_git_commit_argv(worktree_path, sign_policy, message)
-        argv = [ "git", "-C", worktree_path ]
-        argv += [ "-c", "commit.gpgsign=false" ] if sign_policy == "bypass"
-        argv + [ "commit", "-m", message ]
+        Hive::Stages::AutoCommit.auto_commit_git_commit_argv(worktree_path, sign_policy, message)
       end
 
       def auto_commit_git_commit(worktree_path, sign_policy, message)
-        argv = auto_commit_git_commit_argv(worktree_path, sign_policy, message)
-        success, err, timed_out = Hive::GitOps.new(worktree_path).run_git_with_timeout(
-          argv,
-          timeout_sec: AUTO_COMMIT_OP_TIMEOUT_SEC
-        )
-        return { success: true } if success
-
-        detail = if timed_out
-          "git commit timed out after #{AUTO_COMMIT_OP_TIMEOUT_SEC}s; signing or commit hooks may be waiting"
-        else
-          git_command_message("git commit", "", err)
-        end
-        { success: false, message: detail, timed_out: timed_out }
+        Hive::Stages::AutoCommit.auto_commit_git_commit(worktree_path, sign_policy, message)
       end
 
       def auto_commit_commit_failure_reason(sign_policy, commit)
-        return "fix_auto_commit_signing_failed" if commit[:timed_out]
-        return nil unless sign_policy == "inherit"
-        return "fix_auto_commit_signing_failed" if auto_commit_signing_error?(commit[:message])
-
-        nil
+        Hive::Stages::AutoCommit.auto_commit_commit_failure_reason(sign_policy, commit)
       end
 
       def auto_commit_signing_error?(message)
-        AUTO_COMMIT_SIGNING_ERROR_PATTERNS.any? { |pattern| message.to_s.match?(pattern) }
+        Hive::Stages::AutoCommit.auto_commit_signing_error?(message)
       end
 
       def fix_auto_commit_message(task, cfg, ctx, accepted_findings)
@@ -1795,8 +1697,7 @@ module Hive
       end
 
       def git_command_message(command, out, err)
-        details = [ err, out ].map(&:to_s).reject(&:empty?).join("\n").strip
-        details.empty? ? "#{command} failed" : "#{command} failed: #{details}"
+        Hive::Stages::AutoCommit.git_command_message(command, out, err)
       end
 
       def sanitize_trailer_value(value)

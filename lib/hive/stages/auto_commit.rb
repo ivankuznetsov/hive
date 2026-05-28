@@ -1,0 +1,203 @@
+require "open3"
+require "fileutils"
+require "hive/config"
+require "hive/git_ops"
+
+module Hive
+  module Stages
+    # Shared auto-commit helpers extracted from `Hive::Stages::Review` so the
+    # per-pass review fix path AND the stage-exit `CleanExit` invariant can
+    # share one scope-check + sign-policy + commit primitive.
+    #
+    # The module is a pure callable — no instance state, no dependencies on
+    # Review-local context — and every method preserves the exact return
+    # shape Review consumers expect (`{ success: bool, ... }`).
+    module AutoCommit
+      AUTO_COMMIT_SCOPE_GLOB_FLAGS = File::FNM_PATHNAME | File::FNM_DOTMATCH
+      AutoCommitScopeViolation = Data.define(:path, :reason)
+      AUTO_COMMIT_OP_TIMEOUT_SEC = 300
+      AUTO_COMMIT_SIGNING_ERROR_PATTERNS = [
+        /gpg/i,
+        /pinentry/i,
+        /failed to sign/i,
+        /could not sign/i,
+        /signing key/i,
+        /ssh.*sign/i,
+        /sign.*ssh/i
+      ].freeze
+
+      module_function
+
+      def auto_commit_scope_config(cfg)
+        defaults = Hive::Config::DEFAULTS.dig("review", "fix", "auto_commit", "scope_check") || {}
+        override = cfg.dig("review", "fix", "auto_commit", "scope_check")
+        override.is_a?(Hash) ? defaults.merge(override) : defaults
+      end
+
+      def auto_commit_scope_check_enabled?(cfg)
+        auto_commit_scope_config(cfg)["enabled"] != false
+      end
+
+      def staged_auto_commit_paths(worktree_path)
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "diff", "--cached", "--name-only", "--no-renames", "-z"
+        )
+        unless status.success?
+          return {
+            success: false,
+            message: git_command_message("git diff --cached --name-only", out, err)
+          }
+        end
+
+        { success: true, paths: out.split("\0").reject(&:empty?) }
+      end
+
+      def normalize_staged_path(path)
+        normalized = path.to_s
+        parts = normalized.split("/")
+        return nil if normalized.empty? || normalized.start_with?("/")
+        return nil if normalized.include?("\0") || normalized.include?("\\")
+        return nil if parts.any? { |part| part.empty? || part == "." || part == ".." }
+
+        normalized
+      end
+
+      def staged_path_matches_glob?(pattern, path)
+        normalized_pattern = pattern.to_s.tr("\\", "/")
+        return true if File.fnmatch?(normalized_pattern, path, AUTO_COMMIT_SCOPE_GLOB_FLAGS)
+        return false unless normalized_pattern.end_with?("/**")
+
+        prefix = normalized_pattern.delete_suffix("/**")
+        path == prefix || path.start_with?("#{prefix}/")
+      end
+
+      def auto_commit_scope_violations(cfg, paths)
+        scope = auto_commit_scope_config(cfg)
+        allowed = Array(scope["allowed_paths"])
+        denied = Array(scope["denied_paths"])
+
+        paths.filter_map do |raw_path|
+          path = normalize_staged_path(raw_path)
+          if path.nil?
+            AutoCommitScopeViolation.new(path: raw_path.to_s, reason: "invalid staged path")
+          elsif (pattern = denied.find { |glob| staged_path_matches_glob?(glob, path) })
+            AutoCommitScopeViolation.new(path: path, reason: "matches denied path pattern #{pattern.inspect}")
+          elsif allowed.none? { |glob| staged_path_matches_glob?(glob, path) }
+            AutoCommitScopeViolation.new(
+              path: path,
+              reason: "outside review.fix.auto_commit.scope_check.allowed_paths"
+            )
+          end
+        end
+      end
+
+      def auto_commit_scope_failure_message(violations)
+        details = violations.first(5).map { |v| "#{v.path}: #{v.reason}" }.join("; ")
+        suffix = violations.size > 5 ? "; and #{violations.size - 5} more" : ""
+        "auto-commit scope check failed: #{details}#{suffix}"
+      end
+
+      def auto_commit_sign_policy_for(cfg)
+        policy = Hive::Config.review_fix_auto_commit_sign_policy(cfg)
+        return policy if Hive::Config::AUTO_COMMIT_SIGN_POLICIES.include?(policy)
+
+        raise Hive::ConfigError,
+              "review.fix.auto_commit.sign_policy must be one of " \
+              "#{Hive::Config::AUTO_COMMIT_SIGN_POLICIES.inspect}; got #{policy.inspect}"
+      end
+
+      def auto_commit_sign_policy_failure(worktree_path, sign_policy)
+        return nil unless sign_policy == "fail"
+
+        signing = commit_gpgsign_enabled?(worktree_path)
+        unless signing[:success]
+          return {
+            success: false,
+            reason: "fix_auto_commit_sign_policy_failed",
+            message: "auto-commit signing policy failed: #{signing[:message]}; " \
+                     "fix-agent changes remain unstaged in the worktree. Commit or revert those changes manually " \
+                     "before clearing REVIEW_ERROR and re-running"
+          }
+        end
+        return nil unless signing[:enabled]
+
+        {
+          success: false,
+          reason: "fix_auto_commit_sign_policy_failed",
+          message: "auto-commit signing policy failed: commit.gpgsign is enabled; " \
+                   "fix-agent changes remain unstaged in the worktree. Either commit/revert those changes " \
+                   "manually, fix signing config, or set review.fix.auto_commit.sign_policy to inherit or bypass " \
+                   "before clearing REVIEW_ERROR and re-running"
+        }
+      end
+
+      def commit_gpgsign_enabled?(worktree_path)
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "config", "--bool", "--get", "commit.gpgsign"
+        )
+        return { success: true, enabled: out.strip == "true" } if status.success?
+        return { success: true, enabled: false } if out.to_s.empty? && err.to_s.empty?
+
+        {
+          success: false,
+          message: git_command_message("git config --bool --get commit.gpgsign", out, err)
+        }
+      end
+
+      def auto_commit_git_commit_argv(worktree_path, sign_policy, message)
+        argv = [ "git", "-C", worktree_path ]
+        argv += [ "-c", "commit.gpgsign=false" ] if sign_policy == "bypass"
+        argv + [ "commit", "-m", message ]
+      end
+
+      def auto_commit_git_commit(worktree_path, sign_policy, message)
+        argv = auto_commit_git_commit_argv(worktree_path, sign_policy, message)
+        success, err, timed_out = Hive::GitOps.new(worktree_path).run_git_with_timeout(
+          argv,
+          timeout_sec: AUTO_COMMIT_OP_TIMEOUT_SEC
+        )
+        return { success: true } if success
+
+        detail = if timed_out
+          "git commit timed out after #{AUTO_COMMIT_OP_TIMEOUT_SEC}s; signing or commit hooks may be waiting"
+        else
+          git_command_message("git commit", "", err)
+        end
+        { success: false, message: detail, timed_out: timed_out }
+      end
+
+      def auto_commit_commit_failure_reason(sign_policy, commit)
+        return "fix_auto_commit_signing_failed" if commit[:timed_out]
+        return nil unless sign_policy == "inherit"
+        return "fix_auto_commit_signing_failed" if auto_commit_signing_error?(commit[:message])
+
+        nil
+      end
+
+      def auto_commit_signing_error?(message)
+        AUTO_COMMIT_SIGNING_ERROR_PATTERNS.any? { |pattern| message.to_s.match?(pattern) }
+      end
+
+      def auto_commit_failure_with_unstage(worktree_path, message, **attrs)
+        reset_out, reset_err, reset_status = Open3.capture3(
+          "git", "-C", worktree_path, "reset", "HEAD", "--"
+        )
+        unless reset_status.success?
+          message = "#{message}; #{git_command_message('git reset HEAD --', reset_out, reset_err)}"
+        end
+
+        { success: false, message: message }.merge(attrs)
+      end
+
+      def git_head(worktree_path)
+        out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
+        status.success? ? out.strip : nil
+      end
+
+      def git_command_message(command, out, err)
+        details = [ err, out ].map(&:to_s).reject(&:empty?).join("\n").strip
+        details.empty? ? "#{command} failed" : "#{command} failed: #{details}"
+      end
+    end
+  end
+end

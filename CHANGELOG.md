@@ -2,6 +2,11 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.1.10
+
+- Fixed the daemon stranding already-answered `needs_input` tasks across a restart. The `[project, slug] → state_file_mtime` baseline map (consulted by `Policy#decide_edit` to detect fresh user input) was in-memory only, so a pre-restart answer never looked "newer than baseline" on first sight and got skipped on every tick forever until you manually `touch`ed the state file. Baselines now persist to `daemon_dispatch_baselines.json` under the state home (atomic write + fail-closed load + sibling-flock + orphan-tmp sweep), reload on startup, and prune to the live task set each successful tick — bounded to the projects in the snapshot so a per-project status error doesn't wipe its baselines.
+- Fixed features getting stuck for hours at `8-finalize` with `:error reason=dirty_worktree` whenever a stage left orphan edits behind (e.g. a `6-review` fix agent that wrote one more file after the per-pass auto-commit window closed). Promoted "the worktree is clean at stage exit" to a stage-level invariant enforced once in `Hive::Stages::Base.with_stage_events`: residue is auto-committed as `chore(<stage>): commit residual worktree changes` with `Hive-Auto-Commit: residue` trailers, gated by the existing `review.fix.auto_commit.scope_check` allowlist and skipped for the four pause markers. `Finalize.verify_state!` re-runs the same check on entry so any feature already stuck pre-merge self-heals on its next tick. The bot routes dirty-worktree `:error` markers as manual-only, stopping the Autofix retry loop.
+
 ## 0.1.9
 
 - Fixed every tmux-mode Claude launch failing with `claude_launch_failed` after a Claude Code TUI update moved the input caret to the end of a context-prefixed line (`<cwd> <git-status>  ❯`) with a hint footer beneath it. The readiness check now detects the caret at the start or end of its line and tolerates the footer, so brainstorm/plan/review stop timing out. Hardened to be robust to future caret repositioning.

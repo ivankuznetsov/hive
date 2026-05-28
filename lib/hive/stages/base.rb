@@ -187,7 +187,14 @@ module Hive
       # context the generic invariant lacks (see plan §"Non-goals":
       # "Changing what the 4-execute stage does when it detects a
       # waiting dirty worktree mid-pass ... is not in scope").
-      PAUSE_MARKERS = %i[waiting execute_waiting review_waiting manual_steering].freeze
+      #
+      # The list is narrowed to markers actually reachable on
+      # `WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize]`:
+      # the generic `:waiting` and `:manual_steering` markers are
+      # written by `2-brainstorm` / `3-plan` agents, never on a
+      # worktree-owning stage. Adding a new pause marker to a
+      # worktree-owning stage requires a deliberate edit here.
+      PAUSE_MARKERS = %i[execute_waiting review_waiting].freeze
 
       # CleanExit checks the worktree at `stage_exit`. On residue:
       #   - `:auto_committed` → log and fall through (the residue is

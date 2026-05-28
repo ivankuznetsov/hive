@@ -190,6 +190,27 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal "dirty_worktree", marker.attrs["reason"]
   end
 
+  # `:review_waiting` is the 6-review counterpart: when the review
+  # orchestrator surfaces escalations awaiting human edit, it writes
+  # `<!-- REVIEW_WAITING escalations=N pass=NN -->`. The runner expects
+  # the operator to inspect the worktree (and possibly leave residue),
+  # so the clean-exit invariant must NOT overwrite it.
+  def test_with_stage_events_does_not_overwrite_review_waiting_pause_marker
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+      FileUtils.mkdir_p(File.join(worktree, "unrelated"))
+      File.write(File.join(worktree, "unrelated", "dirty.txt"), "x\n")
+      Hive::Markers.set(task.state_file, :review_waiting, escalations: 2, pass: "01")
+    end
+
+    marker = Hive::Markers.current(task.state_file)
+    assert_equal :review_waiting, marker.name,
+                 ":review_waiting must not be overwritten by the invariant"
+    assert_equal "2", marker.attrs["escalations"]
+  end
+
   # When CleanExit overwrites the stage's marker to
   # `:error reason=ensure_clean_on_exit_failed`, the stage's own
   # `result[:commit]` (e.g. "review_complete") is now lying: the

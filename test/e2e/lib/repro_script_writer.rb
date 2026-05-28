@@ -50,11 +50,46 @@ module Hive
         # stay readable — neither SandboxEnv.repro_env nor the shell otherwise
         # carries the path through.
         lines << "export HIVE_SANDBOX_DIR=#{Shellwords.escape(@sandbox_dir)}"
+        # Harness teardown parity: the executor TERMs the releases-stub thread
+        # and every background process at scenario exit so they never outlive
+        # the run. Mirror that here so an aborted repro doesn't leak a daemon
+        # listening on the sandbox lock or a stub holding an ephemeral port.
+        lines.concat(harness_teardown_prelude)
         lines << "echo 'Replaying setup and failed CLI-visible steps for #{@failed_index}'"
         @steps.first(@failed_index.to_i).each do |step|
           lines.concat(emit_step(step))
         end
         lines.join("\n") + "\n"
+      end
+
+      # Bash plumbing for cross-step harness state (background PIDs, stub
+      # server pid + URL file). Registered once at the top of the script so
+      # later step emissions can append PIDs and the EXIT trap reaps them all.
+      def harness_teardown_prelude
+        [
+          "HIVE_REPRO_BG_PIDS=()",
+          "HIVE_REPRO_STUB_PID=",
+          "HIVE_REPRO_STUB_URL_FILE=",
+          "_hive_repro_cleanup() {",
+          "  local pid",
+          "  for pid in \"${HIVE_REPRO_BG_PIDS[@]}\"; do",
+          "    [ -z \"$pid\" ] && continue",
+          "    kill -TERM -\"$pid\" 2>/dev/null || true",
+          "  done",
+          "  sleep 0.3 2>/dev/null || true",
+          "  for pid in \"${HIVE_REPRO_BG_PIDS[@]}\"; do",
+          "    [ -z \"$pid\" ] && continue",
+          "    kill -KILL -\"$pid\" 2>/dev/null || true",
+          "  done",
+          "  if [ -n \"$HIVE_REPRO_STUB_PID\" ]; then",
+          "    kill -TERM \"$HIVE_REPRO_STUB_PID\" 2>/dev/null || true",
+          "  fi",
+          "  if [ -n \"$HIVE_REPRO_STUB_URL_FILE\" ] && [ -f \"$HIVE_REPRO_STUB_URL_FILE\" ]; then",
+          "    rm -f \"$HIVE_REPRO_STUB_URL_FILE\"",
+          "  fi",
+          "}",
+          "trap _hive_repro_cleanup EXIT"
+        ]
       end
 
       def emit_step(step)
@@ -78,17 +113,11 @@ module Hive
         when *LIVE_TMUX_KINDS
           [ "# step #{step.position} skipped: requires live tmux (kind=#{step.kind})" ]
         when "start_releases_stub"
-          [ "# step #{step.position} start_releases_stub: serves release tag " \
-            "#{expand_string(step.args["tag"].to_s).inspect} — a harness-owned local stub; " \
-            "set HIVE_RELEASES_API_URL to a server returning that tag to replay manually" ]
+          emit_start_releases_stub(step)
         when "spawn_background"
-          bg = expand(step.args.fetch("args")).map(&:to_s)
-          [ "# step #{step.position} spawn_background id=#{expand_string(step.args["id"].to_s)}: " \
-            "harness runs `hive #{bg.join(' ')}` attached (HIVE_DAEMON_NO_AUTO_REEXEC=1, " \
-            "HIVE_RELEASES_API_URL=<stub>) and stops it at teardown — run it manually to replay" ]
+          emit_spawn_background(step)
         when "stop_process"
-          [ "# step #{step.position} stop_process id=#{expand_string(step.args["id"].to_s)}: " \
-            "harness-managed teardown; no-op in a flat repro" ]
+          emit_stop_process(step)
         else
           [ "# step #{step.position} skipped: kind=#{step.kind} (stateful)" ]
         end
@@ -205,6 +234,118 @@ module Hive
           "# ruby_block runs with sandbox, run_home, and slug locals restored for replay.",
           Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", "-e", ruby ])
         ]
+      end
+
+      # Launch ReleasesStubServer in a Ruby child, then export HIVE_RELEASES_API_URL.
+      # The child writes its ephemeral URL to a tempfile so this shell can poll
+      # for readiness without a sleep — same condition-wait discipline as the
+      # live harness. The stub pid + url file are captured into globals so the
+      # EXIT trap (see harness_teardown_prelude) reaps them.
+      def emit_start_releases_stub(step)
+        tag = expand_string(step.args.fetch("tag").to_s)
+        ruby_body = stub_server_ruby_body
+        [
+          "# step #{step.position} start_releases_stub: tag=#{tag}",
+          # If a previous step already started a stub, stop it first — the
+          # executor calls @ctx.harness_state[:releases_stub]&.stop before
+          # replacing the slot.
+          "if [ -n \"$HIVE_REPRO_STUB_PID\" ]; then",
+          "  kill -TERM \"$HIVE_REPRO_STUB_PID\" 2>/dev/null || true",
+          "  HIVE_REPRO_STUB_PID=",
+          "fi",
+          "HIVE_REPRO_STUB_URL_FILE=$(mktemp -t hive_repro_stub_url.XXXXXX)",
+          ": > \"$HIVE_REPRO_STUB_URL_FILE\"",
+          "#{Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", "-I#{File.join(Paths.e2e_root, 'lib')}", "-e", ruby_body, tag ])} \"$HIVE_REPRO_STUB_URL_FILE\" &",
+          "HIVE_REPRO_STUB_PID=$!",
+          # Bounded condition-wait on the URL file: 10s @ 50ms ticks.
+          "for _i in $(seq 1 200); do",
+          "  if [ -s \"$HIVE_REPRO_STUB_URL_FILE\" ]; then break; fi",
+          "  sleep 0.05",
+          "done",
+          "if [ ! -s \"$HIVE_REPRO_STUB_URL_FILE\" ]; then",
+          "  echo 'step #{step.position} start_releases_stub: stub url never published' >&2",
+          "  exit 1",
+          "fi",
+          "export HIVE_RELEASES_API_URL=\"$(cat \"$HIVE_REPRO_STUB_URL_FILE\")\""
+        ]
+      end
+
+      # Bash for `hive <args> &` matching BackgroundProcess: own pgroup
+      # (`setsid`), captured logs under run_home/background/<id>.log, the
+      # caller's env merged onto SandboxEnv, and HIVE_RELEASES_API_URL
+      # auto-injected from the active stub when the scenario didn't pin it
+      # explicitly — mirrors step_executor.rb step_spawn_background.
+      def emit_spawn_background(step)
+        id_raw = expand_string(step.args.fetch("id").to_s)
+        id = PathSafety.safe_basename!(id_raw, "spawn_background id")
+        args = expand(step.args.fetch("args")).map(&:to_s)
+        env = expand(step.args["env"] || {})
+        log_path = File.join(@run_home, "background", "#{id}.log")
+        var = bg_pid_var(id)
+        env_assignments = env.map { |key, value| "#{key}=#{value}" }
+        # Match executor: if the caller didn't pin it and a stub is running,
+        # auto-inject HIVE_RELEASES_API_URL=$HIVE_RELEASES_API_URL at runtime.
+        injected = env.key?("HIVE_RELEASES_API_URL") ? "" : " ${HIVE_RELEASES_API_URL:+HIVE_RELEASES_API_URL=$HIVE_RELEASES_API_URL}"
+        command = Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", Paths.hive_bin, *args ])
+        env_prefix = env_assignments.empty? ? "" : "#{Shellwords.join([ "env", *env_assignments ])} "
+        [
+          "# step #{step.position} spawn_background id=#{id}: hive #{args.join(' ')}",
+          "mkdir -p #{Shellwords.escape(File.dirname(log_path))}",
+          # `setsid` gives the child its own session+pgroup so `kill -TERM -$PID`
+          # signals the whole tree, matching BackgroundProcess#stop's `pgroup: true`.
+          # `< /dev/null` detaches stdin so the daemon never blocks on a dead tty.
+          "setsid #{env_prefix}env#{injected} #{command} > #{Shellwords.escape(log_path)} 2>&1 < /dev/null &",
+          "#{var}=$!",
+          "HIVE_REPRO_BG_PIDS+=(\"$#{var}\")"
+        ]
+      end
+
+      # Mirrors BackgroundProcess#stop: TERM the pgroup, brief grace, KILL.
+      def emit_stop_process(step)
+        id_raw = expand_string(step.args.fetch("id").to_s)
+        id = PathSafety.safe_basename!(id_raw, "stop_process id")
+        var = bg_pid_var(id)
+        [
+          "# step #{step.position} stop_process id=#{id}",
+          "if [ -n \"${#{var}:-}\" ]; then",
+          "  kill -TERM -\"$#{var}\" 2>/dev/null || true",
+          "  sleep 0.5",
+          "  kill -KILL -\"$#{var}\" 2>/dev/null || true",
+          "  #{var}=",
+          "fi"
+        ]
+      end
+
+      # Map a step id (already validated as a safe basename, but may contain
+      # dashes/dots) to a bash-legal variable name. Use a stable suffix the
+      # paired stop_process step can rederive.
+      def bg_pid_var(id)
+        "HIVE_REPRO_BG_PID_#{id.tr('-.', '_').upcase}"
+      end
+
+      # The stub server lives in test/e2e/lib/releases_stub_server.rb. The Ruby
+      # child requires it, starts it on an ephemeral port, writes the URL to
+      # ARGV[1] so the parent shell can read it, and then sleeps until TERM —
+      # matching the executor's "stop on scenario teardown" semantics.
+      #
+      # NOTE on exit semantics: the live harness calls server.stop from the
+      # same process that created it, so the serve thread closes cleanly. Here
+      # the server runs in its own process and TERM is delivered while the
+      # accept loop blocks on a syscall — calling Ruby code from that signal
+      # handler can crash a Ruby 3.x child (TCPServer accept + signal-raised
+      # IOError race). Use `exit!` to bypass at-exit hooks and let the OS
+      # close the socket; the listener is short-lived and never persists state.
+      def stub_server_ruby_body
+        <<~RUBY.strip
+          require 'releases_stub_server'
+          tag = ARGV[0]
+          url_file = ARGV[1]
+          server = Hive::E2E::ReleasesStubServer.new(tag: tag)
+          File.write(url_file, server.url)
+          trap('TERM') { exit!(0) }
+          trap('INT')  { exit!(0) }
+          sleep
+        RUBY
       end
 
       def emit_assertion(step)
@@ -375,10 +516,18 @@ module Hive
       def json_pick_ruby(pick, equals)
         return nil unless pick
 
+        # `pick.inspect` produces a Ruby array literal like `["a", "b"]` which
+        # itself contains double quotes. The earlier emission interpolated it
+        # *into* a Ruby double-quoted string (`"expected #{pick.inspect}..."`)
+        # so the inner `"` terminated the outer literal and the generated
+        # ruby -e refused to parse. Bind the inspected array to a local first,
+        # then interpolate the local — its inspect output reuses the safe
+        # `#{... .inspect}` pattern that already works for the other values.
         [
-          "actual_value = #{pick.inspect}.reduce(doc) { |value, key| key.is_a?(Integer) ? value.fetch(key) : value.fetch(key.to_s) }",
+          "pick = #{pick.inspect}",
+          "actual_value = pick.reduce(doc) { |value, key| key.is_a?(Integer) ? value.fetch(key) : value.fetch(key.to_s) }",
           "expected_value = #{equals.inspect}",
-          "abort(\"expected #{pick.inspect} to equal \#{expected_value.inspect}, got \#{actual_value.inspect}\") unless actual_value == expected_value"
+          "abort(\"expected \#{pick.inspect} to equal \#{expected_value.inspect}, got \#{actual_value.inspect}\") unless actual_value == expected_value"
         ].join("\n")
       end
 

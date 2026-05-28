@@ -1662,14 +1662,6 @@ module Hive
         Hive::Stages::AutoCommit.auto_commit_sign_policy_failure(worktree_path, sign_policy)
       end
 
-      def commit_gpgsign_enabled?(worktree_path)
-        Hive::Stages::AutoCommit.commit_gpgsign_enabled?(worktree_path)
-      end
-
-      def auto_commit_git_commit_argv(worktree_path, sign_policy, message)
-        Hive::Stages::AutoCommit.auto_commit_git_commit_argv(worktree_path, sign_policy, message)
-      end
-
       def auto_commit_git_commit(worktree_path, sign_policy, message)
         Hive::Stages::AutoCommit.auto_commit_git_commit(worktree_path, sign_policy, message)
       end

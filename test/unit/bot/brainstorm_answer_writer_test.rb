@@ -113,7 +113,11 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  def test_missing_answer_placeholder_returns_question_not_found
+  # Q1 present, no A-line at all → answer_slot_missing (NOT
+  # question_not_found, which is now reserved for "Q{n} truly absent").
+  # The supervisor renders a distinct message for this so the operator
+  # knows the question IS in the file and the brainstorm.md needs repair.
+  def test_q_present_no_a_line_returns_answer_slot_missing
     with_brainstorm("## Round 1\n\n### Q1. First?\n") do |path|
       result = Hive::Bot::BrainstormAnswerWriter.append!(
         brainstorm_path: path,
@@ -121,7 +125,86 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
         answer_text: "One"
       )
 
-      assert_equal :question_not_found, result
+      assert_equal :answer_slot_missing, result
+    end
+  end
+
+  # Regression: observed 2026-05-28 on
+  # `explore-the-simplest-way-to-260528-2503` — the brainstorm agent
+  # emitted `### A2.` immediately after `### Q1.` for a fresh Round 2.
+  # Old writer's strict `match[1].to_i == question_n` returned no slot,
+  # then the supervisor said "Question 1 was not found" — misleading
+  # because Q1 IS in the file. New writer falls back to "first empty
+  # A-section after Q{n}" so the operator's answer lands cleanly.
+  def test_misnumbered_empty_answer_slot_is_filled_via_by_position_fallback
+    content = <<~MARKDOWN
+      ## Round 2
+
+      ### Q1. Identify OpenClawd.
+      ### A2.
+      ### Q2. Which install path?
+      ### A3.
+
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "OpenClawd.ai"
+      )
+
+      assert_equal :written, result
+      after = File.read(path)
+      assert_includes after, "### Q1. Identify OpenClawd.\n### A2.\nOpenClawd.ai\n",
+                      "answer must be written into the mis-numbered A-slot that " \
+                      "follows Q1 (the by-position fallback)"
+      # Round-trip verify: the parser must read back the answer as Q1's.
+      parsed = Hive::Bot::BrainstormParser.parse(path)
+      assert_equal "OpenClawd.ai", parsed[0].answer,
+                   "parser must accept the mis-numbered A2 under Q1 as Q1's answer"
+    end
+  end
+
+  # The by-position fallback must NOT cross block boundaries. If the
+  # next block (Q, round, or marker) appears before any A line, no slot.
+  def test_no_slot_when_next_block_comes_before_any_a_line
+    with_brainstorm("## Round 1\n\n### Q1. First?\n### Q2. Second?\n### A2.\n") do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "One"
+      )
+
+      assert_equal :answer_slot_missing, result
+    end
+  end
+
+  # The by-position fallback must skip past non-boundary prose lines
+  # between Q{n} and the first A-section. Covers the `scan += 1`
+  # increment that earlier branch tests didn't reach.
+  def test_by_position_fallback_skips_prose_before_finding_answer_slot
+    content = <<~MARKDOWN
+      ## Round 2
+
+      ### Q1. Multi-line question?
+      Extra context that the agent added below the question heading.
+      And more prose that isn't an A-line, a Q, a round, or a marker.
+      ### A2.
+
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "Filled"
+      )
+
+      assert_equal :written, result, "by-position fallback must skip prose lines"
+      assert_includes File.read(path), "### A2.\nFilled\n"
     end
   end
 

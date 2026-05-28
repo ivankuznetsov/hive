@@ -236,8 +236,29 @@ module Hive
         else
           { status: result[:status], overwrote_marker: false }
         end
+      rescue Hive::ConfigError => e
+        # Misconfiguration (invalid sign_policy etc.) is not transient
+        # I/O; the operator needs to see it. Mark `:error` so the
+        # failure surfaces through the same recovery surface as a
+        # scope-violation residue, instead of silently dropping into
+        # the generic `rescue StandardError` warn-and-continue path.
+        warn "[hive] ensure_clean_on_exit invalid config: #{e.message}"
+        existing_marker = safe_current_marker(task)
+        overwrote = mark_clean_exit_failure(
+          task,
+          { status: :git_failed,
+            message: "invalid sign_policy config: #{e.message}" },
+          existing_marker
+        )
+        { status: :git_failed, overwrote_marker: overwrote }
       rescue StandardError => e
         warn "[hive] ensure_clean_on_exit raised #{e.class}: #{e.message}; leaving marker untouched"
+        nil
+      end
+
+      def safe_current_marker(task)
+        Hive::Markers.current(task.state_file)
+      rescue StandardError
         nil
       end
 
@@ -266,8 +287,8 @@ module Hive
       end
 
       def mark_clean_exit_failure(task, result, existing_marker = nil)
-        existing_marker ||= Hive::Markers.current(task.state_file)
-        return false if error_marker?(existing_marker.name)
+        existing_marker ||= safe_current_marker(task)
+        return false if existing_marker && error_marker?(existing_marker.name)
 
         attrs = {
           reason: "ensure_clean_on_exit_failed",

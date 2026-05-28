@@ -215,6 +215,34 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal :error, result[:status]
   end
 
+  # `Hive::ConfigError` (e.g. invalid `sign_policy`) is a programmer/
+  # operator misconfiguration, not a transient I/O blip — the generic
+  # `rescue StandardError` warn-and-continue path would silently
+  # swallow it, hiding the bad config from the operator. The dedicated
+  # rescue must surface it as `:error reason=ensure_clean_on_exit_failed`.
+  def test_with_stage_events_surfaces_config_error_as_clean_exit_failure
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    # Bad sign_policy fed through cfg; CleanExit calls
+    # AutoCommit.auto_commit_sign_policy_for which raises ConfigError.
+    cfg = deep_dup_default_cfg
+    cfg.dig("review", "fix", "auto_commit")["sign_policy"] = "totally_invalid"
+
+    Hive::Stages::Base.with_stage_events(task, cfg: cfg) do
+      # Any dirty worktree triggers CleanExit (so we hit
+      # auto_commit_sign_policy_for); the residue itself is irrelevant.
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+      Hive::Markers.set(task.state_file, :review_complete, attempts: 1)
+    end
+
+    marker = Hive::Markers.current(task.state_file)
+    assert_equal :error, marker.name
+    assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
+    assert_match(/invalid sign_policy config/, marker.attrs["detail"].to_s)
+  end
+
   # The clean / auto_committed branch must leave the stage's own
   # `result[:commit]` alone — only the overwrite branch mutates.
   def test_with_stage_events_preserves_result_commit_when_auto_committing

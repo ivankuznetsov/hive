@@ -226,6 +226,41 @@ class DaemonDispatchBaselinesTest < Minitest::Test
            "a sweep failure must be logged, not silently leak tmp files")
   end
 
+  def test_acquire_lock_swallows_close_error_when_flock_raises
+    # Belt-and-braces: if flock raises AND the subsequent defensive close
+    # also raises (e.g. EIO on the lockfile FD), the failure must still not
+    # propagate and the lock-error event must still be emitted.
+    bad = Object.new
+    bad.define_singleton_method(:flock) { |_mode| raise(IOError, "flock not supported") }
+    bad.define_singleton_method(:close) { raise(IOError, "close blew up") }
+
+    logger = RecordingLogger.new
+    s = Hive::Daemon::DispatchBaselines.new(path: @path, logger: logger)
+
+    with_replaced_singleton_method(File, :open, ->(*_a, **_k) { bad }) do
+      assert_nil s.send(:acquire_lock), "acquire_lock must not raise when both flock and close fail"
+    end
+
+    assert(logger.events.any? { |name, _| name == :daemon_dispatch_baselines_lock_error },
+           "the lock-error event still fires even when the defensive close fails")
+  end
+
+  def test_missing_baselines_array_loads_empty_with_loaded_event
+    # A well-formed envelope whose `baselines` key is missing OR a non-array
+    # value must degrade to {} without raising. Symmetric to the malformed-
+    # mtime entry-drop tests, but at the envelope level. The :loaded event
+    # still fires so the operator sees a "0 baselines loaded" signal rather
+    # than nothing at all.
+    File.write(@path, JSON.generate("schema_version" => 1, "baselines" => "not-an-array"))
+    logger = RecordingLogger.new
+
+    loaded = Hive::Daemon::DispatchBaselines.new(path: @path, logger: logger).load
+
+    assert_empty loaded
+    assert(logger.events.any? { |name, attrs| name == :daemon_dispatch_baselines_loaded && attrs[:count] == 0 },
+           "even a missing/non-array baselines field must still emit a :loaded event")
+  end
+
   def test_acquire_lock_closes_handle_when_flock_raises
     # Symmetric to test_release_lock_closes_the_handle_even_when_flock_raises:
     # if File.open succeeds but flock raises (FUSE/NFS without lockd), the

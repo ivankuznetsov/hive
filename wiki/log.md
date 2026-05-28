@@ -2,6 +2,16 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T13:50:00Z] fix — CleanExit follow-ups: bot callback reason encoding + agent-actionable next_action
+
+**Action:** Two further CleanExit fixes:
+
+1. **`Hive::Markers.error_recovery_match_attr` encodes both `marker_id` and `reason`** when both are present (comma-separated, `marker_id=...,reason=...`). Telegram inline-button callbacks now reconstruct enough attrs for `Hive::Bot::Handlers::RecoverySequence.manual_only?` to refuse `dirty_worktree` / `ensure_clean_on_exit_failed` — previously the callback path only carried `marker_id=<hex>` and the manual-only check (which reads `attrs["reason"]`) never matched, so the bot kept dispatching the retry verb. `Hive::Bot::AlertStore.parse_match_attr` keeps using the leading token (`marker_id=...`) as its race-safe invalidation guard.
+2. **`hive run --json` next_action for `:error reason=ensure_clean_on_exit_failed`** now emits an `EDIT` envelope (target = worktree path, `residue_paths` parsed as an array, `instructions` carrying the canonical recovery one-liner, `markers_to_clear: ["error"]`, `rerun_with` set). `Hive::TaskAction#suggested_next_action_payload` gets a `clean_exit_manual_failure?` predicate returning `{kind: "manual_fix", command: nil}` — mirroring the `auto_commit_manual_failure?` shape so polling consumers see the explicit "do not auto-retry" signal that matches the bot's manual-only routing decision.
+
+**Refreshed pages:**
+- [[bot]] — `RecoverySequence` now refuses inline-button retries on the new manual-only reasons via the comma-encoded `match_attr` round-trip.
+
 ## [2026-05-28T13:30:00Z] fix — CleanExit follow-ups: stale result[:commit], ConfigError surfacing, 300s git timeout
 
 **Action:** Three follow-up fixes to the CleanExit invariant landed today:

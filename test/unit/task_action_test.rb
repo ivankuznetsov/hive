@@ -1256,6 +1256,33 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # CleanExit `:error reason=ensure_clean_on_exit_failed` is the
+  # stage-exit invariant refusing to auto-commit residue. Mirror the
+  # `auto_commit_*_failed` REVIEW_ERROR routing: never emit a retry
+  # command, since operator inspection is required. Without this
+  # branch, `suggested_next_action_payload` would fall through to
+  # `retry_command_string` and emit a clear+rerun recipe — the bot's
+  # manual-only routing already refuses to dispatch it, so consumers
+  # would see contradictory signals between the bot reply and the
+  # CLI envelope.
+  def test_clean_exit_failed_is_manual_fix_with_null_command
+    with_tmp_dir do |dir|
+      task = fake_task(stage_name: "finalize", stage_index: 8, project_root: dir)
+
+      payload = Hive::TaskAction.for(
+        task,
+        marker(:error,
+               "reason" => "ensure_clean_on_exit_failed",
+               "residue_paths" => "wiki/notes.md",
+               "marker_id" => "abc123")
+      ).diagnostic.fetch("suggested_next_action")
+
+      assert_equal "manual_fix", payload.fetch("kind")
+      assert_nil payload["command"],
+                 "ensure_clean_on_exit_failed must carry no shell recipe — operator inspection required"
+    end
+  end
+
   def test_auto_commit_signing_failures_are_manual_fix
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)

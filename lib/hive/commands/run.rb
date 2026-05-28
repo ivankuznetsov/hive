@@ -328,6 +328,35 @@ module Hive
         when :manual_steering
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "manual_steering" }
         when :error
+          # `ensure_clean_on_exit_failed` is the CleanExit invariant
+          # refusing to auto-commit residue (scope-violation or git
+          # failure). A bare `kind: no_op` strands agents: they have
+          # neither the worktree path nor the residue paths to act
+          # on. Surface an EDIT envelope mirroring the
+          # `:review_error/fix_auto_commit_*` shape — target the
+          # worktree root, echo `residue_paths` as a parsed array so
+          # callers don't have to split the comma string themselves,
+          # and include the canonical recovery one-liner so an agent
+          # can shell-exec it directly. Other `:error` reasons keep
+          # the generic NO_OP fallthrough.
+          if marker.attrs["reason"].to_s == "ensure_clean_on_exit_failed"
+            target = task.respond_to?(:worktree_path) && task.worktree_path ? task.worktree_path : task.folder
+            residue_paths = marker.attrs["residue_paths"].to_s.split(",").map(&:strip).reject(&:empty?)
+            verb = friendly_command(task, marker)
+            return {
+              "kind" => Hive::Schemas::NextActionKind::EDIT,
+              "target" => target,
+              "reason" => "ensure_clean_on_exit_failed",
+              "residue_paths" => residue_paths,
+              "error" => marker.attrs,
+              "instructions" => "commit or discard the residue paths in #{target}, " \
+                                "then `hive markers clear #{task.folder} --name ERROR --match-attr reason=ensure_clean_on_exit_failed` " \
+                                "and re-run",
+              "markers_to_clear" => [ "error" ],
+              "rerun_with" => verb
+            }
+          end
+
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
         when :review_error
           # Surface phase + reason from the marker so polling agents can

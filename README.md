@@ -76,7 +76,7 @@ After the skills are published to ClawHub, the intended marketplace install is:
 openclaw skills install hive
 ```
 
-Optional shortcut skills are published as separate ClawHub slugs, for example `hive-plan`, `hive-work`, and `hive-ce-review`. See [openclaw/README.md](openclaw/README.md) for the full skill table, local install loop, and publish checklist.
+Optional shortcut skills are published as separate ClawHub slugs, for example `hive-plan`, `hive-work`, and `hive-ce-review`. The bundle ships 22 slash commands in total; see [openclaw/README.md](openclaw/README.md) for the full skill table, local install loop, and publish checklist.
 
 ## Five-Minute TUI Getting Started
 

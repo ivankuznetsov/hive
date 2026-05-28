@@ -27,9 +27,18 @@ module Hive
         # a retry against a tampered fix.
         def self.build(project:, slug:, stage:, marker:, match_attr:, result_class:, clear_keyboard:,
                        attrs: nil)
-          if manual_only?(marker, attrs)
+          # `match_attr` is a single `key=value` pair the inline-button
+          # path encoded into callback_data because the full row.attrs
+          # hash doesn't survive a Telegram callback. Synthesise a
+          # minimal attrs Hash from it so the attrs-gated manual-only
+          # rules (review_error+fix_tampered, error+dirty_worktree,
+          # error+ensure_clean_on_exit_failed) refuse on the callback
+          # path too — not only the slash-handler path that already
+          # passes the full row.attrs.
+          resolved_attrs = attrs || attrs_from_match_attr(match_attr)
+          if manual_only?(marker, resolved_attrs)
             return result_class.new(action: :reply,
-                                    text: "Hive has no automatic recovery for this state - open it on a laptop.")
+                                    text: manual_only_text(marker, resolved_attrs))
           end
 
           verb = retry_verb_for_stage(stage)
@@ -51,6 +60,22 @@ module Hive
 
         def self.manual_only?(marker, attrs = nil)
           Hive::Bot::NotificationBuilders.manual_only?(marker: marker, attrs: attrs)
+        end
+
+        def self.manual_only_text(marker, attrs)
+          Hive::Bot::NotificationBuilders.manual_only_reply(marker: marker, attrs: attrs)
+        end
+
+        # Inline keyboard callback_data carries one `key=value` pair via
+        # `recovery_match_attr`. Split it back into a 1-key attrs Hash so
+        # `manual_only?` can apply the attrs-gated rules without needing
+        # the full row. Values like `foo=bar=baz` keep the trailing
+        # `=baz` intact via `split("=", 2)`.
+        def self.attrs_from_match_attr(match_attr)
+          return nil unless match_attr.to_s.include?("=")
+
+          key, value = match_attr.to_s.split("=", 2)
+          { key => value }
         end
 
         def self.retry_verb_for_stage(stage)

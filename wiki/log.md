@@ -2,6 +2,20 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T10:00:00Z] fix(daemon) — review-fix delta on dispatch-baseline persistence
+
+**Action:** Addressed ce-code-review findings on the persistence PR. P0: four newly-written dispatcher tests were silently dropped because they sat below `private` — Minitest only discovers public methods, so the regression that motivates the whole file had zero behavioral coverage in CI; reordered so tests stay public above `private`. P2: closed an FD leak in `DispatchBaselines#acquire_lock` (flock-raise after `File.open` succeeded skipped the close — symmetric to the existing `release_lock` fix). P2: added `:daemon_dispatch_baselines_loaded` (boot-time signal with entry count + suspend flag) and `:daemon_dispatch_baselines_newer_schema_suspended` (positive signal that downgrade protection is engaged), so a silently-disabled persistence layer cannot mask the very regression it exists to prevent. P2: made `prune_dispatch_baselines(scope_projects:)` REQUIRED (was nil-defaulted) — a future caller forgetting it would have silently re-stranded answered tasks across per-project status errors. P2: moved the broad `rescue StandardError` defense-in-depth from `ConcurrencyController#persist_dispatch_baselines!` INTO `DispatchBaselines#write` itself, so the store now owns its entire error surface (controller no longer needs a `logger:` kwarg). P3 cleanups: dropped the unreachable `version < SCHEMA_VERSION` load branch, tightened vacuous test assertions (release_lock close-attempted sentinel, root-safe write-failure test via `file_as_parent`), and rewrote `test_nil_store_keeps_state_in_memory` to assert on real behavior instead of a circular `Dir.glob`. Updated [[modules/daemon]]'s failure-mode-visibility paragraph and added the scope-projects-required note.
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
+## [2026-05-27T23:40:00Z] fix(daemon) — persist dispatch baselines across restart
+
+**Action:** Documented the new `Hive::Daemon::DispatchBaselines` store and the restart-survival behavior it gives the daemon's first-sight edit baseline. The `[project, slug] → state_file_mtime` map (in `ConcurrencyController`) was in-memory only, so a daemon restart re-stranded already-answered `needs_input` tasks (a pre-restart answer stopped looking "newer than baseline"); it's now write-through-persisted to `daemon_dispatch_baselines.json` under the state home, fail-closed on load, pruned to the live task set each successful tick. Replaces the rejected marker-`ts` approach (closed PR #229) — no marker-format dependency, mtime-to-mtime comparison. Added a "Persisted dispatch baselines" section and a module-map row to [[modules/daemon]].
+
+**Refreshed pages:**
+- [[modules/daemon]]
+
 ## [2026-05-27T18:00:00Z] feat — daemon-driven update flow (check + nudge, U1–U5)
 
 **Action:** Added the update flow (plan 2026-05-27-002): `Hive::UpdateCheck` release probe, `UpdateCheck::State` shared JSON store, `update.check`/`update.auto` config, dispatcher integration (throttled check + per-channel nudge), and the nudge surfaces (TUI footer + once-per-version bot push). Every channel is nudge-only for now; bash auto-update (U7) is deferred.

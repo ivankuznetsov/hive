@@ -34,6 +34,8 @@
 /logs/
 /.daemon.pid
 /.daemon.pid.*
+/daemon_dispatch_baselines.json
+/daemon_dispatch_baselines.json.*
 /test/e2e/runs/*
 !/test/e2e/runs/.gitkeep
 # Per-task hive runner state (markers, stages, logs, worktrees).

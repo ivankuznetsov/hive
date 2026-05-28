@@ -3,11 +3,11 @@ title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
-updated: 2026-05-13
-tags: [stage, finalize, pr, github]
+updated: 2026-05-28
+tags: [stage, finalize, pr, github, clean-exit]
 ---
 
-**TLDR**: Wraps up an already-open draft PR after 7-artifacts completes. It verifies the worktree is clean and pushed, refreshes the PR body, writes `summary.md`, and flips the PR from draft to ready-for-review.
+**TLDR**: Wraps up an already-open draft PR after 7-artifacts completes. On entry it now self-heals worktree residue via the `CleanExit` backstop (auto-commits in-scope edits, surfaces scope violations as `:error reason=ensure_clean_on_exit_failed`), then refreshes the PR body, writes `summary.md`, and flips the PR from draft to ready-for-review.
 
 ## Preconditions
 

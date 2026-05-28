@@ -76,6 +76,24 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  # Captures every dispatch-request write so tests can assert that the
+  # queue-routable bot verbs (run/develop/brainstorm/plan/review/
+  # open-pr/artifacts/finalize/archive/markers) no longer spawn — they
+  # land here instead. `write!` returns a request_id so the supervisor's
+  # logging path that includes it stays exercised.
+  FakeDispatchRequestWriter = Struct.new(:writes, :next_request_id, :raise_on_write, keyword_init: true) do
+    def write!(project:, slug:, argv:, chat_id: nil, update_id: nil, trigger: nil)
+      raise raise_on_write if raise_on_write
+
+      id = next_request_id || "req-#{writes.length + 1}"
+      writes << {
+        project: project, slug: slug, argv: argv, chat_id: chat_id,
+        update_id: update_id, trigger: trigger, request_id: id
+      }
+      id
+    end
+  end
+
   FakeConversationStore = Struct.new(:starts, :updates, :states, :ttl_updates, keyword_init: true) do
     def start(**kwargs)
       starts << kwargs
@@ -102,6 +120,18 @@ class HiveBotSupervisorTest < Minitest::Test
     def update_ttl(ttl)
       ttl_updates << ttl
     end
+
+    def clear(chat_id:, slug: nil)
+      if slug
+        states.delete([ chat_id, slug ])
+      else
+        states.delete_if { |key, _| key.first == chat_id }
+      end
+    end
+
+    def pending_confirm_count(chat_id:)
+      states.count { |key, state| key.first == chat_id && state.respond_to?(:awaiting_confirm) && state.awaiting_confirm }
+    end
   end
 
   def setup
@@ -111,6 +141,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @child_supervisor = FakeChildSupervisor.new(dispatch_pid: 123, dispatched: [], completed: {}, reap_batches: [])
     @conversation_store = FakeConversationStore.new(starts: [], updates: [], states: {}, ttl_updates: [])
     @notification_dispatcher = FakeNotificationDispatcher.new(processed: [], reset_tasks: [])
+    @dispatch_request_writer = FakeDispatchRequestWriter.new(writes: [])
     # Drive the real constructor so any future invariant added to
     # Supervisor#initialize is exercised by every test in this file. We
     # inject all collaborators so the constructor's `||=` defaults never
@@ -131,7 +162,8 @@ class HiveBotSupervisorTest < Minitest::Test
       router: FakeRouter.new,
       child_supervisor: @child_supervisor,
       conversation_store: @conversation_store,
-      dry_run: false
+      dry_run: false,
+      dispatch_request_writer: @dispatch_request_writer
     )
   end
 
@@ -337,7 +369,8 @@ class HiveBotSupervisorTest < Minitest::Test
       config: @config, token: "test-token", logger: @logger, telegram: @telegram,
       status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
       router: nil, child_supervisor: @child_supervisor,
-      conversation_store: @conversation_store, dry_run: false
+      conversation_store: @conversation_store, dry_run: false,
+      dispatch_request_writer: @dispatch_request_writer
     )
     supervisor.instance_variable_set(:@latest_status_rows, [ retryable ])
     supervisor.instance_variable_set(:@reload, true)
@@ -356,10 +389,12 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     supervisor.process_update(update)
 
-    dispatched = @child_supervisor.dispatched.map { |d| d[:command_argv] }
-    assert(dispatched.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "after SIGHUP reload, /autofix must still resolve the slug and dispatch the " \
+    queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
+    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
+           "after SIGHUP reload, /autofix must still resolve the slug and queue the " \
            "recover sequence — proving the rebuilt Router kept status_snapshot_provider")
+    assert_empty @child_supervisor.dispatched,
+                 "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
 
   def test_default_status_snapshot_provider_dispatches_recover_sequence_for_cached_row
@@ -375,7 +410,8 @@ class HiveBotSupervisorTest < Minitest::Test
       config: @config, token: "test-token", logger: @logger, telegram: @telegram,
       status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
       router: nil, child_supervisor: @child_supervisor,
-      conversation_store: @conversation_store, dry_run: false
+      conversation_store: @conversation_store, dry_run: false,
+      dispatch_request_writer: @dispatch_request_writer
     )
     supervisor.instance_variable_set(:@latest_status_rows, [ retryable ])
 
@@ -385,10 +421,12 @@ class HiveBotSupervisorTest < Minitest::Test
     )
     supervisor.process_update(update)
 
-    dispatched = @child_supervisor.dispatched.map { |d| d[:command_argv] }
-    assert(dispatched.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
+    queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
+    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
            "default snapshot provider must route /autofix through latest_status_rows " \
-           "to a real recover-sequence dispatch")
+           "to a real recover-sequence queued dispatch")
+    assert_empty @child_supervisor.dispatched,
+                 "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
 
   def test_reap_children_dispatches_reply_for_each_completed_child
@@ -425,7 +463,8 @@ class HiveBotSupervisorTest < Minitest::Test
       config: @config, token: "test-token", logger: @logger, telegram: @telegram,
       status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
       router: FakeRouter.new, child_supervisor: @child_supervisor,
-      conversation_store: @conversation_store, dry_run: true
+      conversation_store: @conversation_store, dry_run: true,
+      dispatch_request_writer: @dispatch_request_writer
     )
     result = FakeRouter::Result.new(slug: "done-260526-aaaa", project: "hive")
     update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
@@ -435,20 +474,37 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/All questions answered/, @telegram.messages.last.fetch(:text))
     assert_match(/Dry-run: not dispatching/, @telegram.messages.last.fetch(:text))
     assert_empty @child_supervisor.dispatched, "dry-run must not dispatch hive run"
+    assert_empty @dispatch_request_writer.writes, "dry-run must not write a dispatch request either"
   end
 
-  def test_auto_run_after_answers_recovers_and_logs_when_dispatch_raises
-    @child_supervisor.define_singleton_method(:dispatch) { |**| raise "spawn failed" }
+  def test_auto_run_after_answers_recovers_and_logs_when_queue_write_raises
+    @dispatch_request_writer.raise_on_write = RuntimeError.new("write failed")
     result = FakeRouter::Result.new(slug: "x-260526-aaaa", project: "hive")
     update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
 
     @supervisor.send(:auto_run_after_answers, result, update)
 
-    assert_match(/couldn't start the next round/, @telegram.messages.last.fetch(:text),
-                 "a dispatch failure after the completion ack must surface a corrective message")
+    assert_match(/Couldn't queue the request/, @telegram.messages.last.fetch(:text),
+                 "a queue-write failure must surface a corrective message")
     failure = @logger.events.find { |e| e[:name] == :send_failure }
     refute_nil failure
-    assert_equal "auto_run_after_answers", failure.fetch(:payload).fetch(:source)
+    assert_equal "enqueue_dispatch_request", failure.fetch(:payload).fetch(:source)
+  end
+
+  def test_auto_run_after_answers_writes_dispatch_request_not_spawn
+    result = FakeRouter::Result.new(slug: "x-260526-aaaa", project: "hive")
+    update = Update.new(chat_id: 42, update_id: 7, message_id: 1)
+
+    @supervisor.send(:auto_run_after_answers, result, update)
+
+    assert_equal 1, @dispatch_request_writer.writes.size,
+                 "answer-complete must write exactly one dispatch request"
+    write = @dispatch_request_writer.writes.first
+    assert_equal "hive", write[:project]
+    assert_equal "x-260526-aaaa", write[:slug]
+    assert_equal [ "hive", "run", "x-260526-aaaa", "--json" ], write[:argv]
+    assert_empty @child_supervisor.dispatched,
+                 "the bot must NOT spawn `hive run` itself anymore — that's the daemon's job now"
   end
 
   def test_register_bot_commands_sends_full_command_list_to_telegram
@@ -825,52 +881,13 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal "Dry run: hive plan task", @telegram.messages.last.fetch(:text)
   end
 
-  def test_dispatch_command_sequence_stops_after_failed_first_child
-    failed = child_exit(exit_code: 1, pid: 123)
-    @child_supervisor.completed[123] = failed
-    result = FakeRouter::Result.new(
-      action: :dispatch_commands,
-      commands: [ [ "hive", "markers", "clear" ], [ "hive", "develop", "task" ] ],
-      project: "hive",
-      slug: "task"
-    )
-
-    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
-
-    assert_equal 1, @child_supervisor.dispatched.length
-    assert_equal "Stopped because the previous command failed.", @telegram.messages.last.fetch(:text)
-  end
-
-  def test_dispatch_command_sequence_resets_alert_for_single_command
-    result = FakeRouter::Result.new(
-      action: :dispatch_commands,
-      commands: [ [ "hive", "review", "task", "--json" ] ],
-      project: "hive",
-      slug: "task",
-      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
-    )
-
-    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
-
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
-                 @notification_dispatcher.reset_tasks
-    assert_equal [ "hive", "review", "task", "--json" ], @child_supervisor.dispatched.first.fetch(:command_argv)
-  end
-
-  def test_dispatch_command_sequence_defers_alert_reset_until_markers_clear_succeeds
-    # markers-clear (pid 200) completes with exit 0; retry verb is fire-and-forget.
-    @child_supervisor.dispatch_pid = 200
-    @child_supervisor.completed[200] = child_exit(exit_code: 0, pid: 200)
-    reset_snapshot_at_dispatch = []
-    notification = @notification_dispatcher
-    dispatched_list = @child_supervisor.dispatched
-    dispatch_pid_value = @child_supervisor.dispatch_pid
-    @child_supervisor.define_singleton_method(:dispatch) do |**kwargs|
-      reset_snapshot_at_dispatch << notification.reset_tasks.dup
-      dispatched_list << kwargs
-      dispatch_pid_value
-    end
-
+  # Queue-routable command sequences (the post-refactor common case)
+  # write all requests in order; the daemon's per-slug in-flight gate
+  # serialises execution. There is no bot-side wait between commands
+  # and no "stopped because the previous command failed" reply — that
+  # error path now belongs to the daemon's `child_exited` event and
+  # the bot's subsequent status polling. Plan 2026-05-28-002.
+  def test_dispatch_command_sequence_writes_all_queue_requests_in_order
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [
@@ -884,23 +901,41 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    assert_equal 2, @child_supervisor.dispatched.length
-    assert_equal [], reset_snapshot_at_dispatch[0],
-                 "reset_task must NOT have been called when the first command (markers clear) dispatches"
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
-                 reset_snapshot_at_dispatch[1],
-                 "reset_task must have been called exactly once before the retry verb dispatches"
-    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
-                 @notification_dispatcher.reset_tasks
+    assert_empty @child_supervisor.dispatched,
+                 "queue-routable verbs must NOT spawn from the bot — single-dispatcher invariant"
+    assert_equal 2, @dispatch_request_writer.writes.size,
+                 "both `markers clear` and the retry verb must land in the queue"
+    assert_equal [ "hive", "markers", "clear", "task", "--name", "REVIEW_ERROR" ],
+                 @dispatch_request_writer.writes[0][:argv]
+    assert_equal [ "hive", "review", "task", "--from", "6-review", "--json" ],
+                 @dispatch_request_writer.writes[1][:argv]
   end
 
-  def test_dispatch_command_sequence_skips_alert_reset_when_markers_clear_fails
-    @child_supervisor.completed[123] = child_exit(exit_code: 1, pid: 123)
+  def test_dispatch_command_sequence_resets_alert_after_queue_writes
+    result = FakeRouter::Result.new(
+      action: :dispatch_commands,
+      commands: [ [ "hive", "review", "task", "--json" ] ],
+      project: "hive",
+      slug: "task",
+      alert_reset: { project: "hive", slug: "task", stage: "6-review" }
+    )
+
+    @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
+
+    assert_equal [ { project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil } ],
+                 @notification_dispatcher.reset_tasks
+    assert_equal 1, @dispatch_request_writer.writes.size
+    assert_equal [ "hive", "review", "task", "--json" ],
+                 @dispatch_request_writer.writes.first[:argv]
+    assert_empty @child_supervisor.dispatched
+  end
+
+  def test_dispatch_command_sequence_resets_alert_once_for_two_command_queue_sequence
     result = FakeRouter::Result.new(
       action: :dispatch_commands,
       commands: [
-        [ "hive", "markers", "clear", "task" ],
-        [ "hive", "review", "task" ]
+        [ "hive", "markers", "clear", "task", "--name", "REVIEW_ERROR" ],
+        [ "hive", "review", "task", "--from", "6-review", "--json" ]
       ],
       project: "hive",
       slug: "task",
@@ -909,9 +944,13 @@ class HiveBotSupervisorTest < Minitest::Test
 
     @supervisor.send(:dispatch_command_sequence, result, Update.new(chat_id: 42, update_id: 12))
 
-    assert_equal 1, @child_supervisor.dispatched.length, "retry verb must not run when markers-clear fails"
-    assert_empty @notification_dispatcher.reset_tasks,
-                 "alert reset must NOT fire when the markers-clear precursor fails"
+    # The reset must fire exactly once for the whole sequence — the
+    # daemon's per-slug gate serialises execution and the bot has no
+    # PID to wait on, so the prior "reset between commands" semantics
+    # collapses into "reset after the sequence is queued".
+    assert_equal 1, @notification_dispatcher.reset_tasks.size
+    assert_equal({ project: "hive", slug: "task", stage: "6-review", marker: nil, match_attr: nil },
+                 @notification_dispatcher.reset_tasks.first)
   end
 
   def test_dispatch_command_sequence_skips_alert_reset_in_dry_run
@@ -947,8 +986,11 @@ class HiveBotSupervisorTest < Minitest::Test
     failure = @logger.events.find { |evt| evt[:name] == :send_failure }
     refute_nil failure, ":send_failure must be logged when edit_message_reply_markup raises"
     assert_equal "edit_message_reply_markup", failure[:payload][:source]
-    assert_equal 1, @child_supervisor.dispatched.length,
-                 "the command must still dispatch even when keyboard clear fails"
+    # `develop` is queue-routable, so the request lands in the writer
+    # rather than @child_supervisor.dispatched.
+    assert_equal 1, @dispatch_request_writer.writes.length,
+                 "the queue-routable command must still be enqueued even when keyboard clear fails"
+    assert_empty @child_supervisor.dispatched
   end
 
   def test_registered_project_names_returns_empty_when_config_raises

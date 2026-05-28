@@ -10,6 +10,8 @@ require "hive/bot/notification_dispatcher"
 require "hive/bot/conversation_store"
 require "hive/bot/router"
 require "hive/bot/child_supervisor"
+require "hive/bot/dispatch_request_writer"
+require "hive/daemon/dispatch_request_queue"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/title_formatter"
@@ -33,7 +35,8 @@ module Hive
 
       def initialize(config:, token:, logger: nil, telegram: nil, status_watcher: nil,
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
-                     conversation_store: nil, dry_run: false, update_state: nil)
+                     conversation_store: nil, dry_run: false, update_state: nil,
+                     dispatch_request_writer: nil)
         @config = config
         @dry_run = dry_run
         # Shared update-check state (written by the daemon). The bot owns the
@@ -55,6 +58,11 @@ module Hive
         @router = router || build_router(config)
         @child_supervisor = child_supervisor ||
           Hive::Bot::ChildSupervisor.new(logger: @logger, dry_run: dry_run)
+        # Producer-only handle to the daemon's dispatch-request queue.
+        # Tests inject a fake; production uses the module's module_function
+        # interface directly. `nil` is acceptable for dry-run / no-op modes
+        # where the writer is intentionally unused. Plan 2026-05-28-002.
+        @dispatch_request_writer = dispatch_request_writer || Hive::Bot::DispatchRequestWriter
         @notification_dispatcher = notification_dispatcher ||
           Hive::Bot::NotificationDispatcher.new(
             telegram: @telegram,
@@ -284,6 +292,18 @@ module Hive
         clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
         commands = Array(result.commands)
         reset_pending = !@dry_run && needs_alert_reset?(result)
+
+        # If every command in the sequence is queue-routable (the
+        # common case post-refactor: `markers clear` + `develop`/`review`/`pr`),
+        # write all requests in arrival order and let the daemon's
+        # per-slug in-flight gate serialise execution. There is no
+        # bot-side PID to wait on, so the prior "wait for first to
+        # succeed before dispatching the next" semantics is replaced
+        # by the daemon's per-slug serialisation. Plan 2026-05-28-002.
+        if commands.all? { |argv| queue_routable?(argv) }
+          return enqueue_command_sequence(commands, result, update, reset_pending: reset_pending)
+        end
+
         failed = false
         commands.each_with_index do |argv, idx|
           per_command = @router.class::Result.new(
@@ -293,7 +313,12 @@ module Hive
             slug: result.slug
           )
           last_pid = execute_dispatch(per_command, update)
-          if idx < commands.length - 1 && last_pid
+          # last_pid is an Integer (spawned) or a String request_id
+          # (queue-routed). Only Integer PIDs can be waited on. A
+          # mixed sequence (one queue command, one spawned) falls
+          # through to the legacy path; today's mixes don't exist but
+          # the guard documents the contract for future surfaces.
+          if idx < commands.length - 1 && last_pid.is_a?(Integer)
             unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
               safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
               failed = true
@@ -316,6 +341,24 @@ module Hive
         # sync point above. Reset the alert post-dispatch — only if we did not
         # bail out of the loop on a failed precursor.
         reset_alert_for_result(result) if reset_pending && !failed
+      end
+
+      # Queue path for `dispatch_command_sequence`: write each request
+      # in arrival order, reset the alert if a reset was queued, and
+      # return. If any write raises, `enqueue_dispatch_request` has
+      # already surfaced a corrective Telegram reply and logged.
+      def enqueue_command_sequence(commands, result, update, reset_pending:)
+        commands.each do |argv|
+          per_command = @router.class::Result.new(
+            action: :dispatch_then_reply,
+            command_argv: argv,
+            project: result.project,
+            slug: result.slug
+          )
+          enqueue_dispatch_request(per_command, update)
+        end
+        reset_alert_for_result(result) if reset_pending
+        nil
       end
 
       def needs_alert_reset?(result)
@@ -439,6 +482,19 @@ module Hive
           return nil
         end
 
+        # State-mutating `hive` verbs (run/develop/brainstorm/plan/
+        # review/open-pr/artifacts/finalize/archive/markers) route
+        # through the daemon's dispatch-request queue so there is one
+        # writer of those verbs — the daemon — and the
+        # post-completion mtime baseline stays current. Plan
+        # 2026-05-28-002. Read-only verbs (status/--diagnose, new,
+        # approve) keep the in-process spawn path because they don't
+        # bump task state-file mtime and don't cause the dual-writer
+        # bug.
+        if queue_routable?(result.command_argv)
+          return enqueue_dispatch_request(result, update)
+        end
+
         project_path = project_path_for(result.project)
         pid = @child_supervisor.dispatch(
           command_argv: result.command_argv,
@@ -453,6 +509,72 @@ module Hive
         # diagnose replies still fire for Show details), so silence here
         # is signal-preserving.
         pid
+      end
+
+      # True iff argv[1] is in the daemon's queue allowlist. The bot
+      # rewrites this kind of dispatch into a request-file write; the
+      # daemon picks the request up on its next tick and spawns the
+      # child. See plan 2026-05-28-002 for why.
+      def queue_routable?(argv)
+        Hive::Daemon::DispatchRequestQueue.valid_argv?(Array(argv))
+      end
+
+      # Write a dispatch request for `result.command_argv` and log
+      # `:dispatched_command` with `via=queue` so an operator tailing
+      # bot.log can tell the two dispatch surfaces apart. Returns the
+      # request_id so callers that previously held onto a PID can
+      # still chain. Existing chain points (dispatch_command_sequence's
+      # `wait_for_child_success`) now degrade: there is no PID to
+      # wait on. The retry verb is enqueued anyway and the per-slug
+      # in-flight gate on the daemon side serialises the two.
+      def enqueue_dispatch_request(result, update)
+        request_id = @dispatch_request_writer.write!(
+          project: result.project,
+          slug: result.slug,
+          argv: Array(result.command_argv),
+          chat_id: update.chat_id,
+          update_id: update.update_id,
+          trigger: trigger_for_result(result)
+        )
+        @logger.event(:dispatched_command,
+                      project: result.project,
+                      slug: result.slug,
+                      command: Array(result.command_argv).join(" "),
+                      update_id: update.update_id,
+                      via: "queue",
+                      request_id: request_id)
+        request_id
+      rescue StandardError => e
+        # A producer-side failure (read-only state dir, ENOSPC, an
+        # invalid argv slipped past the router) must not crash the
+        # poll loop. Surface a corrective reply and log so an operator
+        # can recover.
+        @logger.event(:send_failure, source: "enqueue_dispatch_request",
+                                      chat_id: update.chat_id,
+                                      slug: result.slug,
+                                      error_class: e.class.name,
+                                      message: e.message)
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Couldn't queue the request (#{e.class}). Try again, or open this on a laptop."
+        )
+        nil
+      end
+
+      # A coarse trigger label for telemetry. The router doesn't carry
+      # a fine-grained reason today; "slash" vs. "callback" is the
+      # best we can do without invasive Router changes. The daemon
+      # only reads this for log lines.
+      def trigger_for_result(result)
+        intent = result.respond_to?(:intent) ? result.intent : nil
+        case intent
+        when :slash_done then "slash_done"
+        when :callback_autofix, :callback_clear_and_retry then "autofix"
+        when :callback_approve then "callback_approve"
+        when :callback_findings_accept_all then "findings_accept"
+        when :callback_findings_reject_all then "findings_reject"
+        else "bot_dispatch"
+        end
       end
 
       def execute_answer_write(result, update)
@@ -584,7 +706,13 @@ module Hive
       end
 
       def start_answer(result, update)
-        path = brainstorm_path_for(result.slug, project: result.project)
+        # Backfill project from the on-disk brainstorm path. The
+        # `/answer <slug>` slash command doesn't carry project (slugs
+        # are unique enough in practice), but downstream the queue
+        # writer needs project for `find_project` lookup, so we infer
+        # it once here and stash it on the conversation state.
+        resolved_project = result.project || brainstorm_project_for(result.slug)
+        path = brainstorm_path_for(result.slug, project: resolved_project)
         question =
           if path
             Hive::Bot::BrainstormParser.next_unanswered_question(
@@ -600,7 +728,7 @@ module Hive
 
         @conversation_store.start(chat_id: update.chat_id, slug: result.slug,
                                   question_n: question.n, mode: result.mode || :path_b,
-                                  project: result.project)
+                                  project: resolved_project)
         safe_send_message(
           chat_id: update.chat_id,
           text: "Q#{question.n}: #{question.text.to_s.strip}\n\nReply with your answer."
@@ -798,13 +926,27 @@ module Hive
       end
 
       def brainstorm_path_for(slug, project: nil)
+        entry = brainstorm_project_entry_for(slug, project: project)
+        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil
+      end
+
+      # Resolve the project name a brainstorm slug currently lives in.
+      # Returns nil when nothing matches. Used by `start_answer` to
+      # backfill `state.project` so the daemon's dispatch-request
+      # consumer can `Hive::Config.find_project(project)` on `/done`
+      # — the answer flow's slash handlers don't carry project but
+      # the on-disk brainstorm file does.
+      def brainstorm_project_for(slug, project: nil)
+        brainstorm_project_entry_for(slug, project: project)&.fetch("name", nil)
+      end
+
+      def brainstorm_project_entry_for(slug, project: nil)
         projects = Hive::Config.registered_projects
         projects = projects.select { |entry| entry["name"] == project } if project && !project.empty?
-        projects.each do |entry|
+        projects.find do |entry|
           path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md")
-          return path if File.exist?(path)
+          File.exist?(path)
         end
-        nil
       end
 
       def chat_ids

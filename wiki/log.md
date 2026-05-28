@@ -2,6 +2,20 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T22:30:00Z] fix — PR #239 ce-code-review fixups: Q-context-aware answer-slot scan + ENOENT distinction + structured answer_slot_missing event
+
+**Action:** Addressed 10 findings from `/ce-code-review` on PR #239:
+
+1. **Q-context-aware slot location**: `Hive::Bot::BrainstormAnswerWriter.find_empty_answer_slot` now anchors on the parser-identified target Q's line (via a new `target_question_line_index` helper) and walks forward to the first empty A-section before the next block boundary. Replaces the two-step strict-then-fallback scan, which ignored Q/round context — a brainstorm.md with empty `### A1.` in Round 1 (still unanswered) AND Round 2's own `### A1.` would route the operator's Round-2 answer into Round-1's slot. Same combined function also handles the original off-by-one A-header tolerance (e.g. `### A2.` after `### Q1.`) without misattributing.
+2. **ENOENT distinguished from lock contention**: `try_append` returns the `:enoent` sentinel when `brainstorm.md` is missing mid-write; `append!` maps it to `:question_not_found` (short-circuit) instead of polling the full 5s retry deadline and returning a misleading `:lock_busy`.
+3. **Structured answer_slot_missing event**: added to `Hive::Bot::Logger::EVENTS` and the `schemas/hive-bot-log.v1.json` enum. Supervisor's branch now emits the event alongside the Telegram reply — operator-agents tailing `bot.log` see the malformed-slot state without parsing the human-readable text.
+4. **Consolidated regex constants**: `BrainstormAnswerWriter` now reuses `BrainstormParser::{QUESTION,ANSWER,ROUND,MARKER}_RE` directly; the in-file copies subtly diverged (writer's `QUESTION_RE` didn't capture title) and the duplication was a silent-drift risk.
+5. **Canonical heading helpers**: `Hive::Bot::BrainstormParser.question_header(n)` / `.answer_header(n)`. Supervisor's `:answer_slot_missing` reply uses them instead of hard-coding `### A#{n}.`. If the brainstorm.md format ever changes, this is the single place to update.
+6. **Enriched operator instruction**: the reply now says "Ensure exactly one empty `### A{n}.` sits immediately after `### Q{n}.` (remove any stale mis-numbered `### A.` header in between)" — guarding against the double-A-header trap the prior wording could lead an operator into.
+
+**Refreshed pages:**
+- [[modules/bot]] — `BrainstormParser` and `BrainstormAnswerWriter` rows expanded to describe the lenient-A-header rule, Q-context-aware slot location, and the `:answer_slot_missing` / `:question_not_found` mapping.
+
 ## [2026-05-28T13:50:00Z] fix — CleanExit follow-ups: bot callback reason encoding + agent-actionable next_action
 
 **Action:** Two further CleanExit fixes:

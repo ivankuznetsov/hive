@@ -3,12 +3,7 @@ name: markers
 description: Manage state-file markers (clear)
 version: 0.1.0
 user-invocable: true
-metadata:
-  openclaw:
-    homepage: https://github.com/ivankuznetsov/hive
-    requires:
-      bins:
-        - hive
+metadata: {"openclaw": {"homepage": "https://github.com/ivankuznetsov/hive", "requires": {"bins": ["hive"]}}}
 ---
 
 # Hive Markers

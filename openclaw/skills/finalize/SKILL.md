@@ -3,12 +3,7 @@ name: finalize
 description: Move a completed artifacts task into finalize, or run an existing finalize task
 version: 0.1.0
 user-invocable: true
-metadata:
-  openclaw:
-    homepage: https://github.com/ivankuznetsov/hive
-    requires:
-      bins:
-        - hive
+metadata: {"openclaw": {"homepage": "https://github.com/ivankuznetsov/hive", "requires": {"bins": ["hive"]}}}
 ---
 
 # Hive Finalize

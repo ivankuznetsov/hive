@@ -3,12 +3,7 @@ name: ce-review
 description: Move a completed open-pr task into review, or run an existing review task
 version: 0.1.0
 user-invocable: true
-metadata:
-  openclaw:
-    homepage: https://github.com/ivankuznetsov/hive
-    requires:
-      bins:
-        - hive
+metadata: {"openclaw": {"homepage": "https://github.com/ivankuznetsov/hive", "requires": {"bins": ["hive"]}}}
 ---
 
 # Hive CE Review

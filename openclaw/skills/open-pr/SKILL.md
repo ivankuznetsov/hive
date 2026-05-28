@@ -3,12 +3,7 @@ name: open-pr
 description: Move a completed execute task into open-pr, or run an existing open-pr task
 version: 0.1.0
 user-invocable: true
-metadata:
-  openclaw:
-    homepage: https://github.com/ivankuznetsov/hive
-    requires:
-      bins:
-        - hive
+metadata: {"openclaw": {"homepage": "https://github.com/ivankuznetsov/hive", "requires": {"bins": ["hive"]}}}
 ---
 
 # Hive Open PR

@@ -3,12 +3,7 @@ name: init
 description: Bootstrap .hive-state (orphan hive/state branch); TTY-prompts for agents + limits
 version: 0.1.0
 user-invocable: true
-metadata:
-  openclaw:
-    homepage: https://github.com/ivankuznetsov/hive
-    requires:
-      bins:
-        - hive
+metadata: {"openclaw": {"homepage": "https://github.com/ivankuznetsov/hive", "requires": {"bins": ["hive"]}}}
 ---
 
 # Hive Init

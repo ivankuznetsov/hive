@@ -52,8 +52,25 @@ module Hive
       ].freeze
 
       # Default directory inside `<state_home>` where pending request
-      # files live. Created lazily by `directory`.
+      # files live. Created lazily by `directory` with mode 0700 so the
+      # queue's de-facto auth boundary (any process with write access
+      # can enqueue an allowlisted verb) is at minimum scoped to the
+      # owning user. The `requestor` field in each request is NOT
+      # verified against process credentials — file ownership is.
       DIRNAME = "dispatch_requests".freeze
+
+      # ADR-012 slug regex. Slugs from request payloads flow into
+      # filesystem path construction (state-file lookup, log paths);
+      # any character outside this set is rejected at parse time to
+      # prevent path-traversal via the slug field.
+      SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
+
+      # Project name pattern. Loose alphanumeric + dot/underscore/hyphen
+      # matches the `name` keys in `Hive::Config`. The daemon's
+      # `find_project` lookup is the actual authoritative gate; this
+      # regex catches the most obvious traversal candidates (slashes,
+      # nulls, leading dots) before any path is constructed.
+      PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
 
       # Parsed request record returned by `pending`.
       Request = Struct.new(
@@ -68,7 +85,17 @@ module Hive
       # the daemon's other state.
       def directory(state_home: Hive::Paths.state_home)
         path = File.join(state_home, DIRNAME)
-        FileUtils.mkdir_p(path)
+        # Mode 0700 enforces the user-owned-dir invariant: only the
+        # process owner can enqueue requests. Without this, a default
+        # umask of 0022 leaves the dir at 0755 and any local user
+        # could write a request (which the daemon would dispatch
+        # against an allowlisted verb). Idempotent on existing dirs;
+        # if the dir was previously created with looser perms,
+        # `chmod` to tighten.
+        FileUtils.mkdir_p(path, mode: 0o700)
+        # mkdir_p doesn't chmod existing dirs — re-tighten in case
+        # the dir was created by a prior version with default umask.
+        File.chmod(0o700, path) if File.directory?(path)
         path
       end
 
@@ -130,17 +157,36 @@ module Hive
 
       # Validate a request's argv. Returns true when:
       #   - argv is an Array of Strings
+      #   - argv has at least 2 entries (hive + verb)
       #   - argv[0] is "hive"
       #   - argv[1] (the verb) is in ALLOWED_VERBS
-      # All three checks gate this allowlist; failing any is a reject.
+      #   - argv[2] (when present and not a `--flag`) matches SLUG_RE —
+      #     the slug is the most common positional argument and the
+      #     primary path-construction surface; reject malformed slugs
+      #     at the queue boundary instead of trusting downstream parse.
+      #
+      # All checks gate the allowlist; failing any is a reject. This
+      # is the operator-trust gate against a compromised producer
+      # identity running arbitrary CLI verbs or smuggling path-
+      # traversal slugs.
       def valid_argv?(argv)
         return false unless argv.is_a?(Array)
-        return false if argv.empty?
-        return false unless argv.all? { |tok| tok.is_a?(String) }
+        return false if argv.length < 2
+        return false unless argv.all? { |tok| tok.is_a?(String) && !tok.empty? }
         return false unless argv[0] == "hive"
 
         verb = argv[1].to_s
-        ALLOWED_VERBS.include?(verb)
+        return false unless ALLOWED_VERBS.include?(verb)
+
+        # If the third positional argument is present and not a flag,
+        # treat it as a slug and validate against ADR-012's regex.
+        # `markers clear <folder>` passes a folder path (not a slug),
+        # so allow paths under hive-state when the verb is `markers`.
+        return true if argv.length < 3
+        return true if argv[2].start_with?("-")
+        return true if verb == "markers" # folder argument, not slug
+
+        SLUG_RE.match?(argv[2])
       end
 
       # Filename helper exposed for the writer side so tests can predict
@@ -190,9 +236,14 @@ module Hive
 
           project = data["project"].to_s
           return :missing_project if project.empty?
+          return :invalid_project unless PROJECT_RE.match?(project)
 
           slug = data["slug"].to_s
           return :missing_slug if slug.empty?
+          # Slugs flow into path construction in resolve_post_completion_path
+          # + log paths. Reject any character outside ADR-012's slug
+          # regex at the queue boundary to prevent path-traversal.
+          return :invalid_slug unless SLUG_RE.match?(slug)
 
           argv = data["argv"]
           return :invalid_argv unless argv.is_a?(Array)

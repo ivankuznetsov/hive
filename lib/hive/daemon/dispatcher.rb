@@ -388,7 +388,10 @@ module Hive
           # an operator tailing daemon.log sees the full lifecycle:
           # observed → dispatched → completed. The bot side is now a
           # producer only; the daemon is the single dispatcher.
-          if entry.respond_to?(:request_id) && entry.request_id
+          # ChildExit always defines `request_id` (nilable on the
+          # Struct), so `respond_to?` is dead code per M-02 from
+          # PR #241 ce-code-review. Just check the value.
+          if entry.request_id
             Hive::Daemon::DispatchRequestQueue.remove(
               entry.request_id, state_home: dispatch_request_state_home
             )
@@ -733,41 +736,84 @@ module Hive
                         slug: req.slug, trigger: req.trigger,
                         requestor: req.requestor)
 
-          unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
-            reject_request(req, reason: "invalid_argv")
-            next
-          end
-
-          if Hive::Daemon::DispatchRequestQueue.expired?(req, now: now)
-            expire_request(req)
-            next
-          end
-
-          unless Hive::Config.find_project(req.project)
-            reject_request(req, reason: "unknown_project")
-            next
-          end
-
-          gate = @controller.can_dispatch?(
-            project: req.project, slug: req.slug, now: now,
-            external_global_count: @external_active_agent_total,
-            external_project_count: external_active_agent_count_for(req.project)
-          )
-          if @controller.running_task?(project: req.project, slug: req.slug)
-            @logger.event(:dispatch_request_blocked,
+          # Per-iteration rescue: a Process.spawn failure (Errno::EAGAIN
+          # / Errno::ENOMEM under fork-exhaustion) or any other
+          # StandardError in dispatch_request! must not abort the rest
+          # of the pending queue. The request file stays on disk for
+          # the next tick to retry; the failure is logged for
+          # operator visibility. Per R-01 from PR #241 ce-code-review.
+          begin
+            process_dispatch_request_iteration(req, now: now)
+          rescue StandardError => e
+            @logger.event(:dispatch_request_rejected,
                           request_id: req.request_id, project: req.project,
-                          slug: req.slug, reason: "in_flight")
-            next
+                          slug: req.slug,
+                          reason: "spawn_failure: #{e.class}: #{e.message[0, 200]}",
+                          path: req.path)
+            # Don't remove the file — let the next tick try again.
+            # If the failure is persistent (e.g. config corruption),
+            # the operator will see repeated rejected events with
+            # the same request_id.
           end
-          unless gate == :ok
-            @logger.event(:dispatch_request_blocked,
-                          request_id: req.request_id, project: req.project,
-                          slug: req.slug, reason: gate.to_s)
-            next
-          end
-
-          dispatch_request!(req, now: now)
         end
+      end
+
+      # Body of one queue iteration. Extracted so the rescue in
+      # process_dispatch_requests captures any error from the gate
+      # checks AND the actual spawn. Returns nil; side effects via
+      # @controller, @logger, and the queue's remove() call.
+      def process_dispatch_request_iteration(req, now:)
+        unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
+          reject_request(req, reason: "invalid_argv")
+          return
+        end
+
+        if Hive::Daemon::DispatchRequestQueue.expired?(req, now: now)
+          expire_request(req)
+          return
+        end
+
+        unless Hive::Config.find_project(req.project)
+          reject_request(req, reason: "unknown_project")
+          return
+        end
+
+        # C4 from PR #241 ce-code-review: gate on project_enabled? so a
+        # disabled project's queued requests don't dispatch. The
+        # auto-advance path (handle_row) already does this; the
+        # request path must mirror to keep the single-dispatcher
+        # invariant honest.
+        unless project_enabled?(req.project)
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: "project_disabled")
+          return
+        end
+
+        # Reverse the gate-evaluation order from the previous version:
+        # check the cheap, deterministic running_task? gate first so an
+        # in-flight slug doesn't incur the can_dispatch? scan. Per R-04
+        # / M-05 from PR #241 ce-code-review.
+        if @controller.running_task?(project: req.project, slug: req.slug)
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: "in_flight")
+          return
+        end
+
+        gate = @controller.can_dispatch?(
+          project: req.project, slug: req.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(req.project)
+        )
+        unless gate == :ok
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: gate.to_s)
+          return
+        end
+
+        dispatch_request!(req, now: now)
       end
 
       # Build a command string from the validated argv and spawn it

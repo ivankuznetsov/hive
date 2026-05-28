@@ -1337,6 +1337,89 @@ end
     end
   end
 
+  # C4 from PR #241 ce-code-review: process_dispatch_requests must
+  # gate on project_enabled? so a disabled project's queued requests
+  # don't dispatch. Mirrors handle_row's project_enabled? gate.
+  def test_dispatch_request_blocked_when_project_is_disabled
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "DISABLED")
+      stub_find_project!(dispatcher, "p1")
+      # Force the project to look disabled.
+      dispatcher.define_singleton_method(:project_enabled?) { |_| false }
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |(n, attrs)|
+          n == :dispatch_request_blocked && attrs[:request_id] == "DISABLED"
+        end
+        refute_nil blocked, ":dispatch_request_blocked must fire for a disabled project"
+        assert_equal "project_disabled", blocked[1][:reason]
+        # Request file stays on disk for retry once project is re-enabled.
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_equal 1, files.size,
+                     "disabled-project block must NOT remove the request file"
+        assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  # R-01 from PR #241 ce-code-review: a spawn failure (Errno::EAGAIN
+  # under fork-exhaustion, or any other StandardError raised by
+  # dispatch_request!) must not abort the rest of the pending queue.
+  # The failure is logged and the request file is left on disk for
+  # the next tick to retry.
+  def test_dispatch_request_spawn_failure_logs_and_does_not_abort_subsequent_iterations
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Two requests for different slugs in the same tick. The first
+      # raises on dispatch; the second must still be processed.
+      write_request_file(state_home, slug: "s1", request_id: "FAIL1",
+                          created_at: T0)
+      write_request_file(state_home, slug: "s2", request_id: "OK2",
+                          created_at: T0 + 1)
+      stub_find_project!(dispatcher, "p1")
+
+      # Make dispatch_request! raise the FIRST time and succeed after.
+      original = dispatcher.method(:dispatch_request!)
+      call_count = 0
+      dispatcher.define_singleton_method(:dispatch_request!) do |req, now:|
+        call_count += 1
+        raise Errno::EAGAIN, "fork: Resource temporarily unavailable" if call_count == 1
+
+        original.call(req, now: now)
+      end
+
+      begin
+        dispatcher.tick(now: T0)
+
+        # First request → logged as rejected, file left on disk.
+        failed = logger.events.find do |(n, attrs)|
+          n == :dispatch_request_rejected && attrs[:request_id] == "FAIL1"
+        end
+        refute_nil failed,
+                   "spawn failure must surface as :dispatch_request_rejected"
+        assert_match(/spawn_failure: Errno::EAGAIN/, failed[1][:reason])
+        # File NOT removed — next tick retries.
+        files_after = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert(files_after.any? { |p| p.include?("FAIL1") },
+               "FAIL1 file must remain for retry")
+
+        # Second request still dispatched despite the first's failure.
+        assert(sup.spawned.any? { |entry| entry[:request_id] == "OK2" },
+               "subsequent request must dispatch even after a prior iteration raised")
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
   def test_malformed_request_file_routes_through_bad_handler
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(

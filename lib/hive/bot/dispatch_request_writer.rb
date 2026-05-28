@@ -55,6 +55,23 @@ module Hive
           raise ArgumentError, "argv #{argv.inspect} is not allowlisted for dispatch requests"
         end
 
+        # AC-04 from PR #241 ce-code-review: an empty/nil project
+        # silently becomes `""` after `project.to_s`, the daemon
+        # rejects with `:missing_project`, removes the file, and the
+        # operator sees a generic "Couldn't queue" reply. Guard at
+        # the producer boundary so the failure is loud + actionable
+        # rather than silently swallowed downstream.
+        if project.to_s.empty?
+          raise ArgumentError,
+                "project is required for dispatch requests (got #{project.inspect})"
+        end
+        # Symmetric guard for slug — the daemon's `:missing_slug`
+        # reject is the same trap.
+        if slug.to_s.empty?
+          raise ArgumentError,
+                "slug is required for dispatch requests (got #{slug.inspect})"
+        end
+
         request_id = SecureRandom.hex(8)
         created_at = now.utc
         payload = {

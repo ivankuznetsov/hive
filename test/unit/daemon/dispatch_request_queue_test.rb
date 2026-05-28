@@ -98,63 +98,66 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
   def test_pending_rejects_missing_fields_and_bad_created_at
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       dir_path = Q.directory(state_home: dir)
+      # Use realistic placeholders that pass the project/slug regex
+      # gates (SEC-5 from PR #241 ce-code-review) so each fixture
+      # below targets exactly ONE rejection reason — without this,
+      # the new slug check short-circuits before reaching the
+      # original invalid_argv / invalid_created_at branches.
+      good_slug = "task-260528-aaaa"
+      good_project = "test-project"
+      good_argv = [ "hive", "run", good_slug ]
+      ts = Time.utc(2026, 5, 28).iso8601
+
       # Missing request_id
       File.write(File.join(dir_path, "20260528T180000000000-A.json"), JSON.generate(
-        "schema" => "hive-dispatch-request",
-        "schema_version" => 1,
-        "request_id" => "",
-        "created_at" => Time.utc(2026, 5, 28).iso8601,
-        "project" => "hive",
-        "slug" => "s",
-        "argv" => [ "hive", "run", "s" ]
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "", "created_at" => ts,
+        "project" => good_project, "slug" => good_slug, "argv" => good_argv
       ))
       # Missing project
       File.write(File.join(dir_path, "20260528T180000000001-B.json"), JSON.generate(
-        "schema" => "hive-dispatch-request",
-        "schema_version" => 1,
-        "request_id" => "B",
-        "created_at" => Time.utc(2026, 5, 28).iso8601,
-        "project" => "",
-        "slug" => "s",
-        "argv" => [ "hive", "run", "s" ]
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "B", "created_at" => ts,
+        "project" => "", "slug" => good_slug, "argv" => good_argv
+      ))
+      # Invalid project (path-traversal candidate)
+      File.write(File.join(dir_path, "20260528T180000000002-B2.json"), JSON.generate(
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "B2", "created_at" => ts,
+        "project" => "../etc/passwd", "slug" => good_slug, "argv" => good_argv
       ))
       # Missing slug
-      File.write(File.join(dir_path, "20260528T180000000002-C.json"), JSON.generate(
-        "schema" => "hive-dispatch-request",
-        "schema_version" => 1,
-        "request_id" => "C",
-        "created_at" => Time.utc(2026, 5, 28).iso8601,
-        "project" => "p",
-        "slug" => "",
-        "argv" => [ "hive", "run", "s" ]
+      File.write(File.join(dir_path, "20260528T180000000003-C.json"), JSON.generate(
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "C", "created_at" => ts,
+        "project" => good_project, "slug" => "", "argv" => good_argv
+      ))
+      # Invalid slug (path-traversal candidate)
+      File.write(File.join(dir_path, "20260528T180000000004-C2.json"), JSON.generate(
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "C2", "created_at" => ts,
+        "project" => good_project, "slug" => "../escape", "argv" => good_argv
       ))
       # Invalid argv type
-      File.write(File.join(dir_path, "20260528T180000000003-D.json"), JSON.generate(
-        "schema" => "hive-dispatch-request",
-        "schema_version" => 1,
-        "request_id" => "D",
-        "created_at" => Time.utc(2026, 5, 28).iso8601,
-        "project" => "p",
-        "slug" => "s",
-        "argv" => "hive run s"
+      File.write(File.join(dir_path, "20260528T180000000005-D.json"), JSON.generate(
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "D", "created_at" => ts,
+        "project" => good_project, "slug" => good_slug,
+        "argv" => "hive run #{good_slug}"
       ))
       # Bad created_at
-      File.write(File.join(dir_path, "20260528T180000000004-E.json"), JSON.generate(
-        "schema" => "hive-dispatch-request",
-        "schema_version" => 1,
-        "request_id" => "E",
-        "created_at" => "not-a-time",
-        "project" => "p",
-        "slug" => "s",
-        "argv" => [ "hive", "run", "s" ]
+      File.write(File.join(dir_path, "20260528T180000000006-E.json"), JSON.generate(
+        "schema" => "hive-dispatch-request", "schema_version" => 1,
+        "request_id" => "E", "created_at" => "not-a-time",
+        "project" => good_project, "slug" => good_slug, "argv" => good_argv
       ))
       # Root not a hash
-      File.write(File.join(dir_path, "20260528T180000000005-F.json"), JSON.generate([ "array", "root" ]))
+      File.write(File.join(dir_path, "20260528T180000000007-F.json"), JSON.generate([ "array", "root" ]))
 
       reasons = []
       Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { reasons << reason })
       assert_equal %w[
-        missing_request_id missing_project missing_slug invalid_argv invalid_created_at not_a_hash
+        missing_request_id missing_project invalid_project missing_slug invalid_slug invalid_argv invalid_created_at not_a_hash
       ], reasons
     end
   end

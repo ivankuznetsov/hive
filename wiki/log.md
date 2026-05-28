@@ -2,6 +2,41 @@
 
 Append-only log of all wiki operations.
 
+## [2026-05-28T23:30:00Z] fix — PR #241 ce-code-review fixups: schema file, argv+slug validation, security hardening, reliability
+
+**Action:** Addressed 14 findings from `/ce-code-review` on PR #241 across 10 reviewers (correctness, testing, maintainability, project-standards, agent-native, learnings, reliability, security, adversarial, api-contract, cli-readiness):
+
+1. **PS-01/AC-01 — Schema file**: Added `schemas/hive-dispatch-request.v1.json`. Was registered in `SCHEMA_VERSIONS` but the corresponding file was missing, breaking `test/unit/schema_files_test.rb`'s invariant that every key has a published schema. External validators / third-party producers can now reference it.
+2. **SEC-1+SEC-5+L-1 — Slug/project/argv validation**: `valid_argv?` now requires argv length ≥ 2, all non-empty strings, and validates the positional slug at `argv[2]` against ADR-012's regex (`^[a-z][a-z0-9-]{0,62}[a-z0-9]$`) for non-`markers` verbs. `parse_data` validates `project` against a name regex and `slug` against the ADR-012 regex — blocks path-traversal candidates at the queue boundary.
+3. **SEC-3 — Queue dir 0700**: `directory()` now `mkdir_p(..., mode: 0o700)` plus chmod-tightens an already-existing dir. Without this, default umask 0022 left the dir world-readable.
+4. **C2 — Conversation preservation on queue write failure**: `auto_run_after_answers` only clears the conversation on a non-nil dispatch return. A queue write failure (read-only state dir, ENOSPC) no longer strands the operator without a `/done` backstop.
+5. **AC-04 — Producer-side project/slug guards**: `DispatchRequestWriter.write!` raises `ArgumentError` on empty project or slug. Producer-side failure is louder and actionable rather than swallowed downstream.
+6. **R-01 — Per-iteration rescue in `process_dispatch_requests`**: A `Process.spawn` failure (Errno::EAGAIN under fork-exhaustion) in one iteration no longer aborts the rest of the pending queue. Failure logs `reason: spawn_failure: <class>: <message>` and the request file stays for retry.
+7. **C4 — `project_enabled?` gate**: Mirrors `handle_row`. A disabled project's queued requests log `:dispatch_request_blocked reason=project_disabled` and stay for retry once re-enabled.
+8. **R-04/M-05 — Gate ordering**: `running_task?` now precedes `can_dispatch?` so an in-flight slug doesn't incur the more expensive cap-counting scan.
+9. **M-02 — Dead `respond_to?` guard removed**: `ChildExit` always defines `request_id` (nilable); the `respond_to?` check was dead code.
+10. **PS-02 — ADR-033 added**: Records the single-dispatcher invariant. Supersedes ADR-026's "subprocess caller" model for state-mutating verbs while preserving it for read-only verbs (status / doctor / new / approve / accept-finding / reject-finding).
+
+**Tests added** (5):
+- `test_dispatch_request_blocked_when_project_is_disabled` (C4).
+- `test_dispatch_request_spawn_failure_logs_and_does_not_abort_subsequent_iterations` (R-01).
+- `test_write_rejects_empty_project_or_slug` (AC-04).
+- `test_directory_is_created_with_user_only_permissions` (SEC-3).
+- Updated `test_pending_rejects_missing_fields_and_bad_created_at` to cover new `invalid_project` and `invalid_slug` reasons (SEC-5).
+
+**Coverage:** 100.00% line coverage (17667/17667). RuboCop clean. Full suite: 4131 / 15061 / 0 failures / 0 errors / 2 skips.
+
+**Refreshed pages:**
+- [[decisions]] — ADR-033 records the single-dispatcher invariant and the ADR-026 amendment.
+
+**Deferred** (out of scope for the fix pass; tracked as follow-ups):
+- AN-1/AN-2/AN-3: `hive bot dispatch-requests --json` / `hive dispatch drain` / `hive dispatch enqueue` CLI verbs.
+- R-02: per-verb child timeout (current behavior: hung child indefinitely locks per-slug gate until daemon restart).
+- ADV-1: child non-zero exit → Telegram error reply (currently observable only in daemon.log).
+- C3: atomic claim + restart-recovery to prevent duplicate dispatch after daemon SIGKILL.
+- AC-02: clarify whether `:dispatch_request_written` event should exist alongside `:dispatched_command via=queue` (current implementation uses the latter; consistent with bot.log conventions).
+- AC-05: alert-reset timing change in `dispatch_command_sequence` for queue-routable sequences.
+
 ## [2026-05-28T22:30:00Z] fix — PR #239 ce-code-review fixups: Q-context-aware answer-slot scan + ENOENT distinction + structured answer_slot_missing event
 
 **Action:** Addressed 10 findings from `/ce-code-review` on PR #239:

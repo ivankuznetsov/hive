@@ -7,7 +7,29 @@ updated: 2026-05-25
 tags: [decisions, adr]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface; ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode and its permission-mode follow-up; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**.
+
+## ADR-033: Single-dispatcher for state-mutating `hive` verbs via file-backed request queue
+
+**Status:** Active (shipped with plan `2026-05-28-002-refactor-single-dispatcher-via-request-queue`; supersedes the "subprocess caller" portion of ADR-026 for the allowlisted verb set).
+
+**Context:** ADR-026 made the Telegram bot a subprocess caller — it directly `Process.spawn`ed `hive run` (and friends) on its own. ADR-024 made the daemon track per-slug `state_file_mtime` baselines to suppress redundant edit-resume dispatches; that tracking relies on the daemon being the writer that observes the post-completion mtime via its own `ChildSupervisor.reap_all`. When the bot was a parallel writer of `hive run`, the daemon's `ConcurrencyController#observe_state_file_mtime` was never called for bot-driven children. The daemon's baseline went stale, and on its next tick the agent's own write to brainstorm.md looked like a "new user edit" — the daemon dispatched a redundant runner that held `Hive::Lock.with_task_lock` for 1–2 min, during which the bot rejected legitimate user answers with "Try again — another run holds the lock." Diagnosed 2026-05-28 on `explore-the-simplest-way-to-260528-2503`.
+
+**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same code path as auto-advance. The daemon's existing reap + `refresh_post_completion_mtime` then keeps the baseline current.
+
+The new schema `hive-dispatch-request@1` is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published at `schemas/hive-dispatch-request.v1.json` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file).
+
+The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
+
+**Relationship to ADR-026:** ADR-026's "subprocess caller" model still holds for the **non-queue-routable** verbs that don't bump task-state mtime: `hive status`, `hive doctor`, `hive new`, `hive approve`, `hive accept-finding`, `hive reject-finding`. The bot's `ChildSupervisor#dispatch` continues to spawn those directly via `Process.spawn`. The line is drawn at "does this verb's child write to the task state file?" — if yes, queue-route; if no, direct-spawn.
+
+**Consequences:**
+- The daemon is now the SOLE process that spawns `hive run`-class children. The structural cause of the cross-process mtime-baseline bug is gone.
+- The queue dir is created with mode 0700: the producer/consumer authentication boundary is the filesystem-permissions invariant. The `requestor` field in each request is informational only; the daemon does NOT verify it against process credentials. Multi-user hosts therefore depend on per-user `~/.local/state/hive/` ownership, which is the existing operating-system assumption.
+- A new request type expires after 600s. If the daemon is down for longer, queued requests are pruned on its next tick (logged as `dispatch_request_expired`). Operators restarting after extended outage see no automatic re-trigger.
+- Telemetry: 5 daemon events (`dispatch_request_observed/dispatched/completed/rejected/blocked/expired`) provide a full lifecycle trace keyed by `request_id`. The bot continues to log via `:dispatched_command` with `via=queue` and `request_id` so the same correlation ID grep works across daemon.log and bot.log.
+- A per-iteration rescue in `process_dispatch_requests` ensures one request's `Process.spawn` failure (Errno::EAGAIN under fork-exhaustion etc.) does not abort the rest of the tick — the failing request's file stays on disk for the next tick to retry.
+- Notification preservation: the bot's "next question" message is now driven exclusively by the daemon's notification path (status-poll). A `notification_exactly_once` integration test pins the invariant. There is a slightly larger latency window (one tick) between agent completion and operator notification compared to the pre-refactor bot-side reaper, but the deduplication guarantee is stronger.
 
 ## ADR-031: Daemon self-reexec on source-file drift
 

@@ -687,12 +687,17 @@ module Hive
           project: result.project,
           slug: result.slug
         )
-        execute_dispatch(per_command, update)
-        # Clear only AFTER a successful dispatch so a dispatch failure leaves
-        # the conversation intact and the /done backstop can retry. (The
-        # earlier order cleared first, which stranded the operator if the
-        # spawn raised — they'd seen "running automatically" but /done found
-        # no conversation to dispatch.)
+        dispatched_request_id = execute_dispatch(per_command, update)
+        # C2 from PR #241 ce-code-review: ONLY clear the conversation
+        # after a successful enqueue. `enqueue_dispatch_request`
+        # rescues internally and returns nil on failure (write to a
+        # read-only state dir, ENOSPC, ArgumentError on invalid argv
+        # slipped past the router). Without the nil-check the
+        # conversation would be cleared while the request was never
+        # queued — the operator's `/done` backstop would then find
+        # no conversation to re-dispatch.
+        return unless dispatched_request_id
+
         @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
       rescue StandardError => e
         @logger.event(:send_failure, source: "auto_run_after_answers",

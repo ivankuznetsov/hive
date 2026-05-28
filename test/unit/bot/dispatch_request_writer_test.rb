@@ -64,7 +64,10 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
 
   def test_write_is_atomic_no_partial_files_remain
     Dir.mktmpdir("hive-writer") do |dir|
-      W.write!(project: "p", slug: "s", argv: [ "hive", "run", "s" ],
+      # SEC-5 from PR #241 ce-code-review: slug must satisfy the
+      # ADR-012 regex (min 2 chars). Use a realistic slug shape.
+      W.write!(project: "hive", slug: "task-260528-aaaa",
+               argv: [ "hive", "run", "task-260528-aaaa" ],
                state_home: dir, now: Time.utc(2026, 5, 28, 18, 0, 0))
 
       queue_dir = Q.directory(state_home: dir)
@@ -78,18 +81,56 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
 
   def test_write_rejects_non_allowlisted_argv
     Dir.mktmpdir("hive-writer") do |dir|
+      good_slug = "task-260528-aaaa"
       assert_raises(ArgumentError) do
-        W.write!(project: "p", slug: "s", argv: [ "hive", "doctor" ], state_home: dir)
+        W.write!(project: "hive", slug: good_slug, argv: [ "hive", "doctor" ], state_home: dir)
       end
       assert_raises(ArgumentError) do
-        W.write!(project: "p", slug: "s", argv: [ "echo", "rm", "-rf" ], state_home: dir)
+        W.write!(project: "hive", slug: good_slug, argv: [ "echo", "rm", "-rf" ], state_home: dir)
       end
       assert_raises(ArgumentError) do
-        W.write!(project: "p", slug: "s", argv: "hive run s", state_home: dir)
+        W.write!(project: "hive", slug: good_slug, argv: "hive run #{good_slug}", state_home: dir)
       end
       # Nothing should have been written.
       files = Dir.glob(File.join(Q.directory(state_home: dir), "*.json"))
       assert_empty files
+    end
+  end
+
+  # AC-04 from PR #241 ce-code-review: empty project or slug must
+  # raise loudly at the producer boundary, not silently make the
+  # daemon reject + reply "Couldn't queue".
+  def test_write_rejects_empty_project_or_slug
+    Dir.mktmpdir("hive-writer") do |dir|
+      good_argv = [ "hive", "run", "task-260528-aaaa" ]
+
+      empty_project = assert_raises(ArgumentError) do
+        W.write!(project: "", slug: "task-260528-aaaa", argv: good_argv, state_home: dir)
+      end
+      assert_match(/project is required/, empty_project.message)
+
+      empty_slug = assert_raises(ArgumentError) do
+        W.write!(project: "hive", slug: "", argv: good_argv, state_home: dir)
+      end
+      assert_match(/slug is required/, empty_slug.message)
+
+      files = Dir.glob(File.join(Q.directory(state_home: dir), "*.json"))
+      assert_empty files
+    end
+  end
+
+  # SEC-3 from PR #241 ce-code-review: queue dir must be 0700 so the
+  # producer/consumer auth boundary is at least scoped to the
+  # owning user. Default umask of 0022 would leave it world-readable
+  # and any local user could enqueue a request.
+  def test_directory_is_created_with_user_only_permissions
+    Dir.mktmpdir("hive-writer") do |dir|
+      W.write!(project: "hive", slug: "task-260528-aaaa",
+               argv: [ "hive", "run", "task-260528-aaaa" ], state_home: dir)
+      queue_dir = File.join(dir, "dispatch_requests")
+      mode = File.stat(queue_dir).mode & 0o777
+      assert_equal 0o700, mode,
+                   "queue dir must be user-only (got #{mode.to_s(8)})"
     end
   end
 

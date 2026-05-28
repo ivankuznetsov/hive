@@ -3,7 +3,12 @@ name: findings
 description: List findings in the latest reviews/ce-review-NN.md (or --pass N)
 version: 0.1.0
 user-invocable: true
-metadata: {"openclaw":{"homepage":"https://github.com/ivankuznetsov/hive"}}
+metadata:
+  openclaw:
+    homepage: https://github.com/ivankuznetsov/hive
+    requires:
+      bins:
+        - hive
 ---
 
 # Hive Findings

@@ -3,7 +3,12 @@ name: daemon
 description: Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable)
 version: 0.1.0
 user-invocable: true
-metadata: {"openclaw":{"homepage":"https://github.com/ivankuznetsov/hive"}}
+metadata:
+  openclaw:
+    homepage: https://github.com/ivankuznetsov/hive
+    requires:
+      bins:
+        - hive
 ---
 
 # Hive Daemon

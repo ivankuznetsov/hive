@@ -3,7 +3,12 @@ name: hive
 description: Drive any Hive CLI workflow from OpenClaw.
 version: 0.1.0
 user-invocable: true
-metadata: {"openclaw":{"homepage":"https://github.com/ivankuznetsov/hive"}}
+metadata:
+  openclaw:
+    homepage: https://github.com/ivankuznetsov/hive
+    requires:
+      bins:
+        - hive
 ---
 
 # Hive CLI
@@ -15,3 +20,5 @@ Before running anything, check `command -v hive`. If it is missing, stop and tel
 Treat the user's slash-command text after `/hive` as arguments for `hive`. If no arguments are supplied, run `hive --help` and summarize the available workflow. Run commands from the current project/workspace directory unless the user gives another path. Pass arguments safely; do not interpolate raw user text into a shell string.
 
 Prefer `--json` when the Hive command supports it and you need structured output. Summarize the result, including task slug, stage/action, marker, and next command when present.
+
+Before running destructive admin verbs (`drop`, `uninstall`, `update`, `forget`, `prune`, `migrate`, or `metrics`), restate the effect and get explicit user confirmation. These verbs can kill agents, remove worktrees, close draft PRs, drop registry entries, or rewrite installed software — they are not undoable.

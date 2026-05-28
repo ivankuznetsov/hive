@@ -1337,6 +1337,58 @@ end
     end
   end
 
+  def test_dispatch_request_expired_removed_without_dispatch
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Created 11 minutes before "now"
+      ancient = T0 - (11 * 60)
+      write_request_file(state_home, slug: "s1", request_id: "OLD", created_at: ancient)
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        expired = logger.events.find { |(n, _)| n == :dispatch_request_expired }
+        refute_nil expired, "a 11-min-old request must be reaped before dispatch"
+        assert_empty sup.spawned
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_empty files, "expired requests must be unlinked from the queue dir"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_per_slug_in_flight_gate_within_one_tick_blocks_same_slug_row_dispatch
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      # A row exists for the same slug as the queued request. The
+      # request scan fires first and `record_dispatch`'s the controller.
+      # When the row scan later sees the same slug, `dispatch_or_block`
+      # must consult the controller and refuse rather than spawn a
+      # second child against the same task.
+      row_for_same_slug = row(slug: "s1", action: "ready_to_plan",
+                              command: "hive plan s1 --from 2-brainstorm")
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [ row_for_same_slug ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "FIRST")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        # Exactly one spawn — for the request — not two.
+        assert_equal 1, sup.spawned.size,
+                     "per-slug in-flight gate must keep the row scan from double-spawning"
+        assert_equal "FIRST", sup.spawned.first[:request_id]
+        blocked = logger.events.find { |(n, attrs)| n == :blocked && attrs[:reason] == "in_flight" }
+        refute_nil blocked, "row scan must log :blocked reason=in_flight when slug is already running"
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
   def test_dispatch_request_completed_logs_on_child_reap
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(

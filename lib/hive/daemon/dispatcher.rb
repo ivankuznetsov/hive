@@ -544,6 +544,21 @@ module Hive
           return
         end
 
+        # Per-slug in-flight gate — prevents the row scan from
+        # double-dispatching a slug the dispatch-request queue just
+        # spawned earlier in this same tick. The status snapshot was
+        # taken BEFORE process_dispatch_requests, so a needs_input
+        # row that just had its request fired would otherwise hit
+        # handle_row → dispatch_or_block with no signal of the in-
+        # flight child. The controller's `running_task?` predicate
+        # reflects `record_dispatch` calls, so the gate is naturally
+        # correct across tick-internal ordering.
+        if @controller.running_task?(project: row.project, slug: row.slug)
+          @logger.event(:blocked, project: row.project, slug: row.slug,
+                                  stage: row.stage, reason: "in_flight")
+          return
+        end
+
         gate = @controller.can_dispatch?(
           project: row.project, slug: row.slug, now: now,
           external_global_count: @external_active_agent_total,

@@ -44,12 +44,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def spawn(command_string:, project:, slug:, stage:,
-              hive_state_path: nil, state_file_path: nil, dry_run: nil)
+              hive_state_path: nil, state_file_path: nil, dry_run: nil,
+              request_id: nil)
       pid = @next_pid
       @next_pid += 1
       @spawned << {
         pid: pid, command: command_string, project: project, slug: slug,
-        stage: stage, state_file_path: state_file_path, dry_run: dry_run
+        stage: stage, state_file_path: state_file_path, dry_run: dry_run,
+        request_id: request_id
       }
       pid
     end
@@ -98,7 +100,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
-                      project_enabled: true, dispatch_state: nil, status_result: nil)
+                      project_enabled: true, dispatch_state: nil, status_result: nil,
+                      dispatch_request_state_home: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -135,7 +138,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status,
       logger: logger,
       merge_watcher: merge_watcher,
-      dry_run: dry_run
+      dry_run: dry_run,
+      dispatch_request_state_home: dispatch_request_state_home
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -1195,6 +1199,176 @@ end
       # Sanity: writero/answered's baseline is still there too (mtime == baseline → :skip).
       assert_equal T0 - 600,
                    ctrl.last_dispatched_state_file_mtime_for(project: "writero", slug: "answered")
+    end
+  end
+
+  # ── dispatch-request queue integration ───────────────────────────────
+
+  Q = Hive::Daemon::DispatchRequestQueue
+
+  def write_request_file(dir, slug:, request_id:, created_at: T0, argv: nil, project: "p1",
+                         trigger: "answer_complete")
+    argv ||= [ "hive", "run", slug, "--json" ]
+    path = File.join(Q.directory(state_home: dir), Q.filename_for(created_at: created_at, request_id: request_id))
+    payload = {
+      "schema" => "hive-dispatch-request",
+      "schema_version" => 1,
+      "request_id" => request_id,
+      "created_at" => created_at.utc.iso8601,
+      "project" => project,
+      "slug" => slug,
+      "argv" => argv,
+      "requestor" => "bot",
+      "chat_id" => 42,
+      "update_id" => 99,
+      "trigger" => trigger
+    }
+    File.write(path, JSON.generate(payload))
+    path
+  end
+
+  def stub_find_project!(dispatcher, project_name)
+    Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+    Hive::Config.define_singleton_method(:find_project) do |name|
+      name == project_name ? { "name" => project_name, "path" => "/tmp/nonexistent", "hive_state_path" => "/tmp/nonexistent/.hive-state" } : nil
+    end
+    dispatcher
+  end
+
+  def restore_find_project!
+    if Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+      Hive::Config.define_singleton_method(:find_project, Hive::Config.method(:__orig_find_project))
+    end
+  end
+
+  def test_dispatch_request_observed_logged_and_dispatched
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "R1")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        observed = logger.events.find { |(n, _)| n == :dispatch_request_observed }
+        dispatched = logger.events.find { |(n, _)| n == :dispatch_request_dispatched }
+        refute_nil observed
+        refute_nil dispatched
+        assert_equal "R1", observed[1][:request_id]
+        assert_equal 1, sup.spawned.size
+        assert_equal "hive run s1 --json", sup.spawned.first[:command]
+        assert_equal "R1", sup.spawned.first[:request_id]
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_rejected_when_argv_not_allowlisted
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "BAD",
+                         argv: [ "hive", "doctor" ])
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        rejected = logger.events.find { |(n, attrs)| n == :dispatch_request_rejected && attrs[:request_id] == "BAD" }
+        refute_nil rejected
+        assert_equal "invalid_argv", rejected[1][:reason]
+        assert_empty sup.spawned
+        assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_rejected_when_project_unknown
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "RX", project: "unknown-proj")
+      # No stub for find_project ⇒ returns nil
+      Hive::Config.singleton_class.alias_method(:__orig_find_project, :find_project) unless Hive::Config.singleton_class.method_defined?(:__orig_find_project)
+      Hive::Config.define_singleton_method(:find_project) { |_| nil }
+      begin
+        dispatcher.tick(now: T0)
+
+        rejected = logger.events.find { |(n, attrs)| n == :dispatch_request_rejected && attrs[:request_id] == "RX" }
+        refute_nil rejected
+        assert_equal "unknown_project", rejected[1][:reason]
+        assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_blocked_when_in_flight_for_same_slug
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Pre-seed an in-flight slot for (p1, s1)
+      ctrl.record_dispatch(pid: 7777, project: "p1", slug: "s1", stage: nil,
+                           command: "hive run s1", started_at: T0,
+                           state_file_mtime: nil)
+      write_request_file(state_home, slug: "s1", request_id: "DEF")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find { |(n, _)| n == :dispatch_request_blocked }
+        refute_nil blocked
+        assert_equal "in_flight", blocked[1][:reason]
+        # The request file MUST remain on disk for the next tick.
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_equal 1, files.size
+        # Sup must NOT have spawned this request (only the pre-seeded slot exists).
+        assert_empty sup.spawned
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_completed_logs_on_child_reap
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "s1", request_id: "REQ-X")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+        spawned_pid = sup.spawned.first[:pid]
+        sup.define_singleton_method(:reap_all) do |now: Time.now|
+          [
+            ChildExit.new(
+              pid: spawned_pid, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+              command: "hive run s1 --json", state_file_path: nil,
+              started_at: T0, finished_at: now, json_envelope: nil,
+              request_id: "REQ-X"
+            )
+          ]
+        end
+
+        dispatcher.tick(now: T0 + 60)
+
+        completed = logger.events.find { |(n, _)| n == :dispatch_request_completed }
+        refute_nil completed
+        assert_equal "REQ-X", completed[1][:request_id]
+        # The file MUST have been unlinked.
+        files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+        assert_empty files
+      ensure
+        restore_find_project!
+      end
     end
   end
 

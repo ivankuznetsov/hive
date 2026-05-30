@@ -197,6 +197,10 @@ module Hive
       # manual_only? below.
       ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
 
+      # Review fix-phase reasons whose recovery requires a human. A retry
+      # would only clear REVIEW_ERROR and re-enter the same unsafe state.
+      REVIEW_ERROR_MANUAL_ONLY_REASONS = %w[fix_status_check_failed fix_tampered].freeze
+
       # Error-marker reasons whose recovery requires a human (the runner
       # can't auto-clear them via the standard markers-clear + retry-verb
       # loop). `dirty_worktree` is the legacy finalize reason — kept
@@ -216,7 +220,7 @@ module Hive
         return false if attrs.nil?
 
         attrs = attrs.to_h.transform_keys(&:to_s)
-        return true if marker == "review_error" && attrs["phase"] == "fix" && attrs["reason"] == "fix_tampered"
+        return true if marker == "review_error" && attrs["phase"] == "fix" && REVIEW_ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
         return true if marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
 
         false
@@ -230,7 +234,9 @@ module Hive
       def manual_only_reply(marker:, attrs: nil)
         marker = marker.to_s.downcase
         attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
-        if marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
+        if marker == "review_error" && attrs["reason"].to_s == "fix_status_check_failed"
+          "Hive can't auto-recover a worktree whose Git status cannot be read. Open the worktree, repair Git state, then rerun review."
+        elsif marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
           "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
         else
           "Hive has no automatic recovery for this state - open it on a laptop."

@@ -2566,3 +2566,11 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[stages/review]]
+
+## [2026-05-30T19:55:00Z] recovery — make Git-status-check failures manual-only
+
+**Action:** `REVIEW_ERROR phase=fix reason=fix_status_check_failed` now emits `suggested_next_action.kind=manual_fix`, bot recovery refuses `/autofix`, and TUI red-status Enter refuses instead of clearing and rerunning. The same TUI guard covers manual-only `ERROR` reasons such as `ensure_clean_on_exit_failed` so unreadable or dirty worktrees are repaired by an operator before retry.
+
+**Refreshed pages:**
+- [[stages/review]]
+- [[commands/tui]]

@@ -1302,6 +1302,28 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_fix_status_check_failure_is_manual_fix
+    with_tmp_dir do |dir|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
+
+      diagnostic = Hive::TaskAction.for(
+        task,
+        marker(
+          :review_error,
+          "phase" => "fix",
+          "reason" => "fix_status_check_failed",
+          "message" => "fatal: unable to read 26d9b9b4b284d58add70f2ed2d581a1ab503fa67",
+          "pass" => "1"
+        )
+      ).diagnostic
+
+      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_match(/could not read the task worktree Git status/, diagnostic.fetch("detail"))
+      assert_match(/Repair the worktree/, diagnostic.fetch("detail"))
+    end
+  end
+
   def test_review_stale_and_error_retry_commands_include_priority_match_attrs
     review_task = fake_task(stage_name: "review", stage_index: 6)
     review_suggested = Hive::TaskAction.for(

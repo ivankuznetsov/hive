@@ -842,6 +842,10 @@ module Hive
       end
 
       def red_status_autofix(row)
+        if manual_only_red_status_recovery?(row)
+          return [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ]
+        end
+
         if row.action_key.to_s == "error" && row.marker.to_s != "error"
           return dispatch_diagnostic_retry(row)
         end
@@ -854,6 +858,18 @@ module Hive
         else
           [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ]
         end
+      end
+
+      def manual_only_red_status_recovery?(row)
+        attrs = row.attrs.to_h.transform_keys(&:to_s)
+        marker = row.marker.to_s.downcase
+
+        if marker == "review_error"
+          return attrs["phase"] == "fix" &&
+            %w[fix_status_check_failed fix_tampered].include?(attrs["reason"].to_s)
+        end
+
+        marker == "error" && %w[dirty_worktree ensure_clean_on_exit_failed].include?(attrs["reason"].to_s)
       end
 
       # Wrap red_status_autofix so the detail screen closes after the

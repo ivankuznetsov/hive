@@ -488,6 +488,28 @@ module Hive
                             text: "Question #{question_n} was already answered by another device")
         when :lock_busy
           safe_send_message(chat_id: update.chat_id, text: "Try again - another run holds the lock")
+        when :answer_slot_missing
+          # Q{n} IS in the brainstorm file but no empty `### A{n}.`
+          # slot was locatable, even via the by-position fallback. The
+          # agent likely emitted a mis-numbered header (e.g. `### A2.`
+          # right after `### Q1.` for a fresh Round 2 — observed on
+          # explore-the-simplest-way-to-260528-2503). The user used to
+          # get "Question N was not found" here, which is misleading
+          # because the question IS there.
+          @logger.event(:answer_slot_missing, slug: result.slug,
+                                              question_n: question_n,
+                                              project: result.project)
+          expected_a = Hive::Bot::BrainstormParser.answer_header(question_n)
+          expected_q = Hive::Bot::BrainstormParser.question_header(question_n)
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "Question #{question_n}'s answer slot is missing or malformed " \
+                  "in brainstorm.md. The brainstorm agent likely emitted a " \
+                  "mis-numbered `### A.` header. Ensure exactly one empty " \
+                  "`#{expected_a}` sits immediately after `#{expected_q}` " \
+                  "(remove any stale mis-numbered `### A.` header in between), " \
+                  "then try again."
+          )
         else
           safe_send_message(chat_id: update.chat_id, text: "Question #{question_n} was not found.")
         end

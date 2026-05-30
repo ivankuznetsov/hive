@@ -46,7 +46,20 @@ module Hive
           end
 
           if (match = ANSWER_RE.match(line))
-            if current && current[:n] == match[1].to_i
+            # The brainstorm agent very occasionally emits an
+            # off-by-one A-header (e.g. `### A2.` immediately after
+            # `### Q1.` for a fresh Round 2). The strict
+            # `current[:n] == match[1].to_i` check silently dropped
+            # such lines, leaving the Q permanently un-answerable from
+            # the bot — and worse, gave the operator a misleading
+            # "Question N was not found" reply. Accept the FIRST A
+            # section under the current Q as that Q's answer slot
+            # regardless of its number; a subsequent A line under the
+            # same Q (whether duplicate-numbered or not) is still
+            # ignored. The writer's `find_empty_answer_slot` has a
+            # matching lenient fallback so the answer lands in the
+            # actual slot on disk.
+            if current && current[:answer_lines].nil?
               current[:answer_lines] = []
               mode = :answer
             end
@@ -75,6 +88,19 @@ module Hive
 
       def question_for(parsed, question_n)
         parsed.find { |question| question.n == question_n }
+      end
+
+      # Canonical heading strings. Centralized here so supervisor copy,
+      # writer fallback messages, and any future renderer share one
+      # source of truth. If the brainstorm.md format ever changes (e.g.
+      # `### Q{n}.` becomes `### Q{n}:`), these are the single place to
+      # update.
+      def question_header(n)
+        "### Q#{n}."
+      end
+
+      def answer_header(n)
+        "### A#{n}."
       end
 
       def finalize(out, current)

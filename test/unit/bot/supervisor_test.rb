@@ -1393,6 +1393,38 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  # `:answer_slot_missing` is a distinct result from
+  # `:question_not_found` — the question IS in brainstorm.md but no
+  # fillable A-slot was locatable. Supervisor must render a message
+  # that says so (not the legacy "Question N was not found", which is
+  # misleading when Q{n} actually exists). Observed 2026-05-28 on
+  # explore-the-simplest-way-to-260528-2503 where the brainstorm
+  # agent emitted `### A2.` directly after `### Q1.`.
+  def test_execute_answer_write_reports_answer_slot_missing_distinctly
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
+      @supervisor.define_singleton_method(:brainstorm_path_for) { |_slug, project: nil| path }
+      result = FakeRouter::Result.new(
+        action: :write_answer_then_reply,
+        slug: "task",
+        project: "hive",
+        question_n: 1,
+        answer_text: "Build it"
+      )
+
+      with_replaced_singleton_method(Hive::Bot::BrainstormAnswerWriter, :append!,
+                                     ->(**_kwargs) { :answer_slot_missing }) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 24))
+      end
+
+      text = @telegram.messages.last.fetch(:text)
+      assert_match(/answer slot is missing or malformed/, text,
+                   "must distinguish from `Question N was not found`")
+      assert_match(/### A1\./, text, "must name the expected header to add")
+      refute_match(/was not found\.\z/, text,
+                   "must not fall through to the legacy not-found copy")
+    end
+  end
+
 
 
 

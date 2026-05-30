@@ -2559,3 +2559,10 @@ chruby and RVM are intentionally not handled — they modify PATH per-shell and 
 
 **Refreshed pages:**
 - [[commands/bot]]
+
+## [2026-05-30T15:21:04Z] review — auto-commit scoped pre-fix residue
+
+**Action:** Updated 6-review Phase 4 so in-scope residue found before the fix agent is committed through the shared CleanExit/AutoCommit path with `Hive-Auto-Commit-Reason: pre_fix_dirty_worktree`, then rechecked before spawning the fix agent. Out-of-scope residue still lands `REVIEW_ERROR phase=fix reason=fix_dirty_worktree`. The clean-exit event type is now accepted so these commits are visible in `events.jsonl`.
+
+**Refreshed pages:**
+- [[stages/review]]

@@ -22,8 +22,9 @@ module Hive
       #   { status: :scope_violation, paths: [...], message: }
       #   { status: :git_failed, message: }
       #
-      # `reason` is either :stage_exit (default) or :finalize_entry_backstop.
-      # It feeds the Hive-Auto-Commit-Reason trailer so a reader scanning
+      # `reason` is :stage_exit (default), :pre_fix_dirty_worktree,
+      # or :finalize_entry_backstop. It feeds the
+      # Hive-Auto-Commit-Reason trailer so a reader scanning
       # `git log` can tell which hook produced the residue commit.
       def run!(worktree_path:, stage:, task:, cfg:, reason: :stage_exit)
         status_result = porcelain_status(worktree_path)
@@ -94,7 +95,7 @@ module Hive
       #   Hive-Task-Slug: <slug>
       #   Hive-Stage: <stage>
       #   Hive-Auto-Commit: residue
-      #   Hive-Auto-Commit-Reason: <:stage_exit | :finalize_entry_backstop>
+      #   Hive-Auto-Commit-Reason: <:stage_exit | :pre_fix_dirty_worktree | :finalize_entry_backstop>
       def commit_message(task:, stage:, reason:, subject: nil)
         subject ||= commit_subject(stage)
         slug = task.respond_to?(:slug) ? task.slug.to_s : ""

@@ -50,32 +50,40 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     @dirs_to_clean.concat(dirs)
   end
 
-  def test_with_stage_events_auto_commits_in_scope_residue_on_worktree_owning_stage
-    root, task, worktree = make_task_and_worktree("6-review")
-    remember(root, worktree)
+  def test_with_stage_events_auto_commits_in_scope_residue_on_worktree_owning_stages
+    [
+      [ "4-execute", :execute_complete ],
+      [ "6-review", :review_complete ],
+      [ "8-finalize", :complete ]
+    ].each do |stage_dir, terminal_marker|
+      root, task, worktree = make_task_and_worktree(stage_dir)
+      remember(root, worktree)
 
-    Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
-      # Stage runner does its work and writes a terminal marker, but
-      # leaves a wiki/ edit dirty in the worktree on the way out — the
-      # exact regression class the plan describes.
-      FileUtils.mkdir_p(File.join(worktree, "wiki"))
-      File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
-      Hive::Markers.set(task.state_file, :review_complete, attempts: 1)
+      Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+        # Stage runner does its work and writes a terminal marker, but
+        # leaves a wiki/ edit dirty in the worktree on the way out.  The
+        # invariant must clear that residue for every worktree-owning
+        # stage without turning the already-terminal marker into an error.
+        FileUtils.mkdir_p(File.join(worktree, "wiki"))
+        File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+        Hive::Markers.set(task.state_file, terminal_marker, attempts: 1)
+      end
+
+      subject = `git -C #{worktree} log -1 --pretty=%s`.strip
+      body = `git -C #{worktree} log -1 --pretty=%B`
+      assert_equal "chore(#{stage_dir}): commit residual worktree changes", subject
+      assert_match(/Hive-Auto-Commit-Reason: stage_exit/, body)
+      assert_match(/Hive-Stage: #{Regexp.escape(stage_dir)}/, body)
+
+      porcelain = `git -C #{worktree} status --porcelain`
+      assert porcelain.empty?, "stage-exit hook must clear residue for #{stage_dir}"
+
+      # And the runner's own terminal marker survives — auto-committed
+      # residue is not an error and must not strand the stage in a stale
+      # dirty-worktree state.
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal terminal_marker, marker.name
     end
-
-    subject = `git -C #{worktree} log -1 --pretty=%s`.strip
-    body = `git -C #{worktree} log -1 --pretty=%B`
-    assert_equal "chore(6-review): commit residual worktree changes", subject
-    assert_match(/Hive-Auto-Commit-Reason: stage_exit/, body)
-    assert_match(/Hive-Stage: 6-review/, body)
-
-    porcelain = `git -C #{worktree} status --porcelain`
-    assert porcelain.empty?, "stage-exit hook must clear residue"
-
-    # And the runner's own terminal marker survives — auto-committed
-    # residue is not an error.
-    marker = Hive::Markers.current(task.state_file)
-    assert_equal :review_complete, marker.name
   end
 
   def test_with_stage_events_marks_error_on_scope_violation
@@ -262,6 +270,34 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal :error, marker.name
     assert_equal "ensure_clean_on_exit_failed", marker.attrs["reason"]
     assert_match(/invalid sign_policy config/, marker.attrs["detail"].to_s)
+  end
+
+  def test_with_stage_events_ignores_clean_exit_event_logging_failure
+    root, task, worktree = make_task_and_worktree("4-execute")
+    remember(root, worktree)
+
+    calls = []
+    original_emit = Hive::Events.method(:emit)
+    stub = lambda do |**kwargs|
+      calls << kwargs
+      raise IOError, "event sink unavailable" if kwargs[:event_type] == :clean_exit_auto_committed
+
+      original_emit.call(**kwargs)
+    end
+
+    result = with_replaced_singleton_method(Hive::Events, :emit, stub) do
+      Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+        FileUtils.mkdir_p(File.join(worktree, "wiki"))
+        File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+        Hive::Markers.set(task.state_file, :execute_complete)
+        { commit: "execute_complete", status: :complete }
+      end
+    end
+
+    assert calls.any? { |kwargs| kwargs[:event_type] == :clean_exit_auto_committed }
+    assert_equal "execute_complete", result[:commit]
+    assert_equal :execute_complete, Hive::Markers.current(task.state_file).name
+    assert_equal "", `git -C #{worktree} status --porcelain`
   end
 
   # The clean / auto_committed branch must leave the stage's own

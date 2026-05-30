@@ -8,6 +8,7 @@ require "hive/protected_files"
 require "hive/claude_launcher"
 require "hive/stages/base"
 require "hive/stages/auto_commit"
+require "hive/stages/clean_exit"
 require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
@@ -438,7 +439,7 @@ module Hive
           # --- Phase 4: fix ---
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
-          pre_fix_status = worktree_status(worktree_path)
+          pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
           case pre_fix_status
           when :dirty
             Hive::Markers.set(task.state_file, :review_error,
@@ -1709,6 +1710,45 @@ module Hive
         return [ :status_failed, err.to_s ] unless status.success?
 
         out.empty? ? :clean : :dirty
+      end
+
+      def prepare_worktree_for_fix(task, cfg, worktree_path)
+        status = worktree_status(worktree_path)
+        return status unless status == :dirty
+
+        cleanup = Hive::Stages::CleanExit.run!(
+          worktree_path: worktree_path,
+          stage: "6-review",
+          task: task,
+          cfg: cfg,
+          reason: :pre_fix_dirty_worktree
+        )
+
+        case cleanup[:status]
+        when :clean
+          :clean
+        when :auto_committed
+          emit_pre_fix_clean_exit_event(task, cleanup)
+          worktree_status(worktree_path)
+        when :git_failed
+          [ :status_failed, cleanup[:message].to_s ]
+        else
+          :dirty
+        end
+      rescue Hive::ConfigError => e
+        [ :status_failed, "invalid auto-commit config: #{e.message}" ]
+      end
+
+      def emit_pre_fix_clean_exit_event(task, result)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: "6-review",
+          event_type: :clean_exit_auto_committed,
+          message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{Array(result[:paths]).join(',')[0, 200]}"
+        )
+      rescue StandardError
+        nil
       end
 
       def agent_failed?(result)

@@ -55,6 +55,12 @@ module Hive
         daemon_dispatch_baselines_unexpected_error
         daemon_dispatch_baselines_loaded
         daemon_dispatch_baselines_newer_schema_suspended
+        dispatch_request_observed
+        dispatch_request_dispatched
+        dispatch_request_completed
+        dispatch_request_rejected
+        dispatch_request_blocked
+        dispatch_request_expired
         fatal
       ].freeze
 

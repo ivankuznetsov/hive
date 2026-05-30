@@ -1,4 +1,6 @@
 require "digest"
+require "fileutils"
+require "shellwords"
 require "hive/config"
 require "hive/stages"
 require "hive/task_action"
@@ -8,7 +10,9 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
+require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/logger"
+require "hive/paths"
 require "hive/update_check"
 require "hive/update_check/state"
 require "hive/install_channel"
@@ -38,7 +42,8 @@ module Hive
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, dry_run: false,
-                     update_state: nil, update_checker: nil, channel_detector: nil)
+                     update_state: nil, update_checker: nil, channel_detector: nil,
+                     dispatch_request_state_home: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -117,6 +122,10 @@ module Hive
         # see the next warning the next time it goes red, but we don't
         # actively re-emit on every tick. Issue #95.
         @legacy_layout_logged = {}
+        # Test-injectable state home for the dispatch-request queue.
+        # Production passes nil so `DispatchRequestQueue` resolves
+        # `Hive::Paths.state_home`; unit tests inject a sandbox.
+        @dispatch_request_state_home = dispatch_request_state_home
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -198,6 +207,14 @@ module Hive
                         failure_count: drop[:failure_count],
                         last_error: drop[:last_error])
         end
+
+        # 3b. Dispatch-request queue (plan 2026-05-28-002). Process
+        # bot-written request files BEFORE the per-row scan so a slug
+        # whose request just spawned is already in-flight in the
+        # controller and the row scan's gate keeps the status-row loop
+        # from double-dispatching. Single-writer invariant: only the
+        # daemon spawns `hive run`-class verbs.
+        process_dispatch_requests(now: now)
 
         # 4. Per-row dispatch
         result.rows.each { |row| handle_row(row, now: now) }
@@ -366,6 +383,26 @@ module Hive
                         elapsed_sec: (now - entry.started_at).to_i,
                         envelope_marker: entry.json_envelope&.dig("marker"),
                         envelope_ok: entry.json_envelope&.dig("ok"))
+          # Request-driven runs (bot-issued, daemon-spawned) remove their
+          # queue file on reap so the daemon never re-dispatches them and
+          # an operator tailing daemon.log sees the full lifecycle:
+          # observed → dispatched → completed. The bot side is now a
+          # producer only; the daemon is the single dispatcher.
+          # ChildExit always defines `request_id` (nilable on the
+          # Struct), so `respond_to?` is dead code per M-02 from
+          # PR #241 ce-code-review. Just check the value.
+          if entry.request_id
+            Hive::Daemon::DispatchRequestQueue.remove(
+              entry.request_id, state_home: dispatch_request_state_home
+            )
+            @logger.event(:dispatch_request_completed,
+                          request_id: entry.request_id, pid: entry.pid,
+                          project: entry.project, slug: entry.slug,
+                          exit_code: entry.exit_code,
+                          elapsed_sec: (now - entry.started_at).to_i,
+                          envelope_marker: entry.json_envelope&.dig("marker"),
+                          envelope_ok: entry.json_envelope&.dig("ok"))
+          end
           @controller.record_project_dropped(project: entry.project) if entry.exit_code == Hive::ExitCodes::CONFIG
           if entry.exit_code == Hive::ExitCodes::CONFIG
             @logger.event(:project_dropped, project: entry.project)
@@ -511,6 +548,21 @@ module Hive
           return
         end
 
+        # Per-slug in-flight gate — prevents the row scan from
+        # double-dispatching a slug the dispatch-request queue just
+        # spawned earlier in this same tick. The status snapshot was
+        # taken BEFORE process_dispatch_requests, so a needs_input
+        # row that just had its request fired would otherwise hit
+        # handle_row → dispatch_or_block with no signal of the in-
+        # flight child. The controller's `running_task?` predicate
+        # reflects `record_dispatch` calls, so the gate is naturally
+        # correct across tick-internal ordering.
+        if @controller.running_task?(project: row.project, slug: row.slug)
+          @logger.event(:blocked, project: row.project, slug: row.slug,
+                                  stage: row.stage, reason: "in_flight")
+          return
+        end
+
         gate = @controller.can_dispatch?(
           project: row.project, slug: row.slug, now: now,
           external_global_count: @external_active_agent_total,
@@ -636,8 +688,200 @@ module Hive
                               project: project, slug: slug)
       end
 
+      # Consume the file-backed dispatch-request queue (plan
+      # 2026-05-28-002). One pending file = one would-be `hive run`-
+      # class spawn. The daemon is the single dispatcher; the bot is a
+      # producer only.
+      #
+      # Per request, in this order:
+      #   1. Parse failure / bad schema → already routed via
+      #      bad_handler in DispatchRequestQueue.pending; remove and
+      #      log `:dispatch_request_rejected`.
+      #   2. Argv allowlist (defense in depth — the writer already
+      #      validates) → remove + `:dispatch_request_rejected`.
+      #   3. Expiry (10 min default) → remove +
+      #      `:dispatch_request_expired`.
+      #   4. Project dropped (CONFIG=78 from a prior child) → remove +
+      #      `:dispatch_request_rejected reason=project_dropped`.
+      #   5. Per-slug in-flight gate (controller's running_task?) →
+      #      leave the file on disk, `:dispatch_request_blocked
+      #      reason=in_flight`. Picked up next tick.
+      #   6. Concurrency gate (caps / cooldown / quarantine) → leave
+      #      the file on disk, `:dispatch_request_blocked
+      #      reason=<gate>`. Picked up next tick.
+      #   7. Spawn via `dispatch_command`, threading `request_id`
+      #      through the supervisor so `reap_completed` can unlink the
+      #      file and log `:dispatch_request_completed`.
+      def process_dispatch_requests(now:)
+        pending = Hive::Daemon::DispatchRequestQueue.pending(
+          state_home: dispatch_request_state_home,
+          bad_handler: ->(path:, reason:) {
+            @logger.event(:dispatch_request_rejected,
+                          path: path, reason: reason)
+            # `rm_f` is idempotent — quietly does nothing if the
+            # file is already gone (concurrent retry, manual cleanup).
+            FileUtils.rm_f(path)
+          }
+        )
+
+        # Per-slug in-flight gate within this tick: if we just spawned
+        # for (project, slug) on this tick, defer subsequent requests
+        # for the same slug to a later tick. The controller's
+        # `running_task?` reflects spawns recorded in
+        # `record_dispatch`, so this is naturally exclusive across
+        # iterations of this loop too.
+        pending.each do |req|
+          @logger.event(:dispatch_request_observed,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, trigger: req.trigger,
+                        requestor: req.requestor)
+
+          # Per-iteration rescue: a Process.spawn failure (Errno::EAGAIN
+          # / Errno::ENOMEM under fork-exhaustion) or any other
+          # StandardError in dispatch_request! must not abort the rest
+          # of the pending queue. The request file stays on disk for
+          # the next tick to retry; the failure is logged for
+          # operator visibility. Per R-01 from PR #241 ce-code-review.
+          begin
+            process_dispatch_request_iteration(req, now: now)
+          rescue StandardError => e
+            @logger.event(:dispatch_request_rejected,
+                          request_id: req.request_id, project: req.project,
+                          slug: req.slug,
+                          reason: "spawn_failure: #{e.class}: #{e.message[0, 200]}",
+                          path: req.path)
+            # Don't remove the file — let the next tick try again.
+            # If the failure is persistent (e.g. config corruption),
+            # the operator will see repeated rejected events with
+            # the same request_id.
+          end
+        end
+      end
+
+      # Body of one queue iteration. Extracted so the rescue in
+      # process_dispatch_requests captures any error from the gate
+      # checks AND the actual spawn. Returns nil; side effects via
+      # @controller, @logger, and the queue's remove() call.
+      def process_dispatch_request_iteration(req, now:)
+        unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
+          reject_request(req, reason: "invalid_argv")
+          return
+        end
+
+        if Hive::Daemon::DispatchRequestQueue.expired?(req, now: now)
+          expire_request(req)
+          return
+        end
+
+        unless Hive::Config.find_project(req.project)
+          reject_request(req, reason: "unknown_project")
+          return
+        end
+
+        # C4 from PR #241 ce-code-review: gate on project_enabled? so a
+        # disabled project's queued requests don't dispatch. The
+        # auto-advance path (handle_row) already does this; the
+        # request path must mirror to keep the single-dispatcher
+        # invariant honest.
+        unless project_enabled?(req.project)
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: "project_disabled")
+          return
+        end
+
+        # Reverse the gate-evaluation order from the previous version:
+        # check the cheap, deterministic running_task? gate first so an
+        # in-flight slug doesn't incur the can_dispatch? scan. Per R-04
+        # / M-05 from PR #241 ce-code-review.
+        if @controller.running_task?(project: req.project, slug: req.slug)
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: "in_flight")
+          return
+        end
+
+        gate = @controller.can_dispatch?(
+          project: req.project, slug: req.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(req.project)
+        )
+        unless gate == :ok
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: gate.to_s)
+          return
+        end
+
+        dispatch_request!(req, now: now)
+      end
+
+      # Build a command string from the validated argv and spawn it
+      # through the same `dispatch_command` path auto-advance uses.
+      # The on-disk request file is left in place until the child reaps
+      # (see `reap_completed`); that gives an operator a single source
+      # of truth for "what's in flight" when tailing the queue dir.
+      def dispatch_request!(req, now:)
+        command = Shellwords.join(req.argv)
+        state_file_path = resolve_request_state_file_path(req)
+        pid = dispatch_command(
+          command,
+          project: req.project, slug: req.slug,
+          # Request-driven runs don't carry a stage hint — the runner
+          # resolves the task's current stage at boot. Pass nil so the
+          # log line records `stage=nil` instead of inventing one.
+          stage: nil,
+          state_file_mtime: state_file_path && File.exist?(state_file_path) ? File.mtime(state_file_path) : nil,
+          state_file_path: state_file_path,
+          hive_state_path: nil,
+          now: now,
+          trigger: req.trigger.to_s.empty? ? "dispatch_request" : req.trigger,
+          request_id: req.request_id
+        )
+        @logger.event(:dispatch_request_dispatched,
+                      request_id: req.request_id, pid: pid,
+                      project: req.project, slug: req.slug,
+                      command: command, trigger: req.trigger,
+                      chat_id: req.chat_id, update_id: req.update_id)
+      end
+
+      def reject_request(req, reason:)
+        @logger.event(:dispatch_request_rejected,
+                      request_id: req.request_id, project: req.project,
+                      slug: req.slug, reason: reason, path: req.path)
+        Hive::Daemon::DispatchRequestQueue.remove(
+          req.request_id, state_home: dispatch_request_state_home
+        )
+      end
+
+      def expire_request(req)
+        @logger.event(:dispatch_request_expired,
+                      request_id: req.request_id, project: req.project,
+                      slug: req.slug, created_at: req.created_at.utc.iso8601,
+                      path: req.path)
+        Hive::Daemon::DispatchRequestQueue.remove(
+          req.request_id, state_home: dispatch_request_state_home
+        )
+      end
+
+      # Best-effort lookup of the task's CURRENT state file so the
+      # post-completion mtime refresh inside `reap_completed` has a
+      # path to stat. Mirrors `find_post_advance_state_file` but
+      # without the at-dispatch path (a request carries no stage hint).
+      def resolve_request_state_file_path(req)
+        project_entry = Hive::Config.find_project(req.project)
+        return nil unless project_entry
+
+        find_post_advance_state_file(project_entry["hive_state_path"], req.slug)
+      end
+
+      def dispatch_request_state_home
+        @dispatch_request_state_home || Hive::Paths.state_home
+      end
+
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
-                           state_file_path:, hive_state_path:, now:, trigger: "advance")
+                           state_file_path:, hive_state_path:, now:, trigger: "advance",
+                           request_id: nil)
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
@@ -647,7 +891,8 @@ module Hive
           project: project, slug: slug, stage: stage,
           hive_state_path: hive_state_path,
           state_file_path: state_file_path,
-          dry_run: @dry_run
+          dry_run: @dry_run,
+          request_id: request_id
         )
         @controller.record_dispatch(
           pid: pid, project: project, slug: slug, stage: stage,
@@ -657,6 +902,7 @@ module Hive
                                    stage: stage, command: command, trigger: trigger,
                                    dry_run: @dry_run)
         @dispatched_today += 1
+        pid
       end
 
       def enqueue_merge_watch(row)

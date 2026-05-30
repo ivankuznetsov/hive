@@ -29,7 +29,8 @@ and subprocess I/O.
 | `BrainstormAnswerWriter` | `lib/hive/bot/brainstorm_answer_writer.rb` | Locked, first-write-wins insertion into the next answer block, with atomic rewrite. Slot location is **Q-context-aware**: walks forward from the parser-identified target Q's line, returning the first empty A-section before the next block boundary. Returns `:answer_slot_missing` (distinct from `:question_not_found`) when Q{n} is in the file but no fillable A-slot is locatable; the supervisor renders a repair-specific Telegram reply for this case. `Errno::ENOENT` on the underlying file is mapped to `:question_not_found` (not lock contention). |
 | `ConversationStore` | `lib/hive/bot/conversation_store.rb` | In-memory per-chat active answer/Codex state with TTL. No sidecar file; `brainstorm.md` stays canonical. |
 | `CodexConversation` | `lib/hive/bot/codex_conversation.rb` | Short-lived Path A Codex spawn wrapper. Parses `BOT_REPLY`, `BOT_DRAFT`, and `BOT_ERROR` lines. |
-| `ChildSupervisor` | `lib/hive/bot/child_supervisor.rb` | Spawns child `hive ...` commands with `pgroup: true`, writes per-dispatch logs, reaps with `Process.wait2(-1, WNOHANG)`. |
+| `ChildSupervisor` | `lib/hive/bot/child_supervisor.rb` | Spawns child `hive ...` commands with `pgroup: true`, writes per-dispatch logs, reaps with `Process.wait2(-1, WNOHANG)`. After plan 2026-05-28-002 the bot only reaches this path for **non-queue-routable** verbs (read-only `hive status --diagnose` for /details, `hive new` for the idea picker, `hive approve` for the /approve slash command, `hive accept-finding` / `hive reject-finding` for findings replies). State-mutating workflow verbs are written to the daemon's dispatch-request queue instead — see `DispatchRequestWriter` below. |
+| `DispatchRequestWriter` | `lib/hive/bot/dispatch_request_writer.rb` | Producer-only client of the daemon's dispatch-request queue. Atomic tmp+rename JSON write into `<state_home>/dispatch_requests/`. Argv validated against `Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS` at the call site too, so a typo in a slash handler raises locally rather than silently writing a request the daemon would discard. Returns a `request_id` the daemon echoes back in its `dispatch_request_*` events. |
 | `Logger` | `lib/hive/bot/logger.rb` | JSON-line structured logger with size rotation and closed event enum. |
 | `Commands::Bot` | `lib/hive/commands/bot.rb` | Thor command surface and PID-file lifecycle. |
 
@@ -74,6 +75,35 @@ re-parses the file under the lock, refuses non-empty answer slots, and
 inserts the literal confirmed text. Two devices racing the same question
 therefore produce one answer and one "already answered" reply, not a
 merged or overwritten block.
+
+## Single-dispatcher invariant (plan 2026-05-28-002)
+
+The bot is producer-only for state-mutating workflow verbs. When
+`Supervisor#execute_dispatch` sees an argv whose verb is in
+`Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS`
+(`run develop brainstorm plan review open-pr artifacts finalize
+archive markers`), the dispatch is rewritten to
+`DispatchRequestWriter.write!` and a `:dispatched_command via=queue
+request_id=…` event is logged. The daemon picks up the request
+on its next tick.
+
+For multi-command sequences (`dispatch_command_sequence`, used by
+Autofix's `markers clear` + retry-verb pair), the bot writes every
+queue-routable command in arrival order. The daemon's per-slug
+in-flight gate serialises execution; the bot has no PID to wait on
+between commands.
+
+Audit (CI-enforced post-merge):
+
+```
+rg -n 'Process.spawn|spawn!|system\(' lib/hive/bot/
+# Only match: lib/hive/bot/child_supervisor.rb's Process.spawn,
+# which is now reached only by the read-only / non-queue-routable
+# verbs above. No matches for ALLOWED_VERBS.
+```
+
+See [[modules/daemon]] §"Single-dispatcher" and [[architecture]]
+§"Dispatch flow" for the daemon side of the contract.
 
 ## Eval harness
 

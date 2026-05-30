@@ -3100,6 +3100,54 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/no automatic recovery/, fallback_model.flash)
   end
 
+  def test_red_status_autofix_refuses_fix_status_check_failed_review_error
+    calls = []
+    @model.define_singleton_method(:recover_review) do |row, force:|
+      calls << [ row.slug, force ]
+      [ @hive_model, nil ]
+    end
+    row = make_task_row(
+      action_key: "recover_review",
+      action_label: "Needs recovery",
+      slug: "status-check-failed",
+      stage: "6-review",
+      marker: "review_error",
+      attrs: { "phase" => "fix", "reason" => "fix_status_check_failed", "pass" => "1" },
+      suggested_command: nil
+    )
+
+    model, cmd = @model.send(:red_status_autofix, row)
+
+    assert_nil cmd
+    assert_empty calls
+    assert_match(/no automatic recovery/, model.flash)
+    assert_match(/Open in agent/, model.flash)
+  end
+
+  def test_red_status_autofix_refuses_manual_only_error_recovery
+    calls = []
+    @model.define_singleton_method(:recover_error) do |row|
+      calls << row.slug
+      [ @hive_model, nil ]
+    end
+    row = make_task_row(
+      action_key: "error",
+      action_label: "Error",
+      slug: "clean-exit-failed",
+      stage: "8-finalize",
+      marker: "error",
+      attrs: { "reason" => "ensure_clean_on_exit_failed" },
+      suggested_command: nil
+    )
+
+    model, cmd = @model.send(:red_status_autofix, row)
+
+    assert_nil cmd
+    assert_empty calls
+    assert_match(/no automatic recovery/, model.flash)
+    assert_match(/Open in agent/, model.flash)
+  end
+
   def test_red_status_autofix_refuses_shell_composed_diagnostic_retry
     row = make_task_row(action_key: "error", slug: "unsafe-retry", marker: "none").with(
       diagnostic: {

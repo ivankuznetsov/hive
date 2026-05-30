@@ -293,6 +293,19 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes labels, "Show details"
   end
 
+  def test_fix_status_check_failed_review_error_does_not_offer_autofix
+    notification = Hive::Bot::NotificationBuilders.build(
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "phase" => "fix", "reason" => "fix_status_check_failed", "pass" => "1" },
+          stage: "6-review", diagnostic: retry_diagnostic)
+    )
+
+    assert_includes notification.text, "Tap Show details to see what needs manual intervention."
+    labels = notification.keyboard.flatten.map { |button| button[:text] }
+    refute_includes labels, "🔧 Autofix"
+    assert_equal [ "Show details" ], labels
+  end
+
   def test_cause_sentence_for_execute_stale
     r = row(action: "recover_review", marker: "execute_stale")
     notification = Hive::Bot::NotificationBuilders.build(r)

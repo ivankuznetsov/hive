@@ -127,6 +127,18 @@ class HiveBotRecoverySequenceTest < Minitest::Test
     assert_match(/Hive can't auto-recover a dirty worktree/, result.text)
   end
 
+  def test_build_short_circuits_on_fix_status_check_failed_via_attrs
+    result = Hive::Bot::Handlers::RecoverySequence.build(
+      project: "hive", slug: "stuck-260530-aaaa", stage: "6-review",
+      marker: "review_error", match_attr: nil,
+      attrs: { "phase" => "fix", "reason" => "fix_status_check_failed", "pass" => "1" },
+      result_class: Result, clear_keyboard: false
+    )
+
+    assert_equal :reply, result.action
+    assert_match(/Git status cannot be read/, result.text)
+  end
+
   # Real-world callback_data carries BOTH `marker_id=<hex>` (the
   # race-safe clear guard from `Hive::Markers.error_recovery_match_attr`)
   # AND `reason=<...>` (so manual_only? can route on reason without
